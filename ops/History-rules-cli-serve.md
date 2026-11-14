@@ -5360,7 +5360,7 @@ The record is in `ops/engineering-log.md`, 2026-11-12, B826.
 
 ## B884 — the bridge's own files inside a library root (2026-11-13)
 
-- **bridge init, bridge doctor and serve warn, and never refuse, where the config file or the data directory lies inside a library root: one check that touches nothing (`config.LayoutOf`: each path made absolute as Load makes it and compared name by name in the OS's own forms, parsed from strings, so `/music2` is not inside `/music` and a layout joined only through a link is missed) and one set of words (`config.InstallLayout`); init says it once, on stderr, for the layout it wrote or kept, its preflight carrying no such line; both doctors a warn-only `install-layout` line right after data-dir, none over a healthy layout or on a managed bridge, the console's from the config it loads at each run; serve one Warn at each start, before anything touches a root, naming the root `libraryRoots[i]` and no path** (2026-11-13, backlog B884). **Don't let the check stat, resolve or open anything or call what may, compare by a string prefix, refuse a layout, give a healthy layout a doctor line, let init say it twice, let the CLI's advice to move bridge.yaml leave out a setting `resolvePaths` resolves (`layoutPathSettings`), or name a path in serve's line or log it after the roots' check (`serveOpts.rootsCheck`); and don't move `upscale.variantsDir`'s or `upscale.tempDir`'s refusal onto it: they resolve links on purpose.** → History-rules-cli-serve.md
+- **bridge init, bridge doctor and serve warn, and never refuse, where the config file or the data directory lies inside a library root: one check that touches nothing (`config.LayoutOf`: each path made absolute as Load makes it and compared name by name in the OS's own forms, parsed from strings, so `/music2` is not inside `/music` and a layout joined only through a link is missed); init says it once, on stderr, for the layout it wrote or kept, its preflight carrying no such line; both doctors a warn-only `install-layout` line right after data-dir, none over a healthy layout or on a managed bridge, the console's from the config it loads at each run; the CLI's words one fixed sentence that points at README.md's steps (`InstallLayout.Hint`); serve one Warn at each start, before its roots' check, naming the root `libraryRoots[i]` and no path** (2026-11-13, backlog B884). **Don't let the check stat, resolve or open anything or call what may, compare by a string prefix, refuse a layout, give a healthy layout a doctor line, let init say it twice, generate a move's steps in the CLI's words, or name a path or a doc in serve's line or log it after the roots' check (`serveOpts.rootsCheck`); and don't move `upscale.variantsDir`'s or `upscale.tempDir`'s refusal onto it: they resolve links on purpose.** → History-rules-cli-serve.md
 
 *The hazard.* A library root is often a network or removable mount, and while
 one stops answering, a stat of anything under it waits in the kernel for as
@@ -5412,35 +5412,27 @@ folds case is the volume's to say, and asking it is a touch), and Windows'
 own trimming of a name's trailing dots and spaces, which Load does not do
 either. `TestALayoutJoinedOnlyThroughALinkIsMissed` says so with a real link.
 
-*The words.* One set, `InstallLayout`'s: what lies inside which root, the
-first root in libraryRoots order that holds each, both named in one line
-where both lie inside; why it is a risk ("a library root is often a mount,
-and while one stops answering, every bridge command that reads what is
-inside it waits on it, serve, doctor and status among them"); and what to do
-for what lies inside. The data directory: moved, and dataDir set to its new
-path. The config file, alone or with the data directory: moved outside every
-root. In the CLI's words (since round 2), before bridge.yaml moves, each
-setting Load resolves beside it that is relative in it is set to an absolute
-path, all seven named (`layoutPathSettings`: libraryRoots, dataDir,
-tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir and
-upscale.tempDir), a value its `BRIDGE_*` variable gives resolving the same
-way and changed where that variable is set; dataDir is set to where the data
-directory is now, named, when the config file moves alone, and to the data
-directory's new path when the two move together, since it moves with the
-data directory. In the journal's, step 1's words: the config file moved with
-dataDir first set to the data directory's absolute path, and both moved
-keeping dataDir pointed at the data directory, since a relative dataDir
-(./data unless set) resolves beside bridge.yaml. The CLI names each by its
-path, the root beside its place in libraryRoots: B505's rule takes a path
-the operator configured (`LibraryRootError` and init's directory errors name
-the path the operator must find and fix), and the doctor's library-roots and
-data-dir lines print paths already. It offers the platform's default config
-directory (`packaging.DefaultConfigDir`, the data directory's place below
-it) as one place to move to, only where that lies outside every root, worded
-as an example and never as a fix. The journal names each by its setting
-alone (the config file; the data directory (dataDir); library root
-libraryRoots[i]), as every line about the config there does, and offers no
-place.
+*The words.* Two sets, `InstallLayout`'s, and both say what lies inside
+which root, the first root in libraryRoots order that holds each, both named
+in one line where both lie inside, and why it is a risk ("a library root is
+often a mount, and while one stops answering, every bridge command that reads
+what is inside it waits on it, serve, doctor and status among them"). The
+CLI's (`Hint`, `Warning`: bridge init's line, both doctors' hint) name each
+by its path, the root beside its place in libraryRoots: B505's rule takes a
+path the operator configured (`LibraryRootError` and init's directory errors
+name the path the operator must find and fix), and the doctor's library-roots
+and data-dir lines print paths already. What to do they say in one fixed
+sentence, the same for every layout and ending with no period, which init's
+line adds (round 3): "move bridge.yaml and the data directory out of every
+library root, and check every path setting in bridge.yaml; see "Moving the
+bridge's files out of a library root" in the bridge's README.md". The
+journal's (`JournalLine`) name each by its setting alone (the config file;
+the data directory (dataDir); library root libraryRoots[i]), as every line
+about the config there does, offer no place and name no doc, and keep step
+1's words: the config file moved with dataDir first set to the data
+directory's absolute path; the data directory moved, and dataDir set to its
+new path; both moved, keeping dataDir pointed at the data directory, since a
+relative dataDir (./data unless set) resolves beside bridge.yaml.
 
 *Where each surface says it.* bridge init, on stderr, once, for the layout it
 actually wrote (the roots it saved, a public rewrite's kept roots included,
@@ -5462,11 +5454,12 @@ a regular file inside a root fails data-dir as before, the layout's warn
 beside it. The console's doctor builds its Deps from the config it loads at
 each run, so a root added through POST /api/roots is in its next report.
 serve logs one Warn at each start, right after the config's own refusals and
-before the first step that touches a root (the roots' stat,
-`CheckLibraryRootsAccessible`) or the data directory, so the journal holds the
-line from every start before a mount stops answering; a root added while
-serve runs is the doctor's to say. No surface refuses: an install keeps
-working whatever its layout.
+before its roots' check (`CheckLibraryRootsAccessible`) and the data
+directory's preparation, though not before every touch of a root: Load has
+validated a non-empty `upscale.variantsDir` or `upscale.tempDir` through
+`fsutil.IsUnderAny`, which resolves the roots, before it (round 3). A root
+added while serve runs is the doctor's to say. No surface refuses: an
+install keeps working whatever its layout.
 
 *What it leaves.* `upscale.variantsDir` and `upscale.tempDir` keep their
 refusals through `fsutil.IsUnderAny`, and should not follow: a refusal there
@@ -5482,17 +5475,17 @@ commands' own reads, are its later steps.
 config file's directory (`resolvePaths`), and step 1's advice to move
 bridge.yaml kept dataDir's meaning alone: a config at /srv/music/conf with
 `libraryRoots: [..]`, moved to /etc/bridge as advised, would serve /etc.
-Wherever the CLI's words say to move bridge.yaml (init's line, both
-doctors' hint), they now name all seven, in resolvePaths' order, to be set
-to an absolute path first where relative, and say what a `BRIDGE_*`
-variable that gives one does: Load resolves it the same way, so it is
-changed where it is set. Which of them are relative is not asked: the advice
-changes only its words, and init's kept config, the environment and the file
-each say it differently, so the list is the whole fixed one, and
-`TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning` reads
-resolvePaths' source for the settings the words must name, so an eighth
-resolved there fails it until they name it. The journal's words are step
-1's: they name no value (B505), and the round kept them as they were.
+Round 2's CLI words, wherever they said to move bridge.yaml (init's line,
+both doctors' hint), named all seven, in resolvePaths' order, to be set to
+an absolute path first where relative, and said what a `BRIDGE_*` variable
+that gives one does: Load resolves it the same way, so it is changed where
+it is set; round 3 took those steps out of the words (below). Which of them
+were relative was not asked: init's kept config, the environment and the
+file each say it differently, so the list was the whole fixed one, and
+`TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning` read
+resolvePaths' source for the settings the words had to name (since round 3,
+the settings the doc must name). The journal's words are step 1's: they
+name no value (B505), and the round kept them as they were.
 Nothing held serve's line before its roots' check either: step 1's serve
 tests read the journal once `runServe` had returned, and the check's refusal
 of a loopback install goes to stderr, outside the journal.
@@ -5504,6 +5497,52 @@ logged after the check fails it. Two cases the review asked for passed from
 the start and stay as guards: serve run from inside a root with a relative
 `--config` warns once, and a kept config with no dataDir names its default
 data directory inside a root.
+
+*Round 3: the words name the layout, and the steps live in one doc* (a
+scope cut, after the review of round 2). Each round whose words generated
+the steps to move the files met a layout they broke: round 2's, which set
+each relative path setting to an absolute path before the move, pinned a
+setting that points into the data directory being moved (`tlsCertPath:
+./data/server.crt`, `upscale.variantsDir: data/variants`) to its old place,
+which breaks every paired device's pin or makes a directory inside the root
+again, and a dataDir left out read either way. B884's job is to make the
+layout visible, so the CLI's words generate no step. What a move must change
+depends on what each path setting points at, relative or absolute, into what
+moves or at what stays, and README.md's section "Moving the bridge's files
+out of a library root" says how to tell, step by step: stop the service and
+every command that writes (a service manager starts a killed process again);
+move bridge.yaml with the hidden `.bridge.yaml` files beside it, and the
+data directory whole; check each of the seven settings Load resolves beside
+the config; the defaults that follow dataDir (the TLS pair, `acme`,
+`transcoded`); a written-out `upscale.variantsDir` or `upscale.tempDir`,
+which Validate refuses inside a root, so it never moves with a data
+directory that was in one (a config that sets one there is a refusal, never
+a warning case, and the warning tests write none); `BRIDGE_*` variables;
+keep the TLS pair (a bridge that finds none mints one, and every pin
+breaks); check with `bridge doctor --config`; point the service at the new
+place (`bridge init --dir`, keeping the config, writes the unit again:
+systemd's and launchd's embed `--config` and run in the data directory); and
+a procedure of its own for a data directory that is a library root, which
+leaves the music where it is and moves the bridge's own entries (a snapshot
+does not carry the playlist covers, the booklets or the caches, so a
+restore would not do). README.md, because it is the bridge's doc that says
+where the config and the data go on each platform; `docs/docker.md` covers a
+container alone, and the user docs on 1-bit.app are another repo's.
+`TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning` holds the doc
+to its title and to every setting resolvePaths resolves. The platform's
+default directory is no longer offered in the words; the doc names it. The
+console's doctor carries the CLI's words, paths and the doc's name
+included: its report is a success body, where the console keeps a path the
+operator configured (`admin-console.md`'s B604 bullets), B505's rule takes
+such a path, and a managed bridge has no line. Serve's line is byte for byte
+as round 2 left it, now pinned for each layout. The claim that serve says
+its line before anything touches a root was false, in the rule, `runServe`'s
+comment, `serveOpts.rootsCheck`'s and the order test's: Load validates a
+non-empty `upscale.variantsDir` or `upscale.tempDir` through
+`fsutil.IsUnderAny`, which resolves each root's links, before the line; the
+order test proves the order against `CheckLibraryRootsAccessible` alone (its
+name kept, which the dated records cite), and that earlier path is left as
+it is, a follow-up.
 
 *The tests.* In internal/config: `TestThePredicateComparesEachOSsFormsByTheirNames`,
 `TestTheLayoutResolvesRelativePathsAsLoadDoes`,
@@ -5525,4 +5564,4 @@ cmd/bridge, `TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot`,
 `TestServeWithARelativeConfigInsideARootWarnsOnce`,
 `TestServeSaysItsLayoutBeforeItTouchesARoot` and
 `TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns`. The record is
-in `ops/engineering-log.md`, 2026-11-13, B884 step 1 and its round 2.
+in `ops/engineering-log.md`, 2026-11-13, B884 step 1 and its rounds 2 and 3.

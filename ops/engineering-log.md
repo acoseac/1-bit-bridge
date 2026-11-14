@@ -96307,3 +96307,198 @@ named as edits, fails on one block alone, the line's verbatim History twin:
 an edit accounts for one copy and the base held two. With the twin put back
 it passes, and the twin in the patch is the new line byte for byte. `make
 test` and `make build-all` were not run: the brief asked for the packages.
+
+## 2026-11-13 — B884 round 3: the warning names the layout; the steps to move it live in README.md
+
+The rule is `cli-serve.md`'s B884 line, and its long form is in
+`ops/History-rules-cli-serve.md` (*The words* and *Round 3*); this is the
+evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR on
+disk (`~/onebit/tmp`). A scope cut after the review of round 2: every
+reviewer found round 2's generated advice pinning a setting that points into
+the data directory being moved (`tlsCertPath: ./data/server.crt`,
+`upscale.variantsDir: data/variants`) to its old place, and Carbon a
+`dataDir` left out that reads either way. The code is 4b274341, on round 2's
+rules (7f389016). Nothing new touches the filesystem and nothing refuses.
+
+### What changed
+
+- The CLI's words, bridge init's line and both doctors' hint, are what lies
+  inside which root (unchanged), why it is a risk (unchanged) and one fixed
+  sentence, the same for every layout, with no period at its end:
+  "move bridge.yaml and the data directory out of every library root, and
+  check every path setting in bridge.yaml; see "Moving the bridge's files
+  out of a library root" in the bridge's README.md" (`internal/config/layout.go`
+  128 `layoutFix`, 135 `Hint`, 144 `Warning`). Init's line ends with the one
+  period `warnInstallLayout` adds (`cmd/bridge/install_layout.go` 38). The
+  platform's default directory is no longer offered, and
+  `keepingRelativePaths`, `layoutPathSettings`, `suggestion` and
+  `platformConfigDir` are gone.
+- The journal's words are byte for byte as before (`JournalLine`, 155;
+  `journalFix`, 163), split from the CLI's: they name no value and no doc.
+- README.md gains "Moving the bridge's files out of a library root", after
+  "Backup and restore": README.md is the bridge's doc that says where the
+  config and the data go on each platform; `docs/docker.md` covers a
+  container alone, and the user docs on 1-bit.app are another repo's. It
+  covers the brief's five points and the review's three: stop the service and
+  every command that writes first (systemd's unit embeds `--config` and runs
+  in the data directory, `internal/packaging/systemd.service.tmpl` 8-9, with
+  `Restart=always`; launchd's plist the same with `KeepAlive`); the seven
+  settings Load resolves beside the config, judged by what each points at
+  (relative or absolute, into what moved or at what stayed); the defaults
+  that follow `dataDir` (`tls.DefaultPaths`, `internal/tls/tls.go` 81;
+  `EffectiveAutocertCacheDir`, `config.go` 1868; `EffectiveVariantsDir`,
+  2425) told apart from settings written out; a written-out
+  `upscale.variantsDir` or `upscale.tempDir`, which Validate refuses inside a
+  root (`validateVariantsDir`, 4201; `validateRenderTempDir`, 4240), so it is
+  never a warning case and never moves with a data directory that was in one;
+  `./data` for a `dataDir` left out; `BRIDGE_*` variables over the file;
+  keeping the TLS pair (`LoadOrGenerateWithOptions` mints one where neither
+  file is there, `tls.go` 147-155, and every pin breaks), checked with
+  `bridge doctor --config`, whose tls-cert line says `absent (init will mint)`
+  then; the service pointed at the new place by `bridge init --dir`, keeping
+  the config (`finishInit` writes the unit again with the new `--config` and
+  data directory, `init.go` 1303-1308; `--yes` needs `--library` even when it
+  keeps a config, 518-520); and a procedure of its own for a data directory
+  that is a library root, which leaves the music and moves the bridge's own
+  entries (a snapshot carries neither the playlist covers, the booklets nor
+  the caches, so a backup and restore would lose them).
+- The false claims are gone from the code: `serveOpts.rootsCheck`'s comment
+  (`main.go` 2939) and `runServe`'s (3527-3534) say the line comes before the
+  roots' check and the data directory's preparation, and that it is not
+  before every touch of a root, which the order test's and
+  `TestServeSaysEachLayoutAtItsStart`'s comments now say too. The rule and
+  the History, and round 2's rule that the words enumerate every setting,
+  change in the rules patch.
+
+### The review's items
+
+1. The doc: the separate procedure, the stop, the service and the explicit
+   settings, above. The warning tests' configs set neither
+   `upscale.variantsDir` nor `upscale.tempDir`.
+2. The false claims: above.
+3. Serve's line is byte for byte as round 2 left it, and pinned for each
+   layout: `TestServeSaysEachLayoutAtItsStart` (the data directory that is a
+   root, the config file, both), `TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot`
+   and `TestServeWithARelativeConfigInsideARootWarnsOnce` compare the whole
+   recorded line; green before the change and after it.
+4. The console's doctor builds its line from `doctorInstallLayout`, the
+   CLI's words, so its report carries the paths and the doc's name. They may
+   appear there: the report is a success body (GET /api/doctor answers 200),
+   where the console keeps a path the operator configured
+   (`admin-console.md`'s B604 bullets: no path in an error body, a path the
+   console was configured with in a success body), as its data-dir and
+   library-roots lines do; B505's rule takes a path the operator configured;
+   the line is skipped on a managed bridge. No change;
+   `TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns` now pins
+   the hint.
+5. Round 2's advice tests are rewritten, their names kept, since the dated
+   records cite them: `TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning`
+   pins the fixed sentence for the config file alone, the data directory
+   alone, the data directory that is the root, both and the default
+   `dataDir`, refuses a period at its end, and holds README.md's section to
+   its title, once, and to every setting resolvePaths resolves (round 2's
+   reading of resolvePaths, kept for it) and to `BRIDGE_`;
+   `TestTheLayoutsWordsNameWhatLiesInsideWhichRoot` pins both sets of words
+   for five layouts. Its platform-default subtest is gone with the offer.
+   cmd/bridge's `layoutMoveKeys`, `layoutMoveEnv` and `platformDirForLayout`
+   are gone; the doctors' hint, init's line and the kept default's line are
+   pinned whole.
+6. The rules change only in `rules-b884-r3.patch`.
+7. The punctuation: the sentence ends with no period, and init's line is
+   pinned whole, its one period included (`requireOneLayoutWarning`, control
+   E2).
+
+Of the follow-up the brief names: Load validates a non-empty
+`upscale.variantsDir` or `upscale.tempDir` through `fsutil.IsUnderAny`,
+which resolves each root's links (`fsutil/symlink.go` 157-187), before
+serve's line, so a root whose mount does not answer holds that load and the
+line with it. Left as it is.
+
+### Red first
+
+On round 2's code (7f389016) with round 3's tests, internal/config's through
+a shim of names that maps `Hint`, `Warning` and `JournalLine` onto round 2's
+`Advice` and `Line` (an untracked test file, removed after):
+
+```
+$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run '^(TestTheLayoutsWordsNameWhatLiesInsideWhichRoot|TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning)$' ./internal/config/
+--- FAIL: TestTheLayoutsWordsNameWhatLiesInsideWhichRoot (all five layouts)
+    layout_test.go:414: Hint() = "... move the data directory outside every library root, and set dataDir ..."
+    layout_test.go:417: Warning() = "the data directory /m/.bridge is inside library root /m (libraryRoots[0]): ..."
+--- FAIL: TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (all five subtests)
+    layout_test.go:462: the advice is "... move bridge.yaml outside every library root; before you move it, ..."
+    layout_test.go:472: README.md has 0 sections titled "Moving the bridge's files out of a library root", want one
+$ go test ... -run '<the thirteen B884 tests>' ./cmd/bridge/
+--- FAIL: TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot (all four)
+    install_layout_test.go:135: the install-layout hint is "..."
+--- FAIL: TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps (all seven)
+    install_layout_test.go:315 (:332, :354, :370, :388, :400): the run's stderr carries the warning 0 times, want once
+--- FAIL: TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns   (install_layout_test.go:598)
+--- FAIL: TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory          (install_layout_test.go:649)
+--- PASS: the journal's pins, the healthy and sibling guards, the managed case, the order case
+```
+
+After the change every B884 test passes: internal/config's seven,
+internal/doctor's one and cmd/bridge's thirteen.
+
+### Controls
+
+Each an uncommitted mutation of 4b274341, predicted in writing before the
+run (`controls3.predictions.txt`), the test binaries built once per control,
+the files put back with `git checkout --` and checked against HEAD's bytes,
+`git status` clean after. Every one as predicted:
+
+- E1, the brief's: round 2's generated advice back in `Hint`. Red: the words
+  test (layout_test.go:414, :417, all five layouts), the advice test (all
+  five), both doctors (install_layout_test.go:135, all four), init (all
+  seven), the kept default and the console; green: serve's three journal
+  pins.
+- E2, the sentence ending with a period: the advice test
+  (layout_test.go:465, "the advice ends with a period, which bridge init's
+  line doubles"), the words test, both doctors, init and the kept default
+  red; serve's journal green.
+- E3, the journal given the doc's name: the words test (:421, every
+  layout's journal pin; :425, "the journal's line names README"), the advice
+  test, and serve's three journal pins (install_layout_test.go:485, :535,
+  :622) red; both doctors and the order case green.
+- E4, README.md's section renamed: the advice test alone
+  (layout_test.go:472, "README.md has 0 sections titled ...").
+- E5, the section no longer naming `upscale.tempDir`: the advice test
+  (layout_test.go:475, "README.md's steps do not name upscale.tempDir").
+- E6, an eighth setting resolved beside the config (autocert.email in
+  resolvePaths), the doc unchanged: the advice test (:475, "do not name
+  autocert.email"); the words test green.
+
+### The gates
+
+On 4b274341. Under `-race -count=50`, one package at a time outside the
+build lock (a single package needs none), with `-p` and `-parallel` at 8:
+internal/config's seven B884 tests ok in 47 s, internal/doctor's one in 21 s
+and cmd/bridge's thirteen in 542 s (476 s of tests), beside three other
+workers' runs. In one hold of the build lock (01:12 to 01:39):
+`go run ./scripts/third-party-licenses -check-build-tags`, OK (the census
+reads the README.md section's commands as words, none a build); `go vet
+./...` with the Makefile's tags as GOOS linux, darwin and windows, clean;
+and `go test -race -count=1 -timeout 120m` of `./cmd/bridge/` (1,600 s,
+which holds `TestEveryCitedTestNameExists` and the doc-comment sweeps),
+`./internal/doctor/` (8 s) and `./internal/config/` (16 s): all ok. An
+earlier full run of cmd/bridge outside the lock, at a load near 25 on 16
+cores, failed `TestTheTickerAndTheDoctorNameAPruneGivenUp` alone ("the prune
+answered <nil>, want it given up"), a backup test B884 does not reach: it
+failed 8 of 10 runs then (each about 9.5 s), and passed 10 of 10 at
+4b274341 and at b9f50244 in archive copies, and 10 of 10 in the worktree at
+a load near 5 (each about 1.8 s); B869's fix for it (3a976ffc) is not on
+this branch. go1.27.3's gofmt lists none of the Go files B884 touches. The
+rules patch applies at 4b274341 (`git apply --check`), and on a copy with it
+applied `scripts/check-doc-budgets.py` is clean (`cli-serve.md` 98,667
+bytes, 17 fewer than round 2 left it, the B884 line 1,344 bytes; 99,888 with
+B650's open rules patch beside it, which applies in either order),
+`rules-for.py` names `cli-serve.md` for `internal/config/layout.go`, and
+`TestEveryCitedTestNameExists` passes there (and fails on a ghost citation
+planted in the copy's History file, so it read the copy).
+`verify_moves.py --base HEAD`, the line and the four History paragraphs
+named as edits, fails on one block alone, the line's verbatim History twin:
+an edit accounts for one copy and the base held two. With the twin put
+back it passes, and the twin in the patch is the new line byte for byte.
+`make test` and `make build-all` were not run: the brief asked for the
+packages.
