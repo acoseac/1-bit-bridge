@@ -33,9 +33,15 @@ import (
 //
 // A missing dst is one rename of bak onto that path, which is what
 // the rollback did when there was nothing to replace.
+//
+// Each rename that fails is told, with its stage, to the observer a test
+// sets (SetRollbackObserverForTest), before the next step: a test's
+// diagnostic of what holds the file (backlog B872). None is set in
+// production, and the answers are the same with one set.
 func replaceRunningBinary(dst, bak string) error {
 	if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
 		if err := renameFunc(bak, dst); err != nil {
+			observeRollbackRename(RollbackStageInstall, bak, dst, err)
 			return fmt.Errorf("rollback rename %s -> %s: %w", bak, dst, err)
 		}
 		return nil
@@ -44,10 +50,13 @@ func replaceRunningBinary(dst, bak string) error {
 	removeStaleRollbackAsides(dst)
 	aside := fmt.Sprintf("%s.rollback-%d", dst, time.Now().UnixNano())
 	if err := renameFunc(dst, aside); err != nil {
+		observeRollbackRename(RollbackStageVacate, dst, aside, err)
 		return fmt.Errorf("rollback move %s aside: %w", dst, err)
 	}
 	if err := renameFunc(bak, dst); err != nil {
+		observeRollbackRename(RollbackStageBackup, bak, dst, err)
 		if rerr := renameFunc(aside, dst); rerr != nil {
+			observeRollbackRename(RollbackStagePutBack, aside, dst, rerr)
 			return fmt.Errorf("rollback rename %s -> %s failed (%v); restore also failed (%v); manual recovery needed", bak, dst, err, rerr)
 		}
 		return fmt.Errorf("rollback rename %s -> %s: %w (restored)", bak, dst, err)
