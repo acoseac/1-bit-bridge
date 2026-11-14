@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -57,7 +58,7 @@ func TestShippedHashCostIsUnchanged(t *testing.T) {
 // declaration (an *ast.FuncDecl) from a call without a special case.
 func TestNoProductionCodeLowersTheHashCost(t *testing.T) {
 	root := filepath.Join("..", "..")
-	offenders, visited, err := hashCostSetterCallers(root)
+	offenders, visited, err := hashCostSetterCallers(filepath.WalkDir, root)
 	if err != nil {
 		t.Fatalf("walking the tree: %v", err)
 	}
@@ -82,12 +83,13 @@ const hashCostSetter = "SetTestHashCost"
 // hashCostSetterCallers returns the non-test Go files under root that call
 // hashCostSetter, or that it cannot parse, with how many files it read.
 //
-// It walks with filepath.WalkDir (hashCostWalkDir), which asks
-// hashCostDirRule about a directory before listing it. filepath.Walk lists
-// it first, so a directory the rule skips still failed the run when it could
-// not be listed.
-func hashCostSetterCallers(root string) (offenders []string, visited int, err error) {
-	err = hashCostWalkDir(root, func(path string, d os.DirEntry, err error) error {
+// It walks with walk: filepath.WalkDir, or in a test a sweeptest.Removal's
+// WalkDir, which stands in for another process removing a directory while
+// the sweep is under way. Either asks hashCostDirRule about a directory
+// before listing it. filepath.Walk lists it first, so a directory the rule
+// skips still failed the run when it could not be listed.
+func hashCostSetterCallers(walk func(root string, fn fs.WalkDirFunc) error, root string) (offenders []string, visited int, err error) {
+	err = walk(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -103,11 +105,6 @@ func hashCostSetterCallers(root string) (offenders []string, visited int, err er
 	})
 	return offenders, visited, err
 }
-
-// hashCostWalkDir is the walk hashCostSetterCallers makes: filepath.WalkDir,
-// which a test replaces with a sweeptest.Removal to stand in for another
-// process removing a directory while the sweep is under way.
-var hashCostWalkDir = filepath.WalkDir
 
 // hashCostDirRule is hashCostSetterCallers' answer for a directory: SkipDir
 // for one that holds none of this checkout's production code, nil to
@@ -222,7 +219,7 @@ func TestHashCostSweepSkipsOtherCheckouts(t *testing.T) {
 		"worktrees/plain/.git": "gitdir: /elsewhere/.git/worktrees/plain\n",
 		"worktrees/plain/x.go": "package x\n\nfunc init() { SetTestHashCost(4) }\n",
 	})
-	offenders, visited, err := hashCostSetterCallers(root)
+	offenders, visited, err := hashCostSetterCallers(filepath.WalkDir, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +253,7 @@ func TestHashCostSweepSkipsUnderscoreDirectories(t *testing.T) {
 		"_scratch/seed.go":                     call,
 		"internal/manifest/_reextract/main.go": call,
 	})
-	offenders, visited, err := hashCostSetterCallers(root)
+	offenders, visited, err := hashCostSetterCallers(filepath.WalkDir, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +277,7 @@ func TestHashCostSweepSkipsUnderscoreDirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(sealed, 0o755) })
-		if _, _, err := hashCostSetterCallers(root); err != nil {
+		if _, _, err := hashCostSetterCallers(filepath.WalkDir, root); err != nil {
 			t.Errorf("the sweep failed on a directory the go tool ignores, which it should not have listed: %v", err)
 		}
 	})
@@ -318,7 +315,7 @@ func TestHashCostSweepSkipsMakeTestsTMPDIRAtTheRoot(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "checkout")
 			writeSweepTree(t, root, map[string]string{".git/HEAD": "ref: refs/heads/main\n", "cmd/tool/main.go": call})
-			want, wantVisited, err := hashCostSetterCallers(root)
+			want, wantVisited, err := hashCostSetterCallers(filepath.WalkDir, root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,7 +324,7 @@ func TestHashCostSweepSkipsMakeTestsTMPDIRAtTheRoot(t *testing.T) {
 				want = append(want, filepath.Join(root, filepath.FromSlash(row.file)))
 				wantVisited++
 			}
-			offenders, visited, err := hashCostSetterCallers(root)
+			offenders, visited, err := hashCostSetterCallers(filepath.WalkDir, root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -356,16 +353,14 @@ func TestHashCostSweepFinishesWhileMakeTestsTMPDIRChanges(t *testing.T) {
 		t.Run(gone.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "checkout")
 			writeSweepTree(t, root, map[string]string{".git/HEAD": "ref: refs/heads/main\n", "cmd/tool/main.go": call})
-			want, wantVisited, err := hashCostSetterCallers(root)
+			want, wantVisited, err := hashCostSetterCallers(filepath.WalkDir, root)
 			if err != nil {
 				t.Fatal(err)
 			}
 			dir := filepath.Join(root, sweeptest.MakeTestTmpDir, filepath.FromSlash(gone.dir))
 			writeSweepTree(t, dir, map[string]string{"main.go": call})
 			removal := &sweeptest.Removal{Dir: dir}
-			hashCostWalkDir = removal.WalkDir
-			t.Cleanup(func() { hashCostWalkDir = filepath.WalkDir })
-			offenders, visited, err := hashCostSetterCallers(root)
+			offenders, visited, err := hashCostSetterCallers(removal.WalkDir, root)
 			if !removal.Walked {
 				t.Fatal("the sweep did not walk through the stand-in, so this case proves nothing")
 			}

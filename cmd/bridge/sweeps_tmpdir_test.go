@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"go/ast"
+	"io/fs"
 	"path"
 	"path/filepath"
 	"slices"
@@ -13,12 +14,12 @@ import (
 )
 
 // sweepWalks are the two walks that skip what skipsForCitations names, each
-// with what it answers for a tree, one sorted line a fact, and the fact that
-// sweepSeenFile adds where the walk reads it, %s its slash path below the
-// root.
+// with what it answers for a tree walked by walk, one sorted line a fact, and
+// the fact that sweepSeenFile adds where the walk reads it, %s its slash path
+// below the root.
 var sweepWalks = []struct {
 	name  string
-	facts func(t *testing.T, root string) []string
+	facts func(t *testing.T, walk func(root string, fn fs.WalkDirFunc) error, root string) []string
 	seen  string
 }{
 	{"the citation guard's walk", citationFacts, "cites TestOnlyAFileTheWalkReadsCites in %s"},
@@ -31,12 +32,12 @@ var sweepSeenFile = map[string]string{
 	"main.go": "package main\n\n// Guarded by TestOnlyAFileTheWalkReadsCites.\nfunc main() { seen() }\n",
 }
 
-// citationFacts is what scanTestCitationsIn answers for the tree at root:
-// each test it found defined, each citation with the file that makes it, and
-// how many names the tracked docs cite.
-func citationFacts(t *testing.T, root string) []string {
+// citationFacts is what scanTestCitationsIn answers for the tree at root,
+// walked by walk: each test it found defined, each citation with the file
+// that makes it, and how many names the tracked docs cite.
+func citationFacts(t *testing.T, walk func(root string, fn fs.WalkDirFunc) error, root string) []string {
 	t.Helper()
-	cited, defined, mdCited := scanTestCitationsIn(t, root, map[string]bool{"notes.md": true})
+	cited, defined, mdCited := scanTestCitationsIn(t, walk, root, map[string]bool{"notes.md": true})
 	facts := []string{fmt.Sprintf("the docs cite %d", mdCited)}
 	for name := range defined {
 		facts = append(facts, "defines "+name)
@@ -50,12 +51,13 @@ func citationFacts(t *testing.T, root string) []string {
 	return facts
 }
 
-// productionCallFacts is what productionCallsIn finds under root: each call
-// of a function by its bare name, with the file that makes it.
-func productionCallFacts(t *testing.T, root string) []string {
+// productionCallFacts is what productionCallsIn finds under root, walked by
+// walk: each call of a function by its bare name, with the file that makes
+// it.
+func productionCallFacts(t *testing.T, walk func(root string, fn fs.WalkDirFunc) error, root string) []string {
 	t.Helper()
 	var facts []string
-	productionCallsIn(t, root, func(call *ast.CallExpr, rel string) {
+	productionCallsIn(t, walk, root, func(call *ast.CallExpr, rel string) {
 		if fn, ok := call.Fun.(*ast.Ident); ok {
 			facts = append(facts, "calls "+fn.Name+" in "+rel)
 		}
@@ -115,19 +117,19 @@ func TestTheCitationGuardsWalksSkipMakeTestsTMPDIRAtTheRoot(t *testing.T) {
 		{"a directory whose name begins with it", sweeptest.MakeTestTmpDir + "foo", sweepSeenFile, true},
 		{"beside the Go program .github holds", path.Join(".github", "scripts", "tool"), sweepSeenFile, true},
 	}
-	for _, walk := range sweepWalks {
-		t.Run(walk.name, func(t *testing.T) {
+	for _, sweep := range sweepWalks {
+		t.Run(sweep.name, func(t *testing.T) {
 			for _, row := range rows {
 				t.Run(row.name, func(t *testing.T) {
 					root := t.TempDir()
 					writeSweepBaseTree(t, root)
-					want := walk.facts(t, root)
+					want := sweep.facts(t, filepath.WalkDir, root)
 					writeTree(t, filepath.Join(root, filepath.FromSlash(row.dir)), row.files)
 					if row.read {
-						want = append(want, fmt.Sprintf(walk.seen, path.Join(row.dir, "main.go")))
+						want = append(want, fmt.Sprintf(sweep.seen, path.Join(row.dir, "main.go")))
 						sort.Strings(want)
 					}
-					if got := walk.facts(t, root); !slices.Equal(got, want) {
+					if got := sweep.facts(t, filepath.WalkDir, root); !slices.Equal(got, want) {
 						t.Errorf("the walk found %q, want %q", got, want)
 					}
 				})
@@ -142,10 +144,10 @@ func TestTheCitationGuardsWalksSkipMakeTestsTMPDIRAtTheRoot(t *testing.T) {
 // work directory, is one the walk never lists, so it finishes with the answer
 // the tree gives without it. Reading that directory, each walk failed on the
 // directory it had just listed (B567). A sweeptest.Removal stands in for the
-// other process at that moment of the walk.
+// other process at that moment of the walk, handed to each walk as its walk.
 func TestTheCitationGuardsWalksFinishWhileMakeTestsTMPDIRChanges(t *testing.T) {
-	for _, walk := range sweepWalks {
-		t.Run(walk.name, func(t *testing.T) {
+	for _, sweep := range sweepWalks {
+		t.Run(sweep.name, func(t *testing.T) {
 			for _, gone := range []struct{ name, dir string }{
 				{"a test's temporary directory", "TestSomething123"},
 				{"the go command's work directory", "go-build123/b001"},
@@ -153,13 +155,11 @@ func TestTheCitationGuardsWalksFinishWhileMakeTestsTMPDIRChanges(t *testing.T) {
 				t.Run(gone.name, func(t *testing.T) {
 					root := t.TempDir()
 					writeSweepBaseTree(t, root)
-					want := walk.facts(t, root)
+					want := sweep.facts(t, filepath.WalkDir, root)
 					dir := filepath.Join(root, sweeptest.MakeTestTmpDir, filepath.FromSlash(gone.dir))
 					writeTree(t, dir, map[string]string{"x_test.go": "package x\n"})
 					removal := &sweeptest.Removal{Dir: dir}
-					sweepWalkDir = removal.WalkDir
-					t.Cleanup(func() { sweepWalkDir = filepath.WalkDir })
-					got := walk.facts(t, root)
+					got := sweep.facts(t, removal.WalkDir, root)
 					if !removal.Walked {
 						t.Fatal("the walk did not go through the stand-in, so this case proves nothing")
 					}

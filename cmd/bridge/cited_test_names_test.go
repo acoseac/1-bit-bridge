@@ -344,7 +344,7 @@ func TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks(t *testing.T) {
 			if row.notCheckout {
 				tracked = nil
 			}
-			cited, defined, mdCited := scanTestCitationsIn(t, root, tracked)
+			cited, defined, mdCited := scanTestCitationsIn(t, filepath.WalkDir, root, tracked)
 
 			if !defined["TestReal"] {
 				t.Errorf("the tree's real test was not collected as defined: %v", defined)
@@ -375,7 +375,7 @@ func TestScanTestCitationsReadsARootNamedLikeASkippedDirectory(t *testing.T) {
 		writeTree(t, root, map[string]string{
 			"x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestReal(t *testing.T) { _ = t }\n",
 		})
-		if _, defined, _ := scanTestCitationsIn(t, root, nil); !defined["TestReal"] {
+		if _, defined, _ := scanTestCitationsIn(t, filepath.WalkDir, root, nil); !defined["TestReal"] {
 			t.Errorf("a root named %q was not read: defined = %v", name, defined)
 		}
 	}
@@ -453,7 +453,7 @@ func TestScanTestCitationsCollectsEveryNameGoTestRuns(t *testing.T) {
 		"func Test_realLower(t *testing.T) { _ = t }\n")
 	write("notes.md", "Pinned by Test9Ghost, and the family by Test_Real_.\n")
 
-	cited, defined, mdCited := scanTestCitationsIn(t, root, map[string]bool{"notes.md": true})
+	cited, defined, mdCited := scanTestCitationsIn(t, filepath.WalkDir, root, map[string]bool{"notes.md": true})
 
 	if !defined["Test_Real_Case"] || !defined["Test_realLower"] {
 		t.Errorf("the fixture's underscore tests were not collected as defined: %v", defined)
@@ -668,16 +668,21 @@ func isPlanDoc(rel string) bool {
 }
 
 // scanTestCitations is scanTestCitationsIn over the docs git tracks under
-// root: the entry point the whole-tree guard and the fixtures share.
+// root, walked by filepath.WalkDir: the entry point the whole-tree guard and
+// the fixtures share.
 func scanTestCitations(t *testing.T, root string) (cited map[string][]string, defined map[string]bool, mdCited int) {
 	t.Helper()
-	return scanTestCitationsIn(t, root, trackedMarkdownSet(t, root))
+	return scanTestCitationsIn(t, filepath.WalkDir, root, trackedMarkdownSet(t, root))
 }
 
 // scanTestCitationsIn walks the tree once, collecting names defined in
 // _test.go files and names cited from non-test source AND from the COMMENTS
 // of test files. trackedMD is trackedMarkdownSet's answer, taken as a
 // parameter so a fixture can pin the markdown half without a git checkout.
+// walk is how it walks the tree: filepath.WalkDir, or in a test a
+// sweeptest.Removal's WalkDir, which stands in for another process removing
+// a directory while the walk is under way. productionCallsIn takes its walk
+// the same way, so no test replaces a walk the package holds.
 //
 // Test files were skipped entirely at first, and fifteen stale citations sat
 // in their docblocks — a renamed sibling named under its old name, a
@@ -688,11 +693,11 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 // else — a test file's CODE names tests legitimately, and its string
 // literals can hold anything (a User-Agent value spelled like a test name,
 // say — one does). Gemini on #921 folded the two passes into one.
-func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (cited map[string][]string, defined map[string]bool, mdCited int) {
+func scanTestCitationsIn(t *testing.T, walk func(root string, fn fs.WalkDirFunc) error, root string, trackedMD map[string]bool) (cited map[string][]string, defined map[string]bool, mdCited int) {
 	t.Helper()
 	cited, defined = map[string][]string{}, map[string]bool{}
 	mdCitations := map[string]bool{}
-	err := sweepWalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := walk(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -733,12 +738,6 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 	// shared mutable state between them is a seam nobody asked for.
 	return cited, defined, len(mdCitations)
 }
-
-// sweepWalkDir is how the walks that skip by skipsForCitations
-// (scanTestCitationsIn, productionCallsIn) walk a tree: filepath.WalkDir,
-// which a test replaces with a sweeptest.Removal to stand in for another
-// process removing a directory while the walk is under way.
-var sweepWalkDir = filepath.WalkDir
 
 // skipsForCitations reports whether the walk leaves a directory below the
 // root unread: the repository's metadata, and build output or vendored code,
