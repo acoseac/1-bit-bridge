@@ -66,6 +66,7 @@ func TestTheStuckMarkerNeverFollowsAReplacement(t *testing.T) {
 				t.Fatal(err)
 			}
 			mark := &stuckMark{marker: marker, ref: dir, check: StuckCheck{Snapshot: "snapshot"}}
+			writes := markerWrites(t, marker)
 			var hookErr error
 			if racing {
 				mark.beforeCreate = func() { hookErr = os.Symlink(target, marker) }
@@ -74,6 +75,13 @@ func TestTheStuckMarkerNeverFollowsAReplacement(t *testing.T) {
 			if hookErr != nil {
 				t.Fatal(hookErr)
 			}
+			// Published only where nothing stood (backlog B871's round 5: the
+			// link that publishes it refuses the racing entry), and never
+			// leaving its temporary file.
+			if n, want := writes.Load(), map[bool]int32{false: 1, true: 0}[racing]; n != want {
+				t.Errorf("the write said %q %d times, want %d", "writes", n, want)
+			}
+			requireNoEntry(t, filepath.Join(dir, stuckMarkerTmpName), "a temporary file")
 			if got, err := os.ReadFile(target); err != nil || string(got) != "untouched" {
 				t.Fatalf("marker changed the symlink target: %q, %v", got, err)
 			}

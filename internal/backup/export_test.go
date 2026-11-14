@@ -218,7 +218,8 @@ func ReadStuckMarkerBytes(path string) ([]byte, error) { return fsutil.ReadAsFil
 
 // SetRemoveStaleMarkerForTest replaces the removal of a marker a process that
 // ended left beside a backups folder's lock (os.Remove), given its path, and
-// returns the restore.
+// returns the restore. It is called for the marker, then for the temporary
+// file a write of one may have left beside it (stuckMarkerTmpName).
 func SetRemoveStaleMarkerForTest(fn func(path string) error) (restore func()) {
 	prev := removeStaleMarker
 	removeStaleMarker = fn

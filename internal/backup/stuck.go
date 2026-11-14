@@ -215,8 +215,16 @@ type stuckMark struct {
 	// lock (hold.clearStale) has ended: the marker is written only then, so
 	// that removal, begun before the hold was given up, never removes it.
 	after <-chan struct{}
-	// beforeCreate is a per-mark test seam after removal, before exclusive creation.
+	// beforeCreate is a per-mark test seam after the old marker's removal,
+	// before the exclusive creation of the temporary file its bytes go to.
 	beforeCreate func()
+	// afterCreate is a per-mark test seam once the file the marker's bytes
+	// go to is created, before they are written; nil in production.
+	afterCreate func()
+	// failStep is a per-mark test seam: the failure a test puts at the
+	// temporary file's "write" or "close", each made first; nil in
+	// production.
+	failStep func(step string) error
 }
 
 // stuck is this process's holds given up, by every key they stand under: the
@@ -233,6 +241,11 @@ var (
 // stuckMarkerName is the marker a hold given up leaves in its backups folder
 // for another process to read.
 const stuckMarkerName = ".check-still-running"
+
+// stuckMarkerTmpName is the file beside it that a marker's write puts its
+// bytes in before it publishes them under stuckMarkerName (writeMarker): never
+// read as a marker, and removed with one (removeMarker, clearStaleMarker).
+const stuckMarkerTmpName = stuckMarkerName + ".tmp"
 
 // notice is closed, and replaced, at each mark, so a wait for the slot that
 // began before a hold was given up hears of it (takeSlot).
@@ -290,6 +303,19 @@ func markStuckAfter(keys []string, root string, check StuckCheck, after <-chan s
 // folder, unless its holder has removed it already: once a removal of a
 // marker left beside the lock that was under way as the hold was given up has
 // ended (after), outside mu, so its holder's removal never waits for it.
+//
+// The marker is published whole or not at all (backlog B871's round 5): once
+// the old marker is removed, its bytes go to a temporary file beside it
+// (stuckMarkerTmpName), created exclusively, written and closed, and only
+// then linked to the marker's name (os.Link), which refuses anything that
+// stands there, as the exclusive creation of the marker itself did, so a
+// racing entry is left as it is. A reader meets the old marker, none, or the
+// new one complete, never an empty or a partial one. A write, a close or a
+// link that fails publishes nothing, the temporary file is removed on every
+// path once it is made, and only a published marker is said ("writes"). Best
+// effort: a filesystem that makes no hard link (FAT, exFAT) takes no marker,
+// as one that takes no write, and another process's wait then ends
+// ErrBackupsBusy.
 func (mark *stuckMark) writeMarker() {
 	data, err := json.Marshal(mark.check)
 	if err != nil {
@@ -312,26 +338,53 @@ func (mark *stuckMark) writeMarker() {
 	if mark.beforeCreate != nil {
 		mark.beforeCreate()
 	}
-	f, err := os.OpenFile(mark.marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	tmp := filepath.Join(filepath.Dir(mark.marker), stuckMarkerTmpName)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return
 	}
+	if mark.afterCreate != nil {
+		mark.afterCreate()
+	}
 	_ = fsutil.KeepOwner(f, mark.ref)
-	_, _ = f.Write(data)
-	_ = f.Close()
+	err = mark.step("write", func() error {
+		_, err := f.Write(data)
+		return err
+	})
+	if cerr := mark.step("close", f.Close); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Link(tmp, mark.marker)
+	}
+	_ = os.Remove(tmp)
+	if err != nil {
+		return
+	}
 	if hook := onMarkerWrite.Load(); hook != nil {
 		(*hook)("writes", mark.marker)
 	}
 }
 
+// step runs a step of the marker's write, answering its failure, or the
+// failure a test puts at it once it is made (failStep).
+func (mark *stuckMark) step(name string, fn func() error) error {
+	err := fn()
+	if err == nil && mark.failStep != nil {
+		err = mark.failStep(name)
+	}
+	return err
+}
+
 // onMarkerWrite, nil in production, hears a marker's write: "waits" as it
 // begins to wait for a removal under way (after), "writes" once it has
-// written the marker, each with its path (SetOnMarkerWriteForTest).
+// published the marker whole, each with its path (SetOnMarkerWriteForTest).
 var onMarkerWrite atomic.Pointer[func(event, marker string)]
 
-// removeMarker removes the mark's marker, once its write has ended, and keeps
-// any write after it from making one; a nil mark, or one with none, does
-// nothing.
+// removeMarker removes the mark's marker, and the temporary file a write of
+// one may have left beside it (stuckMarkerTmpName), once its write has ended,
+// and keeps any write after it from making one; a nil mark, or one with none,
+// does nothing.
 func (mark *stuckMark) removeMarker() {
 	if mark == nil || mark.marker == "" {
 		return
@@ -340,6 +393,7 @@ func (mark *stuckMark) removeMarker() {
 	defer mark.mu.Unlock()
 	mark.removed = true
 	_ = os.Remove(mark.marker)
+	_ = os.Remove(filepath.Join(filepath.Dir(mark.marker), stuckMarkerTmpName))
 }
 
 // drop takes the mark out of this process's record, under each key it stands
@@ -418,16 +472,19 @@ func stuckAnywhere() (StuckCheck, bool) {
 	return StuckCheck{}, false
 }
 
-// clearStaleMarker removes a marker left in the backups folder at root, which
+// clearStaleMarker removes a marker left in the backups folder at root, and
+// the temporary file a write of one left beside it (stuckMarkerTmpName), which
 // its holder's first step runs: held here, the lock holds no hold given up,
 // so a marker there is a process's that has ended. A restore's holder runs it
 // through hold.clearStale, which a mark of its own waits for.
 func clearStaleMarker(root string) {
 	_ = removeStaleMarker(filepath.Join(root, stuckMarkerName))
+	_ = removeStaleMarker(filepath.Join(root, stuckMarkerTmpName))
 }
 
-// removeStaleMarker is clearStaleMarker's removal (os.Remove), and a test's
-// stand-in for one that does not answer (SetRemoveStaleMarkerForTest).
+// removeStaleMarker is clearStaleMarker's removal (os.Remove), of the marker
+// and of its temporary file, and a test's stand-in for one that does not
+// answer (SetRemoveStaleMarkerForTest).
 var removeStaleMarker = os.Remove
 
 // readStuckMarker is the read of a marker (fsutil.ReadAsFile), and a test's

@@ -38,8 +38,9 @@ const (
 
 // The lines a stuck check's process prints once its check is parked, once
 // its verification has answered, and once the marker its hold given up
-// leaves beside the lock is written whole (its write's "writes" hook, after
-// the write and the close); the line a verification's process prints once
+// leaves beside the lock is published whole (its write's "writes" hook, once
+// the link that publishes it has landed: backlog B871's round 5); the line a
+// verification's process prints once
 // its check has ended, before its verdict is written; and the one it prints
 // as its check begins, on its thread.
 const (
@@ -414,10 +415,10 @@ func TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds(t *testing
 		}
 	}()
 	// The check given up, and the marker its worker writes on a goroutine of
-	// its own written whole, which its process says once the write and its
-	// close have ended, in either order: the file alone, there from before
-	// its write, was read empty by the doctor's one read of it (backlog B871's
-	// round 2).
+	// its own published whole, which its process says once it is published,
+	// in either order: until round 5, whose writer publishes the marker whole,
+	// the file alone, there from before its write, was read empty by the
+	// doctor's one read of it (backlog B871's round 2).
 	deadline := time.After(2 * time.Minute)
 	for given, written := false, false; !given || !written; {
 		select {

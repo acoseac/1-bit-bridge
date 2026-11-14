@@ -63,9 +63,13 @@ func TestAGiveUpOnceTheLocksLetGoBeganWritesNoMarker(t *testing.T) {
 			}
 			h.drop()
 		}
-		// A marker written before the let-go removed it is gone with it.
+		// A marker written before the let-go removed it is gone with it, and
+		// so is the temporary file of its write (backlog B871's round 5).
 		if _, err := os.Lstat(filepath.Join(root, stuckMarkerName)); err == nil {
 			t.Error("a marker was left beside a lock no hold holds")
+		}
+		if _, err := os.Lstat(filepath.Join(root, stuckMarkerTmpName)); err == nil {
+			t.Error("a marker's temporary file was left beside a lock no hold holds")
 		}
 	})
 }
