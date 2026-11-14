@@ -96852,8 +96852,10 @@ CPUs), branch `fix/b901-recheck-grace` from main 92288694, #1469's squash
 `SetCheckGraceForTest`, internal/backup/seams.go 476-498). Commits: 99b4232e
 (the three tests), then this record. Every run: Go 1.27.3
 (`GOTOOLCHAIN=go1.27.3`), the tags `ts_omit_webclient,ts_omit_debugeventbus`,
-TMPDIR `~/onebit/tmp`, 8 of the host's 16 cores; the controls are uncommitted
-edits to the committed tree, predicted in writing first
+TMPDIR `~/onebit/tmp`, the tests at half the host's 16 CPUs (one binary at
+GOMAXPROCS 8, or four lanes at 2; the three vet legs at go's own parallelism,
+6 to 8 s each); the controls are uncommitted edits to the committed tree,
+predicted in writing first
 (`.tmp/_b901/controls.predictions.txt`), each edited file's bytes put back
 from memory once its binary was built.
 
