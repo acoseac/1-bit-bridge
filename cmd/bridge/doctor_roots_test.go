@@ -479,12 +479,18 @@ func TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad(t *testing.T) {
 
 // TestACancelledConsoleDoctorRunSaysItWasStopped: a run whose request goes
 // away before a root's bound says the root was not checked because the run
-// was stopped, never that it did not answer, and comes back at its stop. The
+// was stopped, never that it did not answer, and comes back once stopped. The
 // request goes away once the run waits on the root that does not answer
 // (RootProbes.SetOnRootWaitForTest), the other root's probe having made its
 // stat and its listing (rootStall.probed), so that root is checked however
 // loaded the host; the root's bound, ten minutes, is past the test's own
-// deadline.
+// deadline. Just before the request goes away the case fails on a report the
+// run has published already, and on that alone: the runner publishes on a
+// goroutine of its own and the hook says only that the run is about to wait,
+// so a run that came back on its own just after that look would pass it. That
+// the run came back by its stop is what its library-roots line says: a wait on
+// a root answers that the run was stopped only once the run's context has
+// ended (doctor's waitFor).
 func TestACancelledConsoleDoctorRunSaysItWasStopped(t *testing.T) {
 	const bound = 10 * time.Minute
 	path, healthy, dead := rootsInstall(t, false)
@@ -512,19 +518,17 @@ func TestACancelledConsoleDoctorRunSaysItWasStopped(t *testing.T) {
 	if !s.probed(healthy) {
 		t.Fatalf("the run waits on %s before the probe of %s has made its stat and its listing", dead, healthy)
 	}
-	stopped := make(chan struct{})
-	close(stopped)
+	select {
+	case <-reports:
+		t.Fatal("the run came back before its request went away")
+	default:
+	}
 	cancel()
 	var rep *admin.DoctorReport
 	select {
 	case rep = <-reports:
 	case <-time.After(doctorRootsDeadline):
 		t.Fatalf("the stopped run did not come back within %s", doctorRootsDeadline)
-	}
-	select {
-	case <-stopped:
-	default:
-		t.Error("the run came back before its request went away")
 	}
 	lines := map[string]admin.DoctorCheck{}
 	for _, c := range rep.Checks {
