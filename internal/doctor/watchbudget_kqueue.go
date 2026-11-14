@@ -5,6 +5,7 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -29,7 +30,12 @@ var watchFileLimits = manifest.WatchFileLimits
 //
 // Skipped silently when the watcher is disabled or no root is configured
 // yet, as on Linux.
-func checkWatchLimit(_ context.Context, d Deps) Check {
+//
+// Each root is counted as a work of the runner's RootProbes, on a goroutine
+// of its own, and waited for until the bound from when its count began
+// (backlog B650), as on Linux: a count that does not finish is never read as
+// a small one.
+func checkWatchLimit(ctx context.Context, d Deps) Check {
 	if !d.LibraryWatchEnabled {
 		return ok(checkNameWatcherFDBudget, "library watcher disabled — check skipped")
 	}
@@ -43,17 +49,28 @@ func checkWatchLimit(_ context.Context, d Deps) Check {
 			"the library watcher stays off when it cannot read it; the periodic scan picks up changes.")
 	}
 	budget := limits.Budget()
-	count, err := manifest.CountWatchSet(d.LibraryRoots, budget+1)
-	if err != nil {
+	t := d.probeRun().tallyWatches(ctx, d.LibraryRoots, budget+1,
+		func(c watchCount) int { return c.folders + c.entries }, unansweredCount("the folders and entries"))
+	if t.err != nil {
 		return warn(checkNameWatcherFDBudget,
-			fmt.Sprintf("could not enumerate the library's folders: %v", err),
+			fmt.Sprintf("could not enumerate the library's folders: %v", t.err),
 			"check failed; the watcher counts the library again when bridge serve starts.")
 	}
+	count := manifest.WatchSetCount{Folders: t.total.folders, Entries: t.total.entries}
 	share := describeWatchShare(limits)
-	if count.OpenFiles() > budget {
+	if t.reached {
+		summary := fmt.Sprintf("the library would take the watcher past its share of %d open files (%s; one per folder and per file it watches): the watcher will stay off, and the periodic scan picks up changes", budget, share)
+		hint := watchBudgetHint
+		if len(t.unanswered) > 0 {
+			summary += "; " + strings.Join(t.unanswered, "; ")
+			hint += "; " + stalledCountAdvice
+		}
+		return warn(checkNameWatcherFDBudget, summary, hint)
+	}
+	if len(t.unanswered) > 0 {
 		return warn(checkNameWatcherFDBudget,
-			fmt.Sprintf("the library would take the watcher past its share of %d open files (%s; one per folder and per file it watches): the watcher will stay off, and the periodic scan picks up changes", budget, share),
-			watchBudgetHint)
+			fmt.Sprintf("not checked: %s, so whether the library fits the watcher's share of %d open files (%s) is not known", strings.Join(t.unanswered, "; "), budget, share),
+			stalledCountAdvice)
 	}
 	summary := fmt.Sprintf("%d open files (%d folders and %d entries in them) of the watcher's %d (%s)",
 		count.OpenFiles(), count.Folders, count.Entries, budget, share)
@@ -71,6 +88,31 @@ func checkWatchLimit(_ context.Context, d Deps) Check {
 // watchBudgetHint is what the kqueue check advises when the library is near
 // or past the watcher's budget.
 const watchBudgetHint = "to watch a larger library, raise kern.maxfilesperproc and kern.maxfiles (sysctl, as root) and restart the bridge; or leave the watcher off: the periodic scan picks up changes either way."
+
+// beginWatchCounts begins the count of each root that checkWatchLimit waits
+// for, where it waits for one (the watcher on, roots configured, the limits
+// read), so Run's works on the roots run together.
+func beginWatchCounts(d Deps) {
+	if !d.LibraryWatchEnabled || len(d.LibraryRoots) == 0 {
+		return
+	}
+	limits, err := watchFileLimits()
+	if err != nil {
+		return
+	}
+	run := d.probeRun()
+	for _, root := range d.LibraryRoots {
+		run.beginCount(root, limits.Budget()+1)
+	}
+}
+
+// countRootWatches is the count of what the watcher would hold open under one
+// root, manifest.CountWatchSet over it alone: a work of the runner's
+// RootProbes.
+func countRootWatches(root string, stopAt int) (watchCount, error) {
+	c, err := manifest.CountWatchSet([]string{root}, stopAt)
+	return watchCount{folders: c.Folders, entries: c.Entries}, err
+}
 
 // describeWatchShare says which limit the budget is a share of.
 func describeWatchShare(l manifest.WatchFDLimits) string {

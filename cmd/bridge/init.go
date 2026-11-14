@@ -1541,11 +1541,17 @@ func confirm(r *bufio.Reader, w io.Writer, prompt string, defYes bool) bool {
 // command's too (buildDoctorDepsFor), so the documented `docker run …
 // init --no-service` is not told to pass the --no-service it was given, nor
 // to install a browser opener in an image (backlog B190).
+//
+// Its works on the library roots are the CLI's (cliRootProbes, backlog
+// B650): the launcher's Setup runs this preflight in the launcher's process,
+// as often as the operator runs Setup, and a root that never answered is
+// still out there.
 func initPreflightDeps(cfgDir, dataDir string, roots []string, apiPort, adminPort int) doctor.Deps {
 	return doctor.Deps{
 		ConfigDir:    cfgDir,
 		DataDir:      dataDir,
 		LibraryRoots: roots,
+		RootProbes:   cliRootProbes.BeginRun(),
 		APIPort:      apiPort,
 		AdminPort:    adminPort,
 		InContainer:  inContainerFunc(),
