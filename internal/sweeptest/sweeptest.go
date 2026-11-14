@@ -73,6 +73,70 @@ func IsOtherCheckout(root, dir string) bool {
 // TestTheSweepsSkipTheDirectoryTheCensusSkips, beside the census, holds the
 // two to one name, and TestTheCensusSkipsTheMakefilesTMPDIR holds the
 // census's to the Makefile.
+//
+// Every walk in this module's Go code that can start at the checkout's root
+// skips the directory there before it lists it, by one of two rules: by its
+// name, as IsMakeTestTmpDir answers (the census by its own makeTestTmpDir),
+// or as a dot-directory, with every directory whose name begins with a dot,
+// as the go tool skips them (`go help packages`). Each is listed here by its
+// file and the function that walks, then the tests that make that walk from
+// the root, and its rule with the function that holds it:
+//
+//   - cmd/bridge/cited_test_names_test.go scanTestCitationsIn, from
+//     TestEveryCitedTestNameExists: by its name, in skipsForCitations.
+//   - cmd/bridge/itunes_unwired_test.go productionCallsIn, from
+//     TestTheWireManifestIsTheProvidersAlone and
+//     TestNoProductionPathAsksITunes: by its name, in skipsForCitations.
+//   - internal/adminauth/hashcost_test.go hashCostSetterCallers, from
+//     TestNoProductionCodeLowersTheHashCost: by its name, in hashCostDirRule.
+//   - internal/manifest/flac_handle_discipline_test.go leakyFlacCalls, from
+//     TestNoLeakyFlacConstructors: by its name, in flacDirRule.
+//   - internal/sweeptest/rootwalks_test.go readModule, from
+//     TestEveryWalkFromTheRootIsListed: by its name, in skipsDir.
+//   - scripts/third-party-licenses/tags.go discoverBuildSites, from
+//     TestRealTreeBuildSiteCensus and TestBuildTagsAgree: by its name, in
+//     discoverBuildSites.
+//   - cmd/bridge/blank_keepers_test.go findBlankKeepers, from
+//     TestNoBlankKeepers: as a dot-directory, in moduleDirRule.
+//   - cmd/bridge/config_writers_test.go findConfigWriters, from
+//     TestEveryConfigWriterTakesTheConfigLock: as a dot-directory, in
+//     moduleDirRule.
+//   - cmd/bridge/default_logger_sweep_test.go findDefaultLoggerSetters, from
+//     TestNoTestSetsTheDefaultLoggerByHand: as a dot-directory, in
+//     moduleDirRule.
+//   - cmd/bridge/player_identity_test.go
+//     TestEveryPlayerUUIDMinterUsesFloorChecks, from
+//     TestEveryPlayerUUIDMinterUsesFloorChecks: as a dot-directory, in
+//     moduleDirRule.
+//   - cmd/bridge/served_files_test.go TestEveryServedFileIsOpenedAsAFile,
+//     from TestEveryServedFileIsOpenedAsAFile: as a dot-directory, in
+//     moduleDirRule.
+//   - cmd/bridge/store_path_pin_test.go parseProductionFiles, from
+//     TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase: as a dot-directory,
+//     in moduleDirRule.
+//   - cmd/bridge/docblock_subject_test.go scanDocblockSubjects, from
+//     TestNoDocblockNamesAnotherDeclaration: as a dot-directory, in
+//     scanDocblockSubjects.
+//   - cmd/bridge/server_errorlog_redacts_test.go parseModuleServerSources,
+//     from TestEveryServeHTTPServerRedactsPeerAddresses: as a dot-directory,
+//     in parseModuleServerSources.
+//   - internal/fsutil/walkroot_sweep_test.go sweepTreeWalks, from
+//     TestEveryWalkOfALibraryRootStartsFromWalkableRoot: as a
+//     dot-directory, in sweepDirRule.
+//   - internal/player/dsdconv/served_test.go moduleImports, from
+//     TestNoConvertedStreamIsServed: as a dot-directory, in moduleImports.
+//
+// TestEveryWalkFromTheRootIsListed holds the module to this list. It finds
+// every function of the module that walks a directory tree, test files and
+// programs included, and a walk handed in as a parameter, and fails on one
+// listed neither here nor among the walks it names as starting elsewhere,
+// on an item here that names no such function, on a listed test that does
+// not reach its walk, and on a rule its walk's branch for a directory does
+// not reach through the function named. One more test starts at the root,
+// by another road: TestEveryEmbedPatternRefusesALeadingDot runs go list over
+// ./..., and the go command skips the directory as a dot-directory. The pin
+// reads Go code, so a walk the go command makes for a test is not one it
+// sees.
 const MakeTestTmpDir = ".tmp"
 
 // IsMakeTestTmpDir reports whether dir, a directory a walk from root has
