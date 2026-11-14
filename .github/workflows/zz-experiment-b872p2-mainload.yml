@@ -1,0 +1,55 @@
+# EXPERIMENT (not for merge; B872 part 2): the two Windows rollback reds on
+# main, each -count 20, beside a whole ./cmd/bridge run, with CI's Defender
+# exclusion: five jobs. Runs only on a push to its own branch.
+name: experiment-b872p2-mainload
+
+on:
+  push:
+    branches: ["experiment/b872p2-main-load"]
+
+permissions:
+  contents: read
+
+jobs:
+  mainload:
+    name: reds under load (${{ matrix.try }})
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        try: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - name: Exclude the Go temp tree from Defender (as gate.yml does)
+        shell: bash
+        run: |
+          GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo "$TEMP")
+          pwsh -Command "Add-MpPreference -ExclusionPath '$GOTMP'" || true
+      - name: the two reds beside the cmd/bridge package
+        shell: bash
+        run: |
+          set +e
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 60m ./cmd/bridge > load.log 2>&1 &
+          LOAD=$!
+          sleep 60
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -count 20 -v -timeout 90m \
+            -run '^(TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn|TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack)$' \
+            ./cmd/bridge > reds.log 2>&1
+          echo "reds exit $?"
+          wait $LOAD
+          echo "load exit $?"
+          echo "--- reds: top-level results"
+          grep -E '^--- (PASS|FAIL): Test' reds.log | sed -E 's/ \([0-9.]+s\)//' | sort | uniq -c || true
+          echo "--- reds: failure lines"
+          grep -nE 'being used by another process|Access is denied|could not put the backup back' reds.log | head -10 || true
+          echo "--- load"
+          grep -E '^(ok|FAIL)' load.log | head -5 || true
+          exit 0
