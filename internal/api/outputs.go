@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -235,6 +236,11 @@ type LocalOutputsConfig struct {
 	// track id) and the file it serves, for a song MPD fetches from that
 	// route. Nil is no lookup.
 	LoopbackTrack func(trackID string) (path, absPath string, ok bool)
+	// Inspections, when not nil, is the table of MPD inspections this
+	// builder shares with every other builder given it (MPDInspections):
+	// bridge doctor's, which makes a builder for each gather. Nil keeps the
+	// builder's own guard (inspectBounded).
+	Inspections *MPDInspections
 }
 
 type localOutputs struct {
@@ -276,6 +282,9 @@ type localOutputs struct {
 	// inspecting is an inspection still running past its probe's deadline
 	// (inspectBounded): a probe does not start a second while it runs.
 	inspecting bool
+	// inspections is the table the builder's inspections are shared through
+	// instead (LocalOutputsConfig.Inspections), nil for none.
+	inspections *MPDInspections
 	// answered is auto's newest verdict that a caller of Active recorded,
 	// whichever way the gate reached it: a probe it stored, a probe past its
 	// own deadline it did not store, the cache, or another caller's probe
@@ -371,6 +380,7 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 		cmdline:    conf.ReadLogical,
 		alsaConfig: alsa.LoadPCMConfig,
 	}
+	o.inspections = cfg.Inspections
 	if o.goos == "" {
 		o.goos = runtime.GOOS
 	}
@@ -536,11 +546,18 @@ func (o *localOutputs) probeVerdict(ctx context.Context) (bool, mpd.Report, mpd.
 	found := false
 	expired, abandoned := false, false
 	if !refuse {
-		// Detached from the caller: a cancelled /v1/health must not
-		// store a miss that hides the output for the miss TTL.
-		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputProbeLimit)
-		rep, expired, abandoned = o.inspectBounded(pctx, opt)
-		cancel()
+		if o.inspections != nil {
+			// The table's inspection runs on a context and a deadline of its
+			// own, and this probe waits for it on its caller's: it stops
+			// waiting alone, and stores nothing then (inspectShared).
+			rep, expired, abandoned = o.inspectShared(ctx, opt)
+		} else {
+			// Detached from the caller: a cancelled /v1/health must not
+			// store a miss that hides the output for the miss TTL.
+			pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outputProbeLimit)
+			rep, expired, abandoned = o.inspectBounded(pctx, opt)
+			cancel()
+		}
 		found = rep.Found()
 	}
 	o.mu.Lock()
@@ -614,6 +631,137 @@ func (o *localOutputs) inspectBounded(ctx context.Context, opt mpd.Options) (rep
 		return mpd.Report{}, true, true
 	}
 	return out, ctx.Err() != nil, false
+}
+
+// MPDInspections is the MPD inspections in flight across the outputs
+// builders given it (LocalOutputsConfig.Inspections, backlog B650's third
+// round). bridge doctor makes a builder for each gather (cmd/bridge's
+// doctorOutputChecklist), and an inspection that a file on a dead mount
+// holds in the kernel (mpd.conf, a player's file: mpd.Inspect's reads end
+// with no context) held its own builder's guard alone, so the launcher's
+// doctor row began another inspection, and stranded its goroutine, at every
+// use. A table keeps one inspection in flight for what it reads (its
+// mpd.Options, inspectionKey) from when it begins until Inspect returns or
+// panics; a probe of any builder given the table waits on that one rather
+// than begin another, and the probe after it has returned begins afresh.
+// The zero table is empty and ready.
+type MPDInspections struct {
+	mu  sync.Mutex
+	out map[string]*mpdInspection
+	// waiting, when not nil, is told each time a probe begins to wait on an
+	// inspection: a test's hook.
+	waiting func()
+}
+
+// mpdInspection is one inspection in flight. done closes once Inspect has
+// returned or panicked, rep and panicked are its answer then, and late is
+// whether its deadline (outputProbeLimit from its start) had passed by then;
+// given closes once that deadline and outputProbeGrace have passed, when
+// every probe stops waiting for it. finished is set as done closes, under
+// the table's mu.
+type mpdInspection struct {
+	done, given chan struct{}
+	rep         mpd.Report
+	panicked    bool
+	late        bool
+	finished    bool
+}
+
+// InFlightForTest is the number of inspections the table holds that have
+// not returned. Tests only.
+func (t *MPDInspections) InFlightForTest() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.out)
+}
+
+// inspectionKey is what an inspection reads, as one key: every field of
+// its options (the root, the configuration file and the endpoint, the home
+// and XDG directories it expands, the password), hashed, so two probes
+// share an inspection only over the same reads and the key holds no
+// password.
+func inspectionKey(opt mpd.Options) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%#v", opt)))
+	return hex.EncodeToString(sum[:])
+}
+
+// begin is the inspection in flight in t for what opt reads, or one o begins
+// now: o.inspect on a goroutine of its own, on a context of its own that
+// keeps ctx's values and that o's clock ends at outputProbeLimit, its answer
+// kept and its key let go once it returns or panics, and only then.
+func (t *MPDInspections) begin(o *localOutputs, ctx context.Context, opt mpd.Options) *mpdInspection {
+	key := inspectionKey(opt)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if in := t.out[key]; in != nil {
+		return in
+	}
+	in := &mpdInspection{done: make(chan struct{}), given: make(chan struct{})}
+	if t.out == nil {
+		t.out = map[string]*mpdInspection{}
+	}
+	t.out[key] = in
+	ictx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopDeadline := o.after(outputProbeLimit, func() {
+		t.mu.Lock()
+		if !in.finished {
+			in.late = true
+		}
+		t.mu.Unlock()
+		cancel()
+	})
+	stopGiven := o.after(outputProbeLimit+outputProbeGrace, func() { close(in.given) })
+	go func() {
+		var rep mpd.Report
+		panicked := false
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				logOutputPanic("the probe", r)
+			}
+			stopDeadline()
+			stopGiven()
+			cancel()
+			t.mu.Lock()
+			if t.out[key] == in {
+				delete(t.out, key)
+			}
+			in.rep, in.panicked, in.finished = rep, panicked, true
+			close(in.done)
+			t.mu.Unlock()
+		}()
+		rep = o.inspect(ictx, opt)
+	}()
+	return in
+}
+
+// inspectShared is inspectBounded over the builder's table (MPDInspections):
+// the inspection in flight for what opt reads, or one begun now, waited for
+// until it answers, its deadline and outputProbeGrace pass, or ctx, the
+// caller's own context, ends. Each probe stops waiting alone, and the
+// inspection goes on for every other probe that waits on it. A report that
+// came once its deadline had passed is expired; none, or a panic, is
+// abandoned, as inspectBounded's.
+func (o *localOutputs) inspectShared(ctx context.Context, opt mpd.Options) (rep mpd.Report, expired, abandoned bool) {
+	in := o.inspections.begin(o, ctx, opt)
+	if hook := o.inspections.waiting; hook != nil {
+		hook()
+	}
+	select {
+	case <-in.done:
+	case <-in.given:
+	case <-ctx.Done():
+	}
+	// An answer ready as the wait ended is still the answer.
+	select {
+	case <-in.done:
+	default:
+		return mpd.Report{}, true, true
+	}
+	if in.panicked {
+		return mpd.Report{}, true, true
+	}
+	return in.rep, in.late, false
 }
 
 // nextVerdictLocked numbers a verdict as it is produced. Caller holds mu.

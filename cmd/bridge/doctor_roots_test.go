@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/mpd"
 )
 
 // Backlog B650 through bridge doctor and the console's doctor: a library root
@@ -942,6 +944,107 @@ func TestAWaitOnASharedReadEndsAloneWithItsContext(t *testing.T) {
 	letGo()
 	if a := wait("the second gather", second); a.err != nil || len(a.resp.Outputs) != 1 {
 		t.Errorf("the second gather answered %+v, %v; want the read's body", a.resp, a.err)
+	}
+}
+
+// standInCLIInspections makes a table of its own the one this process's
+// bridge doctor gathers inspect MPD through (cliMPDInspections) for the rest
+// of the test, and puts the process's back once every inspection it holds has
+// returned: a held inspection the test makes after it lets its inspections go
+// first. A test that calls it does not call t.Parallel.
+func standInCLIInspections(t *testing.T) *api.MPDInspections {
+	t.Helper()
+	prev := cliMPDInspections
+	table := &api.MPDInspections{}
+	cliMPDInspections = table
+	t.Cleanup(func() {
+		for deadline := time.Now().Add(30 * time.Second); table.InFlightForTest() > 0; time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Error("an MPD inspection was still in flight 30s after it was let go")
+				break
+			}
+		}
+		cliMPDInspections = prev
+	})
+	return table
+}
+
+// mpdConfHeld stands in for mpd.Inspect on a player box whose mpd.conf is on a
+// mount that does not answer: each inspection begun is counted and does not
+// return until letGo, its cleanup's; once let go, every inspection answers at
+// once with the box linuxBoxSeam stands in for.
+type mpdConfHeld struct {
+	music   string
+	begun   atomic.Int32
+	release chan struct{}
+	once    sync.Once
+}
+
+func newMPDConfHeld(t *testing.T, music string) *mpdConfHeld {
+	t.Helper()
+	h := &mpdConfHeld{music: music, release: make(chan struct{})}
+	t.Cleanup(h.letGo)
+	return h
+}
+
+func (h *mpdConfHeld) inspect(context.Context, mpd.Options) mpd.Report {
+	h.begun.Add(1)
+	<-h.release
+	return mpd.Report{Software: mpd.Software{Name: "Volumio", Version: "4.119"}, MusicDirectory: h.music}
+}
+
+func (h *mpdConfHeld) letGo() { h.once.Do(func() { close(h.release) }) }
+
+// seam is linuxBoxSeam with its inspection through h.
+func (h *mpdConfHeld) seam(c *api.LocalOutputsConfig) {
+	linuxBoxSeam(h.music)(c)
+	c.Inspect = h.inspect
+}
+
+// TestDoctorRunsInOneProcessShareOneMPDInspection is B650's third round
+// through the launcher's doctor row, run three times in one process over a
+// player box whose mpd.conf does not answer: with output.mpd auto the gate's
+// probe, and with on each build's, inspects MPD, and the runs begin one
+// inspection between them, each run coming back while it is held; once it
+// returns, the next run begins a fresh one and reads the box. Red at
+// 0b1a26f0, where each run's builder began an inspection of its own.
+func TestDoctorRunsInOneProcessShareOneMPDInspection(t *testing.T) {
+	for _, mode := range []string{"auto", "on"} {
+		t.Run(mode, func(t *testing.T) {
+			path, music := writePlayerConfig(t)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(strings.Replace(string(data), "mpd: on\n", "mpd: "+mode+"\n", 1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			table := standInCLIInspections(t)
+			standInCLIOutputs(t)
+			held := newMPDConfHeld(t, music)
+			const runs = 3
+			for range runs {
+				d := launcherDoctorDeps(t, path, held.seam)
+				doctorWithin(t, "the launcher's doctor run", func() doctorPrinted { return launcherReport(d) })
+			}
+			if n := held.begun.Load(); n != 1 {
+				t.Fatalf("%d doctor runs in one process began %d MPD inspections while one was held, want one", runs, n)
+			}
+			held.letGo()
+			for deadline := time.Now().Add(doctorRootsDeadline); table.InFlightForTest() > 0; time.Sleep(5 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatal("the inspection was still in flight once it was let go")
+				}
+			}
+			d := launcherDoctorDeps(t, path, held.seam)
+			got, _ := doctorWithin(t, "the run after the inspection returned", func() doctorPrinted { return launcherReport(d) })
+			if n := held.begun.Load(); n != 2 {
+				t.Errorf("after the inspection returned, %d inspections were begun, want a second", n)
+			}
+			if line := reportLine(got.out, "player"); !strings.Contains(line, boxRead) {
+				t.Errorf("the run after the inspection returned: player line = %q, want the box read (%q)\n%s", line, boxRead, got.out)
+			}
+		})
 	}
 }
 

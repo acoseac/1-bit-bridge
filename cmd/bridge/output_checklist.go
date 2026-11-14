@@ -253,6 +253,15 @@ func outputsReadKey(cfgFile string, cfg *config.Config) string {
 // have answered.
 var cliOutputsReads = &outputsReads{}
 
+// cliMPDInspections is the MPD inspections this process's bridge doctor
+// gathers share (api.MPDInspections, backlog B650's third round): the probe
+// output.mpd's auto asks at the gate and the one every build makes inspect
+// mpd.conf and the player's files, which a dead mount holds with no end,
+// and each gather's builder is a new one. A test stands in a table of its
+// own for it before it builds a gather, and puts this one back once its
+// inspections have returned.
+var cliMPDInspections = &api.MPDInspections{}
+
 // unreadInput is the input when the outputs body could not be read: the
 // error, and what does not come from that body. The configured roots are
 // judged unchecked, each by the name its path rule would carry, so the
@@ -367,9 +376,11 @@ func doctorChecks(lines []outputcheck.Line) []doctor.Check {
 // Its body is read through this process's table (cliOutputsReads, as it
 // stands when the gather is built), so a gather over a config whose read
 // another gather began and a root still holds waits on that read rather
-// than beginning one of its own.
+// than beginning one of its own; and its builder inspects MPD through the
+// process's inspections (cliMPDInspections, likewise), so a gather whose
+// inspection another gather began waits on that one.
 func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.LocalOutputsConfig)) func(context.Context) []doctor.Check {
-	reads := cliOutputsReads
+	reads, inspections := cliOutputsReads, cliMPDInspections
 	return func(ctx context.Context) []doctor.Check {
 		route := &loopbackAnswer{ask: func() (string, error) {
 			return probeLoopbackRoute(ctx, cfg.Output.EffectiveLoopbackPort())
@@ -406,6 +417,7 @@ func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.Lo
 			},
 			Cards:           hostTrees.cards,
 			LoopbackBaseURL: route.BaseURL,
+			Inspections:     inspections,
 		}
 		if seam != nil {
 			seam(&lcfg)
@@ -419,7 +431,10 @@ func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.Lo
 		// keeps the session it took, whose next command fails and dials
 		// once more, and the idle close the flight's end arms closes that
 		// one within a minute; so the body it answers reaches every gather
-		// still waiting on it.
+		// still waiting on it. A Close while the build is still dialling
+		// closes nothing of that dial: the session it opens is stored once
+		// it answers, after the Close, and lives until that idle close, a
+		// minute after the build ends.
 		defer lo.Close()
 		src := doctorChecklistSource(cfg, lo, route)
 		src.Reads, src.ReadKey = reads, outputsReadKey(cfgFile, cfg)
