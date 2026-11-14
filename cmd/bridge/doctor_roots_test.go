@@ -568,13 +568,58 @@ func TestTheConsolesDoctorReadsARecoveredRootAsHealthy(t *testing.T) {
 	}
 }
 
+// rootWaitClock is a runner's clock (doctor.RootProbes.SetClockForTest) whose
+// time moves only at a run's wait on a root: the timer a run sets once it has
+// told the runner's hook the root it is about to wait on
+// (SetOnRootWaitForTest) fires at once, the clock moving on by that wait's
+// bound, and every other timer never fires, so a wait on the config's load
+// ends only by the load's answer. A run waits on a root only once its Deps
+// are built, its load answered, so the clock never moves while a load is
+// waited for.
+type rootWaitClock struct {
+	mu   sync.Mutex
+	at   time.Time
+	root atomic.Bool
+}
+
+// onRootWaitClock makes a rootWaitClock the clock of p's runs, before any run
+// of p begins.
+func onRootWaitClock(p *doctor.RootProbes) *rootWaitClock {
+	c := &rootWaitClock{at: time.Unix(1_800_000_000, 0)}
+	p.SetClockForTest(c.now, c.timer)
+	p.SetOnRootWaitForTest(func(string) { c.root.Store(true) })
+	return c
+}
+
+func (c *rootWaitClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *rootWaitClock) timer(d time.Duration) (<-chan time.Time, func() bool) {
+	fired := make(chan time.Time, 1)
+	if !c.root.CompareAndSwap(true, false) {
+		return fired, func() bool { return true }
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
+	fired <- c.at
+	return fired, func() bool { return false }
+}
+
 // TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn is Codex's
 // fourth note on the brief through the console's runner, which loads the
 // config afresh at every run: a dead root replaced by another, sixteen times,
 // leaves sixteen probes out, and the next run begins none for the next root,
 // which it says it did not check and why, while the config's load, which
 // touches no root here, is never held back; a root removed and added again
-// finds its probe still out.
+// finds its probe still out. The runner's time is the case's
+// (rootWaitClock), so a wait on a root passes its bound as the run makes it,
+// and the wait on each load ends by the load's answer, however long the host
+// takes to load the file: under a real bound, config-file's ok past the
+// probes' limit needed the load within 100 ms (backlog B650FIX).
 func TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn(t *testing.T) {
 	const bound = 100 * time.Millisecond
 	const limit = 16
@@ -595,7 +640,9 @@ func TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn(t *testing.T) 
 		}
 	}
 	s := newRootStall(roots...)
-	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), stallProbes(t, s, bound))
+	probes := stallProbes(t, s, bound)
+	onRootWaitClock(probes)
+	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), probes)
 	for _, r := range roots[:limit] {
 		setRoot(r)
 		lines, _ := consoleRun(t, context.Background(), runner)
