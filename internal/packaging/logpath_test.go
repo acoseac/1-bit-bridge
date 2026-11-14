@@ -155,12 +155,15 @@ var (
 // scmStandIn is the Windows service manager as a caller holding the rights
 // given meets it: an open asking for more than they grant is refused with
 // access denied, as Windows refuses it, a name it holds no service by with
-// does-not-exist, and every call is recorded. Its services' states are what
-// a status query would answer, which the install check never asks.
+// does-not-exist, and every call is recorded. It keeps no service's state,
+// since the install check asks none (its calls are a connect, an open and
+// their closes, TestTheInstallCheckAsksOnlyWhatAStandardUserHolds): a stopped
+// service is registered as a running one is, which cmd/bridge's
+// TestAStoppedServiceIsRegistered holds `bridge logs` and bridge doctor to.
 type scmStandIn struct {
 	managerRights, serviceRights uint32
-	// services are the registered services, by name, and their states.
-	services map[string]string
+	// registered are the names the manager holds a service by.
+	registered map[string]bool
 	// connectErr and openErr, where set, are the connect's and a registered
 	// service's open's answers whatever the rights.
 	connectErr, openErr error
@@ -186,7 +189,7 @@ func (s *scmStandIn) manager() serviceManager {
 			if manager != 1 {
 				return 0, fmt.Errorf("open through handle %d, not the manager's", manager)
 			}
-			if _, ok := s.services[name]; !ok {
+			if !s.registered[name] {
 				return 0, errNoSuchServiceHere
 			}
 			if s.openErr != nil {
@@ -210,7 +213,9 @@ func (s *scmStandIn) manager() serviceManager {
 // non-elevated case: a standard user, who holds of the service manager and of
 // the bridge's service only what their default security grants, is told the
 // service is registered, where InstalledKind's mgr.Connect, which asks for
-// all access, is refused and reads as no service.
+// all access, is refused and reads as no service. The calls are a connect, an
+// open and their closes: no status query, so a service's state decides
+// nothing.
 func TestTheInstallCheckAsksOnlyWhatAStandardUserHolds(t *testing.T) {
 	for _, c := range []struct {
 		name                         string
@@ -221,7 +226,7 @@ func TestTheInstallCheckAsksOnlyWhatAStandardUserHolds(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			scm := &scmStandIn{managerRights: c.managerRights, serviceRights: c.serviceRights,
-				services: map[string]string{ServiceLabel: "running"}}
+				registered: map[string]bool{ServiceLabel: true}}
 			got, err := scm.manager().registration(ServiceLabel)
 			if got != ServiceRegistered || err != nil {
 				t.Errorf("registration = %v, %v; want registered", got, err)
@@ -238,7 +243,7 @@ func TestTheInstallCheckAsksOnlyWhatAStandardUserHolds(t *testing.T) {
 	// The stand-in refuses what InstalledKind asks a standard user for, as
 	// Windows does: what makes the first row above a finding.
 	scm := &scmStandIn{managerRights: standardUserManagerRights, serviceRights: standardUserServiceRights,
-		services: map[string]string{ServiceLabel: "running"}}
+		registered: map[string]bool{ServiceLabel: true}}
 	if _, err := scm.manager().connect(scManagerAllAccess); !errors.Is(err, errAccessDeniedHere) {
 		t.Errorf("the stand-in granted a standard user all access to the manager: %v", err)
 	}
@@ -261,17 +266,17 @@ func TestTheInstallCheckTellsNotRegisteredFromCannotTell(t *testing.T) {
 			scm:  &scmStandIn{managerRights: standardUserManagerRights, serviceRights: standardUserServiceRights},
 			want: ServiceNotRegistered},
 		{name: "the manager out of reach",
-			scm:  &scmStandIn{connectErr: errRPC, services: map[string]string{ServiceLabel: "running"}},
+			scm:  &scmStandIn{connectErr: errRPC, registered: map[string]bool{ServiceLabel: true}},
 			want: ServiceRegistrationUnknown, wantErr: errRPC, wantPrefix: "connect to the service manager: "},
 		{name: "the manager refuses even a connect",
-			scm:  &scmStandIn{managerRights: 0, services: map[string]string{ServiceLabel: "running"}},
+			scm:  &scmStandIn{managerRights: 0, registered: map[string]bool{ServiceLabel: true}},
 			want: ServiceRegistrationUnknown, wantErr: errAccessDeniedHere, wantPrefix: "connect to the service manager: "},
 		{name: "a service whose security refuses its status",
-			scm:  &scmStandIn{managerRights: standardUserManagerRights, serviceRights: 0, services: map[string]string{ServiceLabel: "running"}},
+			scm:  &scmStandIn{managerRights: standardUserManagerRights, serviceRights: 0, registered: map[string]bool{ServiceLabel: true}},
 			want: ServiceRegistrationUnknown, wantErr: errAccessDeniedHere, wantPrefix: "open the service " + ServiceLabel + ": "},
 		{name: "a service the manager fails to open",
 			scm: &scmStandIn{managerRights: standardUserManagerRights, serviceRights: standardUserServiceRights,
-				services: map[string]string{ServiceLabel: "running"}, openErr: errRPC},
+				registered: map[string]bool{ServiceLabel: true}, openErr: errRPC},
 			want: ServiceRegistrationUnknown, wantErr: errRPC, wantPrefix: "open the service " + ServiceLabel + ": "},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -298,17 +303,6 @@ func TestTheInstallCheckTellsNotRegisteredFromCannotTell(t *testing.T) {
 	})
 }
 
-// TestAStoppedServiceIsRegistered is backlog B618's stopped service: the
-// check asks whether the service is registered, never whether it runs, so a
-// stopped service's log is still the one bridge logs reads.
-func TestAStoppedServiceIsRegistered(t *testing.T) {
-	scm := &scmStandIn{managerRights: standardUserManagerRights, serviceRights: standardUserServiceRights,
-		services: map[string]string{ServiceLabel: "stopped"}}
-	if got, err := scm.manager().registration(ServiceLabel); got != ServiceRegistered || err != nil {
-		t.Errorf("registration of a stopped service = %v, %v; want registered", got, err)
-	}
-}
-
 // TestBothInstallArtifactsAreReported is backlog B618's install of one kind
 // over the other: the service registered and the Startup-folder launcher
 // there are both reported, and bridge logs reads the service's log
@@ -320,28 +314,28 @@ func TestBothInstallArtifactsAreReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	gone := filepath.Join(t.TempDir(), ServiceLabel+".cmd")
-	registered := map[string]string{ServiceLabel: "running"}
+	registered := map[string]bool{ServiceLabel: true}
 	for _, c := range []struct {
-		name     string
-		services map[string]string
-		launcher func() (string, error)
-		want     WindowsInstall
+		name       string
+		registered map[string]bool
+		launcher   func() (string, error)
+		want       WindowsInstall
 	}{
-		{name: "both", services: registered, launcher: func() (string, error) { return launcher, nil },
+		{name: "both", registered: registered, launcher: func() (string, error) { return launcher, nil },
 			want: WindowsInstall{Service: ServiceRegistered, Startup: true}},
-		{name: "the service alone", services: registered, launcher: func() (string, error) { return gone, nil },
+		{name: "the service alone", registered: registered, launcher: func() (string, error) { return gone, nil },
 			want: WindowsInstall{Service: ServiceRegistered}},
 		{name: "the launcher alone", launcher: func() (string, error) { return launcher, nil },
 			want: WindowsInstall{Service: ServiceNotRegistered, Startup: true}},
 		{name: "neither", launcher: func() (string, error) { return gone, nil },
 			want: WindowsInstall{Service: ServiceNotRegistered}},
-		{name: "a launcher whose path cannot be made", services: registered,
+		{name: "a launcher whose path cannot be made", registered: registered,
 			launcher: func() (string, error) { return "", errors.New("%APPDATA% is unset") },
 			want:     WindowsInstall{Service: ServiceRegistered}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			scm := &scmStandIn{managerRights: standardUserManagerRights, serviceRights: standardUserServiceRights,
-				services: c.services}
+				registered: c.registered}
 			if got := checkWindowsInstall(scm.manager(), c.launcher, os.Stat); got != c.want {
 				t.Errorf("checkWindowsInstall = %+v, want %+v", got, c.want)
 			}

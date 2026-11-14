@@ -55,10 +55,17 @@ func hostLogs() logsHost {
 		goos:       runtime.GOOS,
 		defaultLog: packaging.DefaultLogPath,
 		dirs:       packaging.HostWindowsLogDirs(),
-		install:    packaging.CheckWindowsInstall,
+		install:    logsInstallCheck,
 		isService:  isWindowsService,
 	}
 }
+
+// logsInstallCheck is the Windows install check hostLogs hands `bridge logs`
+// and both doctors, packaging.CheckWindowsInstall: a seam so a test that
+// drives a real entry point decides what is installed rather than the machine
+// it runs on, whose service manager may hold a bridge service or none, as
+// inContainerFunc is for the container verdict. Production never changes it.
+var logsInstallCheck = packaging.CheckWindowsInstall
 
 // errNoDefaultLog is the log path's answer where a host has none to give.
 var errNoDefaultLog = errors.New("no log path is known on this host")
@@ -481,4 +488,24 @@ func consoleLogPath(host logsHost) string {
 		return ""
 	}
 	return p
+}
+
+// doctorLog is the log a doctor's log-file-size line grades: its path, a note
+// on how it was chosen where its reader needs one, and why no file could be
+// named where none could (doctor.Deps' LogPath, LogNote and LogUnresolved).
+type doctorLog struct {
+	path, note, unresolved string
+}
+
+// doctorLogs is which log a doctor's log-file-size line grades, over the host
+// it reads: buildDoctorDepsWith's seam, so that each platform's choice runs on
+// any host (hostLogs in production). console marks the console's doctor.
+type doctorLogs struct {
+	host    logsHost
+	console bool
+}
+
+// choose is the log the line grades: consoleLogPath's, for either doctor.
+func (l doctorLogs) choose() doctorLog {
+	return doctorLog{path: consoleLogPath(l.host)}
 }

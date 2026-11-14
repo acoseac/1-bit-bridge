@@ -405,7 +405,7 @@ func TestABackupsFolderGrantingNoLockGrowsByOneSnapshotAndTheDoctorSaysWhy(t *te
 	if n := len(snapshotDirs(t, root)); n != 1 || !strings.Contains(errs, "no snapshot taken: no lock is granted on the backups folder") {
 		t.Errorf("a start past the day with no lock granted: %d snapshots, want 1, said why\nstdout %s\nstderr %s", n, out, errs)
 	}
-	d := buildDoctorDepsWith(cfgPath, false, doctorDACHost())
+	d := buildDoctorDepsWith(cfgPath, false, doctorDACHost(), doctorLogs{host: hostLogs()})
 	report := doctor.Run(t.Context(), d)
 	found := false
 	for _, c := range report.Checks {

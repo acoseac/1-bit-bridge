@@ -373,10 +373,11 @@ func TestBridgeLogsOffWindowsIsAsItWas(t *testing.T) {
 
 // TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint drives `bridge logs`
 // through run, on this host's own logsHost (hostLogs), its directories set
-// by the environment the test gives it: DefaultLogPath on macOS and Linux;
-// on Windows the user's log too, the service being registered nowhere a CI
-// runner is, so that the host's install check reads not registered there.
-// A guard, green at main.
+// by the environment the test gives it and its install check the test's
+// (logsInstallCheck), which answers not registered, so that no host's own
+// service manager decides the answer: DefaultLogPath on macOS and Linux,
+// asking no check; on Windows the user's log too, asking it once. A guard,
+// green at main.
 func TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
@@ -386,6 +387,10 @@ func TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
 	t.Setenv("PROGRAMDATA", filepath.Join(root, "ProgramData"))
+	asked := 0
+	prev := logsInstallCheck
+	logsInstallCheck = func() packaging.WindowsInstall { asked++; return nothingInstalled }
+	t.Cleanup(func() { logsInstallCheck = prev })
 	path, err := packaging.DefaultLogPath()
 	if err != nil {
 		t.Fatal(err)
@@ -394,6 +399,13 @@ func TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"logs"}, &stdout, &stderr)
 	requireLogsRun(t, code, stdout.String(), stderr.String(), 0, userLogLines, "")
+	wantAsked := 0
+	if runtime.GOOS == "windows" {
+		wantAsked = 1
+	}
+	if asked != wantAsked {
+		t.Errorf("bridge logs asked the install check %d times, want %d", asked, wantAsked)
+	}
 	if runtime.GOOS == "windows" {
 		if got := hostLogs().dirs.ServiceLog(); got != filepath.Join(root, "ProgramData", "1-bit-bridge", "bridge.log") {
 			t.Errorf("the host's service log is %q, not under the PROGRAMDATA given", got)

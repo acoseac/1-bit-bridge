@@ -248,14 +248,16 @@ var inContainerFunc = fsutil.InContainer
 // menu cannot see, so it offers Setup) still gets config-file's warn, and
 // config-dir and the port checks grade what Setup's preflight will.
 func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
-	return buildDoctorDepsWith(cfgPath, absentIsPreSetup, doctorDACHost())
+	return buildDoctorDepsWith(cfgPath, absentIsPreSetup, doctorDACHost(), doctorLogs{host: hostLogs()})
 }
 
-// buildDoctorDepsWith is buildDoctorDepsFor with the host the player-dac line
-// reads (B676): bridge doctor's own process beside the running bridge
-// (doctorDACHost), or, for the console's doctor, the serving process
-// (servingDACHost, adminDoctorRunnerFor).
-func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost) doctor.Deps {
+// buildDoctorDepsWith is buildDoctorDepsFor with the hosts two of its lines
+// read: dacHost, the player-dac line's (B676), bridge doctor's own process
+// beside the running bridge (doctorDACHost) or, for the console's doctor, the
+// serving process (servingDACHost, adminDoctorRunnerFor); and logs, which log
+// the log-file-size line grades (doctorLogs).
+func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost, logs doctorLogs) doctor.Deps {
+	lf := logs.choose()
 	d := doctor.Deps{
 		// The ports `bridge init` writes, which a run that finds no config
 		// grades. A config that loads replaces them below. One that was
@@ -264,12 +266,13 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 		// pid file behind it (doctor's ungradedConfigPortCheck).
 		APIPort:   7788,
 		AdminPort: 7789,
-		// The console export's resolution (adminLogPath), so the console's
-		// doctor grades the file its bridge writes. On Windows `bridge logs`
-		// asks what is installed instead, and so reads the service's log
-		// where a doctor run from a shell grades the user's
-		// (consoleLogPath).
-		LogPath: adminLogPath(),
+		// The console export's resolution (consoleLogPath, through logs), so
+		// the console's doctor grades the file its bridge writes. On Windows
+		// `bridge logs` asks what is installed instead, and so reads the
+		// service's log where a doctor run from a shell grades the user's.
+		LogPath:       lf.path,
+		LogNote:       lf.note,
+		LogUnresolved: lf.unresolved,
 		// Whether this runs in a container, which skips the two checks
 		// whose advice is for a host shell (doctor.Deps.InContainer). It
 		// does not depend on the config, so every lookup below carries it.
@@ -1020,7 +1023,7 @@ func adminDoctorRunner(cfgPath string, ownedPorts []int, checklist func(context.
 // player started with, which the line tells the config's apart from.
 func adminDoctorRunnerFor(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost) func(context.Context) *admin.DoctorReport {
 	return func(ctx context.Context) *admin.DoctorReport {
-		d := buildDoctorDepsWith(cfgPath, false, dacHost)
+		d := buildDoctorDepsWith(cfgPath, false, dacHost, doctorLogs{host: hostLogs(), console: true})
 		d.OwnedPorts = ownedPorts
 		// The player checklist from the serving process's own source, the
 		// one the dashboard's panel shows, rather than the one-shot outputs

@@ -380,6 +380,20 @@ type Deps struct {
 	// complaint about a file that does not exist.
 	LogPath string
 
+	// LogNote says how LogPath was chosen where its reader needs to know:
+	// on Windows, where the install check could not tell whether the
+	// bridge's service is installed. The line carries it after its summary
+	// whatever it found, so the table, --json and the console all show it;
+	// where no file could be named (LogUnresolved) it is the line's hint.
+	LogNote string
+
+	// LogUnresolved says why no log file could be named where one should
+	// have been: a path that could not be made, or, where the install check
+	// could not tell, neither of the Windows logs there. The line is then a
+	// warn in those words, never the ok of a bridge that logs to its
+	// terminal, which an empty LogPath alone reads as.
+	LogUnresolved string
+
 	// Managed mirrors cfg.Deployment.IsManaged(): a control plane runs
 	// this process and whoever is reading the report has no shell on the
 	// host.
