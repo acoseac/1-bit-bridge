@@ -96476,3 +96476,115 @@ grades the service's log under the `PROGRAMDATA` given and asks `logsInstallChec
 `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint` asks it once only there; every other round-2 case models
 Windows through `logsHost` and runs on every host. A standard user's rights stay Microsoft's documentation, which
 neither host shows.
+
+## 2026-11-14 — B618 round 3: the log line's warn is the Windows shell's alone
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` from round 2's head b8d777c5 (its rules included).
+Commits 18289911 (the seam and every case, red first), 0be3563a (the fix), and the one that carries this record.
+The rules line and its long form ship as `rules-b618-r3.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`).
+
+### What was true (at b8d777c5)
+
+Round 2 made a log whose path cannot be made a warn wherever a doctor grades one: `doctorLogs.choose`'s console
+branch (`cmd/bridge/logs.go` 514 to 523) and `shellDoctorLog`'s branch off Windows (533 to 540) answered
+`doctorLog{unresolved: …}`, which `checkLogSize` reads as a warn. So `env -u HOME bridge doctor` on Linux and macOS,
+and the console's doctor of a Windows bridge run outside the service whose home cannot be read, said "[warn]
+log-file-size not checked: the log's path cannot be made (…)", where round 1 said "[ok] no log file configured (logs
+go to the terminal)", as `adminLogPath`'s empty path still makes the console's export say. The brief had put the
+warn in bridge doctor from a shell on Windows alone. `adminDoctorRunnerFor` (`doctor.go` 1028 to 1030) built
+`hostLogs()` itself, so no test could run the console's doctor over a host of its own:
+`TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` set the console flag itself through
+`buildDoctorDepsWith` and stayed green with the flag dropped from the runner. `requireLogLine`
+(`doctor_logs_test.go` 35 to 44) refused the terminal's ok whatever the case wanted, so no case could ask for it.
+`logsInstallCheck`'s doc said production never changes it, which nothing held.
+
+### As built
+
+Item 1. The console's branch grades `consoleLogPath`'s file, "" where its path cannot be made (the terminal's ok);
+round 2's `consoleLog`, whose error nobody reads now, folds back into it, round 1's body. `shellDoctorLog` off
+Windows answers no file where DefaultLogPath fails. The Windows branches keep `LogUnresolved`: a user's log with no
+path where the service is not registered, and the two cases where the check cannot tell. The docs of `doctorLog`,
+`doctorLogs`, `shellDoctorLog`, `adminLogPath` and `doctor.Deps`' `LogPath` and `LogUnresolved` say so.
+`TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade` (`doctor_logs_test.go` 184): its console row and its two
+off-Windows rows (the shell's line and the console's) want the ok, its two Windows rows the warn.
+`TestTheDoctorsLogNoteSurvivesItsRendering` (247) keeps its three Windows rows and adds "a path that cannot be made
+off Windows on darwin" and "on linux" (bridge doctor's table, "[ok] log-file-size … no log file configured (logs go
+to the terminal)" with no hint under it, and its --json) and "a path that cannot be made in the console's doctor"
+(the report `adminDoctorRunnerFor` hands the console, on Windows outside the service and on Linux). `requireLogLine`
+(57) refuses the terminal's ok only where the summary it wants is another.
+
+Item 2. `adminDoctorRunnerFor` (`doctor.go` 1031) takes `logs logsHost` from its caller and sets `console: true`
+itself; `adminDoctorRunner` (1020) and serve's wiring (`main.go` 6381) pass `hostLogs()`, serve once as it wires the
+console, as it hands it `doctorDAC`: `hostLogs` reads PROGRAMDATA and LOCALAPPDATA as it builds the host, and a
+serving process's environment does not change. `consolesLogLine` (`doctor_logs_test.go` 32) runs
+`adminDoctorRunnerFor` over the serving process's DAC host and the test's logs host and takes its report's line, and
+`TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` (218) runs through it: beside a registered service,
+the user's log outside the service and the service's inside, the install check asked no time. A guard, green at
+18289911; its red is control E1.
+
+Item 3. `logsInstallCheck` stays. `TestNoProductionCodeReassignsTheLogsInstallCheck` (`logs_test.go` 427) parses every
+non-test Go file of cmd/bridge the go tool builds, whatever its platform: one declaration, of
+`packaging.CheckWindowsInstall`, and no assignment or address taken anywhere else; the variable's doc cites it.
+
+The brief's binding review dropped its fifth item, and nothing was built for it.
+
+### Red first
+
+At 18289911 (the seam and every case; the console's branch and the branch off Windows still answered
+`LogUnresolved`, as at b8d777c5), `go test -count=1 -v -run '…'` of cmd/bridge with the release tags and TMPDIR
+`~/onebit/tmp`, predictions written first (`.tmp/_b618/r3_red.predictions.txt`, not committed), 70 verdicts, every
+one as predicted:
+
+- red: `TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade`'s console row ("the log-file-size line is warn "not checked:
+  the log's path cannot be made (%USERPROFILE% is not defined)" (hint ""), want ok "no log file configured (logs go
+  to the terminal)" (hint "")") and both off-Windows rows (each twice, the shell's line and the console's: "warn "not
+  checked: the log's path cannot be made ($HOME is not defined)""), and `TestTheDoctorsLogNoteSurvivesItsRendering`'s
+  four new rows (the table's "[warn] log-file-size       not checked: …", --json's warn, the console's report's
+  warn);
+- green: the other rows of both tests, the console's guard (both rows, the check never asked), the pin, and every
+  other touched test.
+
+At 0be3563a all 70 are green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b618/r3_controls.predictions.txt`, not committed), at 0be3563a, an uncommitted
+edit of the clean tree restored with `git checkout --` and its bytes compared with HEAD's, cmd/bridge's test binary
+built for it and the 70 touched verdicts run (`.tmp/_b618/r3_controls.py`). Every control was red where predicted
+and nowhere else; `git status` was clean after.
+
+| | mutation | red verdicts, parent tests counted |
+|---|---|---|
+| E0 | none | 0 |
+| E1 | the brief's: `console: true` dropped from `adminDoctorRunnerFor` | 8: the console's guard's two rows (outside the service "49 B (…/ProgramData/…)" for the user's "48 B", and the install check asked once in each), the console row of the cannot-be-made test ("no log file yet", the service's log) and the rendering's console row on Windows; the off-Windows console rows green, the shell's choice there being the terminal's ok too |
+| E2 | the console's doctor warns again where its path cannot be made | 8: the console row and both off-Windows rows (their console halves), the rendering's two console rows |
+| E3 | bridge doctor off Windows warns again | 6: both off-Windows rows (their shell halves), the rendering's two off-Windows rows |
+| E4 | the Windows shell names no file for a user's log with no path | 4: the "service not registered" row and the rendering's Windows row |
+| E6 | an `init` in logs.go assigns `logsInstallCheck` | 1: the pin ("logs.go:585:15 assigns it") |
+| E6b | a package variable takes its address | 1: the pin ("takes its address") |
+| E6c | its declaration wraps `packaging.CheckWindowsInstall` | 1: the pin ("declares logsInstallCheck as something other than packaging.CheckWindowsInstall") |
+
+### The gates
+
+At 0be3563a, TMPDIR `~/onebit/tmp` and the release tags on every command. In one use of the build lock (06:25:45 to
+06:26:12, the slot taken after 505 s): `go vet ./...` clean for linux/amd64, darwin/amd64 and windows/amd64, and of
+cmd/bridge and internal/doctor for linux/386; `GOOS=windows go test -c ./cmd/bridge/` built, with the release tags
+and without. go1.27.3's gofmt lists none of the changed Go files. Outside the lock, one package per `go test`, `-p 8
+-parallel 8`: `-race -count=50` of cmd/bridge's 13 touched tests (650 runs, 1,450 subtest passes, 43 s), none failed
+or skipped; `go test -race -count=1` of internal/doctor ok (9 s) and of cmd/bridge with `-timeout 120m` ok
+(1,714 s), which holds `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers`; no race reported. The rules patch applies to HEAD (`git apply --check`); on a copy of the
+tracked tree with it applied, outside any checkout, the copy's `make docs-check` steps are clean (`cli-serve.md`
+99,996 bytes), and `TestEveryCitedTestNameExists` passes there and fails with a ghost citation planted in the
+patched History. `make test` and `make build-all` were not run: the brief asked for the packages. Windows and macOS
+are CI's to run.
+
+### What only windows-latest shows
+
+Nothing new. Round 3's cases model Windows through `logsHost` and run on every host, and the pin reads every
+platform's files on every host.
+
+### Left open
+
+The warn off Windows and in the console's doctor is not built: the brief makes it a separate backlog item if it is
+wanted, and this round filed none.
