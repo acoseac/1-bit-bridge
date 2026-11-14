@@ -96996,10 +96996,16 @@ both).
   interrupted at SQLite's open: {… Write:none Recorded:false …}, a step of the
   verification did not end and was given up, and holds the snapshots until it
   does: its check did not end within its bound (context canceled)", each run
-  2.0 to 2.1 s.
+  2.0 to 2.1 s. Corrected in round 2: the hold was elapsed time, and `runCheck`
+  arms its grace's timer only when its worker takes the stop, so a worker more
+  than 500 ms late lets the check answer first and this control stays green
+  without the fix (round 2's L1: green 10 of 10 with the worker 900 ms late);
+  three red runs did not make it a reproduction. Round 2's C1 replaces it.
 - C2, item 2's green, at 99b4232e: the same hook in place of the wait for the
   grace: green 3 of 3, 2.0 to 2.1 s a run, the case's assertion that the grace
-  began passing.
+  began passing. Corrected in round 2: it kept the caller's own expiry, which a
+  worker late enough fails it at (round 2's L2: red 10 of 10 at "left to end on
+  its own" with the worker 2,500 ms late). Round 2's C2 replaces it.
 - C3, the path: `checkGraceOf` given the snapshot through a link to its
   backups folder, as macOS's `/var` is for `/private/var`: 3 of 3 at
   verify_round12_test.go:63, "the check's grace never began, and the recheck
@@ -97009,12 +97015,15 @@ both).
   before its files check, after the stop (`SetBeforeFilesCheckForTest`, its
   own snapshot alone): 3 of 3 at verify_round5_test.go:295, "the recheck was
   given up (… (context canceled)): the test did not reach the case". R2, the
-  same hold at 99b4232e: green 3 of 3.
+  same hold at 99b4232e: green 3 of 3. Corrected in round 2: the same timed
+  hold as C1's, with its flaw; round 2's R1 and R2 replace them.
 - S1, at main, "a retry past its deadline" with its check's thread held 2 s
   as it begins (`SetOnLowPriorityForTest`) in place of the open's sleep, the
   error main drops logged: green 3 of 3, each run logging "a step of the
   verification did not end and was given up, …: its check did not end within
   its bound (context deadline exceeded)": main's case passed a retry given up.
+  Corrected in round 2: a timed hold too, which a worker late enough would
+  outlast; round 2's S1 replaces it.
 - S2, the negative control, at 99b4232e: the grace ended before the parked
   check is let go: 3 of 3 at verify_hold_test.go:518, "the retry answered a
   step of the verification did not end and was given up, …: its check did not
@@ -97072,3 +97081,145 @@ the patched History, which it names.
 
 The backlog file is not on legion0: these are named for the orchestrator to
 file.
+
+## 2026-11-14 — B901 round 2: the red control waits on the give-up, never on elapsed time
+
+Worker b901, legion0, branch `fix/b901-recheck-grace` from round 1's 3e13cfb6.
+Commits: 38095b0e (the round-12 test on a caller of its own, its read-back at
+its gate), ceef35df (a check whose grace never began let go before the drain),
+then this record. Same toolchain, tags, TMPDIR and core budget as round 1; the
+controls predicted in writing first (`.tmp/_b901/controls-r2.predictions.txt`),
+every edited file's bytes put back from memory once its binary was built, and
+`git status` empty before and after each batch.
+
+### The finding
+
+Round 1's C1 held the check 1.5 s after the stop and took the red that
+followed for the inner give-up. `runCheck` arms its grace's timer only when its
+worker takes the stop (finish.go 788-792), so with that worker more than
+500 ms late the check, let go at 1.5 s, answers before the timer fires, and
+with both ready its select may take the check: the control can stay green
+without the fix. C2, the same hold with the fix, kept the caller's own expiry,
+which a worker late enough fails it at. Three runs each proved neither. Round
+1's C1, C2, R1, R2 and S1 bullets above are corrected in place.
+
+### Premises at HEAD
+
+- `verifyAndThen` arms its expiry when the stop reaches it (finish.go 343,
+  351-355) and abandons the worker past it (360-366) before the expiry's
+  callback runs (`onVerifyExpired`, 363): a callback parked there cannot keep
+  the abandonment off, so the expiry itself has to be gated.
+- The no-barrier path reads the record back before it answers (finish.go 607),
+  and once the stop has come `runStep` bounds that step by `StopWriteBound`
+  (hold.go 517-521) and gives the hold up past it (522-524).
+- The round-12 test called `VerifySnapshot` on its own goroutine
+  (verify_round12_test.go 56 at 3e13cfb6) and ended its grace after it (57),
+  so nothing could let go of a recheck held there.
+- The cleanup order is `build-ci-tests.md`'s (216): what stalls let go, the
+  callers joined, the holds drained, then the seams put back.
+
+### The test (38095b0e, ceef35df)
+
+The recheck runs on a caller of the test's (`joinBackupCallers`), its answer
+awaited under a watchdog (two minutes, capped by the binary's deadline,
+`awaitRecheckAnswer`) that says whether the check's grace had begun; its
+read-back is held at its gate (`SetStepGateForTest`, "its read of the record
+after it"); the open's hook still holds the check until its grace has begun;
+the grace ends after the answer; the hook is let go before the drain; a check
+given up is said as that before the answer is judged; and the callers' release
+lets the hook, the grace and the gate go and cancels, then the caller is joined
+and the holds drained, and the seams go back last. ceef35df: 38095b0e drained
+before it let the hook go, so a grace that never began left `awaitClean` to
+wait out its 30 s and fail as a hold never let go, ahead of the assertion that
+names the cause. No production code changes: the caller's expiry stays the
+residual, now the only one, the read-back's own bound being held at its gate.
+
+### Controls (`.tmp/_b901/controls_r2.py`; 6 of 6 as predicted)
+
+C1w, C1f, C2, R1 and R2 run in an instrumented build whose `verifyAndThen`
+takes its expiry from a control's gate (finish.go's two `expire =
+time.After(StopWriteBound)` read `expiryForControl(dir)`, from a temporary
+`zz_b901_expiry_control.go`, nil keeping the timer); each control gives its own
+snapshot a gate only its end closes, installed before the verification begins.
+Each control `-test.count 20`, no `-race`, GOMAXPROCS 8:
+
+- C1w, C1 without the fix: the grace not held (`checkGraceOf` replaced by a
+  channel that never closes), the open's hook let go only once the worker
+  answers (`SetVerifyHandoffForTest`'s answer hook, run once `verifyHeld` has
+  returned: with the check parked, only its give-up lets the worker answer),
+  the read-back at its gate, and the answer required to be the check's
+  give-up: red 20 of 20, every one at verify_round12_test.go:75,
+  "C1-CHECK-GIVEN-UP: a step of the verification did not end and was given up,
+  and holds the snapshots until it does: its check did not end within its
+  bound (context canceled)"; no read-back give-up, outer expiry or watchdog.
+- C1f, the same edits with the fix (the grace held, so the hook goes once the
+  grace begins): green 20 of 20.
+- C2, the committed test (the hook let go once the grace is installed, the
+  grace open through the answer) with the gate and an assertion that no hold
+  of the folder stood given up when the answer came (`StuckCheckHere`): green
+  20 of 20.
+- R1, "stopped by its caller" without its fix: no grace held, its check held
+  before its files check (`SetBeforeFilesCheckForTest`) until the worker
+  answers, the verdict's write, its INCOMPLETE and the read-back at their
+  gates, the expiry gated: red 20 of 20 at verify_round5_test.go:305, "the
+  recheck was given up (… its check did not end within its bound (context
+  canceled)): the test did not reach the case". R2, the same with the fix (the
+  hold let go once the grace begins): green 20 of 20.
+- S1, main's "a retry past its deadline" (verify_hold_test.go at 92288694),
+  its check held at its start until the worker answers, its INCOMPLETE and its
+  read-back at their gates, the error main drops logged (a deadline, no stop,
+  so no expiry arms; not instrumented): green 20 of 20, each logging "… its
+  check did not end within its bound (context deadline exceeded)": main's case
+  passed a retry given up.
+
+### The finding's failure modes, forced (`.tmp/_b901/controls_r2_late.py`; 5 of 5 as predicted)
+
+The same instrumentation also delays `runCheck`'s worker between taking the
+check's context end and arming its timer or taking the test's grace, by
+`B901_LATE_WORKER_MS` (a sleep before finish.go's `t :=
+time.NewTimer(StopWriteBound / 2)`), as a host that runs that worker late
+does. Each `-test.count 10`:
+
+- L1, round 1's C1 (main's test, the 1.5 s hold), the worker 900 ms late:
+  green 10 of 10. That control does not go red without the fix.
+- L2, round 1's C2 (round 1's fixed test, the same hold), the worker 2,500 ms
+  late: red 10 of 10 at "the verification was left to end on its own 2s after
+  its stop, holding the snapshots' lock until it does: context canceled", the
+  caller's expiry, not the grace.
+- L3 and L4, round 2's C1w, the worker 900 and 2,500 ms late: red 10 of 10
+  each, every one the check's give-up.
+- L5, round 2's C2, the worker 2,500 ms late: green 10 of 10.
+
+### Runs
+
+- The round-12 test, `-race`, `-test.count 50`, from one race binary built at
+  ceef35df, GOMAXPROCS 8 (`.tmp/_b901/lanes_r2.py`): quiet, outside the build
+  slot (load 2.4 to 2.6), 14:49 to 14:50: 50 of 50, no FAIL, SKIP or data race,
+  74 s; loaded, in slot1 beside 16 python busy loops (load 17.5 as it ended),
+  15:10 to 15:18: 50 of 50, no FAIL, SKIP or data race, 479 s. The loops were
+  killed by their captured PIDs after, and none was left.
+- In the same slot session (slot1, taken by a guard at 14:58:27 once two other
+  workers let it go, `.tmp/_b901/guard_r2.py` and `session_r2.py`): `go vet
+  ./...` with the tags as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and
+  windows/amd64, exit 0 each (0.9 s each); then `go test -race -count=1
+  -timeout 120m ./internal/backup/` at GOMAXPROCS 8: ok (743.7 s). go1.27.3's
+  gofmt lists none of the changed files.
+- The rule is `rules-b901-r2.patch` (`~/onebit/jobs/b901/`), uncommitted. It
+  applies after round 1's `rules-b901.patch` and rewrites that bullet and its
+  long form in place: the test's new shape, round 2's controls in the place of
+  round 1's timed ones, and that a red control waits for the give-up it shows.
+  Over a git-archive copy of HEAD with round 1's patch and then round 2's
+  applied, and this record, the budgets check is clean (worst load 76.7%),
+  `scripts/doc-split/verify_moves.py --base HEAD` passes (the two new blocks,
+  nothing moved or lost), and cmd/bridge's `TestEveryCitedTestNameExists`,
+  `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass, the
+  first failing on a ghost citation planted in the patched History, which it
+  names.
+
+### Left
+
+- The residual stands: no committed seam holds the caller's own expiry, and
+  the gate above is the instrumented build's alone. A host slower than
+  `StopWriteBound` from the stop to the answer still fails the round-12 test
+  there, in that expiry's words.
+- Round 1's follow-ups stand.
