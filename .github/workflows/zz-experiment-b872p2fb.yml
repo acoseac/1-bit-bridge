@@ -57,6 +57,8 @@ jobs:
           grep -E '^--- (PASS|FAIL): Test' rollback-holders.log | sed -E 's/ \([0-9.]+s\)//' | sort | uniq -c
           grep 'rollback holder diagnostic' rollback-holders.log > rollback-holders.txt
           echo "diagnostic lines: $(wc -l < rollback-holders.txt)"
-          grep -v 'refusals: 0' rollback-holders.txt | head -40
-          grep -E '^--- FAIL' -A12 rollback-holders.log | head -80
+          echo "== every non-zero refusal summary:"
+          grep -E 'refusals: [1-9]' rollback-holders.txt | head -40
+          echo "== the 60 lines before each FAIL (a failing test's messages come before its --- FAIL line):"
+          grep -n -B60 -E '^\s*--- FAIL' rollback-holders.log | grep -v 'this test process is pid' | head -400
           exit 0
