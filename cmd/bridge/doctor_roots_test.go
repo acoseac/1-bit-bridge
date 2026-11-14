@@ -919,15 +919,23 @@ func TestDoctorRunsInOneProcessShareOneReadOfTheBox(t *testing.T) {
 }
 
 // readTimers stands in for the timers bridge doctor's waits on a read set for
-// their bound (outputsReads.timer): a wait's bound passes only when the test
-// fires its timer, so a case gives a wait up at the instant it chooses and a
-// read that answers is waited for however long it takes; armed hears each
-// timer as a wait sets it.
-type readTimers struct{ armed chan chan time.Time }
+// their bound (outputsReads.timer). The next wait set once capture is armed
+// takes a timer whose bound passes only when the test fires it, so a case
+// gives that wait up at the instant it chooses; armed hears each such timer
+// as the wait sets it. Every other wait takes a timer of the time package's
+// for its bound, bridge doctor's own.
+type readTimers struct {
+	armed   chan chan time.Time
+	capture atomic.Bool
+}
 
 func newReadTimers() *readTimers { return &readTimers{armed: make(chan chan time.Time, 64)} }
 
-func (r *readTimers) timer(time.Duration) (<-chan time.Time, func() bool) {
+func (r *readTimers) timer(d time.Duration) (<-chan time.Time, func() bool) {
+	if !r.capture.CompareAndSwap(true, false) {
+		t := time.NewTimer(d)
+		return t.C, t.Stop
+	}
 	c := make(chan time.Time, 1)
 	r.armed <- c
 	return c, func() bool { return true }
@@ -949,9 +957,10 @@ func (r *readTimers) drain() {
 // itself and is answered by its own read, never the one out; a run over the
 // first config again, while its read is out, waits on it; and a run after
 // that read has answered reads the box afresh. The waits on the read the
-// held root keeps are given up through their timers (readTimers); every other
-// wait keeps bridge doctor's bound, which no healthy read comes near, under
-// the test's deadline.
+// held root keeps are given up through their timers (readTimers), which the
+// case captures for those runs alone; every other wait keeps bridge doctor's
+// bound on a timer of the time package's, which no healthy read comes near,
+// its build ending within the builder's own limit, under the test's deadline.
 func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 	path, held := writePlayerConfig(t)
 	other := filepath.Join(filepath.Dir(held), "Songs")
@@ -978,11 +987,12 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 		return checks
 	}
 	// givenUp is a run over the config as it stands whose wait on the read
-	// the held root keeps the test gives up: its timer fired once the run has
-	// set it and holding says the read it waits on is held at the box (the
-	// box's began, for the run that begins it) or that it waits on one another
-	// run began (joined), so the read has reached the box whatever the host's
-	// load.
+	// the held root keeps the test gives up: its timer, captured as the run
+	// sets it (capture, armed just before the run begins, while no other run
+	// waits on a read), fired once holding says the read it waits on is held
+	// at the box (the box's began, for the run that begins it) or that it
+	// waits on one another run began (joined), so the read has reached the
+	// box whatever the host's load.
 	givenUp := func(what string, holding <-chan struct{}) []doctor.Check {
 		t.Helper()
 		timers.drain()
@@ -990,6 +1000,7 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 		drained(joined)
 		check := doctorOutputChecklist(path, mustLoadConfig(t, path), box.seam(held))
 		out := make(chan []doctor.Check, 1)
+		timers.capture.Store(true)
 		go func() { out <- check(context.Background()) }()
 		var fire chan time.Time
 		select {
