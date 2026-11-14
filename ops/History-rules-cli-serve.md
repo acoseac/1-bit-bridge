@@ -5480,7 +5480,7 @@ without `Oversized` (the row past it). The record is in
 
 ## B618 — on Windows, bridge logs reads the file the installed bridge writes (2026-11-13)
 
-- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; round 2, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words.** → History-rules-cli-serve.md
+- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok from a shell, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words.** → History-rules-cli-serve.md
 
 *What was true.* A bridge run as the Windows service writes
 `%PROGRAMDATA%\1-bit-bridge\bridge.log`: `main` calls `redirectServiceIO` once
@@ -5556,6 +5556,7 @@ grades the log `bridge logs` reads (round 2, below).
 `TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt`,
 `TestBridgeLogsOffWindowsIsAsItWas`,
 `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`,
+`TestNoProductionCodeReassignsTheLogsInstallCheck`,
 `TestTheConsolesLogIsTheFileItsProcessWrites`,
 `TestTheWindowsLogChoiceInWindowsPaths`,
 `TestBridgeDoctorFromAShellGradesTheServicesLogWhileItIsRegistered`,
@@ -5604,7 +5605,8 @@ fail alone, and `--json` and the console carry the summary too. With neither
 log there, and where a log's path cannot be made, the line is a warn saying why
 (`doctor.Deps.LogUnresolved`), never the ok "no log file configured (logs go to
 the terminal)" that the empty path it got had read as, in the console's doctor
-and off Windows too. A stat that fails otherwise than for a file not there
+and off Windows too, where round 3 put that ok back (below). A stat that fails
+otherwise than for a file not there
 leaves the service's log chosen, for the line to say why it cannot be graded,
 as `bridge logs` says why it cannot open it. `TestAStoppedServiceIsRegistered`
 could not fail in internal/packaging, where the check asks no service's state:
@@ -5622,3 +5624,31 @@ old `adminLogPath()`), and one was red once more than predicted: bridge logs
 reading the newer of two logs also read the user's where the service's was not
 there, which `TestBridgeLogsSaysWhereTheServicesLogWillBe` refuses. The record
 is in `ops/engineering-log.md`, 2026-11-14, B618 round 2.
+
+*Round 3: the warn where the brief put it.* Round 2's warn for a log whose path
+cannot be made reached the console's doctor and every platform, where the brief
+had put it in bridge doctor from a shell on Windows alone, and changed what
+Linux and macOS print there (`env -u HOME bridge doctor` warned). Off Windows
+(`shellDoctorLog`) and in the console's doctor (`doctorLogs.choose`, over
+`consoleLogPath`, into which round 2's `consoleLog` folds back, its error read
+by nobody now), a path that cannot be made names no file again, the terminal's
+ok, as `adminLogPath` answers the console's export; the Windows shell's
+branches keep `doctor.Deps.LogUnresolved`. The console and off-Windows rows of
+`TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade` and the new off-Windows and
+console rows of `TestTheDoctorsLogNoteSurvivesItsRendering` want that ok, their
+Windows rows the warn, and `requireLogLine` refuses the terminal's ok only where
+the line it wants is another. `adminDoctorRunnerFor` takes the logs host its
+line reads from its caller (`hostLogs` from serve and `adminDoctorRunner`) and
+sets the console flag itself, so
+`TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` runs the
+console's doctor as serve wires it, and is red with the flag dropped.
+`logsInstallCheck` stays, and `TestNoProductionCodeReassignsTheLogsInstallCheck`
+holds it to its one declaration, `packaging.CheckWindowsInstall`, which no
+production code assigns or takes the address of. At 18289911, the cases over
+round 2's branches, every case that wants the ok was red, the first on "the
+log-file-size line is warn "not checked: the log's path cannot be made
+(%USERPROFILE% is not defined)" … want ok "no log file configured (logs go to
+the terminal)"", and the guards were green. Eight controls, each predicted
+before it ran, were red where predicted and nowhere else, among them the
+brief's: `console: true` dropped from `adminDoctorRunnerFor`. The record is in
+`ops/engineering-log.md`, 2026-11-14, B618 round 3.
