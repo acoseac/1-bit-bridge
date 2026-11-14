@@ -404,7 +404,7 @@ func checkSource(snapshotDir string) error {
 	if check, held := StuckCheckOf(root); held {
 		return heldRefusal(snapshotDir, stillRunning(check))
 	}
-	m, err := readManifest(filepath.Join(snap, ManifestFile))
+	m, err := readPreflightManifest(filepath.Join(snap, ManifestFile))
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrNotASnapshot, spelledAsGiven(err, snap, snapshotDir))
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -291,19 +295,71 @@ func TestRestoreRequiresAnExclusiveDataDirLock(t *testing.T) {
 // and serve exited "address already in use" (backlog B562). The config on
 // disk names that port, and the restore finds the serve through it as it
 // would in production.
+//
+// The restore runs once serve's verification of the snapshot has ended
+// (serveBesideItsSnapshot.restore, backlog B885): serve's boot finishes the
+// check the snapshot owes in its place, and a read of the manifest beside
+// its verdict's rename is refused on Windows.
 func TestARestoreOverAnUnlockedServeRefusesWithTheProbe(t *testing.T) {
+	b := startServeBesideItsSnapshot(t, nil)
+	code, stdout, stderr := b.restore(t, nil)
+	if code == 0 || !strings.Contains(stderr, "a bridge is answering on "+b.adminAddr) {
+		t.Fatalf("restore wrote under an unlocked serve, exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
+// errSharingViolation is Windows' refusal of an open of a file another handle
+// holds without sharing it, in the words Windows gives it, which a test
+// answers where the read beside a rename meets it.
+var errSharingViolation = errors.New("The process cannot access the file because it is being used by another process.")
+
+// serveBesideItsSnapshot is a bridge serve on an install beside a snapshot of
+// its data dir taken before it started. It holds no data dir lock (a
+// directory stood where its lock file goes, gone once serve answers), so a
+// restore of the snapshot takes that lock and is refused by its probe of the
+// admin port serve answers on.
+type serveBesideItsSnapshot struct {
+	cfgPath, snap, adminAddr string
+	// checkEnded is closed once serve's verification of the snapshot has
+	// ended, its worker's end included: serve's boot finishes the check the
+	// snapshot owes in its place (decideStartupPass), and that check's
+	// verdict is written over the snapshot's manifest by a rename.
+	checkEnded <-chan struct{}
+}
+
+// startServeBesideItsSnapshot seeds the install and its snapshot, sets the
+// hook that hears serve's verification of the snapshot end before serve
+// starts (a verification runs the end hook that stood as it began, backlog
+// B849's second round), runs before, when set, with the snapshot where it
+// resolves (the path the backup's hooks are given) and the channel that end
+// closes, for a test's own hooks, and starts serve.
+func startServeBesideItsSnapshot(t *testing.T, before func(snap string, checkEnded <-chan struct{})) serveBesideItsSnapshot {
+	t.Helper()
 	admin := holdLoopback(t)
-	adminAddr := admin.addr
-	cfgPath, dataDir, snap := seedRestorableInstall(t, adminAddr)
+	cfgPath, dataDir, snap := seedRestorableInstall(t, admin.addr)
+	resolved, err := fsutil.ResolveLinks(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	var endOnce sync.Once
+	t.Cleanup(backup.SetOnVerifyEndForTest(func(dir string) {
+		if dir == resolved {
+			endOnce.Do(func() { close(ended) })
+		}
+	}))
+	if before != nil {
+		before(resolved, ended)
+	}
 	blockDataDirLock(t, dataDir)
-	squatAdminPort(t, adminAddr)
+	squatAdminPort(t, admin.addr)
 	served := launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
 		return runServe(ctx, serveOpts{configPath: cfgPath, adminListener: admin.ln}, stdout, stderr)
 	})
 	if s := served.stderr.String(); !strings.Contains(s, "could not lock") {
 		t.Fatalf("serve did not start unlocked\nstderr:\n%s", s)
 	}
-	waitForAdminReady(t, adminAddr, served.done, served.stderr)
+	waitForAdminReady(t, admin.addr, served.done, served.stderr)
 	if err := os.Remove(filepath.Join(dataDir, serveLockFileName)); err != nil {
 		t.Fatal(err)
 	}
@@ -312,10 +368,117 @@ func TestARestoreOverAnUnlockedServeRefusesWithTheProbe(t *testing.T) {
 		t.Fatalf("the lock was not takeable once the block was gone: %v", err)
 	}
 	release()
+	return serveBesideItsSnapshot{cfgPath: cfgPath, snap: snap, adminAddr: admin.addr, checkEnded: ended}
+}
 
-	code, stdout, stderr := runRestoreYes(t, cfgPath, snap)
-	if code == 0 || !strings.Contains(stderr, "a bridge is answering on "+adminAddr) {
-		t.Fatalf("restore wrote under an unlocked serve, exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+// restore is bridge restore --yes of the snapshot beside serve, once serve's
+// verification of it has ended (awaitItsCheck; waiting runs as that wait
+// begins).
+func (b serveBesideItsSnapshot) restore(t *testing.T, waiting func()) (code int, stdout, stderr string) {
+	t.Helper()
+	b.awaitItsCheck(t, waiting)
+	return runRestoreYes(t, b.cfgPath, b.snap)
+}
+
+// awaitItsCheck waits for serve's verification of the snapshot to end, until
+// the test's deadline (backlog B885): its verdict is written over the
+// snapshot's manifest by a rename, and the restore reads that manifest before
+// its prompt (backup.CheckRestoreSource) holding no lock, which on Windows is
+// refused beside the rename ("being used by another process"), exit 2: not a
+// recognized snapshot. waiting, when set, runs as the wait begins.
+func (b serveBesideItsSnapshot) awaitItsCheck(t *testing.T, waiting func()) {
+	t.Helper()
+	if waiting != nil {
+		waiting()
+	}
+	select {
+	case <-b.checkEnded:
+	case <-serveGiveUp(t):
+		t.Fatal("serve's verification of its snapshot did not end before the test's deadline")
+	}
+}
+
+// TestTheRestoreBesideAServeRunsOnceItsCheckOfTheSnapshotHasEnded is backlog
+// B885's order, held where it matters: serve's verification of the snapshot
+// is parked after its check and before its verdict's write
+// (backup.SetAfterCheckForTest), and the restore's read of the snapshot's
+// manifest before its prompt answers Windows' refusal while it is parked,
+// and reads the file otherwise (backup.SetRestorePreflightReadForTest). The
+// restore beside serve waits for that verification's end, and its wait, as
+// it begins, lets the parked check go: the verdict is written, the
+// verification ends, and the restore reads the snapshot and is refused, as
+// ever, by the probe of the bridge answering on the admin port. Its control
+// is the wait dropped: the restore reads while the check is parked, which
+// the seam answers as Windows does beside the verdict's rename, and exits 2,
+// as windows-latest's run 43416311381 did. It is an ordering regression
+// test, not a reproduction of that run.
+func TestTheRestoreBesideAServeRunsOnceItsCheckOfTheSnapshotHasEnded(t *testing.T) {
+	var parked, overran atomic.Bool
+	parkedAt, release := make(chan struct{}), make(chan struct{})
+	var parkOnce, releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	var entered, injected atomic.Int32
+	parkBound := serveGiveUpTime(t)
+	b := startServeBesideItsSnapshot(t, func(snap string, checkEnded <-chan struct{}) {
+		manifestPath := filepath.Join(snap, backup.ManifestFile)
+		t.Cleanup(backup.SetAfterCheckForTest(func(dir string) {
+			if dir != snap {
+				return
+			}
+			parked.Store(true)
+			parkOnce.Do(func() { close(parkedAt) })
+			select {
+			case <-release:
+			case <-firesAt(parkBound):
+				overran.Store(true)
+			}
+			parked.Store(false)
+		}))
+		t.Cleanup(backup.SetRestorePreflightReadForTest(func(path string, read func(string) (backup.Manifest, error)) (backup.Manifest, error) {
+			if path != manifestPath {
+				return read(path)
+			}
+			entered.Add(1)
+			if parked.Load() {
+				injected.Add(1)
+				return backup.Manifest{}, &fs.PathError{Op: "open", Path: path, Err: errSharingViolation}
+			}
+			return read(path)
+		}))
+		// Registered after the seams, so it runs before they are put back,
+		// and after serve's drain: the park let go and the verification's
+		// worker joined.
+		t.Cleanup(func() {
+			letGo()
+			select {
+			case <-checkEnded:
+			case <-serveDrainGiveUp(t):
+				t.Error("serve's verification of its snapshot did not end once its park was let go")
+			}
+		})
+	})
+	// Let go before serve's drain too, so serve stops with nothing parked.
+	t.Cleanup(letGo)
+
+	select {
+	case <-parkedAt:
+	case <-serveGiveUp(t):
+		t.Fatal("serve's verification of its snapshot never came to its verdict's write")
+	}
+	code, stdout, stderr := b.restore(t, letGo)
+	if n := entered.Load(); n < 1 {
+		t.Fatalf("the restore never read the snapshot's manifest before its prompt through the seam: exit %d\nstderr:\n%s", code, stderr)
+	}
+	if n := injected.Load(); n != 0 {
+		t.Errorf("the restore read the snapshot's manifest %d time(s) while serve's verification of it was parked "+
+			"before its verdict's write, the read Windows refuses beside that write's rename", n)
+	}
+	if code == 0 || !strings.Contains(stderr, "a bridge is answering on "+b.adminAddr) {
+		t.Errorf("the restore beside serve = %d, want refused by its probe of the bridge on %s\nstdout:\n%s\nstderr:\n%s",
+			code, b.adminAddr, stdout, stderr)
+	}
+	if overran.Load() {
+		t.Error("serve's verification stayed parked until the test's deadline")
 	}
 }
 

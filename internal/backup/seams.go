@@ -304,6 +304,37 @@ func SetVerifyHandoffForTest(answer, expired func(string)) func() {
 	return func() { onVerifyAnswer.Store(oldAnswer); onVerifyExpired.Store(oldExpired) }
 }
 
+// restorePreflightRead, nil in production, stands in for the read of a
+// snapshot's manifest bridge restore makes before its prompt (checkSource,
+// CheckRestoreSource's look): SetRestorePreflightReadForTest.
+var restorePreflightRead atomic.Pointer[func(path string, read func(string) (Manifest, error)) (Manifest, error)]
+
+// SetRestorePreflightReadForTest makes fn answer the read of a snapshot's
+// manifest that bridge restore makes before its prompt (CheckRestoreSource),
+// given the manifest's path and the read it stands in for, which fn may
+// call to answer as production does; and returns the restore. It is that
+// read's alone: the restore's read under the folder's lock, and every other
+// read of a manifest, are not its. A test answers Windows' refusal there
+// while serve's verification of the snapshot is parked before its verdict's
+// write (backlog B885). Production code MUST NOT call it.
+func SetRestorePreflightReadForTest(fn func(path string, read func(string) (Manifest, error)) (Manifest, error)) (restore func()) {
+	var p *func(string, func(string) (Manifest, error)) (Manifest, error)
+	if fn != nil {
+		p = &fn
+	}
+	prev := restorePreflightRead.Swap(p)
+	return func() { restorePreflightRead.Store(prev) }
+}
+
+// readPreflightManifest is checkSource's read of the manifest at path,
+// through the test's stand-in where one is set.
+func readPreflightManifest(path string) (Manifest, error) {
+	if fn := restorePreflightRead.Load(); fn != nil {
+		return (*fn)(path, readManifest)
+	}
+	return readManifest(path)
+}
+
 // onVerifyEnd, nil in production, runs once a verification's worker has let
 // go of everything it held (SetOnVerifyEndForTest).
 var onVerifyEnd atomic.Pointer[func(string)]
