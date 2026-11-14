@@ -1015,19 +1015,22 @@ func printWarnings(w io.Writer, r doctor.Report) {
 //
 // Its player-dac line checks the serving process itself, which is the
 // bridge, over hostTrees (servingDACHost); serve hands adminDoctorRunnerFor
-// the binding its player started with too.
+// the binding its player started with too. Its log-file-size line reads this
+// process's host (hostLogs).
 func adminDoctorRunner(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check) func(context.Context) *admin.DoctorReport {
-	return adminDoctorRunnerFor(cfgPath, ownedPorts, checklist, servingDACHost(hostTrees, nil))
+	return adminDoctorRunnerFor(cfgPath, ownedPorts, checklist, servingDACHost(hostTrees, nil), hostLogs())
 }
 
-// adminDoctorRunnerFor is adminDoctorRunner with the player-dac line's host
-// (servingDACHost): the serving process's credentials, and the binding its
-// player started with, which the line tells the config's apart from. Its
-// log-file-size line grades the serving process's own log (doctorLogs'
-// console), never the install check's.
-func adminDoctorRunnerFor(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost) func(context.Context) *admin.DoctorReport {
+// adminDoctorRunnerFor is adminDoctorRunner with the hosts two of its lines
+// read: the player-dac line's (servingDACHost), the serving process's
+// credentials and the binding its player started with, which the line tells
+// the config's apart from; and logs, the log-file-size line's (hostLogs in
+// production, a test's own elsewhere), on which that line grades the serving
+// process's own log, as the console's doctor, which this sets (doctorLogs'
+// console), and never the install check's.
+func adminDoctorRunnerFor(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost, logs logsHost) func(context.Context) *admin.DoctorReport {
 	return func(ctx context.Context) *admin.DoctorReport {
-		d := buildDoctorDepsWith(cfgPath, false, dacHost, doctorLogs{host: hostLogs(), console: true})
+		d := buildDoctorDepsWith(cfgPath, false, dacHost, doctorLogs{host: logs, console: true})
 		d.OwnedPorts = ownedPorts
 		// The player checklist from the serving process's own source, the
 		// one the dashboard's panel shows, rather than the one-shot outputs

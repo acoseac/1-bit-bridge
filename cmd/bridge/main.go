@@ -6378,7 +6378,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// Ports this process bound, so the console's preflight answers
 		// the port checks from knowledge rather than a bind probe that
 		// can only fail against our own listeners.
-		DoctorRun:             adminDoctorRunnerFor(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc), doctorDAC),
+		DoctorRun:             adminDoctorRunnerFor(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc), doctorDAC, hostLogs()),
 		OutputChecklist:       consoleOutputChecklist(checklistSrc),
 		PlayerOutput:          playerConsole,
 		AnalysisSweep:         analysisSweepClosure(analysisSweepState),

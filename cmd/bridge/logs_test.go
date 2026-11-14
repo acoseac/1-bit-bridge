@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -410,6 +413,70 @@ func TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint(t *testing.T) {
 		if got := hostLogs().dirs.ServiceLog(); got != filepath.Join(root, "ProgramData", "1-bit-bridge", "bridge.log") {
 			t.Errorf("the host's service log is %q, not under the PROGRAMDATA given", got)
 		}
+	}
+}
+
+// TestNoProductionCodeReassignsTheLogsInstallCheck: logsInstallCheck is the
+// entry points' seam, which their tests set
+// (TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint,
+// TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint), and production asks
+// the check its one declaration names, packaging.CheckWindowsInstall: no Go
+// file of this package but a test assigns it or takes its address. The walk
+// reads every file the go tool builds here, whatever its platform, and must
+// find that declaration.
+func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
+	const seam = "logsInstallCheck"
+	matches, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	var declared, changed []string
+	parsed := 0
+	for _, name := range matches {
+		if strings.HasSuffix(name, "_test.go") || goToolIgnores(name) {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		parsed++
+		pkg := importNameOf(f, "github.com/acoseac/1-bit-bridge/internal/packaging")
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.ValueSpec:
+				for i, id := range n.Names {
+					if id.Name != seam {
+						continue
+					}
+					declared = append(declared, fset.Position(id.Pos()).String())
+					if pkg == "" || len(n.Values) != len(n.Names) || !isSelector(n.Values[i], pkg, "CheckWindowsInstall") {
+						t.Errorf("%s declares %s as something other than packaging.CheckWindowsInstall",
+							fset.Position(id.Pos()), seam)
+					}
+				}
+			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name == seam {
+						changed = append(changed, fset.Position(id.Pos()).String()+" assigns it")
+					}
+				}
+			case *ast.UnaryExpr:
+				if id, ok := n.X.(*ast.Ident); ok && n.Op == token.AND && id.Name == seam {
+					changed = append(changed, fset.Position(id.Pos()).String()+" takes its address")
+				}
+			}
+			return true
+		})
+	}
+	if parsed < 20 || len(declared) != 1 {
+		t.Fatalf("parsed %d files and found %s declared at %q, want once: the walk no longer reads the "+
+			"package's own declaration of it, so it proves nothing", parsed, seam, declared)
+	}
+	for _, c := range changed {
+		t.Errorf("%s: production code changes %s, which only a test of an entry point may set; production "+
+			"asks packaging.CheckWindowsInstall, its declaration's", c, seam)
 	}
 }
 

@@ -64,7 +64,8 @@ func hostLogs() logsHost {
 // and both doctors, packaging.CheckWindowsInstall: a seam so a test that
 // drives a real entry point decides what is installed rather than the machine
 // it runs on, whose service manager may hold a bridge service or none, as
-// inContainerFunc is for the container verdict. Production never changes it.
+// inContainerFunc is for the container verdict. Production never changes it
+// (TestNoProductionCodeReassignsTheLogsInstallCheck).
 var logsInstallCheck = packaging.CheckWindowsInstall
 
 // errNoDefaultLog is the log path's answer where a host has none to give.

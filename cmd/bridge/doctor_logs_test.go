@@ -25,20 +25,42 @@ func doctorsLogLine(t *testing.T, logs doctorLogs) doctor.Check {
 	return findCheck(t, doctor.Run(context.Background(), buildDoctorDepsWith("", false, doctorDACHost(), logs)), "log-file-size")
 }
 
+// consolesLogLine runs the console's doctor as serve wires it,
+// adminDoctorRunnerFor, over the serving process's DAC host, the logs host
+// given and no config (isolateConfigEnv), and answers the log-file-size line
+// of the report it hands the console.
+func consolesLogLine(t *testing.T, host logsHost) doctor.Check {
+	t.Helper()
+	isolateConfigEnv(t)
+	for _, c := range adminDoctorRunnerFor("", nil, nil, servingDACHost(hostTrees, nil), host)(context.Background()).Checks {
+		if c.Name == "log-file-size" {
+			return doctor.Check{Name: c.Name, Status: doctor.Status(c.Status), Summary: c.Summary, Hint: c.Hint}
+		}
+	}
+	t.Fatal("the console's doctor has no log-file-size line")
+	return doctor.Check{}
+}
+
 // gradedAs is the log-file-size line's summary for a log at path holding body.
 func gradedAs(body, path string) string {
 	return fmt.Sprintf("%d B (%s)", len(body), path)
 }
 
+// terminalsOK is the log-file-size line's summary where no log is named: a
+// bridge that logs to its terminal. It is the line's still, as before round 2,
+// where a log's path cannot be made off Windows or in the console's doctor.
+const terminalsOK = "no log file configured (logs go to the terminal)"
+
 // requireLogLine fails the test unless the log-file-size line is status
-// summary, with hint under it.
+// summary, with hint under it. Where the line wanted names a log or says why
+// none could be named, the terminal's ok fails it in words of its own too.
 func requireLogLine(t *testing.T, got doctor.Check, status doctor.Status, summary, hint string) {
 	t.Helper()
 	if got.Status != status || got.Summary != summary || got.Hint != hint {
 		t.Errorf("the log-file-size line is %s %q (hint %q),\nwant %s %q (hint %q)", got.Status, got.Summary, got.Hint,
 			status, summary, hint)
 	}
-	if got.Summary == "no log file configured (logs go to the terminal)" {
+	if summary != terminalsOK && got.Summary == terminalsOK {
 		t.Errorf("the line reads as a bridge that logs to its terminal")
 	}
 }
@@ -135,51 +157,63 @@ func TestBridgeDoctorFromAShellSaysWhereTheCheckCannotTell(t *testing.T) {
 	})
 }
 
-// TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade: a log whose path cannot be
-// made is a warn saying why, from a shell and in the console, never the ok of
-// a bridge that logs to its terminal, which the empty path it left once read
-// as.
+// homelessWindowsLogs is a Windows logsHost whose home directory cannot be
+// read, its LOCALAPPDATA unset, so the user's log has no path, and whose
+// install check answers inst.
+func homelessWindowsLogs(t *testing.T, errHome error, inst packaging.WindowsInstall) logsHost {
+	return windowsLogsHost(packaging.WindowsLogDirs{
+		ProgramData: filepath.Join(t.TempDir(), "ProgramData"),
+		Home:        func() (string, error) { return "", errHome },
+		Join:        filepath.Join,
+	}, func() packaging.WindowsInstall { return inst })
+}
+
+// homelessLogs is a logsHost of goos, off Windows, whose DefaultLogPath
+// cannot be made: `env -u HOME bridge doctor`.
+func homelessLogs(goos string) logsHost {
+	return logsHost{goos: goos, defaultLog: func() (string, error) { return "", errors.New("$HOME is not defined") }}
+}
+
+// TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade: on Windows, bridge doctor
+// from a shell says why a log's path cannot be made, a warn, never the ok of a
+// bridge that logs to its terminal, which the empty path it left once read
+// as. That warn is the Windows shell's alone (round 3): off Windows, from a
+// shell or in the console, and in the console's doctor on Windows, run as
+// serve runs it (adminDoctorRunnerFor), a path that cannot be made names no
+// file, the terminal's ok, as before round 2.
 func TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade(t *testing.T) {
 	errHome := errors.New("%USERPROFILE% is not defined")
-	homeless := func(t *testing.T, inst packaging.WindowsInstall) logsHost {
-		return windowsLogsHost(packaging.WindowsLogDirs{
-			ProgramData: filepath.Join(t.TempDir(), "ProgramData"),
-			Home:        func() (string, error) { return "", errHome },
-			Join:        filepath.Join,
-		}, func() packaging.WindowsInstall { return inst })
-	}
 	cannotBeMade := "not checked: the log's path cannot be made (" + errHome.Error() + ")"
 	t.Run("the service not registered", func(t *testing.T) {
-		requireLogLine(t, doctorsLogLine(t, doctorLogs{host: homeless(t, launcherInstalled)}), doctor.Warn, cannotBeMade, "")
+		requireLogLine(t, doctorsLogLine(t, doctorLogs{host: homelessWindowsLogs(t, errHome, launcherInstalled)}), doctor.Warn,
+			cannotBeMade, "")
 	})
 	t.Run("the check cannot tell and the service's log is not there", func(t *testing.T) {
 		errCheck := errors.New("connect to the service manager: Access is denied.")
-		host := homeless(t, packaging.WindowsInstall{ServiceErr: errCheck})
+		host := homelessWindowsLogs(t, errHome, packaging.WindowsInstall{ServiceErr: errCheck})
 		requireLogLine(t, doctorsLogLine(t, doctorLogs{host: host}), doctor.Warn,
 			"not checked: "+host.dirs.ServiceLog()+" is not there, and the other log's path cannot be made ("+errHome.Error()+")",
 			"cannot tell whether the bridge's Windows service is installed ("+errCheck.Error()+")")
 	})
 	t.Run("the console's doctor outside the service", func(t *testing.T) {
-		host := homeless(t, serviceRegistered)
+		host := homelessWindowsLogs(t, errHome, serviceRegistered)
 		host.isService = func() bool { return false }
-		requireLogLine(t, doctorsLogLine(t, doctorLogs{host: host, console: true}), doctor.Warn, cannotBeMade, "")
+		requireLogLine(t, consolesLogLine(t, host), doctor.OK, terminalsOK, "")
 	})
 	for _, goos := range []string{"darwin", "linux"} {
 		t.Run("off Windows on "+goos, func(t *testing.T) {
-			errUnixHome := errors.New("$HOME is not defined")
-			for _, console := range []bool{false, true} {
-				host := logsHost{goos: goos, defaultLog: func() (string, error) { return "", errUnixHome }}
-				requireLogLine(t, doctorsLogLine(t, doctorLogs{host: host, console: console}), doctor.Warn,
-					"not checked: the log's path cannot be made ("+errUnixHome.Error()+")", "")
-			}
+			requireLogLine(t, doctorsLogLine(t, doctorLogs{host: homelessLogs(goos)}), doctor.OK, terminalsOK, "")
+			requireLogLine(t, consolesLogLine(t, homelessLogs(goos)), doctor.OK, terminalsOK, "")
 		})
 	}
 }
 
 // TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService is a guard,
-// green before round 2 and kept by it: the console's doctor grades the log its
-// own process writes, so a console of a bridge run outside the service, beside
-// a registered service, grades the user's log, and inside the service the
+// green before round 2 and kept by it, run since round 3 through the console's
+// doctor as serve wires it (adminDoctorRunnerFor), whose console flag is
+// production's own: the console's doctor grades the log its own process
+// writes, so a console of a bridge run outside the service, beside a
+// registered service, grades the user's log, and inside the service the
 // service's; it asks no install check, which is bridge doctor's alone.
 func TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService(t *testing.T) {
 	for _, inService := range []bool{false, true} {
@@ -194,7 +228,7 @@ func TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService(t *testing.T) 
 			if inService {
 				want = gradedAs(serviceLogLines, w.service)
 			}
-			requireLogLine(t, doctorsLogLine(t, doctorLogs{host: w.host, console: true}), doctor.OK, want, "")
+			requireLogLine(t, consolesLogLine(t, w.host), doctor.OK, want, "")
 			if asked != 0 {
 				t.Errorf("the console's doctor asked the install check %d times; it grades its own process's log", asked)
 			}
@@ -206,8 +240,10 @@ func TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService(t *testing.T) 
 // of a check that cannot tell reaches the reader in bridge doctor's table and
 // in its --json: on an ok line, after the summary, which the table prints
 // (it prints a hint under a warn or a fail alone); with neither log there, as
-// a warn whose hint the table prints too. A path that cannot be made is a warn
-// in both, never the terminal's ok.
+// a warn whose hint the table prints too. On Windows a path that cannot be
+// made is a warn in both, never the terminal's ok. Off Windows it is that ok
+// in both, and in the report the console's doctor hands the console
+// (adminDoctorRunnerFor) it is that ok on Windows too, as before round 2.
 func TestTheDoctorsLogNoteSurvivesItsRendering(t *testing.T) {
 	errCheck := errors.New("connect to the service manager: The RPC server is unavailable.")
 	uncertain := "cannot tell whether the bridge's Windows service is installed (" + errCheck.Error() + ")"
@@ -263,12 +299,7 @@ func TestTheDoctorsLogNoteSurvivesItsRendering(t *testing.T) {
 	})
 	t.Run("a path that cannot be made", func(t *testing.T) {
 		errHome := errors.New("%USERPROFILE% is not defined")
-		host := windowsLogsHost(packaging.WindowsLogDirs{
-			ProgramData: filepath.Join(t.TempDir(), "ProgramData"),
-			Home:        func() (string, error) { return "", errHome },
-			Join:        filepath.Join,
-		}, func() packaging.WindowsInstall { return launcherInstalled })
-		r := render(t, host)
+		r := render(t, homelessWindowsLogs(t, errHome, launcherInstalled))
 		summary := "not checked: the log's path cannot be made (" + errHome.Error() + ")"
 		if !strings.HasPrefix(r.line, "[warn]") || !strings.HasSuffix(r.line, summary) || r.json.Status != "warn" ||
 			r.json.Summary != summary {
@@ -276,6 +307,32 @@ func TestTheDoctorsLogNoteSurvivesItsRendering(t *testing.T) {
 		}
 		if strings.Contains(r.line+r.json.Summary, "logs go to the terminal") {
 			t.Errorf("a path that cannot be made reads as a bridge that logs to its terminal")
+		}
+	})
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run("a path that cannot be made off Windows on "+goos, func(t *testing.T) {
+			r := render(t, homelessLogs(goos))
+			if !strings.HasPrefix(r.line, "[ok]") || !strings.HasSuffix(r.line, terminalsOK) || r.hint != "" {
+				t.Errorf("the table's line is %q, hint %q; want the ok %q and no hint", r.line, r.hint, terminalsOK)
+			}
+			if r.json.Status != "ok" || r.json.Summary != terminalsOK || r.json.Hint != "" {
+				t.Errorf("--json's line is %+v, want the ok %q", r.json, terminalsOK)
+			}
+		})
+	}
+	t.Run("a path that cannot be made in the console's doctor", func(t *testing.T) {
+		windows := homelessWindowsLogs(t, errors.New("%USERPROFILE% is not defined"), serviceRegistered)
+		windows.isService = func() bool { return false }
+		for _, c := range []struct {
+			name string
+			host logsHost
+		}{
+			{"on windows outside the service", windows},
+			{"on linux", homelessLogs("linux")},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				requireLogLine(t, consolesLogLine(t, c.host), doctor.OK, terminalsOK, "")
+			})
 		}
 	})
 }

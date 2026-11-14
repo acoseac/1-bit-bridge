@@ -583,7 +583,7 @@ func TestBothDoctorsCarryThePlayersDACLine(t *testing.T) {
 		t.Errorf("bridge doctor asked %s, want card 5's node, which the GO bar's binding resolves to", got)
 	}
 	var console *doctor.Check
-	for _, c := range adminDoctorRunnerFor(path, nil, nil, withTrees(serving))(context.Background()).Checks {
+	for _, c := range adminDoctorRunnerFor(path, nil, nil, withTrees(serving), hostLogs())(context.Background()).Checks {
 		if c.Name == playerDACCheckName {
 			console = &doctor.Check{Name: c.Name, Status: doctor.Status(c.Status), Summary: c.Summary, Hint: c.Hint}
 		}
@@ -612,7 +612,7 @@ func TestTheDefaultConsoleDoctorChecksTheServingProcessOverTheHostsTrees(t *test
 	// every host: Windows has no getgroups, and would stop the line there.
 	h.creds = func() (dacCreds, error) { return dacCreds{euid: 1000, name: "bridge"}, nil }
 	var line *doctor.Check
-	for _, c := range adminDoctorRunnerFor(path, nil, nil, h)(context.Background()).Checks {
+	for _, c := range adminDoctorRunnerFor(path, nil, nil, h, hostLogs())(context.Background()).Checks {
 		if c.Name == playerDACCheckName {
 			line = &doctor.Check{Name: c.Name, Status: doctor.Status(c.Status), Summary: c.Summary, Hint: c.Hint}
 		}
