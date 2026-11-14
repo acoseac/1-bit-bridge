@@ -5,9 +5,10 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
 
 // redirectServiceIO points os.Stdout and os.Stderr at a per-machine log
@@ -23,18 +24,14 @@ import (
 // spot for machine-wide app state.
 //
 // We can't read the config here (`bridge serve` hasn't parsed flags
-// yet), so the log path is a fixed constant. Packaging's Install sets
-// up %PROGRAMDATA%\1-bit-bridge\ with the right permissions, so this
-// path exists by the time the service starts.
+// yet), so the log path is fixed: packaging's ServiceLog, the one path
+// `bridge logs` and the console read the service's log by (backlog B618),
+// with C:\ProgramData where some automation stripped %PROGRAMDATA%.
+// Packaging's Install sets up %PROGRAMDATA%\1-bit-bridge\ with the right
+// permissions, so this path exists by the time the service starts.
 func redirectServiceIO() {
-	programData := os.Getenv("PROGRAMDATA")
-	if programData == "" {
-		// Fallback: a well-known absolute path. Shouldn't happen on a
-		// real Windows box, but belt-and-braces keeps the service from
-		// running blind if some automation stripped the env var.
-		programData = `C:\ProgramData`
-	}
-	logDir := filepath.Join(programData, "1-bit-bridge")
+	dirs := packaging.HostWindowsLogDirs()
+	logDir := dirs.ServiceLogDir()
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		// If we can't create the log dir we're stuck with whatever
 		// handles the SCM gave us. At least write the failure to
@@ -46,8 +43,8 @@ func redirectServiceIO() {
 		fmt.Fprintf(os.Stderr, "service: cannot prepare log dir %q: %v\n", logDir, err)
 		return
 	}
-	logPath := filepath.Join(logDir, "bridge.log")
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	logPath := dirs.ServiceLog()
+	f, err := packaging.OpenServiceLog(logPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "service: cannot open log file %q: %v\n", logPath, err)
 		return

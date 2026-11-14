@@ -452,7 +452,7 @@ func TestBothDoctorsCarryTheBackupLines(t *testing.T) {
 	if res := backup.SnapshotAndVerify(t.Context(), src, backup.SnapshotOptions{}); !res.Verify.Record.Passes() {
 		t.Fatalf("the snapshot did not verify: %+v %v", res.Verify.Record, res.VerifyErr)
 	}
-	d := buildDoctorDepsWith(cfgPath, false, doctorDACHost())
+	d := buildDoctorDepsWith(cfgPath, false, doctorDACHost(), doctorLogs{host: hostLogs()})
 	if d.Backups == nil {
 		t.Fatal("the doctor's Deps carry no backups lines")
 	}

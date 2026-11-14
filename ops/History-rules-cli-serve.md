@@ -5477,3 +5477,178 @@ predicted, were red where predicted: the check asked only within the bound
 (the row past it), `Oversized` set at the bound (the row at it), and the words
 without `Oversized` (the row past it). The record is in
 `ops/engineering-log.md`, 2026-11-13, B828 round 2.
+
+## B618 — on Windows, bridge logs reads the file the installed bridge writes (2026-11-13)
+
+- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok from a shell, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words.** → History-rules-cli-serve.md
+
+*What was true.* A bridge run as the Windows service writes
+`%PROGRAMDATA%\1-bit-bridge\bridge.log`: `main` calls `redirectServiceIO` once
+`isWindowsService` says the service manager started it, before serve parses a
+flag, and the service runs as LocalSystem, whose `%LOCALAPPDATA%` is under
+`C:\Windows\System32\config\systemprofile`. A bridge the Startup-folder
+launcher starts at sign-in, or `bridge init`'s start of one (`SpawnDetached`),
+writes DefaultLogPath, `%LOCALAPPDATA%\1-bit-bridge\bridge.log`, through
+`start … 1>>"<log>" 2>&1`. A bridge run in the foreground, the menu's "Start
+now" and init's run in its terminal included, writes neither: it logs to its
+terminal. `bridge logs` read DefaultLogPath alone, so on a service install it
+said the file did not exist and to run `bridge start` or `bridge serve`, or
+showed a file an earlier install left; and the console's log export
+(`adminLogPath`, and with it the support bundle's tail and the console's
+doctor's `log-file-size` line) offered DefaultLogPath inside the service,
+which there is LocalSystem's. `packaging.InstalledKind`, which `bridge start`,
+`stop` and `restart` and the menu ask, connects with `mgr.Connect` and opens
+with `OpenService`, which ask `SC_MANAGER_ALL_ACCESS` and `SERVICE_ALL_ACCESS`
+(x/sys v0.49.0, `svc/mgr/mgr.go` lines 43 and 195): a standard user's connect
+is refused, and the probe falls through to the Startup folder, and any failure
+of the open reads as no service. `bridge status` reads the invoking user's
+config and asks its admin port: it never asks the service.
+
+*The install check.* `packaging.CheckWindowsInstall` connects with
+`SC_MANAGER_CONNECT` alone and opens the bridge's service
+(`com.acoseac.1-bit-bridge`) with `SERVICE_QUERY_STATUS` alone, which a
+standard user holds under the default security Windows gives the manager and a
+service `CreateService` registers (Microsoft's "Service Security and Access
+Rights"). A service it opens is registered, running or not;
+`ERROR_SERVICE_DOES_NOT_EXIST` is not registered; any other failure, a connect
+refused or out of reach, a service whose security refuses the open, cannot
+tell, and says why. It finds the Startup-folder launcher by its path. The
+rights are Microsoft's documentation: legion0 has no Windows and CI's runner
+is elevated, so a stand-in that grants a standard user's rights and refuses
+more, as Windows does, carries the cases on every host, and windows-latest
+holds its constants to x/sys/windows's and asks the real manager.
+`InstalledKind` is left as it was: its callers are other commands' (B618's
+report names it).
+
+*As built.* `chooseWindowsLog` decides from the registration and the
+directories alone: the service's log while the service is registered, the
+user's otherwise, the service's first where the check cannot tell; choosing
+the service's needs nothing of the user's path, so a home that cannot be read
+leaves only the other unnamed. `openWindowsLog` reads it, names the other in
+one line on stderr where that is there too, reads the user's where the check
+cannot tell and the service's is not there, saying so, and where it finds no
+log names the path it looked at, or both, and what writes it: Services (where
+the service shows as `1-bit-bridge`) or `sc.exe query com.acoseac.1-bit-bridge`
+for the service, the sign-in launcher, or a foreground run's terminal. The
+paths come from `WindowsLogDirs`, `C:\ProgramData` where `PROGRAMDATA` is
+empty, as the service took it, and the home's `AppData\Local` where
+`LOCALAPPDATA` is, as DefaultLogPath took it; `redirectServiceIO` and
+`InstallWindowsService` take the service's folder and file from it and the
+service's open from `OpenServiceLog`, and DefaultLogPath's Windows answer is
+its `UserLog`. Off Windows `bridge logs` is unchanged, word for word.
+
+*The console.* `consoleLogPath` takes `chooseWindowsLog` with whether its
+process runs as the service (`isWindowsService`) for the check: the service's
+log inside the service, the user's otherwise, DefaultLogPath off Windows. The
+console's doctor builds its report in the serving process and grades that same
+file, asking no install check, so a console of a bridge run another way beside
+a registered service grades the log it writes; bridge doctor run from a shell
+grades the log `bridge logs` reads (round 2, below).
+
+*The tests.* cmd/bridge's
+`TestBridgeLogsReadsTheServicesLogWhileTheServiceIsRegistered`,
+`TestBridgeLogsReadsTheUserLogOfAStartupFolderInstall`,
+`TestBridgeLogsSaysWhichLogItReadsWhereTheServiceIsNotRegistered`,
+`TestBridgeLogsSaysWhereTheServicesLogWillBe`,
+`TestBridgeLogsSaysWhatWritesTheUserLog`,
+`TestBridgeLogsReadsTheServicesLogWhereTheCheckCannotTell`,
+`TestBridgeLogsChoosesTheServicesLogWithoutTheHome`,
+`TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt`,
+`TestBridgeLogsOffWindowsIsAsItWas`,
+`TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`,
+`TestNoProductionCodeReassignsTheLogsInstallCheck`,
+`TestTheConsolesLogIsTheFileItsProcessWrites`,
+`TestTheWindowsLogChoiceInWindowsPaths`,
+`TestBridgeDoctorFromAShellGradesTheServicesLogWhileItIsRegistered`,
+`TestBridgeDoctorFromAShellGradesTheUserLogOfAStartupFolderInstall`,
+`TestBridgeDoctorFromAShellSaysWhereTheCheckCannotTell`,
+`TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade`,
+`TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService`,
+`TestTheDoctorsLogNoteSurvivesItsRendering`,
+`TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint` and
+`TestAStoppedServiceIsRegistered`, internal/doctor's
+`TestALogNoteIsCarriedWhateverTheLineFinds` and
+`TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK`, and internal/packaging's
+`TestTheWindowsLogsAreMadeFromTheirDirectories`,
+`TestTheUserLogNeedsTheHomeOnlyWithoutLocalAppData`,
+`TestTheInstallCheckAsksOnlyWhatAStandardUserHolds`,
+`TestTheInstallCheckTellsNotRegisteredFromCannotTell`,
+`TestBothInstallArtifactsAreReported`,
+`TestOpenServiceLogAppendsAsTheServiceWrites` and, on Windows alone,
+`TestTheStandInsRightsAreWindowsOwn`,
+`TestTheServiceManagerAnswersTheInstallCheck` and
+`TestTheWindowsLogsAreTheHostsOwn` pin it.
+
+*Red first and the controls.* At 779bdfc3, the tests over main's selection,
+every case where the selection changes was red, the first on "bridge logs
+printed "a line of a bridge its sign-in launcher started\n" want "the
+service's first line\nthe service's last line\n"", and the Startup-folder,
+macOS and Linux and host entry-point guards were green. Eleven controls, each
+predicted before it ran, were red where predicted and nowhere else, among
+them the brief's: `openLog`'s Windows call site back to DefaultLogPath alone.
+The record is in `ops/engineering-log.md`, 2026-11-13, B618.
+
+*Round 2: bridge doctor from a shell.* `buildDoctorDepsWith` had set
+`LogPath: adminLogPath()` for both doctors: the console's choice, which asks
+whether the process runs as the service, and bridge doctor run from a shell
+never does, so on a service install it graded the user's log while `bridge
+logs` and the console inside the service read the service's. The builder takes
+`doctorLogs` now, its seam on every host: a `logsHost` (the platform, the
+directories and the install check) and whether the console's doctor asks.
+Bridge doctor's line grades the log `bridge logs` reads (`shellDoctorLog`: the
+install check, its "cannot tell" rule and its fallbacks); the console's
+doctor's (`adminDoctorRunnerFor`) its own process's, asking no check, so a
+console of a bridge run another way beside a registered service grades the file
+it writes. Where the check cannot tell, the line says so after its summary
+(`doctor.Deps.LogNote`), ok or not: the table prints a hint under a warn or a
+fail alone, and `--json` and the console carry the summary too. With neither
+log there, and where a log's path cannot be made, the line is a warn saying why
+(`doctor.Deps.LogUnresolved`), never the ok "no log file configured (logs go to
+the terminal)" that the empty path it got had read as, in the console's doctor
+and off Windows too, where round 3 put that ok back (below). A stat that fails
+otherwise than for a file not there
+leaves the service's log chosen, for the line to say why it cannot be graded,
+as `bridge logs` says why it cannot open it. `TestAStoppedServiceIsRegistered`
+could not fail in internal/packaging, where the check asks no service's state:
+it moved to cmd/bridge under its name, where a stopped service's log, older
+than the user's, must be the one read and graded, and the stand-in keeps
+registered names alone. The entry points take their install check from
+`logsInstallCheck`, which their tests set, so no host's service manager decides
+them. At 9fd10270, the seams over round 1's selection, every case where it
+changes was red, the first on "the log-file-size line is ok "48 B
+(…/AppData/Local/1-bit-bridge/bridge.log)" … want ok "49 B
+(…/ProgramData/1-bit-bridge/bridge.log)"", and the Startup-folder, console and
+entry-point guards were green. Eight controls, each predicted before it ran,
+were red where predicted, the brief's among them (the shell's choice back to the
+old `adminLogPath()`), and one was red once more than predicted: bridge logs
+reading the newer of two logs also read the user's where the service's was not
+there, which `TestBridgeLogsSaysWhereTheServicesLogWillBe` refuses. The record
+is in `ops/engineering-log.md`, 2026-11-14, B618 round 2.
+
+*Round 3: the warn where the brief put it.* Round 2's warn for a log whose path
+cannot be made reached the console's doctor and every platform, where the brief
+had put it in bridge doctor from a shell on Windows alone, and changed what
+Linux and macOS print there (`env -u HOME bridge doctor` warned). Off Windows
+(`shellDoctorLog`) and in the console's doctor (`doctorLogs.choose`, over
+`consoleLogPath`, into which round 2's `consoleLog` folds back, its error read
+by nobody now), a path that cannot be made names no file again, the terminal's
+ok, as `adminLogPath` answers the console's export; the Windows shell's
+branches keep `doctor.Deps.LogUnresolved`. The console and off-Windows rows of
+`TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade` and the new off-Windows and
+console rows of `TestTheDoctorsLogNoteSurvivesItsRendering` want that ok, their
+Windows rows the warn, and `requireLogLine` refuses the terminal's ok only where
+the line it wants is another. `adminDoctorRunnerFor` takes the logs host its
+line reads from its caller (`hostLogs` from serve and `adminDoctorRunner`) and
+sets the console flag itself, so
+`TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` runs the
+console's doctor as serve wires it, and is red with the flag dropped.
+`logsInstallCheck` stays, and `TestNoProductionCodeReassignsTheLogsInstallCheck`
+holds it to its one declaration, `packaging.CheckWindowsInstall`, which no
+production code assigns or takes the address of. At 18289911, the cases over
+round 2's branches, every case that wants the ok was red, the first on "the
+log-file-size line is warn "not checked: the log's path cannot be made
+(%USERPROFILE% is not defined)" … want ok "no log file configured (logs go to
+the terminal)"", and the guards were green. Eight controls, each predicted
+before it ran, were red where predicted and nowhere else, among them the
+brief's: `console: true` dropped from `adminDoctorRunnerFor`. The record is in
+`ops/engineering-log.md`, 2026-11-14, B618 round 3.

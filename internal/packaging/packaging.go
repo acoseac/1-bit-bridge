@@ -518,11 +518,14 @@ func DefaultLogPath() (string, error) {
 		// Co-locate the log with the data/config dir — keeps the whole
 		// install self-contained under one folder and avoids sprinkling
 		// writes under %APPDATA% (which roams) vs %LOCALAPPDATA% (which
-		// doesn't).
-		if x := os.Getenv("LOCALAPPDATA"); x != "" {
-			return filepath.Join(x, productName, bridgeLogFileName), nil
-		}
-		return filepath.Join(home, "AppData", "Local", productName, bridgeLogFileName), nil
+		// doesn't). The user's log is WindowsLogDirs' (UserLog), the one
+		// path bridge logs and the console read it by too; the Windows
+		// service writes another (ServiceLog).
+		return WindowsLogDirs{
+			LocalAppData: os.Getenv("LOCALAPPDATA"),
+			Home:         func() (string, error) { return home, nil },
+			Join:         filepath.Join,
+		}.UserLog()
 	}
 	// On Linux, keep logs alongside the config under XDG_STATE_HOME.
 	if x := os.Getenv("XDG_STATE_HOME"); x != "" {

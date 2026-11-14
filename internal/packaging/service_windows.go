@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -69,20 +68,17 @@ func InstallWindowsService(p Params) (string, error) {
 		}
 	}
 
-	// Resolve the data dir for the service's log file. Co-located with
-	// %PROGRAMDATA%\1-bit-bridge\ to match the service's
-	// redirectServiceIO target in cmd/bridge/service_io_windows.go.
-	programData := os.Getenv("PROGRAMDATA")
-	if programData == "" {
-		programData = `C:\ProgramData`
-	}
-	dataDir := filepath.Join(programData, "1-bit-bridge")
+	// Prepare the folder of the service's log file,
+	// %PROGRAMDATA%\1-bit-bridge\: the one ServiceLogDir names, which
+	// redirectServiceIO in cmd/bridge/service_io_windows.go writes into and
+	// bridge logs reads from.
+	dataDir := HostWindowsLogDirs().ServiceLogDir()
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return "", fmt.Errorf("ensure ProgramData dir: %w", err)
 	}
 
 	config := mgr.Config{
-		DisplayName:      "1-bit-bridge",
+		DisplayName:      ServiceDisplayName,
 		Description:      "Companion server for the 1-bit iOS music player.",
 		StartType:        mgr.StartAutomatic,
 		ErrorControl:     mgr.ErrorNormal,

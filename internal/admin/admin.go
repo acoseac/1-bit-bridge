@@ -176,10 +176,13 @@ type Deps struct {
 	// with backup wiring.
 	BackupSources backup.Sources
 
-	// LogPath is where this install's log file lives — the same
-	// `packaging.DefaultLogPath()` the service units point
-	// StandardOutput/StandardError at, and the same one `bridge logs`
-	// reads. Injected rather than resolved here so internal/admin needs
+	// LogPath is where this bridge's log file lives — cmd/bridge's
+	// adminLogPath: the `packaging.DefaultLogPath()` the service units
+	// point StandardOutput/StandardError at and the Windows sign-in
+	// launcher redirects to, or, inside the Windows service, the service's
+	// own log under %PROGRAMDATA% (backlog B618). `bridge logs` reads the
+	// same file wherever the console runs inside the installed bridge.
+	// Injected rather than resolved here so internal/admin needs
 	// no dependency on internal/packaging, matching how BackupSources
 	// carries the other state-file paths.
 	//
