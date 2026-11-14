@@ -2471,12 +2471,60 @@ func receiveHeld(t *testing.T, ch <-chan struct{}, what string) {
 // for time none was granted: a grant from here plays content.
 func runningAndStarved(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved }
 
+// heldFiles is the heldRig's resolver: the content each reference names, and
+// every content it handed out, to check each was closed.
+type heldFiles struct {
+	content map[string][]byte
+
+	mu     sync.Mutex
+	opened []*heldContent
+}
+
+// heldContent is one content heldFiles handed out.
+type heldContent struct {
+	f      *heldFiles
+	ref    string
+	closed bool
+}
+
+func (c *heldContent) Close() error {
+	c.f.mu.Lock()
+	defer c.f.mu.Unlock()
+	c.closed = true
+	return nil
+}
+
+func (f *heldFiles) Open(_ context.Context, r engine.Reference) (Content, error) {
+	b, ok := f.content[r.String()]
+	if !ok {
+		return Content{}, fmt.Errorf("no content %q", r)
+	}
+	c := &heldContent{f: f, ref: r.String()}
+	f.mu.Lock()
+	f.opened = append(f.opened, c)
+	f.mu.Unlock()
+	return Content{Data: bytes.NewReader(b), Size: int64(len(b)), Closer: c}, nil
+}
+
+// allClosed fails the test unless every content handed out was closed.
+func (f *heldFiles) allClosed(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.opened {
+		if !c.closed {
+			t.Errorf("the content of %q was never closed", c.ref)
+		}
+	}
+}
+
 // heldRig is a backend over the fake kernel playing session 1, its first
 // sink wrapped by a heldWrite, its reporter measuring on the test's ticks.
 type heldRig struct {
 	t     *testing.T
 	k     *alsapcm.FakeKernel
 	b     *Backend
+	files *heldFiles
 	ev    *heldEvents
 	ticks chan time.Time
 	// lets let go of what the test holds, first at the end: the release joins
@@ -2485,12 +2533,13 @@ type heldRig struct {
 	stopped sync.Once
 }
 
-// newHeldRig is a heldRig over files, edit, when there is one, changing the
+// newHeldRig is a heldRig over content, edit, when there is one, changing the
 // backend's Config before it is built.
-func newHeldRig(t *testing.T, w *heldWrite, files nativeFiles, edit func(*Config)) *heldRig {
+func newHeldRig(t *testing.T, w *heldWrite, content map[string][]byte, edit func(*Config)) *heldRig {
 	t.Helper()
-	r := &heldRig{t: t, k: alsapcm.NewFakeKernel(t), ev: &heldEvents{changed: make(chan struct{})}, ticks: make(chan time.Time)}
-	cfg := Config{Resolver: files, Locator: nativeLocator{}, OpenSink: r.k.OpenSink, Notify: w.install,
+	r := &heldRig{t: t, k: alsapcm.NewFakeKernel(t), files: &heldFiles{content: content}, ev: &heldEvents{changed: make(chan struct{})},
+		ticks: make(chan time.Time)}
+	cfg := Config{Resolver: r.files, Locator: nativeLocator{}, OpenSink: r.k.OpenSink, Notify: w.install,
 		Tick: func() (<-chan time.Time, func()) { return r.ticks, func() {} }}
 	if edit != nil {
 		edit(&cfg)
@@ -2538,8 +2587,9 @@ func (r *heldRig) tick() {
 }
 
 // stop lets go of what the test holds, releases the session, joins the
-// backend's goroutines and checks that every open of the node was closed
-// once; a test calls it to read what the session reported to its end.
+// backend's goroutines and checks what the session left: no overlap, every
+// content closed, every open of the node closed once. A test calls it to read
+// what the session reported to its end.
 func (r *heldRig) stop() {
 	r.stopped.Do(func() {
 		for _, f := range r.lets {
@@ -2553,6 +2603,10 @@ func (r *heldRig) stop() {
 		if err := r.b.Wait(ctx); err != nil {
 			r.t.Errorf("the backend's goroutines: %v", err)
 		}
+		if st := r.b.Stats(); st.Overlaps != 0 || st.Goroutines != 0 {
+			r.t.Errorf("backend stats %+v: want no overlap and every goroutine joined", st)
+		}
+		r.files.allClosed(r.t)
 		r.k.CheckClosedEach(r.t)
 	})
 }
@@ -2570,7 +2624,7 @@ func (r *heldRig) stop() {
 func TestNativeIntegrationAFaultInALaterWriteFreezesWhatTheSinkPlayed(t *testing.T) {
 	const xrunAt = 30000
 	w := newHeldWrite(func(at, frames int64) bool { return at > 0 && at+frames > xrunAt }, 0, false)
-	r := newHeldRig(t, w, nativeFiles{"a": heldWAV(100000)}, nil)
+	r := newHeldRig(t, w, map[string][]byte{"a": heldWAV(100000)}, nil)
 	r.k.Free()
 	r.k.XrunAt(xrunAt)
 	r.start("a")
@@ -2613,7 +2667,7 @@ func TestNativeIntegrationThePositionIsOneQuantityAcrossAWritesBookkeeping(t *te
 	// The third Write, of which the sink takes 4000 frames before it holds:
 	// 8192 counted before it.
 	w := newHeldWrite(func(at, _ int64) bool { return at == 2*chunkFrames }, 4000, false)
-	r := newHeldRig(t, w, nativeFiles{"a": heldWAV(40000)}, func(c *Config) { c.Seams = &Seams{ProducerStep: step.seam} })
+	r := newHeldRig(t, w, map[string][]byte{"a": heldWAV(40000)}, func(c *Config) { c.Seams = &Seams{ProducerStep: step.seam} })
 	r.lets = append(r.lets, step.release)
 	r.start("a")
 	receiveHeld(t, w.held, "the third Write held, part of its frames taken")
@@ -2659,7 +2713,7 @@ func TestNativeIntegrationThePositionIsOneQuantityAcrossAWritesBookkeeping(t *te
 func TestNativeIntegrationAPredecessorsPositionStopsAtItsOwnEnd(t *testing.T) {
 	const aFrames = 2 * chunkFrames
 	w := newHeldWrite(func(at, _ int64) bool { return at == aFrames }, 4000, false)
-	r := newHeldRig(t, w, nativeFiles{"a": heldWAV(aFrames), "b": heldWAV(20000)}, nil)
+	r := newHeldRig(t, w, map[string][]byte{"a": heldWAV(aFrames), "b": heldWAV(20000)}, nil)
 	r.start("a", "b")
 	receiveHeld(t, w.held, "the successor's first Write held, part of its frames taken")
 	r.k.Await(t, "the stream to run and its writer to wait on the DAC", runningAndStarved)
@@ -2691,7 +2745,7 @@ func TestNativeIntegrationAPredecessorsPositionStopsAtItsOwnEnd(t *testing.T) {
 func TestNativeIntegrationAPanicInALaterWriteFreezesWhatTheSinkPlayed(t *testing.T) {
 	w := newHeldWrite(func(at, _ int64) bool { return at == 2*chunkFrames }, 4000, true)
 	// The log discarded: the recovery's line for the panic is expected here.
-	r := newHeldRig(t, w, nativeFiles{"a": heldWAV(40000)}, func(c *Config) { c.Log = slog.New(slog.NewTextHandler(io.Discard, nil)) })
+	r := newHeldRig(t, w, map[string][]byte{"a": heldWAV(40000)}, func(c *Config) { c.Log = slog.New(slog.NewTextHandler(io.Discard, nil)) })
 	r.start("a")
 	receiveHeld(t, w.held, "the third Write held, part of its frames taken")
 	r.k.Await(t, "the stream to run and its writer to wait on the DAC", runningAndStarved)
