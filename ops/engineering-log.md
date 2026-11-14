@@ -95688,3 +95688,145 @@ commit, and on a copy with it applied `check-doc-budgets.py` passes and
 worker to the next'` passes, its one edit "hook" to "hooks". Windows and
 macOS are CI's to run: the Windows branch ran here only as the probe runs
 it.
+
+## 2026-11-14 — B871 round 5: the stuck marker published whole, and a test reads it until it decodes
+
+The rules are build-ci-tests.md's line on waiting for a stuck check's marker
+and the marker clause of cli-serve.md's B653 PR 1 round 12 line (round 5's
+patch); their long forms are in `ops/History-rules-build-ci-tests.md` and
+`ops/History-rules-cli-serve.md` ("B871 round 5"); this is the evidence.
+Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR
+`~/onebit/tmp`, the control, the hog runs and the gates pinned to CPUs 0 to
+7. The control's prediction was written before it
+(`.tmp/_b871/r5/predictions.txt`); the control is an uncommitted edit of a
+committed file, put back with `git checkout --` (`.tmp/_b871/r5/ctl_r5.py`).
+
+### The red (backlog B899)
+
+Main fe5e331d's CI run 43527630159, `test (macos-latest)`, attempt 1:
+`TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore` failed with
+"the marker does not read: unexpected end of JSON input". At main,
+`awaitMarker` waited for the marker's file to exist and `readStuckMarker`
+then read it once. `writeMarker` (stuck.go:293-325 at 445a2eca) removed the
+old marker (:309), created the new one with `O_CREATE|O_EXCL` (:315), wrote
+it (:320) and closed it (:321), so a read between the creation and the write
+met an empty file. Production's reader (`stuckMarker`, :439-449) takes a
+marker that does not decode for none, so another process reading in that
+window waits its lock wait out and answers busy without naming the hold: a
+worse message, not data integrity. This branch's round 2 had made the test
+wait for the write's "writes" hook, so the branch did not show it; the
+writer was main's.
+
+### Item 1: the marker published whole
+
+39ad984f. `writeMarker` (stuck.go:319) removes the old marker, creates
+`.check-still-running.tmp` (`stuckMarkerTmpName`, :248) with
+`O_CREATE|O_EXCL`, keeps the folder's owner (`fsutil.KeepOwner`), writes and
+closes it with both errors checked, and publishes it with
+`os.Link(tmp, marker)` (:358), which fails where anything stands at the
+marker's name, as the exclusive creation of the marker did; the temporary
+file is removed on every path once made (:360), and "writes" is said only
+once the marker is published. `removeMarker` (:388) and `clearStaleMarker`
+(:480) remove the temporary name too. The removal ordering with `after` is
+unchanged: the write waits for a stale marker's removal under way, takes its
+mark's lock, then removes the old marker. A marker is written only for a
+hold that holds the folder's lock, one at a time in a process, so no two
+writes of one folder's marker meet at the temporary name.
+
+Red first. A per-mark seam, `afterCreate` (nil in production), was put in
+445a2eca's writer right after its exclusive creation of the marker, with the
+new case, `TestAMarkerReadWhileItIsWrittenIsWholeOrNone`: a read of the
+marker's raw bytes made while the write is parked there meets no marker
+(`os.ErrNotExist`) or bytes that decode whole, and once let go the marker
+stands, whole, said once, with no temporary file. `go test -race -count=3
+-run '^TestAMarkerReadWhileItIsWrittenIsWholeOrNone$' ./internal/backup/`:
+red 3 of 3, `stuck_marker_internal_test.go:100: a read of the marker while
+its write was under way met 0 bytes that do not decode: unexpected end of
+JSON input`. With the publication, green; the seam keeps its place after the
+temporary file's creation, before its bytes. `beforeCreate`, whose one
+caller is `TestTheStuckMarkerNeverFollowsAReplacement`, keeps its place after
+the removal and before the creation: that test still finds the symlink it
+plants at the marker's name untouched, and now also no "writes" and no
+temporary file. `TestAMarkerWhoseWriteOrCloseFailsLeavesNothing` injects the
+write's and the close's failure (`failStep`, per mark, nil in production):
+no marker, no temporary file, no "writes". `TestTheMarkersTemporaryFileGoesWithIt`
+has `clearStaleMarker` and `removeMarker` take a temporary file left beside
+the marker, and `TestAGiveUpOnceTheLocksLetGoBeganWritesNoMarker`'s 300
+rounds of a give-up racing the let-go now find no temporary file either.
+
+Control C1, the in-place write put back (the marker created with
+`O_CREATE|O_EXCL`, `afterCreate` after it, the write and the close
+unchecked), `-race -count=5`: red 5 of 5 as predicted, at
+stuck_marker_internal_test.go:100, no race; restored clean.
+
+Windows, from go1.27.3's source: `os.Link` is
+`syscall.CreateHardLink(n, o, 0)` (`src/os/file_windows.go:321`), and Go's
+own hard-link test (`src/os/os_test.go:900-915`) requires a second `Link` onto an
+existing name to answer a `*LinkError` whose `Err` is `IsExist`; the
+temporary file's `O_CREATE|O_EXCL` is `CREATE_NEW`, not following a reparse
+point (`src/syscall/syscall_windows.go:436-438`). A reader's open has
+`FILE_SHARE_READ | FILE_SHARE_WRITE` and no `FILE_SHARE_DELETE` (:395;
+`fsutil.ReadAsFile` opens with `os.Open` there, notafile_other.go:13): one
+that holds the old marker makes its removal fail and the write gives up, as
+before; none can refuse the link, since no marker stands once the old one is
+removed and no reader opens the temporary file; one that opens the new
+marker before the temporary name's removal keeps that removal from landing
+(one file, two names), the marker published and the temporary file left for
+`removeMarker` or the next `clearStaleMarker`. Nothing new is logged. A
+filesystem that makes no hard link (FAT, exFAT) takes no marker, as one that
+takes no write.
+
+### Item 2: `awaitMarker` reads until it decodes
+
+c37d4c95. `awaitMarker` (verify_stuck_test.go:43) reads the marker's bytes
+every 10 ms, as many reads as its wait holds (30 s, capped by the binary's
+deadline), until they decode as the hold its caller names by the marker's
+words, and touches no hook; `markerWritten`, the hook its callers installed,
+is removed. Its callers, each naming its own hold, and in none an earlier
+hold given up in its root: `TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore`
+(restore_words_unix_test.go:64, A's restore),
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo`
+(restore_source_unix_test.go:175, the restore given up) and
+`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`
+(verify_stuck_test.go:281, the check given up).
+
+The restore test 200 times beside a CPU hog (`gates_r5.py`'s hog step):
+eight busy processes and four lanes of 50 runs on CPUs 0 to 7, from
+binaries built without the race detector. As main's shape, a scratch copy of
+79ae33fa with the marker written in place and `awaitMarker` waiting for the
+file and then reading it once: 1 run of 200 failed,
+`restore_words_unix_test.go:64: the marker does not read: unexpected end of
+JSON input`, B899's words, here on Linux. As this round's: 200 of 200
+passed, and no read of the marker failed to decode.
+
+### The merge conditions
+
+`~/onebit/jobs/b871/b871-r5-merge-conditions.md` (not tracked) answers
+#1457's merge conditions with lines at the round's head, and lists
+`awaitMarker`'s callers: the non-test diff file by file, the nil path of
+each of the ten seams the branch adds (each a skipped call or the platform's
+own; `afterCreate` and `failStep` are never set by `markStuckAfter`), the
+version gate (none of the branch's 62 files is under `guardedPrefixes` or
+`GuardedPaths`), and round 4's two claims that a worker escaped only after a
+failure, each traced at the head with the bounds that apply on Windows.
+
+### The gates
+
+On 79ae33fa, in one session of the build slot (`.tmp/_b871/r5/gates_r5.py`,
+its log `.tmp/_b871/r5/gates.log`): `go vet -tags
+ts_omit_webclient,ts_omit_debugeventbus ./...` as linux/amd64, darwin/arm64
+and windows/amd64, all clean, and go1.27.3's gofmt over the 9 Go files the
+round changed, none listed; the touched tests at `-race -count=50` from one
+race binary per package in four lanes, 500 runs, every one passing and no
+race (`TestTheStaleMarkersRemovalNeverTakesAwayARestoresMarker` 452 s;
+`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` 371 s, then the five
+marker cases, 250 runs, 2 s;
+`TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore` 280 s, then
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo` 274 s;
+`TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds` 191 s);
+the twelve cmd/bridge tests that read a marker production writes, once each,
+all passing; the hog runs above; and `go test -race -count=1 -timeout 120m
+./internal/backup/`, ok in 777 s. The rules patch applies at the final
+commit, and on a copy with it applied `check-doc-budgets.py` passes and
+`verify_moves.py --base HEAD` passes with the two lines named as edited.
+Windows and macOS are CI's to run.
