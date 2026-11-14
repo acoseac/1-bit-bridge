@@ -440,7 +440,9 @@ var onAdmissionLocked atomic.Pointer[func(*hold)]
 var onAbandonBlocked atomic.Pointer[func(*hold)]
 
 // runStep is stepOf, and publishOf where publish is set: a verdict's write,
-// admitted only where the hold is not given up as its step is registered.
+// admitted only where the hold is not given up as its step is registered. A
+// step a test holds (SetStepGateForTest) is given up at its gate alone, never
+// by its bound or the caller's stop.
 func runStep[T any](h *hold, by time.Time, words string, publish bool, step func(ctx, given context.Context) T, late func(T)) (v T, admitted, answered bool) {
 	type answer struct {
 		v        T
@@ -465,6 +467,7 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 	if fixture := stepBoundForTest.Load(); fixture != nil && fixture.root == h.root && fixture.snapshot == h.snapshot && fixture.steps[words] {
 		by = time.Now().Add(fixture.within)
 	}
+	gate := gateOf(h, words)
 	h.mu.Unlock()
 	out := make(chan answer, 1)
 	done := make(chan struct{})
@@ -479,7 +482,25 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 	}()
 	timer := time.NewTimer(time.Until(by))
 	defer timer.Stop()
-	stop := h.stop
+	stop, bound := h.stop, timer.C
+	if gate != nil {
+		// A test holds the step: its gate alone gives it up
+		// (SetStepGateForTest).
+		stop, bound = nil, nil
+	}
+	expire := func() {
+		if late != nil {
+			lateDone := make(chan struct{})
+			go func() {
+				defer close(lateDone)
+				if a := <-out; a.ok {
+					late(a.v)
+				}
+			}()
+			h.track(lateDone)
+		}
+		h.giveUp(done, words)
+	}
 	for {
 		select {
 		case a := <-out:
@@ -498,18 +519,11 @@ func runStep[T any](h *hold, by time.Time, words string, publish bool, step func
 			if time.Until(by) > StopWriteBound {
 				timer.Reset(StopWriteBound)
 			}
-		case <-timer.C:
-			if late != nil {
-				lateDone := make(chan struct{})
-				go func() {
-					defer close(lateDone)
-					if a := <-out; a.ok {
-						late(a.v)
-					}
-				}()
-				h.track(lateDone)
-			}
-			h.giveUp(done, words)
+		case <-bound:
+			expire()
+			return v, true, false
+		case <-gate:
+			expire()
 			return v, true, false
 		}
 	}

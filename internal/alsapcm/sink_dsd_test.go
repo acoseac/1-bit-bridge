@@ -27,9 +27,17 @@ func nativeKernel(t *testing.T) *fakeKernel {
 	k.hw.rates = append(k.hw.rates, 705600)
 	return k
 }
-func nativeSink(t *testing.T, k *fakeKernel, c DSDConfig) *DSDSink {
+
+// nativeSink opens a native sink on k whose life is the background's, each
+// hook given its seams first (as lifeSinkOn's are), and releases it at the
+// test's end.
+func nativeSink(t *testing.T, k *fakeKernel, c DSDConfig, hooks ...func(*nativeSeams)) *DSDSink {
 	t.Helper()
-	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now, at: k.nativeAt})
+	h := nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now, at: k.nativeAt}
+	for _, hook := range hooks {
+		hook(&h)
+	}
+	s, e := openDSDSink(context.Background(), c, h)
 	if e != nil {
 		t.Fatal(e)
 	}

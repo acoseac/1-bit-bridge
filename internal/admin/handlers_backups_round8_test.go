@@ -19,6 +19,12 @@ import (
 
 // TestTheConsoleReportsCancellationAndEveryWriteHandoff drives the job on
 // its server context, including the outer expiration with no worker answer.
+// In the worker cases the write and the read-back are held at their gates
+// (SetStepGateForTest), and each is given up once it has begun: the write
+// once it has stalled, the read-back once its stall has begun. A bound of
+// 300 ms from the write's admission could pass under load before its rename,
+// which then renamed nothing, and the case never reached its stall (backlog
+// B890).
 func TestTheConsoleReportsCancellationAndEveryWriteHandoff(t *testing.T) {
 	for _, mode := range []string{"published then outer expiration", "published then worker answer", "cancelled check", "given-up write"} {
 		t.Run(mode, func(t *testing.T) {
@@ -50,11 +56,18 @@ func TestTheConsoleReportsCancellationAndEveryWriteHandoff(t *testing.T) {
 			letGo := sync.OnceFunc(func() { close(release) })
 			entered := make(chan struct{})
 			enter := sync.OnceFunc(func() { close(entered) })
+			readBackEntered := make(chan struct{})
+			enterReadBack := sync.OnceFunc(func() { close(readBackEntered) })
 			var expired, published atomic.Bool
 			// Let SQLite finish at its normal deadline. Only the worker cases'
-			// parked write/read-back expire; cancellation drives the outer case.
+			// write and read-back are given up, each at its gate, never by a
+			// bound; cancellation drives the outer case.
+			var gate *backup.StepGate
+			fireAll := func() {}
 			if mode == "published then worker answer" || mode == "given-up write" {
-				t.Cleanup(backup.SetStepBoundForTest(dir, 300*time.Millisecond, "its verdict's write", "its read of the record after it"))
+				g, restore := backup.SetStepGateForTest(filepath.Dir(dir), filepath.Base(dir), "its verdict's write", "its read of the record after it")
+				t.Cleanup(restore)
+				gate, fireAll = g, g.FireAll
 			}
 			switch mode {
 			case "cancelled check":
@@ -79,6 +92,7 @@ func TestTheConsoleReportsCancellationAndEveryWriteHandoff(t *testing.T) {
 				}))
 				t.Cleanup(backup.SetReadBackFailureForTest(func(path string) error {
 					if path == dir {
+						enterReadBack()
 						<-release
 					}
 					return errors.New("injected read-back failure")
@@ -95,7 +109,7 @@ func TestTheConsoleReportsCancellationAndEveryWriteHandoff(t *testing.T) {
 			}))
 			logs := loggingtest.Record(t)
 			// This cleanup is registered after every seam and logger restore.
-			t.Cleanup(func() { letGo(); cancel(); s.WaitForBackupJobs(); backuptest.AwaitIdle(t) })
+			t.Cleanup(func() { fireAll(); letGo(); cancel(); awaitBackupJobs(t, s); backuptest.AwaitIdle(t) })
 			s.verifyInBackground(capture, filepath.Dir(dir), 0)
 			select {
 			case <-entered:
@@ -109,7 +123,20 @@ func TestTheConsoleReportsCancellationAndEveryWriteHandoff(t *testing.T) {
 				cancel()
 				letGo()
 			}
-			s.WaitForBackupJobs()
+			if gate != nil {
+				// The write has begun, and stalls: its gate gives it up.
+				gate.Fire("its verdict's write")
+				if mode == "published then worker answer" {
+					// Then the read-back, once its stall has begun.
+					select {
+					case <-readBackEntered:
+					case <-time.After(30 * time.Second):
+						t.Fatal("the read-back never reached its stall")
+					}
+					gate.Fire("its read of the record after it")
+				}
+			}
+			awaitBackupJobs(t, s)
 			var want string
 			switch mode {
 			case "published then outer expiration":
@@ -136,5 +163,21 @@ func TestTheConsoleReportsCancellationAndEveryWriteHandoff(t *testing.T) {
 				t.Error("the verdict had not published before sync stalled")
 			}
 		})
+	}
+}
+
+// awaitBackupJobs waits for the server's backup jobs (WaitForBackupJobs, a
+// bare Wait), failing the test where they have not ended within a minute.
+func awaitBackupJobs(t *testing.T, s *Server) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.WaitForBackupJobs()
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal("the console's backup jobs did not end within a minute")
 	}
 }
