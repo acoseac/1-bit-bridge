@@ -5476,9 +5476,11 @@ begins their probes. A load that gives the run no answer is a
 `*doctor.UnfinishedLoadError`, and config-file fails in words of its own,
 never as a file that does not load: "<path>: its load did not finish within
 5s", or "its load still has not finished, <d> after the doctor began it", its
-hint saying that loading it checks those two settings against each library
-root, that a root whose mount does not answer holds the load (library-roots
-names it, from those roots), and that bridge serve, and every command that
+hint saying that root validation, or the load's slow read of the file, holds
+it: that loading it checks those two settings against each library root,
+which a root whose mount does not answer holds (library-roots names it, from
+those roots), and reads the file, which a mount slow to answer holds (the
+read named since B650FU), and that bridge serve, and every command that
 loads the config, waits for it too. The lines that grade what the config sets
 say they were not checked, "the config that sets <what> did not finish
 loading" (`NotGradedReason`: the ports, tls-cert, data-dir). A load the run

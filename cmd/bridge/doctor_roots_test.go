@@ -334,9 +334,10 @@ func TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn(t *testing.T) {
 // upscale.tempDir set, config.Load's validation resolves every root, so a dead
 // mount held bridge doctor before any check ran. The load is bounded too, the
 // roots probed beside it: config-file fails in the words of a load that did
-// not finish, library-roots names the root, the lines that grade what the
-// config sets say they were not checked, and the run takes the one bound. A
-// config that sets neither loads without asking the root.
+// not finish, its hint naming root validation, or the load's slow read of the
+// file, as what holds it, library-roots names the root, the lines that grade
+// what the config sets say they were not checked, and the run takes the one
+// bound. A config that sets neither loads without asking the root.
 func TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories(t *testing.T) {
 	path, _, dead := rootsInstall(t, true)
 	s := newRootStall(dead)
@@ -351,7 +352,8 @@ func TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories(t *test
 	if line, want := reportLine(got.out, "config-file"), printedLine(doctor.Fail, "config-file", fmt.Sprintf("%s: its load did not finish within %s", path, doctorRootsBound)); line != want {
 		t.Errorf("config-file = %q, want %q", line, want)
 	}
-	if hint := reportHint(got.out, "config-file"); !strings.Contains(hint, "upscale.variantsDir and upscale.tempDir") {
+	if hint := reportHint(got.out, "config-file"); !strings.Contains(hint, "upscale.variantsDir and upscale.tempDir") ||
+		!strings.Contains(hint, "root validation, or the load's slow read of the file, holds it") {
 		t.Errorf("config-file's hint does not say what holds the load: %q", hint)
 	}
 	if hint := reportHint(got.out, "library-roots"); !strings.Contains(hint, fmt.Sprintf("library root %s did not answer within %s", dead, doctorRootsBound)) {

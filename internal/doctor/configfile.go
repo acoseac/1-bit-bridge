@@ -195,9 +195,10 @@ func checkConfigFile(_ context.Context, d Deps) Check {
 			return warn(checkNameConfigFile, c.Path+" was not checked: "+unfinished.Error(), ranWithoutIt)
 		}
 		return fail(checkNameConfigFile, c.Path+": "+unfinished.Error(),
-			"loading it checks upscale.variantsDir and upscale.tempDir against each library root, and a root whose mount does "+
-				"not answer holds the load (library-roots names such a root): bridge serve, and every command that loads this "+
-				"config, waits for it too ("+ranWithoutIt+")")
+			"root validation, or the load's slow read of the file, holds it: loading it checks upscale.variantsDir and "+
+				"upscale.tempDir against each library root, which a root whose mount does not answer holds (library-roots "+
+				"names such a root), and reads the file, which a mount slow to answer holds; bridge serve, and every command "+
+				"that loads this config, waits for it too ("+ranWithoutIt+")")
 	}
 	switch {
 	case c == nil:
