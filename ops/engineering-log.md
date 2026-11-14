@@ -96383,7 +96383,9 @@ tags, TMPDIR `~/onebit/tmp`, half the cores; controls are uncommitted edits
 to the committed tree, their bytes restored from memory by the runner
 (`.tmp/_b872p2fb/controls.py`), each predicted in writing first
 (`.tmp/_b872p2fb/controls.predictions.txt`). The rule change is
-`rules-b872p2-fb.patch` (below).
+`rules-b872p2-fb.patch` (below), which round 2 committed as it was
+(e0378b30). Round 2's record is at the end; where it changes what this
+round says, the text here says so ("Corrected in round 2").
 
 ### Why a diagnostic and no fix
 
@@ -96429,11 +96431,13 @@ with the room it names while it answers `ERROR_MORE_DATA` (234), at most eight
 times, `RmEndSession`; a file not there (the binary once it is set aside) is
 logged "absent" and not registered. For each process: its pid, its image
 (`QueryFullProcessImageNameW`), its parent pid (a Toolhelp process snapshot),
-the Restart Manager's app and service names and its start time. The test's
+the Restart Manager's app and service names and its start time (since round
+2 only a time a process can have started at, else left out). The test's
 goroutine logs it all at the test's end, a line each, labelled candidate user
 (the Restart Manager lists users of a file, not the handle that refused), an
 empty list "no candidate user", beside this process's pid, and last
-`refusals: N; candidate users: …`, on a green run too. `RM_PROCESS_INFO`'s
+`refusals: N; candidate users: …` (since round 2 `refusals: N; ignored: M;
+candidate users: …`), on a green run too. `RM_PROCESS_INFO`'s
 layout (668 bytes) is asserted at compile time. The two CI-red tests take it:
 `TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn` ("the key gone") and
 `TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack`.
@@ -96443,7 +96447,9 @@ positive control, Windows only, `TestTheHolderDiagnosticNamesTheChildThatHoldsTh
 a child, this test binary run again, opens the backup in `t.TempDir()` for
 reading, sharing reading and writing and not deletion, and says so; the real
 `RollbackBinary` (after a guard that skips where a bridge service is
-registered, whose stop it would make) is refused with a sharing violation and
+registered, whose stop it would make; corrected in round 2, it ran on any
+lookup that failed, and runs now only where the service manager answers that
+none is) is refused with a sharing violation and
 puts the binary back, "(restored)" with its bytes; the diagnostic lists the
 child under the backup by its pid, its image (the test binary, by
 `os.SameFile`) and its parent pid (`os.Getpid()`), and the binary as absent;
@@ -96485,6 +96491,12 @@ admin port's probe as before. The park is bounded and let go, and the
 verification's worker joined, before serve's drain and before the seams are
 put back. An ordering regression test, not a reproduction.
 
+Corrected in round 2: the case asserted only that no read came while the
+check was parked, so a restore that let the park go and read without waiting
+for the end, its read after the park and before the verification's end (the
+verdict's rename among it), passed: the case did not pin the wait for the
+end. Round 2's case holds the end itself and asserts the order at the read.
+
 ### 4. The re-init's lsof deadline (21cd0c09)
 
 The doctor bounds an lsof probe at 2 s; a loaded runner's lsof outlives it,
@@ -96518,7 +96530,9 @@ its ports and goes through. It skips where the doctor resolved no lsof.
 
 `TestNoProductionCodeCallsATestOnlySeam` (cd83ab87) lists every production
 call of the five seams, none, and must see each declared and the put-back's
-four observations.
+four observations. Corrected in round 2: a walk of calls alone, which a
+function value (`f := SetProbeLimitForTest`) passed; it resolves every
+reference now.
 
 ### Reds and controls (`.tmp/_b872p2fb/controls.log`)
 
@@ -96536,7 +96550,7 @@ Each as predicted; `git status` clean after the batch.
 | C2-nofilter | another binary's refusal heard | RED |
 | C2-absent | an absent file asked about | RED |
 | C2-quiet | no summary without a refusal | RED |
-| C3-nowait (B885's red) | the wait dropped | RED the case: the read injected once, exit 2; the original test green on Linux |
+| C3-nowait (B885's red) | the wait dropped | RED the case: the read injected once, exit 2; the original test green on Linux. Corrected in round 2: the park's release went with the wait, so this red showed the release, not the wait for the end (round 2's R-nowait+noassert) |
 | C3-unwired | the preflight read not through its seam | RED the case (the seam never entered) |
 | C4-nodeadline (item 4's red) | the deadline dropped from `reinitBrokenInstall` | RED the case, `public init exited 1 …` (the delayed spawn reached); the four re-inits green |
 | C4-unwired | the spawn not through `lsofCommand` | RED the case (no delayed spawn) |
@@ -96588,7 +96602,9 @@ artifact: `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout
 120m -count=200 -v -run
 '^(TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn|TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack)$'
 ./cmd/bridge/ > rollback-holders.log 2>&1`, then `grep 'rollback holder
-diagnostic' rollback-holders.log > rollback-holders.txt`.
+diagnostic' rollback-holders.log > rollback-holders.txt`. Round 2 adds the
+four internal/updater tests its service guard governs, and asks of them and
+of the positive control each run's `--- PASS`, never `--- SKIP` (below).
 
 ### Follow-ups (the backlog file is not on this host)
 
@@ -96602,3 +96618,136 @@ diagnostic' rollback-holders.log > rollback-holders.txt`.
 - `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, the early
   rollback, met the same refusal on windows-latest (run 42709386274, "could not
   put the backup back: rollback rename …"); it can take the diagnostic too.
+
+### Round 2: B885's case waits for the end, the rules land, the Lows
+
+From 401bef31. Commits: cb653e44 (B885's case), 4a2d51ad (the pin),
+00fc9266 (the service guards and the diagnostic's loose ends), e0378b30
+(round 1's rules patch, as it was: sha256 d1921ca2…), e351ecaf (round 2's
+rules, `rules-b872p2-fb-r2.patch`, sha256 5b4d2763…), then this record. The
+review's Medium on `observe` was refuted, and the diagnostic stays. Runs as
+round 1's; the controls' runner is `.tmp/_b872p2fb/controls_r2.py`, its
+predictions `.tmp/_b872p2fb/controls-r2.predictions.txt`, written first.
+
+**B885's case (cb653e44).** Where the two hooks run, read in
+`internal/backup/finish.go`: `SetAfterCheckForTest`'s in `verifyHeld`, once
+the check has answered and before the verdict's publication, on the
+verification's worker, under the backups folder's lock (:584);
+`SetOnVerifyEndForTest`'s, the hook that stood as the verification began
+(:280), in the worker's first deferred function, so its last step: after the
+answer is handed over (:341) and after the worker has let go of the lock, the
+ownership and the slot (:329-331). Held there, the end blocks neither the
+verification's caller, which returns on the answer (:349), nor serve's
+shutdown, which joins the ticker and not the worker (internal/backup keeps no
+join of its workers), nor the restore's lock. The case runs in two stages on
+gates of their own. First the check is parked, let go with no restore under
+way, and seen to clear: the verdict is written and nothing is injected. Then
+the end is held in that last step until the restore's wait for it begins
+(`b.restore(t, endGo.open)`) or the restore's read before its prompt comes,
+whichever is first; the read records whether the end has come, and the case
+asserts it there (`restore_lock_test.go:508`); the refusal is injected only
+while the check is parked, and never was; the restore is refused by its probe
+as before. In the green run the end's release is the wait's alone, apart from
+the read: the restore waits for the end and the read follows it. With the
+wait dropped (the control) the end is held until the read comes, so the read
+precedes the end on every run by the barrier, not the scheduler, and the case
+fails at the ordering assertion, never by a timeout. A cleanup opens both
+gates and waits, bounded, for the end before serve's drain and before the
+seams are put back. `startServeBesideItsSnapshot`'s `before` returns the end's
+hold, set with the end hook before serve starts.
+
+**The rules.** e0378b30 is round 1's patch unchanged. e351ecaf, in
+`build-ci-tests.md`: the diagnostic's summary gains `ignored: M`; the B885
+bullet describes the two stages and adds "or assert the order anywhere but at
+the read"; and two bullets, the service guards' and the seam pin's.
+`verify_moves.py --base HEAD`, given the two lines this round edits, PASS;
+`make docs-check` clean (config-lifecycle.md 99.3%, the worst load 77.0%).
+
+**The Lows (4a2d51ad, 00fc9266).**
+
+- The positive control closes both ends of its pipe in a cleanup registered
+  right after `os.Pipe()`, and the write end of the child's stdin right after
+  `StdinPipe()`, so a `Start` that fails leaks neither.
+- Both Windows service guards fail closed, asking with the least rights that
+  answer: internal/updater's `skipIfBridgeServiceRegistered` (for its four
+  tests that would stop a running service: `TestSwapWindows_RenameTrick`,
+  `TestSwapWindows_RollbackOverwritesExistingBak`,
+  `TestRollbackBinary_Windows` and `TestRollbackBinaryReplacesARunningExe`)
+  and cmd/bridge's `skipIfABridgeServiceIsRegistered` ask `OpenSCManager`
+  with `SC_MANAGER_CONNECT` and `OpenService` with `SERVICE_QUERY_STATUS`, run
+  only on `ERROR_SERVICE_DOES_NOT_EXIST`, and skip, naming the answer, on a
+  service there or on any other answer. Before, both asked `mgr.Connect`,
+  which wants `SC_MANAGER_ALL_ACCESS` and is refused to an unprivileged
+  runner, and ran the test on any lookup that failed.
+- The seam pin resolves identifiers. For each of linux, darwin and windows
+  (`go/build` with the tags) it type-checks the production files of each
+  package that declares a seam or imports a seam's package (`go/types`, an
+  importer that answers an empty package for every path, errors ignored) and
+  reports every identifier `types.Info.Uses` resolves to a seam, in its own
+  package or through an imported package's name, and any dot-import of a
+  seam's package; only the declaration's own name is none. It counts the
+  put-back's four observations on each platform.
+- The candidate's start time: a FILETIME at or before the Unix epoch, or more
+  than an int64 of nanoseconds after it, is none (`filetimeStart`, false), and
+  its line leaves it out; round 1's conversion read the zero FILETIME as
+  2185.
+- `observe` counts the refusals of another binary's rollback it leaves alone,
+  and the summary says so (`ignored: M`).
+
+| | mutation | result |
+|---|---|---|
+| R-nowait (item 1's red) | the restore's wait for the end dropped, the check's release kept | RED the case at the ordering assertion alone ("read the snapshot's manifest 1 time(s) before serve's verification of it had ended"), 1.3 s; the original test green |
+| R-nowait+noassert | that, and the read's count of an early read removed | GREEN: round 1's checks pass a read before the end |
+| P-call-same | doctor.go calls `SetProbeLimitForTest` (round 1's C5) | RED the pin |
+| P-value-same | doctor.go takes it as a package-level value | RED |
+| P-local-same | `f := SetProbeLimitForTest` in a function of doctor.go | RED, naming `internal/doctor/doctor.go:992:7` |
+| P-value-file | doctor_notwindows.go, another file of its package, takes it as a value | RED |
+| P-value-pkg | cmd/bridge's doctor.go takes `doctor.SetProbeLimitForTest` as a value | RED |
+| P-windows-file | doctor_windows.go, built only for windows, takes it as a value | RED |
+| P-namesakes | a local, a struct field and a method of the seam's name in doctor.go | GREEN: none is the seam |
+| L-ignored | the ignored count dropped | RED the bookkeeping case |
+| L-zero | the start time's guard dropped | RED: the zero FILETIME read as 2185-07-21, the epoch's as 1970, past an int64 as 1677 |
+
+Each as predicted, `git status` clean after each batch. The pin reads the
+tree's sources as it runs, so its controls keep their mutation on disk until
+it has run (`--sources`); a first batch that put the bytes back before
+running the pin read green and was discarded. The service guards and the
+pipe's cleanup are Windows files: built and vetted here, run on
+windows-latest.
+
+Runs, at e351ecaf:
+
+- Item 1 beside a CPU hog, in the build slot (taken 07:00): eight busy
+  processes and the test binary pinned to CPUs 0-7 (the hogs kept 7.8 of them
+  busy), `-race`, `-test.count=50` in one process each
+  (`.tmp/_b872p2fb/gates_r2.py`): the control's binary RED 50 of 50, each at
+  the ordering assertion alone, one early read each, 4.9-10.5 s a run; the
+  committed tree's GREEN 50 of 50, no error line, 4.4-10.4 s a run.
+- `-race -count=50` outside the slot, three lanes at GOMAXPROCS 2
+  (`.tmp/_b872p2fb/lanes_r2.py`): both B885 tests (138 s); the pin, the
+  bookkeeping case and the start time (384 s); the two crash-rollback tests
+  (451 s); 50 of 50 each, none skipped, no race.
+- In the slot: `go vet` with the tags over `./...` for linux, darwin and
+  windows, clean (cached clean for these sources); `GOOS=windows go test -c`
+  of `./cmd/bridge/` and `./internal/updater/`, two PE32+ binaries; then
+  `go test -race -count=1 -timeout 120m -p 2 -parallel 4` at GOMAXPROCS 4 of
+  `./cmd/bridge/`, `./internal/updater/`, `./internal/backup/` and
+  `./internal/doctor/`: ok, 1,650.5 s, 37.4 s, 854.3 s and 6.9 s.
+- With this record: cmd/bridge's `TestEveryCitedTestNameExists` and
+  `TestNoDocblockNamesAnotherDeclaration`, and `make docs-check`, clean.
+
+What windows-latest runs, each run's `--- PASS` its evidence, never
+`--- SKIP`:
+
+- The positive control, naming the child:
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=20 -v -run
+  '^TestTheHolderDiagnosticNamesTheChildThatHoldsTheBackup$' ./cmd/bridge/`.
+- The four tests internal/updater's guard governs:
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run
+  '^(TestSwapWindows_RenameTrick|TestSwapWindows_RollbackOverwritesExistingBak|TestRollbackBinary_Windows|TestRollbackBinaryReplacesARunningExe)$'
+  ./internal/updater/`.
+- The stress, its lines kept: `go test -tags
+  ts_omit_webclient,ts_omit_debugeventbus -timeout 120m -count=200 -v -run
+  '^(TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn|TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack)$'
+  ./cmd/bridge/ > rollback-holders.log 2>&1`, then `grep 'rollback holder
+  diagnostic' rollback-holders.log > rollback-holders.txt`.
