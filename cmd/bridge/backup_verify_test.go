@@ -400,7 +400,12 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 // brief's shutdown red at serve's ticker, which serve's backup join waits
 // for: stopped while the verdict's write is held in a sync that never
 // answers, the ticker returns within backup.StopWriteBound of the stop,
-// abandoning the write, and says nothing of the stop.
+// abandoning the write, and says nothing of the stop: its one line is the
+// snapshot it wrote. The write is held at its gate, which nothing fires
+// before the test's joins, as
+// TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound holds
+// its read, so only the caller's expiry ends the ticker's wait for it, never
+// the write's own bound (backlog B895).
 func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing.T) {
 	_, dataDir, root := backupInstall(t)
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
@@ -408,15 +413,21 @@ func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing
 	entered := make(chan struct{})
 	var enter sync.Once
 	letGo := sync.OnceFunc(func() { close(release) })
+	// The cleanups run last-registered first, whatever the test found: the
+	// sync let go (never the gate), the stop, the ticker and then every
+	// worker joined, and the seams put back last.
 	t.Cleanup(backup.SetSyncVerdictForTest(func(string) error {
 		enter.Do(func() { close(entered) })
 		<-release
 		return nil
 	}))
+	_, restoreGate := backup.SetStepGateForTest(root, "", "its verdict's write")
+	t.Cleanup(restoreGate)
+	t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
-	t.Cleanup(func() { letGo(); cancel(); waitClosed(t, done, "the backup ticker"); awaitVerificationsEnd(t, root) })
+	t.Cleanup(func() { letGo(); cancel() })
 	var stdout, stderr safeBuffer
 	go func() {
 		defer close(done)
@@ -440,6 +451,7 @@ func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing
 	if got := stderr.String(); got != "" {
 		t.Errorf("a stopped verification was reported: %s", got)
 	}
+	requireOnlyTheSnapshotsLine(t, &stdout, root)
 }
 
 // TestBothDoctorsCarryTheBackupLines: bridge doctor's Deps, which the
