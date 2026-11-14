@@ -165,7 +165,15 @@ func TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo(t *testing.T
 	if took := time.Since(asked); took > 5*time.Second {
 		t.Errorf("the restore and the prune beside the restore given up waited %v to be refused", took)
 	}
-	awaitMarker(t, root)
+	// Once the marker reads whole (backlog B899): no hold before the
+	// restore's was given up in root, so the marker read is the restore's,
+	// which its words say. In this process the restore's mark refuses the
+	// verification first (verifyAndThen asks this process's marks before any
+	// filesystem); another process's read of the marker is
+	// TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds's.
+	awaitMarker(t, root, "the restore given up", func(s backup.StuckCheck) bool {
+		return s.Restoring() && s.Snapshot == name
+	})
 	if _, err := backup.VerifySnapshotAsAnotherProcessForTest(t.Context(), other, backup.VerifyOptions{LockWait: 10 * time.Second}); !errors.Is(err, backup.ErrCheckStillRunning) ||
 		!strings.Contains(err.Error(), words) {
 		t.Errorf("another process's verification beside the restore given up answered %v, want ErrCheckStillRunning naming %q", err, words)
