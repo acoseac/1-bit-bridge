@@ -128,8 +128,8 @@ func sharedBuilder(mode string, clock *lockedClock, table *MPDInspections, insp 
 	return newLocalOutputs(cfg)
 }
 
-// within is what fn returns, from a goroutine of its own, the case failing by
-// inspectionDeadline where it does not return.
+// withinInspection is what fn returns, from a goroutine of its own, the case
+// failing by inspectionDeadline where it does not return.
 func withinInspection[T any](t *testing.T, what string, fn func() T) T {
 	t.Helper()
 	done := make(chan T, 1)
