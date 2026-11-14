@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -33,6 +34,12 @@ import (
 
 // doctorRootsBound is how long the tests' runners wait for a work on a root.
 const doctorRootsBound = 300 * time.Millisecond
+
+// doctorAnsweringBound is how long a case's runner waits for its roots where
+// every root answers and the case reads what each one answered: no root that
+// answers comes near it, however loaded the host, and the case's deadline is
+// past it.
+const doctorAnsweringBound = 10 * time.Second
 
 // doctorRootsDeadline is how long a test waits for a run a root holds before
 // it fails by its own deadline, never by hanging the suite: the run waited on
@@ -161,6 +168,21 @@ func standInCLIRoots(t *testing.T, s *rootStall) *doctor.RootProbes {
 	p := stallProbes(t, s, doctorRootsBound)
 	cliRootProbes = p
 	return p
+}
+
+// standInCLIProbes makes p the CLI's works on the roots (cliRootProbes) for
+// the rest of the test, and puts the process's back once every work p holds
+// has ended. A test that calls it does not call t.Parallel.
+func standInCLIProbes(t *testing.T, p *doctor.RootProbes) {
+	t.Helper()
+	prev := cliRootProbes
+	t.Cleanup(func() {
+		if !p.DrainForTest(30 * time.Second) {
+			t.Error("a work on a root was still out 30s after the test")
+		}
+		cliRootProbes = prev
+	})
+	cliRootProbes = p
 }
 
 // rootsInstall writes base/bridge.yaml over two roots, healthy and dead, each
@@ -546,13 +568,61 @@ func TestTheConsolesDoctorReadsARecoveredRootAsHealthy(t *testing.T) {
 	}
 }
 
+// rootWaitClock is a runner's clock (doctor.RootProbes.SetClockForTest) whose
+// time moves only at a run's wait on a root: the timer a run sets once it has
+// told the runner's hook the root it is about to wait on
+// (SetOnRootWaitForTest) fires at once, the clock moving on by that wait's
+// bound, and every other timer never fires, so a wait on the config's load
+// ends only by the load's answer. A run waits on a root only once its Deps
+// are built, its load answered, so the clock never moves while a load is
+// waited for.
+type rootWaitClock struct {
+	mu   sync.Mutex
+	at   time.Time
+	root atomic.Bool
+}
+
+// onRootWaitClock makes a rootWaitClock the clock of p's runs, before any run
+// of p begins.
+func onRootWaitClock(p *doctor.RootProbes) *rootWaitClock {
+	c := &rootWaitClock{at: time.Unix(1_800_000_000, 0)}
+	p.SetClockForTest(c.now, c.timer)
+	p.SetOnRootWaitForTest(func(string) { c.root.Store(true) })
+	return c
+}
+
+func (c *rootWaitClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *rootWaitClock) timer(d time.Duration) (<-chan time.Time, func() bool) {
+	fired := make(chan time.Time, 1)
+	if !c.root.CompareAndSwap(true, false) {
+		return fired, func() bool { return true }
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
+	fired <- c.at
+	return fired, func() bool { return false }
+}
+
 // TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn is Codex's
 // fourth note on the brief through the console's runner, which loads the
 // config afresh at every run: a dead root replaced by another, sixteen times,
 // leaves sixteen probes out, and the next run begins none for the next root,
 // which it says it did not check and why, while the config's load, which
 // touches no root here, is never held back; a root removed and added again
-// finds its probe still out.
+// finds its probe still out. The runner's time is the case's
+// (rootWaitClock), so a wait on a root passes its bound as the run makes it,
+// and the wait on each load ends by the load's answer, however long the host
+// takes to load the file: under a real bound, config-file's ok past the
+// probes' limit needed the load within 100 ms (backlog B650FIX). The probes
+// begun are counted once the roots have answered and every work has ended:
+// on this clock a run can return before a probe's goroutine has reached the
+// stat that counts it (B650FIX's round 2).
 func TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn(t *testing.T) {
 	const bound = 100 * time.Millisecond
 	const limit = 16
@@ -573,7 +643,9 @@ func TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn(t *testing.T) 
 		}
 	}
 	s := newRootStall(roots...)
-	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), stallProbes(t, s, bound))
+	probes := stallProbes(t, s, bound)
+	onRootWaitClock(probes)
+	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), probes)
 	for _, r := range roots[:limit] {
 		setRoot(r)
 		lines, _ := consoleRun(t, context.Background(), runner)
@@ -591,13 +663,20 @@ func TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn(t *testing.T) 
 	if c := lines["config-file"]; c.Status != "ok" {
 		t.Errorf("past the probes' limit, config-file = %+v, want the load, which touches no root, made", c)
 	}
-	if n := s.statsOf(last); n != 0 {
-		t.Errorf("past the limit, %d probes of a new root began, want none", n)
-	}
 	setRoot(roots[0])
 	lines, _ = consoleRun(t, context.Background(), runner)
 	if c := lines["library-roots"]; c.Status != "fail" || !strings.Contains(c.Hint, "still has not answered") {
 		t.Errorf("a root added again: library-roots = %+v, want its probe still out", c)
+	}
+	// A probe begins on a goroutine of its own and is counted as it enters
+	// its stat, which a run on this clock does not wait for: the probes are
+	// counted once the roots have answered and every work has ended.
+	s.letGo()
+	if !probes.DrainForTest(30 * time.Second) {
+		t.Fatal("a work on a root was still out 30s after its roots answered")
+	}
+	if n := s.statsOf(last); n != 0 {
+		t.Errorf("past the limit, %d probes of a new root began, want none", n)
 	}
 	if n := s.statsOf(roots[0]); n != 1 {
 		t.Errorf("a root removed and added again was probed %d times, want once", n)
@@ -1187,5 +1266,162 @@ func TestBridgeDoctorPrintsHealthyRootsAsBefore(t *testing.T) {
 	}
 	if strings.Contains(out, "not checked: the folders") || strings.Contains(out, "did not answer") {
 		t.Errorf("a healthy library reads as one that did not answer:\n%s", out)
+	}
+}
+
+// doctorFixed is what bridge doctor --json --fix printed: its exit code, the
+// lines of its report by name, the report its second run of the checks gave,
+// and what its remediations said, which it writes to stderr so that stdout
+// stays JSON.
+type doctorFixed struct {
+	code  int
+	lines map[string]jsonDoctorCheck
+	fixes string
+}
+
+// bridgeDoctorFixOver runs bridge doctor --json --fix over the config at path,
+// bounded by the test's deadline, and reads the report it printed.
+func bridgeDoctorFixOver(t *testing.T, path string) doctorFixed {
+	t.Helper()
+	type printed struct {
+		code        int
+		out, errOut string
+	}
+	got, _ := doctorWithin(t, "bridge doctor --fix", func() printed {
+		var out, errOut strings.Builder
+		code := doctorCmd([]string{"--json", "--fix", "--config", path}, &out, &errOut)
+		return printed{code, out.String(), errOut.String()}
+	})
+	var report jsonDoctorReport
+	if err := json.Unmarshal([]byte(got.out), &report); err != nil {
+		t.Fatalf("bridge doctor --json --fix printed no report (%v):\n%s\nstderr:\n%s", err, got.out, got.errOut)
+	}
+	fixed := doctorFixed{code: got.code, lines: map[string]jsonDoctorCheck{}, fixes: got.errOut}
+	for _, c := range report.Checks {
+		fixed.lines[c.Name] = c
+	}
+	return fixed
+}
+
+// TestBridgeDoctorFixReadsTheRootsAgainForItsSecondReport: bridge doctor --fix
+// prints the report its second run of the checks gives, after its
+// remediations, and that run asks again every root whose probe has ended
+// (backlog B650FIX), as every run did before B650. A root whose first listing
+// is refused, and which lists when it is asked again, is reachable in what
+// --fix prints. Red at 0ddfda75, whose second run of the checks took the first
+// one's doctor.ProbeRun, which keeps every work it has met: the root was
+// listed once, and the report said its listing was refused. That it is asked
+// again is all this case shows, no remediation acting here (config-dir is
+// ok); TestBridgeDoctorFixReportsTheRootItsRemediationLetItList shows a
+// remediation's effect read.
+func TestBridgeDoctorFixReadsTheRootsAgainForItsSecondReport(t *testing.T) {
+	path, _, refused := rootsInstall(t, false)
+	var listings atomic.Int32
+	standInCLIProbes(t, doctor.NewRootProbesForTest(doctorAnsweringBound, nil, func(root string) ([]fs.DirEntry, error) {
+		if root == refused && listings.Add(1) == 1 {
+			return nil, &fs.PathError{Op: "open", Path: root, Err: fs.ErrPermission}
+		}
+		return os.ReadDir(root)
+	}))
+	got := bridgeDoctorFixOver(t, path)
+	if c := got.lines["library-roots"]; c.Status != "ok" || c.Summary != "2 root(s) reachable" {
+		t.Errorf("bridge doctor --fix printed library-roots %+v, want both roots reachable: its second run lists %s again", c, refused)
+	}
+	if n := listings.Load(); n != 2 {
+		t.Errorf("%s was listed %d times, want twice, once by each run of the checks", refused, n)
+	}
+}
+
+// TestBridgeDoctorFixReportsTheRootItsRemediationLetItList: --fix's one
+// remediation, config-dir's (runFixes: the directory made and set to 0700),
+// changes what a library root at that directory answers, and the report --fix
+// prints is of the directory as the remediation left it (backlog B650FIX). The
+// config directory is enter-only (0100) and is the library's root: the first
+// run fails config-dir, since this user cannot write there, and library-roots,
+// whose listing is refused; --fix sets the directory to 0700; and the report
+// it prints has both ok, the root listed again. Red at 0ddfda75, whose second
+// run kept the first one's listing: library-roots still failed with the error
+// --fix had cleared, and the command exited 1.
+func TestBridgeDoctorFixReportsTheRootItsRemediationLetItList(t *testing.T) {
+	skipUnlessModeBitsDeny(t, "root lists and writes an enter-only directory, so neither config-dir nor "+
+		"library-roots fails before --fix, and it remediates nothing; this test needs a user the mode bits deny")
+	base := t.TempDir()
+	dir := filepath.Join(base, "cfg")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "01.flac"), []byte{0}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "bridge.yaml")
+	body := fmt.Sprintf("libraryRoots:\n  - %s\nlistenAddress: \"127.0.0.1:0\"\nadminAddress: \"127.0.0.1:0\"\ndataDir: %s\noutput:\n  mpd: off\n",
+		dir, filepath.Join(base, "data"))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	denyDirForTest(t, dir, 0o100)
+	var mu sync.Mutex
+	var listed []error
+	standInCLIProbes(t, doctor.NewRootProbesForTest(doctorAnsweringBound, nil, func(root string) ([]fs.DirEntry, error) {
+		entries, err := os.ReadDir(root)
+		if root == dir {
+			mu.Lock()
+			listed = append(listed, err)
+			mu.Unlock()
+		}
+		return entries, err
+	}))
+	got := bridgeDoctorFixOver(t, path)
+	if !strings.Contains(got.fixes, "✓ config-dir: ") {
+		t.Errorf("--fix did not say it remediated config-dir:\n%s", got.fixes)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("after --fix the config directory is %v, want 0700", perm)
+	}
+	if c := got.lines["config-dir"]; c.Status != "ok" {
+		t.Errorf("bridge doctor --fix printed config-dir %+v, want ok once it set the directory to 0700", c)
+	}
+	if c := got.lines["library-roots"]; c.Status != "ok" || c.Summary != "1 root(s) reachable" {
+		t.Errorf("bridge doctor --fix printed library-roots %+v, want the root reachable once --fix set it to 0700", c)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(listed) != 2 || !errors.Is(listed[0], fs.ErrPermission) || listed[1] != nil {
+		t.Errorf("the root's listings answered %v, want this user refused, then, once --fix set it to 0700, its entries", listed)
+	}
+}
+
+// TestBridgeDoctorFixJoinsTheProbeOfARootStillOut: --fix's second run of the
+// checks is a run of its own of the CLI's works on the roots (cliRootProbes),
+// so it joins a probe the first run left out past its bound, never beginning
+// a second one, and says the root still has not answered, while it reads the
+// root that answers again. Both reports come back while the root is held; the
+// probes begun are counted once it has answered and every work has ended,
+// since each begins on a goroutine of its own and is counted as it enters its
+// stat. Red at 0ddfda75, whose second run kept the first one's works: it read
+// the root that answers once, and named the held one in the first run's
+// words.
+func TestBridgeDoctorFixJoinsTheProbeOfARootStillOut(t *testing.T) {
+	path, healthy, dead := rootsInstall(t, false)
+	s := newRootStall(dead)
+	p := standInCLIRoots(t, s)
+	got := bridgeDoctorFixOver(t, path)
+	want := fmt.Sprintf("library root %s still has not answered", dead)
+	if c := got.lines["library-roots"]; c.Status != "fail" || !strings.Contains(c.Hint, want) {
+		t.Errorf("bridge doctor --fix printed library-roots %+v, want a fail saying %q", c, want)
+	}
+	s.letGo()
+	if !p.DrainForTest(30 * time.Second) {
+		t.Fatal("a probe was still out once its root answered")
+	}
+	if n := s.statsOf(dead); n != 1 {
+		t.Errorf("bridge doctor --fix began %d probes of the root that did not answer, want one: its second run joins the first one's", n)
+	}
+	if n := s.statsOf(healthy); n != 2 {
+		t.Errorf("bridge doctor --fix began %d probes of the root that answers, want two: its second run reads it again", n)
 	}
 }
