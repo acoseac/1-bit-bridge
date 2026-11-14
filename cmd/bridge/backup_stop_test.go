@@ -26,9 +26,12 @@ const stopGuard = 60 * time.Second
 // The steps of a verification the tests of a stopped ticker hold, in the
 // words the backup package names them by.
 const (
-	stepWriteWords    = "its verdict's write"
-	stepReadBackWords = "its read of the record after it"
-	stepPruneWords    = "the prune after it"
+	stepReadRecordWords = "its read of the snapshot's record"
+	stepVetoWords       = "putting its veto in place"
+	stepCheckWords      = "its check"
+	stepWriteWords      = "its verdict's write"
+	stepReadBackWords   = "its read of the record after it"
+	stepPruneWords      = "the prune after it"
 )
 
 // heldStopBounds stands in for every bound a stop arms on the verification of
@@ -190,6 +193,9 @@ type stopRun struct {
 	named        string
 	restoreBound func()
 	stderr       safeBuffer
+	// verify is what the case checks besides what the ticker said, once the
+	// ticker has returned.
+	verify []func()
 }
 
 // newStopRun is a stopRun over a fresh install, its seams on the snapshots of
@@ -243,6 +249,30 @@ func (r *stopRun) holdAnswer() *stopPark {
 func (r *stopRun) parkCheck() *stopPark {
 	p := r.park()
 	r.t.Cleanup(backup.SetOnLowPriorityForTest(p.park))
+	return p
+}
+
+// parkAfterCheck parks the worker once its check has answered or been given
+// up, outside every step, so no bound of its own is armed there.
+func (r *stopRun) parkAfterCheck() *stopPark {
+	p := r.park()
+	r.t.Cleanup(backup.SetAfterCheckForTest(func(dir string) {
+		if filepath.Dir(dir) == r.root {
+			p.park()
+		}
+	}))
+	return p
+}
+
+// parkAnswered parks the step named once it has answered and published what
+// it found, before its worker takes the answer (backup.SetOnStepAnsweredForTest).
+func (r *stopRun) parkAnswered(step string) *stopPark {
+	p := r.park()
+	r.t.Cleanup(backup.SetOnStepAnsweredForTest(func(dir, s string) {
+		if s == step && filepath.Dir(dir) == r.root {
+			p.park()
+		}
+	}))
 	return p
 }
 
@@ -313,158 +343,328 @@ func (r *stopRun) failHere(what string) func(dir string) error {
 	}
 }
 
+// failFirstRead makes the first read of the run's snapshot's manifest fail,
+// its bytes cut to "{" just before it.
+func (r *stopRun) failFirstRead() {
+	var first atomic.Bool
+	r.t.Cleanup(backup.SetOnManifestReadForTest(func(path string) {
+		if filepath.Dir(filepath.Dir(path)) == r.root && first.CompareAndSwap(false, true) {
+			_ = os.WriteFile(path, []byte("{"), 0o600)
+		}
+	}))
+}
+
+// recordReads has the case check, once the ticker has returned, that its
+// snapshot's record reads database want.
+func (r *stopRun) recordReads(want string) {
+	r.verify = append(r.verify, func() {
+		dirs := snapshotDirs(r.t, r.root)
+		if len(dirs) != 1 {
+			r.t.Fatalf("%d snapshots, want the ticker's one", len(dirs))
+		}
+		rec := recordOf(r.t, dirs[0])
+		if got := backup.StateWords(rec.DatabaseState, rec.DatabaseReasons); got != want {
+			r.t.Errorf("the record reads database %s, want %s", got, want)
+		}
+	})
+}
+
+// stopOrder is the order a case of the table fires the two bounds a stop arms
+// in: the worker's bound on the step it is in, and its caller's expiry.
+type stopOrder int
+
+const (
+	// workerFirst fires the worker's bound on its step, where the stop armed
+	// one, and has the worker answer.
+	workerFirst stopOrder = iota
+	// expiryFirst fires the caller's expiry while the verification is where
+	// the stop came, before the worker's bound.
+	expiryFirst
+	// boundThenExpiry fires the worker's bound first (or lets the check's own
+	// half bound give it up), then, once the worker is parked further on or its
+	// answer held, the caller's expiry.
+	boundThenExpiry
+)
+
+func (o stopOrder) String() string {
+	switch o {
+	case workerFirst:
+		return "the worker's bound first"
+	case expiryFirst:
+		return "the caller's expiry first"
+	}
+	return "the worker's bound, then the caller's expiry"
+}
+
+// The orders a row runs in.
+var (
+	bothOrders  = []stopOrder{workerFirst, expiryFirst}
+	afterBound  = []stopOrder{workerFirst, boundThenExpiry}
+	everyOrder  = []stopOrder{workerFirst, expiryFirst, boundThenExpiry}
+	expiryAlone = []stopOrder{expiryFirst}
+)
+
 // stopCase is a row of TestAStoppedTickerSaysOnlyWhatItsStopAloneDidNotCause.
 type stopCase struct {
 	name string
 	// said is every piece of what the stopped ticker says; nil: nothing.
-	said []string
-	// arm sets the row's seams before the ticker starts, for its worker's bound
-	// first or its caller's expiry first, and answers where the test stops the
-	// ticker (at, a park the verification reaches), the step whose bound the
-	// stop then arms for the worker (step; "" where the check's own half bound
-	// gives it up), and, for the expiry first, a park the verification reaches
-	// once that step was given up, before the expiry fires (later; nil: the
-	// expiry fires at once).
-	arm func(r *stopRun, workerFirst bool) (at *stopPark, step string, later *stopPark)
+	said   []string
+	orders []stopOrder
+	// arm sets the row's seams before the ticker starts, for the order given,
+	// and answers where the test stops the ticker (at, a park the verification
+	// reaches), the step whose bound the stop then arms for the worker (step;
+	// "" where the stop arms none: the check's own half bound gives it up, or
+	// the worker is outside every step), and, for boundThenExpiry, a park the
+	// verification reaches once that bound has fired, or its answer held,
+	// before the expiry fires (later).
+	arm func(r *stopRun, order stopOrder) (at *stopPark, step string, later *stopPark)
 }
 
 // TestAStoppedTickerSaysOnlyWhatItsStopAloneDidNotCause is backlog B895's
 // table: a verification stopped where each row puts it, with the two bounds
 // its stop arms (the worker's on the step it is in, its caller's expiry)
-// fired by the test in either order (backup.SetStopBoundsForTest), the
-// expiry where a row says so after the worker's last step (its answer held).
-// The ticker says nothing where the stop alone gave the verification up (the
-// check, the verdict's write, the read of the record), and says, whichever
-// order, a step a bound of its own gave up, whether before the stop or after
-// the stop gave another up, a read of the record or a write that failed (or
-// is not known durable), a recheck refused or not recorded, and a FAILED
-// finding. Round 1 (67cffea1) said nothing of each in the expiry's order, and
-// nothing in the worker's of the read that failed, the refused or unrecorded
-// recheck, and named the stop's give-up, not the own bound's, after it.
+// fired by the test in each order the row names (backup.SetStopBoundsForTest):
+// the worker's first, the caller's first while the verification is where the
+// stop came, or the worker's and then the caller's once the worker has moved
+// on or its answer is held. The ticker says nothing where the stop alone gave
+// the verification up (the check, a recheck's check, the verdict's write, the
+// read of the record), and says, in every order, a step a bound of its own
+// gave up, whether before the stop or after the stop gave another up, a read
+// of the record or a write that failed (or is not known durable), a recheck
+// refused or not recorded, and a FAILED finding. Round 1 (67cffea1) said
+// nothing of each in the expiry's order, and nothing in the worker's of the
+// read that failed, the refused or unrecorded recheck, and named the stop's
+// give-up, not the own bound's, after it. Round 3's rows hold a step once it
+// has answered and before its worker takes the answer, and the worker after
+// its check (backup.SetOnStepAnsweredForTest, SetAfterCheckForTest): round 2
+// (af338e82) published each outcome only once its worker took it, so it said
+// nothing of them there, nor of a recheck's ErrRecheckNotRecorded before the
+// steps after its check, and it said a recheck's INCOMPLETE that the stop
+// alone kept from being written.
 func TestAStoppedTickerSaysOnlyWhatItsStopAloneDidNotCause(t *testing.T) {
 	deadline := context.DeadlineExceeded.Error()
 	for _, tc := range []stopCase{
-		{"the stop alone, at the check", nil, func(r *stopRun, workerFirst bool) (*stopPark, string, *stopPark) {
+		{"the stop alone, at the check", nil, everyOrder, func(r *stopRun, order stopOrder) (*stopPark, string, *stopPark) {
 			check := r.parkCheck()
-			if workerFirst {
+			switch order {
+			case expiryFirst:
+				// The worker held after the check, which its own half bound may
+				// give up before the expiry fires: the expiry answers.
+				r.parkAfterCheck()
 				return check, "", nil
+			case boundThenExpiry:
+				r.recordReads("INCOMPLETE: cancelled")
+				return check, "", r.parkReadBack()
 			}
-			return check, "", r.parkReadBack()
+			r.recordReads("INCOMPLETE: cancelled")
+			return check, "", nil
 		}},
-		{"the stop alone, at the verdict's write", nil, func(r *stopRun, _ bool) (*stopPark, string, *stopPark) {
-			return r.parkSync(), stepWriteWords, nil
+		{"the stop alone, at the verdict's write", nil, everyOrder, func(r *stopRun, order stopOrder) (*stopPark, string, *stopPark) {
+			write := r.parkSync()
+			if order == boundThenExpiry {
+				return write, stepWriteWords, r.holdAnswer()
+			}
+			return write, stepWriteWords, nil
 		}},
-		{"the stop alone, at the read of the record", nil, func(r *stopRun, _ bool) (*stopPark, string, *stopPark) {
-			return r.parkReadBack(), stepReadBackWords, nil
+		{"the stop alone, at the read of the record", nil, everyOrder, func(r *stopRun, order stopOrder) (*stopPark, string, *stopPark) {
+			read := r.parkReadBack()
+			if order == boundThenExpiry {
+				return read, stepReadBackWords, r.holdAnswer()
+			}
+			return read, stepReadBackWords, nil
+		}},
+		{"a recheck, the stop alone at its check", nil, afterBound, func(r *stopRun, order stopOrder) (*stopPark, string, *stopPark) {
+			r.recheck()
+			check := r.parkCheck()
+			if order == boundThenExpiry {
+				return check, "", r.parkReadBack()
+			}
+			return check, "", nil
 		}},
 		{"the write's own bound, then the stop at the read of the record",
-			[]string{"was given up", stepWriteWords + " did not end within its bound (" + deadline + ")"},
-			func(r *stopRun, _ bool) (*stopPark, string, *stopPark) {
+			[]string{"was given up", stepWriteWords + " did not end within its bound (" + deadline + ")"}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
 				r.parkSync()
 				r.named = stepWriteWords
 				return r.parkReadBack(), stepReadBackWords, nil
 			}},
 		{"the stop at the write, then the read's own bound",
-			[]string{"was given up", stepReadBackWords + " did not end within its bound (" + deadline + ")"},
-			func(r *stopRun, workerFirst bool) (*stopPark, string, *stopPark) {
+			[]string{"was given up", stepReadBackWords + " did not end within its bound (" + deadline + ")"}, afterBound,
+			func(r *stopRun, order stopOrder) (*stopPark, string, *stopPark) {
 				write := r.parkSync()
 				r.parkReadBack()
 				r.named = stepReadBackWords
-				if workerFirst {
-					return write, stepWriteWords, nil
+				if order == boundThenExpiry {
+					return write, stepWriteWords, r.holdAnswer()
 				}
-				return write, stepWriteWords, r.holdAnswer()
+				return write, stepWriteWords, nil
 			}},
 		{"a read of the record that failed, then the prune",
-			[]string{"read the snapshot's manifest"},
-			func(r *stopRun, _ bool) (*stopPark, string, *stopPark) {
-				var first atomic.Bool
-				r.t.Cleanup(backup.SetOnManifestReadForTest(func(path string) {
-					if filepath.Dir(filepath.Dir(path)) == r.root && first.CompareAndSwap(false, true) {
-						_ = os.WriteFile(path, []byte("{"), 0o600)
-					}
-				}))
+			[]string{"read the snapshot's manifest"}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
+				r.failFirstRead()
 				return r.parkPrune(), stepPruneWords, nil
 			}},
 		{"a recheck refused, then the read of the record",
-			[]string{backup.ErrRecheckRefused.Error()},
-			func(r *stopRun, _ bool) (*stopPark, string, *stopPark) {
+			[]string{backup.ErrRecheckRefused.Error()}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
 				r.recheck()
-				// Neither veto, in the bundle or beside it, can be made durable.
-				r.t.Cleanup(backup.SetSyncVetoForTest(func(path string) error {
-					if strings.HasPrefix(path, r.root+string(filepath.Separator)) {
-						return errors.New("injected: the veto's sync failed")
-					}
-					return nil
-				}))
+				r.failVetoSyncs()
 				return r.parkReadBack(), stepReadBackWords, nil
 			}},
 		{"a recheck not recorded where no directory can be synced, then the read of the record",
-			[]string{backup.ErrRecheckNotRecorded.Error()},
-			func(r *stopRun, _ bool) (*stopPark, string, *stopPark) {
+			[]string{backup.ErrRecheckNotRecorded.Error()}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
 				r.recheck()
 				r.t.Cleanup(backup.SetSyncsParentDirForTest(false))
 				return r.parkReadBack(), stepReadBackWords, nil
 			}},
 		{"a write that failed, then the prune",
-			[]string{"injected: the staging failed"},
-			func(r *stopRun, _ bool) (*stopPark, string, *stopPark) {
+			[]string{"injected: the staging failed"}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
 				r.t.Cleanup(backup.SetVerdictWriteFailuresForTest(r.failHere("injected: the staging failed"), nil, nil))
 				return r.parkPrune(), stepPruneWords, nil
 			}},
 		{"a write not known durable, then the read of the record",
-			[]string{"injected: the verdict's sync failed"},
-			func(r *stopRun, _ bool) (*stopPark, string, *stopPark) {
+			[]string{"injected: the verdict's sync failed"}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
 				r.t.Cleanup(backup.SetSyncVerdictForTest(func(string) error { return errors.New("injected: the verdict's sync failed") }))
 				return r.parkReadBack(), stepReadBackWords, nil
 			}},
 		{"a FAILED finding, then the verdict's write",
-			[]string{"database FAILED: schema-newer"},
-			func(r *stopRun, _ bool) (*stopPark, string, *stopPark) {
+			[]string{"database FAILED: schema-newer"}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
 				makeStoreNewer(r.t, r.src.ManifestDB)
 				return r.parkSync(), stepWriteWords, nil
 			}},
 		{"a read of the record that failed once the stop gave the write up",
-			[]string{"its record could not be read back", "injected: the read-back failed"},
-			func(r *stopRun, workerFirst bool) (*stopPark, string, *stopPark) {
+			[]string{"its record could not be read back", "injected: the read-back failed"}, afterBound,
+			func(r *stopRun, order stopOrder) (*stopPark, string, *stopPark) {
 				write := r.parkSync()
 				r.t.Cleanup(backup.SetReadBackFailureForTest(r.failHere("injected: the read-back failed")))
-				if workerFirst {
-					return write, stepWriteWords, nil
+				if order == boundThenExpiry {
+					return write, stepWriteWords, r.holdAnswer()
 				}
-				return write, stepWriteWords, r.holdAnswer()
+				return write, stepWriteWords, nil
 			}},
 		{"an INCOMPLETE whose write failed once the stop gave the check up",
-			[]string{"injected: the staging failed"},
-			func(r *stopRun, workerFirst bool) (*stopPark, string, *stopPark) {
+			[]string{"injected: the staging failed"}, afterBound,
+			func(r *stopRun, order stopOrder) (*stopPark, string, *stopPark) {
 				check := r.parkCheck()
 				r.t.Cleanup(backup.SetVerdictWriteFailuresForTest(r.failHere("injected: the staging failed"), nil, nil))
-				if workerFirst {
-					return check, "", nil
+				if order == boundThenExpiry {
+					return check, "", r.parkReadBack()
 				}
-				return check, "", r.parkReadBack()
+				return check, "", nil
+			}},
+		// Round 3's rows: each outcome published as its step answers.
+		{"a recheck not recorded, the caller's expiry while its worker waits after the check",
+			[]string{backup.ErrRecheckNotRecorded.Error()}, expiryAlone,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
+				r.recheck()
+				r.t.Cleanup(backup.SetSyncsParentDirForTest(false))
+				return r.parkAfterCheck(), "", nil
+			}},
+		{"a read of the record that failed, the stop as that read answers",
+			[]string{"read the snapshot's manifest"}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
+				// Every lookup of a veto of the run's snapshots, from the read's
+				// failure until the read has answered: none is to be made.
+				var reading atomic.Bool
+				var looked atomic.Int64
+				var first atomic.Bool
+				r.t.Cleanup(backup.SetOnManifestReadForTest(func(path string) {
+					if filepath.Dir(filepath.Dir(path)) == r.root && first.CompareAndSwap(false, true) {
+						_ = os.WriteFile(path, []byte("{"), 0o600)
+						reading.Store(true)
+					}
+				}))
+				r.t.Cleanup(backup.SetLookupVetoForTest(func(path string) (os.FileInfo, error) {
+					if reading.Load() && strings.HasPrefix(path, r.root+string(filepath.Separator)) {
+						looked.Add(1)
+					}
+					return os.Lstat(path)
+				}))
+				answered := r.park()
+				r.t.Cleanup(backup.SetOnStepAnsweredForTest(func(dir, step string) {
+					if step == stepReadRecordWords && filepath.Dir(dir) == r.root {
+						reading.Store(false)
+						answered.park()
+					}
+				}))
+				r.verify = append(r.verify, func() {
+					if n := looked.Load(); n != 0 {
+						r.t.Errorf("a veto was looked up %d times once the record's read had failed", n)
+					}
+				})
+				return answered, stepReadRecordWords, nil
+			}},
+		{"a FAILED finding, the stop as the check answers",
+			[]string{"database FAILED: schema-newer"}, bothOrders,
+			func(r *stopRun, order stopOrder) (*stopPark, string, *stopPark) {
+				makeStoreNewer(r.t, r.src.ManifestDB)
+				answered := r.parkAnswered(stepCheckWords)
+				if order == expiryFirst {
+					// The worker held after the check, which its own half bound
+					// may give up before the expiry fires: the expiry answers.
+					r.parkAfterCheck()
+				} else {
+					// The check answered before its half bound passed: what it
+					// found is written, never given up for INCOMPLETE.
+					r.recordReads("FAILED: schema-newer")
+				}
+				return answered, "", nil
+			}},
+		{"a recheck refused, the stop as its veto answers",
+			[]string{backup.ErrRecheckRefused.Error()}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
+				r.recheck()
+				r.failVetoSyncs()
+				return r.parkAnswered(stepVetoWords), stepVetoWords, nil
+			}},
+		{"a write that failed, the stop as the write answers",
+			[]string{"injected: the staging failed"}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
+				r.t.Cleanup(backup.SetVerdictWriteFailuresForTest(r.failHere("injected: the staging failed"), nil, nil))
+				return r.parkAnswered(stepWriteWords), stepWriteWords, nil
+			}},
+		{"a read of the record after it that failed, the stop as that read answers",
+			[]string{"its record could not be read back", "injected: the read-back failed"}, bothOrders,
+			func(r *stopRun, _ stopOrder) (*stopPark, string, *stopPark) {
+				r.t.Cleanup(backup.SetReadBackFailureForTest(r.failHere("injected: the read-back failed")))
+				return r.parkAnswered(stepReadBackWords), stepReadBackWords, nil
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, workerFirst := range []bool{true, false} {
-				order := "the caller's expiry first"
-				if workerFirst {
-					order = "the worker's bound first"
-				}
-				t.Run(order, func(t *testing.T) {
-					stopTheTicker(t, tc, workerFirst)
+			for _, order := range tc.orders {
+				t.Run(order.String(), func(t *testing.T) {
+					stopTheTicker(t, tc, order)
 				})
 			}
 		})
 	}
 }
 
+// failVetoSyncs makes neither veto of a recheck, in the bundle or beside it,
+// durable.
+func (r *stopRun) failVetoSyncs() {
+	r.t.Cleanup(backup.SetSyncVetoForTest(func(path string) error {
+		if strings.HasPrefix(path, r.root+string(filepath.Separator)) {
+			return errors.New("injected: the veto's sync failed")
+		}
+		return nil
+	}))
+}
+
 // stopTheTicker runs one case of the table: its row armed, the ticker started
 // and stopped where the row puts it, the bounds fired in the order asked, and
 // what the ticker said compared with the row's.
-func stopTheTicker(t *testing.T, tc stopCase, workerFirst bool) {
+func stopTheTicker(t *testing.T, tc stopCase, order stopOrder) {
 	r := newStopRun(t)
-	at, step, later := tc.arm(r, workerFirst)
+	at, step, later := tc.arm(r, order)
+	if (order == boundThenExpiry) != (later != nil) {
+		t.Fatalf("the row names a park after its bound (%v) for the order %q", later != nil, order)
+	}
 	var stdout io.Writer = &safeBuffer{}
 	var named *heldWriter
 	if r.named != "" {
@@ -497,23 +697,25 @@ func stopTheTicker(t *testing.T, tc stopCase, workerFirst bool) {
 	if step != "" {
 		bound = r.bounds.await(t, step)
 	}
-	switch {
-	case workerFirst && bound != nil:
-		bound.fire()
-	case !workerFirst && later != nil:
+	switch order {
+	case workerFirst:
+		if bound != nil {
+			bound.fire()
+		}
+	case expiryFirst:
+		expiry.fire()
+	case boundThenExpiry:
 		if bound != nil {
 			bound.fire()
 		}
 		awaitGuarded(t, later.entered, "the verification did not reach where its caller's expiry comes")
 		expiry.fire()
-	case !workerFirst:
-		expiry.fire()
 	}
 	awaitGuarded(t, done, "the stopped ticker did not return")
-	if workerFirst && (!r.answered.Load() || r.expired.Load()) {
+	if order == workerFirst && (!r.answered.Load() || r.expired.Load()) {
 		t.Fatalf("the caller did not take its worker's answer: answered %v, expired %v", r.answered.Load(), r.expired.Load())
 	}
-	if !workerFirst && !r.expired.Load() {
+	if order != workerFirst && !r.expired.Load() {
 		t.Fatalf("the caller's expiry did not answer it (the worker answered: %v)", r.answered.Load())
 	}
 	said := r.stderr.String()
@@ -524,5 +726,8 @@ func stopTheTicker(t *testing.T, tc stopCase, workerFirst bool) {
 		if !strings.Contains(said, want) {
 			t.Errorf("the stopped ticker did not say %q:\n%s", want, said)
 		}
+	}
+	for _, check := range r.verify {
+		check()
 	}
 }
