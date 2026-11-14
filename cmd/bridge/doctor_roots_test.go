@@ -619,7 +619,10 @@ func (c *rootWaitClock) timer(d time.Duration) (<-chan time.Time, func() bool) {
 // (rootWaitClock), so a wait on a root passes its bound as the run makes it,
 // and the wait on each load ends by the load's answer, however long the host
 // takes to load the file: under a real bound, config-file's ok past the
-// probes' limit needed the load within 100 ms (backlog B650FIX).
+// probes' limit needed the load within 100 ms (backlog B650FIX). The probes
+// begun are counted once the roots have answered and every work has ended:
+// on this clock a run can return before a probe's goroutine has reached the
+// stat that counts it (B650FIX's round 2).
 func TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn(t *testing.T) {
 	const bound = 100 * time.Millisecond
 	const limit = 16
@@ -660,13 +663,20 @@ func TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn(t *testing.T) 
 	if c := lines["config-file"]; c.Status != "ok" {
 		t.Errorf("past the probes' limit, config-file = %+v, want the load, which touches no root, made", c)
 	}
-	if n := s.statsOf(last); n != 0 {
-		t.Errorf("past the limit, %d probes of a new root began, want none", n)
-	}
 	setRoot(roots[0])
 	lines, _ = consoleRun(t, context.Background(), runner)
 	if c := lines["library-roots"]; c.Status != "fail" || !strings.Contains(c.Hint, "still has not answered") {
 		t.Errorf("a root added again: library-roots = %+v, want its probe still out", c)
+	}
+	// A probe begins on a goroutine of its own and is counted as it enters
+	// its stat, which a run on this clock does not wait for: the probes are
+	// counted once the roots have answered and every work has ended.
+	s.letGo()
+	if !probes.DrainForTest(30 * time.Second) {
+		t.Fatal("a work on a root was still out 30s after its roots answered")
+	}
+	if n := s.statsOf(last); n != 0 {
+		t.Errorf("past the limit, %d probes of a new root began, want none", n)
 	}
 	if n := s.statsOf(roots[0]); n != 1 {
 		t.Errorf("a root removed and added again was probed %d times, want once", n)
