@@ -51,9 +51,12 @@ type candidateUser struct {
 const filetimeUnixEpoch = 116444736000000000
 
 // filetimeStart is the time a FILETIME of high and low names, and false for
-// one no process can have started at: zero, which a FILETIME left as it was
-// made holds and which would read as 1601, any other before the Unix epoch,
-// and any past what nanoseconds since that epoch hold in an int64.
+// one at or before the Unix epoch, which no process this bridge sees started
+// at, zero among them (a FILETIME left as it was made, which names
+// 1601-01-01), and for one past what an int64 holds of nanoseconds since that
+// epoch (2262). Unchecked, the conversion reads both wrong: the epoch's
+// subtraction wraps zero to a time in 2185, and the multiplication by 100
+// wraps one past 2262 to a time in 1677.
 func filetimeStart(high, low uint32) (time.Time, bool) {
 	v := uint64(high)<<32 | uint64(low)
 	if v <= filetimeUnixEpoch || v-filetimeUnixEpoch > math.MaxInt64/100 {
@@ -355,9 +358,10 @@ func TestTheRollbackHolderDiagnosticAsksOnceAStageIsRefusedInUse(t *testing.T) {
 
 // TestTheStartTimeIsOnlyOneAProcessCanHave: the Restart Manager's start time
 // of a candidate user is read from its FILETIME (filetimeStart) only where it
-// names a time a process can have started at, so a zero one, which reads as
-// 1601, and any before the Unix epoch or past what an int64 of nanoseconds
-// since it holds, leave the start time zero, which String leaves out.
+// names a time a process can have started at, so zero (1601-01-01, which the
+// unchecked conversion read as a time in 2185), one at or before the Unix
+// epoch, and one past what an int64 of nanoseconds since it holds, leave the
+// start time zero, which String leaves out.
 func TestTheStartTimeIsOnlyOneAProcessCanHave(t *testing.T) {
 	split := func(v uint64) (uint32, uint32) { return uint32(v >> 32), uint32(v) }
 	at := time.Date(2026, 11, 14, 3, 4, 5, 600, time.UTC)
