@@ -14,3 +14,9 @@ import "context"
 func checkWatchLimit(_ context.Context, _ Deps) Check {
 	return ok("inotify-watch-limit", "not applicable on this platform")
 }
+
+// beginWatchCounts begins nothing: no check here counts the library.
+func beginWatchCounts(Deps) {}
+
+// countRootWatches is never asked here: no check counts the library.
+func countRootWatches(string, int) (watchCount, error) { return watchCount{}, nil }

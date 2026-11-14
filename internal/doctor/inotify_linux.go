@@ -39,7 +39,15 @@ const checkNameInotifyWatchLimit = "inotify-watch-limit"
 //   - We can't read /proc/sys/fs/inotify/max_user_watches (rare on
 //     a real Linux box; unit tests in container with /proc mounted
 //     ro might trip this — non-fatal)
-func checkWatchLimit(_ context.Context, d Deps) Check {
+//
+// Each root is counted as a work of the runner's RootProbes, on a goroutine
+// of its own, and waited for until the bound from when its count began
+// (backlog B650): a walk that meets a folder on a mount that does not answer
+// waits in the kernel with no end, below a root whose own probe answers too.
+// A count that does not finish is never read as a low one: the check says
+// which root's count it did not have, and that it does not know whether the
+// watcher fits, unless the roots it has already pass the threshold.
+func checkWatchLimit(ctx context.Context, d Deps) Check {
 	if !d.LibraryWatchEnabled {
 		return ok(checkNameInotifyWatchLimit, "library watcher disabled — check skipped")
 	}
@@ -52,23 +60,62 @@ func checkWatchLimit(_ context.Context, d Deps) Check {
 			fmt.Sprintf("could not read /proc/sys/fs/inotify/max_user_watches: %v", err),
 			"falling back to runtime detection — watcher will log a clear error if the budget is exceeded.")
 	}
-	threshold := int(float64(limit) * 0.8)
+	threshold := inotifyThreshold(limit)
 	// Cap the walk at threshold+1: the check only needs to know whether the
 	// directory count EXCEEDS the threshold, so there's no point
 	// enumerating every directory on a multi-TB NAS just to over-count.
-	dirs, err := countDirs(d.LibraryRoots, threshold+1)
-	if err != nil {
+	t := d.probeRun().tallyWatches(ctx, d.LibraryRoots, threshold+1,
+		func(c watchCount) int { return c.folders }, unansweredCount("the folders"))
+	if t.err != nil {
 		return warn(checkNameInotifyWatchLimit,
-			fmt.Sprintf("could not enumerate library directories: %v", err),
+			fmt.Sprintf("could not enumerate library directories: %v", t.err),
 			"check failed; runtime detection still applies.")
 	}
-	if dirs > threshold {
+	if t.reached {
+		summary := fmt.Sprintf("more than %d directories (>80%% of limit %d) — watcher may exhaust kernel budget", threshold, limit)
+		hint := "raise the limit: `echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p`"
+		if len(t.unanswered) > 0 {
+			summary += "; " + strings.Join(t.unanswered, "; ")
+			hint += "; " + stalledCountAdvice
+		}
+		return warn(checkNameInotifyWatchLimit, summary, hint)
+	}
+	if len(t.unanswered) > 0 {
 		return warn(checkNameInotifyWatchLimit,
-			fmt.Sprintf("more than %d directories (>80%% of limit %d) — watcher may exhaust kernel budget", threshold, limit),
-			"raise the limit: `echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.d/99-bridge.conf && sudo sysctl -p`")
+			fmt.Sprintf("not checked: %s, so whether the watcher fits its share of limit %d is not known", strings.Join(t.unanswered, "; "), limit),
+			stalledCountAdvice)
 	}
 	return ok(checkNameInotifyWatchLimit,
-		fmt.Sprintf("%d directories vs limit %d", dirs, limit))
+		fmt.Sprintf("%d directories vs limit %d", t.total.folders, limit))
+}
+
+// inotifyThreshold is the directory count past which checkWatchLimit warns:
+// 80 % of the kernel's limit, which every other watching app on the box
+// shares.
+func inotifyThreshold(limit int) int { return int(float64(limit) * 0.8) }
+
+// beginWatchCounts begins the count of each root that checkWatchLimit waits
+// for, where it waits for one (the watcher on, roots configured, the limit
+// read), so Run's works on the roots run together.
+func beginWatchCounts(d Deps) {
+	if !d.LibraryWatchEnabled || len(d.LibraryRoots) == 0 {
+		return
+	}
+	limit, err := readInotifyLimit()
+	if err != nil {
+		return
+	}
+	run := d.probeRun()
+	for _, root := range d.LibraryRoots {
+		run.beginCount(root, inotifyThreshold(limit)+1)
+	}
+}
+
+// countRootWatches is the count of one root's directories, countDirs over it
+// alone: a work of the runner's RootProbes.
+func countRootWatches(root string, stopAt int) (watchCount, error) {
+	n, err := countDirs([]string{root}, stopAt)
+	return watchCount{folders: n}, err
 }
 
 // readInotifyLimit reads the integer at

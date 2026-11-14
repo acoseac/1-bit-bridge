@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"strings"
 )
@@ -60,15 +61,44 @@ const (
 	configNotThere
 	// configDoesNotLoad: it is there, and config.Load refuses it.
 	configDoesNotLoad
+	// configLoadUnfinished: it is there, and the caller's load of it gave
+	// the run no answer (UnfinishedLoadError).
+	configLoadUnfinished
 )
+
+// UnfinishedLoadError is ConfigFile.LoadErr where the caller's load of the
+// config gave the run no answer (backlog B650): cmd/bridge loads it as a work
+// of the runner's RootProbes (Bounded), since config.Load's validation of
+// upscale.variantsDir and upscale.tempDir resolves each library root, and a
+// root whose mount does not answer holds it in the kernel. Wait says how the
+// run's wait for it ended.
+type UnfinishedLoadError struct{ Wait Wait }
+
+func (e *UnfinishedLoadError) Error() string {
+	switch e.Wait.outcome {
+	case notAnswered:
+		if e.Wait.still {
+			return fmt.Sprintf("its load still has not finished, %s after the doctor began it", e.Wait.since)
+		}
+		return fmt.Sprintf("its load did not finish within %s", e.Wait.bound)
+	case stopped:
+		return "the doctor's run was stopped before it loaded"
+	case heldBack:
+		return fmt.Sprintf("%d earlier loads of the config have not finished yet, and the doctor begins no more until one does", e.Wait.limit)
+	}
+	return "it was not loaded"
+}
 
 // problem classifies c's LoadErr, a permission failure first: that is a
 // fact about who ran doctor, whatever else the error says. A nil c has
 // none.
 func (c *ConfigFile) problem() configProblem {
+	var unfinished *UnfinishedLoadError
 	switch {
 	case c == nil || c.LoadErr == nil:
 		return noConfigProblem
+	case errors.As(c.LoadErr, &unfinished):
+		return configLoadUnfinished
 	case errors.Is(c.LoadErr, fs.ErrPermission):
 		return configUnreadable
 	case errors.Is(c.LoadErr, fs.ErrNotExist):
@@ -107,6 +137,8 @@ func (c *ConfigFile) NotGradedReason(what string) string {
 		return "the named config does not exist"
 	case configDoesNotLoad:
 		return "the config that sets " + what + " does not load"
+	case configLoadUnfinished:
+		return "the config that sets " + what + " did not finish loading"
 	}
 	return ""
 }
@@ -152,6 +184,20 @@ func checkConfigFile(_ context.Context, d Deps) Check {
 		return fail(checkNameConfigFile,
 			c.Path+" does not load: "+oneLine(c.LoadErr.Error()),
 			"every command that reads this file refuses it, and `bridge serve` will not start with it; fix it and re-run `bridge doctor` ("+ranWithoutIt+")")
+	case configLoadUnfinished:
+		// A load the run stopped waiting for, or never began, says nothing
+		// of the file: not checked, a warn. One that did not finish within
+		// the bound fails, since every command that loads the file waits
+		// as long, bridge serve's start included (backlog B650).
+		var unfinished *UnfinishedLoadError
+		errors.As(c.LoadErr, &unfinished)
+		if unfinished.Wait.outcome != notAnswered {
+			return warn(checkNameConfigFile, c.Path+" was not checked: "+unfinished.Error(), ranWithoutIt)
+		}
+		return fail(checkNameConfigFile, c.Path+": "+unfinished.Error(),
+			"loading it checks upscale.variantsDir and upscale.tempDir against each library root, and a root whose mount does "+
+				"not answer holds the load (library-roots names such a root): bridge serve, and every command that loads this "+
+				"config, waits for it too ("+ranWithoutIt+")")
 	}
 	switch {
 	case c == nil:

@@ -95028,6 +95028,165 @@ the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
 
+## 2026-11-13 — B650: bridge doctor bounds every wait on a library root, and names the root that did not answer
+
+The rule is `cli-serve.md`'s B650 line, with `output.md`'s line on the
+checklist's read, and its long form in `ops/History-rules-cli-serve.md` ("B650
+— the doctor's bound on a library root"); this is the evidence. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk (`~/onebit/tmp`).
+The brief was rescoped from b650-v1 (the scanner recording the root a stalled
+scan is in), whose review showed that cannot be attributed reliably and found
+this: the doctor itself waited on a root with no end.
+
+### Step 0: the doctor's steps that touch a root
+
+At 4678b983:
+
+- `checkLibraryRoots` (`internal/doctor/doctor.go` 1258-1298): `os.Stat` and
+  `os.ReadDir` of each root on the run's goroutine; its context ignored
+  (`_ context.Context`).
+- `checkWatchLimit`: Linux's `countDirs` (`inotify_linux.go` 42-72, 104-142:
+  `fsutil.WalkableRoot`, then `WalkConfigured` over every folder below each
+  root) and kqueue's `manifest.CountWatchSet` (`watchbudget_kqueue.go` 32-69,
+  `manifest/watcher_fds.go` 159, `walkWatchTree`). Both ignore their context,
+  and their cap is a count, not a time.
+- Before any check ran: `buildDoctorDepsWith` → `config.Load`
+  (`cmd/bridge/doctor.go` 329) → `Validate` → `validateVariantsDir` and
+  `validateRenderTempDir` (`internal/config/config.go` 4075-4078, 4215, 4247)
+  → `fsutil.IsUnderAny` (`internal/fsutil/symlink.go` 157-187):
+  `EvalSymlinksOrClean` (an Lstat of each component) and `caseInsensitiveFS`
+  (a Stat) of every root, where `upscale.variantsDir` or `upscale.tempDir` is
+  set. No context.
+- On a player box (the MPD gate open), the checklist's outputs body
+  (`output_checklist.go` `readOutputs` → `LocalOutputs.Response` → `build` →
+  `pathRules` → `mpd.ProveRoots` → `musicPrefix`, `internal/mpd/paths.go`
+  119-179): a Stat and an EvalSymlinks of each root and Stats of the music
+  directory's entries. The context reaches MPD's `find` alone, and the build
+  runs on the goroutine of the call that began it
+  (`internal/api/outputs.go` 649-696).
+- Nothing else in a doctor run touches a root while the doctor's own files
+  are off its mount: the data dir's, the player's, the store's and the
+  sidecars' probes read the data directory, and the backups folder's reads
+  are bounded since B653. The config file and the data directory on a dead
+  mount are backlog B884's: a data directory under a library root is one,
+  where `buildDoctorDepsRun` stats the database on the run's goroutine
+  before `doctor.Run` (`os.Stat(dbPath)`, `cmd/bridge/doctor.go` 506), and
+  the player checklist (`doctorOutputChecklist`) stats it inside its bounded
+  read and reads the token file on the run's goroutine (`tokenFile`). (Round
+  2 corrected this line, which said those probes touch no root.)
+
+The console: GET /api/doctor (`internal/admin/handlers_doctor.go` 58-79)
+calls `DoctorRun(r.Context())`, `adminDoctorRunnerFor`'s closure
+(`cmd/bridge/doctor.go` 1018-1044), on the request's goroutine, which rebuilds
+Deps (`config.Load` again) and runs `doctor.Run` there. A stat the kernel held
+kept that goroutine past the browser's disconnect (the admin server sets no
+write timeout) and wrote no response. The handler is not serialised, and the
+Settings page asks it at every render (`renderSettingsPrereqs`), so each
+render left one more goroutine on the stat. The other in-process callers are
+the CLI's: `bridge doctor` (`runDoctorReport`, twice with `--fix`), the
+launcher's doctor row (`menu.go` `actDoctor`) and its Setup's preflight
+(`actSetup` → `initCmd` → `ensureDoctorClean`); init's second port pass
+touches no root.
+
+### Red first
+
+The case tests, copied verbatim from the branch into a copy of 4678b983's tree
+(`maintree.py`: the worktree copied, each file B650 changed put back by `git
+show 4678b983:<path>`, each file it added removed), through a shim that routes
+main's own calls on the roots through the tests' stand-ins and changes nothing
+of when they run (`shim.py`: `checkLibraryRoots`' `os.Stat` and `os.ReadDir`
+through the run's, `countDirs` through the stand-in count, `IsUnderAny` in
+`Validate` through a seam, the console's runner over the given probes; every
+call still on the run's goroutine, with no bound), their own deadline
+shortened to 10 s for the run (main never returns, so any deadline shows it):
+
+```
+$ go test -C <main-tree> -count=1 -p 8 -v -run '<the cases>' ./internal/doctor/   (the --- and message lines)
+    b650_red_linux_test.go:40: inotify-watch-limit did not return within 10s: a root that does not answer held it
+--- FAIL: TestACountBelowARootThatAnswersIsNotReadAsALowOne (10.01s)
+--- PASS: TestAHealthyLibrarysWatchLineIsAsItWas (0.00s)
+    b650_red_test.go:157: Run did not return within 10s: a root that does not answer held it
+--- FAIL: TestARunNamesARootThatDoesNotAnswerWithinItsBound (10.01s)
+    b650_red_test.go:231: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestTheSecondOfTwoRootsDoesNotAnswer (10.01s)
+    b650_red_test.go:252: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestRootsThatDoNotAnswerCostOneBoundTogether (10.01s)
+    b650_red_test.go:273: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestARootWhoseListingDoesNotAnswerIsNamed (10.01s)
+    b650_red_test.go:286: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestALaterRunFindsTheRootStillNotAnsweringAndAsksItNoMore (10.00s)
+    b650_red_test.go:320: the overlapping runs did not return within 10s: a root that does not answer held it
+--- FAIL: TestOverlappingRunsShareOneProbeOfARoot (10.01s)
+--- PASS: TestHealthyRootsReadAsTheyAlwaysDid (0.00s)
+FAIL	github.com/acoseac/1-bit-bridge/internal/doctor	70.073s
+
+$ go test -C <main-tree> -count=1 -p 8 -v -timeout 20m -run '<the cases>' ./cmd/bridge/
+    b650_red_test.go:255: bridge doctor did not return within 10s: a root that does not answer held it
+--- FAIL: TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn (10.00s)
+    b650_red_test.go:294: bridge doctor did not return within 10s: a root that does not answer held it
+--- FAIL: TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories (10.01s)
+    b650_red_test.go:327: the console's doctor did not return within 10s: a root that does not answer held it
+--- FAIL: TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce (10.01s)
+    b650_red_test.go:368: the checklist did not return within 10s: a root that does not answer held it
+--- FAIL: TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead (10.00s)
+--- PASS: TestBridgeDoctorPrintsHealthyRootsAsBefore (0.01s)
+FAIL	github.com/acoseac/1-bit-bridge/cmd/bridge	40.082s
+```
+
+Every case fails by its own deadline, none by hanging the suite, and the three
+guards pass on main's tree: over roots that answer, library-roots, the inotify
+line and config-file print what main printed, word for word. The branch's
+first commit, b4f83ae5, turns every case green.
+
+### Controls
+
+Each an uncommitted edit to the committed tree, its prediction written down
+before the run (`control-predictions.txt`, `controls-predictions.txt`),
+restored with `git checkout --` (`git status` clean after each):
+
+- C1, the brief's: the bound removed (`waitFor`'s timer `left + 1000h`):
+  `TestARunNamesARootThatDoesNotAnswerWithinItsBound` "Run did not return
+  within 1m0s" and `TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn`
+  "bridge doctor did not return within 1m30s", each by its own deadline.
+- C2, one work a key (`beginOut` never joins the work out): the later run, the
+  overlapping runs and the console's second run red, "two runs began 2
+  probes", "8 overlapping runs began 8 probes", no "still".
+- C3, a run's works kept (`ProbeRun.met` not asked): "the root was probed 4
+  times, want twice".
+- C4, no limit: no warn past it, at both levels, and the fifth load answered.
+- C5, one limit for both kinds (`outOfKind` counting every work): the load
+  beside sixteen probes held back, and the console's config-file "was not
+  checked: 4 earlier loads" past the probes' limit. Its first edit (`if true`)
+  did not compile, left as no control and run again.
+- C6, a work never let go (its delete removed): "the probe that answered late
+  is still out", and the console's recovered root never probed afresh.
+- C7, a stop said as a stall (`waitFor`'s stopped return removed): both
+  stopped runs "did not answer within", a fail.
+- C8, no probes beside the load (`loadDoctorConfig`'s `BeginRoots` removed):
+  "after the load, the roots were probed 0 and 0 times".
+- C10, the fold assigning in place of adding: the healthy inotify line "2
+  directories", want 3, and the fold's table red.
+
+Each as predicted.
+
+### The gates
+
+On 8ead962b, in one hold of the build lock (08:26 to 09:04, `gate.py`), `-p 8
+-parallel 8`: under `-race -count=50`, the touched tests of internal/doctor
+(the 16 cases of `rootprobes_test.go` and `rootprobes_linux_test.go`, and the
+earlier ones over the code they changed: `TestRun_FullReportShape`, the
+library-roots, config-file, port and tls-cert "not checked" tests, the count
+through a linked root) ok in 413 s; of cmd/bridge (the 11 of
+`doctor_roots_test.go`, the checklist's 10 over the changed read, and
+`TestDoctorAndInitCarryTheContainerVerdict` over `initPreflightDeps`) ok in
+252 s; `TestLibraryRootsOfIsTheRootsLoadGives` ok. `go test -race -count=1
+-timeout 120m` of `./internal/doctor/` (15 s), `./internal/config/` (14 s) and
+`./cmd/bridge/` (1,574 s, which holds `TestEveryCitedTestNameExists`): all ok.
+`go vet ./...` with the Makefile's tags for GOOS linux, darwin and windows:
+clean. go1.27.3's gofmt lists none of the Go files the change touches. The
+macOS-only case (`rootprobes_kqueue_test.go`) is vetted here and runs on CI's
+macOS leg; `make test` and `make build-all` were not run: the brief asked for
+the packages.
 ## 2026-11-13 — B567: every sweep from the root skips make test's TMPDIR
 
 Backlog B567, on `fix/b567-census-skips-test-tmp` from main 4678b983, worker
@@ -96372,6 +96531,454 @@ the tree with this record. The rule change is `rules-b872-r3.patch`: round
 now names the notice's seam, the held wait and its abort; the budgets check
 is clean with it.
 
+## 2026-11-14 — B650 round 2: bridge doctor's gathers share one read of the box, and the root tests read their waits on the runner's clock
+
+The rules are `output.md`'s B650 line (the checklist's read) and the long
+form in `ops/History-rules-cli-serve.md` ("B650 — the doctor's bound on a
+library root"); this is round 2's evidence, from the review of round 1.
+Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk
+(`~/onebit/tmp`). Commits 7df9a009 (item 1), 9db4a0e3 (item 3), 91474ddf
+(item 1's case drains its last run through `drainLoopOnCleanup`, which
+`TestEveryBackgroundGoroutineDrainsOnCleanup` asked for in cmd/bridge's full
+run) and 1f4cbefe (two of item 3's cases count their probes once every probe
+has ended, which the run beside 16 busy processes asked for); item 2 is the
+correction of round 1's Step 0 above.
+
+### Item 1, Step 0: the long-lived paths that call readOutputs more than once
+
+At 336a61aa `readOutputs` (`cmd/bridge/output_checklist.go` 120-154) began a
+read of its own at every call (131-134). Its callers:
+
+- Serve, and each serve session the launcher runs in its process: the
+  console's checklist (`internal/admin/handlers_output_checklist.go` 41) and
+  doctor (`handlers_doctor.go` 70, `handlers_logs.go` 349) call it with the
+  request's context over the serving process's builder (`cmd/bridge/main.go`
+  6381-6382), whose one flight every read joins (`internal/api/outputs.go`
+  657-671), each joiner leaving with its own context (663-667), which
+  net/http cancels as the handler returns. At most the flight stays held:
+  no read is left per call.
+- `bridge doctor`: one gather a run, two with `--fix` (`doctor.go` 59-85),
+  and the process ends. `bridge init`'s preflight gathers none: only
+  `buildDoctorDepsRun` sets the checklist (`doctor.go` 407), and the
+  console's runner replaces it (1123).
+- The launcher (`menu.go`), which runs for as long as its menu does: its
+  doctor row (`actDoctor`, 384-385) is offered only while
+  `packaging.IsInitialized` finds no platform config (`menu.go` 130-137,
+  `internal/packaging/state.go` 91-98), so its lookup of that path loads
+  none and gathers nothing. Where `DefaultConfigDir` fails (no HOME:
+  `os.UserHomeDir`, `internal/packaging/packaging.go` 487-491),
+  `IsInitialized` gives `""`, `resolveConfigPath("")` grades
+  `./bridge.yaml` (`configpath.go` 50-52), and the row gathers at every use,
+  each over a one-shot builder of its own (`output_checklist.go` 307): on an
+  MPD box whose root does not answer, each use stranded one read's goroutine
+  until the process ended. A config made between the menu's look and the
+  row's run gives one gather, after which the row is gone.
+
+One long-lived path strands reads, so item 1 is a fix, not a Low.
+
+### Item 1, the fix
+
+`bridge doctor`'s gathers read the box through a table the process keeps
+(`cliOutputsReads`, `outputsReads`): at most one read in flight for a key,
+the config file's name and its settings as yaml.v3 encodes them
+(`outputsReadKey`; encoding/json leaves MPD's password out, which two
+configs can differ by), which every gather over that key waits on, each for
+its own bound (`outputsReadBound`) and on its own context. The read runs on
+`context.WithoutCancel` of the context of the gather that began it, so no
+gather's end ends it or answers another's wait with its cancellation, and it
+leaves the table under the table's lock as it answers, so a gather after
+that reads the config it loaded then. Serve's source keeps a read of its own
+per call, on its request's context. `bridge doctor --fix`'s two gathers now
+wait on one read, each for its own bound, so its two waits (B884's) are as
+they were.
+
+`defer lo.Close()` while a read another gather waits on is inside that
+builder's `Response`: `Close` (`internal/api/outputs.go` 1313-1327) takes the
+builder's lock, which no holder keeps across I/O, closes the session without
+taking its turn (`serialSession.Close`, 201), and leaves the flight alone;
+the build keeps the session it took (`build`, 794), whose next command fails
+and dials once more (`again`, 797-805; `session`, 723-765), and the idle
+close the flight's end arms (`armIdle`, 698-706; `idleClose`, 708-721) closes
+that one within a minute. So the read's body reaches every gather still
+waiting on it, and `Close` waits for none of it.
+`TestDoctorRunsInOneProcessShareOneReadOfTheBox`'s last run is answered by
+the read the first run's builder began and closed, under `-race`.
+
+### Red first
+
+The three tests, as 91474ddf has them, in a copy of the worktree with
+`output_checklist.go` put back as 336a61aa has it and a names-only shim
+(`redtree2.py`: the table's type, its hook and count, the process's table,
+the source's two fields, none of which that `readOutputs` reads),
+predictions written first (`r2-red-predictions.txt`):
+
+```
+$ go test -C <red-tree> -race -count=1 -p 8 -parallel 8 -v -run '<the four>' ./cmd/bridge/
+--- PASS: TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead (0.30s)
+    doctor_roots_test.go:749: 3 doctor runs in one process began 3 reads of the box, want one
+--- FAIL: TestDoctorRunsInOneProcessShareOneReadOfTheBox (0.98s)
+    doctor_roots_test.go:841: the first config's runs began 2 reads, want one while it is out
+    doctor_roots_test.go:853: after the read answered, the first config's runs began 3 reads, want a second
+--- FAIL: TestADoctorRunTakesOnlyTheReadOfItsOwnConfig (0.65s)
+    doctor_roots_test.go:931: the second gather began a read of its own while the first one's was out
+--- FAIL: TestAWaitOnASharedReadEndsAloneWithItsContext (0.00s)
+```
+
+The first red run, on the tests' first draft, also raced: a case that failed
+left a reader running past the cleanup that puts the bound back. Each case
+joins its readers in a cleanup that runs before that one, and the run above
+is race-free. 7df9a009 turns the three green.
+
+### Item 1's controls
+
+On 7df9a009, each an uncommitted edit of `output_checklist.go`, restored with
+`git checkout --` (`git status` clean after each), predictions in
+`r2-controls-predictions.txt`:
+
+- R2-C1, a read per call back (the table bypassed): all three red, as at
+  336a61aa.
+- R2-C2, the key the file's name alone: the edited config's gather waited on
+  the held read, "the player line = ... did not answer within 300ms", its
+  music line not its own read's, "began 0 reads, want its own one".
+- R2-C3, the read on its first gather's context: "the read's context ended
+  with the first gather's: context canceled", and the second gather answered
+  that cancellation, not the body.
+- R2-C4, a read never leaving the table: the test's drain "the read was
+  still out once its root answered", and the cleanup's "still out 30s after
+  the box answered".
+
+Each as predicted.
+
+### Item 2
+
+Round 1's Step 0 said nothing else in a doctor run touches a root; a data
+directory under a library root says otherwise, and the line now names the
+residual and its backlog entry, B884. The review read
+`doctorOutputChecklist`'s stat of the database as made on the run's
+goroutine: it is inside the build (`Tracks`, `output_checklist.go` 392 at
+9db4a0e3), so inside the read the bound covers, where a dead mount reads as
+a box that did not answer; what that gather reads on the run's goroutine is
+the token file (`tokenFile`, 528-529, `auth.OpenStore`). The corrected line
+names both, and `buildDoctorDepsRun`'s `os.Stat(dbPath)` (`doctor.go` 506),
+which runs before `doctor.Run`.
+
+### Item 3: the timing asserts
+
+At 336a61aa: `rootprobes_test.go` 173 (a whole run under the bound and
+15 s), 259 (two roots under 1.75 bounds), 301 (a second run under 300 ms),
+351 (a stopped run under 750 ms), and `doctor_roots_test.go` 448 (a whole
+console run under 2 s after its stop at 150 ms); and
+`TestTheLoadsHaveALimitOfTheirOwn` (591-614) waited on its loads with no
+deadline.
+
+- 173, 259, 301 and 351: a seam. `RootProbes` reads its time through two
+  fields, `now` and `timer` (`time.Now` and `time.NewTimer`'s in
+  production), and the cases run on a clock that moves only when the case
+  moves it (`clockOf`, `rootprobes_test.go`), whose timers say what they
+  wait for as they are set: 173 and 259 read one wait of the bound, move the
+  clock past it, and require the run back with no other wait set (259's two
+  roots: one bound, not two); 301's second run sets no wait at all; 351's
+  run comes back on its stop with the clock never moved, and its next run,
+  the clock past the bound, says the root still has not answered. Each fails
+  at once on a wait it should not set, and by its 60 s deadline on a run that
+  does not return.
+- 448: a lower bound and a deadlock guard. The root's bound is ten minutes;
+  the run must come back after its stop (a channel the stop closes before it
+  cancels) and within `doctorWithin`'s 90 s.
+- `TestTheLoadsHaveALimitOfTheirOwn`: its loads run under `within`'s 60 s.
+
+Beside 16 busy processes the first loaded run of the five failed 5 of the
+100 runs of two of them, "began 0 probes, want one"
+(`TestALaterRunFindsTheRootStillNotAnsweringAndAsksItNoMore` 3,
+`TestARunStoppedByItsCallerSaysSoAndNotThatTheRootIsStuck` 2): the test
+clock moves at once, so a run set its wait and was answered before its
+probe's goroutine had made the stat the stand-in counts. Since 1f4cbefe both
+read the count once the roots answer and the probes drain (`probesBegun`):
+a probe that has ended has made its one stat.
+
+Controls on 9db4a0e3, the same way (`r2-controls3-predictions.txt`):
+
+- R2-C5, the roots' probes begun only as each is waited for: "once one bound
+  passed, the run set a wait of 2s" at once.
+- R2-C6, the bound counted from the run's start, not the work's: "the second
+  run set a wait of 300ms" and "the next run set a wait of 1.5s", at once.
+- R2-C7, the run's context ignored: "the stopped run did not return within
+  1m0s" and "the console's doctor did not return within 1m30s", each by its
+  deadline.
+- R2-C8, the bound's timer never firing: "Run did not return within 1m0s of
+  its bound passing", and "the loads did not return within 1m0s", where until
+  9db4a0e3 that case would have hung to the binary's timeout.
+- R2-C9, no wait at all: "the run came back before its request went away",
+  its line saying the root did not answer.
+
+Each as predicted.
+
+### The gates
+
+Every run under `-race`, `-p 8 -parallel 8`, the packages with `-timeout
+120m`; "in the slot" is a hold of the build lock, where no other worker's
+build runs:
+
+- Item 3's five internal/doctor cases, `-count=50`: ok on 9db4a0e3 (63 s)
+  and in the slot on 1f4cbefe (63 s). Beside 16 busy processes, the host's
+  core count, in the slot: on 91474ddf red, 5 of the 100 runs of two cases
+  (above), and on 1f4cbefe ok (65 s).
+- cmd/bridge's five (item 3's console case, item 1's three, round 1's
+  checklist case), `-count=50`: ok on 9db4a0e3 (107 s) and 91474ddf
+  (108 s), and beside 16 busy processes in the slot on 91474ddf (114 s).
+  1f4cbefe changes no code cmd/bridge's tests build.
+- `./internal/doctor/` once: ok on 9db4a0e3 (11 s) and in the slot on
+  1f4cbefe (11 s).
+- `./cmd/bridge/` once: on 9db4a0e3 red on
+  `TestEveryBackgroundGoroutineDrainsOnCleanup` alone (1,686 s), which
+  91474ddf answers. Three more runs, on 91474ddf outside the slot (2,645 s)
+  and in it (1,603 s) and on 1f4cbefe outside it (3,703 s, beside another
+  worker's gate), were each red on one of backup's timing tests alone, every
+  other test ok: `TestTheTickerAndTheDoctorNameAPruneGivenUp` twice ("the
+  prune answered <nil>, want it given up": the prune finds the backups
+  folder still held by the previous verification's worker, B849's class,
+  which B869's 3a976ffc fixes and this branch does not carry), and
+  `TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` once
+  ("a stopped verification was reported", B895's). Alone, `-count=10`, the
+  second is ok on 1f4cbefe, and the first fails 1 of 10 in the slot there and
+  1 of 40 on a copy of main's own tree, 2bebca26, which carries none of
+  B650, with the same words. In the slot on 1f4cbefe, with those two skipped
+  (`-skip`), `./cmd/bridge/` is ok (1,626 s).
+- `go vet ./...` with the Makefile's tags for GOOS linux, darwin and
+  windows: clean on 91474ddf and in the slot on 1f4cbefe. go1.27.3's gofmt
+  lists none of the Go files round 2 touches.
+
+## 2026-11-14 — B650 round 3: bridge doctor's gathers share one MPD inspection, and two doctor tests take their waits off the clock
+
+The rules are `output.md`'s B650 lines (the checklist's read, and since this
+round the shared inspection) and the long form in
+`ops/History-rules-cli-serve.md` ("B650 — the doctor's bound on a library
+root"); this is round 3's evidence, from the review of round 2. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk (`~/onebit/tmp`).
+Commits adccca08 and 83f716a9 (item 1), 23dc1e5c and 8a6dfca2 (item 2).
+Round 2's correction of round 1's Step 0 line and round 2's record above
+stand as they are; the History's line naming the records gave round 2
+round 1's date, and says now that rounds 2 and 3 are of 2026-11-14.
+
+### Item 1: MPD inspections across reconstructed gathers
+
+At 0b1a26f0 each gather's outputs builder is its own
+(`cmd/bridge/output_checklist.go` 413), and the checklist asks its gate
+(`Active`, 439) before the shared read (94, 98). Under `output.mpd: auto`
+the gate probes MPD (`internal/api/outputs.go` 437); under `on` each build
+does (789). Every probe inspects through `inspectBounded` (578-614): on a
+context detached from its caller (541), on a goroutine of its own, abandoned
+past its deadline and the grace (610), and the guard that keeps a second from
+beginning while one runs is the builder's own (`inspecting`, 278, 580-584,
+596). An `mpd.conf` on a mount that does not answer holds `mpd.Inspect` in
+`conf.ReadHost` (`internal/mpd/inspect.go` 154) with no end, so every use of
+the launcher's doctor row began another inspection and stranded its
+goroutine.
+
+The launcher's doctor row loads neither its probe runner nor its config's
+load afresh at each use: the runner is the process's (`cliRootProbes`,
+`cmd/bridge/doctor.go` 265, each use beginning a run of it alone, 273), and
+the load is a work of it keyed by the file's path, its bytes and the
+`BRIDGE_` variables (`doctor.Bounded` with `doctorConfigKey`, 630, 647),
+which a later use joins while it is out. What each use still reads with no
+bound is the config file itself (`resolveConfigPath`'s stat, 299; 307;
+`os.ReadFile`, 618): the config file on a dead mount, B884's.
+
+The fix: `api.MPDInspections`, a table the builders given it share
+(`LocalOutputsConfig.Inspections`; bridge doctor's builders are given the
+process's, `cliMPDInspections`). One inspection is in flight for what it reads,
+its `mpd.Options` (the root, the configuration file, the endpoint, the home
+and XDG directories it expands, the password) hashed (`inspectionKey`), on a
+goroutine and a context of its own that keeps the first caller's values, which
+the builder's clock ends at `outputProbeLimit`; it is held from when it begins
+until `Inspect` returns or panics (its key let go in that goroutine's
+deferral, the panic logged). A probe of any builder given the table waits on
+the one in flight until it answers, its deadline and `outputProbeGrace` pass
+(a timer of the builder's clock closes `given`), or the probe's own context
+ends; a report that came past the deadline is late, which the probe takes as
+expired; none, or a panic, is no verdict. A probe that comes once the
+deadline and the grace have passed answers at once with none, as serve's own
+guard answers a probe while its inspection still runs. Serve's builder is
+given no table and keeps its guard and its detached wait, which
+`TestCancelledProbeIsNotCached` pins: there a caller whose context has ended
+still has the probe's verdict.
+
+### Red first
+
+The five internal/api cases and the cmd/bridge case in a copy of the worktree
+with `internal/api/outputs.go` and `cmd/bridge/output_checklist.go` put back as
+0b1a26f0 has them, through a names-only shim (`redtree3.py`: the table's type
+with its hook and count, the config's field, the process's table, none of
+which that code reads), the api cases' deadline shortened to 10 s in the copy,
+predictions written first (`r3-red-predictions.txt`):
+
+```
+$ go test -C <red-tree> -race -count=1 -p 8 -parallel 8 -v -run '<the five>' ./internal/api/
+    outputs_inspections_test.go:197: three gathers began 3 inspections while one was held, want one
+--- FAIL: TestBuildersSharingATableBeginOneInspection (2.55s)
+    outputs_inspections_test.go:238: a gather's wait did not come within 10s
+--- FAIL: TestAProbeWaitingOnASharedInspectionStopsWithItsOwnContext (10.01s)
+    outputs_inspections_test.go:304: the held configuration was inspected 2 times, want once
+--- FAIL: TestAnEditedConfigurationBeginsAnInspectionOfItsOwn (0.85s)
+--- PASS: TestASharedInspectionThatPanicsLetsItsKeyGo (0.00s)
+    outputs_inspections_test.go:363: three builds began 3 inspections while one was held, want one
+--- FAIL: TestTheBuildsProbeSharesTheTableToo (2.55s)
+
+$ go test -C <red-tree> -race -count=1 -p 8 -parallel 8 -v -run '^TestDoctorRunsInOneProcessShareOneMPDInspection$' ./cmd/bridge/
+    doctor_roots_test.go:1031: 3 doctor runs in one process began 3 MPD inspections while one was held, want one
+    doctor_roots_test.go:1031: 3 doctor runs in one process began 3 MPD inspections while one was held, want one
+    --- FAIL: TestDoctorRunsInOneProcessShareOneMPDInspection/auto (2.62s)
+    --- FAIL: TestDoctorRunsInOneProcessShareOneMPDInspection/on (2.62s)
+```
+
+Each as predicted; the panic's case is green there too, since there the
+guard is each builder's own, which a panic let go already: the case guards
+the shared slot's cleanup. adccca08 turns the rest green. The cases count the inspections begun through the `Inspect` seam,
+require exactly one begun while it is held and each gather back meanwhile,
+and a second begun once it has returned, which reads the box.
+
+### Item 1's controls
+
+On adccca08, each an uncommitted edit of `internal/api/outputs.go`, restored
+with `git checkout --` (`git status` clean after each), predictions in
+`r3-controls-predictions.txt`:
+
+- R3-C1, each builder's own guard back (the table never used): the four api
+  cases and cmd/bridge's red as at 0b1a26f0, the panic's case green as
+  there.
+- R3-C2, the slot let go as the waits give up rather than as `Inspect`
+  returns: cmd/bridge's case "began 3 MPD inspections" in both modes, as
+  predicted; the api case went red by its 60 s deadline, not by its count as
+  predicted: with the key let go the next gather began a second inspection
+  and waited on that one, whose deadline the case's clock never reached.
+- R3-C3, the inspection on its first caller's context: "the inspection's
+  context ended with the gathers that stopped waiting: context canceled".
+- R3-C4, a probe that does not stop with its own context: "the first gather,
+  its context ended did not come within 1m0s".
+- R3-C5, a key that ignores what the inspection reads: "a gather over the
+  edited configuration did not return within 1m0s", waiting on the held
+  configuration's inspection.
+
+### Item 2: two waits off the clock
+
+`TestADoctorRunTakesOnlyTheReadOfItsOwnConfig` set the read's bound to
+300 ms for every run, the healthy edited and recovered ones included, which
+had to answer within it; `TestACancelledConsoleDoctorRunSaysItWasStopped`
+cancelled its run 150 ms after it began, which a loaded host could reach
+before the healthy root's probe had ended, both roots then not checked.
+bridge doctor's waits on a read set their timer through the read table
+(`outputsReads.timer`, time.NewTimer's where none), and the first case gives
+the waits on the held read up through it (`readTimers`) once each has set it
+and the read it waits on is held at the box or joined (8a6dfca2), every
+other wait keeping bridge doctor's bound under the case's 90 s deadline,
+`boxNotRead()` reading the bound the case leaves. The second cancels once
+the run waits on the root that does not answer
+(`RootProbes.SetOnRootWaitForTest`, a test's hook told the root, the work's
+key kept on the work for it) and the healthy root's probe has made its stat
+and its listing (`rootStall.probed`).
+
+The old bounds, first under load: the two cases as 0b1a26f0 has them,
+`-count=50` beside 16 busy processes in the slot, were ok (43 s), the host's
+scheduling never once making the healthy steps late enough. So they were run
+where a healthy step is slower than the bound, as a loaded host makes it:
+copies whose stand-ins stat a root they do not hold 300 ms late and bring a
+read over a config naming no held root to the box 400 ms late (`slow.py`, the
+worktree untouched), predictions in `r3-slow-predictions.txt`:
+
+```
+the cases as 0b1a26f0 has them:
+    doctor_roots_test.go:467: the stopped run's library-roots = {... Summary:2 root(s) not checked ...}, want a warn ...
+--- FAIL: TestACancelledConsoleDoctorRunSaysItWasStopped (0.31s)
+    doctor_roots_test.go:842: over the edited config, the player line = "The bridge could not read this box's player and cards (it did not answer within 300ms: ...)", want its own read (...)
+--- FAIL: TestADoctorRunTakesOnlyTheReadOfItsOwnConfig (0.94s)
+the cases as 8a6dfca2 has them, the same steps slowed:
+--- PASS: TestACancelledConsoleDoctorRunSaysItWasStopped (0.31s)
+--- PASS: TestADoctorRunTakesOnlyTheReadOfItsOwnConfig (0.44s)
+```
+
+The new cases' first loaded run found a race of their own: beside 16 busy
+processes, 2 of 50 runs of the own-config case failed, "the first config's
+runs began 0 reads, want one while it is out", the case having fired the
+first stalled wait's timer as soon as the wait set it, while the read that
+wait began was still on its way to the box. 8a6dfca2 fires a wait's timer
+only once the read it waits on is held at the box (the box's `began`) or the
+gather has joined one (`joined`). Its control, R3-C9, in copies with the held
+read 200 ms late to the box: with the wait for the hold dropped, "the first
+config's runs began 0 reads, want one while it is out"; with it, ok.
+
+Controls on 23dc1e5c, the same way (`r3-controls5-predictions.txt`):
+
+- R3-C6, the root-wait hook never told: "the run did not wait on <NAS>
+  within 1m30s".
+- R3-C7, the read table's timer ignored: "the run over the held root set no
+  wait within 1m30s".
+- R3-C8, the run's stop not heeded in `waitFor`: "the stopped run did not
+  come back within 1m30s".
+
+Each as predicted.
+
+### Items 3 and 4
+
+Round 2's correction of round 1's Step 0 line (above) and its record are in
+the log, as round 2's patch wrote them; the History named round 2's record
+with round 1's date. The Lows:
+
+- `outputsReadKey` hashes the config file's name and `yaml.Marshal` of the
+  config `Load` made, whose `dataDir` (`yaml:"dataDir"`, written whatever its
+  value) is the derived one: `Load` gives an unset one `./data`
+  (`applyDefaults`, `internal/config/config.go` 3187, 3260), applies
+  `BRIDGE_DATA_DIR` over it (`applyEnvOverrides`, 3188) and makes it absolute
+  against the config file's directory (`resolvePaths`, 3193, 3299), so two
+  configurations whose data directories differ, however each was derived,
+  never share a key.
+- `lo.Close()` while the build is dialling MPD closes nothing of that dial:
+  `Close` (`internal/api/outputs.go` 1313-1327 at 0b1a26f0) takes the
+  session the builder holds, none yet, and the dial, on the build's context,
+  stores the session it opens after (`session`, 723-765), which lives until
+  the idle close the flight's end arms, a minute after the build ends
+  (`armIdle`, 698-706; `idleClose`, 708-721). The comment beside the deferral
+  in `doctorOutputChecklist` says so.
+- The History's claim that the checklist stats the database inside its
+  bounded read is true: the stat is in the build's `Tracks`
+  (`output_checklist.go` 392 at 0b1a26f0), run inside the read the wait's
+  bound covers; the token file is read on the run's goroutine (`tokenFile`).
+
+### The gates
+
+Every run under `-race`, the `-count=50` runs and the packages' with
+`-p 8 -parallel 8`, the packages with `-timeout 120m`, each time the one go
+test reports; "in the slot" is a hold of the build lock, where no other
+worker's build runs, and "loaded" is beside 16 busy processes, the host's
+core count, in the slot:
+
+- internal/api's five shared-inspection cases and thirteen of the probe's
+  beside them (`TestAnInspectionThatNeverReturnsIsNoVerdict`; the
+  cancellation cases, `TestACallerThatStopsWaitingGetsTheGatesLastAnswer`
+  and `TestCancelledProbeIsNotCached`; the verdict-order cases,
+  `TestAnOlderCacheVerdictNeverOverwritesANewerOne` and
+  `TestAWaiterNeverRecordsAnOlderVerdict`; and the probe's cache, flight and
+  route cases), `-count=50`: ok on 23dc1e5c (314 s), and the five loaded
+  there (2 s). internal/api's code at 83f716a9 is 23dc1e5c's, its one change
+  a test's doc comment.
+- internal/doctor's five clock cases, `-count=50`: ok on 23dc1e5c (63 s),
+  and loaded there (64 s); the package is the same at 83f716a9.
+- cmd/bridge's six (item 1's case, item 2's two, round 2's two, round 1's
+  checklist case), `-count=50`: ok on 23dc1e5c (162 s) and in the slot on
+  83f716a9 (161 s), and loaded on 23dc1e5c (170 s) and on 83f716a9 (171 s).
+  Item 2's two alone, loaded: red on 23dc1e5c, 2 of the own-config case's
+  50 runs (above), and ok on 83f716a9 (5 s).
+- `./internal/doctor/` once: ok on 23dc1e5c (11 s) and in the slot on
+  83f716a9 (11 s). `./internal/api/` once: ok on 23dc1e5c (154 s) and in the
+  slot on 83f716a9 (154 s).
+- `./cmd/bridge/` once: on 8a6dfca2 red on
+  `TestNoDocblockNamesAnotherDeclaration` alone (1,641 s), whose sweep of
+  every package's doc comments found `withinInspection`'s opening with a
+  name nothing declares; 83f716a9 answers it, and the sweep and its
+  neighbours are then ok (23 s). On 83f716a9, outside the slot, another
+  worker holding it as the run began: ok (1,763 s).
+- `go vet ./...` with the Makefile's tags for GOOS linux, darwin and
+  windows: clean in the slot on 23dc1e5c and on 83f716a9. go1.27.3's gofmt
+  lists none of the Go files round 3 touches.
 ## 2026-11-13 — B886, B887, B890: the CI timing flakes wait on seams, never on time
 
 Worker b886, legion0 (Ubuntu 26.04, Linux 7.0.0-38-generic, x86-64, 16
