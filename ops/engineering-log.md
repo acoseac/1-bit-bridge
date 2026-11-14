@@ -96843,3 +96843,230 @@ B872's bullet on a check given up (wait for the marker until it decodes as the
 hold awaited, bounded by a deadline asked after every read); `git apply
 --check` takes it, and the budgets check is clean with it (the worst load from
 76.1% to 76.3%).
+
+## 2026-11-14 — B901: a recheck stopped at SQLite's open answers within a grace the test holds
+
+Worker b901, legion0 (Ubuntu 26.04, Linux 7.0.0-38-generic, x86-64, 16
+CPUs), branch `fix/b901-recheck-grace` from main 92288694, #1469's squash
+(B886; its PR head 43053318 is not in this clone, and main holds its seam,
+`SetCheckGraceForTest`, internal/backup/seams.go 476-498). Commits: 99b4232e
+(the three tests), then this record. Every run: Go 1.27.3
+(`GOTOOLCHAIN=go1.27.3`), the tags `ts_omit_webclient,ts_omit_debugeventbus`,
+TMPDIR `~/onebit/tmp`, 8 of the host's 16 cores; the controls are uncommitted
+edits to the committed tree, predicted in writing first
+(`.tmp/_b901/controls.predictions.txt`), each edited file's bytes put back
+from memory once its binary was built.
+
+### The hazard
+
+On #1470's macOS CI (run 43569478849, attempt 1: main fe5e331d with B618,
+without B886) `TestAnIncompleteNoBarrierRecheckLeavesItsRecordTrusted`
+expected `ErrRecheckNotRecorded` and got "a step of the verification did not
+end and was given up, …: its check did not end within its bound (context
+canceled)" (the brief's transcription: `gh` is refused here, so the run's log
+was not read). The test cancels at SQLite's open
+(`SetOnDatabaseOpenForTest(cancel)`, verify_round12_test.go 19 at main), a hook
+that runs on the check's own thread as `checkSQLite` begins (verify_db.go
+161-164). Once the check's context has ended, `runCheck` (finish.go 777-808)
+waits half of `StopWriteBound` for that thread (790-792), the lowest-priority
+one (`runLowPriority`, 831-848: nice 19 and the idle I/O class on Linux,
+`PRIO_DARWIN_BG` on macOS), and gives the check up past it (803-804), which the
+worker answers as `ErrCheckGivenUp` naming "its check" (575-577, 393-408).
+Production is as designed: a check that does not end within its bound is given
+up.
+
+### Premises at HEAD
+
+- The grace: `runCheck` asks `checkGraceForTest` once the check's context has
+  ended, given its `dir`, and a channel it answers takes the timer's place
+  (finish.go 793-799); `checkGraceOf` (verify_stuck_test.go 193-205) answers
+  one for its snapshot alone and closes `begun` as that grace begins.
+- The path: `verifyHeld` resolves the snapshot (finish.go 433,
+  `resolveSnapshotIn`: verify_paths.go 40-47, through `resolveDir`, 20-26, and
+  `resolveLinks = fsutil.ResolveLinks`, 31) and hands `runCheck` that path
+  (573). The case's `dir` is `verifiedSnapshot`'s answer, `resolvedTestDir(t,
+  res.Dir)` (backup_test.go 1344), `fsutil.ResolveLinks` (verify_test.go
+  1187-1194): the path the check sees, which C3 below holds it to.
+- The caller's own bound: at the stop `verifyAndThen` arms `expire =
+  time.After(StopWriteBound)` (finish.go 351-355) and past it abandons the
+  worker (360-366) with `verifyExpiryError` (373-380), "the verification was
+  left to end on its own 2s after its stop, holding the snapshots' lock until
+  it does: context canceled". No seam holds it, and the budget (test files
+  only) keeps it: it is the residual.
+- The version gate: `internal/backup` is in neither `guardedPrefixes`
+  (internal/player/qualification/version_gate.go 36) nor `GuardedPaths`
+  (20-28), so nothing is bumped.
+
+### The fix (99b4232e)
+
+`TestAnIncompleteNoBarrierRecheckLeavesItsRecordTrusted` holds its check's
+grace past the stop with `checkGraceOf(t, dir)`, passed right after
+`VerifySnapshot` returns and in cleanup. The open's hook cancels, then holds
+the check's thread until the grace has begun, or until a channel the test's
+end closes, so in every run the check answers inside the grace, and the case
+then asserts that the grace began. Its cleanups run `pass`, the hook's
+release, `awaitClean`, then the seams: registered the other way round, the
+grace's seam first and `t.Cleanup(pass)` last. Its comment names the residual
+in the words of its error.
+
+### The siblings
+
+Every `SetOnDatabaseOpenForTest` in `./internal/backup` and every in-check hook
+that cancels, paces or delays (`SetOnLowPriorityForTest`,
+`SetOnCheckEntryForTest`, `SetBeforeFilesCheckForTest`,
+`SetFilesCheckIncompleteForTest`, `SetVerifyReadRateForTest`, and
+`SetVerifyDeadlineForTest`'s callers), lines at main:
+
+- The same race, fixed in 99b4232e:
+  - `TestARecheckThatDidNotEndLeavesTheVetoItMade/stopped_by_its_caller`
+    (verify_round5_test.go 243-253): one byte a second, the stop 50 ms after
+    the check's thread begins (a `time.AfterFunc` in the low-priority hook),
+    and an answer required (294-299: a check given up fails it). It now holds
+    its grace past the stop with `checkGraceOf`, ended after the answer
+    (`endGrace`) and by the callers' release.
+  - `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries/a_retry_past_its_deadline`
+    (verify_hold_test.go 436-438): a 150 ms deadline and a 400 ms sleep at the
+    open, its answer's error dropped (474) and only what it found asked (479),
+    which a check given up answers INCOMPLETE too (`incompleteOf`, finish.go
+    578-582). It takes #1469's arrangement: `parkCheckOf`, the park and the
+    grace's beginning awaited (`awaitParkedPastItsDeadline`), the check let go,
+    its answer awaited and only then its grace ended, the record's read, the
+    veto, the write, its INCOMPLETE and the read-back held at their gates, and
+    the park, the grace and the gates let go by the callers' release before
+    the callers are joined and the seams put back. It keeps its error, refuses
+    `ErrCheckGivenUp`, and requires `context.DeadlineExceeded` and both
+    verdicts INCOMPLETE (deadline). It verifies no snapshot of another store
+    first (`aCheckOfAnotherSnapshotGoesBy`), which proves the park's scope, as
+    #1469's case does already.
+- An answer either way, no change:
+  - `TestACancelledVerificationWritesIncomplete` (verify_test.go 637-665):
+    paced, stopped 50 ms after the check's thread begins, it asks
+    `errors.Is(err, context.Canceled)` and a record INCOMPLETE (cancelled). A
+    check given up answers both: `ErrCheckGivenUp` wraps the stop (finish.go
+    399-403), and the hold given up writes the same INCOMPLETE (578-582,
+    625-630). The timer's grace cannot turn it red; its one red is the
+    caller's expiry, and a held grace would leave the check all of that
+    expiry where the timer leaves it half, so it keeps the timer.
+  - `TestAStopWithABlockedSyncReturnsWithinItsBound/the_check` (715-793): it
+    asks only that `Finish` returns within `StopWriteBound` and a second of
+    the stop, whichever step answers.
+- A check given up expected, no change, each check parked before it reads
+  anything behind a 300 ms deadline:
+  `TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting`'s two
+  cases (verify_bound_test.go 128-140, 172-175),
+  `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` (verify_stuck_test.go
+  404-408), `TestAVerificationWaitingItsTurnHearsOfACheckGivenUp` (622-623,
+  649), `givenUpCheckOf` (restore_source_test.go 200-213), "a retry given up"
+  (verify_hold_test.go 439-449), `TestARecheckGivenUpLeavesTheVetoItMade`
+  (526-530), `TestAGivenUpVerificationReadsItsRecordBack` (770-773), and
+  `TestAnOwnershipIsLetGoBeforeTheLock`'s "a capture's, refused at once"
+  (verify_round5_test.go 730-732).
+- Unrelated: the open recorded (`requireNoOpen`, verify_test.go 388-402) and
+  the stray file made at the open (`TestABundleThatChangesWhileItIsCheckedFails`,
+  702-706), the brief's two; the panics at the open
+  (`TestAPanicInAVerificationLetsGoOfWhatItHolds`, verify_stuck_test.go
+  718-719; "a retry that panics", verify_hold_test.go 450-456; "on a panic of
+  its check", verify_round5_test.go 254-260), where no stop or deadline comes
+  and the recovered panic answers the check at once (`onPanic`, finish.go
+  784); the observers (`checksRun`, verify_veto_test.go 64-69;
+  `TestTheVerificationRunsOnAThreadOfItsOwn`, verify_test.go 948-965); and
+  `TestTheReadsArePaced` (925-944), paced with no stop or deadline. #1469's
+  "past its deadline" (verify_round5_test.go 233-242) is the arrangement
+  itself.
+- Outside the census (not `./internal/backup`), for the record: cmd/bridge's
+  `TestTheTickerReportsAPanickedCheckAtShutdown` (backup_round10_test.go 30)
+  panics at the open, its stop coming after the check
+  (`SetAfterCheckForTest`); internal/admin's "cancelled check"
+  (handlers_backups_round8_test.go 73-74, 122-125) takes either answer, since
+  `reportBackupVerification` (handlers_backups.go 303-332) logs a check given
+  up and one stopped alike, `recordRead=true` and no "not recorded".
+
+### Red and controls (`.tmp/_b901/controls.py`; 9 of 9 as predicted)
+
+Each `-test.count 3`, no `-race`, GOMAXPROCS 8; "main" is a copy of the tree
+with the three test files at 92288694 (the production code is the same at
+both).
+
+- C0, the committed tree: the three tests green, 33 PASS lines.
+- C1, item 2's red, at main: the open's hook cancels, then holds the check's
+  thread `3*StopWriteBound/4` (1.5 s), released early by a channel a cleanup
+  closes: 3 of 3 at verify_round12_test.go:24, "expected a recheck
+  interrupted at SQLite's open: {… Write:none Recorded:false …}, a step of the
+  verification did not end and was given up, and holds the snapshots until it
+  does: its check did not end within its bound (context canceled)", each run
+  2.0 to 2.1 s.
+- C2, item 2's green, at 99b4232e: the same hook in place of the wait for the
+  grace: green 3 of 3, 2.0 to 2.1 s a run, the case's assertion that the grace
+  began passing.
+- C3, the path: `checkGraceOf` given the snapshot through a link to its
+  backups folder, as macOS's `/var` is for `/private/var`: 3 of 3 at
+  verify_round12_test.go:63, "the check's grace never began, and the recheck
+  answered a step of the verification did not end and was given up, …: its
+  check did not end within its bound (context canceled)".
+- R1, at main, "stopped by its caller" with its check's thread held 1.5 s
+  before its files check, after the stop (`SetBeforeFilesCheckForTest`, its
+  own snapshot alone): 3 of 3 at verify_round5_test.go:295, "the recheck was
+  given up (… (context canceled)): the test did not reach the case". R2, the
+  same hold at 99b4232e: green 3 of 3.
+- S1, at main, "a retry past its deadline" with its check's thread held 2 s
+  as it begins (`SetOnLowPriorityForTest`) in place of the open's sleep, the
+  error main drops logged: green 3 of 3, each run logging "a step of the
+  verification did not end and was given up, …: its check did not end within
+  its bound (context deadline exceeded)": main's case passed a retry given up.
+- S2, the negative control, at 99b4232e: the grace ended before the parked
+  check is let go: 3 of 3 at verify_hold_test.go:518, "the retry answered a
+  step of the verification did not end and was given up, …: its check did not
+  end within its bound (context deadline exceeded), want its check's answer
+  past its deadline, never its check given up".
+- S3, at 99b4232e: the check let go 1.5 s after its grace began, past the
+  timer's half of `StopWriteBound`: green 3 of 3.
+
+`git status` was empty before and after the batch.
+
+### Runs
+
+The nine cases of the three tests (the round-12 test, and each subtest of the
+other two a lane of its own), from one `-race` test binary built at 99b4232e,
+`-test.count 50`, four lanes at once at GOMAXPROCS 2 (`.tmp/_b901/lanes.py`):
+
+- quiet, outside the build slot (another worker's run in it, load 3.4 to 7.1),
+  12:20 to 12:27: every case 50 of 50, no FAIL, SKIP or data race; the lanes
+  took 81 to 243 s, 420 s in all;
+- loaded, in slot1, beside 16 python busy loops (load 17.7 to 21.0 as the
+  lanes ended), 13:06 to 13:45: every case 50 of 50, no FAIL, SKIP or data
+  race; the lanes took 443 to 1,252 s (the round-12 test 443 s, "stopped by
+  its caller" 814 s, "a retry past its deadline" 1,029 s), 2,321 s in all.
+  The loops were killed by their captured PIDs after, and none was left.
+
+In the same slot session (slot1, taken by a guard at 12:53:42 once another
+worker's gate let it go, `.tmp/_b901/guard.py` and `session.py`): `go vet
+./...` with the tags as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and
+windows/amd64, clean (5.7, 7.8 and 7.7 s); then `go test -race -count=1
+-timeout 120m ./internal/backup/` at GOMAXPROCS 8: ok (761.9 s). go1.27.3's
+gofmt lists none of the three files. The rule is `rules-b901.patch`,
+uncommitted (`~/onebit/jobs/b901/`): one bullet in `build-ci-tests.md`, after
+B886's on a check that must answer past its deadline, and its long form in
+`ops/History-rules-build-ci-tests.md`. `git apply --check` takes it at HEAD;
+over a copy of HEAD with it applied and this record appended, the budgets
+check is clean (worst load 76.6%), `scripts/doc-split/verify_moves.py --base
+HEAD` passes (the two new blocks, nothing moved or lost), and cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass, the first failing on a ghost citation planted in
+the patched History, which it names.
+
+### Left
+
+- The residual, the caller's own expiry: a check's answer and the worker's
+  steps after it slower than `StopWriteBound` from the stop end the round-12
+  case at "the verification was left to end on its own 2s after its stop,
+  holding the snapshots' lock until it does: context canceled", and "stopped
+  by its caller" at "the recheck found , want INCOMPLETE" (a zero `Found`, its
+  write unknown; B886's record names that case's class). No test seam holds
+  it, and a seam is a production change.
+- `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` and
+  `TestARecheckGivenUpLeavesTheVetoItMade` read what their prune kept without
+  asserting `!Skipped` (backlog B851's rule); both prune after `awaitClean`,
+  so it does not flake, but a prune that met the lock would pass them.
+
+The backlog file is not on legion0: these are named for the orchestrator to
+file.
