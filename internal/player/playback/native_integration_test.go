@@ -8,12 +8,15 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2210,4 +2213,507 @@ func TestNativeIntegrationFenceStopsTheWrites(t *testing.T) {
 		t.Fatal(e)
 	}
 	k.CheckClosedEach(t)
+}
+
+// The occurrence whose Write is under way (B903). The producer hands the sink
+// an occurrence's frames in a Write (writeAll) and counts them (written) only
+// once that Write has returned, under the session's lock; the sink takes and
+// publishes them as the Write goes, and its writer may hand them to the
+// kernel, and the DAC play them, before that count. These tests hold one of
+// the producer's Writes to the real Sink over the fake kernel there, through
+// a wrapper of the session's sink installed as the sink opens (heldWrite),
+// and read what the reporter says of the occurrence meanwhile: what the sink
+// played of it, which the sink never counts past what it took (Played is at
+// most its Written, which is at most what it took), never the producer's
+// count from before the Write.
+
+// heldWAV is a canonical WAV of frames stereo 24-bit frames at 48 kHz, no
+// sample zero.
+func heldWAV(frames int) []byte {
+	const rate, width = 48000, 3
+	data := make([]byte, 0, frames*2*width)
+	for f := range frames {
+		for c := range 2 {
+			v := int32((f*7919+c*31)%(1<<23-2) + 1)
+			if (f+c)%2 == 1 {
+				v = -v
+			}
+			data = append(data, byte(v), byte(v>>8), byte(v>>16))
+		}
+	}
+	var w bytes.Buffer
+	w.WriteString("RIFF")
+	_ = binary.Write(&w, binary.LittleEndian, uint32(36+len(data)))
+	w.WriteString("WAVEfmt ")
+	_ = binary.Write(&w, binary.LittleEndian, uint32(16))
+	_ = binary.Write(&w, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&w, binary.LittleEndian, uint16(2))
+	_ = binary.Write(&w, binary.LittleEndian, uint32(rate))
+	_ = binary.Write(&w, binary.LittleEndian, uint32(rate*2*width))
+	_ = binary.Write(&w, binary.LittleEndian, uint16(2*width))
+	_ = binary.Write(&w, binary.LittleEndian, uint16(8*width))
+	w.WriteString("data")
+	_ = binary.Write(&w, binary.LittleEndian, uint32(len(data)))
+	w.Write(data)
+	return w.Bytes()
+}
+
+// heldWrite is a session's sink with one of the producer's Writes held: the
+// first for which hold is true, given the frames the sink took before it (at)
+// and its own (frames). The sink takes the first take of its frames (all of
+// them for take 0) before the hold and the rest after it, as a Write that
+// waits for room part of the way does; held is closed once it holds, and
+// release lets it go on, or panic in place of going on when panics is set.
+// Only the producer calls Write, so took is its alone.
+type heldWrite struct {
+	streamSink
+	hold   func(at, frames int64) bool
+	take   int64
+	panics bool
+
+	took  int64
+	first atomic.Bool
+	// before and after are what the sink had taken before the Write held,
+	// and once it held.
+	before, after atomic.Int64
+	held, gate    chan struct{}
+	letGo         sync.Once
+}
+
+func newHeldWrite(hold func(at, frames int64) bool, take int64, panics bool) *heldWrite {
+	return &heldWrite{hold: hold, take: take, panics: panics, held: make(chan struct{}), gate: make(chan struct{})}
+}
+
+// install wraps the first sink a session opens (Config.Notify's NoteOpened),
+// on the goroutine that opened it, before the session makes it current or
+// starts the goroutines that use it.
+func (w *heldWrite) install(n Note) {
+	if n.Kind == NoteOpened && w.streamSink == nil && n.output != nil && n.output.native == nil {
+		w.streamSink = n.output.sink
+		n.output.sink = w
+	}
+}
+
+// release lets the Write held go on.
+func (w *heldWrite) release() { w.letGo.Do(func() { close(w.gate) }) }
+
+func (w *heldWrite) Write(ctx context.Context, b []byte) (int, error) {
+	fb := int64(w.Params().FrameBytes())
+	at, frames := w.took, int64(len(b))/fb
+	if !w.hold(at, frames) || !w.first.CompareAndSwap(false, true) {
+		n, err := w.streamSink.Write(ctx, b)
+		w.took += int64(n)
+		return n, err
+	}
+	take := frames
+	if w.take > 0 {
+		take = min(w.take, frames)
+	}
+	n, err := w.streamSink.Write(ctx, b[:take*fb])
+	w.took += int64(n)
+	w.before.Store(at)
+	w.after.Store(w.took)
+	close(w.held)
+	<-w.gate
+	if w.panics {
+		panic("a test's sink Write panics, part of its frames taken")
+	}
+	if err != nil || take == frames {
+		return n, err
+	}
+	m, err := w.streamSink.Write(ctx, b[take*fb:])
+	w.took += int64(m)
+	return n + m, err
+}
+
+// stepHold holds the producer at the first step it takes once armed
+// (Seams.ProducerStep: no session lock held, and no Write under way), until
+// release; held is closed once it holds.
+type stepHold struct {
+	armed      atomic.Bool
+	held, gate chan struct{}
+	letGo      sync.Once
+}
+
+func newStepHold() *stepHold { return &stepHold{held: make(chan struct{}), gate: make(chan struct{})} }
+
+func (h *stepHold) seam(engine.SessionID, string, engine.OccurrenceID) {
+	if h.armed.CompareAndSwap(true, false) {
+		close(h.held)
+		<-h.gate
+	}
+}
+
+func (h *stepHold) release() { h.letGo.Do(func() { close(h.gate) }) }
+
+// heldEvent is one event a session reported: its kind, its occurrence, and a
+// position's or a fault's frames.
+type heldEvent struct {
+	kind   string
+	o      engine.OccurrenceID
+	frames int64
+	fault  engine.Fault
+}
+
+func (e heldEvent) String() string {
+	if e.kind == "fault" {
+		return fmt.Sprintf("fault %s at %d+%d", e.fault.Reason, e.o, e.frames)
+	}
+	return fmt.Sprintf("%s %d+%d", e.kind, e.o, e.frames)
+}
+
+// heldEvents keeps what a session reported, in order, and tells waiters of
+// each.
+type heldEvents struct {
+	mu      sync.Mutex
+	evs     []heldEvent
+	changed chan struct{}
+}
+
+func (e *heldEvents) add(x heldEvent) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.evs = append(e.evs, x)
+	close(e.changed)
+	e.changed = make(chan struct{})
+}
+
+func (e *heldEvents) Prepared(_ engine.SessionID, o engine.OccurrenceID, _ engine.Join) {
+	e.add(heldEvent{kind: "prepared", o: o})
+}
+func (e *heldEvents) Refused(_ engine.SessionID, o engine.OccurrenceID, _ engine.Unplayable) {
+	e.add(heldEvent{kind: "refused", o: o})
+}
+func (e *heldEvents) Submitted(_ engine.SessionID, o engine.OccurrenceID) {
+	e.add(heldEvent{kind: "submitted", o: o})
+}
+func (e *heldEvents) Audible(_ engine.SessionID, o engine.OccurrenceID) {
+	e.add(heldEvent{kind: "audible", o: o})
+}
+func (e *heldEvents) Position(_ engine.SessionID, p engine.Position) {
+	e.add(heldEvent{kind: "position", o: p.Occurrence, frames: p.Frames})
+}
+func (e *heldEvents) Fault(_ engine.SessionID, f engine.Fault) {
+	e.add(heldEvent{kind: "fault", o: f.Occurrence, frames: f.Frames, fault: f})
+}
+func (e *heldEvents) Finished(engine.SessionID)       { e.add(heldEvent{kind: "finished"}) }
+func (e *heldEvents) DeviceReleased(engine.SessionID) { e.add(heldEvent{kind: "device released"}) }
+func (e *heldEvents) Released(engine.SessionID)       { e.add(heldEvent{kind: "released"}) }
+
+// events is what was reported so far.
+func (e *heldEvents) events() []heldEvent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.evs)
+}
+
+// await waits until cond holds of what was reported, under the fake's
+// watchdog.
+func (e *heldEvents) await(t *testing.T, what string, cond func([]heldEvent) bool) []heldEvent {
+	t.Helper()
+	timer := time.NewTimer(alsapcm.Watchdog())
+	defer timer.Stop()
+	for {
+		e.mu.Lock()
+		evs, ch := slices.Clone(e.evs), e.changed
+		e.mu.Unlock()
+		if cond(evs) {
+			return evs
+		}
+		select {
+		case <-ch:
+		case <-timer.C:
+			alsapcm.LogGoroutines(t)
+			t.Fatalf("waited %v for %s: %+v", alsapcm.Watchdog(), what, evs)
+		}
+	}
+}
+
+// heldFault is the fault reported, if one was.
+func heldFault(evs []heldEvent) (engine.Fault, bool) {
+	for _, e := range evs {
+		if e.kind == "fault" {
+			return e.fault, true
+		}
+	}
+	return engine.Fault{}, false
+}
+
+func hasHeldFault(evs []heldEvent) bool {
+	_, ok := heldFault(evs)
+	return ok
+}
+
+// lastHeldPosition is the last position reported, if one was.
+func lastHeldPosition(evs []heldEvent) (heldEvent, bool) {
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].kind == "position" {
+			return evs[i], true
+		}
+	}
+	return heldEvent{}, false
+}
+
+// receiveHeld waits for ch under the fake's watchdog.
+func receiveHeld(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	timer := time.NewTimer(alsapcm.Watchdog())
+	defer timer.Stop()
+	select {
+	case <-ch:
+	case <-timer.C:
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
+	}
+}
+
+// runningAndStarved is the stream started and its writer waiting on the DAC
+// for time none was granted: a grant from here plays content.
+func runningAndStarved(v alsapcm.KernelView) bool { return v.State == "RUNNING" && v.Starved }
+
+// heldRig is a backend over the fake kernel playing session 1, its first
+// sink wrapped by a heldWrite, its reporter measuring on the test's ticks.
+type heldRig struct {
+	t     *testing.T
+	k     *alsapcm.FakeKernel
+	b     *Backend
+	ev    *heldEvents
+	ticks chan time.Time
+	// lets let go of what the test holds, first at the end: the release joins
+	// the producer, and a sink's close waits for its writer.
+	lets    []func()
+	stopped sync.Once
+}
+
+// newHeldRig is a heldRig over files, edit, when there is one, changing the
+// backend's Config before it is built.
+func newHeldRig(t *testing.T, w *heldWrite, files nativeFiles, edit func(*Config)) *heldRig {
+	t.Helper()
+	r := &heldRig{t: t, k: alsapcm.NewFakeKernel(t), ev: &heldEvents{changed: make(chan struct{})}, ticks: make(chan time.Time)}
+	cfg := Config{Resolver: files, Locator: nativeLocator{}, OpenSink: r.k.OpenSink, Notify: w.install,
+		Tick: func() (<-chan time.Time, func()) { return r.ticks, func() {} }}
+	if edit != nil {
+		edit(&cfg)
+	}
+	b, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.b = b
+	r.lets = append(r.lets, w.release)
+	t.Cleanup(r.stop)
+	return r
+}
+
+// start starts session 1 on refs, each named after the one before.
+func (r *heldRig) start(refs ...string) {
+	r.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), alsapcm.Watchdog())
+	defer cancel()
+	first, _ := engine.NewReference(refs[0])
+	if err := r.b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Entry: 1, Ref: first}, Events: r.ev}); err != nil {
+		r.t.Fatal(err)
+	}
+	for i, name := range refs[1:] {
+		ref, _ := engine.NewReference(name)
+		id := engine.OccurrenceID(i + 2)
+		if err := r.b.Prepare(ctx, 1, id-1, &engine.Occurrence{ID: id, Entry: uint32(id), Ref: ref}); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+}
+
+// tick has the reporter measure once: a send returns when the reporter took
+// it, and the second when it has done what the first asked.
+func (r *heldRig) tick() {
+	r.t.Helper()
+	for range 2 {
+		select {
+		case r.ticks <- time.Time{}:
+		case <-time.After(alsapcm.Watchdog()):
+			alsapcm.LogGoroutines(r.t)
+			r.t.Fatalf("no reporter took a tick within %v", alsapcm.Watchdog())
+		}
+	}
+}
+
+// stop lets go of what the test holds, releases the session, joins the
+// backend's goroutines and checks that every open of the node was closed
+// once; a test calls it to read what the session reported to its end.
+func (r *heldRig) stop() {
+	r.stopped.Do(func() {
+		for _, f := range r.lets {
+			f()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), alsapcm.Watchdog())
+		defer cancel()
+		if err := r.b.Release(ctx, 1); err != nil {
+			r.t.Errorf("Release: %v", err)
+		}
+		if err := r.b.Wait(ctx); err != nil {
+			r.t.Errorf("the backend's goroutines: %v", err)
+		}
+		r.k.CheckClosedEach(r.t)
+	})
+}
+
+// TestNativeIntegrationAFaultInALaterWriteFreezesWhatTheSinkPlayed pins an
+// xrun inside a later Write (B903): the sink took that Write's frames and its
+// writer handed them to the kernel, which stopped once 30000 frames were
+// written in all, while the producer had not counted them yet, where the
+// scheduler left it on CI's macOS runner four times
+// (TestPlaybackFaultsOnAnXrunAndNeverRecovers in internal/alsapcm reported
+// 28672 frames, seven Writes, against 30080 to 31200 written). The fault
+// names the frames the kernel was given, every one of which the sink counts
+// played at an xrun, and the position stops there; the producer's count
+// stopped it a Write short.
+func TestNativeIntegrationAFaultInALaterWriteFreezesWhatTheSinkPlayed(t *testing.T) {
+	const xrunAt = 30000
+	w := newHeldWrite(func(at, frames int64) bool { return at > 0 && at+frames > xrunAt }, 0, false)
+	r := newHeldRig(t, w, nativeFiles{"a": heldWAV(100000)}, nil)
+	r.k.Free()
+	r.k.XrunAt(xrunAt)
+	r.start("a")
+	receiveHeld(t, w.held, "a later Write held before it returns, its frames taken")
+	f, _ := heldFault(r.ev.await(t, "the xrun's fault while that Write is held", hasHeldFault))
+	v := r.k.View()
+	counted := w.before.Load()
+	if counted == 0 || int64(v.Total) <= counted {
+		t.Fatalf("the Write held began at frame %d, and the kernel was given %d: want a later Write, some of whose frames reached the kernel", counted, v.Total)
+	}
+	// Red before B903: the reporter capped the frames at what the producer had
+	// counted, the Writes before the one held.
+	if f.Reason != engine.ReasonXrun || f.Occurrence != 1 || f.Frames != int64(v.Total) {
+		t.Errorf("fault %+v; want an xrun in occurrence 1 at the %d frames the kernel was given, every one of which the sink counts played (the producer had counted %d)", f, v.Total, counted)
+	}
+	// Green before B903 too: the position stops where the fault does, the
+	// Write counted since.
+	r.stop()
+	evs := r.ev.events()
+	at := slices.IndexFunc(evs, func(e heldEvent) bool { return e.kind == "fault" })
+	if p, ok := lastHeldPosition(evs[:at]); !ok || p.o != 1 || p.frames != f.Frames {
+		t.Errorf("the last position before the fault is %+v; want occurrence 1 at the fault's %d frames", p, f.Frames)
+	}
+	if p, ok := lastHeldPosition(evs[at:]); ok {
+		t.Errorf("a position after the fault: %+v", p)
+	}
+}
+
+// TestNativeIntegrationThePositionIsOneQuantityAcrossAWritesBookkeeping pins
+// a Write's bookkeeping as no move of the position (B903). The DAC played
+// into a Write the sink took part of and the producer had not counted, and
+// playback is held there: the reporter says what the sink played of the
+// occurrence. Once the Write returns and the producer counts it, the
+// reporter's cap, all the occurrence gave the sink, covers what was played,
+// so the position is the same frame. The cap before the count said the
+// frames counted before the Write: a position that never stepped back, and
+// jumped at the count.
+func TestNativeIntegrationThePositionIsOneQuantityAcrossAWritesBookkeeping(t *testing.T) {
+	step := newStepHold()
+	// The third Write, of which the sink takes 4000 frames before it holds:
+	// 8192 counted before it.
+	w := newHeldWrite(func(at, _ int64) bool { return at == 2*chunkFrames }, 4000, false)
+	r := newHeldRig(t, w, nativeFiles{"a": heldWAV(40000)}, func(c *Config) { c.Seams = &Seams{ProducerStep: step.seam} })
+	r.lets = append(r.lets, step.release)
+	r.start("a")
+	receiveHeld(t, w.held, "the third Write held, part of its frames taken")
+	r.k.Await(t, "the stream to run and its writer to wait on the DAC", runningAndStarved)
+	r.k.Play(t, 200*time.Millisecond)
+	// Playback is held from here: no time is granted, and the sink's next
+	// measurement is parked, so what it counts played cannot move.
+	_, unpark := r.k.ParkNextStatus()
+	r.lets = append(r.lets, unpark)
+	r.tick()
+	played, counted, taken := w.Position().Played, w.before.Load(), w.after.Load()
+	if played <= counted || played >= taken {
+		t.Fatalf("the sink counts %d frames played; want some of the held Write's frames played, past the %d the producer counted, and some not, short of the %d the sink took", played, counted, taken)
+	}
+	// Red before B903: the reporter said the frames the producer had counted.
+	if p, ok := lastHeldPosition(r.ev.events()); !ok || p.o != 1 || p.frames != played {
+		t.Errorf("before the Write is counted the position is %+v; want occurrence 1 at the %d frames the sink played of it (the producer had counted %d)", p, played, counted)
+	}
+	// The Write takes the rest of its frames and returns; the producer counts
+	// it and holds at its next step, no Write under way.
+	step.armed.Store(true)
+	w.release()
+	receiveHeld(t, step.held, "the producer's next step, the held Write counted")
+	r.tick()
+	if p := w.Position().Played; p != played {
+		t.Fatalf("playback moved across the count: %d frames played, then %d", played, p)
+	}
+	// Green before B903 too: the cap, what the occurrence gave the sink,
+	// covers what was played.
+	if p, ok := lastHeldPosition(r.ev.events()); !ok || p.o != 1 || p.frames != played {
+		t.Errorf("once the Write is counted the position is %+v; want occurrence 1 still at the %d frames played", p, played)
+	}
+}
+
+// TestNativeIntegrationAPredecessorsPositionStopsAtItsOwnEnd pins the cap the
+// reporter keeps for every occurrence but the one whose Write is under way
+// (B903): a gapless successor's first Write held, part of its frames taken
+// and played past its predecessor's end, the successor having counted none
+// of them, so the occurrence heard is still the predecessor, whose position
+// is its own frames, never what the sink played past them: green before B903
+// as after, red with the cap gone for every occurrence. Which occurrence a
+// fault in a successor's first Write names is B903G's.
+func TestNativeIntegrationAPredecessorsPositionStopsAtItsOwnEnd(t *testing.T) {
+	const aFrames = 2 * chunkFrames
+	w := newHeldWrite(func(at, _ int64) bool { return at == aFrames }, 4000, false)
+	r := newHeldRig(t, w, nativeFiles{"a": heldWAV(aFrames), "b": heldWAV(20000)}, nil)
+	r.start("a", "b")
+	receiveHeld(t, w.held, "the successor's first Write held, part of its frames taken")
+	r.k.Await(t, "the stream to run and its writer to wait on the DAC", runningAndStarved)
+	r.k.Play(t, 200*time.Millisecond)
+	r.tick()
+	played, taken := w.Position().Played, w.after.Load()
+	if played <= aFrames || played >= taken {
+		t.Fatalf("the sink counts %d frames played; want the DAC past the predecessor's %d frames, into the successor's first %d", played, aFrames, taken-aFrames)
+	}
+	evs := r.ev.events()
+	for _, e := range evs {
+		if e.kind == "position" && e.o == 1 && e.frames > aFrames {
+			t.Errorf("the predecessor's position ran past its own %d frames: %+v", aFrames, e)
+		}
+	}
+	if p, ok := lastHeldPosition(evs); !ok || p.o != 1 || p.frames != aFrames {
+		t.Errorf("the position is %+v; want the predecessor, occurrence 1, at its own end, %d frames", p, aFrames)
+	}
+}
+
+// TestNativeIntegrationAPanicInALaterWriteFreezesWhatTheSinkPlayed pins a
+// panic inside a later Write (B903), the sink having taken part of its frames
+// and the DAC played some of them: the producer dies in the Write and never
+// counts it, so the session holds it under way for good, and the session's
+// fault (backend_failed) names what the sink played of the occurrence. That
+// is exact: nothing is written after the panic, so every frame the sink took
+// past the occurrence's start is the occurrence's own, and Played never
+// passes them.
+func TestNativeIntegrationAPanicInALaterWriteFreezesWhatTheSinkPlayed(t *testing.T) {
+	w := newHeldWrite(func(at, _ int64) bool { return at == 2*chunkFrames }, 4000, true)
+	// The log discarded: the recovery's line for the panic is expected here.
+	r := newHeldRig(t, w, nativeFiles{"a": heldWAV(40000)}, func(c *Config) { c.Log = slog.New(slog.NewTextHandler(io.Discard, nil)) })
+	r.start("a")
+	receiveHeld(t, w.held, "the third Write held, part of its frames taken")
+	r.k.Await(t, "the stream to run and its writer to wait on the DAC", runningAndStarved)
+	r.k.Play(t, 200*time.Millisecond)
+	played, counted, taken := w.Position().Played, w.before.Load(), w.after.Load()
+	if played <= counted || played >= taken {
+		t.Fatalf("the sink counts %d frames played; want some of the held Write's frames played, past the %d the producer counted, and some not, short of the %d the sink took", played, counted, taken)
+	}
+	w.release()
+	f, _ := heldFault(r.ev.await(t, "the producer's panic reported as the session's fault", hasHeldFault))
+	s := r.b.known(1)
+	s.mu.Lock()
+	underWay := s.inWrite && s.writing != nil && s.writing.id == 1
+	s.mu.Unlock()
+	if !underWay {
+		t.Fatalf("the producer's panic left no Write of occurrence 1 under way")
+	}
+	// Red before B903: the reporter said the frames the producer had counted.
+	if f.Reason != ReasonFailed || f.Occurrence != 1 || f.Frames != played {
+		t.Errorf("fault %+v; want %s in occurrence 1 at the %d frames the sink played of it (the producer had counted %d)", f, ReasonFailed, played, counted)
+	}
+	if p := w.Position().Played; p != played {
+		t.Errorf("the sink counts %d frames played once the session faulted, %d before: no time was granted", p, played)
+	}
 }
