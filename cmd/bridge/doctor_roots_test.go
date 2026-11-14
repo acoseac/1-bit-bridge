@@ -1298,12 +1298,12 @@ func bridgeDoctorFixOver(t *testing.T, path string) doctorFixed {
 // remediations, and that run asks again every root whose probe has ended
 // (backlog B650FIX), as every run did before B650. A root whose first listing
 // is refused, and which lists when it is asked again, is reachable in what
-// --fix prints. Red at 0ddfda75, which handed the second run the first one's
-// run of the works (doctor.ProbeRun), which keeps every work it has met: the
-// root was listed once, and the report said its listing was refused. That it
-// is asked again is all this case shows, no remediation acting here
-// (config-dir is ok); TestBridgeDoctorFixReportsTheRootItsRemediationLetItList
-// shows a remediation's effect read.
+// --fix prints. Red at 0ddfda75, whose second run of the checks took the first
+// one's doctor.ProbeRun, which keeps every work it has met: the root was
+// listed once, and the report said its listing was refused. That it is asked
+// again is all this case shows, no remediation acting here (config-dir is
+// ok); TestBridgeDoctorFixReportsTheRootItsRemediationLetItList shows a
+// remediation's effect read.
 func TestBridgeDoctorFixReadsTheRootsAgainForItsSecondReport(t *testing.T) {
 	path, _, refused := rootsInstall(t, false)
 	var listings atomic.Int32

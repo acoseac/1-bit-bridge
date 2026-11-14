@@ -80,12 +80,13 @@ func runDoctorReport(d doctor.Deps, jsonOut, doFix bool, stdout, stderr io.Write
 			fixOut = stderr
 		}
 		runFixes(fixOut, &report, d)
-		// Re-run the checks so the displayed status matches reality, as a
-		// run of its own of the CLI's works on the roots, whose run d
-		// carries (buildDoctorDepsWith): a run keeps every work it has met,
-		// so the first run's would hand back the probes it made before the
-		// fixes (backlog B650FIX). A new run asks again every root whose
-		// probe has ended, and joins one still out, whose bound it began with.
+		// Re-run the checks so the displayed status matches reality, in a
+		// new run of the CLI's works on the roots (cliRootProbes, the runner
+		// of the run buildDoctorDepsWith gave d): a run keeps every work it
+		// has met, so the first one would hand back the probes it made
+		// before the fixes (backlog B650FIX). The new run asks again every
+		// root whose probe has ended, and joins one still out, keeping the
+		// bound it began with.
 		d.RootProbes = cliRootProbes.BeginRun()
 		report = doctor.Run(ctx, d)
 	}
