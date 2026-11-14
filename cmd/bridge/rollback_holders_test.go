@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,8 +41,25 @@ type candidateUser struct {
 	// app and service are the Restart Manager's names for it.
 	app, service string
 	// started is when the process started, which tells a pid used again
-	// apart.
+	// apart: the zero time where the Restart Manager gave none a process can
+	// have started at (filetimeStart), which String leaves out.
 	started time.Time
+}
+
+// filetimeUnixEpoch is the Unix epoch as a FILETIME: 100 ns intervals since
+// 1601-01-01 UTC.
+const filetimeUnixEpoch = 116444736000000000
+
+// filetimeStart is the time a FILETIME of high and low names, and false for
+// one no process can have started at: zero, which a FILETIME left as it was
+// made holds and which would read as 1601, any other before the Unix epoch,
+// and any past what nanoseconds since that epoch hold in an int64.
+func filetimeStart(high, low uint32) (time.Time, bool) {
+	v := uint64(high)<<32 | uint64(low)
+	if v <= filetimeUnixEpoch || v-filetimeUnixEpoch > math.MaxInt64/100 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, int64(v-filetimeUnixEpoch)*100), true
 }
 
 func (u candidateUser) String() string {
@@ -95,6 +113,9 @@ type rollbackHolders struct {
 	mu       sync.Mutex
 	refusals []refusalReport
 	asked    map[updater.RollbackStage]bool
+	// ignored counts the refusals of another binary's rollback the observer
+	// heard and left alone (another test's).
+	ignored int
 }
 
 // newRollbackHolders is the diagnostic on the rollback of the binary at dst,
@@ -123,13 +144,17 @@ func watchRollbackHolders(t *testing.T, dst string) *rollbackHolders {
 }
 
 // observe is the observer: it records a refusal of a rename of the
-// rollback of dst, ignoring another test's, and at the first refusal of its
-// stage that says a file is in use asks about each of the rename's two
-// files, there and then, while the file is still held. It runs on the
-// goroutine that made the rename, and logs nothing: the test's goroutine
+// rollback of dst, counting and leaving alone another binary's (another
+// test's), and at the first refusal of its stage that says a file is in use
+// asks about each of the rename's two files, there and then, while the file
+// is still held. Every rename of the put-back has dst at one end. It runs on
+// the goroutine that made the rename, and logs nothing: the test's goroutine
 // logs it all at its end.
 func (h *rollbackHolders) observe(r updater.RollbackRename) {
 	if r.From != h.dst && r.To != h.dst {
+		h.mu.Lock()
+		h.ignored++
+		h.mu.Unlock()
 		return
 	}
 	rep := refusalReport{rename: r}
@@ -181,8 +206,9 @@ func (h *rollbackHolders) usersOf(stage updater.RollbackStage, path string) ([]c
 // lines is what the diagnostic found, a line each: this process's pid; each
 // refusal, its stage, its paths and its Windows error code; for each file
 // asked about, each candidate user, "no candidate user", "absent" or why it
-// could not be asked; and last, "refusals: N; candidate users: …", which a
-// run that met no refusal says too.
+// could not be asked; and last, "refusals: N; ignored: M; candidate users:
+// …", which a run that met no refusal says too, M the refusals of another
+// binary's rollback it left alone.
 func (h *rollbackHolders) lines() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -227,13 +253,14 @@ func (h *rollbackHolders) lines() []string {
 	case !asked && len(h.refusals) > 0:
 		users = "not asked, no refusal said a file was in use"
 	}
-	return append(out, fmt.Sprintf("%srefusals: %d; candidate users: %s", lead, len(h.refusals), users))
+	return append(out, fmt.Sprintf("%srefusals: %d; ignored: %d; candidate users: %s", lead, len(h.refusals), h.ignored, users))
 }
 
 // TestTheRollbackHolderDiagnosticAsksOnceAStageIsRefusedInUse drives the
 // diagnostic with refusals as the rollback's observer hands them over, its
 // platform's two functions stood in for, so its bookkeeping runs on every
-// host: a refusal of another binary's rollback is ignored; the first
+// host: a refusal of another binary's rollback is left alone and counted
+// (ignored); the first
 // refusal of a stage that says a file is in use asks about both of its
 // files there, a file that is not there "absent" and not asked about; a
 // second such refusal of that stage, and a refusal that says no file is in
@@ -278,7 +305,7 @@ func TestTheRollbackHolderDiagnosticAsksOnceAStageIsRefusedInUse(t *testing.T) {
 			return nil, nil
 		},
 	}
-	if got := h.lines(); len(got) != 2 || got[1] != "rollback holder diagnostic: refusals: 0; candidate users: none" {
+	if got := h.lines(); len(got) != 2 || got[1] != "rollback holder diagnostic: refusals: 0; ignored: 0; candidate users: none" {
 		t.Errorf("the report of a run that met no refusal = %q, want this process's pid and the summary", got)
 	}
 	h.observe(updater.RollbackRename{Stage: updater.RollbackStageBackup, From: filepath.Join(dir, "other.exe.bak"), To: filepath.Join(dir, "other.exe"), Err: errInUse})
@@ -311,7 +338,7 @@ func TestTheRollbackHolderDiagnosticAsksOnceAStageIsRefusedInUse(t *testing.T) {
 		fmt.Sprintf("%sthe vacate rename %s -> %s was refused (Windows error 32: %v): a file in use, the stage's first", lead, dst, aside, errInUse),
 		fmt.Sprintf("%s  %s: no candidate user", lead, dst),
 		fmt.Sprintf("%s  %s: the Restart Manager could not be asked: %v", lead, aside, errNoRM),
-		fmt.Sprintf("%srefusals: 4; candidate users: pid 4242, image C:\\holder.exe, parent pid 7 of bridge.exe.bak", lead),
+		fmt.Sprintf("%srefusals: 4; ignored: 1; candidate users: pid 4242, image C:\\holder.exe, parent pid 7 of bridge.exe.bak", lead),
 	}
 	if got := h.lines(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("the report =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -321,7 +348,44 @@ func TestTheRollbackHolderDiagnosticAsksOnceAStageIsRefusedInUse(t *testing.T) {
 	// summary says so.
 	quiet := &rollbackHolders{dst: dst, asked: map[updater.RollbackStage]bool{}, classify: h.classify, ask: h.ask}
 	quiet.observe(updater.RollbackRename{Stage: updater.RollbackStageInstall, From: bak, To: dst, Err: errDenied})
-	if got := quiet.lines(); got[len(got)-1] != lead+"refusals: 1; candidate users: not asked, no refusal said a file was in use" {
+	if got := quiet.lines(); got[len(got)-1] != lead+"refusals: 1; ignored: 0; candidate users: not asked, no refusal said a file was in use" {
 		t.Errorf("the summary of a run whose one refusal said no file was in use = %q", got[len(got)-1])
+	}
+}
+
+// TestTheStartTimeIsOnlyOneAProcessCanHave: the Restart Manager's start time
+// of a candidate user is read from its FILETIME (filetimeStart) only where it
+// names a time a process can have started at, so a zero one, which reads as
+// 1601, and any before the Unix epoch or past what an int64 of nanoseconds
+// since it holds, leave the start time zero, which String leaves out.
+func TestTheStartTimeIsOnlyOneAProcessCanHave(t *testing.T) {
+	split := func(v uint64) (uint32, uint32) { return uint32(v >> 32), uint32(v) }
+	at := time.Date(2026, 11, 14, 3, 4, 5, 600, time.UTC)
+	hi, lo := split(filetimeUnixEpoch + uint64(at.UnixNano()/100))
+	if got, ok := filetimeStart(hi, lo); !ok || !got.Equal(at.Truncate(100*time.Nanosecond)) {
+		t.Errorf("filetimeStart of %s = %s (%v), want it back to 100 ns", at, got, ok)
+	}
+	for _, tc := range []struct {
+		name string
+		v    uint64
+	}{
+		{"zero", 0},
+		{"1601 plus one interval", 1},
+		{"the Unix epoch itself", filetimeUnixEpoch},
+		{"past an int64 of nanoseconds", filetimeUnixEpoch + math.MaxInt64/100 + 1},
+		{"the largest FILETIME", math.MaxUint64},
+	} {
+		hi, lo := split(tc.v)
+		if got, ok := filetimeStart(hi, lo); ok || !got.IsZero() {
+			t.Errorf("filetimeStart of %s = %s (%v), want the zero time and false", tc.name, got, ok)
+		}
+	}
+	u := candidateUser{pid: 9, parent: -1, image: `C:\x.exe`}
+	if s := u.String(); strings.Contains(s, "started") || s != `pid 9, image C:\x.exe, parent pid unknown` {
+		t.Errorf("a candidate user with no start time reads %q, want no start time in it", s)
+	}
+	u.started = at
+	if s := u.String(); !strings.Contains(s, "started 2026-11-14T03:04:05.0000006Z") {
+		t.Errorf("a candidate user with its start time reads %q, want it", s)
 	}
 }

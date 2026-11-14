@@ -14,11 +14,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/svc/mgr"
 
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
@@ -127,8 +125,9 @@ func candidateUsers(path string) ([]candidateUser, error) {
 			pid: int(pid), parent: -1,
 			app:     windows.UTF16ToString(info.AppName[:]),
 			service: windows.UTF16ToString(info.ServiceShortName[:]),
-			started: time.Unix(0, info.Process.ProcessStartTime.Nanoseconds()),
 		}
+		// Zero, or none a process can have started at, leaves it zero.
+		u.started, _ = filetimeStart(info.Process.ProcessStartTime.HighDateTime, info.Process.ProcessStartTime.LowDateTime)
 		if img, err := processImage(pid); err != nil {
 			u.image = fmt.Sprintf("not read (%v)", err)
 		} else {
@@ -204,23 +203,33 @@ func parentPIDs() (map[uint32]uint32, error) {
 	return parents, nil
 }
 
-// skipIfABridgeServiceIsRegistered skips where a bridge service is
-// registered: RollbackBinary stops a running one and starts it again
-// (stopServiceIfRunning), and a test must not. internal/updater's
+// skipIfABridgeServiceIsRegistered skips unless the service manager says no
+// bridge service exists: RollbackBinary stops a running one and starts it
+// again (stopServiceIfRunning), and a test must not. It asks with the least
+// rights that answer, which any user has (SC_MANAGER_CONNECT, then
+// SERVICE_QUERY_STATUS), so an unprivileged runner is answered too, and runs
+// only on ERROR_SERVICE_DOES_NOT_EXIST: a lookup that fails otherwise is no
+// answer, and skips, failing closed. internal/updater's
 // skipIfBridgeServiceRegistered is the same check.
 func skipIfABridgeServiceIsRegistered(t *testing.T) {
 	t.Helper()
-	m, err := mgr.Connect()
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
-		return
+		t.Skipf("the service manager could not be asked whether a bridge service is registered (%v); RollbackBinary would stop one", err)
 	}
-	defer m.Disconnect()
-	s, err := m.OpenService(packaging.ServiceLabel)
+	defer func() { _ = windows.CloseServiceHandle(scm) }()
+	name, err := windows.UTF16PtrFromString(packaging.ServiceLabel)
 	if err != nil {
-		return
+		t.Fatal(err)
 	}
-	s.Close()
-	t.Skip("a bridge service is registered on this machine; RollbackBinary would stop it")
+	s, err := windows.OpenService(scm, name, windows.SERVICE_QUERY_STATUS)
+	switch {
+	case err == nil:
+		_ = windows.CloseServiceHandle(s)
+		t.Skip("a bridge service is registered on this machine; RollbackBinary would stop it")
+	case !errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST):
+		t.Skipf("the service manager could not say whether a bridge service is registered (%v); RollbackBinary would stop one", err)
+	}
 }
 
 // holderChildEnv names the file this test binary, run again as the positive
@@ -286,7 +295,9 @@ func TestTheHolderDiagnosticNamesTheChildThatHoldsTheBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = said.Close() })
+	// Both ends, so a Start that fails leaks neither; the write end is
+	// closed again below once the child has its copy.
+	t.Cleanup(func() { _ = said.Close(); _ = sayer.Close() })
 	child.Stdout = sayer
 	var childErr bytes.Buffer
 	child.Stderr = &childErr
@@ -294,6 +305,8 @@ func TestTheHolderDiagnosticNamesTheChildThatHoldsTheBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Closed here too where Start fails, which leaves it to no Wait.
+	t.Cleanup(func() { _ = letGo.Close() })
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}

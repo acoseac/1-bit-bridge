@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"golang.org/x/sys/windows/svc/mgr"
+	"golang.org/x/sys/windows"
 
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
@@ -19,25 +19,35 @@ import (
 // (needs a real Service installed); these tests hit the file-system
 // pieces without standing up SCM.
 
-// skipIfBridgeServiceRegistered skips when a bridge service is
-// registered. swapBinary and RollbackBinary both call
-// stopServiceIfRunning, which stops a running service and restarts
-// it afterwards. A restart that fails leaves that service down.
-// A connect that fails, and a service that is not registered, are
-// what production treats as nothing to stop, so those runs continue.
+// skipIfBridgeServiceRegistered skips unless the service manager says
+// no bridge service exists. swapBinary and RollbackBinary both call
+// stopServiceIfRunning, which stops a running service and restarts it
+// afterwards; a restart that fails leaves that service down. It asks
+// with the least rights that answer, which any user has
+// (SC_MANAGER_CONNECT, then SERVICE_QUERY_STATUS: mgr.Connect asks for
+// SC_MANAGER_ALL_ACCESS, which an unprivileged runner is refused), and
+// runs only on ERROR_SERVICE_DOES_NOT_EXIST: a lookup that fails
+// otherwise is no answer, and skips, failing closed (backlog B872 part
+// 2). cmd/bridge's skipIfABridgeServiceIsRegistered is the same check.
 func skipIfBridgeServiceRegistered(t *testing.T) {
 	t.Helper()
-	m, err := mgr.Connect()
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
-		return
+		t.Skipf("the service manager could not be asked whether a bridge service is registered (%v); this test would stop one", err)
 	}
-	defer m.Disconnect()
-	s, err := m.OpenService(packaging.ServiceLabel)
+	defer func() { _ = windows.CloseServiceHandle(scm) }()
+	name, err := windows.UTF16PtrFromString(packaging.ServiceLabel)
 	if err != nil {
-		return
+		t.Fatal(err)
 	}
-	s.Close()
-	t.Skip("a bridge service is registered on this machine; this test would stop it")
+	s, err := windows.OpenService(scm, name, windows.SERVICE_QUERY_STATUS)
+	switch {
+	case err == nil:
+		_ = windows.CloseServiceHandle(s)
+		t.Skip("a bridge service is registered on this machine; this test would stop it")
+	case !errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST):
+		t.Skipf("the service manager could not say whether a bridge service is registered (%v); this test would stop one", err)
+	}
 }
 
 func TestSwapWindows_RenameTrick(t *testing.T) {
