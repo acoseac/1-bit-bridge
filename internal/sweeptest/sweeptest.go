@@ -81,6 +81,18 @@ const MakeTestTmpDir = ".tmp"
 // directory of the same name further down, or one whose name merely begins
 // with it, is the tree's like any other, and the root itself never is,
 // whatever it is called.
+//
+// The name is compared exactly, on a filesystem that folds case too (macOS's
+// default APFS, Windows), where a .TMP at the root is read. The Makefile
+// makes the directory itself, by the name its TMPDIR line gives (mkdir -p),
+// so make test's TMPDIR is .tmp wherever make test made it, and the census
+// compares the name exactly too (scripts/third-party-licenses/tags.go,
+// makeTestTmpDir): a fold here alone would split this rule from the
+// census's. What stays open is a .TMP that was there first, on a filesystem
+// that folds: mkdir -p finds it under the Makefile's name and makes nothing,
+// so make test's files land in a directory a walk lists as .TMP, which a
+// sweep that skips the directory by its name reads, the census among them,
+// and one that skips every dot-directory still skips.
 func IsMakeTestTmpDir(root, dir string) bool {
 	return filepath.Clean(dir) == filepath.Join(root, MakeTestTmpDir)
 }
