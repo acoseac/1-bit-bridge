@@ -46,7 +46,8 @@ const doctorRunMargin = 20 * time.Second
 // rootStall stands in for every touch of the roots it holds: the probe's stat
 // and listing, and config.Load's resolution of the roots, none of which
 // answers until letGo. It counts the probes begun of each root (its stats)
-// and the loads that met it before it was let go.
+// and the loads that met it before it was let go, and, of every root, the
+// stats and the listings that have returned.
 type rootStall struct {
 	held    map[string]bool
 	release chan struct{}
@@ -54,10 +55,13 @@ type rootStall struct {
 	mu      sync.Mutex
 	stats   map[string]int
 	loads   map[string]int
+	statted map[string]int
+	listed  map[string]int
 }
 
 func newRootStall(held ...string) *rootStall {
-	s := &rootStall{held: map[string]bool{}, release: make(chan struct{}), stats: map[string]int{}, loads: map[string]int{}}
+	s := &rootStall{held: map[string]bool{}, release: make(chan struct{}), stats: map[string]int{}, loads: map[string]int{},
+		statted: map[string]int{}, listed: map[string]int{}}
 	for _, r := range held {
 		s.held[r] = true
 	}
@@ -71,14 +75,29 @@ func (s *rootStall) stat(p string) (fs.FileInfo, error) {
 	if s.held[p] {
 		<-s.release
 	}
-	return os.Stat(p)
+	fi, err := os.Stat(p)
+	s.mu.Lock()
+	s.statted[p]++
+	s.mu.Unlock()
+	return fi, err
 }
 
 func (s *rootStall) readDir(p string) ([]fs.DirEntry, error) {
 	if s.held[p] {
 		<-s.release
 	}
-	return os.ReadDir(p)
+	entries, err := os.ReadDir(p)
+	s.mu.Lock()
+	s.listed[p]++
+	s.mu.Unlock()
+	return entries, err
+}
+
+// probed says a probe of root has made its stat and its listing.
+func (s *rootStall) probed(root string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.statted[root] > 0 && s.listed[root] > 0
 }
 
 // contain is Validate's containment check as a held root makes it: it waits,
@@ -438,26 +457,56 @@ func TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad(t *testing.T) {
 
 // TestACancelledConsoleDoctorRunSaysItWasStopped: a run whose request goes
 // away before a root's bound says the root was not checked because the run
-// was stopped, never that it did not answer, and comes back at its stop: no
-// sooner, and within the test's deadline (doctorWithin's), which is long
-// before the root's bound here.
+// was stopped, never that it did not answer, and comes back at its stop. The
+// request goes away once the run waits on the root that does not answer
+// (RootProbes.SetOnRootWaitForTest), the other root's probe having made its
+// stat and its listing (rootStall.probed), so that root is checked however
+// loaded the host; the root's bound, ten minutes, is past the test's own
+// deadline.
 func TestACancelledConsoleDoctorRunSaysItWasStopped(t *testing.T) {
 	const bound = 10 * time.Minute
-	path, _, dead := rootsInstall(t, false)
+	path, healthy, dead := rootsInstall(t, false)
 	s := newRootStall(dead)
-	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), stallProbes(t, s, bound))
+	probes := stallProbes(t, s, bound)
+	waiting := make(chan string, 16)
+	probes.SetOnRootWaitForTest(func(root string) {
+		select {
+		case waiting <- root:
+		default:
+		}
+	})
+	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), probes)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	reports := make(chan *admin.DoctorReport, 1)
+	go func() { reports <- runner(ctx) }()
+	for root := ""; root != dead; {
+		select {
+		case root = <-waiting:
+		case <-time.After(doctorRootsDeadline):
+			t.Fatalf("the run did not wait on %s within %s", dead, doctorRootsDeadline)
+		}
+	}
+	if !s.probed(healthy) {
+		t.Fatalf("the run waits on %s before the probe of %s has made its stat and its listing", dead, healthy)
+	}
 	stopped := make(chan struct{})
-	time.AfterFunc(150*time.Millisecond, func() {
-		close(stopped)
-		cancel()
-	})
-	lines, _ := consoleRun(t, ctx, runner)
+	close(stopped)
+	cancel()
+	var rep *admin.DoctorReport
+	select {
+	case rep = <-reports:
+	case <-time.After(doctorRootsDeadline):
+		t.Fatalf("the stopped run did not come back within %s", doctorRootsDeadline)
+	}
 	select {
 	case <-stopped:
 	default:
 		t.Error("the run came back before its request went away")
+	}
+	lines := map[string]admin.DoctorCheck{}
+	for _, c := range rep.Checks {
+		lines[c.Name] = c
 	}
 	want := fmt.Sprintf("library root %s was not checked: the doctor's run was stopped before it answered", dead)
 	if c := lines["library-roots"]; c.Status != "warn" || c.Summary != "1 root(s) not checked" || c.Hint != want {
@@ -718,9 +767,11 @@ func drained(ch <-chan struct{}) {
 }
 
 // boxNotRead and boxRead are the Player line's words for a checklist whose
-// outputs body was not read within the bound, and for one read from this
-// box, whose MPD does not answer.
-func boxNotRead() string { return fmt.Sprintf("it did not answer within %s", doctorRootsBound) }
+// outputs body was not read within its wait's bound, outputsReadBound as the
+// case leaves it (a case that gives a wait up through its timer, readTimers,
+// leaves bridge doctor's), and for one read from this box, whose MPD does not
+// answer.
+func boxNotRead() string { return fmt.Sprintf("it did not answer within %s", outputsReadBound) }
 
 const boxRead = "Volumio is installed, but MPD is not answering on port 6600"
 
@@ -784,11 +835,40 @@ func TestDoctorRunsInOneProcessShareOneReadOfTheBox(t *testing.T) {
 	}
 }
 
+// readTimers stands in for the timers bridge doctor's waits on a read set for
+// their bound (outputsReads.timer): a wait's bound passes only when the test
+// fires its timer, so a case gives a wait up at the instant it chooses and a
+// read that answers is waited for however long it takes; armed hears each
+// timer as a wait sets it.
+type readTimers struct{ armed chan chan time.Time }
+
+func newReadTimers() *readTimers { return &readTimers{armed: make(chan chan time.Time, 64)} }
+
+func (r *readTimers) timer(time.Duration) (<-chan time.Time, func() bool) {
+	c := make(chan time.Time, 1)
+	r.armed <- c
+	return c, func() bool { return true }
+}
+
+// drain forgets the timers set so far.
+func (r *readTimers) drain() {
+	for {
+		select {
+		case <-r.armed:
+		default:
+			return
+		}
+	}
+}
+
 // TestADoctorRunTakesOnlyTheReadOfItsOwnConfig: a run in that process over a
 // config edited since the read out began, a root another, reads the box
 // itself and is answered by its own read, never the one out; a run over the
 // first config again, while its read is out, waits on it; and a run after
-// that read has answered reads the box afresh.
+// that read has answered reads the box afresh. The waits on the read the
+// held root keeps are given up through their timers (readTimers); every other
+// wait keeps bridge doctor's bound, which no healthy read comes near, under
+// the test's deadline.
 func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 	path, held := writePlayerConfig(t)
 	other := filepath.Join(filepath.Dir(held), "Songs")
@@ -805,13 +885,37 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 		}
 	}
 	reads, _ := standInCLIOutputs(t)
+	timers := newReadTimers()
+	reads.timer = timers.timer
 	box := newBoxStall(t, held)
-	setOutputsReadBound(t, doctorRootsBound)
 	gather := func() []doctor.Check {
 		checks, _ := doctorWithin(t, "the checklist", func() []doctor.Check {
 			return doctorOutputChecklist(path, mustLoadConfig(t, path), box.seam(held))(context.Background())
 		})
 		return checks
+	}
+	// givenUp is a run over the config as it stands whose wait on the read
+	// the held root keeps the test gives up: its timer fired once the run has
+	// set it, its read begun or joined by then.
+	givenUp := func(what string) []doctor.Check {
+		t.Helper()
+		timers.drain()
+		check := doctorOutputChecklist(path, mustLoadConfig(t, path), box.seam(held))
+		out := make(chan []doctor.Check, 1)
+		go func() { out <- check(context.Background()) }()
+		select {
+		case c := <-timers.armed:
+			c <- time.Now()
+		case <-time.After(doctorRootsDeadline):
+			t.Fatalf("%s set no wait within %s", what, doctorRootsDeadline)
+		}
+		select {
+		case checks := <-out:
+			return checks
+		case <-time.After(doctorRootsDeadline):
+			t.Fatalf("%s did not return within %s of its wait being given up", what, doctorRootsDeadline)
+		}
+		panic("unreachable")
 	}
 	line := func(checks []doctor.Check, name string) string {
 		for _, c := range checks {
@@ -821,7 +925,7 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 		}
 		return ""
 	}
-	if got := line(gather(), "player"); !strings.Contains(got, boxNotRead()) {
+	if got := line(givenUp("the run over the held root"), "player"); !strings.Contains(got, boxNotRead()) {
 		t.Fatalf("the player line over the held root = %q, want the box not read", got)
 	}
 	setRoot(other)
@@ -836,7 +940,7 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 		t.Errorf("the edited config's run began %d reads, want its own one", n)
 	}
 	setRoot(held)
-	if got := line(gather(), "player"); !strings.Contains(got, boxNotRead()) {
+	if got := line(givenUp("the run over the first config again"), "player"); !strings.Contains(got, boxNotRead()) {
 		t.Errorf("over the first config again, the player line = %q, want its read still out", got)
 	}
 	if n := box.readsOver(held); n != 1 {

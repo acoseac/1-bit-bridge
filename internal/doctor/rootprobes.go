@@ -87,10 +87,19 @@ type RootProbes struct {
 	// moves it.
 	now   func() time.Time
 	timer func(d time.Duration) (c <-chan time.Time, stop func() bool)
+	// onRootWait, when not nil, is told the root each time a run is about to
+	// wait for a probe of it that has not answered: a test's hook
+	// (SetOnRootWaitForTest).
+	onRootWait func(root string)
 
 	mu  sync.Mutex
 	out map[workKey]*rootWork
 }
+
+// SetOnRootWaitForTest makes fn told the root each time a run of p is about to
+// wait for a probe of it that has not answered, on the run's goroutine; set it
+// before any run of p begins. Tests only.
+func (p *RootProbes) SetOnRootWaitForTest(fn func(root string)) { p.onRootWait = fn }
 
 // NewRootProbes is a runner's RootProbes, with no work out.
 func NewRootProbes() *RootProbes {
@@ -185,9 +194,10 @@ const (
 	workOther = "other" // a caller's work (Bounded): cmd/bridge's load of the config
 )
 
-// rootWork is one work: when it began, and, once done is closed, what its
-// worker returned, or the panic it recovered (workPanic).
+// rootWork is one work: its key, when it began, and, once done is closed,
+// what its worker returned, or the panic it recovered (workPanic).
 type rootWork struct {
+	key   workKey
 	began time.Time
 	done  chan struct{}
 	value any
@@ -227,7 +237,7 @@ func (p *RootProbes) beginOut(key workKey, fn func() any) *rootWork {
 	if p.outOfKind(key.kind) >= p.limitOf(key.kind) {
 		return nil
 	}
-	w := &rootWork{began: p.now(), done: make(chan struct{})}
+	w := &rootWork{key: key, began: p.now(), done: make(chan struct{})}
 	p.out[key] = w
 	go p.work(key, w, fn)
 	return w
@@ -308,6 +318,9 @@ func (r *ProbeRun) waitFor(ctx context.Context, w *rootWork, kind string) Wait {
 		return Wait{outcome: heldBack, bound: p.bound, limit: p.limitOf(kind)}
 	}
 	if left := w.began.Add(p.bound).Sub(p.now()); left > 0 && !isDone(w) {
+		if p.onRootWait != nil && w.key.kind == workRoot {
+			p.onRootWait(w.key.name)
+		}
 		passed, stop := p.timer(left)
 		select {
 		case <-w.done:

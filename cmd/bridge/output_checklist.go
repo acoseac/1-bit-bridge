@@ -138,12 +138,12 @@ func readOutputs(ctx context.Context, src outputChecklistSource) (api.OutputsRes
 	}
 	r := src.Reads.begin(ctx, src.ReadKey, src.Outputs)
 	bound := outputsReadBound
-	t := time.NewTimer(bound)
-	defer t.Stop()
+	passed, stop := src.Reads.waitTimer(bound)
+	defer stop()
 	select {
 	case <-r.done:
 		return r.resp, r.err
-	case <-t.C:
+	case <-passed:
 	case <-ctx.Done():
 	}
 	// An answer ready as the wait ended is still the answer.
@@ -184,6 +184,20 @@ type outputsReads struct {
 	// joined, when not nil, is told each time a gather waits on a read
 	// another gather began: a test's hook.
 	joined func()
+	// timer, when not nil, is the timer a wait on the table's reads sets for
+	// its bound, its channel and its stop (time.NewTimer's where nil): a
+	// test's, which passes only when the test says.
+	timer func(time.Duration) (<-chan time.Time, func() bool)
+}
+
+// waitTimer is the timer a wait for a read of rs's, or of no table, sets for
+// its bound d.
+func (rs *outputsReads) waitTimer(d time.Duration) (<-chan time.Time, func() bool) {
+	if rs == nil || rs.timer == nil {
+		t := time.NewTimer(d)
+		return t.C, t.Stop
+	}
+	return rs.timer(d)
 }
 
 // begin is the read a wait for the outputs body waits on: the read in flight
