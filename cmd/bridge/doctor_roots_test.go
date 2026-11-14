@@ -884,7 +884,7 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	reads, _ := standInCLIOutputs(t)
+	reads, joined := standInCLIOutputs(t)
 	timers := newReadTimers()
 	reads.timer = timers.timer
 	box := newBoxStall(t, held)
@@ -896,19 +896,30 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 	}
 	// givenUp is a run over the config as it stands whose wait on the read
 	// the held root keeps the test gives up: its timer fired once the run has
-	// set it, its read begun or joined by then.
-	givenUp := func(what string) []doctor.Check {
+	// set it and holding says the read it waits on is held at the box (the
+	// box's began, for the run that begins it) or that it waits on one another
+	// run began (joined), so the read has reached the box whatever the host's
+	// load.
+	givenUp := func(what string, holding <-chan struct{}) []doctor.Check {
 		t.Helper()
 		timers.drain()
+		drained(box.began)
+		drained(joined)
 		check := doctorOutputChecklist(path, mustLoadConfig(t, path), box.seam(held))
 		out := make(chan []doctor.Check, 1)
 		go func() { out <- check(context.Background()) }()
+		var fire chan time.Time
 		select {
-		case c := <-timers.armed:
-			c <- time.Now()
+		case fire = <-timers.armed:
 		case <-time.After(doctorRootsDeadline):
 			t.Fatalf("%s set no wait within %s", what, doctorRootsDeadline)
 		}
+		select {
+		case <-holding:
+		case <-time.After(doctorRootsDeadline):
+			t.Fatalf("%s's read was not held at the box within %s", what, doctorRootsDeadline)
+		}
+		fire <- time.Now()
 		select {
 		case checks := <-out:
 			return checks
@@ -925,7 +936,7 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 		}
 		return ""
 	}
-	if got := line(givenUp("the run over the held root"), "player"); !strings.Contains(got, boxNotRead()) {
+	if got := line(givenUp("the run over the held root", box.began), "player"); !strings.Contains(got, boxNotRead()) {
 		t.Fatalf("the player line over the held root = %q, want the box not read", got)
 	}
 	setRoot(other)
@@ -940,7 +951,7 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 		t.Errorf("the edited config's run began %d reads, want its own one", n)
 	}
 	setRoot(held)
-	if got := line(givenUp("the run over the first config again"), "player"); !strings.Contains(got, boxNotRead()) {
+	if got := line(givenUp("the run over the first config again", joined), "player"); !strings.Contains(got, boxNotRead()) {
 		t.Errorf("over the first config again, the player line = %q, want its read still out", got)
 	}
 	if n := box.readsOver(held); n != 1 {
