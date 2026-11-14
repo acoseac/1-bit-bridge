@@ -97510,19 +97510,20 @@ What a run caches, each a `rootWork` under a `workKey{kind, name}`
   variable). Begun once, as the Deps are built (630), before either report;
   `Run` begins none.
 
-What the remediation can change: the Chmod of the config directory changes
-what a probe finds of a root that is that directory (its listing needs read
-permission there: the enter-only 0100 directory set to 0700) or lies below it
-(its stat needs search permission there: 0600 set to 0700, say), and what a
-count finds of a root at it (its walk cannot open its root, an error,
-`inotify_linux.go` 160-163), below it (the walk's start needs the same search
-permission), or above it (the walk passes over a folder it cannot list,
-165-166, and counts what is below it once it can). It changes
-nothing of the config's load: neither the file's bytes nor the environment,
-which are its key. And where the config directory grants no search
-permission, the config is not readable by this user, config-dir is not checked
-(`checkConfigDir`, `internal/doctor/doctor.go` 589-610) and nothing is
-remediated.
+What the remediation can change: the roots come from a config this user read
+in the config directory, so that directory grants this user search
+permission already (where it does not, the config is not readable by this
+user, config-dir is not checked, `checkConfigDir`,
+`internal/doctor/doctor.go` 589-610, and nothing is remediated), and the
+Chmod adds read and write permission alone, which changes no stat and no walk
+below the directory. What it can change is a listing of the directory
+itself: what the probe of a root that is the directory finds (its listing
+needs read permission there: the enter-only 0100 directory set to 0700), what
+that root's count finds (its walk cannot open its root, an error,
+`inotify_linux.go` 160-163), and what the count of a root above it finds (its
+walk passes over a folder it cannot list, 165-166, and counts what is below it
+once it can). It changes nothing of the config's load: neither the file's
+bytes nor the environment, which are its key.
 
 The fix, 69af4900: the second `doctor.Run` gets a new run of the same runner,
 `d.RootProbes = cliRootProbes.BeginRun()` (`cmd/bridge/doctor.go` 90 at
@@ -97698,3 +97699,117 @@ busy processes, the host's core count, in the slot.
   the worktree, and applied to a fresh copy of HEAD's two files it gives the
   copy's bytes.
 - go1.27.3's gofmt lists none of the Go files B650FIX touches.
+
+## 2026-11-14 — B650FIX round 2: the churn case counts its probes after a drain, and the record says only what can happen
+
+The rule and its long form are `rules-b650fix-r2.patch`'s, uncommitted and
+cumulative: round 1's patch with this round's changes to the History section,
+to be applied alone. Worker b650fix, legion0, from round 1's head 2f84cb14.
+Commits: ebafbf91 (the churn case), 09409933 (the comment at the second
+report), then this record, which also corrects round 1's paragraph on what
+the remediation can change (item 2). Every run as round 1's: Go 1.27.3, the
+tags, TMPDIR `~/onebit/tmp`, 8 of the 16 cores; controls are uncommitted
+edits to the committed tree, predicted in writing first
+(`.tmp/_b650fix/r2_controls.predictions.txt`), the bytes put back from memory,
+`git status` clean after the builds.
+
+### Item 1: the counts after a drain
+
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn` read
+`s.statsOf(last)` (`cmd/bridge/doctor_roots_test.go` 663 at 2f84cb14) and
+`s.statsOf(roots[0])` (671) as soon as a run had returned. The stand-in
+counts a probe as it enters its stat (`rootStall.stat`, 78-81), on the
+probe's own goroutine, which `beginOut` starts and does not wait for
+(`go p.work`, `internal/doctor/rootprobes.go` 252); on round 1's
+`rootWaitClock` (`doctor_roots_test.go` 600-610) a run's wait on a root ends
+at once, so the run can return before that goroutine has counted. A count
+could then read 0 of a probe begun (a false failure), or miss one begun past
+the limit (a defect passed). ebafbf91 keeps the report assertions while the
+roots are held, then lets them go (674), requires the drain (675:
+`DrainForTest`, a fatal failure if a work is still out after 30 s), and only
+then reads both counts (678, 681), as round 1's join case does.
+
+The controls (`r2_controls.py`), each built once with exact-once edits, its
+gate a channel (the stall's release, which only `letGo` closes), run against
+the case as 2f84cb14 has it (old) and as ebafbf91 has it (new):
+
+- A, a false failure for `roots[0]`: the stand-in holds NAS-00's probe, begun
+  in the first run, between its begin and its stat. Old: red, "a root removed
+  and added again was probed 0 times, want once", the probe let go by the
+  cleanup, whose drain succeeded. New: green, its drain succeeding and the
+  probe counted once.
+- B, a missed extra probe for `last`: `beginOut` admits the first root work
+  the limit refuses (the seventeenth run's probe of NAS-16) under a key no run
+  asks for, so the drain waits for it while `beginOut` still answers nil and
+  the report keeps "was not checked: 16 earlier probes …"; the stand-in holds
+  that probe before its stat. Old: green, its count read at once missing the
+  probe. New: red, "past the limit, 1 probes of a new root began, want none",
+  its report assertions green and its drain succeeding.
+
+Each as predicted. The case's time does not grow: without the race detector,
+the old and new cases alternated twenty rounds each, median 0.100 s and
+0.090 s.
+
+### Item 2: the record says only what can happen
+
+Round 1's paragraph above ("What the remediation can change") said that the
+Chmod changes what is found below a config directory without search
+permission, and two sentences later that such a directory leaves the config
+unreadable, so nothing is remediated. A remediated directory grants search
+permission already, and adding read and write permission changes no stat and
+no walk below it. The paragraph now keeps the reachable cases alone: a root
+at the config directory (its probe's listing, its count's walk) and a root
+above it (its count's walk, which lists the directory). The History's
+paragraph is corrected alike in the patch.
+
+### Item 3: two notes
+
+The probes' limit and `--fix`. The second report begins a new probe of every
+root whose probe has ended, and `beginOut` refuses a new work while sixteen
+works on the roots are out (`rootprobes.go` 247-249; `outOfKind`, 258-266,
+counts the probes and the watch counts together), so a root the first report
+probed can be one the second cannot. That needs: the watch counts begun,
+which is Linux or a kqueue platform with its limit read (`beginWatchCounts`
+begins none where it cannot read it, `inotify_linux.go` 104-107,
+`watchbudget_kqueue.go` 99-102, and none at all elsewhere, Windows included,
+`inotify_other.go` 18-19) and `libraryWatch.enabled`; eight library roots on
+mounts that do not answer, each with its probe and an admitted count that
+stays blocked, which the local root's own probe, begun beside the config's
+load and answered at once, leaves room for; and a local root listed last, so
+that its count is the one the limit holds back in the first report. The
+second report then begins no probe of the local root and says it "was not
+checked: 16 earlier probes of the library roots have not answered yet, and
+the doctor begins no more until one does", where a plain `bridge doctor`
+reads it ok. The exit code does not change: library-roots fails already, for
+the eight.
+
+The coupling. `runDoctorReport` takes the second report's run from
+`cliRootProbes` (`cmd/bridge/doctor.go` 95 at 09409933), not from the runner
+behind `d.RootProbes`, which a `ProbeRun` does not expose. Every caller
+builds `d` through `buildDoctorDepsWith` (285, `cliRootProbes.BeginRun()`;
+`doctorCmd`, 52; the launcher's row, `menu.go` 385), so the two are one
+runner today; Deps carrying a run of another runner would have their second
+report run on the CLI's works. 09409933's comment at that line says so.
+
+### The gates
+
+- The touched cases, `-race -count=50`, GOMAXPROCS 8, outside the slot on
+  09409933: the churn case 50 of 50 (median 0.13 s, max 0.14 s), the three
+  `--fix` cases 50 of 50 each (medians 0.01, 0.01 and 0.32 s), and
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway` 50 of 50; no
+  race reported (27 s).
+- In the slot (got at 15:24, its guard's first try), on 09409933: `go vet
+  ./...` with the tags as linux/amd64, darwin/arm64 (CGO_ENABLED=0) and
+  windows/amd64, clean; then `go test -race -count=1 -p 8 -parallel 8 -timeout
+  120m ./cmd/bridge/ ./internal/doctor/`, GOMAXPROCS 8: both ok,
+  `./cmd/bridge/` in 1,578.3 s (1,541 top-level cases passed, 9 skipped) and
+  `./internal/doctor/` in 10.9 s (198 passed, 3 skipped), none failed.
+- The rules patch: `git apply --check` takes it on the worktree; applied to a
+  disposable copy of HEAD's tree (git's directory the worktree's) it gives the
+  bytes built from round 1's patch and this round's changes, and there `make
+  docs-check` passes (the budgets ok: `cli-serve.md` 98,921 bytes, the worst
+  load 77.1 %, `config-lifecycle.md` at 99.9 % the closest),
+  `verify_moves.py --base HEAD` passes (one block moved, 1,764 bytes), and
+  `TestEveryCitedTestNameExists` fails on a ghost citation planted in the
+  copy's History and passes without it.
+- go1.27.3's gofmt lists none of the Go files round 2 touches.
