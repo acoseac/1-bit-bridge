@@ -72,6 +72,9 @@ INDEX="${2:?shard index, 0-based}"
 # The two flags that MUST stay identical to the Makefile's `test` target.
 # They live here as well only because this script bypasses that target to
 # add `-run`; if either changes there, change it here in the same commit.
+# One difference is deliberate: make test runs cmd/bridge whole, in a go
+# test of its own with -timeout 45m (backlog B897), where a `bridge` shard
+# runs a quarter of its tests and keeps 30m.
 RACE_FLAGS=(-race -timeout 30m)
 
 # group:shards — which packages are sharded by test name AND how many ways,

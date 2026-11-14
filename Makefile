@@ -62,9 +62,40 @@ build-all: check-build-tags
 test test-fast: export TMPDIR := $(TMPDIR)
 test test-fast: override TMPDIR := $(if $(strip $(TMPDIR)),$(TMPDIR),$(CURDIR)/.tmp)
 
+# cmd/bridge runs in a go test of its own, beside the one for every other
+# package, with -timeout 45m (B897; ops/History-rules-build-ci-tests.md).
+# Its 1,500-odd tests run one after another, so its time is their sum: under
+# -race on a 16-core Linux host it ran 1,634 s alone and 1,729 s beside a
+# second run of it (2026-11-14), 9 and 4 % short of the 30m every other
+# package keeps, where a wait that gives up at the binary's deadline less
+# 30 s gave up at once. go test gives every package of one invocation the
+# same -timeout, so one package's own takes an invocation of its own. Beside
+# the others' it builds and runs one thing at a time (-p 1), so the two build
+# and run no more at once than P and one; alone it takes P. TEST_PKGS's words
+# that begin with ./, ../ or /, or name the module, are its packages, which
+# go list expands; every other word, a flag or a flag's value, goes to each
+# go test as it stands, after the packages, so a flag whose value is a path
+# is written -flag=path.
+BRIDGE_TEST_PKG := github.com/acoseac/1-bit-bridge/cmd/bridge
+TEST_PATTERNS   := . .. ./% ../% /% github.com/acoseac/1-bit-bridge github.com/acoseac/1-bit-bridge/%
+test_packages    = $(filter $(TEST_PATTERNS),$(TEST_PKGS))
+test_flags       = $(filter-out $(TEST_PATTERNS),$(TEST_PKGS))
+
 test:
 	@mkdir -p "$(TMPDIR)"
-	TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $(P) -race -timeout 30m $(TEST_PKGS)
+	@set -e; pkgs=$$(go list -tags "$(GO_TAGS)" -race $(test_packages)); bridge=; rest=; \
+	for p in $$pkgs; do if [ "$$p" = $(BRIDGE_TEST_PKG) ]; then bridge=$$p; else rest="$$rest $$p"; fi; done; \
+	jobs=$(P); [ -z "$$rest" ] || jobs=1; status=0; \
+	if [ -n "$$bridge" ]; then \
+		echo TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $$jobs -race -timeout 45m $$bridge $(test_flags) \&; \
+		TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $$jobs -race -timeout 45m $$bridge $(test_flags) & bridge_test=$$!; \
+	fi; \
+	if [ -n "$$rest" ]; then \
+		echo TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $(P) -race -timeout 30m$$rest $(test_flags); \
+		TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $(P) -race -timeout 30m$$rest $(test_flags) || status=1; \
+	fi; \
+	[ -z "$$bridge" ] || wait $$bridge_test || status=1; \
+	exit $$status
 
 # Fast inner-loop tests: no race detector — much faster to build and a
 # fraction of the RAM, so it won't thrash on a loaded machine. Use while

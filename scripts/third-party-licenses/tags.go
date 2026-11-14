@@ -136,7 +136,22 @@ var reviewedBuildSites = map[string][]string{
 		"GOOS=linux GOARCH=amd64 go build -tags \"$(GO_TAGS)\" -p $(P) -ldflags \"$(LDFLAGS)\" -o $(DIST)/$(BINARY)-linux-amd64 $(PKG)",
 		"GOOS=windows GOARCH=amd64 go build -tags \"$(GO_TAGS)\" -p $(P) -ldflags \"$(LDFLAGS)\" -o $(DIST)/$(BINARY)-windows-amd64.exe $(PKG)",
 		"GOOS=windows GOARCH=arm64 go build -tags \"$(GO_TAGS)\" -p $(P) -ldflags \"$(LDFLAGS)\" -o $(DIST)/$(BINARY)-windows-arm64.exe $(PKG)",
-		"TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $(P) -race -timeout 30m $(TEST_PKGS)",
+		// make test's recipe, one logical line: cmd/bridge in a go test of its
+		// own beside the other packages' (B897), each Go line here one of the
+		// recipe's.
+		`@set -e; pkgs=$$(go list -tags "$(GO_TAGS)" -race $(test_packages)); bridge=; rest=; ` +
+			`for p in $$pkgs; do if [ "$$p" = $(BRIDGE_TEST_PKG) ]; then bridge=$$p; else rest="$$rest $$p"; fi; done; ` +
+			`jobs=$(P); [ -z "$$rest" ] || jobs=1; status=0; ` +
+			`if [ -n "$$bridge" ]; then ` +
+			`echo TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $$jobs -race -timeout 45m $$bridge $(test_flags) \&; ` +
+			`TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $$jobs -race -timeout 45m $$bridge $(test_flags) & bridge_test=$$!; ` +
+			`fi; ` +
+			`if [ -n "$$rest" ]; then ` +
+			`echo TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $(P) -race -timeout 30m$$rest $(test_flags); ` +
+			`TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $(P) -race -timeout 30m$$rest $(test_flags) || status=1; ` +
+			`fi; ` +
+			`[ -z "$$bridge" ] || wait $$bridge_test || status=1; ` +
+			`exit $$status`,
 		"TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $(P) $(TEST_PKGS)",
 		"BRIDGE_DSD_FIXTURE_TESTS=1 go test -tags \"$(GO_TAGS)\" ./internal/transcode/ -run 'TestDSDRender_|TestDSDLowpass|TestRunDSD' -count=1 -v",
 		"BRIDGE_INSTALL_TEST_SHELLS=\"$(INSTALLER_SHELLS)\" go test -tags \"$(GO_TAGS)\" -count=1 ./scripts/install-test/",

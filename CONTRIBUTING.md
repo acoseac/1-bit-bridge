@@ -44,7 +44,12 @@ This keeps player tests on the checkout's disk when the host's `/tmp` is
 tmpfs, which the player's durability checks refuse. A non-empty caller
 `TMPDIR` wins; choose a directory on persistent storage if the checkout is
 also on tmpfs. Use `make test TEST_PKGS=./internal/config` for a focused race
-run through the same target. `.tmp/` is ignored by Git and excluded from Docker builds.
+run through the same target. `make test` runs `cmd/bridge` in a `go test` of
+its own, with a 45-minute timeout, beside the one for every other package,
+which keeps 30 minutes: its tests run one after another and take close to 30
+minutes under `-race` on a busy host. The words of `TEST_PKGS` that do not
+begin with `./`, `../` or `/` go to both as flags, after the packages, so write
+a flag whose value is a path as `-flag=path`. `.tmp/` is ignored by Git and excluded from Docker builds.
 Unix-socket fixtures keep short `/tmp/mpd*` paths or bind by basename from
 inside their directory, since deep checkout paths exceed the OS socket
 address limit (104 bytes on macOS, 108 on Linux).
