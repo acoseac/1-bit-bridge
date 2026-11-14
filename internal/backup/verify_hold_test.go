@@ -395,6 +395,18 @@ func receiveWithin[T any](t *testing.T, ch <-chan T, bound time.Duration, what s
 // bounded, and required given up (backlog B872's second round: parked at
 // SQLite's open behind its deadline, it could end as a retry past its
 // deadline and pass all the same).
+//
+// The retry past its deadline takes B886's arrangement (backlog B901): its
+// check alone is parked on its thread before it reads anything (parkCheckOf)
+// until its 150 ms deadline has passed and its grace has begun; then it is
+// let go, answers INCOMPLETE (deadline), and only once the verification has
+// answered is its grace ended (checkGraceOf), every other step the deadline
+// bounds held at its gate (SetStepGateForTest); and its answer is read,
+// required the deadline's and never a check given up. It slept 400 ms at
+// SQLite's open, so its check answered within the half of StopWriteBound
+// runCheck gives it past the deadline only on a host that ran its thread in
+// time, and its error was dropped, so a retry given up passed as one past its
+// deadline.
 func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testing.T) {
 	for _, tc := range []string{"a retry stopped before it began", "a retry past its deadline", "a retry given up",
 		"a retry that panics", "a quick VERIFIED over a full one"} {
@@ -428,14 +440,25 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 			release := func() {}
 			var parked <-chan struct{}
 			const givenUpDeadline = 300 * time.Millisecond
+			// The retry past its deadline's park and grace, and what the
+			// test's end lets go before it joins the retry.
+			var pastParked, graceBegun <-chan struct{}
+			letCheckGo, endGrace := func() {}, func() {}
+			var letGo []func()
 			switch tc {
 			case "a retry stopped before it began":
 				stopped, cancel := context.WithCancel(ctx)
 				cancel()
 				ctx = stopped
 			case "a retry past its deadline":
+				entered, letCheck := parkCheckOf(t, dir)
 				t.Cleanup(backup.SetVerifyDeadlineForTest(150 * time.Millisecond))
-				t.Cleanup(backup.SetOnDatabaseOpenForTest(func() { time.Sleep(400 * time.Millisecond) }))
+				begun, pass := checkGraceOf(t, dir)
+				gate, restoreGate := backup.SetStepGateForTest(filepath.Dir(dir), filepath.Base(dir), "its read of the snapshot's record",
+					"putting its veto in place", "its verdict's write", "its write of INCOMPLETE", "its read of the record after it")
+				t.Cleanup(restoreGate)
+				pastParked, graceBegun, letCheckGo, endGrace = entered, begun, letCheck, pass
+				letGo = append(letGo, letCheck, pass, gate.FireAll)
 			case "a retry given up":
 				t.Cleanup(backup.SetVerifyDeadlineForTest(givenUpDeadline))
 				p := newParking()
@@ -457,7 +480,8 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 			}
 			level := backup.CheckQuick
 			var res backup.VerifyResult
-			if parked != nil {
+			switch {
+			case parked != nil:
 				callers := joinBackupCallers(t, release)
 				done := make(chan verifyAnswer, 1)
 				start := time.Now()
@@ -470,7 +494,33 @@ func TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries(t *testi
 					t.Fatalf("the retry answered %v, want its check given up: the test did not reach the case", a.err)
 				}
 				res = a.res
-			} else {
+			case pastParked != nil:
+				callers := joinBackupCallers(t, func() {
+					for _, f := range letGo {
+						f()
+					}
+				})
+				done := make(chan verifyAnswer, 1)
+				callers.start(func() {
+					r, err := backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{Level: level})
+					done <- verifyAnswer{r, err}
+				})
+				a, ok := awaitParkedPastItsDeadline(t, pastParked, graceBegun, done)
+				if !ok {
+					// The check let go, its answer awaited, and only then its
+					// grace ended: a grace ended while the check is still parked
+					// gives it up (runCheck).
+					letCheckGo()
+					a = awaitVerifyAnswer(t, done, "the retry")
+				}
+				endGrace()
+				if errors.Is(a.err, backup.ErrCheckGivenUp) || !errors.Is(a.err, context.DeadlineExceeded) {
+					t.Fatalf("the retry answered %v, want its check's answer past its deadline, never its check given up: the test did not reach the case", a.err)
+				}
+				requireVerdict(t, "what the retry past its deadline found", a.res.Found, backup.StateIncomplete, backup.ReasonDeadline,
+					backup.StateIncomplete, backup.ReasonDeadline)
+				res = a.res
+			default:
 				res, _ = backup.VerifySnapshot(ctx, dir, backup.VerifyOptions{Level: level})
 			}
 			if tc == "a quick VERIFIED over a full one" && res.Found.DatabaseState != backup.StateVerified {

@@ -208,7 +208,12 @@ func TestAWriteGivenUpLandsNothingOnceItResumes(t *testing.T) {
 // (SetStepGateForTest): so the deadline decides the check's verdict alone,
 // whatever the host's pace (backlog B886: on macOS's CI a 400 ms sleep at the
 // database's open, on the check's background-priority thread, outlasted the
-// second's grace past the deadline, and the recheck was given up). In every
+// second's grace past the deadline, and the recheck was given up). Stopped by
+// its caller, the check's grace past the stop is held the same way, ended
+// only once the verification has answered (backlog B901: a check's thread
+// slower than half of StopWriteBound to answer the stop gave the recheck up);
+// the caller's own expiry, StopWriteBound from the stop (verifyAndThen), is no
+// grace, and a host slower than that still ends the recheck there. In every
 // case the prune runs once the verification's worker has ended, its unlock
 // held from the answer until the test waits for that end (unlockHold,
 // backlog B849), and must run.
@@ -251,6 +256,11 @@ func TestARecheckThatDidNotEndLeavesTheVetoItMade(t *testing.T) {
 				t.Cleanup(backup.SetOnLowPriorityForTest(func() {
 					once.Do(func() { time.AfterFunc(50*time.Millisecond, cancel) })
 				}))
+				// Its grace past the stop, held until the verification has
+				// answered (backlog B901).
+				_, pass := checkGraceOf(t, dir)
+				endGrace = pass
+				letGo = append(letGo, pass)
 			case "on a panic of its check":
 				var panicked atomic.Bool
 				t.Cleanup(backup.SetOnDatabaseOpenForTest(func() {
