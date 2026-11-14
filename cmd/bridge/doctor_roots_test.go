@@ -1156,6 +1156,109 @@ func TestAWaitOnASharedReadEndsAloneWithItsContext(t *testing.T) {
 	}
 }
 
+// TestTheLoopbackProbeOutlivesTheGatherThatBeganTheRead: the body of the read
+// every bridge doctor gather over a config waits on carries the loopback
+// route's base URL, which its build asks of the route through the probe of
+// the gather that began the read (loopbackAnswer), so no gather's end may end
+// that probe either. A gather on a context of its own begins the read, which
+// the library root holds before its build has asked the route (boxStall: its
+// read of the indexed tracks); the gather's context ends, and it asks the
+// route as its wait gives up (unreadInput); a gather over the same config on
+// Background waits on that read, and once the root answers it is answered by
+// the read's body, which names the route that serves, so its Music line, over
+// a root MPD's music directory does not hold, says the root's tracks play
+// through the route. Red at 9acee209, whose probe took the first gather's
+// context, ended by then: the body named no route, and the waiting gather's
+// Music line failed.
+func TestTheLoopbackProbeOutlivesTheGatherThatBeganTheRead(t *testing.T) {
+	route := startProbedRoute(t, true)
+	path, held := writePlayerConfig(t)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probed := strings.Replace(string(data), "  loopbackPort: 0\n", fmt.Sprintf("  loopbackPort: %d\n", portOf(t, route.BaseURL())), 1)
+	if probed == string(data) {
+		t.Fatal("the player's config sets no loopback port to point at the route")
+	}
+	if err := os.WriteFile(path, []byte(probed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// MPD's music directory holds no library root, so the Music line rests on
+	// the route.
+	music := t.TempDir()
+	_, joined := standInCLIOutputs(t)
+	box := newBoxStall(t, held)
+	setOutputsReadBound(t, doctorRootsDeadline)
+	ctx, cancel := context.WithCancel(context.Background())
+	var gathers sync.WaitGroup
+	// After the bound's cleanup, so before it: the gathers end before the
+	// bound they read is put back.
+	t.Cleanup(func() {
+		cancel()
+		box.letGo()
+		ended := make(chan struct{})
+		go func() { gathers.Wait(); close(ended) }()
+		select {
+		case <-ended:
+		case <-time.After(30 * time.Second):
+			t.Error("a gather was still running 30s after the box answered")
+		}
+	})
+	gather := func(ctx context.Context) <-chan []doctor.Check {
+		check := doctorOutputChecklist(path, mustLoadConfig(t, path), box.seam(music))
+		out := make(chan []doctor.Check, 1)
+		gathers.Add(1)
+		go func() {
+			defer gathers.Done()
+			out <- check(ctx)
+		}()
+		return out
+	}
+	answer := func(what string, ch <-chan []doctor.Check) map[string]doctor.Check {
+		t.Helper()
+		select {
+		case checks := <-ch:
+			lines := map[string]doctor.Check{}
+			for _, c := range checks {
+				lines[c.Name] = c
+			}
+			return lines
+		case <-time.After(doctorRootsDeadline):
+			t.Fatalf("%s did not return within %s", what, doctorRootsDeadline)
+			panic("unreachable")
+		}
+	}
+	first := gather(ctx)
+	select {
+	case <-box.began:
+	case <-time.After(doctorRootsDeadline):
+		t.Fatalf("the first gather's read was not held at the box within %s", doctorRootsDeadline)
+	}
+	cancel()
+	answer("the first gather, its context ended", first)
+	second := gather(context.Background())
+	select {
+	case <-joined:
+	case <-box.began:
+		t.Fatal("the second gather began a read of its own while the first one's was out")
+	case <-time.After(doctorRootsDeadline):
+		t.Fatalf("the second gather did not wait on the first one's read within %s", doctorRootsDeadline)
+	}
+	box.letGo()
+	lines := answer("the second gather", second)
+	if c := lines["player"]; !strings.Contains(c.Summary, boxRead) {
+		t.Errorf("the waiting gather's player line = %q, want the read's body (%q)", c.Summary, boxRead)
+	}
+	const unproven, plays = "Music is not in MPD's music directory", "; it plays through the bridge's loopback HTTP route"
+	if c := lines["music"]; c.Status != doctor.Warn || !strings.HasPrefix(c.Summary, unproven) || !strings.HasSuffix(c.Summary, plays) {
+		t.Errorf("the waiting gather's music line = %+v, want a warn on the read's rule for its root (%q) that ends %q", c, unproven, plays)
+	}
+	if n := box.readsOver(held); n != 1 {
+		t.Errorf("the two gathers began %d reads of the box, want one", n)
+	}
+}
+
 // standInCLIInspections makes a table of its own the one this process's
 // bridge doctor gathers inspect MPD through (cliMPDInspections) for the rest
 // of the test, and puts the process's back once every inspection it holds has

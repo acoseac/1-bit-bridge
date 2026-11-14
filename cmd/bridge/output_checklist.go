@@ -397,7 +397,7 @@ func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.Lo
 	reads, inspections := cliOutputsReads, cliMPDInspections
 	return func(ctx context.Context) []doctor.Check {
 		route := &loopbackAnswer{ask: func() (string, error) {
-			return probeLoopbackRoute(ctx, cfg.Output.EffectiveLoopbackPort())
+			return probeLoopbackRoute(context.WithoutCancel(ctx), cfg.Output.EffectiveLoopbackPort())
 		}}
 		dbPath := manifest.DefaultDBPath(cfg.DataDir)
 		lcfg := api.LocalOutputsConfig{
