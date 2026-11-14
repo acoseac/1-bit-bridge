@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -122,10 +121,24 @@ func runMakeTest(t *testing.T, env []string, vars ...string) makeTestRun {
 	cmd := exec.Command(makePath, append([]string{"-s", "test"}, vars...)...)
 	cmd.Dir = r.dir
 	cmd.Env = append([]string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "STUB_DIR=" + calls}, env...)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	// Into a file, never a pipe: Wait waits for every holder of a pipe it
+	// copies from to close it, so a go test the recipe left running would
+	// hold Run until it ended, and a recipe that returned without waiting
+	// for it would pass.
+	out, err := os.Create(filepath.Join(r.dir, "make.out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout, cmd.Stderr = out, out
 	r.err = cmd.Run()
-	r.out = out.String()
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.out = string(b)
 	entries, err := os.ReadDir(calls)
 	if err != nil {
 		t.Fatal(err)
