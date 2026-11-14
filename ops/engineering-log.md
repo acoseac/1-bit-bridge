@@ -96273,9 +96273,11 @@ not taken here.
 ### Red first, then green (`.tmp/_b895/red-prefix.log`)
 
 The seam and the tests at 2bebca26 without the classification (the hold's
-causes recorded, `givenUp` still reading `ctx.Err()`):
+causes recorded, `givenUp` still reading `ctx.Err()`; three of the names
+below, their `Test` elided, are round 1's tests, which round 2's table
+replaced):
 `go test -race -count=1 -v -tags … -run
-'^(TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound|TestATickerStoppedWhileAStepHangsSaysNothingWhicheverBoundFiresFirst|TestATickerStoppedWhileItsCheckHangsSaysNothing|TestATickerStoppedBesideAFailureStillSaysIt)$'
+'^(TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound|…ATickerStoppedWhileAStepHangsSaysNothingWhicheverBoundFiresFirst|…ATickerStoppedWhileItsCheckHangsSaysNothing|…ATickerStoppedBesideAFailureStillSaysIt)$'
 ./cmd/bridge`: `backup_stop_test.go:249: a stopped verification was reported:
 backup (startup): the verification of …/backups/2026-11-13T19-03-13Z was
 given up, and its step still holds the snapshots until it ends; its write did
@@ -96353,3 +96355,178 @@ bound waits on its clock in the two check cases until B886's seam; B886
 edits `runStep`'s select and `seams.go` too, so the two branches meet there,
 its gate case giving a step up at a bound of its own (`giveUp`), which is
 said, as it should be.
+
+## 2026-11-13 — B895 round 2: whichever bound fires first, a give-up the stop alone caused is silent, and everything else is said
+
+Worker b895, legion0, branch `fix/b895-ticker-stop-report` from round 1's
+head 67cffea1. Commits: d1b48fa3 (backup: what a verification knows is
+published to its hold before each step that can block, a give-up keeps it,
+`givenFor` names a step's own bound first, and the caller's expiry answers
+what was published) and 2fa9b9cf (the table). Every run: Go 1.27.3, tags
+`ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`; controls
+are uncommitted production mutations of 2fa9b9cf, each predicted in writing
+first (`.tmp/_b895/r2-controls.predictions.txt`), the bytes put back from
+memory.
+
+### The brief's items, at 67cffea1
+
+1. An earlier failure dropped, then silenced (Codex). Real. A give-up after
+   an error of the worker's own answered `givenUp(ctx, nil)` without it: a
+   manifest read that failed, then the prune (`finish.go:596-600`); a
+   recheck refused, then the read-back (:625-627); and the review's two
+   more, a recheck not recorded where no directory can be synced (:674-676,
+   which passed the veto's error alone) and a write that failed or is not
+   known durable (:704-710, whose error round 1 passed to the worker's own
+   answer alone). A give-up the stop made was then a `*givenUpAtStop`, which
+   `AsTheStop` took for the stop.
+2. An own-bound give-up silenced when the caller's expiry wins (the Claude
+   API). Real, and wider, as the review said: the expiry arm (:360-366)
+   answered `verifyExpiryError(ctx.Err())` with nothing found, so in that
+   order nothing the worker knew was said; and `givenFor` (`hold.go:304`)
+   answered the first cause and whether every give-up was the stop's, so a
+   step its own bound gave up after the stop gave another up was named as
+   the stop's ("its verdict's write did not end within its bound (context
+   canceled)", the red run below).
+3. A read-back-only give-up at the stop (Carbon 1). Rejected: once the
+   read-back is given up, `verifyHeld` asks `h.gaveUp()` and answers
+   `answer(h.givenUp(ctx, werr))` (:706-710), an error never nil, and
+   `answer` keeps a `*givenUpAtStop` beside a read-back the stop gave up
+   (`if _, atStop := err.(*givenUpAtStop); atStop &&
+   errors.Is(res.ReadErr, ErrReadBackGivenUp)`, :574-575). Its rows stay in
+   the table, silent at 67cffea1 and now.
+4. `laterBound` and the stop bound (Carbon 2), settled first. The claim
+   holds, and is no defect: `runStep` arms the stop's bound only
+   `if time.Until(by) > StopWriteBound` (`hold.go:545-546`; :574-575 now),
+   and `laterBound` gives a step begun past the deadline half a
+   `StopWriteBound` from its start (:591-597; :620-626 now), so such a step,
+   and any whose own bound is within `StopWriteBound` of the stop, keeps its
+   own bound, the nearer, which gives it up as a bound of its own (`giveUp`,
+   `context.DeadlineExceeded`): no give-up the stop made, and said. The
+   table runs that arming: in "the stop at the write, then the read's own
+   bound" the read-back registers after the stop with its own bound 1 ms
+   off (`SetStepBoundForTest`), and the stop arms nothing on it.
+
+### The fix (d1b48fa3)
+
+`verify_known.go`'s `established` (what the check found and whether the
+snapshot is legacy, the worker's own errors, a read-back's failure),
+published under the hold's lock (`know`, `knowFound`, `knowRead`): a
+manifest read's failure before the prune, a refusal before the read-back,
+the finding after the check, `ErrRecheckNotRecorded` and a veto's failure
+before the read-back, a write's error before the prune and the read-back,
+and a read-back's failure as it is read. `givenUp` joins the published
+errors and is a `*givenUpAtStop` only with none; `givenFor` answers the
+first give-up a step's own bound made (`other`, which the caller's give-up,
+`abandon`, never sets) before the hold's first; and the expiry arm answers
+`h.expired(ctx)`: `Found`, `Legacy` and `ReadErr` as published,
+`WriteUnknown`, and `verifyExpiryError` joined to that own-bound give-up, to
+the published errors and to `ErrRecordNotReadBack` over a read-back's
+failure.
+
+### The table (2fa9b9cf) and its red at round 1 (`.tmp/_b895/r1red.log`)
+
+`TestAStoppedTickerSaysOnlyWhatItsStopAloneDidNotCause` takes round 1's
+three ordering tests' cases as rows: thirteen, each run with the worker's
+bound first and with the caller's expiry first, the expiry after the
+worker's last step where a row needs it (the worker's answer held at
+`SetVerifyHandoffForTest`'s answer hook, or the read-back parked). Silent:
+the stop alone at the check, at the verdict's write and at the read-back.
+Said: the write's own bound, then the stop at the read-back; the stop at the
+write, then the read-back's own bound; a manifest read that failed (the
+record corrupted at its first read), then the prune; a recheck refused
+(neither veto syncs), then the read-back; a recheck not recorded where no
+directory can be synced, then the read-back; a write that failed (its
+staging), then the prune; a write not known durable (its sync), then the
+read-back; a FAILED finding (a store newer than this bridge), then the
+verdict's write; a read-back that failed once the stop gave the write up;
+an INCOMPLETE whose write failed once the stop gave the check up.
+
+Round 1's production (internal/backup as 67cffea1 has it) under the table,
+without `-race`, as predicted in writing
+(`.tmp/_b895/r2-table.predictions.txt`): red in 14 of the 20 said cases,
+every one with the caller's expiry first (silent) and, with the worker's
+bound first, the manifest read and the two rechecks (silent) and the
+read-back's own bound after the stop (the line above, the read-back's own
+bound not named); green in the other six (the worker's case of the write's
+own bound, of each write, of the FAILED finding, of the read-back that
+failed and of the INCOMPLETE whose write failed) and in the six silent
+cases. At 2fa9b9cf every case is green.
+
+### Controls (`.tmp/_b895/r2controls.py`), each red where predicted
+
+Twelve production mutations of 2fa9b9cf, each run over the table, the
+shutdown bound (`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound`)
+and internal/backup's two tests, from binaries built without `-race`, about
+50 s a control; `git status` was empty after each.
+
+- C1, the brief's: `AsTheStop` answers the stop's error whatever err is.
+  Red: every said case but the FAILED finding's two, which the found-verdict
+  rule says without `AsTheStop` (18 cases), as predicted; the hold's unit
+  test in eight rows, not the six predicted, since its two rows that are the
+  stop also ask `AsTheStop` over a context never stopped, which the mutation
+  answers nil; the expiry's unit test in its five said rows.
+- C2, the expiry answering as round 1 did (`WriteUnknown`, its own error
+  alone): red the ten said cases with the expiry first.
+- C3, `givenFor` naming the first give-up: red the read-back's own bound
+  after the stop with the worker's bound first, and its unit row.
+- C4, a stop-only give-up typed whatever was published: red the worker's
+  cases of the manifest read, both rechecks, both writes and the INCOMPLETE
+  whose write failed, and the unit row beside a published error.
+- C5 to C10, each publication left out in turn (the manifest read's
+  failure, the refusal, `ErrRecheckNotRecorded`, the write's error, the
+  read-back's failure, the finding): red exactly the rows each feeds, in
+  both orders, but the read-back's failure and the finding with the expiry
+  first alone, the worker's answer carrying those itself.
+- C11, the expiry dropping the own-bound give-up: red the expiry's cases of
+  the two own-bound rows, and those two rows of the expiry's unit test.
+- C12, the caller's own give-up kept as a step's (`abandon` setting
+  `other`): red the expiry's unit row of a watchdog with no stop, which then
+  named a step given up.
+
+### Runs
+
+At 2fa9b9cf, in the build slot, `-race -count=200` of the table, a lane per
+row (both its orders each count) and two more, the shutdown bound and
+internal/backup's two tests (`.tmp/_b895/lanes2.py`: race binaries built
+once, every lane pinned to CPUs 0-7, half the cores, at GOMAXPROCS=2):
+
+- Unloaded (`.tmp/_b895/session_a.log`; a docs check's build, outside the
+  slot, overlapped its first two minutes): every case of every lane 200 of
+  200, no failure, no race; 1388 s wall, a table case 1.44 to 5.54 s, the
+  shutdown bound 2.56 to 4.00 s, the unit tests under 0.01 s.
+- Loaded, beside one busy loop pinned to each of the 16 CPUs
+  (`.tmp/_b895/session_b4.log`): every case of every lane 200 of 200, no
+  failure, no race, but the recheck not recorded, whose lane a watchdog
+  stopped at 163 of 200 in each order at 01:12, before the session's
+  two-hour limit, so that lanes2.py killed its hogs and summed up
+  (`.tmp/_b895/lanestop.py`), and a second loaded session ran on to 200
+  (`.tmp/_b895/lanes2top.py`: its 37 more of each order, the lane alone
+  beside the same hogs, 1092 s, no failure, no race); the first session 5975 s,
+  the table's other lanes ending between 1644 s and 4608 s, a table case
+  3.66 to 24.56 s, the shutdown bound 9.59 to 14.61 s, the unit tests under
+  0.02 s. What the hogs slow is the check, which runs at nice 19 with the
+  idle I/O class on Linux (`priority_linux.go`): the rows whose check never
+  reads (the two that park it, the manifest read that failed) are the
+  quickest, 3.66 to 6.99 s a case, and the recheck not recorded, which runs
+  two checks (its snapshot's and the recheck), the slowest.
+
+No case waits a real `StopWriteBound`; the check's two rows wait the check's
+own half bound on its clock (B886's seam is for that one). Then in the
+unloaded run's slot session (`.tmp/_b895/pkgs.py`), side by side and pinned
+to CPUs 0-7 at `-parallel 4`, `go test -race -count=1 -timeout 120m`:
+`./cmd/bridge` ok (1664.4 s), `TestEveryCitedTestNameExists` alone skipped,
+and `./internal/backup` ok (832.2 s); and `go vet -tags … ./...` as GOOS
+linux, darwin and windows, each clean. The cited-names test
+ran apart (`.tmp/_b895/docs2/docs_check2.py`, its binary run over a copy of
+the tree): over 2fa9b9cf's docs red, naming exactly the three tests the
+table replaced; over them with `rules-b895-r2.patch` green, and red, naming
+it alone, with a ghost citation planted. go1.27.3's gofmt lists none of the
+files changed, and the budgets check is clean with the patch (`cli-serve.md`
+99728 bytes).
+
+Left open: as in round 1, B886 edits `runStep`'s select and `seams.go`, so
+the two branches meet there. And 2fa9b9cf alone fails cmd/bridge's
+`TestEveryCitedTestNameExists`: the History file and round 1's record above
+cited the three tests the table replaced, which `rules-b895-r2.patch`
+repoints (the History) and elides (the record), so the patch lands with the
+code.

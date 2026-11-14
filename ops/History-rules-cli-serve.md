@@ -5513,25 +5513,70 @@ bound of its own (`context.DeadlineExceeded`); `giveUpAtStop`, the bound the
 caller's stop set (`runStep`'s once the stop reset it, the check's half of
 `StopWriteBound` past a context the stop ended), and with no stop a bound of
 its own; `abandon`, the caller's stop, or its watchdog's deadline. `givenUp`
-names the first. A give-up every one of whose steps the stop gave up, with no
-write's error beside it (the INCOMPLETE's, a veto's), is a `*givenUpAtStop`;
+names the first give-up a step's own bound made, whatever the stop gave up
+before it, and otherwise the first (`givenFor`; round 1 named the first, so
+a bound of its own after the stop read as the stop's: round 2 below). A
+give-up every one of whose steps the stop gave up, with no error of the
+worker's own published beside it (since round 2 every such error; round 1
+asked only a write's, the INCOMPLETE's or a veto's), is a `*givenUpAtStop`;
 a read-back the stop gave up beside it keeps it one, and a read of the record
 that failed does not (`verifyHeld`'s answer). `backup.AsTheStop(ctx, err)`
 answers ctx's own error for one, ctx cancelled and its cause the
 cancellation, and err itself otherwise. The ticker asks it before
 `ctxerr.WithoutCancellation`, so a give-up the stop made alone is silent
-whichever bound fires first, while the rule for a verdict found beside the
-stop (B653 PR 1, rounds 10 and 11) still says a FAILED finding, and a write
-or a read of the record that failed, and a step given up at a bound of its
-own, whenever its answer comes, are still said. The CLI and the console say
-a give-up as they did. The tests fire the two bounds through
-`SetStopBoundsForTest` (nil in production, where the timers are as they
-were); the check's own half bound is B886's seam.
-`TestATickerStoppedWhileAStepHangsSaysNothingWhicheverBoundFiresFirst` (the
-verdict's write and the read-back, each bound first),
-`TestATickerStoppedWhileItsCheckHangsSaysNothing`,
-`TestATickerStoppedBesideAFailureStillSaysIt` (a FAILED finding, a read-back
-that failed, an INCOMPLETE whose write failed, a write given up at its own
-bound and answered once stopped) and internal/backup's
-`TestAGiveUpIsTheStopOnlyWhereTheStopMadeItAlone` pin it; the record is in
-`ops/engineering-log.md`, 2026-11-13, B895.
+whichever bound fires first, while a FAILED finding (the rule for a verdict
+found beside the stop, B653 PR 1, rounds 10 and 11), a read or a write that
+failed, a recheck refused or not recorded, and a step given up at a bound of
+its own are said whichever bound fires first: round 1 claimed so, which held
+neither for its caller's expiry nor beside an error a give-up dropped until
+round 2 (below). The CLI and the console say a give-up as they did. The
+tests fire the two bounds through `SetStopBoundsForTest` (nil in production,
+where the timers are as they were); the check's own half bound is B886's
+seam. Round 1's three ordering tests are rows of round 2's table now.
+
+*Round 2* (2026-11-13). Round 1's answer lost what came before a give-up,
+and its caller's expiry knew none of it. A give-up dropped the worker's own
+errors: a manifest read that failed, then the prune given up at the stop; a
+recheck refused, or not recorded where no directory can be synced, then the
+read-back; so `AsTheStop` took the answer for the stop, and the ticker said
+nothing. The expiry (`verifyAndThen`'s `<-expire`) answered the stop's error
+alone, with nothing found, so a step its own bound gave up, a FAILED finding,
+and a write or a read-back that failed went unsaid whenever the caller's
+expiry fired before the worker answered. And a step its own bound gave up
+after the stop gave another up was named as the stop's. Now the worker
+publishes to its hold, under the hold's lock, before each step that can
+block, what its check found and each error of its own (`verify_known.go`:
+`know`, `knowFound`, `knowRead`; a manifest read that failed, a recheck
+refused or not recorded, a veto or a write that failed or is not known
+durable, a read-back that failed); `givenUp` joins those errors and is a
+`*givenUpAtStop` only where the stop alone gave the hold up and none was
+published; `givenFor` names the first give-up a step's own bound made, its
+caller's own give-up aside; and the expiry answers what was published
+(`expired`), with `WriteUnknown` (B653 PR 1's eighth round), its own error
+joined to that own-bound give-up and to those errors; `VerifySnapshot` and
+`FinishCapture` share `verifyAndThen`, so the CLI and the console, which say
+every error, say at an expiry what was published too. Two of the round's
+items were no defect. A read-back the stop alone gave up after a write that
+ended was the stop's already: `answer` is given `givenUp`'s answer there,
+never nil. And the stop arms no bound on a step whose own bound is within
+`StopWriteBound` (`runStep`, only where `time.Until(by) > StopWriteBound`),
+as every step begun past the deadline's is (`laterBound`, half a
+`StopWriteBound` from its start): so it is, and right, since that bound is
+the nearer and gives the step up first, a give-up of its own that the stop
+did not make, which is said.
+`TestAStoppedTickerSaysOnlyWhatItsStopAloneDidNotCause` runs thirteen rows,
+each with the worker's bound first and with the caller's expiry first, the
+worker's answer held where the expiry must come after its last step: silent,
+the stop alone at the check, the verdict's write and the read-back; said, a
+step its own bound gave up before the stop and one after the stop gave
+another up, a manifest read that failed, a recheck refused, one not recorded
+where no directory can be synced, a write that failed and one not known
+durable, a FAILED finding, a read-back that failed after the stop gave the
+write up, and an INCOMPLETE whose write failed after the stop gave the check
+up. At round 1's code 14 of its 20 said cases were red (every one with the
+expiry first; with the worker's bound first the manifest read, both
+rechecks and the own bound after the stop), the other six said already,
+and every silent one green.
+internal/backup's `TestAGiveUpIsTheStopOnlyWhereTheStopMadeItAlone` and
+`TestACallersExpiryAnswersWhatItsWorkerPublished` pin the hold's side; the
+record is in `ops/engineering-log.md`, 2026-11-13, B895 and B895 round 2.
