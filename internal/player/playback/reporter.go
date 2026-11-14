@@ -134,11 +134,26 @@ func (s *session) reportStep() bool {
 			evs = append(evs, func() { s.ev.Position(id, pos) })
 		}
 	}
-	// What is heard: its content played, at most what it gave the sink,
-	// counted from the frame it started at (its from, a seek's target).
+	// What is heard: its content played, counted from the frame it started at
+	// (its from, a seek's target), at most what it gave the sink, which is
+	// what the producer counted (written) but while its Write is under way
+	// (B903). The producer counts a Write's frames once the Write has
+	// returned, and the sink takes them, and may play them, before that, so
+	// there the bound is Played alone: a sink never counts played more than
+	// it took (alsapcm.Sink's Played is at most its Written, a native sink's
+	// at most its Submitted), and every frame it took past the occurrence's
+	// start is the occurrence's own, since the producer writes no other
+	// before that Write returns. A fault during the Write freezes what the
+	// sink played, never the count from before the Write; once the Write is
+	// counted, written covers Played, and the cap gives the same frames. A
+	// panic in the Write leaves it under way, and nothing is written after.
 	if heard != nil {
 		p := posOf(heard.out)
-		frames := heard.from + min(max(p.Played-heard.start, 0), heard.written)
+		played := max(p.Played-heard.start, 0)
+		if !s.inWrite || s.writing != heard {
+			played = min(played, heard.written)
+		}
+		frames := heard.from + played
 		if heard.id != s.posOcc || frames != s.posFrames {
 			s.posOcc, s.posFrames = heard.id, frames
 			pos := engine.Position{Occurrence: heard.id, Frames: frames, RateHz: heard.out.logicalRate(), Measured: p.Measured}
