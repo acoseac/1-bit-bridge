@@ -1,0 +1,62 @@
+# EXPERIMENT (not for merge; B872 part 2's fallback, round 2). Runs only on a push to its own branch: the holder
+# diagnostic's positive control, the four tests internal/updater's service guard governs, and the two rollback tests
+# that went red on CI, 200 times, keeping the diagnostic's lines.
+name: experiment-b872p2fb
+
+on:
+  push:
+    branches: ["experiment/b872p2fb-r2-win"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: holder diagnostic on windows-latest
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - name: Exclude the Go temp tree from Defender (as gate.yml does)
+        shell: bash
+        run: |
+          GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo "$TEMP")
+          echo "Go os.TempDir() = $GOTMP"
+          pwsh -Command "Add-MpPreference -ExclusionPath '$GOTMP'" || true
+      - name: The positive control, 20 times
+        shell: bash
+        run: |
+          set +e
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=20 -v -run '^TestTheHolderDiagnosticNamesTheChildThatHoldsTheBackup$' ./cmd/bridge/ > control.log 2>&1
+          echo "control exit $?"
+          echo "PASS lines: $(grep -c '^--- PASS: TestTheHolderDiagnosticNamesTheChildThatHoldsTheBackup' control.log); SKIP lines: $(grep -c '^--- SKIP' control.log); FAIL lines: $(grep -c '^--- FAIL' control.log)"
+          grep -E 'candidate user|refusals:' control.log | head -20
+          grep -E '^--- (FAIL|SKIP)' -A8 control.log | head -40
+          exit 0
+      - name: The four tests the updater's service guard governs
+        shell: bash
+        run: |
+          set +e
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run '^(TestSwapWindows_RenameTrick|TestSwapWindows_RollbackOverwritesExistingBak|TestRollbackBinary_Windows|TestRollbackBinaryReplacesARunningExe)$' ./internal/updater/ > updater.log 2>&1
+          echo "updater exit $?"
+          grep -E '^--- (PASS|SKIP|FAIL)' updater.log
+          exit 0
+      - name: The two rollback tests, 200 times, with the diagnostic's lines
+        shell: bash
+        run: |
+          set +e
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 120m -count=200 -v -run '^(TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn|TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack)$' ./cmd/bridge/ > rollback-holders.log 2>&1
+          echo "stress exit $?"
+          grep -E '^--- (PASS|FAIL): Test' rollback-holders.log | sed -E 's/ \([0-9.]+s\)//' | sort | uniq -c
+          grep 'rollback holder diagnostic' rollback-holders.log > rollback-holders.txt
+          echo "diagnostic lines: $(wc -l < rollback-holders.txt)"
+          grep -v 'refusals: 0' rollback-holders.txt | head -40
+          grep -E '^--- FAIL' -A12 rollback-holders.log | head -80
+          exit 0
