@@ -45,11 +45,36 @@ const probeTimeout = 2 * time.Second
 
 // probeLimit is how long an lsof probe may run. Production returns
 // probeTimeout. A test that calls the real lsof replaces it with the time
-// the test has left, so a loaded runner does not turn a slow lsof into a
-// failed verdict (backlog B338). The production 2s bound stays: systemctl
-// reads probeTimeout directly, and the timeout-contract tests leave this
-// at the default. Production code MUST NOT mutate it.
+// the test has left (SetProbeLimitForTest), so a loaded runner does not
+// turn a slow lsof into a failed verdict (backlog B338). The production 2s
+// bound stays: systemctl reads probeTimeout directly, and the
+// timeout-contract tests leave this at the default. Production code MUST
+// NOT mutate it.
 var probeLimit = func() time.Duration { return probeTimeout }
+
+// SetProbeLimitForTest makes every lsof probe this package spawns (the owner
+// probe of both port ladders, and macOS's second look) run for the time until
+// deadline's answer, less reserve, where that is longer than probeTimeout,
+// and for probeTimeout otherwise, as with no deadline; deadline is a test's
+// t.Deadline. It returns what puts the limit before it back. It is for a
+// test, in this package or another (cmd/bridge's, whose bridge init and
+// bridge doctor ask about a port the test holds: backlog B872 part 2), that
+// asks the real lsof: a loaded runner's lsof outlives probeTimeout, and a
+// probe cut short reads as no answer (backlog B338). Production code MUST
+// NOT call it. Process-global: a test that uses it MUST NOT call
+// t.Parallel(), and restores it in a t.Cleanup.
+func SetProbeLimitForTest(deadline func() (time.Time, bool), reserve time.Duration) (restore func()) {
+	prev := probeLimit
+	probeLimit = func() time.Duration {
+		if dl, ok := deadline(); ok {
+			if remain := time.Until(dl) - reserve; remain > probeTimeout {
+				return remain
+			}
+		}
+		return probeTimeout
+	}
+	return func() { probeLimit = prev }
+}
 
 // Status is the outcome of a single check.
 type Status string

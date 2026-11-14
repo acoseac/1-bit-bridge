@@ -414,9 +414,11 @@ func (r *refusedInstall) bootConsole(t *testing.T, opts serveOpts) (servedBridge
 
 // doctorLineOf runs `bridge doctor --json` on the settings at cfg, as an
 // operator beside the bridge would, and returns its install-probation line,
-// nil where it has none.
+// nil where it has none. Beside a running serve its port checks ask the real
+// lsof, under the test's deadline (lsofTakesTheTestsDeadline).
 func doctorLineOf(t *testing.T, cfg string) *jsonDoctorCheck {
 	t.Helper()
+	lsofTakesTheTestsDeadline(t)
 	var stdout, stderr bytes.Buffer
 	run(t.Context(), []string{"doctor", "--json", "--config", cfg}, &stdout, &stderr)
 	var report jsonDoctorReport

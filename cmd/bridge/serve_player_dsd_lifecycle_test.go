@@ -45,6 +45,8 @@ func legacyKeyLines(log, key string) []string {
 func TestLegacyDSDKeysStillLoadAndAreWarnedOnce(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
+	// bridge doctor beside the serve asks the real lsof about its ports.
+	lsofTakesTheTestsDeadline(t)
 	box := newDSDBox(t)
 	log := watchLog(t)
 	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer + "    dsdMode: dop\n    allowDoP: true\n    dsdQualification: approved.json\n",

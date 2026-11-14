@@ -54,6 +54,8 @@ const (
 // The certificate is the one a mint would make now, less one IPv4 address
 // and both IPv6 addresses of the walk.
 func TestServeHoldsBackOnlyTheIPv6AddressesItsCertificateDoesNotName(t *testing.T) {
+	// bridge doctor beside each serve asks the real lsof about its ports.
+	lsofTakesTheTestsDeadline(t)
 	// Registered before the boots, so the cleanup that stops each serve,
 	// registered after it, runs first.
 	t.Cleanup(advertise.SetInterfacesForTest([]advertise.InterfaceForTest{{

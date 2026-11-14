@@ -40,6 +40,8 @@ import (
 // minted again, and bridge doctor's certificate and pairing lines are quiet,
 // the pairing line saying why the QR dials an address and not the name.
 func TestServeOnAHostWhoseNameIsNotASCII(t *testing.T) {
+	// bridge doctor beside the serve asks the real lsof about its ports.
+	lsofTakesTheTestsDeadline(t)
 	for _, tc := range []struct {
 		name, host, library string
 		mdns                bool

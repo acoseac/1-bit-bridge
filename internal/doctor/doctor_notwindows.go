@@ -24,6 +24,23 @@ import (
 // Production code MUST NOT mutate it.
 var lsofCommand = exec.CommandContext
 
+// SetLsofCommandForTest makes cmd build every lsof spawn this package makes,
+// in place of exec.CommandContext, given the spawn's context, the resolved
+// lsof and its arguments, and returns what puts the spawn before it back: a
+// test in another package slows the real lsof down through it (cmd/bridge's
+// re-init case, backlog B872 part 2). Production code MUST NOT call it.
+// Process-global, as SetProbeLimitForTest is.
+func SetLsofCommandForTest(cmd func(ctx context.Context, name string, args ...string) *exec.Cmd) (restore func()) {
+	prev := lsofCommand
+	lsofCommand = cmd
+	return func() { lsofCommand = prev }
+}
+
+// LsofForTest is the lsof this package resolved at its init (lsofPath), ""
+// where the host has none, for which it spawns nothing: a test that slows the
+// real lsof down skips without one.
+func LsofForTest() string { return lsofPath }
+
 // isPIDListeningOnPort reports whether targetPID is among the processes
 // listening on the given local TCP port. The bool answers "is it us?" for
 // checkPort's own-bridge branch; the error reports a probe-MECHANISM

@@ -173,8 +173,11 @@ func recordBridgePID(t *testing.T, cfgDir string, pid int) {
 
 // reinitBrokenInstall runs `bridge init --yes --force --no-service` over
 // the install, with any extra flags, and returns its exit code and output.
+// Its preflight asks the real lsof whether the recorded bridge holds the
+// ports, under the test's deadline (lsofTakesTheTestsDeadline).
 func reinitBrokenInstall(t *testing.T, cfgDir, lib string, extra ...string) (int, string) {
 	t.Helper()
+	lsofTakesTheTestsDeadline(t)
 	args := append([]string{
 		"--yes", "--force", "--no-service",
 		"--dir", cfgDir, "--library", lib, "--name", "Rewritten",
