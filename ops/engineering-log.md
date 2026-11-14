@@ -96843,3 +96843,173 @@ B872's bullet on a check given up (wait for the marker until it decodes as the
 hold awaited, bounded by a deadline asked after every read); `git apply
 --check` takes it, and the budgets check is clean with it (the worst load from
 76.1% to 76.3%).
+
+## 2026-11-14 — B895-TEST: the stopped tickers' tests hold the hung step at its gate
+
+Worker b895t, legion0, branch `fix/b895-ticker-tests-one-order` from main
+92288694, #1469's squash (B886; its PR head 43053318 is not in this clone, and
+the squash holds `SetStepGateForTest`, `internal/backup/seams.go` 435).
+Commits: 246ca2dc (the two tests), then this record. Every run: Go 1.27.3, the
+tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`;
+controls are uncommitted edits to the committed tree, each predicted in
+writing first (`.tmp/_b895t/controls.predictions.txt`), the edited files'
+bytes put back from memory once their binary was built. No production change.
+
+### The hazard
+
+#1460's macOS CI (run 43470491773) failed
+`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` with "a
+stopped verification was reported". A stop arms two bounds of
+`StopWriteBound` (2 s, `internal/backup/finish.go` 19) at once:
+
+- the step's own: `runStep` resets its timer on the stop (`hold.go` 517-521)
+  and past it gives the step up (522-524); the worker answers
+  `ErrCheckGivenUp` joined to the cancellation by a second `%w` (`finish.go`
+  403), which `ctxerr.WithoutCancellation` keeps whole (`ctxerr.go` 87-100),
+  and the ticker reports it (`cmd/bridge/backup.go` 811-818);
+- the caller's: `verifyAndThen` arms its expiry on the same stop (`finish.go`
+  351-355) and past it abandons the hold and answers
+  `verifyExpiryError(ctx.Err())` (360-366, 373-380), one `%w` around the
+  cancellation, which `WithoutCancellation` takes out (`ctxerr.go` 82-86,
+  106-107).
+
+Which fires first is the scheduler's choice, and only the second is silent.
+
+### The outer expiry's path is silent at HEAD
+
+With the caller's expiry first, `res` carries `WriteUnknown` and nothing
+found (`finish.go` 361-366); no prune ran, so `PruneSkipped` is `!abandoned`,
+false (`finish.go` 945-953); `reportTickerVerdict` returns at `backup.go`
+800-803 (the failure nil, `Found.DatabaseState` empty); and the prune's lines
+need a live context or a deletion (`backup.go` 649-654). Every green run below
+shows it: stderr empty, stdout the snapshot's line alone. No production
+defect there.
+
+### The change (246ca2dc)
+
+- `TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound`'s
+  manifest-read case holds "its read of the snapshot's record" at its gate,
+  and `TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` holds
+  "its verdict's write", each with `backup.SetStepGateForTest(root, "", step)`
+  set before the ticker starts. `gateOf` matches the hold's root and, for the
+  snapshot "", any snapshot under it (`seams.go` 465-474), and the ticker makes
+  its snapshot during its pass. `root` is `backupInstall`'s, under the data dir
+  it resolves (`backup_verify_test.go` 26-34), which is the root
+  `resolveSnapshotIn` gives the hold (`verify_paths.go` 40-58), so the seam
+  matches from `package main` as it is (C2 below). A gated step's `runStep`
+  drops the stop and the bound (`hold.go` 486-490), so it ends by its answer
+  or its gate, and nothing in the test fires the gate: only the caller's
+  expiry ends the ticker's wait.
+- The lock-open case keeps its seam and has no gate: `verifyHeld` takes the
+  lock (`finish.go` 442) before its first step (527), so only its caller's
+  expiry ends that wait already.
+- The cleanups are registered so that, last-registered first, they run in
+  this order whatever the body found: the hang's own seam let go (never the
+  gate) and the cancel; `drainLoopOnCleanup`'s join of the ticker;
+  `awaitHoldsLetGo` (the mark dropped, every hold let go, every snapshot's
+  ownership free); then the seams, the gate's restore among them, which fires
+  every gate as it puts the seam back, so only once no step waits at one.
+  Main's version ran the release, the cancel, a `waitClosed` that fails
+  fatally at 10 s and `awaitVerificationsEnd` in one cleanup, and the round-2
+  test released and joined again at its body's end. The seam's doc asks a
+  test to fire its gates before it joins (`seams.go` 432-434); here the hung
+  step answers once its own seam lets go, so no join waits on a gate.
+- Each case asserts what it did (the ticker back within `StopWriteBound` and a
+  second of the stop; stderr empty, else "a stopped verification was
+  reported"), and now that stdout is exactly `backup (startup): wrote <the
+  one snapshot>` (`requireOnlyTheSnapshotsLine`).
+
+### Controls (`.tmp/_b895t/controls.py`; 6 of 6 as predicted, C5's run time aside)
+
+SUP is the uncommitted suppression of the caller's expiry: `verifyAndThen`'s
+stop arm no longer arms `expire` (`finish.go` 351-355; the watchdog, an hour
+away, stays). Each case alone, `-test.count 3`.
+
+- C0, the committed tree: the three cases green, 3 of 3 each.
+- C1, the red (SUP, then the cancel, and only then the gate fired, so the
+  cancellation comes before the give-up and the step is given up as by its
+  own bound): the manifest's read red 3 of 3, `backup_round2_test.go:497: a
+  stopped verification was reported: backup (startup): the verification of
+  <dir> was given up, and its step still holds the snapshots until it ends;
+  it wrote nothing; its record was not read back: a step of the verification
+  did not end and was given up, and holds the snapshots until it does: its
+  read of the snapshot's record did not end within its bound (context
+  canceled)`; the verdict's sync red 3 of 3 with CI's line,
+  `backup_verify_test.go:453: a stopped verification was reported: ... its
+  write did not finish, and its record reads database INCOMPLETE: unsynced,
+  files INCOMPLETE: unsynced: ... its verdict's write did not end within its
+  bound (context canceled)`. Nothing else failed (the ticker back at once,
+  stdout the snapshot's line). The committed lines are 494 and 452; the
+  control's inserted statements moved them by three and one. With the gate
+  held (C0) both are green.
+- C2, SUP alone, the gate held: both cases red 3 of 3 at :491 and :449, "the
+  ticker did not return while ...", after 12.4 s each, nothing reported: the
+  gated step outlived its own stop bound.
+- C3, SUP with main's two test files (no gate): red 3 of 3 at main's
+  `backup_round2_test.go:476` and `backup_verify_test.go:441`, "a stopped
+  verification was reported ... given up ... (context canceled)", about 2 s
+  after each stop: production's own step bound, the residual below, forced.
+- C4, SUP with the gate scoped to the snapshot "x": red 3 of 3 at :494 and
+  :452, as C3: the empty snapshot is what reaches the snapshot the ticker
+  makes.
+- C5, a race build with `t.Fatal` right after the cancel in both cases: red 3
+  of 3 with that line alone, no drain timeout, no hold left, no data race.
+  Predicted 2 to 3 s a run, measured 1.3 to 1.4 s: once its hang is let go
+  the worker answers before the caller's expiry.
+
+`git status` was empty after each.
+
+### Runs
+
+At 246ca2dc, from one `-race` test binary of it (`.tmp/_b895t/lanes.py`), one
+lane per case (the manifest's read, the lock's open, the verdict's sync), the
+three at once, GOMAXPROCS 2 each, `-test.count 50`:
+
+- quiet, outside the build slot (load about 3, another worker's session in
+  the slot): every case 50 of 50, no FAIL, SKIP or data race; the lanes took
+  178, 179 and 183 s;
+- beside 16 python busy loops, in the slot (load about 17.6): every case 50 of
+  50, no FAIL, SKIP or data race; the lanes took 248, 245 and 501 s (the
+  verdict's sync runs the check first, on its lowest-priority thread).
+
+In slot1, taken at 13:45:31 by a guard that waited 46 minutes behind another
+worker's session (`.tmp/_b895t/guard.py`, `session.py`): `go vet` with the
+tags over `./...` as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and
+windows/amd64, exit 0 each with nothing printed; `go test -race -count=1
+-timeout 120m ./cmd/bridge/` at GOMAXPROCS 8, ok in 1604.2 s, no FAIL and no
+data race; then the loaded lanes. go1.27.3's gofmt lists neither test file,
+and cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` and
+`TestEveryBackgroundGoroutineDrainsOnCleanup` pass over the tree with this
+record. The rule is `rules-b895t.patch`, uncommitted: one bullet in
+`build-ci-tests.md`, after B886's gate bullet (a test that stops a
+verification while a step hangs forces one order of the two bounds, and for
+the caller's expiry holds the step at its gate, fired only after its joins);
+`git apply --check` takes it, and the budgets check is clean with it (the
+worst load from 76.4% to 76.7%).
+
+### The residual
+
+The step-first order stays in production: where `runStep`'s bound, reset at
+the stop (`hold.go` 517-524), fires before the caller's expiry, a give-up the
+stop alone caused is reported (C3 forces it). That is B895's production fix
+(branch `fix/b895-ticker-stop-report`, unmerged), which also rewrites these
+two tests as a table firing both bounds (f8fc6011, 2fa9b9cf): its merge meets
+this change in the same two files.
+
+### The version gate
+
+`cmd/bridge/backup_round2_test.go`, `cmd/bridge/backup_verify_test.go` and
+`ops/engineering-log.md` are under neither `guardedPrefixes` nor
+`GuardedPaths` (`internal/player/qualification/version_gate.go` 20-36), and
+`internal/backup` is untouched: `go run ./scripts/qualification-version -base
+92288694 -head HEAD` says "qualification version OK: 92288694..HEAD". Nothing
+is bumped.
+
+### Left
+
+- B895's production branch and this change edit the same two tests; its
+  merge keeps one shape of them.
+
+The backlog file is not on legion0: this is named for the orchestrator to
+file.
