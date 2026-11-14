@@ -5503,7 +5503,11 @@ have not finished yet, and the doctor begins no more until one does". A root
 removed and added again finds its work still out. The loads have a limit of
 their own so that roots that do not answer never hold back a load, which with
 no directory setting touches no root, nor the report that names them with
-it.
+it. `bridge doctor` keeps the player checklist's read of the outputs body
+the same way since round 2 (`output.md`'s line): a read the process keeps for
+each config (`cliOutputsReads`), which every gather over that config waits
+on, so a root that holds it holds one goroutine however often the
+launcher's doctor row runs.
 
 *What it does not do.* No work is cancelled, nothing is unmounted, and no
 probe runs in another process: a stat the kernel holds is let go by the
@@ -5514,7 +5518,14 @@ follow-up's: bridge init's own load of an existing install's config
 (`withExistingInstallDeps`) and its save, the console's settings saves, whose
 validation resolves every root where either directory is set, and GET
 /v1/outputs, whose build a root that does not answer holds (the checklist's
-read of it is bounded).
+read of it is bounded). Nor does it bound the doctor's own files: the
+config file and the data directory on a dead mount are backlog B884's. A
+data directory under a library root is one: `buildDoctorDepsRun` stats its
+database on the run's goroutine before `doctor.Run` (`os.Stat(dbPath)`),
+the data-dir line and the player's, the store's and the sidecars' probes
+read it unbounded, and the player checklist stats the database inside its
+bounded read (`doctorOutputChecklist`) and reads the token file on the
+run's goroutine (`tokenFile`).
 
 *The tests.* `TestARunNamesARootThatDoesNotAnswerWithinItsBound`,
 `TestTheSecondOfTwoRootsDoesNotAnswer`,
@@ -5542,14 +5553,26 @@ read of it is bounded).
 `TestACancelledConsoleDoctorRunSaysItWasStopped`,
 `TestTheConsolesDoctorReadsARecoveredRootAsHealthy`,
 `TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn`,
-`TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead` and
+`TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead`,
+`TestDoctorRunsInOneProcessShareOneReadOfTheBox`,
+`TestADoctorRunTakesOnlyTheReadOfItsOwnConfig`,
+`TestAWaitOnASharedReadEndsAloneWithItsContext` and
 `TestBridgeDoctorPrintsHealthyRootsAsBefore` in cmd/bridge; and
 `TestLibraryRootsOfIsTheRootsLoadGives` in internal/config. No filesystem a
 test can make stops answering, so each stands a root that does not answer in
 where the step touches it: the probe's `stat` and `readDir`
-(`doctor.NewRootProbesForTest`), the count (`RootProbes.countWatches`), and
-`Validate`'s containment check (`config.SetRootContainmentForTest`). The record
-is in `ops/engineering-log.md`, 2026-11-13, B650.
+(`doctor.NewRootProbesForTest`), the count (`RootProbes.countWatches`),
+`Validate`'s containment check (`config.SetRootContainmentForTest`), and the
+checklist's build (`boxStall`: its read of the indexed tracks held), whose
+reads it counts. A run's time is its runner's (`RootProbes.now` and
+`timer`: `time.Now` and `time.NewTimer`'s in production), and since round 2
+the four cases that held a run to how long it took read its waits on a
+test clock that moves only when the case moves it (`clockOf`): the wait a
+run sets, the instant its bound passes, and a wait it should not set, none
+of which a loaded host's scheduling moves; cmd/bridge's stopped console run
+keeps a lower bound instead, its return after its stop, under its 90 s
+deadline, below its root's ten-minute bound. The record is in
+`ops/engineering-log.md`, 2026-11-13, B650 and B650 round 2.
 ## B828 — a state file that holds nothing refuses the start in the bridge's words (2026-11-13)
 
 - **…and a state file that holds nothing, empty or JSON's white space alone (of a file larger than the 16 MiB and one byte it is read to, all that was read, nothing past it read), refuses the node's start before the node is built, whatever `tailscale.hostname` or the auth key says, in the bridge's words (`tsnet.EmptyStateError`, naming no path: a copy of the file keeps the node; moved aside, a new device follows, and what that costs), which serve's tailnet line and `bridge tsnet auth` and `status` (exit 1) print and the console's tile shows in LastError (`tsnetAdminStatus`, from `LastStartError`); Tailscale's own start refuses that file, in words about a TPM-sealed state, and the bridge moves and replaces nothing** (2026-11-13, backlog B828, the review of its brief, and its round 2). **Don't take a state file that holds nothing for no node, build or start the upstream node over it, ask `tailscale.hostname` before it, move, replace or write the file, name a path in its words, count a byte JSON does not skip as nothing, or read past the bound to decide it.** `TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode`, `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`, and cmd/bridge's `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` and `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` pin it. → History-rules-cli-serve.md
