@@ -96654,7 +96654,11 @@ precedes the end on every run by the barrier, not the scheduler, and the case
 fails at the ordering assertion, never by a timeout. A cleanup opens both
 gates and waits, bounded, for the end before serve's drain and before the
 seams are put back. `startServeBesideItsSnapshot`'s `before` returns the end's
-hold, set with the end hook before serve starts.
+hold, set with the end hook before serve starts. Corrected in round 3: one
+cleanup, registered after serve's start, opened both gates before serve's
+drain; the join, registered with the case's seams, opened them again and
+waited for the end after the drain; and the end hook, registered after
+those, was put back before the join ran. Round 3 registers it first.
 
 **The rules.** e0378b30 is round 1's patch unchanged. e351ecaf, in
 `build-ci-tests.md`: the diagnostic's summary gains `ignored: M`; the B885
@@ -96686,7 +96690,10 @@ the read"; and two bullets, the service guards' and the seam pin's.
   reports every identifier `types.Info.Uses` resolves to a seam, in its own
   package or through an imported package's name, and any dot-import of a
   seam's package; only the declaration's own name is none. It counts the
-  put-back's four observations on each platform.
+  put-back's four observations on each platform. Corrected in round 3: for
+  amd64 alone, so a file built only for arm64 was never read, and a use its
+  checker could not record (a seam as a map literal's value under a key of
+  a type it could not resolve) passed it; round 3 scans by name (below).
 - The candidate's start time: a FILETIME at or before the Unix epoch, or more
   than an int64 of nanoseconds after it, is none (`filetimeStart`, false), and
   its line leaves it out; round 1's conversion read the zero FILETIME as
@@ -96704,7 +96711,7 @@ the read"; and two bullets, the service guards' and the seam pin's.
 | P-value-file | doctor_notwindows.go, another file of its package, takes it as a value | RED |
 | P-value-pkg | cmd/bridge's doctor.go takes `doctor.SetProbeLimitForTest` as a value | RED |
 | P-windows-file | doctor_windows.go, built only for windows, takes it as a value | RED |
-| P-namesakes | a local, a struct field and a method of the seam's name in doctor.go | GREEN: none is the seam |
+| P-namesakes | a local, a struct field and a method of the seam's name in doctor.go | GREEN: none is the seam (since round 3 every namesake is a reference: P3-namesake) |
 | L-ignored | the ignored count dropped | RED the bookkeeping case |
 | L-zero | the start time's guard dropped | RED: the zero FILETIME read as 2185-07-21, the epoch's as 1970, past an int64 as 1677 |
 
@@ -96751,3 +96758,153 @@ What windows-latest runs, each run's `--- PASS` its evidence, never
   '^(TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn|TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack)$'
   ./cmd/bridge/ > rollback-holders.log 2>&1`, then `grep 'rollback holder
   diagnostic' rollback-holders.log > rollback-holders.txt`.
+
+### Round 3: the seam pin by name, and B885's read after the publication
+
+From 77ad4954. Commits: 6c5b842a (the pin), 163f0fde (B885), a76bfa69 (the
+start time's comments), a4bdb614 (the rules, `rules-b872p2-fb-r3.patch`,
+sha256 1bf5b0b9…), then this record. The exit was named before the round: a
+Medium on the seam pin, the observer hook or the holder diagnostic parks the
+PR; one on B885 or the lsof deadline alone cuts that part; there is no round
+4. The controls' runner is `.tmp/_b872p2fb/controls_r3.py`, its predictions
+`.tmp/_b872p2fb/controls-r3.predictions.txt`, written first.
+
+**The pin (6c5b842a).** Round 2's pin type-checked each package with an
+importer that answered every import with an empty package, its errors
+ignored, so a use the checker could not record passed it:
+`map[time.Duration]any{time.Second: SetProbeLimitForTest}`, a value under a
+key of a type it could not resolve. It read the files linux, darwin and
+windows build for amd64 alone, so a file built only for arm64 passed it, and
+it pinned five seams named by hand. The pin now scans by name
+(`scanSeams`, `cmd/bridge/test_seams_scan_test.go`, which takes no
+`testing.T`): every non-test Go file of the module, walking as the citation
+guard walks, parsed whatever its build constraints (883 at a76bfa69); a seam
+is every exported function, method, var or type a non-test file declares at
+the top level whose name ends in `ForTest` (74); a reference is every
+identifier of a seam's name but a declaration's own name node, a selector's
+included, and a `//go:linkname` directive naming one (4). A reference stands
+only in a test-support package, one whose name ends in `test` and is not
+`main` (19 here), which the pin requires no non-test file outside such a
+package to import (none does), or at an allowlist entry's file and line, with
+its reason and a proof the pin checks (`seamExemptions`):
+
+- `cmd/bridge/main.go:3901`, serve's call of
+  `SetUpscaleTargetBeforeCommitForTest`: it lies in the if at :3900 that
+  checks `opts.upscaleTargetBeforeCommit` against nil, a field declared at
+  :3114 that no non-test file of cmd/bridge sets (`fieldWrites`: a selector
+  assigned, incremented, ranged into or whose address is taken, a key in a
+  composite literal, a literal without keys of a struct that declares it,
+  elided types included); `serve_cancel_test.go:711` alone sets it. The
+  proof's first run named `internal/manifest/test_seams.go:61`,
+  `manifest.Store`'s own field of that name: an unexported field is set only
+  in its own package, so for one the proof reads that package's files alone.
+- `internal/advertise/reach.go:116`, `InterfaceForTest`, the type of
+  `SetInterfacesForTest`'s parameter, and `internal/fsutil/owner_unix.go:414`,
+  `SimulateRootForTest`, called by `SimulateRootRefusingForTest` (:413-428):
+  each lies in the declaration of a seam the pin holds to the same rule.
+
+`internal/backup/backuptest/backuptest.go:97` (`ActiveHoldsForTest`) is the
+test-support package's. An entry no reference matches fails, and says the
+line the reference moved to. The five seams the pin named must still be
+found where they are declared, and `rollback_replace.go` must tell the
+put-back's observer of each of its four stages once, by the stage it names.
+
+**The replay.** #1469's head 43053318 is not in this clone (`git log`
+refuses it, and no ref holds it). The newest B886 commit here, on any ref,
+is dd11a7fe, `fix/b886-timing-flakes`' head (B886 round 2), which has
+`SetOnCheckEntryForTest`, `SetStepGateForTest` and `SetCheckGraceForTest`
+(`internal/backup/seams.go:160`, :435 and :491 there; 0c2de7a4 added the
+step gate). The scan ran as a
+harness of its own (`.tmp/_b872p2fb/replay_r3.py`: the scan's file byte for
+byte, the three walk helpers it calls copied verbatim, a main that takes the
+root) over a `git archive` of dd11a7fe in `~/onebit/tmp`, outside the
+repository, removed after: 882 non-test files, 72 seams, 4 references, the
+same three allowlisted sites at the same lines and backuptest's. No
+production file refers to B886's three seams. Over this tree the harness
+agrees with the pin: 883, 74, 4.
+
+**B885 (163f0fde).** In round 2's control the read came as soon as the check
+was let go, harmless on Linux, but on Windows it could also land in the
+verdict's rename and add an exit 2 to the failure the control is about. The
+end hook now opens `endHeld` as it begins to hold, after the verdict's
+publication and after the worker has let go of all it held, and the read
+waits for it, bounded by the test's deadline, before it asks whether the end
+has come. In the green run the end has come by then; in the control the read
+comes between the publication and the end, and the case fails at the
+ordering assertion alone. The cleanups, by line in `restore_lock_test.go`:
+`startServeBesideItsSnapshot` registers the end hook's restore at :352,
+before it runs the case's `before` (:362), which registers the after-check
+seam's restore at :453, the read's at :463 and the join at :490; serve's
+drain is registered as it launches (`main_test.go:276`, through :366), and
+the case's own gate opener at :505. Cleanups run last-registered-first:
+:505 opens both gates, serve drains, :490 opens them again and waits,
+bounded, for the end, and only then are the read's seam, the after-check
+seam and the end hook put back.
+
+**The comments (a76bfa69).** `filetimeStart` refuses a FILETIME at or before
+the Unix epoch, which its comment called before it, and zero, which its
+comment and its test's said reads as 1601: it names 1601-01-01, and the
+conversion without the check read it as a time in 2185, as round 2's L-zero
+showed.
+
+**The rules (a4bdb614).** `build-ci-tests.md`'s seam-pin rule, which required
+resolving identifiers, now says what the pin does; B885's adds the read's
+wait for the end's hold and the end hook put back last. Both are condensed to
+their titles and their own Don't sentences, their long forms in
+`ops/History-rules-build-ci-tests.md`. `verify_moves.py` cannot pair an
+edited line whose long form starts with the same title (each `--edit` finds
+two successors), so: with the History file at HEAD's, the two `--edit`
+prefixes PASS; with the whole patch, what is missing is exactly the two
+edited bullets, each with its successor in both files
+(`.tmp/_b872p2fb/vm_r3.py`). `make docs-check` clean; a ghost citation
+planted in the patched History file fails `TestEveryCitedTestNameExists`.
+
+Controls, each planted while both pins ran over the tree: NEW is the pin at
+a76bfa69, OLD round 2's built at 77ad4954. Each plant vetted for its own
+target first (linux, darwin or arm64; the ignore-tagged file is never built).
+
+| | plant | NEW | OLD |
+|---|---|---|---|
+| P3-maplit | `var _ = map[time.Duration]any{time.Second: SetProbeLimitForTest}` in doctor.go | RED `internal/doctor/doctor.go:55:44` | GREEN |
+| P3-darwin | a `//go:build darwin` file, `var _ = SetProbeLimitForTest` | RED `seamplant.go:5:9` | RED |
+| P3-arm64-tag | the same, `//go:build arm64` | RED | GREEN |
+| P3-arm64-name | the same in `seamplant_arm64.go` | RED `seamplant_arm64.go:3:9` | GREEN |
+| P3-method-value | `_ = manifestStore.SetAcoustIDMatchForTest` in main.go | RED `cmd/bridge/main.go:3903:20` | GREEN |
+| P3-var-assign | a package var assigned the seam in a function | RED `doctor.go:994:20` | RED |
+| P3-cross-pkg | `var _ = doctor.SetProbeLimitForTest` in cmd/bridge | RED `cmd/bridge/doctor.go:228:16` | RED |
+| P3-call | round 1's C5, a call | RED `doctor.go:55:32` | RED |
+| P3-local-value | `f := SetProbeLimitForTest` in probeBind | RED `doctor.go:992:7` | RED |
+| P3-linkname | a `//go:linkname` naming the seam, in an ignore-tagged file | RED `seamplant.go:10:1` | GREEN |
+| P3-namesake | a local named like the seam | RED (by design, until allowlisted) | GREEN |
+| P3-observe | the vacate's observation removed | RED, the stages without `RollbackStageVacate` | RED |
+| P3-guard-write | main.go's serveOpts literal sets the guarded field | RED, the allowlist's proof: `main.go:3234:118` sets it | GREEN |
+| P3-line-shift | a line inserted above the allowlisted call | RED twice: `main.go:3902:17` not allowlisted; the entry stale, "it is at line 3902 now" | GREEN |
+| P3-support-import | a production file imports `internal/sweeptest` | RED | GREEN |
+| P3-within-broken | `SimulateRootRefusingForTest` renamed, a wrapper of the old name added | RED, the allowlist's proof | GREEN |
+| the committed tree | | GREEN | GREEN |
+| R3-nowait (B885) | the restore's wait for the end dropped | RED `TestTheRestoreBesideAServeRunsOnceItsCheckOfTheSnapshotHasEnded` at the ordering assertion alone, 50 of 50 under `-race` (`restore_lock_test.go:526` in the control's file, :527 in the committed one; one early read each); the original test green | |
+
+Each as predicted; `git status` clean after the batch.
+
+Runs, at a4bdb614:
+
+- `-race -count=50` outside the slot (`.tmp/_b872p2fb/lanes_r3.py`, GOMAXPROCS
+  2 a lane): the pin and the start time (116 s), both B885 tests (152 s); 50
+  of 50 each, none skipped, no race.
+- In the slot (taken 12:26 by a guard probing slot1 every 0.2 s, after two
+  plain queues of an hour lost every gap to other workers): `go vet` with the
+  tags over `./...` for linux, darwin and windows, clean (cached clean for
+  these sources); `GOOS=windows go test -c` of `./cmd/bridge/` and
+  `./internal/updater/`, two PE32+ binaries; `go test -race -count=1 -timeout
+  120m -p 2 -parallel 4` at GOMAXPROCS 4 of `./cmd/bridge/`,
+  `./internal/updater/` and `./internal/doctor/`: ok, 1,596.3 s, 37.0 s and
+  7.0 s.
+- With this record: cmd/bridge's `TestEveryCitedTestNameExists` and
+  `TestNoDocblockNamesAnotherDeclaration`, and `make docs-check`, clean.
+
+What windows-latest runs: round 2's list, and B885's case 20 times, green
+every run: `go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=20
+-v -run '^TestTheRestoreBesideAServeRunsOnceItsCheckOfTheSnapshotHasEnded$'
+./cmd/bridge/`; once more with its control on an experiment branch alone
+(the line `b.awaitItsCheck(t, waiting)` removed from
+`serveBesideItsSnapshot.restore`), red at the ordering assertion alone.
