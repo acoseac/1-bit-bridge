@@ -96371,3 +96371,234 @@ the tree with this record. The rule change is `rules-b872-r3.patch`: round
 2's first B872 bullet in `build-ci-tests.md`, which named the wait's seam,
 now names the notice's seam, the held wait and its abort; the budgets check
 is clean with it.
+
+## 2026-11-14 — B872 part 2, the fallback: a test diagnostic names who uses a file the Windows rollback could not rename; B885; the re-init's lsof deadline
+
+Worker b872p2fb, legion0, branch `fix/b872-holder-diagnostic` from main
+fe5e331d (round 1's branch, `fix/b872-windows-reds`, and its production
+retries are not carried over). Commits: 49bab97f (the observer), 3087f410
+(the diagnostic), b0487109 (B885), 21cd0c09 (the lsof deadline), cd83ab87
+(the seams' pin), then this record. Every run: Go 1.27.3, the Makefile's
+tags, TMPDIR `~/onebit/tmp`, half the cores; controls are uncommitted edits
+to the committed tree, their bytes restored from memory by the runner
+(`.tmp/_b872p2fb/controls.py`), each predicted in writing first
+(`.tmp/_b872p2fb/controls.predictions.txt`). The rule change is
+`rules-b872p2-fb.patch` (below).
+
+### Why a diagnostic and no fix
+
+On windows-latest the crash rollback's rename of the backup over the binary
+was refused twice in 465 jobs ("The process cannot access the file because it
+is being used by another process"), once on each of two PR heads and never on
+main (0 of 102), the binary put back both times. A read-only trace found no
+handle of the test process or of production on either file; a fresh
+real-sized binary under load was held once in 180 rounds, for 32 ms; on main,
+under load, the two tests passed 200 of 200. What holds the file is not known,
+so this round changes no production behaviour: it makes a future red name its
+candidate users. The production probe waits for evidence (backlog B898 for the
+held-file class, and an item of its own once a holder is named).
+
+### 1. The observer (49bab97f)
+
+`replaceRunningBinary` (`internal/updater/rollback_replace.go`), the put-back
+Windows' `RollbackBinary` runs, hands each of its four renames that fails to an
+observer a test sets (`updater.SetRollbackObserverForTest`, an atomic pointer,
+nil in production; `rollback_observer.go`), with a fixed stage (`install`: the
+backup onto a missing binary; `vacate`; `backup`; `putback`: the set-aside
+binary back after the backup's refusal), both paths and the error, on the
+goroutine that made the rename and before the next step. With none set a
+refused rename costs one atomic load. `TestTheRollbackObserverHearsEachRefusedRenameAndChangesNothing`
+runs each stage refused through a seam on `renameFunc` answering Windows'
+words for a file in use, the backup's refusal followed by the put-back's (the
+manual-recovery message), and none refused, each once with no observer and
+once with one, comparing the rename order, the bytes in the binary's, the
+backup's and the set-aside place, the exact error (the existing messages byte
+for byte) and the ordered events.
+
+### 2. The diagnostic (3087f410)
+
+`watchRollbackHolders(t, dst)` (`cmd/bridge/rollback_holders_test.go`) puts
+the diagnostic on every rollback of the binary at `dst` through the observer.
+At the first refusal of a stage that says a file is in use (Windows error 32,
+33, or 5, which Windows answers a rename onto an image another process runs,
+B202, as well as a permission) it asks, there and then while the file is still
+held, who uses each of the rename's two files, each in a Restart Manager
+session of its own (`RmGetList` answers for all of a session's files
+together): `RmStartSession`, `RmRegisterResources`, `RmGetList` asked again
+with the room it names while it answers `ERROR_MORE_DATA` (234), at most eight
+times, `RmEndSession`; a file not there (the binary once it is set aside) is
+logged "absent" and not registered. For each process: its pid, its image
+(`QueryFullProcessImageNameW`), its parent pid (a Toolhelp process snapshot),
+the Restart Manager's app and service names and its start time. The test's
+goroutine logs it all at the test's end, a line each, labelled candidate user
+(the Restart Manager lists users of a file, not the handle that refused), an
+empty list "no candidate user", beside this process's pid, and last
+`refusals: N; candidate users: …`, on a green run too. `RM_PROCESS_INFO`'s
+layout (668 bytes) is asserted at compile time. The two CI-red tests take it:
+`TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn` ("the key gone") and
+`TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack`.
+`TestTheRollbackHolderDiagnosticAsksOnceAStageIsRefusedInUse` drives the
+bookkeeping on every host with the platform's two functions stood in for. The
+positive control, Windows only, `TestTheHolderDiagnosticNamesTheChildThatHoldsTheBackup`:
+a child, this test binary run again, opens the backup in `t.TempDir()` for
+reading, sharing reading and writing and not deletion, and says so; the real
+`RollbackBinary` (after a guard that skips where a bridge service is
+registered, whose stop it would make) is refused with a sharing violation and
+puts the binary back, "(restored)" with its bytes; the diagnostic lists the
+child under the backup by its pid, its image (the test binary, by
+`os.SameFile`) and its parent pid (`os.Getpid()`), and the binary as absent;
+the child ends when the test closes its stdin, never on a timer. This host is
+Linux: the Windows files are vetted and their test binaries built with
+`GOOS=windows`; their runs are windows-latest's.
+
+### 3. B885 (b0487109)
+
+Step 0: run 43416311381's log is not on this host (no `gh`; no copy beside the
+briefs), so the writer is named from the code, not confirmed against the log.
+The one test that restores beside a running serve is
+`TestARestoreOverAnUnlockedServeRefusesWithTheProbe` (a walk of cmd/bridge's
+test functions for a restore and a serve in one body found it alone). Its
+serve starts its backup ticker whatever its data dir lock (`main.go`'s
+unconditional start), and the boot pass finishes the check the seeded
+snapshot owes (`backup.Snapshot` lets its capture's ownership go, so its
+PENDING reads by its age: owed and not owned, `decideStartupPass` →
+`verifyInPlace` → `Claim` → `FinishCapture`), whose verdict is renamed over
+that snapshot's `manifest.json`. `bridge restore` reads the manifest before its
+prompt holding no lock (`checkSource`, `restore_source.go`), a read Windows
+refuses beside a rename of the file ("being used by another process"), which
+the restore answers as not a recognized snapshot, exit 2 (`backup.go`'s
+`ErrNotASnapshot` branch). Nothing else in the test writes that manifest.
+
+The fix: the test restores once serve's verification of the snapshot has
+ended, heard through `backup.SetOnVerifyEndForTest` set before serve starts (a
+verification runs the end hook that stood as it began) and filtered to the
+snapshot where it resolves, until the test's deadline
+(`serveBesideItsSnapshot.restore`). `backup.SetRestorePreflightReadForTest`
+(nil in production) stands in for that read alone. The case,
+`TestTheRestoreBesideAServeRunsOnceItsCheckOfTheSnapshotHasEnded`, parks the
+verification after its check and before its verdict's write
+(`backup.SetAfterCheckForTest`), waits until it is parked, answers Windows'
+refusal at the read while it is parked and reads the file otherwise; the
+restore's wait, as it begins, lets the park go, the verdict is written and the
+verification ends, and the restore reads the snapshot and is refused by the
+admin port's probe as before. The park is bounded and let go, and the
+verification's worker joined, before serve's drain and before the seams are
+put back. An ordering regression test, not a reproduction.
+
+### 4. The re-init's lsof deadline (21cd0c09)
+
+The doctor bounds an lsof probe at 2 s; a loaded runner's lsof outlives it,
+and bridge init's preflight over a config that does not load then fails a port
+its own recorded bridge holds (`checkChosenPort`), exit 1. internal/doctor's
+tests take the test's deadline since B338; cmd/bridge's did not.
+`doctor.SetProbeLimitForTest(deadline, reserve)` (cross-platform; internal/doctor's
+own helper takes it now) gives every lsof spawn, macOS's second look included,
+the time until the test's deadline less the reserve, and probeTimeout
+otherwise. Step 0's census: in a copy of the tree whose lsof spawn recorded the
+test on whose stack it ran (`.tmp/_b872p2fb/census/`), cmd/bridge's whole suite
+(580 s, all green) made 20 spawns from eight tests, each on the test's own
+goroutine, none of them parallel: the four broken-config re-inits
+(`TestInitReplacesABrokenConfigWhileItsBridgeHoldsTheDefaultPorts`,
+`TestInitOverABrokenConfigRefusesADefaultPortItsBridgeIsNotSeenHolding`,
+`TestInitOverABrokenConfigRecognisesItsBridgeOnThePortsItWrites`,
+`TestInitOverABrokenConfigRefusesAWrittenPortItsBridgeIsNotSeenHolding`,
+through `ensureDoctorClean` → `checkChosenPort`),
+`TestARollbackIsRefusedAndReportedOnceAMigrationBegan` (`doctorLineOf` →
+`bridge doctor`), `TestLegacyDSDKeysStillLoadAndAreWarnedOnce` (`doctorCmd`),
+`TestServeOnAHostWhoseNameIsNotASCII` and
+`TestServeHoldsBackOnlyTheIPv6AddressesItsCertificateDoesNotName`
+(`doctor.Run`), the last four `checkPort` beside a running serve. The four
+doctor tests that can skip by platform record no pid and hold no port, so none
+reaches the probe elsewhere. Each of the eight now gives it the deadline
+(`lsofTakesTheTestsDeadline`, in `reinitBrokenInstall`, `doctorLineOf` and
+three tests). `doctor.SetLsofCommandForTest` and `doctor.LsofForTest` (not on
+Windows) let `TestTheReinitsLsofProbeTakesTheTestsDeadline` hold the first
+lsof 2.5 s before it starts: the public re-init still finds this process on
+its ports and goes through. It skips where the doctor resolved no lsof.
+
+`TestNoProductionCodeCallsATestOnlySeam` (cd83ab87) lists every production
+call of the five seams, none, and must see each declared and the put-back's
+four observations.
+
+### Reds and controls (`.tmp/_b872p2fb/controls.log`)
+
+Each as predicted; `git status` clean after the batch.
+
+| | mutation | result |
+|---|---|---|
+| C1-unwired (item 1's red) | the four observations dropped | RED install, vacate, backup, backup then putback (no event), none refused green; RED the pin (0 of 4 observations) |
+| C1-late | the backup's observation after the put-back | RED backup, backup then putback (order) |
+| C1-retry | with an observer set, the backup renamed once more | RED backup, backup then putback ("with an observer the renames were …") |
+| C1-swapped | the event's paths swapped | RED the four refused rows |
+| C1-wrongerr | the put-back's event given the backup's error | RED backup then putback |
+| C2-everytime | every in-use refusal asks | RED the bookkeeping case |
+| C2-notinuse | a refusal that says no file is in use asks | RED |
+| C2-nofilter | another binary's refusal heard | RED |
+| C2-absent | an absent file asked about | RED |
+| C2-quiet | no summary without a refusal | RED |
+| C3-nowait (B885's red) | the wait dropped | RED the case: the read injected once, exit 2; the original test green on Linux |
+| C3-unwired | the preflight read not through its seam | RED the case (the seam never entered) |
+| C4-nodeadline (item 4's red) | the deadline dropped from `reinitBrokenInstall` | RED the case, `public init exited 1 …` (the delayed spawn reached); the four re-inits green |
+| C4-unwired | the spawn not through `lsofCommand` | RED the case (no delayed spawn) |
+| C4-noreserve | the setter never takes the deadline | RED the case, exit 1 |
+| C5-caller | a production file calls `SetProbeLimitForTest` | RED the pin, naming `internal/doctor/doctor.go` |
+
+### Runs
+
+- `-race -count=50`, each lane a prebuilt race test binary of its own
+  (`.tmp/_b872p2fb/lanes.py`), five lanes at once at GOMAXPROCS 2, at
+  cd83ab87: internal/updater's five put-back tests (the table and the four
+  `TestRollbackReplace…`), 50 of 50 each (1 s); internal/doctor's ten that
+  ask the real lsof or pin its own timeout (the nine callers of
+  `realProbeUsesTheTestDeadline` and
+  `TestIsPIDListeningOnPortReportsItsOwnTimeoutDistinctly`), 50 of 50 each
+  (118 s); cmd/bridge's fifteen, in three lanes: the bookkeeping case, the
+  pin, both B885 tests, the lsof case and the four re-inits (380 s), the two
+  crash-rollback tests (456 s), and the four serve-and-doctor tests (649 s),
+  50 of 50 each, none skipped. No race reported in any lane.
+- In the build slot (taken at once, 02:40): `go vet` with the tags over
+  `./...` for linux, darwin and windows, clean (the results cached clean for
+  these sources). Then `go test -race -count=1 -timeout 120m -p 2 -parallel 4`
+  at GOMAXPROCS 4 of `./cmd/bridge/`, `./internal/updater/`,
+  `./internal/backup/` and `./internal/doctor/`: ok, 1,689.8 s, 38.5 s,
+  792.0 s and 7.0 s.
+- `GOOS=windows go test -c` of the four packages built, and `go vet` of them
+  for windows passed before the commits too (the Windows files' only runs
+  here). go1.27.3's gofmt lists none of the files changed.
+- The census copy's whole cmd/bridge run (non-race, the census hook its only
+  difference): ok, 580 s.
+- The rules patch, over a `git archive` copy of cd83ab87 with git pointed at
+  this worktree's index: `check-doc-budgets.py` ok (config-lifecycle.md
+  99.3%, the worst load 76.6%); `verify_moves.py --base HEAD` PASS (B202's
+  long form, 1,535 bytes, moved to `ops/History-rules-config-lifecycle.md`
+  by `move_entry.py`; five new blocks: its pointer and this round's four
+  bullets); cmd/bridge's `TestEveryCitedTestNameExists` and
+  `TestNoDocblockNamesAnotherDeclaration` pass over the copy, and the first
+  fails there once a ghost citation is planted in its `build-ci-tests.md`.
+- The version gate: neither `guardedPrefixes` nor `GuardedPaths`
+  (`internal/player/qualification/version_gate.go`) names a file this round
+  changes, so no qualification version moves.
+
+What only windows-latest can show: the Restart Manager's answers, the
+positive control, and the candidates of a refusal. The positive control:
+`go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=20 -v -run
+'^TestTheHolderDiagnosticNamesTheChildThatHoldsTheBackup$' ./cmd/bridge/`,
+green every run, naming the child. The stress, its lines kept for CI's
+artifact: `go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout
+120m -count=200 -v -run
+'^(TestACrashRollbackToAReleaseBeforeTheSwitchNeedsItOn|TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack)$'
+./cmd/bridge/ > rollback-holders.log 2>&1`, then `grep 'rollback holder
+diagnostic' rollback-holders.log > rollback-holders.txt`.
+
+### Follow-ups (the backlog file is not on this host)
+
+- `bridge restore`'s look at the snapshot before its prompt
+  (`backup.CheckRestoreSource`) reads the manifest once, with no retry, and
+  says "not a recognized snapshot directory", exit 2, for a read Windows
+  refused beside a verification's verdict rename: a refusal that passes worded
+  as one that does not. A live backup's opens retry sharing and access
+  refusals with atomicwrite's bounded backoff; this read could too, or say the
+  snapshot was busy.
+- `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, the early
+  rollback, met the same refusal on windows-latest (run 42709386274, "could not
+  put the backup back: rollback rename …"); it can take the diagnostic too.
