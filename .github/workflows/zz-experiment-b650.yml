@@ -1,0 +1,46 @@
+# EXPERIMENT (not for merge; B650's merge evidence). Runs only on a push to its own branch:
+# TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn, whose config load must finish within a real 100 ms,
+# 200 times on each OS, to count misses under CI load.
+name: experiment-b650
+
+on:
+  push:
+    branches: ["experiment/b650-churn-load"]
+
+permissions:
+  contents: read
+
+jobs:
+  churn:
+    name: churn test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - name: Exclude the Go temp tree from Defender (as gate.yml does)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo "$TEMP")
+          pwsh -Command "Add-MpPreference -ExclusionPath '$GOTMP'" || true
+      - name: The churn test, 200 times
+        shell: bash
+        run: |
+          set +e
+          RACE=""; [ "$RUNNER_OS" = Linux ] && RACE=-race
+          go test $RACE -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 80m -count=200 -v -run '^TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn$' ./cmd/bridge/ > churn.log 2>&1
+          echo "exit $? (race: ${RACE:-off})"
+          echo "PASS: $(grep -c -- '--- PASS: TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn' churn.log); FAIL: $(grep -c -- '--- FAIL' churn.log)"
+          grep -B30 -- '--- FAIL' churn.log | head -80
+          exit 0
