@@ -425,6 +425,10 @@ func TestACrashRollbackWithTheVariableOffPutsAReleaseBeforeTheSwitchBack(t *test
 	for start := 1; start <= updater.ProbationFailedStarts; start++ {
 		r.startThatPanics(t)
 	}
+	// The rollback's rename was refused here once on windows-latest, the
+	// backup "being used by another process": the diagnostic names who used
+	// it (backlog B872 part 2).
+	watchRollbackHolders(t, r.bin)
 	code, stderr, served := serveToItsEnd(t, serveOpts{configPath: r.cfg, binaryPath: r.bin})
 	if served || code != supervision.RestartExitCode {
 		t.Fatalf("the start after the crashes, the variable off and no key = %d (served %v), want %d before it served; stderr=%s",
