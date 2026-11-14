@@ -95187,6 +95187,193 @@ clean. go1.27.3's gofmt lists none of the Go files the change touches. The
 macOS-only case (`rootprobes_kqueue_test.go`) is vetted here and runs on CI's
 macOS leg; `make test` and `make build-all` were not run: the brief asked for
 the packages.
+## 2026-11-13 — B567: every sweep from the root skips make test's TMPDIR
+
+Backlog B567, on `fix/b567-census-skips-test-tmp` from main 4678b983, worker
+b567 on legion0 (Linux, amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`, 16 cores, so `-p 8` and `-parallel 8`). Commits: the red tests
+ad2002f7, the fix 9dff8f6f, fsutil's table of tree walks e2d9afe0 (the
+gates below), then this record. The rule's line goes into
+`.claude/rules/build-ci-tests.md`, after B740's, through
+`rules-b567-r1.patch`, its long form under B567 in
+`ops/History-rules-build-ci-tests.md`, where the patch also corrects B740's
+long form.
+
+**What was wrong.** B740 made the build-site census skip `.tmp`, the TMPDIR
+make test and make test-fast give every package's tests when the caller sets
+none, and its record said the Go-file sweeps (the citation guard, the
+hash-cost, flac-handle and blank-keeper guards) skipped it already, as every
+name the go tool ignores. Listing every walk in the repository's tests and
+scripts that starts at the checkout root, with its rule for a directory:
+
+- Three rules read `.tmp`, each because it reads dot-directories on purpose
+  (`.github` holds a Go program and docs these guards read):
+  `skipsForCitations` (`cmd/bridge/cited_test_names_test.go`), which two
+  walks share, the citation guard's (`scanTestCitationsIn`, under
+  `TestEveryCitedTestNameExists`) and `productionCalls`
+  (`cmd/bridge/itunes_unwired_test.go`, under
+  `TestTheWireManifestIsTheProvidersAlone` and
+  `TestNoProductionPathAsksITunes`); `hashCostDirRule`
+  (`internal/adminauth/hashcost_test.go`, under
+  `TestNoProductionCodeLowersTheHashCost`); and `flacDirRule`
+  (`internal/manifest/flac_handle_discipline_test.go`, under
+  `TestNoLeakyFlacConstructors`), which the brief had not named.
+- These skip it: the census, by `makeTestTmpDir`; the blank-keeper guard's
+  rule (`moduleDirRule`, over `goToolIgnores`) and the five sweeps of
+  `cmd/bridge` that share it; the docblock-subject and server-error-log walks,
+  `internal/fsutil`'s tree-walk sweep and `internal/player/dsdconv`'s served
+  sweep, which skip every dot-directory.
+- These start at the root and walk no tree there: the embed-pattern guard
+  (`go list`, then one package directory each), the serial-DTO walk (named
+  package directories), the job-writer sweep (listed directories), the
+  qualification-constructor walk (`../../internal` and its own package), the
+  licence generator's notices (one level a directory), and the Python
+  doc-split and budget scripts (one-level globs and named folders, or a
+  staging directory outside the repository).
+
+While make test ran, every package's tests kept their temporary trees in
+`.tmp` and the go command its work directories, so the three rules met
+another package's files mid-walk: a test defined there satisfied a citation
+this tree does not back, a comment there cited a test nothing defines, a
+setter call or a leaky flac call there was reported as this module's, a file
+in mid-edit failed the walk, and a directory removed between its listing and
+its own failed it outright.
+
+**Red first.** At the red tests (ad2002f7: the cases and the walk seams, no
+skip), each package alone, TMPDIR on disk (`.tmp/_b567/gotmp`), every row in
+make test's TMPDIR red and every look-alike row green:
+
+```
+hashcost_test.go:328: offenders = [".../checkout/.tmp/…/001/cmd/tool/main.go" ".../checkout/cmd/tool/main.go"] after reading 2 files, want [".../checkout/cmd/tool/main.go"] after reading 1
+hashcost_test.go:328: offenders = [".../checkout/.tmp/…/001/half.go: could not parse: …/half.go:3:27: expected ')', found 'EOF'" ".../checkout/cmd/tool/main.go"] after reading 2 files, want [".../checkout/cmd/tool/main.go"] after reading 1
+hashcost_test.go:364: the sweep failed: open .../checkout/.tmp/go-build123/b001: no such file or directory
+flac_handle_discipline_test.go:324: found [".tmp/…/001/p/probe.go:5: flac.ParseFile — use os.Open + flac.Parse + defer f.Close()" "p/probe.go:5: flac.ParseFile — use …"] after parsing 2 non-test and 1 test files (2 importing the package), want ["p/probe.go:5: …"] after 1, 0 and 1
+flac_handle_discipline_test.go:361: the sweep failed: open .../checkout/.tmp/go-build123/b001: no such file or directory
+sweeps_tmpdir_test.go:131: the walk found ["cites …ATemporaryTreeCites in .tmp/…/001/main.go" "cites …ATemporaryTreeCites in .tmp/…/001/x_test.go" "cites …ParkedNeverRuns in prod.go" … "defines …ParkedNeverRuns" …], want ["cites …ParkedNeverRuns in prod.go" …]
+sweeps_tmpdir_test.go:130: …/.tmp/…/001/half_test.go:5:31: expected '}', found 'EOF'
+sweeps_tmpdir_test.go:131: the walk found ["calls g in prod.go" "calls leftOver in .tmp/…/001/main.go"], want ["calls g in prod.go"]
+sweeps_tmpdir_test.go:130: …/.tmp/…/001/half.go:3:12: expected ')', found 'EOF'
+sweeps_tmpdir_test.go:162: open …/.tmp/go-build123/b001: no such file or directory
+```
+
+The last line stands for the four removal cases of the citation guard's two
+walks, the `open` lines above it for the two of each other sweep: each sweep
+failed on the directory it had just listed, removed by `sweeptest.Removal` at
+that moment of the walk.
+
+In the real checkout, with a leftover tree planted at `.tmp/b567-leftover/`
+(a non-test file calling `adminauth.SetTestHashCost`,
+`manifest.BuildManifest` and `enrich.NewITunesClient`, a leaky
+`flac.ParseFile`, and a test file whose comment cites a test nothing defines;
+`.tmp/_b567/leftover.py`) and the red commit's three predicates put back
+from git, the five whole-tree guards failed, and B740's census passed:
+
+```
+cited_test_names_test.go:74: no test function of this name exists: …ALeftoverTreeCites  (cited by .tmp/b567-leftover/…/001/x_test.go)
+itunes_unwired_test.go:89: a production path calls a builder that carries enrichmentProgress whatever enrich.enabled says:
+itunes_unwired_test.go:124: a production path wires the iTunes fallback, which no text names as a service enrichment asks:
+hashcost_test.go:74: non-test files call SetTestHashCost, which would weaken password hashing in production: [../../.tmp/b567-leftover/…/001/cmd/tool/main.go]
+flac_handle_discipline_test.go:89: mewkiz/flac path-taking constructors leak the file handle (Stream.Close cannot close a *bufio.Reader), which blocks deletion on Windows:
+```
+
+At 9dff8f6f, the same tree planted: all five ok, and the census's two.
+
+**The fix.** `skipsForCitations`, `hashCostDirRule` and `flacDirRule` skip
+the root's own `.tmp` by `sweeptest.IsMakeTestTmpDir`, decided by its name
+before the walk lists it, as the census skips it by `makeTestTmpDir`. One
+definition, `sweeptest.MakeTestTmpDir`, serves the three test packages. The
+census keeps its constant: it is a program and sweeptest is imported by tests
+alone, and a test package cannot reach a program's unexported constant, so
+`TestTheSweepsSkipTheDirectoryTheCensusSkips` (beside the census) holds the
+two to one name, as B740's `TestTheCensusSkipsTheMakefilesTMPDIR` holds the
+census's to the Makefile. Only the root's is skipped: a `.tmp` below the root,
+`.tmpfoo` and `.github`'s Go program stay read (the look-alike rows). Not
+renamed: `tags_test.go`'s rows and `.dockerignore` name `.tmp`. A directory
+removed mid-walk is stood in for, never raced, by `sweeptest.Removal`, a walk
+that removes its directory as the walk reaches it, after the directory above
+it was listed and before it is listed itself, taken through a walk seam of
+each package (`sweepWalkDir`, `hashCostWalkDir`, `flacWalkDir`), which the
+sweeps call on the test's own goroutine and each case puts back in its
+cleanup; `productionCalls` gained a root (`productionCallsIn`) so a fixture
+can be walked.
+
+**Negative controls**, at 9dff8f6f, predicted before the run in
+`.tmp/_b567/controls.predictions.txt` (`.tmp/_b567/controls.py`: exact-once
+replacements, the test binaries built per control, the named tests run, the
+bytes put back from memory; `git status` clean after), every one as
+predicted, every test run beside them green:
+
+| Mutation | Red |
+|---|---|
+| C1 `skipsForCitations` without the skip | both walks' rows in the TMPDIR (4), both walks' removals (4) |
+| C2 `hashCostDirRule` without the skip | its two TMPDIR rows, its two removals |
+| C3 `flacDirRule` without the skip | its TMPDIR row, its two removals |
+| C4 `IsMakeTestTmpDir` at any depth | `TestIsMakeTestTmpDir` ("one further down"), the row below the root in all four walks |
+| C5 `IsMakeTestTmpDir` for any name beginning `.tmp` | `TestIsMakeTestTmpDir` (".tmpfoo", ".tmp.old"), the `.tmpfoo` row in all four walks |
+| C6 `MakeTestTmpDir` renamed `.scratch` | the pin alone (the cases follow the constant) |
+| C7 the hash-cost seam unwired | its two removals ("did not walk through the stand-in") |
+| C8 `Removal` that removes nothing | `TestARemovalRemovesWhatTheWalkReaches`, the walk that reads it |
+
+**The gates**, through the build lock, nothing else of this worker's in it
+(`.tmp/_b567/gates.py`, under `guard.py`). `make test` was given `P=8` and
+`TEST_PKGS='-count=1 -parallel 8 ./...'`, so its recipe ran `go test -tags …
+-p 8 -race -timeout 30m -count=1 -parallel 8 ./...`, uncached, and TMPDIR was
+unset, so the Makefile's fallback was in force (the recipe line reads
+`TMPDIR="…/b567/.tmp"`), every package's tests and the go command's work
+directories in the checkout's `.tmp` while the sweeps walked the checkout.
+
+At 9dff8f6f: `go vet ./...` for linux, darwin and windows, each with the
+Makefile's tags and without them, clean; the 25 new and touched tests under
+`go test -race -count=50 -p 5 -parallel 8`, ok; `make build-all P=8` ok. The
+first make test failed one package: `internal/fsutil`'s
+`TestEveryWalkOfALibraryRootStartsFromWalkableRoot`, which reads every
+production Go file for a tree walk, found `sweeptest.go`'s `(*Removal).WalkDir`
+in neither of its tables (sweeptest is imported by tests alone, but its file
+is no test file). Every other package was ok. The second run, already under
+way, was stopped and what it left in `.tmp` removed; e2d9afe0 lists the
+stand-in in `otherTreeWalks`.
+
+At e2d9afe0: the six vets clean again (answered mostly from the build
+cache, which keeps clean results alone); the 26 tests (the 25 and fsutil's
+sweep) under `-race -count=50`, ok, no race reported (`cmd/bridge` 644 s,
+`internal/manifest` 259 s, `internal/adminauth` 95 s, `internal/fsutil`
+87 s, `scripts/third-party-licenses` 38 s, `internal/sweeptest` 1 s); `make
+build-all P=8` ok (`check-build-tags: OK`). make test with the checkout's
+`.tmp`:
+
+- run 1 (10:04 to 10:34): 89 packages ok, none failed (`cmd/bridge` 1708 s,
+  `internal/manifest` 1689 s);
+- run 2 (10:34 to 11:05): 88 ok, and `cmd/bridge` failed
+  `TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, two subtests,
+  "the analysis pool never settled", within a second each, at 1781 s of the
+  binary's 1800 while another worker's `bridge.test` ran outside the lock.
+  That wait gives up at the binary's deadline less 30 s (`serveGiveUpTime`),
+  so this is the package meeting its 30-minute cap, not the assertion; alone
+  under `-race -count=3` the test passed 3 of 3, a second a subtest;
+- run 3 (13:12 to 13:42): 89 ok, none failed (`cmd/bridge` 1717 s);
+- run 4 (14:13 to 14:43), the third whole run: 89 ok, none failed
+  (`cmd/bridge` 1711 s, `internal/manifest` 1695 s).
+
+At P=8 on this host `cmd/bridge` runs within about 90 s of its cap; the two
+runs that met it ran 1781 s and 1791 s.
+
+With TMPDIR outside the checkout (`~/onebit/jobs/b567/ext-tmp`, the recipe
+line naming it) and a leftover tree in the checkout's `.tmp`
+(`.tmp/b567-leftover/`: the five guards' plants above and a file in
+mid-edit): the first run (13:42 to 14:13) had 88 packages ok, and
+`cmd/bridge` met its cap as run 2 had, at 1791 s:
+`TestMixedCaseConcurrentLookupsEnqueueOnce` and
+`TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, every case "the
+analysis pool never settled" within a second; the guards that read the
+checkout, the five the leftover turned red at the red commit among them,
+passed. Run again (15:10 to 15:40): 89 ok, none failed (`cmd/bridge`
+1733 s), the leftover unread.
+
+The rules patch applies at this record's commit; `make docs-check`'s
+scripts are clean on a copy with it applied (`build-ci-tests.md` 37,355
+bytes), and `TestEveryCitedTestNameExists` passes there, and fails on a
+citation planted in that copy's History file, so it read the copy.
+
 ## 2026-11-13 — B828: a tsnet state file that holds nothing refuses the start in the bridge's words
 
 Worker b828, legion0, branch `fix/b828-empty-tsnet-state` from main 4678b983. Commits a2a3d3fe (the tests, red
@@ -96792,3 +96979,474 @@ core count, in the slot:
 - `go vet ./...` with the Makefile's tags for GOOS linux, darwin and
   windows: clean in the slot on 23dc1e5c and on 83f716a9. go1.27.3's gofmt
   lists none of the Go files round 3 touches.
+## 2026-11-13 — B886, B887, B890: the CI timing flakes wait on seams, never on time
+
+Worker b886, legion0 (Ubuntu 26.04, Linux 7.0.0-38-generic, x86-64, 16
+CPUs), branch `fix/b886-timing-flakes` from main 2bebca26. Commits: 0c2de7a4
+(the two seams), e788a843 (B886), bd301b02 and 2b5124a2 (B890), 3d6be0e8
+(B887), then this record. Every run: Go 1.27.3, the Makefile's tags, TMPDIR
+`~/onebit/tmp/b886`. The reds ran at copies of main, each mutation made
+exactly once and keeping main's line numbers (`.tmp/_b886/redcopy.py`); the
+controls are uncommitted edits to the committed tree, predicted in writing
+first (`.tmp/_b886/controls.predictions.txt`), restored with `git checkout
+--`, `git status` empty after each.
+
+### Step 0
+
+- B887: `<-s.Done()` (sink_dsd_engine_test.go:171 at main) waits for the
+  revocation the round that wrote the test meant: "cancelling an in-flight
+  activation still revokes it so the abandoned caller cannot authorize sound
+  later" (`ops/History-rules-player.md`, the native engine hand-off's review
+  round 2, #1356). `Done` closes only once the sink's writer ends, which
+  nothing but a release begins here, and of the Resume's wait (`await`) only
+  the context's arm begins one (`abandoned`, `revokeFound`). Its reply arm
+  answers the held refusal of a paused sink's reopen (sink_dsd_writer.go:108,
+  :119, :122), and the sink stays paused and alive. So each arm asserts its
+  own outcome.
+- B890, the console: run 43428379048's log could not be read here (`gh` is
+  refused by this sandbox, and no copy of it, or of #1462's, is on legion0).
+  The code's reading: the case bounded only the write and the read-back,
+  300 ms from their admission (hold.go:465-467), and its stall is the
+  manifest's sync after the rename (verify_record.go:357); a case that never
+  reached it had its write given up in its staging, which fsyncs (:565)
+  before the rename asks the give-up (:576), and the write renamed nothing.
+- B890, the ticker: yes. `SetOnManifestReadForTest`'s hook runs in
+  `readRecord` (finish.go:220-226), whose first call in the ticker's
+  verification is the worker's `stepReadRecord`, "its read of the snapshot's
+  record" (finish.go:527-531); the boot pass lists the folder through
+  `ReadStatus` (`readManifest`), which the hook does not see.
+
+### The seams (0c2de7a4)
+
+`SetStepGateForTest(root, snapshot, steps...)` (internal/backup/seams.go),
+a sibling of `SetStepBoundForTest`, holds named steps of the holds on one
+resolved backups folder, of one snapshot or ("") of any: such a step is
+given up when the test fires its gate (`StepGate.Fire`; `gateOf`, looked up
+as `runStep` registers the step, its case beside the timer's), and by
+nothing else, its bound and its caller's stop both ignored. Its restore fires
+every gate, and a test fires them all (`FireAll`) before it joins its
+callers. `SetCheckGraceForTest(fn)` is run by `runCheck` once a check's
+context has ended, given the snapshot, and answers the channel whose close
+ends that check's grace in the timer's place (nil keeps the timer). Both are
+nil in production; `SetStepBoundForTest`'s five other callers keep their
+durations.
+
+### B886 (e788a843)
+
+`TestARecheckThatDidNotEndLeavesTheVetoItMade/past_its_deadline` slept
+400 ms at the database's open behind a 150 ms deadline, on the check's
+thread, which runs at the lowest priority (`PRIO_DARWIN_BG` on macOS), and
+`runCheck` gives a check whose context has ended a second more. The check is
+now parked before it reads anything (`parkCheck`) until its deadline has
+passed and its grace has begun (`checkGraceOf`), then let go, and answers
+INCOMPLETE (deadline) within a grace the test ends at its end; the record's
+read, the veto, the write, its INCOMPLETE and the read-back are held at
+their gates, never fired. The verification runs under `joinBackupCallers`,
+whose release lets the park, the grace and the gates go first; an answer
+before the grace began fails at once (`awaitParkedPastItsDeadline`). In all
+three cases the prune follows the worker's end, its unlock held from the
+answer until the test waits (`unlockHold`, backlog B849), and asserts
+`!Skipped`, saying `SkippedFor`: B869's item 2 loses this site.
+
+### B890, the console (bd301b02)
+
+`TestTheConsoleReportsCancellationAndEveryWriteHandoff`'s two worker modes
+hold the write and the read-back at their gates: the write is fired once it
+has stalled (`entered`), and in "published then worker answer" the read-back
+once its hook says it has begun. "given-up write" moves too: held at an
+unfired gate its write would wait in its stage hook until the test's end.
+The two waits for the console's jobs, a bare `Wait`, are bounded
+(`awaitBackupJobs`, a minute).
+
+### B890, the ticker (2b5124a2)
+
+At the stop `runStep` resets the hung read's timer to `StopWriteBound`
+(hold.go:496-500 at main) and the caller arms its expiry for the same
+(finish.go:351-355); the ticker silences the expiry's cancellation and
+reports a step given up (cmd/bridge/backup.go:811-818). `answerOnceExpired`
+holds, on the worker, the answer of the ticker's verification (`filepath.Dir(dir)
+== root`, resolved) until the caller's expiry hook has run, at most 10 s,
+its overrun said on the test's goroutine, and let go at the test's end; the
+answer hook runs before `done <- outcome` (finish.go:338-341), so nothing
+waits on the worker. The bound check on the ticker's return stays.
+
+### B887 (3d6be0e8)
+
+`nativeSink` takes `lifeSinkOn`'s hooks, and a one-shot `armPick` set just
+before the Resume forces its wait: `armReply`, `armContext`, and `armAny`,
+the select's own pick, which asserts whichever outcome it took (the sink's
+`revoked`, read under its lock). Through the context the sink is revoked and
+its writer ends with no release from the test; through the reply it is
+paused and released, its writer alive, until the test's
+`BeginRelease(Immediate)`. Every wait is under the package's watchdog, and a
+cleanup registered after the sink's cancels, lets the Locate go and joins
+the Resume before the sink is released.
+
+### Reds and controls
+
+At main:
+
+- B886, `parkCheck` for the sleep and the join for the cleanup at :235:
+  verify_round5_test.go:238 "the recheck was given up (… its check did not
+  end within its bound (context deadline exceeded))", 3 of 3 under `-race`.
+- B890, the console, the write parked at its staging until the test's end:
+  handlers_backups_round8_test.go:103 "verification never reached its
+  stall", 3 of 3, each after its 30 s.
+- B890, the ticker, main with the step gate added: the read given up at its
+  gate once it hung, the ticker's report awaited on stderr, then the stop:
+  backup_round2_test.go:476 "a stopped verification was reported: … was
+  given up … its read of the snapshot's record did not end within its
+  bound", 3 of 3.
+- B887, only an `armPick` set to `armReply`: `go test -race -run
+  '^TestNativeResumeCancelsLocate$' -count=1 -timeout 2m ./internal/alsapcm`,
+  `panic: test timed out after 2m0s`, the test at sink_dsd_engine_test.go:171.
+
+Controls at 3d6be0e8 (`-count=3`, no `-race`, `.tmp/_b886/controls.py`):
+
+- C1, the grace fired at once and the check parked until the answer:
+  verify_round5_test.go:288 "the recheck was given up", 3 of 3.
+- C1b, the wait for the worker's end removed, its unlock still held: every
+  case at :306, "the prune once the recheck's worker had ended was skipped
+  (another verification or prune of these snapshots holds their lock)", 3 of
+  3.
+- C2, `armReply` with its release removed, `-watchdog 5s`:
+  sink_dsd_engine_test.go:227 "waited 5s for the sink's end", 3 of 3.
+- C3, the write parked at its staging, its gate fired, the read-back's hook
+  seen, then the staging let go: the rename refused,
+  handlers_backups_round8_test.go:117 "verification never reached its
+  stall", 3 of 3 (30.3 s each).
+- C4, the answer's wait removed, under the ticker's red forcing:
+  backup_round2_test.go:488, 3 of 3.
+- C4b, the read's gate fired just after the stop, the worker's give-up first
+  as on CI, the wait removed: :488 "(context canceled)", 3 of 3; C4g, the
+  same with the wait kept: green 3 of 3 (2.4 s each).
+
+### Runs
+
+- `-race -count=50`, four single-package lanes at once outside the build slot,
+  GOMAXPROCS 4 each (17:41 to 17:50): backup 483.9 s (200 PASS lines, 50
+  runs of the test and its three cases), admin 509.8 s (250), cmd/bridge
+  347.9 s (150), alsapcm 3.6 s (200); no FAIL, SKIP or race.
+- In slot1, taken at 18:32:11 by a guard that waited behind two other
+  workers' gates: `go vet` with the tags over `./...` for linux, darwin and
+  windows, exit 0 each; `go test -race -count=1 -p 8 -parallel 8 -timeout
+  120m` of the four packages, ok: backup 777.9 s, alsapcm 85.9 s, admin
+  1099.6 s, cmd/bridge 1633.9 s.
+- Loaded, in the same slot session, 18:59:45 to 19:11:29, legion0 (Linux
+  7.0.0-38-generic): 16 busy loops (`python3 -c "while True: pass"`, as many
+  as `getconf _NPROCESSORS_ONLN` says), killed by their captured PIDs after,
+  beside the four tests at `-race -count=20`, GOMAXPROCS 16, four lanes at
+  once: backup 701.6 s (80 PASS lines), admin 361.7 s (100), cmd/bridge
+  187.1 s (60), alsapcm 4.9 s (80); no FAIL, SKIP or race. The ticker's bound
+  check, its return within `StopWriteBound` and a second of the stop, held in
+  every run.
+- The rules patch (`rules-b886-r1.patch`): `make docs-check`'s steps over a
+  patched copy of the tracked tree pass (worst load 76.3%), and cmd/bridge's
+  `TestEveryCitedTestNameExists` there failed on a ghost citation planted in
+  the patched History, naming it, and passed without it. go1.27.3's gofmt
+  lists none of the changed files.
+
+### Left
+
+- A cancelled Resume revokes the sink or keeps it paused, at random (the
+  select of its wait); `Drop` or `Close` ends either, so nothing leaks. Which
+  it should do is the product's choice.
+- At a stop, the ticker reports a verification whose step hangs given up, or
+  says nothing, by which of the two `StopWriteBound` timers the stop arms
+  comes first; production keeps that race. Whether a stop should ever report
+  a step given up is the product's choice.
+- "stopped by its caller" (verify_round5_test.go:241) and the console's
+  "cancelled check" (handlers_backups_round8_test.go:73): the stop arms the
+  caller's 2 s expiry (finish.go:351-355), and a worker slower than that,
+  its check on the lowest-priority thread, answers after it, an unknown
+  write. The same class; neither failed in these runs.
+- `SetStepBoundForTest`'s callers `TestAWriteGivenUpLandsNothingOnceItResumes`
+  (verify_round5_test.go:83), `TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp`
+  (verify_round6_test.go:138) and `TestEveryStepUnderTheLockIsBoundedAndMarked`
+  (verify_hold_test.go:229) bound a write 300 ms from its admission and wait
+  for a park it reaches only past fsyncs (the veto's, the staging's): B890's
+  class, candidates for the gate.
+- internal/admin's other bare waits for the console's jobs
+  (`WaitForBackupJobs`: handlers_backups_verify_test.go, round6, round7,
+  admin_test.go).
+
+The backlog file is not on legion0: these are named for the orchestrator to
+file.
+
+## 2026-11-13 — B886 round 2: two waits left on time, the ticker test left to B895, the version
+
+Worker b886, legion0, branch `fix/b886-timing-flakes` from round 1's 75defae8
+(its rules, r1). Commits: 67c32992 (the ticker test back to main's), c63ba178
+(the Locate awaited), 3555aa81 (the recheck's park by path), 71859211
+(qualificationVersion 50), then this record. Same toolchain, tags and
+TMPDIR as round 1; controls predicted in writing first
+(`.tmp/_b886/controls-r2.predictions.txt`), restored with `git checkout --`,
+`git status` empty after each. The brief's review moved the B871 carry (its
+item 4) out of this round: `parkAnEarlierWorker` and the helpers the carry
+leans on exist only on B871's unmerged branch.
+
+### The ticker test, back to main's (67c32992)
+
+Round 1's `answerOnceExpired` held the worker's answer until its caller had
+expired, so `TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound`
+passed whichever of the two `StopWriteBound` timers a stop arms came first in
+production: it forced the silent order, and hid the race that is its subject,
+which B895 fixes on its own branch. The file is main's again, byte for byte;
+`answerOnceExpired` went with it, and the rule round 1 wrote for it goes
+with the r2 rules patch. `SetVerifyHandoffForTest` predates round 1 and
+stays (`verify_bound_test.go` and the console's round 8 test use it); so does
+the step gate (the recheck's and the console's tests), its any-snapshot key
+("" for the snapshot) now used by no committed test. The test is left out of
+the `-count=50` runs, where main's flake (B872p2: about 4 in 100 under
+`-race`) is expected until B895.
+
+### The Locate awaited (c63ba178)
+
+Through its context a cancelled Resume answers from `abandoned` with no wait
+for its writer (`found` false: nothing waits on the release it began), so the
+reopen's Locate it cancelled ends whenever the writer next runs, after the
+answer as often as not. The test gave it one second from the answer and
+called a later end "resume context did not cancel locator", in `armContext`
+and in `armAny` when the select took the context. It now awaits the end
+under the package's watchdog (`-watchdog`, fake_test.go:788: a minute),
+which fails naming what it waited for.
+
+### The recheck's park, by its snapshot's path (3555aa81)
+
+`parkCheck`'s hook (`SetOnLowPriorityForTest`) takes no path and parks the
+first check it sees, so in "past its deadline" a stray check of another
+snapshot would take the park and leave the recheck's own check unparked.
+`SetOnCheckEntryForTest` (internal/backup/seams.go, nil in production) runs on
+every check's thread once its priority is lowered, before it reads anything,
+given the snapshot's resolved path (runCheck, finish.go); `parkCheckOf` parks
+the first check of one snapshot there and lets every other go by. The case
+parks its own snapshot's check with it and first verifies a snapshot of
+another store, in a backups folder of its own, as another process would
+(`aCheckOfAnotherSnapshotGoesBy`): that check must answer with its verdict
+recorded and the park untouched. It returns once that verification's worker
+has ended (`SetOnVerifyEndForTest`), never at its answer: at the answer
+alone, the first run under `-race` reported `holdUnlockOf`'s install of
+`SetOnLockReleaseForTest` against the worker's late read of it as it let its
+lock go (backlog B849). The end is reordered as the review asked: the check
+let go, its answer awaited, then its grace ended; the callers' release still
+ends it for a case that fails earlier.
+
+### qualificationVersion (71859211)
+
+The branch changes `internal/alsapcm/sink_dsd_engine_test.go` and
+`sink_dsd_test.go`, under the guarded prefix `internal/alsapcm/`
+(`guardedPrefixes`), so the version moves from main's 49 to 50, with the
+runbook's five current references (`TestQualificationRunbookVersion`). At
+71859211's parent, `go run ./scripts/qualification-version -base 2bebca26
+-head HEAD` (CI's step) answered "guarded code changed without
+qualificationVersion increase (49 -> 49)", exit 1; at 71859211, "qualification
+version OK: 2bebca26..HEAD".
+
+### Reds and controls
+
+- The Locate: at round 1's head (a copy, `redcopy.py`), the test's Locate made
+  to end 1.5 s after the cancel: sink_dsd_engine_test.go:203 "resume context
+  did not cancel locator", `armContext` 3 of 3 and `armAny` 3 of 3 (the select
+  took the context each time), `armReply` green. Controls at 71859211:
+  R2C1a, the timer back with the same late end: :205, the same 3 of 3;
+  R2C1g, the fix with the late end: green 3 of 3, every arm; R2C1b, the
+  timer back with no forcing, `-race -count=50` beside 16 busy loops:
+  green 200 of 200 (7.6 s): beside the busy loops alone the writer always ran within the
+  second, so the forced late end (R2C1a) is the control that shows the defect.
+- The park: R2C3, the global park back (`parkCheck(t, "")`): "past its
+  deadline" fails at once at verify_round5_test.go:235, "the park of this
+  snapshot's check took a check of another snapshot", 3 of 3; R2C3b, the
+  grace ended before the check is let go: :295, "the recheck was given up",
+  3 of 3.
+
+### Runs
+
+- `-race -count=50`, three single-package lanes at once outside the slot,
+  GOMAXPROCS 4 (21:01 to 21:10): internal/backup 538.2 s (200 PASS lines),
+  internal/alsapcm 3.8 s (200), internal/player/qualification whole, the
+  version gate's own tests among it, 136.3 s (11,950); no FAIL, SKIP or race.
+  The reverted ticker test is not among them: it is main's, and its flake is
+  B895's.
+- In slot1, taken at once at 21:10:42: `go vet` with the tags over `./...`
+  for linux, darwin and windows, exit 0 each; `go test -race -count=1 -p 8
+  -parallel 8 -timeout 120m`, all ok: internal/backup 808.3 s,
+  internal/alsapcm 86.5 s, internal/admin 1121.0 s, cmd/bridge 1680.3 s (the
+  reverted ticker test passing in it), internal/player/qualification 4.3 s.
+- Loaded, in the same session, 21:39:19 to 22:10:57, legion0 (Linux
+  7.0.0-38-generic): 16 busy loops (`getconf _NPROCESSORS_ONLN`), killed by
+  their captured PIDs after, beside the same three lanes at `-race
+  -count=50`, GOMAXPROCS 16, and R2C1b's lane: internal/backup 1896.0 s
+  (200), internal/alsapcm 8.7 s (200), internal/player/qualification 384.3 s
+  (11,950), R2C1b 7.6 s (200); no FAIL, SKIP or race.
+- CI's version step at 71859211: "qualification version OK:
+  2bebca26..HEAD". The rules patch (`rules-b886-r2.patch`): `make
+  docs-check`'s steps over a patched copy pass, and cmd/bridge's
+  `TestEveryCitedTestNameExists` there failed on a ghost citation planted in
+  the patched History, naming it, and passed without it. go1.27.3's gofmt
+  lists none of the changed files.
+
+### Left
+
+- The B871 carry (`unlockHold.release` waiting for the end hook,
+  `parkAnEarlierWorker` waiting only for a worker that started, a
+  completeness pin for unjoined verification calls), once B871 merges.
+- `parkCheck`'s other users (B872's cases) still park the first check they
+  see; `parkCheckOf` is there for them.
+- Round 1's follow-ups stand.
+## 2026-11-14 — B899: the stuck marker is waited for until it decodes, not until it exists
+
+Worker b899t, legion0, branch `fix/b899-await-marker-decodes` from main
+fe5e331d. Commits: cbd6544d (the helper, its three callers and its cases),
+then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`, 8 of the
+host's 16 cores; controls are uncommitted edits to the committed tree, each
+predicted in writing first (`.tmp/_b899t/controls.predictions.txt`), the
+edited files' bytes put back from memory once their binary was built.
+
+### The hazard
+
+Main's gate run 43527630159 (fe5e331d, `test (macos-latest)`) failed
+`TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore` with "the
+marker does not read: unexpected end of JSON input". The marker's writer
+creates it (`os.OpenFile` with `O_CREATE|O_EXCL`, `internal/backup/stuck.go`
+238) and writes it only after (243), and the tests' `awaitMarker`
+(`verify_stuck_test.go` 32-43 at fe5e331d) waited only until the file was
+there; `readStuckMarker` (`restore_mark_test.go` 21-28) then decoded it, so a
+read between the create and the write met an empty file. Production is not
+affected: a marker that does not parse reads as none (`stuckMarker`,
+`stuck.go` 362-372), so another process's admission goes on waiting for the
+folder's lock and asks the marker again a second later (`verify_lock.go`
+212-230, `markerPoll`), answering `ErrBackupsBusy` only past its wait, never a
+hold that is not there. The change is to tests alone; `internal/backup` is
+outside the qualification gate's `guardedPrefixes` and `GuardedPaths`
+(`internal/player/qualification/version_gate.go` 20-36), so nothing is bumped.
+
+### The port
+
+The helper is B871's round 5's (PR #1457). The brief names its source as
+6191017c, which this clone does not hold (`git cat-file -t 6191017c`: not a
+valid object). The local `fix/b871-restore-lows` at 53170036 (round 5's test
+commit is c37d4c95) matches every line the brief cites of it: `awaitMarker`'s
+count of reads (`verify_stuck_test.go` 46), `waitWithin`
+(`restore_mark_test.go` 39), `parkCheck` on `SetOnDatabaseOpenForTest`
+(`verify_stuck_test.go` 80: the branch began before B872 part 1 merged, so its
+diff from fe5e331d reverts that fix inside the same hunk) and
+`StuckCheckOf(root, backup.ProbeByDoctor)` (`restore_mark_test.go` 326,
+which does not build at fe5e331d). So it was taken from there by function,
+never by hunk: `awaitMarker` with its imports (`encoding/json`, `fmt`),
+`waitReserve` and `waitWithin` verbatim, and the three call sites
+(`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`,
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo`,
+`TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore`, whose
+`readStuckMarker` after the wait goes, the helper answering the marker), their
+comments citing B899 where round 5's cite B871's rounds 2 and 5. `parkCheck`,
+`awaitParkedAndGivenUp`, `awaitEvent`, `awaitReader` and the rest stay as main
+has them. A grep at fe5e331d found no other caller of `awaitMarker` in
+`internal/backup`'s tests.
+
+### Where main's helper differs from round 5's
+
+- Its bound holds. Round 5 computed its number of reads once,
+  `max(int(waitWithin(t, 30*time.Second)/every), 1)`, so the reads' own time,
+  a hook's and a host that runs it late added up past 30 s. Main's
+  `awaitMarkerWithin` takes an absolute deadline from `waitWithin`, asks it
+  after every read, and cuts each pause to what is left of it;
+  `awaitMarker(t, root, what, want)` is `awaitMarkerWithin(t, root, what, want,
+  30*time.Second, t.Fatalf)`, and only the case that exhausts the budget
+  injects a limit and a `fatalf` of its own.
+- The hook is one call: `onMarkerRead(data, err)` after each `os.ReadFile`
+  returns and before the decode, on the helper's goroutine. `onMarkerRead` is
+  a package-level func in the test file, nil but in the helper's own cases,
+  set by `setOnMarkerRead`, which registers the cleanup that puts the
+  previous one back as it sets it; those cases are not parallel and start no
+  goroutine. No production hook is touched. #1457's round 6 takes main's
+  version.
+
+### The cases and the red
+
+- `TestTheMarkerWaitReadsAnEmptyMarkerUntilItDecodes`: the marker planted
+  empty, as the writer's `O_EXCL` create leaves it, and written whole inside
+  the hook once the helper has read it empty: the helper answers the written
+  hold, having read the empty file at least once and the marker at least
+  twice.
+- `TestTheMarkerWaitReadsAnotherHoldsMarkerUntilItsOwnReplacesIt`: snapshot
+  A's verification's marker, which a wait for A's restore refuses, replaced
+  inside the hook by A's restore's once read.
+- `TestTheMarkerWaitFailsAtItsDeadlineNamingWhatItsLastReadMet`: a 200 ms
+  limit and an injected `fatalf` that records, over no marker, a marker cut
+  short, another hold's marker, and a first read that answers once the whole
+  limit has passed (the hook sleeps the limit): each fails once, never before
+  its limit, with the helper's message naming its reads and what the last
+  met, and the slow read is its last.
+
+Red first, before the port, with a temporary adapter of the new signature
+that ran main's existence wait and then `readStuckMarker`: the empty-marker
+case failed 20 runs of 20, each at once, `verify_stuck_test.go:709: the marker
+does not read: unexpected end of JSON input`, which is `readStuckMarker`'s
+`t.Fatalf` (`restore_mark_test.go` 25) on its decode (24), reported at the
+case's call since the adapter, `awaitMarker` and `readStuckMarker` are
+helpers. The other two were red as well: the other hold's case answered the
+earlier hold's marker, its hook never called; in the exhausting case the
+no-marker row waited main's 30 s and failed through the test's own `t`, the
+cut and slow rows failed at the decode, and the other hold's row answered B's
+verification with no failure recorded. Then the port, and all three green.
+
+### Controls (`.tmp/_b899t/controls.py`; 10 of 10 as predicted)
+
+- C0, the committed tree: the three cases green.
+- C1, round 5's count of reads in place of the deadline: the exhausting case
+  red, its slow row reading 20 times ("its first read answered past the
+  limit, so it was its last") and its other rows failing at 194 to 196 ms,
+  "before its limit of 200ms"; the other two cases green.
+- C2, the hook's call taken out: the empty-marker case red after its 30 s (in
+  2922 reads, "the last met 0 bytes that do not decode"), the other hold's
+  case too (2919 reads, "the last met another hold's marker"), and every row
+  of the exhausting case (the hook's count, 0, against the message's 21).
+- C3, `want` not asked: the other hold's case red (A's verification answered
+  after one read) and that row of the exhausting case (B's verification
+  answered, no failure recorded); the empty-marker case green.
+- C4, the deadline asked one limit late: the slow row red (21 reads); the
+  other rows green, failing at 400 ms.
+- C5, the deadline at half the limit: the first three rows red, failing at 100
+  to 101 ms; the slow row green.
+- C6, the pause not cut to what is left of the deadline: green throughout, as
+  predicted. That cut shortens one pause by 10 ms at most, and no case pins
+  it.
+- C7, the message without what the last read met: every row of the
+  exhausting case red.
+- C8 to C10, each call site's `want` turned to refuse the marker its own hold
+  writes: each test red after the 30 s wait, naming the marker it met
+  (`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`: 2915 reads, "the
+  last met another hold's marker", the check's, `Restore:false`; the given-up
+  restore's: 2916 reads, `Restore:true`; A's restore's: 2907 reads,
+  `Restore:true`): each wait asserts the hold its marker names, which in
+  `restore_words_unix_test.go` main's check after the wait asserted.
+
+`git status` was empty after the batch.
+
+### Runs
+
+At cbd6544d, the twelve tests of the four touched files, the three new among
+them, from one `-race` test binary in four lanes at once, GOMAXPROCS 2 each,
+`-test.count 50` (`.tmp/_b899t/lanes.py`):
+
+- quiet, outside the build slot (load 2 to 4, another worker's run in the
+  slot): every test 50 of 50, no data race; the lanes took 370, 453, 559 and
+  851 s;
+- beside 16 python busy loops, in the slot (load about 17): every test 50 of
+  50, no data race; the lanes took 769, 1003, 1276 and 3073 s.
+
+In the same slot session (`.tmp/_b899t/slot_session.py`): `go vet ./...` with
+the tags as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and windows/amd64,
+clean. The windows leg does not compile `restore_source_unix_test.go` or
+`restore_words_unix_test.go` (`//go:build unix`; `go list` names them ignored
+there), so their coverage is the linux and darwin legs' and every run here.
+Then `go test -race -count=1 -timeout 120m ./internal/backup/`: ok (735.3 s).
+go1.27.3's gofmt lists none of the four files, and cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass over the tree with this record. The rule is
+`rules-b899t.patch`, uncommitted: one bullet in `build-ci-tests.md`, after
+B872's bullet on a check given up (wait for the marker until it decodes as the
+hold awaited, bounded by a deadline asked after every read); `git apply
+--check` takes it, and the budgets check is clean with it (the worst load from
+76.1% to 76.3%).

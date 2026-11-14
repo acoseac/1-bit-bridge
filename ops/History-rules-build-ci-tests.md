@@ -1317,11 +1317,63 @@ same files. The name is a constant, not the environment's TMPDIR: a bare
 `.tmp`, and a skip of the environment's directory passed under
 `make test-fast` and failed under a bare run (the record's control C740-3).
 Not every dot-directory: `.github` and `.claude` hold sites the census must
-read, where the Go-file sweeps skip every name the go tool ignores.
+read. (This said until 2026-11-13 that the Go-file sweeps skip every name
+the go tool ignores, which held for the blank-keeper guard alone of the
+four the record named: the citation guard's walks and the hash-cost and
+flac-handle guards read `.github` on purpose, and `.tmp` with it, until
+B567, below.)
 `TestTheCensusSkipsTheMakefilesTMPDIRAtTheRoot` plants in a fixture's
 `.tmp`, read from the Makefile, what the suite leaves there, and keeps a
 link at the root, in a `.tmp` below it and in a look-alike `.tmp.old`
 failing the census. Record: `ops/engineering-log.md`, B740.
+
+### B567 — every sweep from the root skips make test's TMPDIR (2026-11-13)
+
+- **…and so does every other sweep from the root that reads this checkout's files, by `sweeptest.IsMakeTestTmpDir`: the citation guard's walks (`skipsForCitations`, which `productionCalls` shares), the hash-cost guard and the flac-handle guard, which read dot-directories on purpose, while a sweep that skips every name the go tool ignores skips it already; `TestTheSweepsSkipTheDirectoryTheCensusSkips` holds `sweeptest.MakeTestTmpDir` to the census's constant, which the census, a program, cannot share with a package only tests import** (2026-11-13, backlog B567). **Don't give a sweep from the root a check of its own for that directory, rename either copy of its name alone, or skip a `.tmp` below the root or a name that only begins with it.**
+
+B740's record said the Go-file sweeps (the citation guard, the hash-cost,
+flac-handle and blank-keeper guards) already skip every name the go tool
+ignores, `.tmp` among them, so that the census was the one sweep that read
+it. Of the four, only the blank-keeper guard's rule (`moduleDirRule`, over
+`goToolIgnores`) did, with the sweeps that share it and the few that skip
+every dot-directory of their own. The citation guard's walk
+(`scanTestCitationsIn`) and `productionCalls`, both over
+`skipsForCitations`, the hash-cost guard (`hashCostDirRule`) and the
+flac-handle guard (`flacDirRule`) read `.github` on purpose, and read `.tmp`
+with it. While make test ran with its TMPDIR there, every package's tests
+kept their temporary trees in it, and the go command its work directories,
+so a Go file there changed these sweeps' answers (a test defined there
+satisfied a citation this tree does not back, a comment there cited a test
+nothing defines, a setter call or a leaky flac call there was reported as
+this module's, a file there in mid-edit failed the walk), and a directory
+removed between its listing and its own failed the walk outright. A
+leftover tree in a worktree's `.tmp` turned the five whole-tree guards built
+on them red, and none once they skipped it.
+
+Each of the three predicates skips the root's own `.tmp` by
+`sweeptest.IsMakeTestTmpDir`, decided by the name before the walk lists it,
+as the census skips it by `makeTestTmpDir`. The three test packages share
+that one definition, `sweeptest.MakeTestTmpDir`. The census keeps its own:
+it is a program, and sweeptest is imported by tests alone, nor can a test
+package reach a program's unexported constant. So
+`TestTheSweepsSkipTheDirectoryTheCensusSkips`, beside the census, holds the
+two to one name, as `TestTheCensusSkipsTheMakefilesTMPDIR` holds the
+census's to the Makefile. Only the root's: a `.tmp` further down, a name
+that begins with `.tmp` and the Go program under `.github` are read as
+before. A sweep that skips every name the go tool ignores needs nothing: it
+never reaches `.tmp`. A directory removed mid-walk is stood in for, never
+raced, by `sweeptest.Removal`, a walk that removes its directory at the
+moment the walk reaches it, after the directory above it was listed and
+before it is listed itself, which each sweep takes through its package's
+walk seam (`sweepWalkDir`, `hashCostWalkDir`, `flacWalkDir`).
+`TestTheCitationGuardsWalksSkipMakeTestsTMPDIRAtTheRoot`,
+`TestTheCitationGuardsWalksFinishWhileMakeTestsTMPDIRChanges`,
+`TestHashCostSweepSkipsMakeTestsTMPDIRAtTheRoot`,
+`TestHashCostSweepFinishesWhileMakeTestsTMPDIRChanges`,
+`TestFlacSweepSkipsMakeTestsTMPDIRAtTheRoot`,
+`TestFlacSweepFinishesWhileMakeTestsTMPDIRChanges`, `TestIsMakeTestTmpDir`
+and `TestARemovalRemovesWhatTheWalkReaches` pin it. Record:
+`ops/engineering-log.md`, B567.
 
 ### B520 — self-dial candidate search (2026-10-26)
 
@@ -1809,3 +1861,9 @@ Rejected:
 - Moving the prune before the verification made as another process, which hides the window instead of waiting for the worker's end.
 
 Round 2 (Codex's review of round 1). A worker drops its hold, which is all `awaitClean` and `ActiveHoldsForTest` count, before its last step, the end hook. Round 1's worker read the hook in that step, so the worker of an earlier verification of `older` (the test's own `verifiedSnapshot`), past the drain but not yet at that step, could run a hook the test set later for the verification it meant, and the wait could pass on that end. The worker now runs the hook that stood as its verification began (`verifyAndThen` reads it first), and the test sets the hook when it arms, just before the verification it waits for. `TestAVerificationBegunBeforeItsEndHookNeverRunsIt` parks a worker at its last step (`SetAroundVerifyEndForTest`, nil in production), where `ActiveHoldsForTest` is already 0, sets the hook, lets the worker go on and requires that it ran none, then that a verification begun once the hook is set runs it: red 10 of 10 on the hook read at the end (41cc6d50), green with the fix; its control, the hook read at the end again, red 10 of 10. Rejected: an identity handed to the hook (the caller's context), which every call site of the seam would have to carry, for no case the read at the start does not cover. The same round qualified the order of the let-go: where the lock's let-go overruns `releaseBound`, `hold.release` returns with it still under way and the slot goes before it ends; the hold's mark stands until then (`keepMarkUntil`), and `drop`, with the end hook after it, waits for it.
+
+## B886, B887 and B890: the CI timing flakes wait on seams (2026-11-13)
+
+- **…and a request whose wait can find its writer's reply and its own context's end ready together is tested one arm at a time: a one-shot `armPick` (`nativeSeams.arm`), set just before that request, forces its wait alone, each arm asserting the outcome it makes, and the select's own pick (`armAny`) asserting whichever it took; what an arm leaves running (the Locate a Resume answered through its context did not wait for) is awaited on the package's watchdog** (2026-11-13, backlog B887, and B886's second round). `TestNativeResumeCancelsLocate` cancelled a Resume while its reopen's Locate ran, then waited on the sink's `Done` with no bound, the sink's release only in its cleanup. The Resume's wait (`await`) then finds the writer's reply and the context's end ready together. Through the context the Resume revokes the sink (`abandoned`, `revokeFound`), which the round that wrote the test meant ("cancelling an in-flight activation still revokes it so the abandoned caller cannot authorize sound later": `ops/History-rules-player.md`, the native engine hand-off's review round 2), and the sink's writer ends. Through the reply, the held refusal of a paused sink's reopen, nothing revokes the sink: it stays paused and alive, and the wait ran to the package's timeout. At main, with only an `armPick` set to `armReply`, `go test -race -run '^TestNativeResumeCancelsLocate$' -count=1 -timeout 2m ./internal/alsapcm` panicked "test timed out after 2m0s" at that wait. Each arm is now a case of its own: through the context the sink is revoked (`revoked`, read under the sink's lock) and ends with no release from the test; through the reply it is paused and released, its writer alive, until the test's `BeginRelease(Immediate)`; and `armAny`, the select's own pick, asserts whichever of the two it took. The pick is set just before the Resume, since Activate's wait, on a context that never ends, waits on nil channels under `armContext`. Every wait is under the package's watchdog, and a cleanup registered after the sink's own cancels, lets the Locate go and joins the Resume before the sink is released. The control, the reply arm with its release removed, is red 3 of 3, "waited 5s for the sink's end" (`-watchdog 5s`). Which outcome a cancelled Resume should have is the product's question, left open. In B886's second round: through its context a Resume answers from `abandoned` without waiting for its writer, so the Locate it cancelled ends whenever the writer next runs, after the answer as often as not; the test gave it one second from the answer and called a later end "resume context did not cancel locator" (`armContext`, and `armAny` when the select took the context). It now awaits the Locate's end on the package's watchdog (`-watchdog`, a minute), which fails naming what it waited for. At round 1's head, with the test's Locate made to end 1.5 s after the cancel (a writer scheduled late), the context arm failed so 3 of 3, and `armAny` 3 of 3, the select having taken the context each time; the fix passes that forcing 3 of 3. **Don't wait for an outcome one arm alone makes, set the pick before an earlier request's wait, wait on a sink's `Done` with no bound, or time what an arm leaves running with a timer a writer scheduled late outlasts.** `TestNativeResumeCancelsLocate` holds to it.
+
+- **…and a test that waits for a step under the backups folder's lock to be given up gives it up at its gate once the step has reached the park the test waits for (`SetStepGateForTest`), never by a bound counted from its admission (`SetStepBoundForTest`), which a slow host can pass before the step reaches that park; and a check that must answer past a short deadline is parked by its own snapshot's path (`parkCheckOf`, over `SetOnCheckEntryForTest`), never as the first check that comes, until its grace has begun, then let go, its answer awaited, and only then its grace ended (`SetCheckGraceForTest`), every other step that deadline bounds held at its gate** (2026-11-13, backlog B886 and B890, and B886's second round). `TestARecheckThatDidNotEndLeavesTheVetoItMade/past_its_deadline` slept 400 ms at the database's open behind a 150 ms deadline, on the check's thread, which runs at the lowest priority (`PRIO_DARWIN_BG` on macOS), and `runCheck` gives a check whose context has ended half of `StopWriteBound` more before it gives it up: on macOS's CI it gave it up, and the case failed at "the recheck was given up". At main, with `parkCheck` in the sleep's place, it failed there 3 of 3. The check is now parked before it reads anything until its deadline has passed and its grace has begun, then let go, and answers INCOMPLETE (deadline) within a grace the test ends at its end; the record's read, the veto, the write, its INCOMPLETE and the read-back are held at their gates, never fired, so the deadline decides the check's verdict alone, whatever the host's pace. The control, the grace fired at once and the check parked until the verification answers, is red 3 of 3 at "the recheck was given up". `TestTheConsoleReportsCancellationAndEveryWriteHandoff`'s two worker modes bounded the write and the read-back 300 ms from their admission, and the mode's stall is the manifest's sync after the rename (`publishVerdict`); the write's staging fsyncs before its rename, which asks its give-up, so a write given up in its staging renamed nothing and the case never reached its stall ("verification never reached its stall"). At main, with the write parked at its staging, it failed so 3 of 3. The write is now given up at its gate once it has stalled, and the read-back once its hook says it has begun; the control, the write's gate fired while it was parked in its staging and the staging let go after, is red 3 of 3 at the same line. A gate ignores its step's bound and its caller's stop, the seam's restore fires every gate, and a test fires them all (`FireAll`) before it joins its callers. `SetStepBoundForTest`'s five other callers keep their durations. In B886's second round: `parkCheck`'s hook takes no path and parks the first check it sees, whatever its snapshot, so a stray check of another snapshot would take the park and leave the recheck's own check unparked. `SetOnCheckEntryForTest` (nil in production) runs on every check's thread once its priority is lowered, before it reads anything, given the snapshot's resolved path, and `parkCheckOf` parks the first check of one snapshot there and lets every other go by. The case parks its own snapshot's check with it, and first verifies a snapshot of another store, in a backups folder of its own, as another process would: that check must answer with its verdict recorded and the park untouched, and with the global park back the case fails at once, 3 of 3 ("the park of this snapshot's check took a check of another snapshot"). It waits for that verification's worker's end, never its answer, before it installs the seams the worker reads as it lets go (backlog B849): at the answer alone, `-race` reported the install of `SetOnLockReleaseForTest` against the worker's late read. The grace is ended only once the verification has answered: ended while the check is still parked, it gives the check up, and the case fails at "the recheck was given up", 3 of 3. **Don't bound a step a test waits in by a duration from its admission, give a check meant to answer past its deadline a timer's grace or end its grace before its answer, park a check by anything but its snapshot's path, or fire a gate before its step has reached that park.** `TestARecheckThatDidNotEndLeavesTheVetoItMade` and `TestTheConsoleReportsCancellationAndEveryWriteHandoff` hold to it.
