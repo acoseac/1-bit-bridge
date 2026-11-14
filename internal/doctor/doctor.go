@@ -372,12 +372,13 @@ type Deps struct {
 	// does: an install it is about to write has no snapshot to grade.
 	Backups func(ctx context.Context) []Check
 
-	// LogPath is the file the service unit redirects this bridge's stderr
-	// to — cmd/bridge's adminLogPath: packaging.DefaultLogPath(), or,
-	// inside the Windows service, the service's own log under
-	// %PROGRAMDATA% (backlog B618). Empty (a foreground `bridge serve`,
-	// which logs to its terminal) makes checkLogSize a no-op rather than a
-	// complaint about a file that does not exist.
+	// LogPath is the file the log-file-size line grades, cmd/bridge's
+	// doctorLogs: for bridge doctor run from a shell the installed bridge's
+	// log, on Windows the one bridge logs reads by its install check, and
+	// for the console's doctor the serving process's own (backlog B618).
+	// Empty (a foreground `bridge serve`, which logs to its terminal) makes
+	// checkLogSize a no-op rather than a complaint about a file that does
+	// not exist.
 	LogPath string
 
 	// LogNote says how LogPath was chosen where its reader needs to know:

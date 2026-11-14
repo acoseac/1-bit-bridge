@@ -445,8 +445,7 @@ func followLog(ctx context.Context, f *os.File, pos int64, stdout, stderr io.Wri
 }
 
 // adminLogPath resolves the log file the admin console's export offers,
-// wired into admin.Deps.LogPath, and the one bridge doctor's log-file-size
-// line grades: consoleLogPath on this process's host.
+// wired into admin.Deps.LogPath: consoleLogPath on this process's host.
 //
 // Returns "" rather than an error on failure, and that empty is a real state
 // rather than a swallowed fault: the path fails to resolve only where the
@@ -458,36 +457,37 @@ func adminLogPath() string {
 	return consoleLogPath(hostLogs())
 }
 
-// consoleLogPath is the file the process asking writes its log to, as far as
-// it can know. On Windows that is `bridge logs`' own choice
-// (chooseWindowsLog) with whether this process runs as the service in place
-// of the install check, since the console asks of the bridge it is part of:
-// the service's log inside the service, where DefaultLogPath is LocalSystem's
-// under C:\Windows\System32\config\systemprofile while the service writes
-// %PROGRAMDATA% (backlog B618), and the user's otherwise. Elsewhere it is
-// DefaultLogPath, which the launchd and systemd units point the bridge's
-// output at. So the console and `bridge logs` read one file wherever the
-// console runs inside the installed bridge. They part where they ask of two
-// bridges, a console of a bridge run another way beside a registered service;
-// and on Windows `bridge doctor` run from a shell, which is no service,
-// grades the user's log, where `bridge logs` reads the service's.
+// consoleLogPath is consoleLog's path, "" where it cannot be made.
 func consoleLogPath(host logsHost) string {
+	p, err := consoleLog(host)
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
+// consoleLog is the file the process asking writes its log to, as far as it
+// can know, or why its path cannot be made. On Windows that is `bridge logs`'
+// own choice (chooseWindowsLog) with whether this process runs as the service
+// in place of the install check, since the console asks of the bridge it is
+// part of: the service's log inside the service, where DefaultLogPath is
+// LocalSystem's under C:\Windows\System32\config\systemprofile while the
+// service writes %PROGRAMDATA% (backlog B618), and the user's otherwise.
+// Elsewhere it is DefaultLogPath, which the launchd and systemd units point the
+// bridge's output at. So the console and `bridge logs` read one file wherever
+// the console runs inside the installed bridge; they part only where they ask
+// of two bridges, a console of a bridge run another way beside a registered
+// service, which is that bridge's own log.
+func consoleLog(host logsHost) (string, error) {
 	if host.goos == "windows" {
 		service := packaging.ServiceNotRegistered
 		if host.isService != nil && host.isService() {
 			service = packaging.ServiceRegistered
 		}
 		files := chooseWindowsLog(service, host.dirs)
-		if files.readErr != nil {
-			return ""
-		}
-		return files.read
+		return files.read, files.readErr
 	}
-	p, err := host.defaultLogPath()
-	if err != nil {
-		return ""
-	}
-	return p
+	return host.defaultLogPath()
 }
 
 // doctorLog is the log a doctor's log-file-size line grades: its path, a note
@@ -498,14 +498,86 @@ type doctorLog struct {
 }
 
 // doctorLogs is which log a doctor's log-file-size line grades, over the host
-// it reads: buildDoctorDepsWith's seam, so that each platform's choice runs on
-// any host (hostLogs in production). console marks the console's doctor.
+// it reads: buildDoctorDepsWith's seam, so that each platform's choice, its
+// install check included, runs on any host (hostLogs in production). bridge
+// doctor, run from a shell, grades the installed bridge's log as `bridge logs`
+// reads it (shellDoctorLog). The console's doctor (console) grades its own
+// process's log, as the console's export offers it (consoleLog), and asks no
+// install check: a console of a bridge run another way beside a registered
+// service grades the file it writes, not the service's.
 type doctorLogs struct {
 	host    logsHost
 	console bool
 }
 
-// choose is the log the line grades: consoleLogPath's, for either doctor.
+// choose is the log the line grades.
 func (l doctorLogs) choose() doctorLog {
-	return doctorLog{path: consoleLogPath(l.host)}
+	if l.console {
+		p, err := consoleLog(l.host)
+		if err != nil {
+			return doctorLog{unresolved: unresolvedLog(err)}
+		}
+		return doctorLog{path: p}
+	}
+	return shellDoctorLog(l.host)
+}
+
+// shellDoctorLog is the log bridge doctor grades from a shell: the one `bridge
+// logs` reads. Off Windows that is DefaultLogPath. On Windows it is the
+// service's log while the install check finds the service registered, running
+// or not, and the user's otherwise (chooseWindowsLog); where the check cannot
+// tell, the service's where it is there and the user's where only that is, each
+// with a note that says so, and neither, said, where neither is there. A path
+// that cannot be made is said too: none of these is a bridge that logs to its
+// terminal.
+func shellDoctorLog(host logsHost) doctorLog {
+	if host.goos != "windows" {
+		p, err := host.defaultLogPath()
+		if err != nil {
+			return doctorLog{unresolved: unresolvedLog(err)}
+		}
+		return doctorLog{path: p}
+	}
+	inst := host.windowsInstall()
+	files := chooseWindowsLog(inst.Service, host.dirs)
+	switch inst.Service {
+	case packaging.ServiceRegistered:
+		return doctorLog{path: files.read}
+	case packaging.ServiceNotRegistered:
+		if files.readErr != nil {
+			return doctorLog{unresolved: unresolvedLog(files.readErr)}
+		}
+		return doctorLog{path: files.read}
+	}
+	uncertain := fmt.Sprintf("cannot tell whether the bridge's Windows service is installed (%v)", inst.ServiceErr)
+	if !logIsGone(files.read) {
+		return doctorLog{path: files.read, note: uncertain + ", so this is its log, the one `bridge logs` reads"}
+	}
+	if files.otherErr != nil {
+		return doctorLog{
+			unresolved: fmt.Sprintf("%s is not there, and the other log's path cannot be made (%v)", files.read, files.otherErr),
+			note:       uncertain,
+		}
+	}
+	if !logIsGone(files.other) {
+		return doctorLog{path: files.other,
+			note: fmt.Sprintf("%s, and its log, %s, is not there, so this is the one `bridge logs` reads", uncertain, files.read)}
+	}
+	return doctorLog{
+		unresolved: fmt.Sprintf("neither %s nor %s exists", files.read, files.other),
+		note:       uncertain + "; the service writes the first once it starts, and a bridge its sign-in launcher starts the second",
+	}
+}
+
+// unresolvedLog says that a log's path could not be made, and why.
+func unresolvedLog(err error) string {
+	return fmt.Sprintf("the log's path cannot be made (%v)", err)
+}
+
+// logIsGone says whether a stat of path answers that nothing is there. A stat
+// that fails otherwise leaves the file chosen, for the line to say why it
+// cannot be graded, as `bridge logs` says why it cannot be opened.
+func logIsGone(path string) bool {
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
 }

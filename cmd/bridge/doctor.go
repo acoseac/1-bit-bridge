@@ -255,7 +255,9 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 // read: dacHost, the player-dac line's (B676), bridge doctor's own process
 // beside the running bridge (doctorDACHost) or, for the console's doctor, the
 // serving process (servingDACHost, adminDoctorRunnerFor); and logs, which log
-// the log-file-size line grades (doctorLogs).
+// the log-file-size line grades (doctorLogs, backlog B618): bridge doctor's,
+// run from a shell, the installed bridge's as `bridge logs` reads it, or the
+// console's doctor's, its own process's.
 func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost, logs doctorLogs) doctor.Deps {
 	lf := logs.choose()
 	d := doctor.Deps{
@@ -266,10 +268,10 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 		// pid file behind it (doctor's ungradedConfigPortCheck).
 		APIPort:   7788,
 		AdminPort: 7789,
-		// The console export's resolution (consoleLogPath, through logs), so
-		// the console's doctor grades the file its bridge writes. On Windows
-		// `bridge logs` asks what is installed instead, and so reads the
-		// service's log where a doctor run from a shell grades the user's.
+		// The log-file-size line's file (doctorLogs): for bridge doctor the
+		// one `bridge logs` reads, its install check, "cannot tell" rule and
+		// fallbacks included, and for the console's doctor the one its
+		// bridge writes, which the console's export offers too.
 		LogPath:       lf.path,
 		LogNote:       lf.note,
 		LogUnresolved: lf.unresolved,
@@ -1020,7 +1022,9 @@ func adminDoctorRunner(cfgPath string, ownedPorts []int, checklist func(context.
 
 // adminDoctorRunnerFor is adminDoctorRunner with the player-dac line's host
 // (servingDACHost): the serving process's credentials, and the binding its
-// player started with, which the line tells the config's apart from.
+// player started with, which the line tells the config's apart from. Its
+// log-file-size line grades the serving process's own log (doctorLogs'
+// console), never the install check's.
 func adminDoctorRunnerFor(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost) func(context.Context) *admin.DoctorReport {
 	return func(ctx context.Context) *admin.DoctorReport {
 		d := buildDoctorDepsWith(cfgPath, false, dacHost, doctorLogs{host: hostLogs(), console: true})
