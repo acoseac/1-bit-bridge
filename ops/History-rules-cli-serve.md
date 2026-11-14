@@ -5517,8 +5517,10 @@ names the first give-up a step's own bound made, whatever the stop gave up
 before it, and otherwise the first (`givenFor`; round 1 named the first, so
 a bound of its own after the stop read as the stop's: round 2 below). A
 give-up every one of whose steps the stop gave up, with no error of the
-worker's own published beside it (since round 2 every such error; round 1
-asked only a write's, the INCOMPLETE's or a veto's), is a `*givenUpAtStop`;
+worker's own published beside it that is news (since round 3, what a
+give-up itself made is no news: below; since round 2 every other such
+error; round 1 asked only a write's, the INCOMPLETE's or a veto's), is a
+`*givenUpAtStop`;
 a read-back the stop gave up beside it keeps it one, and a read of the record
 that failed does not (`verifyHeld`'s answer). `backup.AsTheStop(ctx, err)`
 answers ctx's own error for one, ctx cancelled and its cause the
@@ -5529,7 +5531,9 @@ found beside the stop, B653 PR 1, rounds 10 and 11), a read or a write that
 failed, a recheck refused or not recorded, and a step given up at a bound of
 its own are said whichever bound fires first: round 1 claimed so, which held
 neither for its caller's expiry nor beside an error a give-up dropped until
-round 2 (below). The CLI and the console say a give-up as they did. The
+round 2, nor where the expiry or a give-up came between a step's answer and
+its worker until round 3, which says it of what a step has published (both
+below). The CLI and the console say a give-up as they did. The
 tests fire the two bounds through `SetStopBoundsForTest` (nil in production,
 where the timers are as they were); the check's own half bound is B886's
 seam. Round 1's three ordering tests are rows of round 2's table now.
@@ -5545,12 +5549,14 @@ and a write or a read-back that failed went unsaid whenever the caller's
 expiry fired before the worker answered. And a step its own bound gave up
 after the stop gave another up was named as the stop's. Now the worker
 publishes to its hold, under the hold's lock, before each step that can
-block, what its check found and each error of its own (`verify_known.go`:
-`know`, `knowFound`, `knowRead`; a manifest read that failed, a recheck
-refused or not recorded, a veto or a write that failed or is not known
-durable, a read-back that failed); `givenUp` joins those errors and is a
-`*givenUpAtStop` only where the stop alone gave the hold up and none was
-published; `givenFor` names the first give-up a step's own bound made, its
+block (since round 3 each step as it answers: below), what its check found
+and each error of its own (`verify_known.go`; round 2's `know`, `knowFound`
+and `knowRead`, which round 3 replaced; a manifest read that failed, a
+recheck refused or not recorded, a veto or a write that failed or is not
+known durable, a read-back that failed); `givenUp` joins those errors and is
+a `*givenUpAtStop` only where the stop alone gave the hold up and none was
+published (since round 3, none of them news); `givenFor` names the first
+give-up a step's own bound made, its
 caller's own give-up aside; and the expiry answers what was published
 (`expired`), with `WriteUnknown` (B653 PR 1's eighth round), its own error
 joined to that own-bound give-up and to those errors; `VerifySnapshot` and
@@ -5580,3 +5586,76 @@ and every silent one green.
 internal/backup's `TestAGiveUpIsTheStopOnlyWhereTheStopMadeItAlone` and
 `TestACallersExpiryAnswersWhatItsWorkerPublished` pin the hold's side; the
 record is in `ops/engineering-log.md`, 2026-11-13, B895 and B895 round 2.
+
+*Round 3* (2026-11-14). Round 2 published what the worker knew only once it
+took each step's answer, so an expiry, or a give-up, that came between a
+step's answer and its worker said nothing of it. A recheck's finding and
+`ErrRecheckNotRecorded` were published apart, the error behind a second look
+at the give-up after the `afterCheck` seam: an expiry between them said the
+finding alone, and the error was never published. A manifest read that failed
+was followed, in its step, by the veto's lookup (`vetoedAt`, which can wait on
+the folder): given up there, the read's error was lost whichever bound fired.
+A FAILED finding answered just before the check's half bound passed was
+replaced by INCOMPLETE, and a refused recheck, a write's failure and a
+read-back's failure answered just before their step's give-up were dropped.
+And round 2 published every error of a write, so a recheck's recovery
+INCOMPLETE that a give-up of the hold kept from being written ("the veto could
+not be confirmed") made a stop alone at a recheck's check said. Now `runStep`
+publishes each step's outcome on the step's own goroutine as the step
+answers, under the hold's lock, unless the step was given up first (`knowIn`:
+never a late answer, whatever step runs then), and keeps an answer its worker
+takes after a give-up of the hold ended its signal (`keep`) for the worker's
+own answer (`stepKnowing`, `publishOf`'s outcome). Every such error carries
+whether it is news (`newsOf`): what a give-up itself made (a veto attempt or a
+rename it refused, `ErrCheckGivenUp` or the step's context's error; a cache
+stamp it skipped and nothing else) is joined to the worker's own answer, never
+to its caller's expiry, and never makes a give-up the stop made alone anything
+but that stop; B653 PR 1's `TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp`
+and `TestRecoveryPublicationSeparatesItsCacheStampFromDurability` still find
+those words in the worker's answer. The check takes its own answer as it
+makes it, on its thread, in one compare-and-swap of the hold's check slot,
+`ErrRecheckNotRecorded` beside it where no directory can be synced
+(`takeFinding`); every give-up of the hold (`giveUpAs`, under its lock) and
+`runCheck`'s give-up of the check (`dropCheck`) close the slot the same way,
+so a check that answered before either stands whole and one after is not
+published at all, its worker taking its INCOMPLETE (`findingOf`). The check's
+thread, at the lowest priority, takes no lock a caller's expiry could wait
+behind. A read of the record that fails returns at once, its error published
+as it answers, and no veto is looked up after it. The read-back keeps a
+failure it published before its step was given up as the reason its record
+was not read (`knownRead`).
+
+What stays open is the instant between an operation's return and its
+publication on its step's goroutine: in `runStep` (hold.go), the step's
+closure returning, the outcome's extraction and `knowIn`'s lock; on the
+check's thread, `checkBundle`'s return and `takeFinding`'s compare-and-swap.
+None of it is I/O. An expiry, or the step's own bound, that takes the hold's
+lock within it answers without that outcome, as one that came just before
+the operation returned would. Closing it would need the expiry to wait for
+the step, whose operation may never return, and the expiry never waits. So
+the rule is that the stop alone is silent and every outcome a step has
+published is said, whichever bound fires first; not every outcome an
+operation has returned.
+
+`TestAStoppedTickerSaysOnlyWhatItsStopAloneDidNotCause` runs each row in each
+order that differs: the worker's bound first; the caller's expiry first, where
+the stop came; and the worker's bound, then the caller's expiry once the
+worker has moved on or its answer is held. The silent rows at the write and
+the read-back run all three (the two cases the expiry's order had left out),
+and the check's runs the expiry while the check hangs, the worker held after
+it. Seven rows are new, each holding a step once it has answered and
+published, before its worker takes the answer (`SetOnStepAnsweredForTest`),
+or the worker after its check (`SetAfterCheckForTest`): a recheck not
+recorded, the expiry after its check; a read that failed, with no veto looked
+up after it; a FAILED finding, its record FAILED where the worker answers; a
+recheck refused, a write that failed and a read-back that failed, each the
+stop as its step answers; and a recheck, the stop alone at its check
+(silent). Round 2's code with the new seam alone was red in 13 of the 42
+cases, every case of the seven new rows, and green in the other 29, the
+three cases new to old rows among them (it left those silent already). The
+check's row reads its record again once the ticker has returned, database
+INCOMPLETE: cancelled, as round 1's check test did. internal/backup's
+`TestAStepGivenUpPublishesNothingItAnswersLate`,
+`TestTheChecksAnswerIsTakenOnceBeforeAnyGiveUp` and
+`TestWhatAGiveUpMadeIsNoNews` pin the hold's side; the record is in
+`ops/engineering-log.md`, 2026-11-14, B895 round 3.

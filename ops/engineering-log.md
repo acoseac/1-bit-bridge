@@ -96530,3 +96530,179 @@ the two branches meet there. And 2fa9b9cf alone fails cmd/bridge's
 cited the three tests the table replaced, which `rules-b895-r2.patch`
 repoints (the History) and elides (the record), so the patch lands with the
 code.
+
+## 2026-11-14 — B895 round 3: each outcome published as its step answers, a check's answer taken once, a failed read published at once
+
+Worker b895, legion0, branch `fix/b895-ticker-stop-report` from round 2's
+head af338e82. Commits: 12fad56a (backup: each step's outcome published as
+the step answers, with whether it is news; the check's answer taken in one
+compare-and-swap; a read that failed looks up no veto) and 2020cfb4 (the
+table). Every run: Go 1.27.3, tags `ts_omit_webclient,ts_omit_debugeventbus`,
+TMPDIR `~/onebit/tmp`; controls are uncommitted production mutations of
+2020cfb4, each predicted in writing first
+(`.tmp/_b895/r3/controls.predictions.txt`), the bytes put back from memory.
+
+### The brief's items, at af338e82
+
+1. A finding and `ErrRecheckNotRecorded` published apart. Real:
+   `finish.go:667` published the finding (`h.knowFound`), and `:682-686` the
+   error in the noBarrier branch behind `if !h.gaveUp()`, the `afterCheck`
+   seam (`:668-670`) between them; an expiry there said the finding alone.
+   Fixed by the review's rule in one atomic step: the check publishes its
+   answer and the error together as it makes it (`takeFinding`), unless a
+   give-up came first. The step is a compare-and-swap of the hold's check
+   slot rather than a section of `h.mu`, since the check runs on a thread at
+   the lowest priority, which must hold no lock a caller's expiry could wait
+   behind (the loaded runs below show how long that thread waits beside
+   hogs); every give-up of the hold closes the slot under `h.mu`
+   (`giveUpAs`), and `runCheck`'s give-up closes it too (`dropCheck`), so
+   "`h.given` already true when it locks" is "the slot closed before the
+   answer's swap", and no later acquisition decides it.
+2. A failed manifest read lost behind the veto's lookup. Real: the read step
+   (`:597-601`) answered `opened{m: m, err: err, doubted: vetoedAt(snap)}`,
+   looking the veto up after a failed read, and `:602-604` discarded the
+   step's answer on a give-up before `:609`'s `h.know(readErr)`. Fixed: the
+   read step returns at once on a failure, no veto looked up (`doubted` is
+   unused there), its error published as the step answers, before the
+   discard and before anything else that can block.
+3. A step's outcome between its return and its publication. Closed for
+   every outcome the review lists: the check's finding (`:648-667`, replaced
+   by INCOMPLETE at `:659-663` once a give-up came first), a refusal
+   (`:628-638`, dropped by `case !ok || h.gaveUp()` before `:637`'s
+   `h.know`), the read's error (above), the write's (`:725-729`) and the
+   read-back's (`:555-562`). `runStep` publishes each on the step's own
+   goroutine as the step answers (`stepKnowing`, `publishOf`'s outcome;
+   `knowIn`), refusing a step whose signal a give-up ended first, so a late
+   answer is never published while another step runs, and keeps an answer
+   its worker takes after a give-up ended its signal (`keep`), for the
+   worker's own answer; the check publishes by its own swap. No `h.mu` is
+   held across filesystem work. The residual is the instant between an
+   operation's return and that publication: the closure's return, the
+   outcome's extraction and `knowIn`'s lock (`runStep`, hold.go), or
+   `checkBundle`'s return and `takeFinding`'s swap; none of it I/O. Closing
+   it would need the expiry to wait for a step whose operation may never
+   return, so it stays, stated in the History entry, and the invariant's
+   words there and in `cli-serve.md` say "published".
+4. The control, run: `AsTheStop` answering `ctx.Err()` whatever err is (C1
+   below). Its red cases are listed there; the FAILED cases stay green, and
+   the separate control that removes the ticker's found-verdict report
+   (C1b) turns them red.
+5. The lows. The check's row reads its record again once the ticker has
+   returned, database INCOMPLETE: cancelled, as round 1's
+   `…ATickerStoppedWhileItsCheckHangsSaysNothing` did, in the orders where
+   the worker wrote it before the answer. The expiry-first rows with no
+   later park fired the expiry before the step's bound, so the order "the
+   step's bound, then the expiry before the worker's answer" was missing for
+   the two silent rows at the write and the read-back: each runs it now (the
+   worker's answer held), and the check's row runs the expiry while the
+   check hangs (the worker held after it). For the said rows that order
+   answers what the expiry order answers: the step given up at the stop adds
+   no news, and the expiry answers what was published.
+
+A defect beside them: round 2 published every error of a write, so a
+recheck stopped at its check, whose recovery INCOMPLETE a give-up of the hold
+kept from being written ("the verdict was not written: the veto could not be
+confirmed"), was said. What a give-up itself made is no news now (`newsOf`),
+joined to the worker's own answer (B653 PR 1's
+`TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp` and
+`TestRecoveryPublicationSeparatesItsCacheStampFromDurability` still read
+those words there) and never to the expiry's, and the row is silent.
+
+### The table (2020cfb4) and its red at af338e82 (`.tmp/_b895/r3/red.log`)
+
+`TestAStoppedTickerSaysOnlyWhatItsStopAloneDidNotCause` runs 20 rows in 42
+cases (three orders where they differ). Round 2's production (internal/backup
+as af338e82 has it) with the new seam alone (`SetOnStepAnsweredForTest` and
+its two calls) under the table, without `-race`, as predicted in writing
+(`.tmp/_b895/r3/red.predictions.txt`): red in 13 cases, every case of the
+seven new rows: a recheck, the stop alone at its check (W, B: said, "its
+write: the verdict was not written: the veto could not be confirmed"); a
+recheck not recorded, the expiry after its check (E); a read that failed,
+the stop as it answers (W, E: silent, and the veto looked up twice after the
+failed read); a FAILED finding, the stop as the check answers (W, E); a
+recheck refused, a write that failed, and a read-back that failed, each the
+stop as its step answers (W, E); green in the other 29. At 2020cfb4 every
+case is green.
+
+### Controls (`.tmp/_b895/r3/r3controls.py`), each red where predicted
+
+Eleven production mutations of 2020cfb4, each run over the table, the
+shutdown bound and ten internal/backup tests, from binaries built without
+`-race`, about 39 s a control; `git status` was empty after each.
+
+- C1, the brief's: `AsTheStop` answers `ctx.Err()` whatever err is. Red: 27
+  table cases, every said case but the four FAILED ones: the write's own
+  bound then the stop (W, E); the stop at the write then the read's own
+  bound (W, B); a read that failed then the prune (W, E); a recheck refused
+  (W, E); a recheck not recorded (W, E); a write that failed then the prune
+  (W, E); a write not known durable (W, E); a read-back that failed once the
+  stop gave the write up (W, B); an INCOMPLETE whose write failed (W, B); a
+  recheck not recorded, the expiry after its check (E); and, each the stop
+  as its step answers, a read that failed, a recheck refused, a write that
+  failed and a read-back that failed (W, E). Green: a FAILED finding then
+  the write (W, E) and a FAILED finding as the check answers (W, E), said by
+  the ticker's found-verdict rule (`cmd/bridge/backup.go:803-810`, and the
+  latter's W by the no-error branch, `:835-845`, its answer carrying no
+  error), the eleven silent cases, the shutdown bound. internal/backup: all
+  nine rows of `TestAGiveUpIsTheStopOnlyWhereTheStopMadeItAlone` (the
+  mutation answers nil over a context never stopped) and the six said rows of
+  `TestACallersExpiryAnswersWhatItsWorkerPublished`.
+- C1b, the ticker's found-verdict report removed (`:803-810` returning): red
+  a FAILED finding then the write (W, E) and a FAILED finding as the check
+  answers (E); that row's W stays green, reported by the no-error branch.
+- C2, `knowIn` publishing over an ended signal: red
+  `TestAStepGivenUpPublishesNothingItAnswersLate` alone (the late answer
+  published beside the next step's).
+- C3, every error news: red the recheck stopped alone at its check (W, B),
+  the five rows of `TestWhatAGiveUpMadeIsNoNews` that are no news, and the
+  row of each round-2 unit test where a give-up made the refusal.
+- C4, no `keep`: red the late-return test (its third answer lost), the three
+  rows of `TestTheNoBarrierWorkerReportsAVetoAcrossGiveUp` and two of
+  `TestRecoveryPublicationSeparatesItsCacheStampFromDurability` (the
+  recovery step given up before its stamp, with and without its sync
+  failing).
+- C5, the veto looked up after a failed read: red a read that failed as it
+  answers (W, E), by its lookup count alone.
+- C6, the read step's outcome nil: red a read that failed then the prune
+  (W, E) and as it answers (W, E).
+- C7, `takeFinding` dropping `ErrRecheckNotRecorded`: red a recheck not
+  recorded (W, E) and the expiry after its check (E), and three unit rows.
+- C8, `runCheck` giving up a check whose answer was taken: red a FAILED
+  finding as the check answers (W), its record INCOMPLETE where FAILED was
+  written.
+- C9, the expiry answering what is no news: red the recheck stopped alone at
+  its check (B) and one unit row.
+- C10, `givenUp` taking any error for a reason to say it: red the recheck
+  stopped alone at its check (W) and one unit row.
+
+### Runs
+
+At 2020cfb4, in the build slot, `-race -count=200` of the table, a lane per
+case (42) and two more, the shutdown bound and internal/backup's five unit
+tests (`.tmp/_b895/lanes3.py`: race binaries built once, every lane pinned to
+CPUs 0-7, half the cores, at GOMAXPROCS=2):
+
+- Unloaded (`.tmp/_b895/r3/session_a.log`): every lane 200 of 200, no
+  failure, no race; 2046 s wall, a table case 1.45 to 29.87 s, the shutdown
+  bound 3.05 to 19.65 s, the unit tests under 0.05 s.
+- Loaded, beside one busy loop pinned to each of the 16 CPUs
+  (`.tmp/_b895/r3/session_b.log`; its lanes were to be stopped at 06:10,
+  before its two-hour limit, and none had to be): every lane 200 of 200, no
+  failure, no race; 5017 s wall, a table case 3.96 to 48.16 s, the slowest
+  the two rows of a recheck not recorded, which run two checks (14.40 to
+  48.16 s), the shutdown bound 12.83 to 28.74 s.
+
+Then in session A, side by side and pinned to CPUs 0-7 at `-parallel 4`,
+`go test -race -count=1 -timeout 120m`: `./cmd/bridge` ok (1679.1 s, whole),
+`./internal/backup` ok (769.2 s); and `go vet -tags … ./...` as GOOS linux,
+darwin and windows, each clean. Earlier, outside the slot and without
+`-race`, internal/backup ok (537.4 s) beside cmd/bridge's and internal/admin's
+backup and console tests (`.tmp/_b895/r3/early.out`). cmd/bridge's
+`TestEveryCitedTestNameExists` ran over 2020cfb4 with `rules-b895-r3.patch`
+(`.tmp/_b895/docs3/docs_check3.py`): green, and red, naming it alone, with a
+ghost citation planted. go1.27.3's gofmt lists none of the files changed, and
+the budgets check is clean with the patch (`cli-serve.md` 99852 bytes).
+
+Left open: as in rounds 1 and 2, B886 edits `runStep`'s select and
+`seams.go`, and round 3 edits `runStep`'s goroutine and adds a seam there, so
+the two branches meet there.
