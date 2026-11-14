@@ -378,7 +378,9 @@ type Deps struct {
 	// for the console's doctor the serving process's own (backlog B618).
 	// Empty (a foreground `bridge serve`, which logs to its terminal) makes
 	// checkLogSize a no-op rather than a complaint about a file that does
-	// not exist.
+	// not exist. It is empty too where the log's path cannot be made, off
+	// Windows and in the console's doctor: no file to grade, as the
+	// console's export has none to offer.
 	LogPath string
 
 	// LogNote says how LogPath was chosen where its reader needs to know:
@@ -389,10 +391,11 @@ type Deps struct {
 	LogNote string
 
 	// LogUnresolved says why no log file could be named where one should
-	// have been: a path that could not be made, or, where the install check
-	// could not tell, neither of the Windows logs there. The line is then a
-	// warn in those words, never the ok of a bridge that logs to its
-	// terminal, which an empty LogPath alone reads as.
+	// have been, which only bridge doctor from a shell on Windows says: a
+	// path that could not be made, or, where the install check could not
+	// tell, neither of the Windows logs there. The line is then a warn in
+	// those words, never the ok of a bridge that logs to its terminal,
+	// which an empty LogPath alone reads as.
 	LogUnresolved string
 
 	// Managed mirrors cfg.Deployment.IsManaged(): a control plane runs
