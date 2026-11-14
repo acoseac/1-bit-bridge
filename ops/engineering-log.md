@@ -96371,3 +96371,161 @@ the tree with this record. The rule change is `rules-b872-r3.patch`: round
 2's first B872 bullet in `build-ci-tests.md`, which named the wait's seam,
 now names the notice's seam, the held wait and its abort; the budgets check
 is clean with it.
+
+## 2026-11-14 — B567 follow-up: the sweeps from the root take their walk, and every walk from the root is listed
+
+The follow-up to B567's review (its Lows), worker b567fu on legion0 (Linux,
+amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`, 16 cores, half of them
+used), branch `fix/b567fu-walk-params` from main fe5e331d (#1463). Test-only:
+the files changed are tests and `internal/sweeptest`, which tests alone
+import. Commits: b8db1843 (item 1), f2063d01 (item 2), c54d4066 (item 3),
+6db77bcf (item 4), then this record. The rules line and its long form ship as
+`rules-b567fu.patch` (`.claude/rules/build-ci-tests.md`,
+`ops/History-rules-build-ci-tests.md`), which also corrects B567's long form
+where it names the walk seams this follow-up removed.
+
+**Item 1, the walk as a parameter (a pure refactor).** B567 gave each package
+a package-level walk seam its removal tests reassigned: `sweepWalkDir`
+(`cmd/bridge`), `hashCostWalkDir` (`internal/adminauth`) and `flacWalkDir`
+(`internal/manifest`). The four sweeps now take their walk as their first
+parameter after `t`, as `productionCalls` already handed `productionCallsIn`
+its root: `scanTestCitationsIn` (`cmd/bridge/cited_test_names_test.go:696`),
+`productionCallsIn` (`cmd/bridge/itunes_unwired_test.go:27`),
+`hashCostSetterCallers` (`internal/adminauth/hashcost_test.go:91`) and
+`leakyFlacCalls` (`internal/manifest/flac_handle_discipline_test.go:110`).
+The whole-tree tests and the fixtures hand them `filepath.WalkDir`, the
+removal tests a `sweeptest.Removal`'s `WalkDir`, and the three variables are
+gone, so no test mutates its package's state. Every touched test passed as
+before; there is no red step, since nothing it does changes an answer.
+
+**Item 2, the skip is lexical.** Each removal test gained a row, "make test's
+TMPDIR itself", in which the `Removal` removes the root's `.tmp` as the walk
+reaches it in the root's listing: `cmd/bridge/sweeps_tmpdir_test.go:164`
+(both walks), `internal/adminauth/hashcost_test.go:362` and
+`internal/manifest/flac_handle_discipline_test.go:356`, and the new pin's
+own, `internal/sweeptest/rootwalks_fixtures_test.go:232`. The walk reaches it
+(`Reached` must be true, where the other rows require false), and it is gone
+before the sweep decides anything about it, so the sweep finishes with the
+answer the tree gives without it only if it skips the directory by its name,
+before listing it or asking anything of it. The rows pass as the rules stand,
+which skip by `sweeptest.IsMakeTestTmpDir` before any I/O; the controls below
+turn them red. The brief's first control (`IsOtherCheckout` moved ahead of
+the skip) was not run, as the brief's review corrected it: that check takes
+any `Lstat` error for "not a checkout", so it stays green.
+
+**Item 3, the exact match, kept.** `IsMakeTestTmpDir`'s doc
+(`internal/sweeptest/sweeptest.go:149-159`) says why the name is compared
+exactly also where the filesystem folds case: the Makefile makes the
+directory itself, by the name its TMPDIR line gives (`mkdir -p`), so make
+test's TMPDIR is `.tmp` wherever make test made it; and the census compares
+the name exactly (`scripts/third-party-licenses/tags.go:471`), so a fold in
+sweeptest alone would split the two rules. The residual is a `.TMP` that was
+there first, on a filesystem that folds: `mkdir -p` finds it under the
+Makefile's name and makes nothing, so make test's files land in a directory
+a walk lists as `.TMP`, which the sweeps that skip the directory by name read
+(the census among them) and those that skip every dot-directory still skip.
+No folding, and no case: legion0 cannot make a volume that folds case.
+
+**Item 4, every walk from the root, listed and pinned.** `MakeTestTmpDir`'s
+doc (`internal/sweeptest/sweeptest.go:77-139`) lists the sixteen walks in the
+module's Go code that can start at the checkout's root, each by its file and
+the function that walks, the tests that make the walk from the root (exact
+`func Test…` names: `TestEveryCitedTestNameExists` reads sweeptest.go whole),
+and its rule with the function that holds it. By its name: the four B567
+sweeps, the census (`discoverBuildSites`, by its own `makeTestTmpDir`) and
+the pin. As a dot-directory: `moduleDirRule`'s six (`findBlankKeepers`,
+`findConfigWriters`, `findDefaultLoggerSetters`,
+`TestEveryPlayerUUIDMinterUsesFloorChecks`'s walk,
+`TestEveryServedFileIsOpenedAsAFile`'s, `parseProductionFiles`),
+`scanDocblockSubjects`, `parseModuleServerSources`, fsutil's `sweepTreeWalks`
+and dsdconv's `moduleImports`. One more test starts at the root by another
+road, named beside the list: `TestEveryEmbedPatternRefusesALeadingDot` runs
+`go list ./...`, and the go command skips the directory as a dot-directory
+(B567's record counted it among the walks that "walk no tree there"; the go
+command walks it).
+
+`TestEveryWalkFromTheRootIsListed` (`internal/sweeptest/rootwalks_test.go`)
+reads every Go file of the module (882 non-test and 2,046 test files),
+skipping the root's `.tmp` by `IsMakeTestTmpDir`, `.git`, another checkout,
+a `_` name, testdata, vendor, node_modules and another module, and reading
+the other dot-directories (`.github` holds a Go program). From each file's
+AST it finds every function that walks a tree: a call of filepath.WalkDir,
+filepath.Walk, fs.WalkDir or fsutil.WalkConfigured; a walk callback written
+in it; a call through a walk it is handed or holds (a parameter, variable or
+field in filepath.WalkDir's shape, a named type of that shape resolved in its
+package); a callback its package declares, handed on; or a directory listed
+by a function or closure that calls itself. A function that only hands a walk
+on is no walk: the function it hands it to is. Each walk found must be an
+item of the list, its tests in its directory reaching it through the
+package's calls and its walk's branch for a directory (an if on the entry's
+IsDir: its init, condition and body) reaching its rule through the function
+the item names; or an entry of `walksElsewhere` (65: the bridge's own walks,
+the fixtures', and those below the root or outside the checkout), with what
+it walks. A stale item or entry fails, a walk in both fails, and a walk a
+test file holds at package level fails whatever the lists say. The first run
+found one walk of the bridge's own code at package level,
+`internal/fsutil/walkroot.go`'s `walkResolvedDirectory` (nil in production,
+which fsutil's tests set): it is an entry, out of this test-only change's
+reach. What the pin cannot see: a walk a command makes (`go list ./...`), or
+one kept as a queue of directories.
+
+Fixture tests pin the pin: `TestTheWalkSweepFindsEveryShapeOfWalk` (each
+shape of walk found by its key alone, beside four non-walks, and the same
+walk in each directory the sweep reads or skips),
+`TestTheWalkSweepFinishesWhileMakeTestsTMPDIRChanges` (item 2's rows for the
+pin's own walk), `TestTheInventoryReadsEachItemAsWritten` (an item's lines
+joined and its tests split; an unreadable item, no list, two lists) and
+`TestCheckWalksNamesEveryWayTheListsCanBeWrong` (one row for each problem
+the check reports, the parameterized sweep listed nowhere among them, each
+the one problem). One thing the first fixture run caught: go/doc/comment
+dedents a doc by its common indentation, so a doc that is a list alone reads
+as prose; the real doc has prose before its list, and two fixture rows gained
+a lead paragraph.
+
+**Negative controls**, at 6db77bcf, predicted before the run in
+`.tmp/_b567fu/controls.predictions.txt` (`.tmp/_b567fu/controls.py`:
+exact-once replacements or a planted file, kept on disk while the tests ran,
+since the pin reads the tree as it runs; test binaries built per control;
+the bytes put back from memory; `git status` clean after), every one as
+predicted, the baseline green:
+
+| Mutation | Red |
+|---|---|
+| C1 `skipsForCitations` without the skip | both walks: the two TMPDIR rows each, all three removal rows each (the TMPDIR itself: `open …/001/.tmp: no such file or directory`); the pin, for both walks' rule |
+| C2 `hashCostDirRule` without the skip | its two TMPDIR rows, its three removal rows; the pin |
+| C3 `flacDirRule` without the skip | its TMPDIR row, its three removal rows; the pin |
+| C4 `hashCostSetterCallers` asks `d.Info()` of a directory before its rule | the "TMPDIR itself" row alone (`lstat …/checkout/.tmp: no such file or directory`); the other rows and the pin green |
+| C5 the pin's `skipsDir` without the skip | its three removal rows, the shapes fixture (the TMPDIR's half.go fails the parse), the pin (readModule's rule) |
+| C6 a root walker through a parameterized helper, planted in cmd/bridge | the pin, one problem: `sweepTheCheckout walks a directory tree (calls walk, a walk it is handed; a walk callback) and is named neither …` |
+| C7 the same helper with a named callback | the pin: `… (calls walk, a walk it is handed; hands on visitAll, a walk callback) …` |
+| C8 dsdconv's item removed from the doc | the pin: `moduleImports … named neither` |
+| C9 a `walksElsewhere` key misspelt | the pin, two problems: the walk named neither, the entry naming no walk |
+| C10 the flac item's test renamed to `TestFixtureWritersLeaveNoOpenHandle` | the pin: `no test of that name in its directory reaches it` |
+| C11 `var flacWalkDir = filepath.WalkDir` put back | the pin: `holds a walk at package level in a test file` |
+| C12 `parseModuleServerSources`' branch for a directory without its dot rule (its file branch keeps one) | the pin: no IsDir branch reaches the dot rule |
+
+**The runs.** The touched tests under `-race -count=50`, one single-package
+lane each at `GOMAXPROCS=2` (8 cores), outside the build slot, which another
+worker held: `internal/adminauth` (the five hash-cost tests) ok in 97 s,
+`internal/manifest` (the four flac tests) 285 s, `internal/sweeptest` (the
+package) 356 s, `cmd/bridge` (the ten citation and production-call tests) 736
+s, all ok, no race reported. Then, in the slot (`.tmp/_b567fu/gates.py` under
+`guard.py`): `go vet` with the Makefile's tags for linux, darwin and windows,
+each clean (4, 8 and 8 s, mostly from the cache, which keeps clean results
+alone); and `go test -race -count=1 -p 2 -parallel 4` at `GOMAXPROCS=4` of
+`./cmd/bridge/ ./internal/adminauth/ ./internal/manifest/
+./internal/sweeptest/`: all ok, no race reported (`cmd/bridge` 1,617 s,
+`internal/manifest` 1,614 s, `internal/adminauth` 54 s, `internal/sweeptest` 7
+s; 1,670 s in all). Two other workers held the slot from 07:42 to 11:21; the
+guard, relaunched for a fresh window as it waited, took it then, probing every
+0.2 s, after a 3 s prober lost a hand-off between them.
+`qualification.CheckVersion(fe5e331d, HEAD)` answers nil: no guarded path
+changed, so no `qualificationVersion` bump. `make test` and `make build-all`
+were not run: the brief asked for the packages. The rules patch applies at
+this record's commit; on a copy of the tracked tree with it applied
+(`.tmp/_b567fu/verify_patch.py`), `scripts/check-doc-budgets.py` is clean
+(`build-ci-tests.md` 42,351 bytes), `scripts/doc-split/verify_moves.py --base
+HEAD --edit "Each of the three predicates skips"` passes (one edited block,
+B567's long form, and six new blocks), and `TestEveryCitedTestNameExists` and
+the census's two real-tree tests pass there; the citation guard failed on a
+ghost citation planted in that copy's History file, so it read the copy.
