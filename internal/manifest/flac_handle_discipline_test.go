@@ -338,11 +338,22 @@ func TestFlacSweepSkipsMakeTestsTMPDIRAtTheRoot(t *testing.T) {
 // directory, is one the sweep never lists, so it finishes with the answer
 // the tree gives without it. Reading that directory, the sweep failed on the
 // directory it had just listed (B567). A sweeptest.Removal stands in for the
-// other process at that moment of the walk.
+// other process at that moment of the walk, handed to the sweep as its walk.
+//
+// The last row removes the TMPDIR itself, which the walk reaches as an entry
+// of the root's listing: it is gone before the sweep decides anything about
+// it, so the sweep must skip it by its name alone, before it lists it or asks
+// anything of it. A sweep that listed it, or that failed on what a stat of it
+// answers, fails there.
 func TestFlacSweepFinishesWhileMakeTestsTMPDIRChanges(t *testing.T) {
-	for _, gone := range []struct{ name, dir string }{
-		{"a test's temporary directory", "TestSomething123"},
-		{"the go command's work directory", "go-build123/b001"},
+	for _, gone := range []struct {
+		name    string
+		dir     string // a slash path below make test's TMPDIR, "" for the TMPDIR itself
+		reached bool   // whether the walk reaches it: the root's listing names the TMPDIR alone
+	}{
+		{"a test's temporary directory", "TestSomething123", false},
+		{"the go command's work directory", "go-build123/b001", false},
+		{"make test's TMPDIR itself", "", true},
 	} {
 		t.Run(gone.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "checkout")
@@ -361,7 +372,10 @@ func TestFlacSweepFinishesWhileMakeTestsTMPDIRChanges(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the sweep failed: %v", err)
 			}
-			if removal.Reached {
+			if removal.Reached != gone.reached {
+				if gone.reached {
+					t.Fatalf("the sweep never reached %s, which the root's listing names, so this case proves nothing", dir)
+				}
 				t.Errorf("the sweep reached %s, in make test's TMPDIR", dir)
 			}
 			if !slices.Equal(sweep.calls, want.calls) || sweep.nonTest != want.nonTest || sweep.test != want.test || sweep.importers != want.importers {

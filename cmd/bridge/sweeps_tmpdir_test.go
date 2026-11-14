@@ -145,12 +145,23 @@ func TestTheCitationGuardsWalksSkipMakeTestsTMPDIRAtTheRoot(t *testing.T) {
 // the tree gives without it. Reading that directory, each walk failed on the
 // directory it had just listed (B567). A sweeptest.Removal stands in for the
 // other process at that moment of the walk, handed to each walk as its walk.
+//
+// The last row removes the TMPDIR itself, which the walk reaches as an entry
+// of the root's listing: it is gone before the walk decides anything about
+// it, so the walk must skip it by its name alone, before it lists it or asks
+// anything of it. A walk that listed it, or that failed on what a stat of it
+// answers, fails there.
 func TestTheCitationGuardsWalksFinishWhileMakeTestsTMPDIRChanges(t *testing.T) {
 	for _, sweep := range sweepWalks {
 		t.Run(sweep.name, func(t *testing.T) {
-			for _, gone := range []struct{ name, dir string }{
-				{"a test's temporary directory", "TestSomething123"},
-				{"the go command's work directory", "go-build123/b001"},
+			for _, gone := range []struct {
+				name    string
+				dir     string // a slash path below make test's TMPDIR, "" for the TMPDIR itself
+				reached bool   // whether the walk reaches it: the root's listing names the TMPDIR alone
+			}{
+				{"a test's temporary directory", "TestSomething123", false},
+				{"the go command's work directory", "go-build123/b001", false},
+				{"make test's TMPDIR itself", "", true},
 			} {
 				t.Run(gone.name, func(t *testing.T) {
 					root := t.TempDir()
@@ -163,7 +174,10 @@ func TestTheCitationGuardsWalksFinishWhileMakeTestsTMPDIRChanges(t *testing.T) {
 					if !removal.Walked {
 						t.Fatal("the walk did not go through the stand-in, so this case proves nothing")
 					}
-					if removal.Reached {
+					if removal.Reached != gone.reached {
+						if gone.reached {
+							t.Fatalf("the walk never reached %s, which the root's listing names, so this case proves nothing", dir)
+						}
 						t.Errorf("the walk reached %s, in make test's TMPDIR", dir)
 					}
 					if !slices.Equal(got, want) {
