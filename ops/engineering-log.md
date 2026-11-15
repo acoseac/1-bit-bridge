@@ -100297,7 +100297,7 @@ and `move_entry.py`.
 
 ## 2026-11-15 — B898 PR 3: the harvest test reads past Windows' refusal of its open of the state file
 
-Worker b898pr3, legion0, branch `test/b898-harvest-read` from main 3f4843e1,
+Branch `test/b898-harvest-read` from main 3f4843e1,
 test files only. Commits: 2b20bcf1 (the helper reads through a core that
 takes its read function, main's single read kept, and the hold cases: red),
 fd8c4648 (one state file for the three cases, still red), 84cf147b (the read
@@ -100365,7 +100365,7 @@ pending cover, written once through `atlasharvest.OpenStateStore`: let go by
 the read at a refusal it heard, the covers come back; held throughout, the
 read is busy with the hold's refusal; in `eventually`'s form a poll whose
 read is refused throughout answers not yet, and a later one, whose read lets
-the hold go, the covers. `TestTheHarvestHelperReadsPastAHoldOnTheStateFile`
+the hold go, the covers. `…HarvestHelperReadsPastAHoldOnTheStateFile`
 (Windows) holds the file with a handle that shares nothing, its own open
 through the same retry so that a scanner's hold of the fixture just written
 is waited out, checks before anything else that `os.ReadFile` beside it
