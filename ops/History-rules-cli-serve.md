@@ -2282,6 +2282,8 @@ mentions across the four `ops/audit-*.md` files.
 
 - **Serve installs the console's view of its player (`newConsolePlayer`, `admin.Deps.PlayerOutput`) beside GET /v1/outputs' view, over the same boot plan, `bridgePlayer` and `bridgeOutput`, the boot snapshot, whether it holds the data dir's lock and its player-state preflight, so the page's pending changes are `planServePlayer`'s answer on the live config** (B601, 2026-10-31). `runServe` builds it right after `apiSrv.WithBridgeOutput(playerView)`, from `playerPlan`, `player`, `playerView`, `cfg`, `opts.playerGOOS`, `lockErr == nil`, `playerStateErr`, `opts.playerTrees` (the zero value is `hostTrees`) and the manifest store, and hands it to the console as `Deps.PlayerOutput`. Its status reads the boot plan, `bridgeOutput.Facts` (the element's facts: one engine snapshot and the bounded DAC read), the engine's snapshot after `ready` (the transport, the occurrence heard and its position), the hotplug feed's latest resolution of the boot binding, and the live config the console hands it; the next start's decision is `planServePlayer` on that config (or the boot's player-state refusal again, which only a start can find gone), and the pending list is its difference from the boot plan. The track heard is named through `bridgePlayer.res` (`library.Resolver.StoredPath`, then the store's row), looked up once an occurrence within 500 ms. A DAC listing is one reading of the box at a time (`consolePlayer.read`: 3 s, its slot let go only when the reading returns, so a read stuck in the kernel holds the next back rather than doubling it), bracketed by a reading of sysfs's identities before /proc as `readPlayerDACObserved` is (a card whose unit or devnum moved between the two is set aside as transient, and so is one whose devnum either reading could not read, saying so; a transient card's /proc id and name, which the list shows, are redacted of both readings' serials and ports, as a USB row's are of its own), and refused whole when it is not whole (`CardsComplete`, `Partial`); each USB card's playback endpoint gets a token (128 random bits, 10 minutes, the newest 64 kept) for the unit as that reading read it, its devnum included, and the binding each kind builds there (`binding.For`), and a choice reads the box again, in the write's config turn just before the save, and requires the same unit (`binding.SameUnit`) at the same devnum building the same binding (`hotplug.SameBinding`). A transport row plays only while the player's output is open (`outputOpen`: the live config withholding nothing, GET /v1/outputs' element not unavailable, the engine's output report available): the engine runs on after the player is turned off, another DAC is chosen or its DAC is unplugged, and plays nothing then (Codex on the PR). **Never let the view write the config, start, dial or probe MPD, hand a serial out but as its label, read `eng` or `res` before `ready`, read the box but through its one bounded, bracketed reading at a time, or call a transport playable while the output is withheld or gone.** `TestTheConsoleShowsTheRunningPlayer`, `TestTheConsoleSaysNothingPlaysOnceTheDACIsUnplugged`, `TestTheConsoleTurnsAPlayerOnForTheNextStart`, `TestTheConsoleOffersNoPlayerOffLinux`, `TestTheConsoleListsEachPlaybackEndpointOfTheBox`, `TestAUnitSwappedWhileTheBoxIsReadIsNotOffered`, `TestAUnitWhoseEnumerationCannotBeReadIsOfferedNoToken` and `TestTheTokensAreBounded` pin it.
 
+- **Serve starts the player's hotplug watcher on Linux once the live config holder exists, and its teardown cancels and joins it** (B470 PR 4a2): `startPlayerHotplug` runs the `hotplug.Service` on the holder's `Load` and `Changed`, reading the box through `hostTrees` (a boot test's `serveOpts.playerTrees` in their place), so the player turned on or off, or its binding changed, while serve runs starts, stops or re-reads the watch; the service runs on a context its stop alone cancels (since B470 PR 4b3: on serve's own it stopped as the shutdown began, before the player its reports feed), the stop waits for it within `shutdownGrace`, and the service itself returns within its watch's stop deadline. Off Linux nothing starts. `serveOpts.playerGOOS`, `hotplugSource` and `hotplugBoot` let a boot test stand in for Linux, run the watcher on a source that hears nothing, and wait on the decision; `hotplugObserve` and `hotplugTiming` hold its readings and stretch its stop. The watcher reads the player block through `livePlayerSettings`, which serve's player reads too, with the OpenHome port clash judged on serve's boot snapshot (`playerHotplugWiring.BootConfig`, `config.PlayerEnabledAsBooted`; B612's second round), so neither the opt-in nor a listener's address reaches the watch before the next start. The console's Player page changes `output.player` while serve runs (B601: its switch and its DAC choice, and B612's OpenHome switch, through the holder). `TestServeRunsThePlayersWatcherWhileThePlayerIsOn`, `TestServeStartsNoPlayerWatcherOffLinux`, `TestServeStartsThePlayersWatcherWhenTheConfigTurnsItOn`, `TestThePlayersWatcherStopJoinsItsService` and `TestALiveClashWithTheOpenHomePortLeavesTheRunningPlayerAsItIs` pin the wiring. Rules in `player.md`.
+
 ## Scanner, deletion passes, and manifest writes
 
 - **Shutdown joins every background writer**, and the wait must be written
@@ -5596,6 +5598,97 @@ the box, every other wait keeping bridge doctor's bound; and the shared
 inspection's cases read its deadline on the builder's clock
 (`lockedClock`). The record is in `ops/engineering-log.md`: B650 on
 2026-11-13, and its rounds 2 and 3 on 2026-11-14.
+
+## B650FIX — bridge doctor --fix's second report is a run of its own (2026-11-14)
+
+- **…and each report is a run of its own: `bridge doctor --fix` runs the checks again after its remediations as a new run of the CLI's works (`cliRootProbes.BeginRun()` in `runDoctorReport`), which asks again every root whose probe has ended and joins one still out, whose bound counts from when it began** (2026-11-14, backlog B650FIX). **Don't give a second report the first one's run, which keeps every work it has met, or a new runner, which begins a second work for a root still out.** → History-rules-cli-serve.md
+
+*The hazard.* `runDoctorReport` runs the checks (`doctor.Run`), applies
+`--fix`'s remediations (`runFixes`), and runs the checks again, on the same
+Deps, so that the report it prints is of what the remediations left. B650 gave
+those Deps one run of the CLI's works on the roots (`buildDoctorDepsWith`:
+`cliRootProbes.BeginRun()`), and a run keeps every work it has met
+(`ProbeRun.met`), so the second report was handed back the first one's root
+probes and watch counts, made before the remediations; before B650 every run
+of the checks read every root. In production: a config directory that is
+enter-only (0100) and is itself a library root fails config-dir, which this
+user cannot write, and library-roots, whose listing is refused; `--fix` sets
+the directory to 0700; and the second report still failed library-roots with
+the first listing's error, so the command exited 1. Nothing was written, and
+the next `bridge doctor` was right.
+
+*The fix.* The second report is a new run of the same runner
+(`d.RootProbes = cliRootProbes.BeginRun()`), the one every caller's Deps carry
+a run of (`doctorCmd` and the launcher's row, both through
+`buildDoctorDepsWith`), never a runner of its own. A work that has ended has
+left the runner's works, its worker deleting its key before it closes its done
+channel, so the new run begins that root's probe afresh. One still out is
+joined (`beginOut` returns it), never begun twice, and its bound counts from
+when it began, which the first report's wait saw pass, so the second report
+sets no wait on it and says at once that the root still has not answered.
+
+*What a run keeps, and what a remediation changes.* A run keeps three kinds of
+work, each under its key: a root's probe (the root as configured: its stat,
+and of a directory its listing), a root's watch count (its cap and the root,
+with the library watcher on: the folders below it, on kqueue with their
+entries), and a caller's work (cmd/bridge's load of the config, keyed by its
+path and a digest of its bytes and every `BRIDGE_` variable). `runFixes` takes
+one action, config-dir's, where that line is not ok and names a directory: an
+`os.MkdirAll` of it at 0700, which makes nothing config-dir's own check had not
+made in the first run, and an `os.Chmod` to 0700. The roots come from a config
+this user read in that directory, so it grants search permission already (one
+that does not leaves the config unreadable, config-dir not checked and nothing
+remediated), and the Chmod adds read and write permission alone, which
+changes no stat and no walk below it. It can change a listing of the directory
+itself: what the probe of a root that is the config directory finds (its
+listing needs read permission there), what that root's count finds, and what
+the count of a root above it finds, whose walk lists it. The new run asks each
+of them again, as it asks every other.
+
+*What it leaves.* The config is loaded once, as the Deps are built before
+either report, and what the load gave is copied into them
+(`ConfigFile.LoadErr`, the roots, the ports), so the second report grades the
+same load. No remediation changes the file or the environment, but a load that
+did not finish within its bound in the first report and finished afterwards is
+still reported as unfinished: retained state outside this fix, which predates
+B650 (the Deps were always built once).
+
+*Two limits of the new run.* The second report begins a new probe of every
+root whose probe has ended, and the runner begins no work on the roots while
+sixteen are out, probes and watch counts together (`beginOut`, `outOfKind`),
+so a root the first report probed can be one the second cannot. With the watch
+counts begun (Linux or a kqueue platform with its limit read, none on Windows,
+and `libraryWatch.enabled`), eight library roots on mounts that do not answer,
+each with its probe and an admitted count that stays blocked, and a local root
+listed last, whose count the limit holds back in the first report, `--fix`'s
+report says the local root "was not checked: 16 earlier probes of the library
+roots have not answered yet, and the doctor begins no more until one does",
+where a plain `bridge doctor` reads it ok; the exit code is the same,
+library-roots failing already for the eight. And the new run is taken from
+`cliRootProbes`, not from the runner behind `d.RootProbes`, which a `ProbeRun`
+does not expose: the two are one runner only because every caller builds its
+Deps through `buildDoctorDepsWith` (`doctorCmd`, the launcher's row), which
+the comment at that line says.
+
+*The tests.* `TestBridgeDoctorFixReadsTheRootsAgainForItsSecondReport` (a root
+whose first listing is refused, and whose next one answers, is reachable in
+what `--fix` prints), `TestBridgeDoctorFixReportsTheRootItsRemediationLetItList`
+(the enter-only config directory that is the library's root: its mode 0700
+afterwards, config-dir and library-roots ok, its listings refused and then
+answered) and `TestBridgeDoctorFixJoinsTheProbeOfARootStillOut` (a held root
+joined, the root that answers read again, the probes begun counted once the
+root has answered and every work has ended), each through
+`bridge doctor --json --fix`, in cmd/bridge. And since B650FIX
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn` runs its runner
+on a clock of its own (`RootProbes.SetClockForTest`, `rootWaitClock`), whose
+time moves only at a run's wait on a root, so the wait on each config load ends
+by the load's answer: under its real 100 ms bound, its config-file ok past the
+probes' limit needed the load within 100 ms of real time. Since round 2 it
+counts the probes begun once the roots have answered and every work has ended
+(`DrainForTest`): on its clock a run can return before a probe's goroutine
+reaches the stat that counts it. The record is in `ops/engineering-log.md`,
+B650FIX and its round 2, on 2026-11-14.
+
 ## B828 — a state file that holds nothing refuses the start in the bridge's words (2026-11-13)
 
 - **…and a state file that holds nothing, empty or JSON's white space alone (of a file larger than the 16 MiB and one byte it is read to, all that was read, nothing past it read), refuses the node's start before the node is built, whatever `tailscale.hostname` or the auth key says, in the bridge's words (`tsnet.EmptyStateError`, naming no path: a copy of the file keeps the node; moved aside, a new device follows, and what that costs), which serve's tailnet line and `bridge tsnet auth` and `status` (exit 1) print and the console's tile shows in LastError (`tsnetAdminStatus`, from `LastStartError`); Tailscale's own start refuses that file, in words about a TPM-sealed state, and the bridge moves and replaces nothing** (2026-11-13, backlog B828, the review of its brief, and its round 2). **Don't take a state file that holds nothing for no node, build or start the upstream node over it, ask `tailscale.hostname` before it, move, replace or write the file, name a path in its words, count a byte JSON does not skip as nothing, or read past the bound to decide it.** `TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode`, `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`, and cmd/bridge's `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` and `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` pin it. → History-rules-cli-serve.md

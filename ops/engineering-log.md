@@ -97830,6 +97830,537 @@ does. Each `-test.count 10`:
   `StopWriteBound` from the stop to the answer still fails the round-12 test
   there, in that expiry's words.
 - Round 1's follow-ups stand.
+## 2026-11-14 — B895-TEST: the stopped tickers' tests hold the hung step at its gate
+
+Worker b895t, legion0, branch `fix/b895-ticker-tests-one-order` from main
+92288694, #1469's squash (B886; its PR head 43053318 is not in this clone, and
+the squash holds `SetStepGateForTest`, `internal/backup/seams.go` 435).
+Commits: 246ca2dc (the two tests), then this record. Every run: Go 1.27.3, the
+tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`;
+controls are uncommitted edits to the committed tree, each predicted in
+writing first (`.tmp/_b895t/controls.predictions.txt`), the edited files'
+bytes put back from memory once their binary was built. No production change.
+
+### The hazard
+
+#1460's macOS CI (run 43470491773) failed
+`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` with "a
+stopped verification was reported". A stop arms two bounds of
+`StopWriteBound` (2 s, `internal/backup/finish.go` 19) at once:
+
+- the step's own: `runStep` resets its timer on the stop (`hold.go` 517-521)
+  and past it gives the step up (522-524); the worker answers
+  `ErrCheckGivenUp` joined to the cancellation by a second `%w` (`finish.go`
+  403), which `ctxerr.WithoutCancellation` keeps whole (`ctxerr.go` 87-100),
+  and the ticker reports it (`cmd/bridge/backup.go` 811-818);
+- the caller's: `verifyAndThen` arms its expiry on the same stop (`finish.go`
+  351-355) and past it abandons the hold and answers
+  `verifyExpiryError(ctx.Err())` (360-366, 373-380), one `%w` around the
+  cancellation, which `WithoutCancellation` takes out (`ctxerr.go` 82-86,
+  106-107).
+
+Which fires first is the scheduler's choice, and only the second is silent.
+
+### The outer expiry's path is silent at HEAD
+
+With the caller's expiry first, `res` carries `WriteUnknown` and nothing
+found (`finish.go` 361-366); no prune ran, so `PruneSkipped` is `!abandoned`,
+false (`finish.go` 945-953); `reportTickerVerdict` returns at `backup.go`
+800-803 (the failure nil, `Found.DatabaseState` empty); and the prune's lines
+need a live context or a deletion (`backup.go` 649-654). Every green run below
+shows it: stderr empty, stdout the snapshot's line alone. No production
+defect there.
+
+### The change (246ca2dc)
+
+- `TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound`'s
+  manifest-read case holds "its read of the snapshot's record" at its gate,
+  and `TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` holds
+  "its verdict's write", each with `backup.SetStepGateForTest(root, "", step)`
+  set before the ticker starts. `gateOf` matches the hold's root and, for the
+  snapshot "", any snapshot under it (`seams.go` 465-474), and the ticker makes
+  its snapshot during its pass. `root` is `backupInstall`'s, under the data dir
+  it resolves (`backup_verify_test.go` 26-34), which is the root
+  `resolveSnapshotIn` gives the hold (`verify_paths.go` 40-58), so the seam
+  matches from `package main` as it is (C2 below). A gated step's `runStep`
+  drops the stop and the bound (`hold.go` 486-490), so it ends by its answer
+  or its gate, and nothing in the test fires the gate: only the caller's
+  expiry ends the ticker's wait.
+- The lock-open case keeps its seam and has no gate: `verifyHeld` takes the
+  lock (`finish.go` 442) before its first step (527), so only its caller's
+  expiry ends that wait already.
+- The cleanups are registered so that, last-registered first, they run in
+  this order whatever the body found: the hang's own seam let go (never the
+  gate) and the cancel; `drainLoopOnCleanup`'s join of the ticker;
+  `awaitHoldsLetGo` (the mark dropped, every hold let go, every snapshot's
+  ownership free); then the seams, the gate's restore among them, which fires
+  every gate as it puts the seam back, so only once no step waits at one.
+  Main's version ran the release, the cancel, a `waitClosed` that fails
+  fatally at 10 s and `awaitVerificationsEnd` in one cleanup, and the round-2
+  test released and joined again at its body's end. The seam's doc asks a
+  test to fire its gates before it joins (`seams.go` 432-434); here the hung
+  step answers once its own seam lets go, so no join waits on a gate.
+- Each case asserts what it did (the ticker back within `StopWriteBound` and a
+  second of the stop; stderr empty, else "a stopped verification was
+  reported"), and now that stdout is exactly `backup (startup): wrote <the
+  one snapshot>` (`requireOnlyTheSnapshotsLine`).
+
+### Controls (`.tmp/_b895t/controls.py`; 6 of 6 as predicted, C5's run time aside)
+
+SUP is the uncommitted suppression of the caller's expiry: `verifyAndThen`'s
+stop arm no longer arms `expire` (`finish.go` 351-355; the watchdog, an hour
+away, stays). Each case alone, `-test.count 3`.
+
+- C0, the committed tree: the three cases green, 3 of 3 each.
+- C1, the red (SUP, then the cancel, and only then the gate fired, so the
+  cancellation comes before the give-up and the step is given up as by its
+  own bound): the manifest's read red 3 of 3, `backup_round2_test.go:497: a
+  stopped verification was reported: backup (startup): the verification of
+  <dir> was given up, and its step still holds the snapshots until it ends;
+  it wrote nothing; its record was not read back: a step of the verification
+  did not end and was given up, and holds the snapshots until it does: its
+  read of the snapshot's record did not end within its bound (context
+  canceled)`; the verdict's sync red 3 of 3 with CI's line,
+  `backup_verify_test.go:453: a stopped verification was reported: ... its
+  write did not finish, and its record reads database INCOMPLETE: unsynced,
+  files INCOMPLETE: unsynced: ... its verdict's write did not end within its
+  bound (context canceled)`. Nothing else failed (the ticker back at once,
+  stdout the snapshot's line). The committed lines are 494 and 452; the
+  control's inserted statements moved them by three and one. With the gate
+  held (C0) both are green.
+- C2, SUP alone, the gate held: both cases red 3 of 3 at :491 and :449, "the
+  ticker did not return while ...", after 12.4 s each, nothing reported: the
+  gated step outlived its own stop bound.
+- C3, SUP with main's two test files (no gate): red 3 of 3 at main's
+  `backup_round2_test.go:476` and `backup_verify_test.go:441`, "a stopped
+  verification was reported ... given up ... (context canceled)", about 2 s
+  after each stop: production's own step bound, the residual below, forced.
+- C4, SUP with the gate scoped to the snapshot "x": red 3 of 3 at :494 and
+  :452, as C3: the empty snapshot is what reaches the snapshot the ticker
+  makes.
+- C5, a race build with `t.Fatal` right after the cancel in both cases: red 3
+  of 3 with that line alone, no drain timeout, no hold left, no data race.
+  Predicted 2 to 3 s a run, measured 1.3 to 1.4 s: once its hang is let go
+  the worker answers before the caller's expiry.
+
+`git status` was empty after each.
+
+### Runs
+
+At 246ca2dc, from one `-race` test binary of it (`.tmp/_b895t/lanes.py`), one
+lane per case (the manifest's read, the lock's open, the verdict's sync), the
+three at once, GOMAXPROCS 2 each, `-test.count 50`:
+
+- quiet, outside the build slot (load about 3, another worker's session in
+  the slot): every case 50 of 50, no FAIL, SKIP or data race; the lanes took
+  178, 179 and 183 s;
+- beside 16 python busy loops, in the slot (load about 17.6): every case 50 of
+  50, no FAIL, SKIP or data race; the lanes took 248, 245 and 501 s (the
+  verdict's sync runs the check first, on its lowest-priority thread).
+
+In slot1, taken at 13:45:31 by a guard that waited 46 minutes behind another
+worker's session (`.tmp/_b895t/guard.py`, `session.py`): `go vet` with the
+tags over `./...` as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and
+windows/amd64, exit 0 each with nothing printed; `go test -race -count=1
+-timeout 120m ./cmd/bridge/` at GOMAXPROCS 8, ok in 1604.2 s, no FAIL and no
+data race; then the loaded lanes. go1.27.3's gofmt lists neither test file,
+and cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` and
+`TestEveryBackgroundGoroutineDrainsOnCleanup` pass over the tree with this
+record. The rule is `rules-b895t.patch`, uncommitted: one bullet in
+`build-ci-tests.md`, after B886's gate bullet (a test that stops a
+verification while a step hangs forces one order of the two bounds, and for
+the caller's expiry holds the step at its gate, fired only after its joins);
+`git apply --check` takes it, and the budgets check is clean with it (the
+worst load from 76.4% to 76.7%).
+
+### The residual
+
+The step-first order stays in production: where `runStep`'s bound, reset at
+the stop (`hold.go` 517-524), fires before the caller's expiry, a give-up the
+stop alone caused is reported (C3 forces it). That is B895's production fix
+(branch `fix/b895-ticker-stop-report`, unmerged), which also rewrites these
+two tests as a table firing both bounds (f8fc6011, 2fa9b9cf): its merge meets
+this change in the same two files.
+
+### The version gate
+
+`cmd/bridge/backup_round2_test.go`, `cmd/bridge/backup_verify_test.go` and
+`ops/engineering-log.md` are under neither `guardedPrefixes` nor
+`GuardedPaths` (`internal/player/qualification/version_gate.go` 20-36), and
+`internal/backup` is untouched: `go run ./scripts/qualification-version -base
+92288694 -head HEAD` says "qualification version OK: 92288694..HEAD". Nothing
+is bumped.
+
+### Left
+
+- B895's production branch and this change edit the same two tests; its
+  merge keeps one shape of them.
+
+The backlog file is not on legion0: this is named for the orchestrator to
+file.
+## 2026-11-14 — B650FIX: bridge doctor --fix's second report is a run of its own, and the churn case waits for its loads on a clock of its own
+
+The rule is `cli-serve.md`'s B650FIX line, after B650's, and its long form in
+`ops/History-rules-cli-serve.md` ("B650FIX — bridge doctor --fix's second
+report is a run of its own"), both in `rules-b650fix.patch`, uncommitted,
+which also moves out the long form of the line on the player's hotplug watcher
+(`move_entry.py --line 111`: `cli-serve.md` was 14 bytes under its budget).
+Worker b650fix, legion0 (Linux 7.0.0-38, x86-64, 16 CPUs), branch
+`fix/b650fix-doctor-second-run` from main 0ddfda75 (#1461, B650). Commits:
+097abaae (item 1's cases, red), 69af4900 (item 1's line), 6afd5bbb (item 2),
+663725f5 (two comments' wording), then this record. Every run: Go 1.27.3, the
+tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`, 8 of
+the 16 cores. Controls are uncommitted edits to the committed tree, each
+predicted in writing first (`.tmp/_b650fix/controls1.predictions.txt`,
+`controls2.predictions.txt`), the edited files' bytes put back from memory,
+`git status` clean after each.
+
+### Item 1: the second report after --fix
+
+At 0ddfda75, `runDoctorReport` (`cmd/bridge/doctor.go` 59-108) runs
+`doctor.Run(ctx, d)` (66), `runFixes` (82) and `doctor.Run(ctx, d)` again (84)
+on the same `d`, whose `RootProbes` is the one run `buildDoctorDepsWith` began
+(273, `cliRootProbes.BeginRun()`). A run keeps every work it has met
+(`ProbeRun.met`, `internal/doctor/rootprobes.go` 169) and hands it back
+(`begin`, 219-221), so the second report graded the first one's root probes
+and watch counts. Every caller builds `d` through `buildDoctorDepsWith`
+(`doctorCmd`, 52; the launcher's row, `menu.go` 385), and only `doctorCmd`
+passes `--fix`. No other production path runs the checks twice on one Deps:
+`bridge init`'s second pass over its preflight's Deps (`init.go` 860-870)
+runs `doctor.RunPortChecks`, which touches no root.
+
+What `runFixes` does (168-207): of the checks that are not ok, `config-dir`
+alone has a remediation (175): where `d.ConfigDir` is set (176),
+`os.MkdirAll(d.ConfigDir, 0o700)` (186) and `os.Chmod(d.ConfigDir, 0o700)`
+(197); every other check is passed over (202-204). config-dir is not ok where
+its check's own `os.MkdirAll` (`internal/doctor/doctor.go` 616) or its write
+(621-624) fails, so the remediation's MkdirAll makes nothing the check had not
+made, and its Chmod is what changes a directory.
+
+What a run caches, each a `rootWork` under a `workKey{kind, name}`
+(`rootprobes.go` 188-204):
+
+- `workRoot`, named by the root as configured (`beginRoot`, 381-384):
+  `probeRoot` (398-411), its stat and, of a directory, its listing
+  (`rootAnswer`, 389-394). Begun beside the config's load (`loadDoctorConfig`'s
+  `BeginRoots`, `cmd/bridge/doctor.go` 623), at `Run`'s start
+  (`internal/doctor/doctor.go` 484) and by `checkLibraryRoots` (1293).
+- `workCount`, named by the count's cap and the root (`beginCount`, 429-435,
+  the key at 431): the platform's `countRootWatches` (Linux's `countDirs`,
+  `inotify_linux.go` 116-119; kqueue's `manifest.CountWatchSet`,
+  `watchbudget_kqueue.go` 112-115). Begun by `beginWatchCounts` at `Run`'s
+  start (485) and by `tallyWatches` (455-483) in `checkWatchLimit`, only with
+  `libraryWatch.enabled` and roots configured.
+- `workOther`, named by its caller's key (`Bounded`, 361-369): cmd/bridge's
+  load of the config, keyed by `doctorConfigKey` (`cmd/bridge/doctor.go`
+  647-659: the path, and a digest of the file's bytes and every `BRIDGE_`
+  variable). Begun once, as the Deps are built (630), before either report;
+  `Run` begins none.
+
+What the remediation can change: the roots come from a config this user read
+in the config directory, so that directory grants this user search
+permission already (where it does not, the config is not readable by this
+user, config-dir is not checked, `checkConfigDir`,
+`internal/doctor/doctor.go` 589-610, and nothing is remediated), and the
+Chmod adds read and write permission alone, which changes no stat and no walk
+below the directory. What it can change is a listing of the directory
+itself: what the probe of a root that is the directory finds (its listing
+needs read permission there: the enter-only 0100 directory set to 0700), what
+that root's count finds (its walk cannot open its root, an error,
+`inotify_linux.go` 160-163), and what the count of a root above it finds (its
+walk passes over a folder it cannot list, 165-166, and counts what is below it
+once it can). It changes nothing of the config's load: neither the file's
+bytes nor the environment, which are its key.
+
+The fix, 69af4900: the second `doctor.Run` gets a new run of the same runner,
+`d.RootProbes = cliRootProbes.BeginRun()` (`cmd/bridge/doctor.go` 90 at
+663725f5), `cliRootProbes` kept. In `rootprobes.go` at 0ddfda75: `BeginRun`
+(173-175) gives an empty `met` and a `began` of its own; a work that has ended
+has left the runner's `out`, its worker deleting its key under the runner's
+lock (276-278) before it closes `done` (280), so `beginOut` (231-244) finds
+none and begins it afresh (240-242), and the root is asked again; a work still
+out is in `out` and `beginOut` returns it (234-236): joined, never begun
+twice. Its bound counts from its own `began` (240):
+`left := w.began.Add(p.bound).Sub(p.now())` (320). The first report's wait on
+it ended only once that bound had passed (its timer fired at `left`, or `left`
+was already not positive), so in the second report `left` is not positive, no
+hook is told (321-323), no timer set (324), and the wait ends at once, not
+answered (336-338), with `still` set (337: the work began before the new run),
+the line saying "still has not answered, <d> after the doctor first asked it"
+(`unansweredRoot`, 515). A work the first report began and did not wait for (a
+count `tallyWatches` stopped short of, 469-471 and 477-479), still out within
+its bound, is joined and waited for until the rest of that bound, as any run
+joins it.
+
+Its limit: the config is loaded once, in `buildDoctorDepsRun`
+(`loadDoctorConfig`, 355), and what the load gave is copied into `d`
+(`d.ConfigFile.LoadErr`, 363; the roots, 368 and 400; the ports and the rest
+of that branch), so the second `Run` grades the same load, and a load that
+timed out in the first report and finished afterwards is still reported as
+unfinished. That state is retained outside this fix, and the Deps being built
+once predates B650 (before it, the load ran there unbounded).
+
+The cases, 097abaae, each through `bridge doctor --json --fix` (`doctorCmd`),
+red at that commit, whose code is 0ddfda75's (the roots' temporary paths
+shortened to `<tmp>`):
+
+```
+--- FAIL: TestBridgeDoctorFixReadsTheRootsAgainForItsSecondReport (0.01s)
+    doctor_roots_test.go:1271: bridge doctor --fix printed library-roots {Name:library-roots Status:fail Summary:1 problem(s) Hint:fix or remove, after checking that a volume it is on is mounted: <tmp>/NAS (open <tmp>/NAS: permission denied)}, want both roots reachable: its second run lists <tmp>/NAS again
+    doctor_roots_test.go:1274: <tmp>/NAS was listed 1 times, want twice, once by each run of the checks
+--- FAIL: TestBridgeDoctorFixReportsTheRootItsRemediationLetItList (0.01s)
+    doctor_roots_test.go:1332: bridge doctor --fix printed library-roots {Name:library-roots Status:fail Summary:1 problem(s) Hint:fix or remove, after checking that a volume it is on is mounted: <tmp>/cfg (open <tmp>/cfg: permission denied)}, want the root reachable once --fix set it to 0700
+    doctor_roots_test.go:1337: the root's listings answered [open <tmp>/cfg: permission denied], want this user refused, then, once --fix set it to 0700, its entries
+--- FAIL: TestBridgeDoctorFixJoinsTheProbeOfARootStillOut (0.32s)
+    doctor_roots_test.go:1358: bridge doctor --fix printed library-roots {Name:library-roots Status:fail Summary:1 problem(s) Hint:library root <tmp>/NAS did not answer within 300ms: its mount may be stalled; ...}, want a fail saying "library root <tmp>/NAS still has not answered"
+    doctor_roots_test.go:1368: bridge doctor --fix began 1 probes of the root that answers, want two: its second run reads it again
+```
+
+The remediation case's directory mode (0700) and its config-dir line (ok)
+passed there: the remediation ran, and only the probe was the first report's.
+The cache case shows the root asked again, and no more: no remediation acts
+there (config-dir is ok). The remediation case shows the remediation's effect
+read: the first listing a real EACCES, the second, after the Chmod, the
+directory's entries. The join case counts the probes begun once the held root
+has answered and every work has ended (`DrainForTest`), since `beginOut`
+starts each worker on a goroutine of its own (242) and the stand-in counts at
+its stat's entry. 69af4900 turns all three green.
+
+Controls on 69af4900 (`controls1.py`), each as predicted:
+
+- C1, the shared run back (the line removed): all three red, as at 097abaae.
+- C2, a new runner as production makes one
+  (`doctor.NewRootProbes().BeginRun()`): the cache case red at its count only
+  (the root listed once by the stand-in, the new runner listing it with
+  `os.ReadDir`), the remediation case at its listings only, and the join case
+  at its words (`library-roots` ok, "2 root(s) reachable": the new runner asked
+  the held root's directory afresh) and at the root that answers' count (1).
+- C3, a new runner with the stand-in's calls, bound, limits, clock and hook and
+  none of its works (a control-only clone in `internal/doctor`): the cache and
+  remediation cases green, both asking again, and the join case red at its
+  words ("did not answer within 300ms") and at the begin count: "bridge doctor
+  --fix began 2 probes of the root that did not answer, want one".
+
+### Item 2: the churn case's config load
+
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn`
+(`cmd/bridge/doctor_roots_test.go` 556-605 at 0ddfda75) gave the console
+runner's works a real 100 ms bound (576), and the config's load runs under the
+same bound (`loadDoctorConfig` → `doctor.Bounded`, `cmd/bridge/doctor.go` 630;
+`waitFor`, `rootprobes.go` 315-344), so its `config-file` ok past the probes'
+limit (591-593) needed `config.Load` within 100 ms of real time. The code
+differs from the brief in one count: that assertion is one run's, the
+seventeenth, past the limit. Runs 1 to 16 and the eighteenth assert
+library-roots alone, which names the root from the load's unfinished roots
+whatever the load did (`d.LibraryRoots = unfinished`, `cmd/bridge/doctor.go`
+368), so a slow load there passes.
+
+The options, weighed:
+
+- A bound of its own for the load: the loads and the probes share
+  `RootProbes.bound` (`rootprobes.go` 72), read by `waitFor` at 320, 329 and
+  338 and in the `Wait` its words come from, so a second bound is a choice by
+  kind inside production's wait, and the load's wait would still be on real
+  time, only wider.
+- The runner's clock: `RootProbes.now` and `timer` (84-89; `time.Now` and
+  `realTimer` in production, 113-114) are all that `BeginRun` (174),
+  `beginOut` (240) and `waitFor` (320, 324, 329, 338) read of time, and
+  internal/doctor's tests set them inside their package (`clockOf`,
+  `rootprobes_test.go` 136-140), which cmd/bridge cannot. Chosen:
+  `RootProbes.SetClockForTest(now, timer)` (`rootprobes.go` 104-112 at
+  663725f5), which sets those two fields and nothing else, on the instance,
+  and which production never calls.
+
+The case's clock, `rootWaitClock` (`doctor_roots_test.go` 579-610 at
+663725f5), moves only at a run's wait on a root. `waitFor` tells the runner's
+hook the root it is about to wait on (`SetOnRootWaitForTest`, 321-323) on the
+run's goroutine just before it sets that wait's timer (324); the hook marks the
+next timer, which fires at once, the clock moving on by the bound, and every
+other timer never fires. A run waits on its load inside `buildDoctorDepsRun`
+(`loadDoctorConfig`, 630), before `doctor.Run` (1124) reaches any wait on a
+root (`checkLibraryRoots`, `internal/doctor/doctor.go` 1300), so while the load
+is waited for the clock stands still, and that wait ends only on `w.done`
+(326): by the load's answer, however long the host takes. A hook moved after
+the timer would leave a root's wait unfired, and the case would fail by its
+90 s deadline, not pass. What the case proves is unchanged: sixteen probes held
+to the limit across the churn, the warn past it in its exact words,
+config-file ok there, no probe of the new root, and the re-added root's probe
+still out (its bound long past on the clock: "still has not answered") and
+probed once.
+
+Its time does not grow: under the race detector, in the package runs below,
+0.13 s at 663725f5 against 1.73 s on main's tree, whose sixteen runs each
+waited 100 ms of real time on a root.
+
+The control on 6afd5bbb (`controls2.py`): the load of a config naming the
+case's last root (`NAS-16`, its seventeenth run's) held at a gate, a channel,
+before `config.Load`, the gate closed once a held load's wait has ended
+without its answer (`Bounded` returned, `wait.Answered()` false), never by a
+timer; a control-only file carries the gate, the case as 69af4900 has it
+(`ctlOldChurnCase`) and two harness cases:
+
+- G1, that case alone: red at config-file alone, "past the probes' limit,
+  config-file = {Name:config-file Status:fail Summary:<tmp>/bridge.yaml: its
+  load did not finish within 100ms ...}, want the load, which touches no root,
+  made", every other assertion green (1.81 s).
+- G2, the new case run on a goroutine and, once its seventeenth load was held
+  at the gate, the old one beside it: the old case red at config-file as in
+  G1, and the new case green, its load held 1.79 s of real time at the gate
+  until the old case's 100 ms wait had ended without the answer, and its
+  config-file ok.
+
+### The gates
+
+"In the slot" is a hold of the build lock (guarded, got at 14:21 behind
+b895t's session), where no other worker's build runs; "loaded" is beside 16
+busy processes, the host's core count, in the slot.
+
+- Item 1's three cases and the churn case, with
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway` (the one other
+  case that runs `doctor --fix`), `-race -count=50`, GOMAXPROCS 8: 250 of 250
+  on 6afd5bbb outside the slot (27 s), and 250 of 250 loaded on 663725f5 (43 s;
+  slowest runs 0.34 s, the join case, and 0.39 s, the churn case); no race
+  reported.
+- `go vet ./...` with the tags as linux/amd64, darwin/arm64 (CGO_ENABLED=0)
+  and windows/amd64, in the slot on 663725f5: clean.
+- `./cmd/bridge/` once, `-race -count=1 -p 8 -parallel 8 -timeout 120m`,
+  GOMAXPROCS 8, in the slot, at 663725f5 and, started 300 s later beside it,
+  on main's tree (a copy of the worktree with the three files B650FIX changes
+  put back as 0ddfda75 has them; its 3,453 tracked files compared with
+  0ddfda75's, none differing): both ok, go test's elapsed 1,631.8 s at
+  663725f5 and 1,628.6 s on main (wall 1,635 s and 1,656 s, the second
+  compiling its copy), 1,541 and 1,538 top-level cases passed, 9 skipped in
+  each, none failed. The 1,547 cases both ran took 1,630.0 s and 1,627.2 s
+  between them; the churn case 0.13 s against 1.73 s, and the three new cases
+  0.35 s.
+- Without the race detector: the cmd/bridge cases whose names hold Doctor,
+  Diagnostics or VolumeIsAway, ok on 69af4900 (28 s) and on 6afd5bbb (34 s);
+  `./internal/doctor/` once, ok on 6afd5bbb (9 s).
+- The rules patch, on a copy of HEAD's tree with it applied (git's directory
+  the worktree's): `make docs-check`'s four steps (the budgets ok,
+  `cli-serve.md` 98,921 bytes from 99,986, the worst load 77.1 % from 77.4 %,
+  `config-lifecycle.md` at 99.9 % now the closest to its budget),
+  `verify_moves.py --base HEAD` PASS (one block moved, 1,764 bytes), and
+  `TestEveryCitedTestNameExists` over the copy, red with a ghost citation
+  planted in its History and green without. `git apply --check` takes it on
+  the worktree, and applied to a fresh copy of HEAD's two files it gives the
+  copy's bytes.
+- go1.27.3's gofmt lists none of the Go files B650FIX touches.
+
+## 2026-11-14 — B650FIX round 2: the churn case counts its probes after a drain, and the record says only what can happen
+
+The rule and its long form are `rules-b650fix-r2.patch`'s, uncommitted and
+cumulative: round 1's patch with this round's changes to the History section,
+to be applied alone. Worker b650fix, legion0, from round 1's head 2f84cb14.
+Commits: ebafbf91 (the churn case), 09409933 (the comment at the second
+report), then this record, which also corrects round 1's paragraph on what
+the remediation can change (item 2). Every run as round 1's: Go 1.27.3, the
+tags, TMPDIR `~/onebit/tmp`, 8 of the 16 cores; controls are uncommitted
+edits to the committed tree, predicted in writing first
+(`.tmp/_b650fix/r2_controls.predictions.txt`), the bytes put back from memory,
+`git status` clean after the builds.
+
+### Item 1: the counts after a drain
+
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn` read
+`s.statsOf(last)` (`cmd/bridge/doctor_roots_test.go` 663 at 2f84cb14) and
+`s.statsOf(roots[0])` (671) as soon as a run had returned. The stand-in
+counts a probe as it enters its stat (`rootStall.stat`, 78-81), on the
+probe's own goroutine, which `beginOut` starts and does not wait for
+(`go p.work`, `internal/doctor/rootprobes.go` 252); on round 1's
+`rootWaitClock` (`doctor_roots_test.go` 600-610) a run's wait on a root ends
+at once, so the run can return before that goroutine has counted. A count
+could then read 0 of a probe begun (a false failure), or miss one begun past
+the limit (a defect passed). ebafbf91 keeps the report assertions while the
+roots are held, then lets them go (674), requires the drain (675:
+`DrainForTest`, a fatal failure if a work is still out after 30 s), and only
+then reads both counts (678, 681), as round 1's join case does.
+
+The controls (`r2_controls.py`), each built once with exact-once edits, its
+gate a channel (the stall's release, which only `letGo` closes), run against
+the case as 2f84cb14 has it (old) and as ebafbf91 has it (new):
+
+- A, a false failure for `roots[0]`: the stand-in holds NAS-00's probe, begun
+  in the first run, between its begin and its stat. Old: red, "a root removed
+  and added again was probed 0 times, want once", the probe let go by the
+  cleanup, whose drain succeeded. New: green, its drain succeeding and the
+  probe counted once.
+- B, a missed extra probe for `last`: `beginOut` admits the first root work
+  the limit refuses (the seventeenth run's probe of NAS-16) under a key no run
+  asks for, so the drain waits for it while `beginOut` still answers nil and
+  the report keeps "was not checked: 16 earlier probes …"; the stand-in holds
+  that probe before its stat. Old: green, its count read at once missing the
+  probe. New: red, "past the limit, 1 probes of a new root began, want none",
+  its report assertions green and its drain succeeding.
+
+Each as predicted. The case's time does not grow: without the race detector,
+the old and new cases alternated twenty rounds each, median 0.100 s and
+0.090 s.
+
+### Item 2: the record says only what can happen
+
+Round 1's paragraph above ("What the remediation can change") said that the
+Chmod changes what is found below a config directory without search
+permission, and two sentences later that such a directory leaves the config
+unreadable, so nothing is remediated. A remediated directory grants search
+permission already, and adding read and write permission changes no stat and
+no walk below it. The paragraph now keeps the reachable cases alone: a root
+at the config directory (its probe's listing, its count's walk) and a root
+above it (its count's walk, which lists the directory). The History's
+paragraph is corrected alike in the patch.
+
+### Item 3: two notes
+
+The probes' limit and `--fix`. The second report begins a new probe of every
+root whose probe has ended, and `beginOut` refuses a new work while sixteen
+works on the roots are out (`rootprobes.go` 247-249; `outOfKind`, 258-266,
+counts the probes and the watch counts together), so a root the first report
+probed can be one the second cannot. That needs: the watch counts begun,
+which is Linux or a kqueue platform with its limit read (`beginWatchCounts`
+begins none where it cannot read it, `inotify_linux.go` 104-107,
+`watchbudget_kqueue.go` 99-102, and none at all elsewhere, Windows included,
+`inotify_other.go` 18-19) and `libraryWatch.enabled`; eight library roots on
+mounts that do not answer, each with its probe and an admitted count that
+stays blocked, which the local root's own probe, begun beside the config's
+load and answered at once, leaves room for; and a local root listed last, so
+that its count is the one the limit holds back in the first report. The
+second report then begins no probe of the local root and says it "was not
+checked: 16 earlier probes of the library roots have not answered yet, and
+the doctor begins no more until one does", where a plain `bridge doctor`
+reads it ok. The exit code does not change: library-roots fails already, for
+the eight.
+
+The coupling. `runDoctorReport` takes the second report's run from
+`cliRootProbes` (`cmd/bridge/doctor.go` 95 at 09409933), not from the runner
+behind `d.RootProbes`, which a `ProbeRun` does not expose. Every caller
+builds `d` through `buildDoctorDepsWith` (285, `cliRootProbes.BeginRun()`;
+`doctorCmd`, 52; the launcher's row, `menu.go` 385), so the two are one
+runner today; Deps carrying a run of another runner would have their second
+report run on the CLI's works. 09409933's comment at that line says so.
+
+### The gates
+
+- The touched cases, `-race -count=50`, GOMAXPROCS 8, outside the slot on
+  09409933: the churn case 50 of 50 (median 0.13 s, max 0.14 s), the three
+  `--fix` cases 50 of 50 each (medians 0.01, 0.01 and 0.32 s), and
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway` 50 of 50; no
+  race reported (27 s).
+- In the slot (got at 15:24, its guard's first try), on 09409933: `go vet
+  ./...` with the tags as linux/amd64, darwin/arm64 (CGO_ENABLED=0) and
+  windows/amd64, clean; then `go test -race -count=1 -p 8 -parallel 8 -timeout
+  120m ./cmd/bridge/ ./internal/doctor/`, GOMAXPROCS 8: both ok,
+  `./cmd/bridge/` in 1,578.3 s (1,541 top-level cases passed, 9 skipped) and
+  `./internal/doctor/` in 10.9 s (198 passed, 3 skipped), none failed.
+- The rules patch: `git apply --check` takes it on the worktree; applied to a
+  disposable copy of HEAD's tree (git's directory the worktree's) it gives the
+  bytes built from round 1's patch and this round's changes, and there `make
+  docs-check` passes (the budgets ok: `cli-serve.md` 98,921 bytes, the worst
+  load 77.1 %, `config-lifecycle.md` at 99.9 % the closest),
+  `verify_moves.py --base HEAD` passes (one block moved, 1,764 bytes), and
+  `TestEveryCitedTestNameExists` fails on a ghost citation planted in the
+  copy's History and passes without it.
+- go1.27.3's gofmt lists none of the Go files round 2 touches.
 ## 2026-11-14 — B903: a fault during a Write under way freezes what the sink played
 
 Worker b903, legion0, branch `fix/b903-xrun-fault-test`. Its base is main at
@@ -98088,3 +98619,80 @@ over the head's, green ×50 at the head.
   reach the fake kernel"; the native-integration overlay reaches it too, as
   `native_integration_test.go` did before this round. Not corrected here,
   beside this round's rule.
+
+## 2026-11-15 — B904: the stalled-storage stop test waits for the stall before it stops serve
+
+Branch `fix/b904-serve-stop-stall-test`, from main at 9acee209. Commits:
+fdc91a18 (the fix: three test files under `cmd/bridge`), then this record.
+Every run: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`,
+darwin/arm64, GOMAXPROCS=6 of 12 cores. The fix was first built and proved
+as an uncommitted prototype on 9acee209, with its controls as an overlay
+that is not part of the fix; fdc91a18 is that prototype's diff, applied
+unchanged.
+
+### The hazard
+
+`TestServeStopWithThePlayersStorageStalled` failed on `test (macos-latest)`
+(run 43647029825, attempt 1, 11-14) with "the abandonment logged [], want
+once" and "a second serve lock with the player stalled: <nil>, want it
+held" (`serve_player_unix_test.go` 60 and 66 at 9acee209). The test relies
+on the supervisor being parked in the `engineConfig` seam, past the
+start's last stop checks (`serve_player.go` 439 and 445), when serve's stop
+cancels the player (377). Nothing ordered the stop after that hold. When
+the cancel lands first, the start returns at 446-447 and logs nothing,
+`supervise` settles at once (876-878), `stop` returns before its bound
+with no warning (381-382), and runServe lets the last share of the lock
+go: CI's pair. Repeated runs failed for other reasons: each pass waited out
+the 12.6 s stop bound, a boot failure left its supervisor parked, and
+iteration n's player could still run while n+1 set the global medium seam
+(`atomicwrite.mediumOf`). That was a test seam, not production.
+
+### The fix
+
+- `launchServe` takes optional hooks that run once the drain is
+  registered and before `waitForListening`, the call that can fail. A
+  cleanup registered there exists whatever the boot does, and runs before
+  the drain.
+- `playerStall` holds the start at the `engineConfig` seam. `await` waits
+  until the stall is entered: it fails at once if the start ends first,
+  and at `serveGiveUp` with serve's stacks. `end`, the one cleanup,
+  cancels serve, cancels the player (`p.cancel()`, not `p.stop()`, which
+  would wait out the bound), lets the stall go and joins `settled` until
+  `serveDrainGiveUp`. All of that happens before the directories and the
+  medium seam go.
+- The test waits for the stall before its health check and its stop, and
+  bounds its stop at 1.9 s (surface, discovery and warm at 100 ms each; the
+  engine never runs and OpenHome is off here) instead of 12.6 s.
+
+A premise of the brief was wrong. Letting the stall go does not reach
+`EnsurePlayerUUID` (`serve_player.go` 449, before the seam at 501). It
+reaches `engine.New`, whose `atomicwrite.ProbeDurable` reads the medium
+seam. So the player is joined before `persistentMedium`'s restore.
+
+### Proofs
+
+Each control fails on the unfixed test and passes with the fix:
+
+- **A boot failure** (the handed listener refused after the start is
+  held): unfixed, 10/10 leave the parked supervisor (1, 2 … 10
+  accumulate). Fixed, 10/10 settled, with 0 supervisors left.
+- **Health failing**, two ways: unfixed, the cleanup waits until
+  `serveGiveUp`. Fixed, 10/10 for each report only the injected failure,
+  in under 1 s.
+- **CI's red, deterministic:** a migration hold released only by the stop
+  or by the test's own wait, with no timer. Unfixed, 10/10 fail with
+  exactly CI's two messages, in two builds. Fixed, 10/10 pass.
+- **Health after the stall:** 20/20 fixed, 0/10 unfixed.
+- **The stall wait's bound:** a start that ends early fails in 0.83-0.86
+  s. A hang gives up at `serveGiveUp`, and the cleanup then joins.
+- **×200,** `-race -count=200 -timeout 30m`:
+  - quiet: 200/200, 0 races, 0 panics, 2.76-2.92 s each;
+  - beside 16 busy loops: 200/200, 0 races, 0 panics, 2.94-3.49 s each,
+    627 s in all; the load average reached 58.
+- **`./cmd/bridge` once,** `-race -timeout 120m`: 1548 of 1548 tests ran,
+  1544 pass, 4 skip (root-only and case-insensitive-volume), 0 fail, 0
+  races.
+- **`go vet`** with the tags (linux amd64 and arm64, darwin, windows):
+  clean.
+- **The files:** `git diff --name-only 9acee209..HEAD` names the three
+  test files and this log.

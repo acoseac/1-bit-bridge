@@ -101,6 +101,16 @@ type RootProbes struct {
 // before any run of p begins. Tests only.
 func (p *RootProbes) SetOnRootWaitForTest(fn func(root string)) { p.onRootWait = fn }
 
+// SetClockForTest makes now and timer the clock p's runs read, in place of
+// time.Now and time.NewTimer's: when a run and a work began, and the timer a
+// wait for a work's bound sets. Set it before any run of p begins. A test of
+// another package then decides when a bound passes, so a wait on a work that
+// answers ends only by its answer while the test's time stands still (backlog
+// B650FIX). Tests only.
+func (p *RootProbes) SetClockForTest(now func() time.Time, timer func(d time.Duration) (c <-chan time.Time, stop func() bool)) {
+	p.now, p.timer = now, timer
+}
+
 // NewRootProbes is a runner's RootProbes, with no work out.
 func NewRootProbes() *RootProbes {
 	return &RootProbes{
