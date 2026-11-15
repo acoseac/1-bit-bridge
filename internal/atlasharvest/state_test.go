@@ -9,7 +9,49 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
+
+// errHeld stands in for Windows' refusal of an open another program holds,
+// which the open's read takes for one on every host here.
+var errHeld = errors.New("held for a moment")
+
+// TestTheStateFileIsReadAgainWhileWindowsRefusesIt: the harvest state's open
+// reads a file refused for a moment again (backlog B898): refused once, at its
+// second read; refused at every read, it fails busy after the schedule's five
+// reads, which turns the harvest off for the session as before; a file not
+// there opens empty at its first. ClearStoredCredential opens it so too.
+func TestTheStateFileIsReadAgainWhileWindowsRefusesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		cursor         int64 // the file's; 0: no file
+		refused, reads int
+	}{{"refused once", 42, 1, 2}, {"refused at every read", 42, 99, 5}, {"not there", 0, 0, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "atlas-harvest.json")
+			if tc.cursor != 0 {
+				if err := os.WriteFile(path, []byte(`{"resultCursor":42}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reads, prev := 0, readStateFile
+			readStateFile = func(p string) ([]byte, error) {
+				if reads++; reads <= tc.refused {
+					return nil, &fs.PathError{Op: "open", Path: p, Err: errHeld}
+				}
+				return os.ReadFile(p)
+			}
+			t.Cleanup(func() { readStateFile = prev })
+			t.Cleanup(atomicwrite.SetReadRetryableForTest(func(err error) bool { return errors.Is(err, errHeld) }))
+			s, err := OpenStateStore(path)
+			if busy := tc.refused > tc.reads; reads != tc.reads || busy != (errors.Is(err, atomicwrite.ErrReadBusy) && errors.Is(err, errHeld)) ||
+				!busy && (err != nil || s.Snapshot().ResultCursor != tc.cursor) {
+				t.Fatalf("the open answered %v after %d reads, want %d reads, busy %v", err, reads, tc.reads, busy)
+			}
+		})
+	}
+}
 
 // TestStateStore_AtlasCredential pins the premium-cover credential gate:
 // a usable credential needs both a token AND a base URL AND a non-expired
