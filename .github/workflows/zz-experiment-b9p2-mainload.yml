@@ -52,4 +52,6 @@ jobs:
           grep -nE 'being used by another process|Access is denied|could not put the backup back' reds.log | head -10 || true
           echo "--- load"
           grep -E '^(ok|FAIL)' load.log | head -5 || true
+          echo "--- load: failing tests and their first lines"
+          grep -nE '^--- FAIL|^panic:|^fatal error:|_test\.go:[0-9]+: ' load.log | head -60 || true
           exit 0
