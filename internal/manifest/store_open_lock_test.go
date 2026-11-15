@@ -342,6 +342,32 @@ func TestOneProcessHoldsTheStoreOnce(t *testing.T) {
 		waitForOtherProcessToHold(t, path)
 	})
 
+	// Two spellings of one data directory, the second through a link to it
+	// (macOS's /var and /private/var), are one hold: an open through the link
+	// counts on the exclusive hold taken by the real path, where a hold keyed
+	// by spelling would try a second descriptor and meet its own process's
+	// exclusive lock (Carbon on PR 2a's brief).
+	t.Run("two spellings of one data directory are one hold", func(t *testing.T) {
+		real := t.TempDir()
+		link := filepath.Join(t.TempDir(), "data")
+		if err := os.Symlink(real, link); err != nil {
+			t.Skipf("no symbolic link can be made here: %v", err)
+		}
+		openAndClose(t, filepath.Join(real, "bridge.db"))
+		hold, err := HoldStoreExclusive(filepath.Join(real, "bridge.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer hold.Release()
+		s, err := OpenStore(filepath.Join(link, "bridge.db"))
+		if err != nil {
+			t.Fatalf("an open through a link to the data directory under this process's exclusive hold = %v, want it counted", err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("an exclusive acquire under its shared hold refuses", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "bridge.db")
 		s, err := OpenStore(path)

@@ -104,15 +104,24 @@ var storeLocks = struct {
 }{byKey: map[string]*storeLockEntry{}}
 
 // storeLockKey keys the registry: the database's path made absolute and
-// cleaned. The bridge opens its store at DefaultDBPath(dataDir) alone
+// cleaned, its directory resolved where it is there (filepath.EvalSymlinks:
+// macOS's /var reached as /private/var, a Windows short name), so two
+// spellings of one data directory meet one hold (Carbon on B653 PR 2a's
+// brief); a directory not there yet keys as written. The bridge opens its
+// store at DefaultDBPath(dataDir) alone
 // (TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase), so serve's store and
-// its ticker's snapshot meet one key; a process that names one database by
-// two spellings holds two descriptors, a residual the PR names.
+// its ticker's snapshot meet one key either way; two spellings through a
+// link to the database file itself, or a hard link, still hold two
+// descriptors, a residual the PR names.
 func storeLockKey(dbPath string) string {
-	if abs, err := filepath.Abs(filepath.Clean(dbPath)); err == nil {
-		return abs
+	abs, err := filepath.Abs(filepath.Clean(dbPath))
+	if err != nil {
+		abs = filepath.Clean(dbPath)
 	}
-	return filepath.Clean(dbPath)
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		return filepath.Join(dir, filepath.Base(abs))
+	}
+	return abs
 }
 
 // The lifetime lock's seams, the platform's calls in production: the lock
