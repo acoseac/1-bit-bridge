@@ -493,6 +493,9 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse(t *testing.T) {
 // eight of its forward attempts, its last wait shortened to what remained,
 // and its put-back held throughout all seven, each said.
 func TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a virtual-clock schedule: a scanner's hold of a file this test writes would draw on its deadline; Windows' real holds are held_windows_test.go's")
+	}
 	ms := func(ns ...int) []time.Duration {
 		var ds []time.Duration
 		for _, n := range ns {
