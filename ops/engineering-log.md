@@ -100457,7 +100457,7 @@ reads the end hook as it begins (finish.go:280), and a worker runs the hook
 that stood then (seams.go:339-342). The prune's failure now prints its
 `PruneResult`.
 
-### What 172d511f adds (the brief's review, binding)
+### What 172d511f adds
 
 - **A held unlock goes as the test's body ends.** With the end's wait
   removed (C1 below), the test failed a second time 30 s after its skipped
@@ -100470,9 +100470,9 @@ that stood then (seams.go:339-342). The prune's failure now prints its
 - **A drain past its bound ends the run.** 3a976ffc's drain reported its
   30 s bound with `t.Error`, and the cleanups after it then ran beside the
   worker: the lock-release seam put back, which that worker reads with no
-  lock (verify_lock.go:199), and the fixture's folders removed. The review
-  asked for a `t.Fatal` there, or for the hook to be kept until the end is
-  heard. On Go 1.27.3 neither a `t.Fatal` nor a panic in a cleanup stops
+  lock (verify_lock.go:199), and the fixture's folders removed. A drain
+  past its bound must keep those from running, which a `t.Fatal` in it
+  would not do. On Go 1.27.3 neither a `t.Fatal` nor a panic in a cleanup stops
   the cleanups after it: `runCleanup` runs the ones left from a deferred
   call (testing.go:1795-1804), on a Goexit and on a panic alike, and a
   two-cleanup scratch test showed both. So past its bound the drain ends
@@ -100541,3 +100541,95 @@ At f4c1e106: 172d511f's code, and the record's first part. TMPDIR was
 | gofmt (`go run cmd/gofmt -l`) on the two test files | nothing listed |
 | `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f4c1e106 and with this table |
 | `make docs-check` | exit 0, at f4c1e106 and with this table |
+
+## 2026-11-15 — B869A round 2: the hold's seam goes back as the snapshot's worker ends, and the drains wait for every hold
+
+Branch `fix/b869a-prune-given-up`, round 1 at 6f205fd2. Test-only.
+Commits: 34a9977a (the fix and three tests), then this record and the
+round-1 record's wording. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`. Every
+control was built through `go test -c -overlay` from edits made in memory,
+so no tracked file was written; `git status` was empty before and after
+each build and run, and the predictions were written to a file before each
+round.
+
+### What it changes, and why
+
+1. **A prune's worker could outlive its drain beside the seams' restores.**
+   In `TestTheTickerAndTheDoctorNameAPruneGivenUp` the hold's drain waited
+   for the snapshot's end alone, heard before the prune began. A prune
+   whose worker outlived the test's own drain (`awaitHoldsLetGo`, whose
+   `t.Fatal` lets the later cleanups run) then had the lock-release seam
+   and `onPrune` put back beside it: F1a below shows both races at round 1.
+   - The seam now goes back once the snapshot's worker has ended and no
+     hold is left (`letGoAndAwaitEnd`: `awaitNoHolds`, then `putSeamBack`,
+     a `sync.Once` the cleanup shares), so a holder after the snapshot never
+     reads the hold's hook
+     (`TestAnEndedInstallSnapshotPutsTheLockReleaseSeamBack`).
+   - `awaitHoldsLetGo` and `awaitVerificationsEnd` still had to end the run
+     past their bounds: the cleanups after them put back seams a holder
+     still running reads with no lock, `onPrune` among them (read on the
+     prune's step goroutine, backup.go:1190), which F1c shows racing with
+     the lock-release seam already back. They now end the run there
+     (`endTheRun`), for every one of their 41 calls in the backup test
+     files.
+2. **A snapshot refused before its worker began ended the run and hid its
+   failure.** The debt was set by `arm`, from `OnKept`, before any worker
+   existed. A verification refused before its worker began
+   (`verifyAndThen`'s refusals at its folder's mark and its slot,
+   finish.go:288-306) left the drain waiting 30 s for an end no worker
+   would bring; then it ended the run, the test's own failure unprinted.
+   - Neither the hook's entry nor `t.Failed()` shows that no work is live.
+     A worker answers before its unlock and can stay parked there, in its
+     ownership's let-go (hold.go:322-328). The worker that writes an
+     abandoned verification's INCOMPLETE (`abandonPending`, finish.go:697-735)
+     takes and lets go of the lock and runs no end hook.
+   - The debt is now the backup package's own count of holds
+     (`backup.ActiveHoldsForTest`). A verification's hold is counted from
+     `newHold` (finish.go:292, hold.go:108), before its slot and its worker,
+     until `drop` (hold.go:397): its worker's last step but the end hook,
+     after its unlock (finish.go:329-331). A release past its bound keeps
+     the count until the unlock ends (hold.go:342-349, 384-386). A refusal
+     drops it at once (finish.go:300, 304). `abandonPending`'s worker keeps
+     a hold of its own (finish.go:700-704), as a prune's, a claim's and a
+     restore's do (backup.go:1086-1089, owner.go:251-254,
+     restore_source.go:198-200 and 257-258).
+   - The hold's cleanup waits until none is left (`awaitNoHolds`), and an
+     end heard once the test's body has ended asks nothing of the folder's
+     lock (`over`). `verifyAndThen` has no seam at its worker's start, and
+     none was added: the count already begins before the worker does.
+3. **The round-1 record's wording.** It now states each requirement as the
+   change's own reason.
+4. **`arm`'s restore of the end hook runs before the hold's drain.** That is
+   harmless. A worker reads the end hook once, as its verification begins
+   (finish.go:280), through an atomic pointer (seams.go:330, 352-353), so a
+   restore after that changes nothing it calls, and the hook touches the
+   hold's own state alone. `arm`'s docblock says so, and the registration
+   stays where B849's second round put it.
+
+### Reds, greens and controls
+
+A is `TestAHoldArmedForAVerificationRefusedBeforeItsWorkerLeavesTheTestsFailure`,
+B `TestAHoldsCleanupWaitsForAWorkerParkedBeforeItsUnlock` and C
+`TestAnEndedInstallSnapshotPutsTheLockReleaseSeamBack`. A and B run their
+case as a process of their own and read its output: its exit code, its
+failures, and a line printed by a cleanup registered before the hold, so
+after the hold's own cleanups. F1 lets the fixed test's prune stall go from
+the loop's drain instead of from the test's own cleanup, so that cleanup's
+`awaitHoldsLetGo` outlives its bound with the prune's worker parked.
+
+| Run | Build | Result |
+|---|---|---|
+| C at round 1 | 6f205fd2's helpers, the new tests | red 3 of 3 at backup_unlock_hold_test.go:97, "the prune's release ran the seam that stood before the hold 0 times, want once" |
+| A at round 1 | the same | red: its case, refused at the slot once `OnKept` had armed the hold, ended by `endTheRun`'s panic, exit 2, "the snapshot's verification did not end within 30 s of its unlock's let-go", its own failure unprinted; 34.4 s |
+| B at round 1 | the same | green, 2.7 s: round 1's drain waited for the armed worker |
+| A, B, C and the fixed test | 34a9977a | green 3 of 3 each; A 4.1 to 4.3 s, B 2.5 to 2.7 s, C 1.4 to 1.7 s |
+| C-ctl | 34a9977a, `awaitNoHolds` and `putSeamBack` taken out of `letGoAndAwaitEnd` | C red 3 of 3, "0 times, want once" |
+| B-ctl | 34a9977a, the drain returning at once where the hook was never entered and the test had failed | B red: the case's last cleanup found "holds 1", its worker still parked before its unlock |
+| F1a | 6f205fd2, F1 | `awaitHoldsLetGo` failed at its bound, "a hold given up was never let go", and the cleanups after it raced the prune's worker twice: `SetOnPruneForTest`'s restore (seams.go:115) against `pruneHeld`'s read (backup.go:1190), and `SetOnLockReleaseForTest`'s restore (seams.go:240) against the release's read (verify_lock.go:199); exit 1, 31.9 s |
+| F1b | 34a9977a, F1 | the run ended at `awaitHoldsLetGo`'s bound, exit 2, "a hold given up was never let go"; no race; 32.0 s |
+| F1c | F1b, `awaitHoldsLetGo`'s `endTheRun` put back to `t.Fatal` | one race, `onPrune`'s (seams.go:115 against backup.go:1190), none on the lock-release seam; exit 1, 32.0 s |
+| R1 | round 1's red at main, the delay | red 3 of 3 at backup_round5_test.go:183, "the prune answered <nil>, want it given up" |
+| G | 34a9977a, the delay | green 3 of 3, 3.8 s |
+| C1 | 34a9977a, the delay, the whole `unlock.letGoAndAwaitEnd(t)` call taken out | red 3 of 3 at :190 with the skipped-prune assertion alone, 2.4 to 2.6 s, no race |
+| C2 | 34a9977a, the hold's hook parked for good | the run ended at the hold's drain, exit 2, "a backup holder kept its hold after the snapshot's unlock was let go: 1 still held 30 s on"; 61.5 s |
