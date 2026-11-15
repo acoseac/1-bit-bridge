@@ -1,8 +1,10 @@
 package backup
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -143,6 +145,25 @@ func SetOnLowPriorityForTest(fn func()) (restore func()) {
 	prev := onLowPriority
 	onLowPriority = fn
 	return func() { onLowPriority = prev }
+}
+
+// onCheckEntry, nil in production, runs on a check's own thread once its
+// priority is lowered, before it reads anything of the snapshot, given the
+// snapshot's resolved path (SetOnCheckEntryForTest).
+var onCheckEntry atomic.Pointer[func(dir string)]
+
+// SetOnCheckEntryForTest sets the function every check runs on its own
+// thread, its priority lowered, before it reads anything of the snapshot,
+// given the snapshot's resolved path, and returns the restore: a test parks
+// the check of its own snapshot there and lets every other go by. The
+// function must return for every other snapshot.
+func SetOnCheckEntryForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := onCheckEntry.Swap(p)
+	return func() { onCheckEntry.Store(prev) }
 }
 
 // SetOnDatabaseOpenForTest sets the function a verification runs just
@@ -381,6 +402,99 @@ func SetStepBoundForTest(dir string, within time.Duration, steps ...string) func
 	}
 	prev := stepBoundForTest.Swap(fixture)
 	return func() { stepBoundForTest.Store(prev) }
+}
+
+// stepGateFixture holds named steps of the holds on one backups folder until
+// the test fires their gates (SetStepGateForTest).
+type stepGateFixture struct {
+	root, snapshot string
+	gates          map[string]*stepGate
+}
+
+// stepGate is one step's gate, closed once, when the test fires it.
+type stepGate struct {
+	fired chan struct{}
+	once  sync.Once
+}
+
+var stepGateForTest atomic.Pointer[stepGateFixture]
+
+// StepGate is a test's hold of named steps under a backups folder's lock
+// (SetStepGateForTest).
+type StepGate struct{ f *stepGateFixture }
+
+// SetStepGateForTest holds the named steps of every hold on the resolved
+// backups folder root, of the snapshot named or, where snapshot is "", of
+// any: such a step is given up once the test fires its gate (Fire), and by
+// nothing else, neither its bound nor its caller's stop, while one that
+// answers first ends as any step does. It answers the gates and the restore,
+// which fires every gate and puts the seam back. Other folders, snapshots
+// and steps keep their production bounds. A test fires every gate (FireAll)
+// before it joins the callers whose steps it may hold, and restores the seam
+// once they and their holds have ended.
+func SetStepGateForTest(root, snapshot string, steps ...string) (*StepGate, func()) {
+	f := &stepGateFixture{root: root, snapshot: snapshot, gates: make(map[string]*stepGate, len(steps))}
+	for _, step := range steps {
+		f.gates[step] = &stepGate{fired: make(chan struct{})}
+	}
+	g := &StepGate{f: f}
+	prev := stepGateForTest.Swap(f)
+	return g, func() { g.FireAll(); stepGateForTest.Store(prev) }
+}
+
+// Fire gives the step named up: a hold in that step now, and every hold that
+// comes to it later. A step the gate does not hold is the test's error.
+func (g *StepGate) Fire(step string) {
+	s := g.f.gates[step]
+	if s == nil {
+		panic(fmt.Sprintf("backup: no gate holds the step %q", step))
+	}
+	s.once.Do(func() { close(s.fired) })
+}
+
+// FireAll fires every gate.
+func (g *StepGate) FireAll() {
+	for step := range g.f.gates {
+		g.Fire(step)
+	}
+}
+
+// gateOf is the gate a test holds the step named words of h by
+// (SetStepGateForTest): nil in production, and for every other step. With
+// h.mu held.
+func gateOf(h *hold, words string) <-chan struct{} {
+	f := stepGateForTest.Load()
+	if f == nil || f.root != h.root || (f.snapshot != "" && f.snapshot != h.snapshot) {
+		return nil
+	}
+	if s := f.gates[words]; s != nil {
+		return s.fired
+	}
+	return nil
+}
+
+// checkGraceForTest, nil in production, is what a check whose context has
+// ended is given before it is given up (runCheck), a test's
+// (SetCheckGraceForTest).
+var checkGraceForTest atomic.Pointer[func(dir string) <-chan struct{}]
+
+// SetCheckGraceForTest sets the grace a check whose context has ended (its
+// deadline, or its caller's stop) is given before it is given up (runCheck):
+// fn, run on the verification's worker once that context has ended, given the
+// snapshot's resolved path, answers the channel whose close ends the grace,
+// or nil to keep the timer, half of StopWriteBound, as every snapshot but a
+// test's does; and it returns the restore. A check that answers within the
+// grace is taken, as one within the timer is, so a test that closes the
+// channel only once the check has answered gives no check up past its
+// deadline, whatever its thread's pace. The test closes it before it joins
+// its callers, and restores the seam once they and their holds have ended.
+func SetCheckGraceForTest(fn func(dir string) <-chan struct{}) (restore func()) {
+	var p *func(string) <-chan struct{}
+	if fn != nil {
+		p = &fn
+	}
+	prev := checkGraceForTest.Swap(p)
+	return func() { checkGraceForTest.Store(prev) }
 }
 
 // beforeFilesCheck is the test seam between the two component checks.

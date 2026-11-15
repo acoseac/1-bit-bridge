@@ -108,6 +108,15 @@ type Deps struct {
 	ConfigDir    string
 	DataDir      string
 	LibraryRoots []string
+	// RootProbes is the runner's works on the library roots, as this run
+	// sees them (backlog B650): every check that touches a library root or
+	// anything below it does so as a work there, on a goroutine of its own,
+	// and waits for it rootProbeBound from when it began, so a root whose
+	// mount does not answer is named rather than holding the run. The
+	// console's runner keeps one RootProbes across its runs, so such a root
+	// holds one goroutine however often the doctor runs, and the CLI's
+	// commands share one for their process. Nil gives the run one of its own.
+	RootProbes *ProbeRun
 	// ConfigFile is the caller's bridge.yaml lookup: which file it found
 	// and whether that file loaded (checkConfigFile). Nil means the
 	// caller did not look one up, which the check reports as skipped.
@@ -467,6 +476,13 @@ func (r *Report) PortFailed() bool {
 // request-path goroutine, which is exactly the bug this signature exists to
 // close.
 func Run(ctx context.Context, d Deps) Report {
+	d.RootProbes = d.probeRun()
+	// Every work on a library root that a check below waits for begins now,
+	// so their bounds run together (backlog B650): roots that do not answer
+	// cost the run one bound, not one each, and a root's count runs beside
+	// its probe.
+	d.RootProbes.BeginRoots(d.LibraryRoots)
+	beginWatchCounts(d)
 	// The checks before the data directory's line, which sits beside
 	// config-dir (Deps.DataDirPreparation), and those after it.
 	head := []func(context.Context, Deps) Check{
@@ -644,6 +660,8 @@ func noCertificatePathReason(d Deps) string {
 		return "the named config does not exist"
 	case configDoesNotLoad:
 		return "the config that sets its path does not load"
+	case configLoadUnfinished:
+		return "the config that sets its path did not finish loading"
 	}
 	if d.ConfigFile != nil && d.ConfigDir == "" {
 		return "there is no config directory to look in (config-dir above says why)"
@@ -904,6 +922,8 @@ func ungradedConfigPortCheck(name string, c *ConfigFile) *Check {
 		why = "the named config does not exist"
 	case configDoesNotLoad:
 		why = "the config that sets this port does not load"
+	case configLoadUnfinished:
+		why = "the config that sets this port did not finish loading"
 	default:
 		return nil
 	}
@@ -1255,29 +1275,44 @@ func bindVerdict(name string, port int) (Check, bool) {
 	return Check{}, true
 }
 
-func checkLibraryRoots(_ context.Context, d Deps) Check {
+// checkLibraryRoots grades every configured root by a stat and a listing of
+// it, each root's probe a work of the runner's RootProbes on a goroutine of
+// its own, waited for until the bound from when it began (backlog B650): the
+// probes run together, so roots that do not answer cost one bound, and a root
+// that has not answered by then fails by its name, as configured, while the
+// run goes on to its other checks. A root a run did not wait for (its context
+// ended, or the runner's limit held its probe back) is not checked, a warn,
+// never a root that does not answer. A healthy root is counted, never listed.
+func checkLibraryRoots(ctx context.Context, d Deps) Check {
 	if len(d.LibraryRoots) == 0 {
 		return ok(checkNameLibraryRoots, "none configured (init will prompt)")
+	}
+	run := d.probeRun()
+	works := make([]*rootWork, len(d.LibraryRoots))
+	for i, r := range d.LibraryRoots {
+		works[i] = run.beginRoot(r)
 	}
 	missing := []string{}
 	unreadable := []string{}
 	empty := []string{}
-	for _, r := range d.LibraryRoots {
-		info, err := os.Stat(r)
-		if err != nil {
+	var stalled, unchecked []string
+	for i, r := range d.LibraryRoots {
+		switch w := run.waitFor(ctx, works[i], workRoot); w.outcome {
+		case notAnswered:
+			stalled = append(stalled, unansweredRoot(r, w))
+			continue
+		case stopped, heldBack:
+			unchecked = append(unchecked, unansweredRoot(r, w))
+			continue
+		}
+		switch a := works[i].value.(rootAnswer); {
+		case a.statErr != nil:
 			missing = append(missing, r)
-			continue
-		}
-		if !info.IsDir() {
+		case a.notDir:
 			unreadable = append(unreadable, r+" (not a directory)")
-			continue
-		}
-		entries, err := os.ReadDir(r)
-		if err != nil {
-			unreadable = append(unreadable, r+" ("+err.Error()+")")
-			continue
-		}
-		if len(entries) == 0 {
+		case a.readErr != nil:
+			unreadable = append(unreadable, r+" ("+a.readErr.Error()+")")
+		case a.empty:
 			empty = append(empty, r)
 		}
 	}
@@ -1285,16 +1320,43 @@ func checkLibraryRoots(_ context.Context, d Deps) Check {
 	// bare mount point, empty (B651): the scan keeps the tracks it indexed
 	// under such a root, and the watcher waits for it, so the hints say to
 	// check the mount before anything is removed.
-	if len(missing)+len(unreadable) > 0 {
-		problems := append(append([]string{}, missing...), unreadable...)
-		return fail(checkNameLibraryRoots, fmt.Sprintf("%d problem(s)", len(problems)),
-			"fix or remove, after checking that a volume it is on is mounted: "+strings.Join(problems, "; "))
+	if n := len(stalled) + len(missing) + len(unreadable); n > 0 {
+		var parts []string
+		if len(stalled) > 0 {
+			parts = append(append(parts, stalled...), stalledRootAdvice())
+		}
+		if len(missing)+len(unreadable) > 0 {
+			problems := append(append([]string{}, missing...), unreadable...)
+			parts = append(parts, "fix or remove, after checking that a volume it is on is mounted: "+strings.Join(problems, "; "))
+		}
+		return fail(checkNameLibraryRoots, fmt.Sprintf("%d problem(s)", n), strings.Join(append(parts, unchecked...), "; "))
+	}
+	emptyHint := "empty root (scan will find 0 tracks; a volume not mounted yet reads so, and the scan keeps the tracks it indexed there): " + strings.Join(empty, "; ")
+	if len(unchecked) > 0 {
+		hint := strings.Join(unchecked, "; ")
+		if len(empty) > 0 {
+			hint += "; " + emptyHint
+		}
+		return warn(checkNameLibraryRoots, fmt.Sprintf("%d root(s) not checked", len(unchecked)), hint)
 	}
 	if len(empty) > 0 {
-		return warn(checkNameLibraryRoots, fmt.Sprintf("%d empty root(s)", len(empty)),
-			"empty root (scan will find 0 tracks; a volume not mounted yet reads so, and the scan keeps the tracks it indexed there): "+strings.Join(empty, "; "))
+		return warn(checkNameLibraryRoots, fmt.Sprintf("%d empty root(s)", len(empty)), emptyHint)
 	}
 	return ok(checkNameLibraryRoots, fmt.Sprintf("%d root(s) reachable", len(d.LibraryRoots)))
+}
+
+// stalledRootAdvice is what library-roots says to do of a root that does not
+// answer, after naming it. It names a command only where the command cannot
+// wait on the mount: Linux's /proc/mounts is the kernel's table, read without
+// asking any filesystem.
+func stalledRootAdvice() string {
+	s := "check the server or the disk such a root is on, and its mount, before removing anything: until it answers " +
+		"the scan reads nothing under it, and a bridge serve started meanwhile waits for it; a disk spinning up " +
+		"can take this long, so run the doctor again"
+	if runtime.GOOS == "linux" {
+		s += " (cat /proc/mounts lists the mounts without waiting on any of them)"
+	}
+	return s
 }
 
 func checkServiceManager(ctx context.Context, d Deps) Check {

@@ -4,7 +4,7 @@
 
 ## Things that have bitten before
 
-**Twenty-four claims in this list have been wrong and been corrected** — the
+**Twenty-five claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -30,8 +30,10 @@ gopkg.in/yaml.v3 v3.0.1's decoder does", (2026-10-22) "an output
 refusal names the setting, never its value", (2026-10-22) "a block
 yaml.v3 does not decode is one Load refuses", (2026-10-22) "no
 refusal, warning or log line of the config path carries any part of a
-value or a key", and (2026-11-05) "`mergeDuplicate` picks its surviving
-base with that same order [the comparator's], not by arrival". The first
+value or a key", (2026-11-05) "`mergeDuplicate` picks its surviving
+base with that same order [the comparator's], not by arrival", and
+(2026-11-13) "the Go-file sweeps skip every name the go tool ignores". The
+first
 five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
@@ -107,6 +109,11 @@ defect `FuzzPickIsShuffleInvariant` had just found in #851, and that the base
 is chosen by synced, then format. It stood for two months beside
 `mergeDuplicate`'s own docblock, which says the opposite, and B611 found it
 while adding the dedup key's rule to the same bullet.
+The twenty-fifth was a record's premise carried into a rule's long form:
+B740 said the Go-file sweeps skip every name the go tool ignores, `.tmp`
+among them, and so fixed the census alone. Of the four sweeps it named, only
+the blank-keeper guard did; the citation, hash-cost and flac-handle guards
+read make test's `.tmp` until B567 listed every walk from the root.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,

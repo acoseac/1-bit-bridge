@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -81,11 +82,12 @@ const hashCostSetter = "SetTestHashCost"
 // hashCostSetterCallers returns the non-test Go files under root that call
 // hashCostSetter, or that it cannot parse, with how many files it read.
 //
-// It walks with filepath.WalkDir, which asks hashCostDirRule about a
-// directory before listing it. filepath.Walk lists it first, so a directory
-// the rule skips still failed the run when it could not be listed.
+// It walks with filepath.WalkDir (hashCostWalkDir), which asks
+// hashCostDirRule about a directory before listing it. filepath.Walk lists
+// it first, so a directory the rule skips still failed the run when it could
+// not be listed.
 func hashCostSetterCallers(root string) (offenders []string, visited int, err error) {
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err = hashCostWalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -101,6 +103,11 @@ func hashCostSetterCallers(root string) (offenders []string, visited int, err er
 	})
 	return offenders, visited, err
 }
+
+// hashCostWalkDir is the walk hashCostSetterCallers makes: filepath.WalkDir,
+// which a test replaces with a sweeptest.Removal to stand in for another
+// process removing a directory while the sweep is under way.
+var hashCostWalkDir = filepath.WalkDir
 
 // hashCostDirRule is hashCostSetterCallers' answer for a directory: SkipDir
 // for one that holds none of this checkout's production code, nil to
@@ -124,6 +131,15 @@ func hashCostDirRule(root, path, name string) error {
 	// go tool's "." rule is not borrowed with it: this walk reads the Go
 	// program tracked under .github/, and that rule would drop it.
 	if strings.HasPrefix(name, "_") {
+		return filepath.SkipDir
+	}
+	// Nor make test's TMPDIR, the root's own .tmp (sweeptest.IsMakeTestTmpDir),
+	// where every package's tests keep their temporary files while the suite
+	// runs, this package's fixtures among them: a call there was reported as
+	// production code, a file there in mid-edit as one that does not parse,
+	// and a directory there removed between its listing and its own failed
+	// the walk (B567). Only that one: a .tmp further down is the tree's.
+	if sweeptest.IsMakeTestTmpDir(root, path) {
 		return filepath.SkipDir
 	}
 	// Nor another checkout inside this one (sweeptest.IsOtherCheckout), such
@@ -268,6 +284,102 @@ func TestHashCostSweepSkipsUnderscoreDirectories(t *testing.T) {
 			t.Errorf("the sweep failed on a directory the go tool ignores, which it should not have listed: %v", err)
 		}
 	})
+}
+
+// TestHashCostSweepSkipsMakeTestsTMPDIRAtTheRoot plants, one per row, what
+// make test leaves in the directory it gives every package's tests as TMPDIR
+// when the caller sets none (sweeptest.MakeTestTmpDir, at the root), and the
+// same call where the sweep must still find it.
+//
+// The suite runs every package's tests at once, so while the whole-tree
+// guard walked the checkout, another package's temporary Go files sat in
+// that directory, this package's own fixtures among them: a call there was
+// reported as production code, and a file in mid-edit as one that does not
+// parse (B567). The rows in that directory leave the sweep's answer as it is
+// without them. The rows in a directory of the same name below the root, in
+// one whose name begins with it, and beside the Go program .github holds are
+// found as before: the sweep skips that directory at the root alone, as the
+// build-tag census does (B740).
+func TestHashCostSweepSkipsMakeTestsTMPDIRAtTheRoot(t *testing.T) {
+	const call = "package main\n\nimport \"example/internal/adminauth\"\n\nfunc main() { adminauth.SetTestHashCost(4) }\n"
+	tmp := path.Join(sweeptest.MakeTestTmpDir, "TestSomething123", "001")
+	for _, row := range []struct {
+		name  string
+		file  string // a slash path below the root
+		body  string
+		found bool // whether the sweep must report the file
+	}{
+		{"a call in make test's TMPDIR", path.Join(tmp, "cmd", "tool", "main.go"), call, false},
+		{"a file in mid-edit in make test's TMPDIR", path.Join(tmp, "half.go"), "package main\n\nfunc main() { db := open(\n", false},
+		{"a call in a directory of that name below the root", path.Join("internal", "x", sweeptest.MakeTestTmpDir, "main.go"), call, true},
+		{"a call in a directory whose name begins with it", path.Join(sweeptest.MakeTestTmpDir+"foo", "main.go"), call, true},
+		{"a call beside the Go program .github holds", path.Join(".github", "scripts", "tool", "main.go"), call, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "checkout")
+			writeSweepTree(t, root, map[string]string{".git/HEAD": "ref: refs/heads/main\n", "cmd/tool/main.go": call})
+			want, wantVisited, err := hashCostSetterCallers(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeSweepTree(t, root, map[string]string{row.file: row.body})
+			if row.found {
+				want = append(want, filepath.Join(root, filepath.FromSlash(row.file)))
+				wantVisited++
+			}
+			offenders, visited, err := hashCostSetterCallers(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			slices.Sort(want)
+			slices.Sort(offenders)
+			if !slices.Equal(offenders, want) || visited != wantVisited {
+				t.Errorf("offenders = %q after reading %d files, want %q after reading %d", offenders, visited, want, wantVisited)
+			}
+		})
+	}
+}
+
+// TestHashCostSweepFinishesWhileMakeTestsTMPDIRChanges: a directory in make
+// test's TMPDIR that another process removes while the sweep is under way,
+// as go test removes a test's temporary directory and the go command a work
+// directory, is one the sweep never lists, so it finishes with the answer
+// the tree gives without it. Reading that directory, the sweep failed on the
+// directory it had just listed (B567). A sweeptest.Removal stands in for the
+// other process at that moment of the walk.
+func TestHashCostSweepFinishesWhileMakeTestsTMPDIRChanges(t *testing.T) {
+	const call = "package main\n\nimport \"example/internal/adminauth\"\n\nfunc main() { adminauth.SetTestHashCost(4) }\n"
+	for _, gone := range []struct{ name, dir string }{
+		{"a test's temporary directory", "TestSomething123"},
+		{"the go command's work directory", "go-build123/b001"},
+	} {
+		t.Run(gone.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "checkout")
+			writeSweepTree(t, root, map[string]string{".git/HEAD": "ref: refs/heads/main\n", "cmd/tool/main.go": call})
+			want, wantVisited, err := hashCostSetterCallers(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(root, sweeptest.MakeTestTmpDir, filepath.FromSlash(gone.dir))
+			writeSweepTree(t, dir, map[string]string{"main.go": call})
+			removal := &sweeptest.Removal{Dir: dir}
+			hashCostWalkDir = removal.WalkDir
+			t.Cleanup(func() { hashCostWalkDir = filepath.WalkDir })
+			offenders, visited, err := hashCostSetterCallers(root)
+			if !removal.Walked {
+				t.Fatal("the sweep did not walk through the stand-in, so this case proves nothing")
+			}
+			if err != nil {
+				t.Fatalf("the sweep failed: %v", err)
+			}
+			if removal.Reached {
+				t.Errorf("the sweep reached %s, in make test's TMPDIR", dir)
+			}
+			if !slices.Equal(offenders, want) || visited != wantVisited {
+				t.Errorf("offenders = %q after reading %d files, want %q after reading %d", offenders, visited, want, wantVisited)
+			}
+		})
+	}
 }
 
 // writeSweepTree writes each file in files, named by its slash path below
