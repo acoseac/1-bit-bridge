@@ -166,17 +166,37 @@ func (h heldRequest) waitEnded(t *testing.T) {
 // notification ready together.
 type tickSeam struct {
 	asked chan armedWait
-	hold  atomic.Pointer[chan struct{}]
+	hold  atomic.Pointer[seamHold]
 
-	mu   sync.Mutex
-	last armedWait
+	// handed, nil but in the seam's own tests, runs on the loop's goroutine
+	// once the loop has handed the test an arming, before it goes on: a test
+	// parks the loop there (parkAfterHanding).
+	handed func(armedWait)
+
+	mu      sync.Mutex
+	last    armedWait
+	armings int
 }
 
-// armedWait is one wait the loop armed: its length and its own channel.
+// armedWait is one wait the loop armed: its length, its own channel, and
+// which of the loop's armings it is, counted from 1.
 type armedWait struct {
 	d    time.Duration
 	tick chan time.Time
+	n    int
 }
+
+// seamHold is a hold holdNext set: the arming that takes it records itself
+// in it and waits until it is released.
+type seamHold struct {
+	ch      chan struct{}
+	once    sync.Once
+	takenBy atomic.Int64 // the arming that took it, 0 while none has
+}
+
+// release lets the arming that took the hold go on, or lets the arming that
+// takes it later go straight through.
+func (h *seamHold) release() { h.once.Do(func() { close(h.ch) }) }
 
 // fire hands w its tick, whether or not the loop still waits on it: a wait
 // the loop has left keeps the tick, and nobody reads it.
@@ -190,10 +210,17 @@ func (w armedWait) fire() {
 func installTickSeam(u *Updater) *tickSeam {
 	s := &tickSeam{asked: make(chan armedWait, 64)}
 	u.after = func(d time.Duration) <-chan time.Time {
-		w := armedWait{d: d, tick: make(chan time.Time, 1)}
+		s.mu.Lock()
+		s.armings++
+		w := armedWait{d: d, tick: make(chan time.Time, 1), n: s.armings}
+		s.mu.Unlock()
 		s.asked <- w
+		if s.handed != nil {
+			s.handed(w)
+		}
 		if h := s.hold.Swap(nil); h != nil {
-			<-*h
+			h.takenBy.Store(int64(w.n))
+			<-h.ch
 		}
 		return w.tick
 	}
@@ -201,16 +228,37 @@ func installTickSeam(u *Updater) *tickSeam {
 }
 
 // holdNext holds the loop at its next arming, inside the seam's after, until
-// release (or the test's end). Called once the loop runs, so that the release
-// at the test's end comes before runLoop's stop.
-func (s *tickSeam) holdNext(t *testing.T) (release func()) {
-	ch := make(chan struct{})
-	var once sync.Once
-	release = func() { once.Do(func() { close(ch) }) }
-	t.Cleanup(release)
-	s.hold.Store(&ch)
-	return release
+// the hold is released (or the test's end). Called once the loop runs, so
+// that the release at the test's end comes before runLoop's stop.
+func (s *tickSeam) holdNext(t *testing.T) *seamHold {
+	h := &seamHold{ch: make(chan struct{})}
+	t.Cleanup(h.release)
+	s.hold.Store(h)
+	return h
 }
+
+// handingPark parks the loop just after it has handed the test one arming
+// (tickSeam.handed), until letGo or the test's end: where a busy scheduler
+// can leave the loop's goroutine while the test, handed the arming, goes on.
+type handingPark struct {
+	goOn chan struct{}
+	once sync.Once
+}
+
+// parkAfterHanding parks s's loop just after it hands the test arming n. Set
+// before the loop runs; its letGo is registered once runLoop's stop is, so
+// that it comes before that stop.
+func parkAfterHanding(s *tickSeam, n int) *handingPark {
+	p := &handingPark{goOn: make(chan struct{})}
+	s.handed = func(w armedWait) {
+		if w.n == n {
+			<-p.goOn
+		}
+	}
+	return p
+}
+
+func (p *handingPark) letGo() { p.once.Do(func() { close(p.goOn) }) }
 
 // waitArmed waits for the loop to arm its next wait, which it does once the
 // turn before it is done, and returns it; fire then fires it.
@@ -539,14 +587,14 @@ func TestAWakeAndAnOldTickReadyTogetherAskNothing(t *testing.T) {
 	u, ticks := switchedUpdater(t, gh, sw, Options{LiveCheckInterval: func() time.Duration { return 3 * time.Hour }})
 	runLoop(t, u)
 	first := ticks.waitArmed(t)
-	release := ticks.holdNext(t)
+	release := ticks.holdNext(t).release
 	first.fire() // a tick while off; the loop's next arming is held
 	old := ticks.waitArmed(t)
 
 	sw.off.Store(false)
 	u.ChecksSwitched() // the notification, ready
 	old.fire()         // and the old wait's tick, ready too
-	inspect := ticks.holdNext(t)
+	inspect := ticks.holdNext(t).release
 	release()
 	next := ticks.waitArmed(t)
 	if n := gh.requests.Load(); n != 0 {
@@ -567,6 +615,71 @@ func TestAWakeAndAnOldTickReadyTogetherAskNothing(t *testing.T) {
 	ticks.waitArmed(t)
 	if n := gh.requests.Load(); n != 1 {
 		t.Errorf("the tick a full interval after checks were turned on asked GitHub %d time(s), want 1", n)
+	}
+}
+
+// TestAHoldSetOnceAnArmingIsHandedHoldsTheNextArming is the seam's own order
+// (backlog B872U): a test sets a hold once it has been handed an arming, to
+// hold the arming after it, and the arming it was handed must not take it.
+// The loop is parked just after the hand-off (parkAfterHanding), where a busy
+// scheduler can leave it while the test goes on. Had the arming handed taken
+// the hold, the loop would wait there before its select, released only by a
+// step after the test's next waitArmed: TestAWakeAndAnOldTickReadyTogetherAskNothing
+// waited out testWait so at its second waitArmed on Windows' CI (3a6b924e).
+// The hold is released before the loop goes on, so this test ends at once
+// whichever arming takes it, and says which did.
+func TestAHoldSetOnceAnArmingIsHandedHoldsTheNextArming(t *testing.T) {
+	gh := newReleaseStandIn(t, "v9.9.9")
+	sw := &testSwitch{}
+	sw.off.Store(true)
+	u, ticks := switchedUpdater(t, gh, sw, Options{LiveCheckInterval: func() time.Duration { return 3 * time.Hour }})
+	park := parkAfterHanding(ticks, 1)
+	runLoop(t, u)
+	t.Cleanup(park.letGo)
+
+	first := ticks.waitArmed(t) // the loop parks just after handing it
+	hold := ticks.holdNext(t)
+	hold.release()
+	park.letGo()
+	first.fire()
+	next := ticks.waitArmed(t)
+	if by := hold.takenBy.Load(); by != int64(next.n) {
+		t.Fatalf("the hold set once arming %d was handed was taken by arming %d, want arming %d, the next one", first.n, by, next.n)
+	}
+}
+
+// TestAHoldSetBeforeAnArmingIsThatArmingsAlone: a hold set before the loop's
+// next arming is taken by that arming before the test is handed it, so a hold
+// the test sets once it has the arming is the next arming's and replaces
+// nothing (backlog B872U). With the loop parked just after the hand-off, a
+// hold the arming had not taken yet would be replaced untaken, and the arming
+// handed would take the second one: TestAWakeAndAnOldTickReadyTogetherAskNothing's
+// loop then waited on the hold the test releases only after its third
+// waitArmed, which waited out testWait. The first hold is set before the loop
+// runs, so that the loop's first arming is the one it is for; both holds are
+// released before the loop goes on.
+func TestAHoldSetBeforeAnArmingIsThatArmingsAlone(t *testing.T) {
+	gh := newReleaseStandIn(t, "v9.9.9")
+	sw := &testSwitch{}
+	sw.off.Store(true)
+	u, ticks := switchedUpdater(t, gh, sw, Options{LiveCheckInterval: func() time.Duration { return 3 * time.Hour }})
+	park := parkAfterHanding(ticks, 1)
+	before := ticks.holdNext(t)
+	runLoop(t, u)
+	t.Cleanup(park.letGo)
+
+	first := ticks.waitArmed(t) // the loop parks just after handing it
+	after := ticks.holdNext(t)
+	before.release()
+	after.release()
+	park.letGo()
+	first.fire()
+	next := ticks.waitArmed(t)
+	if by := before.takenBy.Load(); by != int64(first.n) {
+		t.Errorf("the hold set before arming %d was taken by arming %d (0: none), want arming %d", first.n, by, first.n)
+	}
+	if by := after.takenBy.Load(); by != int64(next.n) {
+		t.Errorf("the hold set once arming %d was handed was taken by arming %d, want arming %d, the next one", first.n, by, next.n)
 	}
 }
 
