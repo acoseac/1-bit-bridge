@@ -52,6 +52,10 @@ var renameFunc = os.Rename
 // discipline the previous copy helper documented.
 //
 // mode 0 skips the chmod — NTFS has no executable bit to set.
+//
+// The rename that stages src is made again while another process holds the
+// file (backlog B898), on the forward schedule and a deadline of its own, as
+// nothing is armed or held yet: a scanner reads a candidate just extracted.
 func stageIntoDir(src, dst string, mode os.FileMode) (staged string, err error) {
 	return stageIntoDirNamed(src, dst, mode, ".bridge-swap-*")
 }
@@ -64,7 +68,7 @@ func stageIntoDir(src, dst string, mode os.FileMode) (staged string, err error) 
 // directory the bridge already runs from. On Windows the name ends in .exe,
 // so the candidate runs as any program there does.
 func stageForCheck(src, dst string) (string, error) {
-	pattern := ".bridge-check-*"
+	pattern := checkStagePrefix + "*"
 	if isWindows() {
 		pattern += ".exe"
 	}
@@ -74,6 +78,14 @@ func stageForCheck(src, dst string) (string, error) {
 // stageIntoDirNamed is stageIntoDir, the staged file named after pattern as
 // os.CreateTemp names it.
 func stageIntoDirNamed(src, dst string, mode os.FileMode, pattern string) (staged string, err error) {
+	return liveMoves().stage(src, dst, mode, pattern, newBudget(forwardWaits))
+}
+
+// stage is stageIntoDirNamed through m, its rename's waits drawn from budget:
+// the swap's forward deadline where the swap stages, one of its own before
+// the install marker's lock (stageForCheck). Its rename's refusal is a
+// *SwapError, NothingMoved.
+func (m moves) stage(src, dst string, mode os.FileMode, pattern string, budget *waitBudget) (staged string, err error) {
 	tmp, err := os.CreateTemp(filepath.Dir(dst), pattern)
 	if err != nil {
 		return "", fmt.Errorf("create staging file beside %s: %w", dst, err)
@@ -101,13 +113,14 @@ func stageIntoDirNamed(src, dst string, mode os.FileMode, pattern string) (stage
 		}
 	}()
 
-	if rerr := renameFunc(src, tmpName); rerr != nil {
+	if r := m.renameStep(StageStaging, src, tmpName, forwardWaits, budget); r.err != nil {
+		rerr := r.err
 		if !isCrossDeviceErr(rerr) {
 			// Narrow on purpose. A rename refused for any other reason
 			// — permissions, a vanished source — is a fact worth
 			// surfacing, and masking it behind a copy that then fails
 			// for its own reason would report the wrong cause.
-			return "", fmt.Errorf("stage %s beside %s: %w", src, dst, rerr)
+			return "", failed(NothingMoved, r, fmt.Sprintf("stage %s beside %s: %v", src, dst, rerr))
 		}
 		if cerr := copyFileTo(src, tmpName); cerr != nil {
 			return "", cerr
