@@ -675,9 +675,10 @@ func TestTheCountsAreFoldedAsOneWalkCountedThem(t *testing.T) {
 // TestALoadThatDidNotFinishFailsTheConfigLine: cmd/bridge's load of the
 // config, a work its runner waits for as it waits for a root, that gave the
 // run no answer fails config-file in words of its own, never as a file that
-// does not load, and the lines that grade what it sets say they were not
-// checked; one the run stopped waiting for, or never began, is not checked, a
-// warn.
+// does not load, its hint naming both steps of the load that can hold it,
+// root validation and the read of the file, and the lines that grade what it
+// sets say they were not checked; one the run stopped waiting for, or never
+// began, is not checked, a warn.
 func TestALoadThatDidNotFinishFailsTheConfigLine(t *testing.T) {
 	const path = "/etc/1-bit-bridge/bridge.yaml"
 	unfinished := func(w Wait) Deps {
@@ -686,7 +687,8 @@ func TestALoadThatDidNotFinishFailsTheConfigLine(t *testing.T) {
 	d := unfinished(Wait{outcome: notAnswered, bound: 5 * time.Second})
 	c := checkConfigFile(context.Background(), d)
 	if c.Status != Fail || c.Summary != path+": its load did not finish within 5s" ||
-		!strings.Contains(c.Hint, "upscale.variantsDir and upscale.tempDir") || strings.Contains(c.Hint, "refuses") {
+		!strings.Contains(c.Hint, "upscale.variantsDir and upscale.tempDir") || strings.Contains(c.Hint, "refuses") ||
+		!strings.Contains(c.Hint, "root validation, or the load's slow read of the file, holds it") {
 		t.Errorf("config-file = %+v", c)
 	}
 	if c := checkAPIPort(context.Background(), d); c != ok(checkNamePortAPI, "not checked: the config that sets this port did not finish loading") {

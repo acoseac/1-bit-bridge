@@ -98620,6 +98620,242 @@ over the head's, green ×50 at the head.
   `native_integration_test.go` did before this round. Not corrected here,
   beside this round's rule.
 
+## 2026-11-14 — B650FU: B650's Lows: a stopped run's look before its stop, the healthy waits' bound, the loopback probe off the gather's context, and the config-file hint
+
+The rule is `output.md`'s B650 line on the checklist's read (the loopback
+probe its body carries, and the case that pins it), in `rules-b650fu.patch`,
+uncommitted. Worker b650fu, legion0 (Linux 7.0.0-38, x86-64, 16 CPUs), branch
+`fix/b650fu-doctor-lows` from main 9acee209, which carries B650 (0ddfda75,
+#1461) and B650FIX (#1475). Commits: 4bb99deb (item 1), bc8f8a6a (item 2),
+26bdd0a5 (item 4), 279e7868 (item 5's hint), d1dfc1d3 (item 3), then this
+record. Every run: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`,
+TMPDIR `~/onebit/tmp`, 8 of the 16 cores. The controls are uncommitted edits to
+the committed tree at d1dfc1d3, predicted in writing first
+(`.tmp/_b650fu/controls.predictions.txt`), every edited file's bytes put back
+from memory and checked by its hash, `git status` clean after the batch; their
+test binaries are built without the race detector, each case run alone, and
+each came out as predicted. Line numbers are 9acee209's unless a commit is
+named.
+
+### Item 1: the stopped console run's check that it came back no sooner
+
+`TestACancelledConsoleDoctorRunSaysItWasStopped`
+(`cmd/bridge/doctor_roots_test.go` 480-542) made a channel and closed it
+(515-516) just before `cancel()` (517), then asked it without blocking
+(524-528), so its "came back before its request went away" branch could not be
+taken. 4bb99deb looks at the runner's channel without blocking just before the
+cancel (523-527 at d1dfc1d3), fails on a report there, and drops the dead
+check. The look catches a report published already, and that alone: the runner
+publishes on a goroutine of its own (`go func() { reports <- runner(ctx) }()`,
+504), and the hook says only that the run is about to wait
+(`internal/doctor/rootprobes.go` 331-332), so a run that came back on its own
+just after the look passes it. The order the case needs is in what it asserts
+already, and no seam was added: `waitFor` answers `stopped` from its context's
+arm alone (338-342; 341 is the one `outcome: stopped` in production), which
+`unansweredRoot` words "was not checked: the doctor's run was stopped before
+it answered" (528-529), the hint the case requires, so the run's wait on the
+root that does not answer ended by the case's cancel, and the run came back
+after it.
+
+- C1-new, HEAD's case with the root let go and the report's publication waited
+  for (`len(reports) == 1`) right after its `probed` check: red at the look,
+  "the run came back before its request went away", and nothing after it.
+- C1-old, main's case with the same edit: red only at its library-roots line,
+  "{Name:library-roots Status:ok Summary:2 root(s) reachable Hint:}, want a
+  warn ...", never in the old check's words.
+
+### Item 2: the own-config case's healthy waits
+
+`TestADoctorRunTakesOnlyTheReadOfItsOwnConfig` set its read table's timer to
+`readTimers` (968) for every wait, and a `readTimers` timer passed only when the
+case fired it (926-930), so the waits of its two healthy runs (the edited
+config's, and the one after the read answered) had no bound but `doctorWithin`'s
+90 s, while three texts said every wait but the held read's kept bridge
+doctor's bound: the case's comment (943-950), `ops/History-rules-cli-serve.md`
+(5594-5597 at 9acee209), and round 3's record above ("every other wait keeping
+bridge doctor's bound under the case's 90 s deadline").
+
+Chosen: real timers, not the three texts corrected. bc8f8a6a's
+`readTimers.timer` (936-944 at d1dfc1d3) hands out `time.NewTimer` for the
+bound the wait asks (`outputsReadBound`, 20 s) to every wait but the next one
+set once `capture` is armed, which it takes with `CompareAndSwap(true, false)`,
+as `rootWaitClock.timer` takes its flag (602), and `givenUp` arms it just
+before the run whose wait it gives up begins (1005 at d1dfc1d3), when no other
+run waits on a read. Why: the three texts say what the case was meant to be,
+and the change makes them true in the test alone; a healthy read cannot outlast
+a 20 s timer while it can answer, since its build ends within the builder's own
+limit (`outputBuildLimit`, 15 s: `internal/api/outputs.go` 35, 822); and a
+healthy run that waits on the held read by mistake now fails at bridge
+doctor's bound, in its Player line's words, not at the hang guard. The
+History's sentence and round 3's record stay as written: true of the case
+since bc8f8a6a, and not at 0ddfda75 (#1461's squash) or 9acee209.
+
+The controls key the shared read on the file's name alone (round 2's R2-C2
+shape: `outputsReadKey`, `cmd/bridge/output_checklist.go` 255-262), so the
+edited config's run waits on the held read:
+
+- C2-new, HEAD's case: red in 20.05 s, "over the edited config, the player line
+  = \"The bridge could not read this box's player and cards (it did not answer
+  within 20s: ...)\"", its music line "MPD was not asked about Songs, and the
+  bridge's loopback HTTP route is not serving", and "the edited config's run
+  began 0 reads, want its own one".
+- C2-old, main's case: red in 90.12 s, by the hang guard alone: "the checklist
+  did not return within 1m30s: a root that does not answer held it".
+
+### Item 3: the hooks written without the lock
+
+`MPDInspections.waiting` (`internal/api/outputs.go` 651-653) is read by every
+probe without the table's mu (`inspectShared`, 747-749) and written by one
+test before its builders probe (`outputs_inspections_test.go` 230);
+`RootProbes.onRootWait` is read alike (`rootprobes.go` 331-332) and said to be
+set before any run (`SetOnRootWaitForTest`, 99-102). No test sets either during
+runs, so `-race` is clean, and locking would want a case that sets one during
+runs, which no test needs. Chosen: the precondition written on `waiting`,
+worded as `SetOnRootWaitForTest` words it (d1dfc1d3, `outputs.go` 651-655):
+comments only, no behaviour changed, `rootprobes.go` untouched. A third hook
+of the shape is outside this budget: `outputsReads.timer`
+(`output_checklist.go` 187-190), read without the table's mu in `waitTimer`
+(195-201) and set by `TestADoctorRunTakesOnlyTheReadOfItsOwnConfig` before any
+gather, whose comment does not say when it may be set.
+
+### Item 4: the loopback probe's context
+
+`doctorOutputChecklist`'s route answer asked `probeLoopbackRoute(ctx, …)` on
+the gather's own context (`output_checklist.go` 399-401), once a gather
+(`loopbackAnswer`, 480-495). The body of the read every gather over a config
+waits on carries the route's base URL (`mpdInfo.LoopbackBaseURL =
+o.loopback()`, `internal/api/outputs.go` 1003-1004), which the build asks after
+its path rules (995) have read the indexed tracks (`o.tracks`, 1070), of the
+route answer of the gather whose builder it is: the one that began the read.
+Where that gather's context ends while the read is held before its build asks
+the route, the gather gives its wait up (`readOutputs`, 147, 155-157) and asks
+its route itself (`unreadInput`, 292-293) on the ended context: the request
+fails at once, and the answer kept for the body names no route. A gather that
+joined the read asks a route answer of its own there, which no body carries.
+Every production gather runs on Background
+(`runDoctorReport`, `cmd/bridge/doctor.go` 65; the console's runner replaces
+the checklist with the serving source's, 1135), so no bridge reached it.
+26bdd0a5 asks `probeLoopbackRoute(context.WithoutCancel(ctx), …)` (400), the
+probe's own 2 s limit kept (`loopbackProbeLimit`, 498, 520).
+
+`TestTheLoopbackProbeOutlivesTheGatherThatBeganTheRead`
+(`doctor_roots_test.go` 1161-1262 at d1dfc1d3): a loopback route that serves
+(`startProbedRoute`) named by the player config's `loopbackPort`, which the
+fixture writes 0, a value that skips the probe (`output_checklist_test.go`
+508); MPD's music directory an empty folder, so the root's rule is `unproven`
+and the Music line rests on the route (`internal/outputcheck/outputcheck.go`
+255-286); the first gather on a cancellable context, held at the box's read of
+the indexed tracks (`boxStall`), before the build asks the route, its context
+ended and its answer awaited; a second gather on Background, heard joining the
+read (`joined`) before the root is let go, a read of its own (`began`) failing
+the case at once; then the second gather's player line the body's (`boxRead`),
+its music line a warn on the body's rule ("Music is not in MPD's music
+directory") ending "; it plays through the bridge's loopback HTTP route", and
+one read of the box. It does not ask for the absence of "loopback route is not
+serving": main's words are ", and the bridge's loopback HTTP route is not
+serving" (`outputcheck.go` 283), which such a check would pass.
+
+Red first, and its controls:
+
+- C4-red, main's line put back: red at the music line, "{Name:music
+  Status:fail Summary:Music is not in MPD's music directory, and the bridge's
+  loopback HTTP route is not serving Hint:Start the bridge, so MPD can fetch
+  those tracks over its loopback HTTP route.}", its player line and its read
+  count green.
+- C4-body, the build asks no route (1004 dropped): red at the music line in the
+  same words, so the line rests on the body's base URL, not on the waiting
+  gather's own probe.
+- C4-join, a read per gather (`outputsReads.begin` past its table): red at "the
+  second gather began a read of its own while the first one's was out".
+- C4-timeout, every wait on a read bounded at 1 ns: red at the player line
+  ("... it did not answer within 1ns ...") and at the music line, a warn from
+  the gather's own probe over its own unchecked root ("MPD was not asked about
+  Music; it plays through the bridge's loopback HTTP route"), which the case
+  tells from the body's.
+
+### Item 5: two notes (one hint text; the rest record only)
+
+The stale probe. A gather that gives its wait up at its bound asks the route
+then (`unreadInput`, 292-293) and keeps that answer (`loopbackAnswer`'s once),
+and the read it began asks the same answer when its build reaches the route
+(`outputs.go` 1003-1004), whenever that is: every gather still waiting on that
+read when it finishes takes that answer in the body, however many gathers
+joined it meanwhile, and it clears only for the gathers begun after the read
+has answered, which leaves the table as it answers (`output_checklist.go` 233),
+so that the next gather begins a read of its own (217). The body's base URL
+decides the Music line ahead of the gather's own probe (`outputcheck.go`
+266-286): a stale non-empty one hides the joiner's fresh `not_serving`, or
+error, behind a warn saying the root's tracks play (266-270), and a stale empty
+one fails a route that serves now (282-284). It is in the doctor's report
+alone: nothing is written, and the console's doctor reads the serving
+process's route (`TestServeChecklistReadsTheLiveRootsAndTheRoute`), never a
+probe. 26bdd0a5 leaves it as it was: the probe is no longer cancelled with its
+gather, and is still made at its gather's give-up.
+
+The hint. A load that did not finish within the bound failed config-file with
+a hint that put it down to root validation alone
+(`internal/doctor/configfile.go` 197-200). The bound covers `config.Load` whole
+(`cmd/bridge/doctor.go` 642-643): its read of the file (`readConfigFile`,
+`internal/config/config.go` 3032-3041) and its validation, whose containment
+check resolves each root where either directory is set (`rootContainment`,
+`fsutil.IsUnderAny`, 4226). The lookup's stat (`cmd/bridge/configpath.go` 47)
+and the doctor's first read of the file (`doctor.go` 630) are not bounded, so
+a config on a mount that never answers holds the run before any hint, while
+one on a mount slow on every access can pass both and then miss the bound in
+the load's own read, with no root involved. 279e7868's hint (198-201): "root
+validation, or the load's slow read of the file, holds it: loading it checks
+upscale.variantsDir and upscale.tempDir against each library root, which a root
+whose mount does not answer holds (library-roots names such a root), and reads
+the file, which a mount slow to answer holds; bridge serve, and every command
+that loads this config, waits for it too (...)". It claims no bound on the
+whole run, keeps "upscale.variantsDir and upscale.tempDir" and says no
+"refuses" (`doctor_roots_test.go` 354, `rootprobes_test.go` 689, which still
+require both), and both cases require its new words. The History's account of
+the hint (`ops/History-rules-cli-serve.md`, "The config's load") says it too,
+in the same commit.
+
+- C5, main's hint put back: red in both,
+  `TestALoadThatDidNotFinishFailsTheConfigLine` ("config-file =
+  {...Hint:loading it checks ...}") and
+  `TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories`
+  ("config-file's hint does not say what holds the load: ...").
+
+### The gates
+
+In the slot (a hold of the build lock, where no other worker's build runs; got
+at once at 22:52, 22:56 and 23:24, the host idle), on d1dfc1d3; "loaded" is
+beside 16 busy processes, the host's core count, in the slot:
+
+- The controls above, one batch of 3.5 min; its unedited baseline green.
+- `go vet ./...` with the tags as GOOS linux, darwin and windows: clean (3 s,
+  8 s and 8 s).
+- `-race -count=50`, each case a run of its own from race binaries built at
+  d1dfc1d3, four lanes at GOMAXPROCS 2: the touched cases,
+  `TestACancelledConsoleDoctorRunSaysItWasStopped`,
+  `TestADoctorRunTakesOnlyTheReadOfItsOwnConfig`,
+  `TestTheLoopbackProbeOutlivesTheGatherThatBeganTheRead`,
+  `TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories` and
+  internal/doctor's `TestALoadThatDidNotFinishFailsTheConfigLine`, 50 of 50
+  each, and three cases on the code they cover,
+  `TestAWaitOnASharedReadEndsAloneWithItsContext`,
+  `TestDoctorRunsInOneProcessShareOneReadOfTheBox` and
+  `TestBridgeDoctorSaysTheLoopbackRouteIsNotServing`, 50 of 50 each; no race
+  reported (54 s). Loaded, cmd/bridge's four touched cases 50 of 50 each, their
+  slowest runs 0.02, 0.08, 0.07 and 0.33 s (17 s).
+- `go test -race -count=1 -p 3 -parallel 8 -timeout 120m ./cmd/bridge/
+  ./internal/api/ ./internal/doctor/`, GOMAXPROCS 8: ok, 1,579.8 s, 150.1 s
+  and 11.0 s.
+- go1.27.3's gofmt lists none of the Go files B650FU touches.
+- The rules patch, on a copy of d1dfc1d3's tree with this record appended and
+  the patch applied there (`git apply` with `GIT_CEILING_DIRECTORIES` set; git's
+  directory the worktree's): the applied `output.md` is the bytes the patch was
+  built from; `make docs-check`'s four steps pass (the budgets ok, `output.md`
+  78,141 bytes from 77,779, the worst load 77.3 %, `config-lifecycle.md` at
+  99.9 % still the closest); `verify_moves.py` passes over d1dfc1d3 with the one
+  line edited, and over 9acee209 with that line and the History's "The config's
+  load" paragraph edited, nothing moved and no citation broken; and
+  `TestEveryCitedTestNameExists` passes over the copy, and fails on a ghost
+  citation planted in the copy's `output.md`.
 ## 2026-11-15 — B904: the stalled-storage stop test waits for the stall before it stops serve
 
 Branch `fix/b904-serve-stop-stall-test`, from main at 9acee209. Commits:

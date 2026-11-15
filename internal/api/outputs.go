@@ -649,7 +649,9 @@ type MPDInspections struct {
 	mu  sync.Mutex
 	out map[string]*mpdInspection
 	// waiting, when not nil, is told each time a probe begins to wait on an
-	// inspection: a test's hook.
+	// inspection, on the probe's goroutine: a test's hook, which a probe reads
+	// without mu, so set it before any builder given the table probes. Tests
+	// only.
 	waiting func()
 }
 

@@ -334,9 +334,10 @@ func TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn(t *testing.T) {
 // upscale.tempDir set, config.Load's validation resolves every root, so a dead
 // mount held bridge doctor before any check ran. The load is bounded too, the
 // roots probed beside it: config-file fails in the words of a load that did
-// not finish, library-roots names the root, the lines that grade what the
-// config sets say they were not checked, and the run takes the one bound. A
-// config that sets neither loads without asking the root.
+// not finish, its hint naming root validation, or the load's slow read of the
+// file, as what holds it, library-roots names the root, the lines that grade
+// what the config sets say they were not checked, and the run takes the one
+// bound. A config that sets neither loads without asking the root.
 func TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories(t *testing.T) {
 	path, _, dead := rootsInstall(t, true)
 	s := newRootStall(dead)
@@ -351,7 +352,8 @@ func TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories(t *test
 	if line, want := reportLine(got.out, "config-file"), printedLine(doctor.Fail, "config-file", fmt.Sprintf("%s: its load did not finish within %s", path, doctorRootsBound)); line != want {
 		t.Errorf("config-file = %q, want %q", line, want)
 	}
-	if hint := reportHint(got.out, "config-file"); !strings.Contains(hint, "upscale.variantsDir and upscale.tempDir") {
+	if hint := reportHint(got.out, "config-file"); !strings.Contains(hint, "upscale.variantsDir and upscale.tempDir") ||
+		!strings.Contains(hint, "root validation, or the load's slow read of the file, holds it") {
 		t.Errorf("config-file's hint does not say what holds the load: %q", hint)
 	}
 	if hint := reportHint(got.out, "library-roots"); !strings.Contains(hint, fmt.Sprintf("library root %s did not answer within %s", dead, doctorRootsBound)) {
@@ -479,12 +481,18 @@ func TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad(t *testing.T) {
 
 // TestACancelledConsoleDoctorRunSaysItWasStopped: a run whose request goes
 // away before a root's bound says the root was not checked because the run
-// was stopped, never that it did not answer, and comes back at its stop. The
+// was stopped, never that it did not answer, and comes back once stopped. The
 // request goes away once the run waits on the root that does not answer
 // (RootProbes.SetOnRootWaitForTest), the other root's probe having made its
 // stat and its listing (rootStall.probed), so that root is checked however
 // loaded the host; the root's bound, ten minutes, is past the test's own
-// deadline.
+// deadline. Just before the request goes away the case fails on a report the
+// run has published already, and on that alone: the runner publishes on a
+// goroutine of its own and the hook says only that the run is about to wait,
+// so a run that came back on its own just after that look would pass it. That
+// the run came back by its stop is what its library-roots line says: a wait on
+// a root answers that the run was stopped only once the run's context has
+// ended (doctor's waitFor).
 func TestACancelledConsoleDoctorRunSaysItWasStopped(t *testing.T) {
 	const bound = 10 * time.Minute
 	path, healthy, dead := rootsInstall(t, false)
@@ -512,19 +520,17 @@ func TestACancelledConsoleDoctorRunSaysItWasStopped(t *testing.T) {
 	if !s.probed(healthy) {
 		t.Fatalf("the run waits on %s before the probe of %s has made its stat and its listing", dead, healthy)
 	}
-	stopped := make(chan struct{})
-	close(stopped)
+	select {
+	case <-reports:
+		t.Fatal("the run came back before its request went away")
+	default:
+	}
 	cancel()
 	var rep *admin.DoctorReport
 	select {
 	case rep = <-reports:
 	case <-time.After(doctorRootsDeadline):
 		t.Fatalf("the stopped run did not come back within %s", doctorRootsDeadline)
-	}
-	select {
-	case <-stopped:
-	default:
-		t.Error("the run came back before its request went away")
 	}
 	lines := map[string]admin.DoctorCheck{}
 	for _, c := range rep.Checks {
@@ -915,15 +921,23 @@ func TestDoctorRunsInOneProcessShareOneReadOfTheBox(t *testing.T) {
 }
 
 // readTimers stands in for the timers bridge doctor's waits on a read set for
-// their bound (outputsReads.timer): a wait's bound passes only when the test
-// fires its timer, so a case gives a wait up at the instant it chooses and a
-// read that answers is waited for however long it takes; armed hears each
-// timer as a wait sets it.
-type readTimers struct{ armed chan chan time.Time }
+// their bound (outputsReads.timer). The next wait set once capture is armed
+// takes a timer whose bound passes only when the test fires it, so a case
+// gives that wait up at the instant it chooses; armed hears each such timer
+// as the wait sets it. Every other wait takes a timer of the time package's
+// for its bound, bridge doctor's own.
+type readTimers struct {
+	armed   chan chan time.Time
+	capture atomic.Bool
+}
 
 func newReadTimers() *readTimers { return &readTimers{armed: make(chan chan time.Time, 64)} }
 
-func (r *readTimers) timer(time.Duration) (<-chan time.Time, func() bool) {
+func (r *readTimers) timer(d time.Duration) (<-chan time.Time, func() bool) {
+	if !r.capture.CompareAndSwap(true, false) {
+		t := time.NewTimer(d)
+		return t.C, t.Stop
+	}
 	c := make(chan time.Time, 1)
 	r.armed <- c
 	return c, func() bool { return true }
@@ -945,9 +959,10 @@ func (r *readTimers) drain() {
 // itself and is answered by its own read, never the one out; a run over the
 // first config again, while its read is out, waits on it; and a run after
 // that read has answered reads the box afresh. The waits on the read the
-// held root keeps are given up through their timers (readTimers); every other
-// wait keeps bridge doctor's bound, which no healthy read comes near, under
-// the test's deadline.
+// held root keeps are given up through their timers (readTimers), which the
+// case captures for those runs alone; every other wait keeps bridge doctor's
+// bound on a timer of the time package's, which no healthy read comes near,
+// its build ending within the builder's own limit, under the test's deadline.
 func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 	path, held := writePlayerConfig(t)
 	other := filepath.Join(filepath.Dir(held), "Songs")
@@ -974,11 +989,12 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 		return checks
 	}
 	// givenUp is a run over the config as it stands whose wait on the read
-	// the held root keeps the test gives up: its timer fired once the run has
-	// set it and holding says the read it waits on is held at the box (the
-	// box's began, for the run that begins it) or that it waits on one another
-	// run began (joined), so the read has reached the box whatever the host's
-	// load.
+	// the held root keeps the test gives up: its timer, captured as the run
+	// sets it (capture, armed just before the run begins, while no other run
+	// waits on a read), fired once holding says the read it waits on is held
+	// at the box (the box's began, for the run that begins it) or that it
+	// waits on one another run began (joined), so the read has reached the
+	// box whatever the host's load.
 	givenUp := func(what string, holding <-chan struct{}) []doctor.Check {
 		t.Helper()
 		timers.drain()
@@ -986,6 +1002,7 @@ func TestADoctorRunTakesOnlyTheReadOfItsOwnConfig(t *testing.T) {
 		drained(joined)
 		check := doctorOutputChecklist(path, mustLoadConfig(t, path), box.seam(held))
 		out := make(chan []doctor.Check, 1)
+		timers.capture.Store(true)
 		go func() { out <- check(context.Background()) }()
 		var fire chan time.Time
 		select {
@@ -1138,6 +1155,109 @@ func TestAWaitOnASharedReadEndsAloneWithItsContext(t *testing.T) {
 	letGo()
 	if a := wait("the second gather", second); a.err != nil || len(a.resp.Outputs) != 1 {
 		t.Errorf("the second gather answered %+v, %v; want the read's body", a.resp, a.err)
+	}
+}
+
+// TestTheLoopbackProbeOutlivesTheGatherThatBeganTheRead: the body of the read
+// every bridge doctor gather over a config waits on carries the loopback
+// route's base URL, which its build asks of the route through the probe of
+// the gather that began the read (loopbackAnswer), so no gather's end may end
+// that probe either. A gather on a context of its own begins the read, which
+// the library root holds before its build has asked the route (boxStall: its
+// read of the indexed tracks); the gather's context ends, and it asks the
+// route as its wait gives up (unreadInput); a gather over the same config on
+// Background waits on that read, and once the root answers it is answered by
+// the read's body, which names the route that serves, so its Music line, over
+// a root MPD's music directory does not hold, says the root's tracks play
+// through the route. Red at 9acee209, whose probe took the first gather's
+// context, ended by then: the body named no route, and the waiting gather's
+// Music line failed.
+func TestTheLoopbackProbeOutlivesTheGatherThatBeganTheRead(t *testing.T) {
+	route := startProbedRoute(t, true)
+	path, held := writePlayerConfig(t)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probed := strings.Replace(string(data), "  loopbackPort: 0\n", fmt.Sprintf("  loopbackPort: %d\n", portOf(t, route.BaseURL())), 1)
+	if probed == string(data) {
+		t.Fatal("the player's config sets no loopback port to point at the route")
+	}
+	if err := os.WriteFile(path, []byte(probed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// MPD's music directory holds no library root, so the Music line rests on
+	// the route.
+	music := t.TempDir()
+	_, joined := standInCLIOutputs(t)
+	box := newBoxStall(t, held)
+	setOutputsReadBound(t, doctorRootsDeadline)
+	ctx, cancel := context.WithCancel(context.Background())
+	var gathers sync.WaitGroup
+	// After the bound's cleanup, so before it: the gathers end before the
+	// bound they read is put back.
+	t.Cleanup(func() {
+		cancel()
+		box.letGo()
+		ended := make(chan struct{})
+		go func() { gathers.Wait(); close(ended) }()
+		select {
+		case <-ended:
+		case <-time.After(30 * time.Second):
+			t.Error("a gather was still running 30s after the box answered")
+		}
+	})
+	gather := func(ctx context.Context) <-chan []doctor.Check {
+		check := doctorOutputChecklist(path, mustLoadConfig(t, path), box.seam(music))
+		out := make(chan []doctor.Check, 1)
+		gathers.Add(1)
+		go func() {
+			defer gathers.Done()
+			out <- check(ctx)
+		}()
+		return out
+	}
+	answer := func(what string, ch <-chan []doctor.Check) map[string]doctor.Check {
+		t.Helper()
+		select {
+		case checks := <-ch:
+			lines := map[string]doctor.Check{}
+			for _, c := range checks {
+				lines[c.Name] = c
+			}
+			return lines
+		case <-time.After(doctorRootsDeadline):
+			t.Fatalf("%s did not return within %s", what, doctorRootsDeadline)
+			panic("unreachable")
+		}
+	}
+	first := gather(ctx)
+	select {
+	case <-box.began:
+	case <-time.After(doctorRootsDeadline):
+		t.Fatalf("the first gather's read was not held at the box within %s", doctorRootsDeadline)
+	}
+	cancel()
+	answer("the first gather, its context ended", first)
+	second := gather(context.Background())
+	select {
+	case <-joined:
+	case <-box.began:
+		t.Fatal("the second gather began a read of its own while the first one's was out")
+	case <-time.After(doctorRootsDeadline):
+		t.Fatalf("the second gather did not wait on the first one's read within %s", doctorRootsDeadline)
+	}
+	box.letGo()
+	lines := answer("the second gather", second)
+	if c := lines["player"]; !strings.Contains(c.Summary, boxRead) {
+		t.Errorf("the waiting gather's player line = %q, want the read's body (%q)", c.Summary, boxRead)
+	}
+	const unproven, plays = "Music is not in MPD's music directory", "; it plays through the bridge's loopback HTTP route"
+	if c := lines["music"]; c.Status != doctor.Warn || !strings.HasPrefix(c.Summary, unproven) || !strings.HasSuffix(c.Summary, plays) {
+		t.Errorf("the waiting gather's music line = %+v, want a warn on the read's rule for its root (%q) that ends %q", c, unproven, plays)
+	}
+	if n := box.readsOver(held); n != 1 {
+		t.Errorf("the two gathers began %d reads of the box, want one", n)
 	}
 }
 
