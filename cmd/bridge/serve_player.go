@@ -363,7 +363,10 @@ func startServePlayer(plan servePlayerPlan, w servePlayerWiring) *bridgePlayer {
 // markReady closes ready, once.
 func (p *bridgePlayer) markReady() { p.readyOnce.Do(func() { close(p.ready) }) }
 
-// stop is serve's teardown of the player: it ends it and waits for its
+// stop is serve's teardown of the player: it closes the console's test tones
+// first (closeTones, B601; serve closed them as its stop began, and the
+// supervisor's shutdown closes them again, for an engine that stopped on its
+// own), then ends the player and waits for its
 // supervisor, which stops the OpenHome surface first, then the engine and
 // joins it, and then the backend, each within its bound, before serve's
 // watcher and store close (the caller's defer order). A player whose start or whose state storage is
@@ -374,6 +377,7 @@ func (p *bridgePlayer) stop() {
 	if p.cancel == nil {
 		return
 	}
+	p.closeTones()
 	p.refuseOpenHome(context.Background())
 	p.cancel()
 	bound := p.bounds.discovery + p.bounds.surface + p.bounds.engine + p.bounds.backend + p.bounds.warm + time.Second
@@ -384,6 +388,22 @@ func (p *bridgePlayer) stop() {
 	case <-t.C:
 		playerLog.Warn("player: did not stop within its bound: its start or its state storage is stalled; it is abandoned and ends with the process, and serve keeps its data directory's lock until then",
 			"bound", bound)
+	}
+}
+
+// closeTones closes the console's test tones for good (CloseTones, B601): the
+// one that plays ends with serve_stopping, and none is counted from then on.
+// Serve calls it as its stop begins, before its servers drain and the
+// console's requests end, and stop and the supervisor's shutdown call it again
+// first; any goroutine may, any number of times. The backend is set before
+// ready closes, and a player not ready yet has admitted no tone, since the
+// console's view asks only a player that runs.
+func (p *bridgePlayer) closeTones() {
+	if p.cancel == nil || !signalled(p.ready) {
+		return
+	}
+	if tb := tonesOf(p.be); tb != nil {
+		tb.CloseTones()
 	}
 }
 

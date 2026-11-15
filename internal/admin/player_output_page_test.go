@@ -494,13 +494,14 @@ func TestThePlayerPageOffersTheOpenHomeSwitchBelowThePlayersOwn(t *testing.T) {
 // playerPageHarnessRun drives the shipped renderPlayerOutput over the cases
 // and prints what each left of the switch panel, the OpenHome switch and the
 // status line. The functions it calls that these cases do not look at are
-// stubs (the transports' table, the pending list), and every other one is
-// extracted from app.js as shipped; the panel, the OpenHome box and its note
-// start hidden, as the template ships them.
+// stubs (the transports' table, the pending list, the test tone's line), and
+// every other one is extracted from app.js as shipped; the panel, the
+// OpenHome box and its note start hidden, as the template ships them.
 const playerPageHarnessRun = `
 let playerOutputLatest = null;
 function renderPlayerOutputTransports() {}
 function renderPlayerOutputPending() {}
+function renderPlayerOutputTone() {}
 const input = JSON.parse(await (await import("node:fs/promises")).readFile(process.argv[2], "utf8"));
 const out = [];
 for (const c of input.cases) {
