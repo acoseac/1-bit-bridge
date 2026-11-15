@@ -9,7 +9,8 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
-	"github.com/acoseac/1-bit-bridge/internal/testtone"
+	"github.com/acoseac/1-bit-bridge/internal/player/testtone"
+	"github.com/acoseac/1-bit-bridge/internal/tonebounds"
 )
 
 // The console's test tone (B601): a quiet 1 kHz sine through the DAC the
@@ -38,8 +39,8 @@ const ToneYield = time.Second
 // still held (the engine's ReleaseTimeout).
 const ToneStopWait = 2 * time.Second
 
-// ToneRequest is a tone the console asks for: its peak in dBFS (testtone.Check)
-// and its length in whole seconds (testtone.CheckSeconds).
+// ToneRequest is a tone the console asks for: its peak in dBFS
+// (tonebounds.Check) and its length in whole seconds (tonebounds.CheckSeconds).
 type ToneRequest struct {
 	LevelDBFS float64
 	Seconds   int
@@ -236,10 +237,10 @@ func (t *toneHold) ended() ToneOutcome {
 // its context has ended Tone waits at most ToneStopWait for the result, then
 // answers stop_unconfirmed, the slot still held.
 func (b *Backend) Tone(ctx context.Context, req ToneRequest) ToneResult {
-	if testtone.Check(req.LevelDBFS) != nil {
+	if tonebounds.Check(req.LevelDBFS) != nil {
 		return ToneResult{Outcome: ToneLevelRefused}
 	}
-	if testtone.CheckSeconds(req.Seconds) != nil {
+	if tonebounds.CheckSeconds(req.Seconds) != nil {
 		return ToneResult{Outcome: ToneLengthRefused}
 	}
 	b.toneEntering()

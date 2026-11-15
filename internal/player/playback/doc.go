@@ -58,10 +58,11 @@
 //
 // # The console's test tone (B601)
 //
-// Tone plays a quiet 1 kHz sine (internal/testtone, -30 dBFS or quieter, 1 to
-// 30 seconds) through the bound DAC while the player is stopped, PCM alone: the
-// device slot's third holder beside a session and the silent probe. It is
-// counted among the backend's goroutines first, under gmu, which serve's stop
+// Tone plays a quiet 1 kHz sine (internal/player/testtone's, by
+// internal/tonebounds' bounds: -30 dBFS or quieter, 1 to 30 seconds) through
+// the bound DAC while the player is stopped, PCM alone: the device slot's third
+// holder beside a session and the silent probe. It is counted among the
+// backend's goroutines first, under gmu, which serve's stop
 // closes (CloseTones), so Wait joins every tone it did not refuse; then it
 // takes the slot in one step under the backend's lock that refuses by word,
 // never waiting: the supervisor's gate shut (ToneOutput: output_unknown until

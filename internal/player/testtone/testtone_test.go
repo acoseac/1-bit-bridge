@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"github.com/acoseac/1-bit-bridge/internal/tonebounds"
 )
 
 // loudest is the tone's ceiling as this test writes it, apart from the
@@ -73,38 +74,39 @@ func sample(t *testing.T, packed []byte, n int, f format.ALSAFormat, bits int) i
 	return v / scale
 }
 
-// TestTheToneRefusesALevelAboveMinus30 (B601): Check and Build refuse every
-// level above -30 dBFS, below -90 and every value that is no number, and take
-// -30, -40 and -90; the ceiling is this test's own literal, so a constant
-// raised past it fails here.
+// TestTheToneRefusesALevelAboveMinus30 (B601): the bounds' Check and Build
+// refuse every level above -30 dBFS, below -90 and every value that is no
+// number, and take -30, -40 and -90, and CheckSeconds every length outside 1
+// to 30 seconds; the ceiling is this test's own literal, so a constant raised
+// past it fails here.
 func TestTheToneRefusesALevelAboveMinus30(t *testing.T) {
 	for _, level := range []float64{-29.99, -20, 0, 6, -90.01, math.NaN(), math.Inf(1), math.Inf(-1), math.Nextafter(loudest, 0)} {
-		if err := Check(level); err == nil {
-			t.Errorf("Check(%g) took it: the tone is never louder than %g dBFS", level, loudest)
+		if err := tonebounds.Check(level); err == nil {
+			t.Errorf("tonebounds.Check(%g) took it: the tone is never louder than %g dBFS", level, loudest)
 		}
 		if _, err := Build(48000, 24, format.S243LE, level); err == nil {
-			t.Errorf("Build at %g dBFS built a tone: it asks Check first", level)
+			t.Errorf("Build at %g dBFS built a tone: it asks tonebounds.Check first", level)
 		}
 	}
 	for _, level := range []float64{loudest, -40, -90} {
-		if err := Check(level); err != nil {
-			t.Errorf("Check(%g) refused it: %v", level, err)
+		if err := tonebounds.Check(level); err != nil {
+			t.Errorf("tonebounds.Check(%g) refused it: %v", level, err)
 		}
 		if _, err := Build(48000, 24, format.S243LE, level); err != nil {
 			t.Errorf("Build at %g dBFS: %v", level, err)
 		}
 	}
-	if Loudest > loudest {
-		t.Errorf("Loudest is %g dBFS, above %g", Loudest, loudest)
+	if tonebounds.Loudest > loudest {
+		t.Errorf("tonebounds.Loudest is %g dBFS, above %g", tonebounds.Loudest, loudest)
 	}
 	for _, s := range []int{0, -1, 31, 600} {
-		if CheckSeconds(s) == nil {
-			t.Errorf("CheckSeconds(%d) took it: the console's tone lasts 1 to 30 seconds", s)
+		if tonebounds.CheckSeconds(s) == nil {
+			t.Errorf("tonebounds.CheckSeconds(%d) took it: the console's tone lasts 1 to 30 seconds", s)
 		}
 	}
 	for _, s := range []int{1, 10, 30} {
-		if err := CheckSeconds(s); err != nil {
-			t.Errorf("CheckSeconds(%d): %v", s, err)
+		if err := tonebounds.CheckSeconds(s); err != nil {
+			t.Errorf("tonebounds.CheckSeconds(%d): %v", s, err)
 		}
 	}
 }
@@ -149,7 +151,7 @@ func TestTheToneIsTheSineItsLevelNames(t *testing.T) {
 				if tone.Amplitude != amp || tone.FullScale != full {
 					t.Errorf("%s/%d at %g dBFS: amplitude %d of %d, want %d of %d", p.f, p.bits, level, tone.Amplitude, tone.FullScale, amp, full)
 				}
-				if tone.Frames*ToneHz%rate != 0 || tone.Frames*1000%rate != 0 {
+				if tone.Frames*tonebounds.ToneHz%rate != 0 || tone.Frames*1000%rate != 0 {
 					t.Errorf("%d frames at %d Hz is not a whole number of 1 kHz cycles", tone.Frames, rate)
 				}
 				want := func(n int) int64 {

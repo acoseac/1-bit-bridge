@@ -15,16 +15,18 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
-	"github.com/acoseac/1-bit-bridge/internal/testtone"
+	"github.com/acoseac/1-bit-bridge/internal/player/testtone"
+	"github.com/acoseac/1-bit-bridge/internal/tonebounds"
 )
 
 // The test tone: a 1 kHz sine, never louder than pcmTestLoudest dBFS,
-// because the hardware gate is run on headphones. The tone and its bounds are
-// internal/testtone's, which the console's tone (B601) shares.
+// because the hardware gate is run on headphones. The tone is
+// internal/player/testtone's and its bounds internal/tonebounds', which the
+// console's tone (B601) shares.
 const (
-	pcmTestToneHz   = testtone.ToneHz
-	pcmTestLoudest  = testtone.Loudest
-	pcmTestQuietest = testtone.Quietest
+	pcmTestToneHz   = tonebounds.ToneHz
+	pcmTestLoudest  = tonebounds.Loudest
+	pcmTestQuietest = tonebounds.Quietest
 )
 
 // pcmTestDevice is what the harness drives: an *alsapcm.Device, or a
@@ -270,7 +272,7 @@ func pcmTestRunFrom(device, rate, bits int, alsaFormat string, seconds int, leve
 	if seconds < 1 || seconds > 600 {
 		return bad("--seconds is 1 to 600, not %d", seconds)
 	}
-	if testtone.Check(level) != nil {
+	if tonebounds.Check(level) != nil {
 		return bad("--level is %g to %g dBFS, not %g: the tone is never louder than %g dBFS", pcmTestQuietest, pcmTestLoudest, level, pcmTestLoudest)
 	}
 	return pcmTestRun{rate: rate, bits: bits, format: f, seconds: seconds, level: level}, 0
