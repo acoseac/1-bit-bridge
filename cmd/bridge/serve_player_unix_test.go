@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil/fsutiltest"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
-	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
 
 // TestServeStopWithThePlayersStorageStalled: the player's start stalls on
@@ -28,25 +26,21 @@ import (
 // bound, says so and returns, exit 0, and keeps its data directory's lock
 // while the stalled start may still write there, so a second serve of that
 // directory in this process is refused until the stall ends; then the lock
-// is let go, and the engine the start went on to build never runs.
+// is let go, and the engine the start went on to build never runs. The stop
+// comes once the start is held: before that, a stop is one the start sees at
+// its own looks at it, and it ends there, as it should.
 func TestServeStopWithThePlayersStorageStalled(t *testing.T) {
 	persistentMedium(t)
 	rec := loggingtest.Record(t)
-	var startOnce sync.Once
-	starts := make(chan struct{})
-	letStart := func() { startOnce.Do(func() { close(starts) }) }
+	stall := newPlayerStall()
+	// The stop's bound is the sum of these and a second (bridgePlayer.stop):
+	// with OpenHome off and no engine run, the surface's, discovery's and the
+	// warm build's bound nothing else, so they are short here.
 	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn(),
-		bounds: servePlayerBounds{engine: 300 * time.Millisecond, backend: 300 * time.Millisecond},
-		seams:  &servePlayerSeams{engineConfig: func(*engine.Config) { <-starts }}})
-	// However the test ends, the stall is let go before its directories go.
-	t.Cleanup(func() {
-		letStart()
-		select {
-		case <-ps.player.settled:
-		case <-serveGiveUp(t):
-			t.Errorf("the player did not end once its stall was let go")
-		}
-	})
+		bounds: servePlayerBounds{engine: 300 * time.Millisecond, backend: 300 * time.Millisecond,
+			surface: 100 * time.Millisecond, discovery: 100 * time.Millisecond, warm: 100 * time.Millisecond},
+		seams: &servePlayerSeams{engineConfig: stall.hold}, stall: stall})
+	stall.await(t, ps)
 	if code := ps.health(t); code != http.StatusOK {
 		t.Fatalf("GET /v1/health while the player's storage stalls: %d", code)
 	}
@@ -65,7 +59,7 @@ func TestServeStopWithThePlayersStorageStalled(t *testing.T) {
 	if !errors.As(err, &held) {
 		t.Fatalf("a second serve's lock with the player stalled: %v, want it held", err)
 	}
-	letStart()
+	stall.letGo()
 	select {
 	case <-ps.player.settled:
 	case <-serveGiveUp(t):
