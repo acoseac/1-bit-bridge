@@ -601,6 +601,51 @@ func TestEveryEngineReasonHasItsFault(t *testing.T) {
 	}
 }
 
+// TestATransportWriteWhileTheConfigurationIsReservedIsRefused pins the
+// engine's configuration reservation through the SOAP layer (B728 B9 PR 3):
+// with two entries and a reservation held on the player's engine, Play, SeekId
+// of the second, SeekIndex 1, Next and Previous each answer 501, Action Failed
+// (the engine's `configuring`), Id reading the first as before and
+// TransportState Stopped, no session started; Stop, Pause, an Insert (its
+// NewId), a DeleteId and SetRepeat succeed beside it; and once the
+// reservation is let go, Play succeeds and starts.
+func TestATransportWriteWhileTheConfigurationIsReservedIsRefused(t *testing.T) {
+	p := newTestPlayer(t)
+	h := p.handler("")
+	a := p.add(uriOf(goldenID), nil)
+	b := p.add(uriOf(trackB), nil)
+	lease, err := p.eng.ReserveConfiguration(context.Background())
+	must(t, "the reservation", err)
+	for _, w := range [][]string{{"Play"}, {"SeekId", "Value", u(b)}, {"SeekIndex", "Value", "1"}, {"Next"}, {"Previous"}} {
+		if r := soapFault(t, h, playlist, w[0], w[1:]...); r.fault != errActionFailed {
+			t.Errorf("%s while the configuration is reserved: fault %d, want 501", w[0], r.fault)
+		}
+	}
+	if got := read(t, h, playlist, "Id")["Value"]; got != u(a) {
+		t.Errorf("Id %s after the refused writes, want the first, %d", got, a)
+	}
+	if got := read(t, h, playlist, "TransportState")["Value"]; got != "Stopped" {
+		t.Errorf("TransportState %s after the refused writes, want Stopped", got)
+	}
+	if n := p.be.sessionCount(); n != 0 {
+		t.Errorf("the refused writes started %d sessions", n)
+	}
+	read(t, h, playlist, "Stop")
+	read(t, h, playlist, "Pause")
+	c := newID(t, h, b, uriOf(trackC), "")
+	read(t, h, playlist, "DeleteId", "Value", u(c))
+	read(t, h, playlist, "SetRepeat", "Value", "1")
+	if got := queueOf(t, h); !slices.Equal(got, []uint32{a, b}) {
+		t.Errorf("the queue %v after the edits beside the reservation, want a, b", got)
+	}
+	p.eng.ReleaseConfiguration(lease)
+	read(t, h, playlist, "Play")
+	p.startUnderWay()
+	if s := p.be.session(t, 1); s.first.Entry != a {
+		t.Errorf("Play once the reservation was let go started %d, want the first, %d", s.first.Entry, a)
+	}
+}
+
 // TestATransportWritesAnswerIsTheEnginesAdmission pins transportFault: nil and
 // a superseded playback are success; a cancellation of a command the engine
 // admitted (it may have run) is success, and one it never admitted (wrapping

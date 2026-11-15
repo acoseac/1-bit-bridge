@@ -14,8 +14,10 @@
 // not (admission is decided once, between the caller and the owner: the
 // caller abandons a command it stops waiting for that the owner has not
 // admitted yet, and the owner refuses it in turn); one whose context ends
-// after its admission may have run, and its refusal does not wrap it. Once
-// admitted its effect is applied, or recorded as the pending
+// after its admission may have run, and its refusal does not wrap it, but for
+// a configuration reservation, whose grant the method lets go again ("The
+// configuration reservation" below). Once admitted its effect is applied, or
+// recorded as the pending
 // intent while a release is under way, and its reply is sent once that
 // effect is decided, which can be after a backend call. The reply is sent
 // after the snapshot of the step that decided it, so a caller reads its own
@@ -40,9 +42,10 @@
 // write, at most ReserveTimeout (5 s) after the first of them parked, and
 // without asking its context again; Play and Pause for a Pause, a Resume
 // or a start under way, and the other transport commands but Stop behind
-// them. Stop, the output's reports, the maintenance commands and the modes
-// never wait. A Stop, or a report that stops playback, answers the
-// transport commands still waiting as it runs (a Pause nil, the rest
+// them. Stop, the output's reports, the maintenance commands, the modes and
+// the configuration reservation's two commands never wait. A Stop, or a
+// report that stops playback, answers the transport commands still waiting
+// as it runs (a Pause nil, the rest
 // ReasonOvertaken or the output's reason: none of them ran, so none changed
 // anything), and EnterMaintenance refuses every waiting command.
 //
@@ -92,10 +95,11 @@
 // session) moves, with no call; any other release, or a pause with no
 // session no seek made, refuses. In every state Play, PlayID, PlayIndex,
 // Next, Previous and a seek that plays are refused while a release is
-// unconfirmed; whatever starts a session, or will, is refused while the
-// output is unknown or unavailable (Next and Previous with it, past the end
-// aside), and an empty queue refuses it; and everything is refused once
-// shutdown begins. The policy function, policy, is the table: Next and
+// unconfirmed; whatever starts a session, or will (Next and Previous with it,
+// past the end aside), is refused while the output is unknown or unavailable
+// and while a configuration reservation is held (ReasonConfiguring), and an
+// empty queue refuses it; and everything is refused once shutdown begins.
+// The policy function, policy, is the table: Next and
 // Previous select and play in every state, paused and stopped included, as
 // PlayID and PlayIndex do, as controllers use them and SeekId and SeekIndex,
 // and as OpenHome's reference Playlist source (ohPipeline's SourcePlaylist)
@@ -331,6 +335,29 @@
 // transport stopped, never resumed. A hold expires after
 // Config.MaintenanceTTL unless renewed (RenewMaintenance), which also ends
 // one whose holder left before the reply.
+//
+// # The configuration reservation
+//
+// A write that must not run beside playback, the DAC's DSD choice being the
+// one today (B728 B9 PR 3), holds the configuration reservation
+// (ReserveConfiguration). The owner grants it in the one step that finds the
+// transport stopped with nothing under way: no session starting, live, paused
+// or releasing, and no release unconfirmed (ReasonNotStopped otherwise);
+// maintenance and the shutdown refuse it as they refuse every command. While
+// one is held, whatever starts a session, or will, is refused
+// ReasonConfiguring wherever the output's refusal is asked, after it,
+// changing nothing; Stop, Pause, the edits, the modes and the output's reports
+// run as they would. The grant is never lost to its caller: the owner is asked
+// on a context that does not end, and a grant the caller's context outlived is
+// let go before the method returns, which answers ReasonCancelled wrapping
+// ErrNotAdmitted, though the owner admitted it. Its release
+// (ReleaseConfiguration) is a command that answers once the lease is gone from
+// the snapshot it publishes, never a message a later Play could overtake. The
+// lease is its holder's alone, in no snapshot (Snapshot.ConfigurationReserved
+// says whether one is held), and has no expiry: the holder lets it go once its
+// write has returned. EnterMaintenance is not refused while one is held, a
+// residual: only the harness's bridge output play enters maintenance, and it
+// holds none.
 //
 // # OpenHome
 //
