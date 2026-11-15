@@ -609,6 +609,8 @@ const readAttempts = 5
 // read that answers its first call with each refusal in turn and, where then
 // is not nil, its second with then, an error platform takes standing in for a
 // scanner's refusal of the fresh file, and reads the file on every other call.
+// It wants the covers, the refusal asked again, every later call answering
+// the covers or an error platform takes, and at most readAttempts calls.
 func readsPastOneRefusal(t *testing.T, platform func(error) bool, then error, refusals ...error) {
 	t.Helper()
 	dataDir := pendingCoverState(t)
@@ -626,8 +628,12 @@ func readsPastOneRefusal(t *testing.T, platform func(error) bool, then error, re
 			answers = append(answers, err)
 			return b, err
 		})
-		if err != nil || len(answers) != 2 || len(covers) != 1 || covers[heldCover] != 0 {
-			t.Errorf("a read refused with %q, then %v = %v, %v, its calls answering %v; want %s at 0 attempts after 2 calls", refusal, then, covers, err, answers, heldCover)
+		later := true
+		for _, a := range answers[1:] {
+			later = later && (a == nil || platform(a))
+		}
+		if err != nil || len(answers) < 2 || len(answers) > readAttempts || !later || len(covers) != 1 || covers[heldCover] != 0 {
+			t.Errorf("a read refused with %q, then %v = %v, %v, its calls answering %v; want %s at 0 attempts after 2 to %d calls, each after the first the covers or the platform's refusal", refusal, then, covers, err, answers, heldCover, readAttempts)
 		}
 	}
 }
