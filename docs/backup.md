@@ -227,6 +227,21 @@ it makes a data directory that is not there yet, and refuses one it cannot
 make or use (a regular file or a link to nothing where it goes, or above it),
 naming the path, before it writes anything.
 
+Restore also refuses, before it asks you to confirm and with nothing
+restored, while any bridge command has the library database open: a `bridge
+scan`, `analyze` or `upscale`, a `bridge library add` or `remove`, a `bridge
+backup`, or `bridge doctor`. Stop it, then restore again. It refuses as well
+where the data directory's storage grants no file locks, since it cannot then
+show that nothing has the database open: put the data directory on storage
+that grants them. While restore runs, every other bridge command refuses to
+open the database.
+
+While an update the bridge installed waits to be confirmed after a start that
+did not end cleanly, restore refuses to replace the database, with nothing
+restored. A restore made while an update is on probation keeps that update
+from being rolled back: the previous version may not read the database the
+restore put in place.
+
 Before it asks you to confirm, restore looks at the snapshot. It refuses at
 once, with nothing restored, while a check, a prune or a restore of those
 snapshots that did not end still holds them, and it refuses a snapshot whose
