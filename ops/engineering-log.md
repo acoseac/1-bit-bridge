@@ -100470,3 +100470,46 @@ the stand-in's test 1.57 to 1.59 s, the composition case 0.11 to 0.13 s;
 the package 163.1 s). cmd/bridge's `TestEveryCitedTestNameExists`,
 `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
 the tree with this update.
+
+### Round 3: the composition cases take a later platform refusal
+
+`readsPastOneRefusal` wanted exactly two calls, while its calls after the
+injected refusal are real reads of a freshly written state file: on Windows a
+scanner can refuse one of them too, and the composed predicate's third call
+returning the covers would have failed both composition cases. Never seen;
+the hazard is the code's. Commits: b4121464 (the cases, red first),
+ac6d2109 (the assertion), then this update.
+
+The helper now takes the platform's predicate and a second refusal (`then`),
+injected on the second call where it is not nil, and wants the covers with no
+error, at least two calls, every call after the first answering the covers or
+an error the platform's predicate takes, and at most atomicwrite's five
+attempts (`readAttempts`). Each composition case runs it once without a
+second refusal and once with one: `errPlatformForTest` in
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore`, whose predicate is
+installed before `retryStandIn`, and `ERROR_SHARING_VIOLATION` in
+`TestTheStandInRetryKeepsWindowsOwnRetry`, which runs on Windows alone and
+has not run yet.
+
+Red first at b4121464, the exact count kept: the portable case's pass with a
+second refusal failed for both its refusals, the covers read after three
+calls; its pass without one passed. Controls on ac6d2109, predicted in a file
+first, the bytes put back, `git status` empty after:
+- The exact count back: the pass with a second refusal red for both
+  refusals, as predicted.
+- The seam replacing again: red where predicted (`errPlatformForTest` in
+  both passes) and wider: in the pass with a second refusal `errBusyForTest`
+  failed too, since that pass's second refusal is `errPlatformForTest`, which
+  the replacing seam no longer asks again on.
+
+Runs on ac6d2109: `go vet ./cmd/bridge/` with the tags for linux/amd64,
+linux/386 and windows/amd64, clean; its windows/amd64 test binary builds;
+go1.27.3's gofmt lists neither changed file. In the build slot, the host
+otherwise idle, one go test of the harvest tests and both composition cases
+50 times under -race: `TestTheHarvestRunsWithEnrichmentOff`, the stand-in's
+test and the portable composition case 50 of 50 each (1.49 to 1.90 s, 1.58 to
+1.59 s and 0.43 to 0.44 s a run), no data race, the package 178.7 s; the
+Windows case, named in the selection, does not build on this host, and its
+run is windows-latest's. cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this update.
