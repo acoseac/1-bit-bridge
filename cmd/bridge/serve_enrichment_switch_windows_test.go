@@ -13,6 +13,15 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
+// TestTheStandInRetryKeepsWindowsOwnRetry: with the stand-in hold's retry in
+// place, as TestTheHarvestHelperReadsPastAStandInHold has it, a read refused
+// once with Windows' sharing violation, then once with access denied, is
+// still asked again and returns the covers (backlog B898).
+func TestTheStandInRetryKeepsWindowsOwnRetry(t *testing.T) {
+	retryStandIn(t)
+	readsPastOneRefusal(t, windows.ERROR_SHARING_VIOLATION, windows.ERROR_ACCESS_DENIED)
+}
+
 // TestTheHarvestHelperReadsPastAHoldOnTheStateFile: the harvest helper's read
 // waits out a handle on the state file that shares nothing, the refusal main
 // bf622968's gate met at its poll for the settled covers (backlog B898), let

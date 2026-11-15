@@ -575,19 +575,74 @@ func pendingCoversNow(t *testing.T, dataDir string, read func(string) ([]byte, e
 	return covers, true
 }
 
-// readPastAHold runs the harvest helper's read past a hold on the state file,
-// let go by the read at a refusal it heard, held throughout, and in
-// eventually's form; hold returns the read and the let go, refused its refusal.
-func readPastAHold(t *testing.T, hold func(t *testing.T, path string) (read func(string) ([]byte, error), letGo func()), refused func(error) bool) {
-	const mbid = "77777777-7777-4777-8777-777777777777"
-	dataDir := t.TempDir()
+// heldCover is the pending cover pendingCoverState's file holds.
+const heldCover = "77777777-7777-4777-8777-777777777777"
+
+// pendingCoverState writes, in a data dir of its own, a harvest state file
+// holding heldCover at 0 attempts, through the harvest's own store.
+func pendingCoverState(t *testing.T) (dataDir string) {
+	dataDir = t.TempDir()
 	state, err := atlasharvest.OpenStateStore(harvestStatePath(dataDir))
 	if err == nil {
-		err = state.AddPendingCovers([]string{mbid})
+		err = state.AddPendingCovers([]string{heldCover})
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
+	return dataDir
+}
+
+// retryStandIn has atomicwrite ask again on errBusyForTest, the stand-in
+// hold's refusal, as well as on what it asked again on before (on Windows the
+// platform's sharing violation and access denied), and returns its predicate:
+// a process-global seam, so a test that calls it does not call t.Parallel.
+func retryStandIn(t *testing.T) func(error) bool {
+	busy := func(err error) bool { return errors.Is(err, errBusyForTest) }
+	t.Cleanup(atomicwrite.SetReadRetryableForTest(busy))
+	return busy
+}
+
+// readsPastOneRefusal reads the covers of a state file of its own through a
+// read refused once with each refusal in turn, and wants them after a second.
+func readsPastOneRefusal(t *testing.T, refusals ...error) {
+	t.Helper()
+	dataDir := pendingCoverState(t)
+	for _, refusal := range refusals {
+		reads := 0
+		covers, err := readPendingCovers(t.Context(), dataDir, func(p string) ([]byte, error) {
+			if reads++; reads == 1 {
+				return nil, &os.PathError{Op: "open", Path: p, Err: refusal}
+			}
+			return os.ReadFile(p)
+		})
+		if err != nil || reads != 2 || len(covers) != 1 || covers[heldCover] != 0 {
+			t.Errorf("a read refused once with %q = %v, %v after %d reads; want %s at 0 attempts after 2", refusal, covers, err, reads, heldCover)
+		}
+	}
+}
+
+// errPlatformForTest stands in for an error the platform's own predicate
+// asks again on, which on Linux and macOS no error is.
+var errPlatformForTest = errors.New("an error the platform asks again on")
+
+// TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore: the stand-in hold's
+// retry adds errBusyForTest to what atomicwrite asked again on before it and
+// replaces none of it, so the stand-in's test still waits out a refusal of the
+// platform's own (on Windows a scanner's hold of the file, backlog B898). A
+// predicate standing in for the platform's is installed first: synthetic
+// coverage of the composition on every host; Windows' own codes are
+// TestTheStandInRetryKeepsWindowsOwnRetry's, on Windows alone.
+func TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore(t *testing.T) {
+	t.Cleanup(atomicwrite.SetReadRetryableForTest(func(err error) bool { return errors.Is(err, errPlatformForTest) }))
+	retryStandIn(t)
+	readsPastOneRefusal(t, errPlatformForTest, errBusyForTest)
+}
+
+// readPastAHold runs the harvest helper's read past a hold on the state file,
+// let go by the read at a refusal it heard, held throughout, and in
+// eventually's form; hold returns the read and the let go, refused its refusal.
+func readPastAHold(t *testing.T, hold func(t *testing.T, path string) (read func(string) ([]byte, error), letGo func()), refused func(error) bool) {
+	dataDir := pendingCoverState(t)
 	t.Run("let go at a refusal its read heard", func(t *testing.T) {
 		read, letGo := hold(t, harvestStatePath(dataDir))
 		refusals := 0
@@ -599,8 +654,8 @@ func readPastAHold(t *testing.T, hold func(t *testing.T, path string) (read func
 			}
 			return b, err
 		})
-		if err != nil || refusals == 0 || len(covers) != 1 || covers[mbid] != 0 {
-			t.Errorf("the covers past a hold let go at its first refusal = %v, %v after %d refusals; want %s at 0 attempts, past a refusal", covers, err, refusals, mbid)
+		if err != nil || refusals == 0 || len(covers) != 1 || covers[heldCover] != 0 {
+			t.Errorf("the covers past a hold let go at its first refusal = %v, %v after %d refusals; want %s at 0 attempts, past a refusal", covers, err, refusals, heldCover)
 		}
 	})
 	t.Run("held throughout", func(t *testing.T) {
@@ -623,18 +678,17 @@ func readPastAHold(t *testing.T, hold func(t *testing.T, path string) (read func
 			answers, covers = append(answers, ok), got
 			return ok
 		}, "the covers past a hold let go once a poll was refused throughout")
-		if len(answers) < 2 || answers[0] || len(covers) != 1 || covers[mbid] != 0 {
-			t.Errorf("the polls answered %v, then %v; want not yet, then %s at 0 attempts", answers, covers, mbid)
+		if len(answers) < 2 || answers[0] || len(covers) != 1 || covers[heldCover] != 0 {
+			t.Errorf("the polls answered %v, then %v; want not yet, then %s at 0 attempts", answers, covers, heldCover)
 		}
 	})
 }
 
 // TestTheHarvestHelperReadsPastAStandInHold runs readPastAHold on every host,
-// its hold a read answering errBusyForTest until let go, which atomicwrite asks
-// again on through a process-global seam: it does not call t.Parallel.
+// its hold a read answering errBusyForTest until let go, which retryStandIn
+// has atomicwrite ask again on through a process-global seam: no t.Parallel.
 func TestTheHarvestHelperReadsPastAStandInHold(t *testing.T) {
-	busy := func(err error) bool { return errors.Is(err, errBusyForTest) }
-	t.Cleanup(atomicwrite.SetReadRetryableForTest(busy))
+	busy := retryStandIn(t)
 	readPastAHold(t, func(t *testing.T, path string) (func(string) ([]byte, error), func()) {
 		held := true
 		return func(p string) ([]byte, error) {
