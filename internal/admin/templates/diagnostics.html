@@ -209,10 +209,12 @@
     </div>
 
     <p class="hint" id="logs-redact-hint" hidden>
-      Replaces absolute filesystem paths and non-loopback IPs. Library-relative
-      paths and loopback addresses are kept, because they identify nobody and
-      are usually the reason the line is being read. This is a courtesy pass,
-      not an anonymiser — read the file before posting it somewhere public.
+      Replaces absolute filesystem paths and non-loopback IPs, and drops a DAC's
+      product string from the player's lines that name a DAC, keeping its USB
+      IDs. Library-relative paths and loopback addresses are kept, because they
+      identify nobody and are usually the reason the line is being read. This
+      is a courtesy pass, not an anonymiser — read the file before posting it
+      somewhere public.
     </p>
 
     <div class="panel-actions" id="logs-actions" hidden>

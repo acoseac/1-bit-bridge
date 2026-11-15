@@ -260,7 +260,7 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 		// own state is never opened, so serve stays its one writer.
 		r.dsdState = openPlayerDSD(dir, player, env.trees, nil)
 		r.dsdState.recordDir = cfg.DataDir
-		_ = r.dsdState.migrate(ctx, nil)
+		_ = r.dsdState.migrate(ctx, nil, nil)
 	}
 	if !on {
 		out.line("output.player.enabled is false in %s: this harness plays all the same, and bridge serve runs no player", path)

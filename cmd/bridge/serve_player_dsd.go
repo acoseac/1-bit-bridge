@@ -255,9 +255,11 @@ func openPlayerDSD(dataDir string, player config.PlayerConfig, trees outputTrees
 // bound, the DAC the boot binding resolves to now (nil for the start's step,
 // the part of the bridge's), unless the player's stop has begun, says what
 // the step did, and returns its error: nil when no step was made, or the step
-// was saved. A write that landed and is not known to be durable ends the
-// run's steps (done).
-func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound) error {
+// was saved. unit is the USB unit boundOf read bound from, which a line naming
+// the DAC cleans its product string by (dacLabel); nil where bound is. A
+// write that landed and is not known to be durable ends the run's steps
+// (done).
+func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound, unit *alsa.USBIdentity) error {
 	if d == nil || d.store == nil || !d.steps(bound) {
 		return nil
 	}
@@ -271,7 +273,7 @@ func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound) error {
 	if errors.Is(err, atomicwrite.ErrLanded) || errors.Is(err, dsdstate.ErrLandedNotHeld) {
 		d.done = true
 	}
-	d.say(step, err, bound)
+	d.say(step, err, bound, unit)
 	if err == nil && step.Changed && bound != nil && d.changed != nil {
 		d.changed(bound.Key)
 	}
@@ -288,8 +290,10 @@ func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound) error {
 // landed is one Warn line for the start's step, which the next start makes
 // again, and for a DAC's part the lines ask writes as it asks the part again
 // in this run. A step saved logs each warning it wrote, a Warn line beside
-// it, and what it migrated.
-func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound) {
+// it, and what it migrated. A line names the DAC by dacLabel, with unit for
+// the bound DAC alone: a warning that names another model gets no unit, and
+// its label is that model's USB IDs.
+func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound, unit *alsa.USBIdentity) {
 	landed := errors.Is(err, atomicwrite.ErrLanded)
 	switch {
 	case errors.Is(err, dsdstate.ErrLandedNotHeld):
@@ -306,7 +310,7 @@ func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound) {
 		return
 	case landed && bound != nil:
 		playerLog.Warn("player: the DSD migration's part for the bound DAC reached the state's file and is not known to be durable: the player plays on, this run asks it no more, and the next start goes on from what the file holds then",
-			"dac", dacLabel(bound.Key), "err", err)
+			"dac", dacLabel(bound.Key, unit), "err", err)
 	case landed:
 		playerLog.Warn("player: the migration of the legacy DSD keys reached the state's file and is not known to be durable, and the player starts without it: this run asks it no more, and the next start goes on from what the file holds then",
 			"err", err)
@@ -317,7 +321,11 @@ func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound) {
 			attrs = append(attrs, "reason", w.Reason)
 		}
 		if w.DAC != nil {
-			attrs = append(attrs, "dac", dacLabel(*w.DAC))
+			var of *alsa.USBIdentity
+			if bound != nil && w.DAC.Equal(bound.Key) {
+				of = unit
+			}
+			attrs = append(attrs, "dac", dacLabel(*w.DAC, of))
 		}
 		playerLog.Warn("player: the DSD migration recorded a warning in the player's DSD state", attrs...)
 	}
@@ -327,7 +335,7 @@ func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound) {
 	st := d.store.State()
 	attrs := []any{"defaultMode", st.DefaultMode}
 	if bound != nil {
-		attrs = append(attrs, "dac", dacLabel(bound.Key))
+		attrs = append(attrs, "dac", dacLabel(bound.Key, unit))
 		if mode, _, own := st.ChoiceFor(bound.Key); own {
 			attrs = append(attrs, "choice", mode)
 		}
@@ -418,10 +426,10 @@ func (d *playerDSD) retry(ctx context.Context) {
 // again, and so does the next start, where the marker still waits.
 func (d *playerDSD) ask(ctx context.Context, r binding.Resolution) {
 	d.again = nil
-	bound, err := d.boundOf(r)
+	bound, unit, err := d.boundOf(r)
 	read := err == nil
 	if read {
-		if err = d.migrate(ctx, &bound); err == nil || errors.Is(err, atomicwrite.ErrLanded) || errors.Is(err, dsdstate.ErrLandedNotHeld) || ctx.Err() != nil {
+		if err = d.migrate(ctx, &bound, &unit); err == nil || errors.Is(err, atomicwrite.ErrLanded) || errors.Is(err, dsdstate.ErrLandedNotHeld) || ctx.Err() != nil {
 			return
 		}
 	}
@@ -432,7 +440,7 @@ func (d *playerDSD) ask(ctx context.Context, r binding.Resolution) {
 		return
 	case d.tries == 0 && read:
 		playerLog.Warn("player: the DSD migration's part for the bound DAC was not saved, and the player plays on without it: it is asked again in this run",
-			"dac", dacLabel(bound.Key), "err", err)
+			"dac", dacLabel(bound.Key, &unit), "err", err)
 	case d.tries == 0:
 		playerLog.Info("player: the DSD migration's part for the bound DAC waits: its model could not be read, and it is asked again in this run",
 			"err", err)
@@ -443,29 +451,51 @@ func (d *playerDSD) ask(ctx context.Context, r binding.Resolution) {
 }
 
 // boundOf is the DAC r resolves to, as the migration asks of it
-// (dsdstate.BoundOf): its card's identity and its descriptors, read again from
-// the box, and only while both are of the unit and enumeration r names.
-func (d *playerDSD) boundOf(r binding.Resolution) (dsdstate.Bound, error) {
+// (dsdstate.BoundOf), and the USB unit its card's identity read as, the
+// serial and the port the lines naming the DAC clean its product string of
+// (dacLabel): its card's identity and its descriptors, read again from the
+// box, and only while both are of the unit and enumeration r names.
+func (d *playerDSD) boundOf(r binding.Resolution) (dsdstate.Bound, alsa.USBIdentity, error) {
 	card, ok := d.sysfs.Card(r.Card)
 	if !ok || card.Kind != alsa.IdentityUSB || card.USB == nil || !binding.SameUnit(*card.USB, r.Identity) || card.USB.DevNum != r.Identity.DevNum {
-		return dsdstate.Bound{}, errors.New("the bound card is no longer the unit the watcher resolved")
+		return dsdstate.Bound{}, alsa.USBIdentity{}, errors.New("the bound card is no longer the unit the watcher resolved")
 	}
 	q, err := d.sysfs.Qualification(r.Card)
 	if err != nil {
-		return dsdstate.Bound{}, err
+		return dsdstate.Bound{}, alsa.USBIdentity{}, err
 	}
 	if q.Port != r.Identity.Port || q.DevNum != r.Identity.DevNum || q.Interface != r.Identity.Interface {
-		return dsdstate.Bound{}, errors.New("the bound card's descriptors are of another unit than the watcher resolved")
+		return dsdstate.Bound{}, alsa.USBIdentity{}, errors.New("the bound card's descriptors are of another unit than the watcher resolved")
 	}
-	return dsdstate.BoundOf(card, q, r.Endpoint.Device, r.Endpoint.Subdevice)
+	bound, err := dsdstate.BoundOf(card, q, r.Endpoint.Device, r.Endpoint.Subdevice)
+	if err != nil {
+		return dsdstate.Bound{}, alsa.USBIdentity{}, err
+	}
+	return bound, *card.USB, nil
 }
 
-// dacLabel names a DAC model for a log line: its USB IDs and its product
-// string, which its key holds and nothing else does (no serial, no port).
-func dacLabel(k dacprofile.Key) string {
-	label := usbid.Hex16(k.VendorID()) + ":" + usbid.Hex16(k.ProductID())
-	if p, ok := k.Product(); ok {
-		label += " " + p
+// dacLabel names a DAC model for a log line: its USB IDs (vvvv:pppp), then
+// its product string with unit's port, in each of its spellings, and its
+// serial taken out (playerDACText), as the console's DACs and GET
+// /v1/outputs' dac element have them: a unit can put either in its product
+// string. unit is the unit the key was read from (boundOf); with none, the
+// label is the IDs alone, since only that unit's reading says what to take
+// out. The IDs stand alone too where the cleaned product string still holds
+// the serial (usbid.Serial.HeldIn): in another case, or with other marks
+// between its letters and digits, which playerDACText's exact match leaves.
+// That check fails closed, and so drops the product string in two more cases
+// by design: a serial whose letters and digits, folded, stand inside
+// playerDACText's own [redacted] marker (ACT, say), which the cleaned text
+// then holds, and a serial with no letter or digit, which HeldIn finds in
+// every text.
+func dacLabel(k dacprofile.Key, unit *alsa.USBIdentity) string {
+	ids := usbid.Hex16(k.VendorID()) + ":" + usbid.Hex16(k.ProductID())
+	p, ok := k.Product()
+	if !ok || unit == nil {
+		return ids
 	}
-	return label
+	if p = playerDACText(p, *unit); unit.Serial.HeldIn(p) {
+		return ids
+	}
+	return ids + " " + p
 }
