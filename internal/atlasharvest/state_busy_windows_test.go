@@ -62,7 +62,7 @@ func holdSharingNothing(t *testing.T, path string) (release func()) {
 	}
 	var h windows.Handle
 	if err := atomicwrite.ReadWithRetryCtx(t.Context(), func() (err error) {
-		h, err = windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		h, err = windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
 		return err
 	}); err != nil {
 		t.Fatal(err)
