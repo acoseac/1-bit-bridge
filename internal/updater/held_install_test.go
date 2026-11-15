@@ -7,8 +7,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -395,5 +397,25 @@ func TestEveryProtectedOperationFitsInsideTheMarkersLockWait(t *testing.T) {
 			t.Errorf("%s made %d writes, waited %s and stopped %d services; its row counts %d, %s and %d",
 				row.name, row.writes, row.waited, row.stops, row.wantW, waits, row.wantStop)
 		}
+	}
+}
+
+// TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried: the swap's own
+// staging, its rename refused across volumes after the forward deadline's
+// time and the copy that stands in for it made, leaves the probes after it
+// untried: nothing moved, nothing armed, the candidate's copy removed and
+// ErrDeadlinePassed the answer, never a hold.
+func TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried(t *testing.T) {
+	r := newHeldRig(t, "elsewhere", map[string]*refusals{"src>staged": {n: 1, err: &os.LinkError{Op: "rename", Err: syscall.EXDEV}}})
+	r.took = map[string]time.Duration{"src>staged": secs(5)}
+	err := r.swap()
+	if got := strings.Join(r.calls, " "); got != "src>staged" {
+		t.Errorf("calls = %q, want the staging alone", got)
+	}
+	if !errors.Is(err, ErrDeadlinePassed) || errors.Is(err, ErrBinaryInUse) || r.armedAt >= 0 {
+		t.Errorf("the swap = %v, armed %v; want the probes untried for the deadline and nothing armed", err, r.armedAt >= 0)
+	}
+	if got := r.files(); got != "dst=N bak=P aside=- cand=-" {
+		t.Errorf("files = %s, want the binary and its backup where they were", got)
 	}
 }

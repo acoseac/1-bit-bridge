@@ -41,7 +41,8 @@ const (
 
 // RenameRefusal is one refused attempt at a step: its stage, the file it moves
 // (From) and where to (To, empty for a probe), the error, which attempt it was,
-// from 1, and the wait before the next, 0 where no attempt follows.
+// from 1, and the wait before the next, 0 where none is made; a wait that
+// ends past the step's deadline is followed by no attempt.
 type RenameRefusal struct {
 	Stage    RenameStage
 	From, To string
@@ -73,42 +74,60 @@ func SetRenameObserverForTest(fn func(RenameRefusal)) (restore func()) {
 
 // moves is how the updater moves the bridge's binary: rename makes one rename,
 // probe one probe (movable), inUse says whether a refusal is another process's
-// hold (inUse), and wait sleeps before an attempt.
+// hold (inUse), wait sleeps before an attempt, and now reads the clock its
+// deadlines are kept on.
 type moves struct {
 	rename func(oldpath, newpath string) error
 	probe  func(path string) error
 	inUse  func(error) bool
 	wait   func(time.Duration)
+	now    func() time.Time
 }
 
-// renameInUse, probeMovable and renameWait are moves' inUse, probe and wait
-// in production: the platform's predicate and probe (held_windows.go, and
-// held_other.go's false and nil) and time.Sleep. Test seams, as renameFunc
-// is: production code MUST NOT mutate them.
+// renameInUse, probeMovable, renameWait and renameNow are moves' inUse,
+// probe, wait and now in production: the platform's predicate and probe
+// (held_windows.go, and held_other.go's false and nil), time.Sleep and
+// time.Now, whose monotonic reading the deadlines compare. Test seams, as
+// renameFunc is: production code MUST NOT mutate them, and a test that sets
+// renameWait sets renameNow to a clock its waits advance.
 var (
 	renameInUse  = inUse
 	probeMovable = movable
 	renameWait   = time.Sleep
+	renameNow    = time.Now
 )
 
 // liveMoves is production's moves, read from the seams as each operation
 // begins.
 func liveMoves() moves {
-	return moves{rename: renameFunc, probe: probeMovable, inUse: renameInUse, wait: renameWait}
+	return moves{rename: renameFunc, probe: probeMovable, inUse: renameInUse, wait: renameWait, now: renameNow}
 }
 
-// waitBudget is what an operation may still wait on one of its deadlines: the
-// forward one, shared by every step made while the binary is in place and
-// nothing is armed, or the recovery one, kept for the put-back alone. A wait
-// that does not fit in what is left is not made.
-type waitBudget struct{ left time.Duration }
+// deadline is the time past which an operation tries no step: the forward
+// one, set as the operation begins and shared by every step made while the
+// binary is in place and nothing is armed, or the recovery one, set as the
+// put-back begins. A wait is made only where it ends at or before it, and an
+// attempt is begun only at or before it, so that the last of a schedule's
+// attempts, at its whole total, is made where nothing else took time. A step
+// under way is never cut short (a rename takes no context): once the
+// deadline is seen to have passed, no further step, attempt or wait of the
+// operation's is begun, but for the two its destructive renames need, the
+// place after a vacate that landed and the put-back after a refused place.
+type deadline struct{ at time.Time }
 
-func newBudget(schedule []time.Duration) *waitBudget {
-	return &waitBudget{left: waitsTotal(schedule)}
+// deadlineOf is the deadline schedule's waits set from now.
+func (m moves) deadlineOf(schedule []time.Duration) deadline {
+	return deadline{at: m.now().Add(waitsTotal(schedule))}
 }
+
+// passed reports whether d is behind m's clock.
+func (m moves) passed(d deadline) bool { return m.now().After(d.at) }
 
 // stepResult is a step's answer: its error, nil where it landed, the attempts
-// it made and its waits between them, and whether its last refusal was a hold.
+// it made and its waits between them (each at its length in the schedule, a
+// wait the clock overran included), and whether its last refusal was a hold.
+// A step not tried for its deadline made no attempt, and its error is
+// ErrDeadlinePassed.
 type stepResult struct {
 	err      error
 	attempts int
@@ -117,25 +136,35 @@ type stepResult struct {
 }
 
 // try makes a step at once, and again after each of schedule's waits while it
-// is refused for a hold and the wait fits in budget; a refusal of any other
-// kind ends it at once, as it was answered, and a hold past the schedule or
-// the budget ends it saying so (inUseError). The renames take no context: a
-// step is bounded by its schedule, and a stop waits at most its waits.
-func (m moves) try(stage RenameStage, from, to string, schedule []time.Duration, budget *waitBudget, step func() error) stepResult {
+// is refused for a hold and the wait ends by dl; a refusal of any other kind
+// ends it at once, as it was answered, and a hold past the schedule or the
+// deadline ends it saying so (inUseError), a wait the clock overran past dl
+// followed by no attempt. A step whose deadline has passed before its first
+// attempt is not tried at all (ErrDeadlinePassed). The renames take no
+// context: a step's waits are bounded by its schedule, and a stop waits at
+// most those.
+func (m moves) try(stage RenameStage, from, to string, schedule []time.Duration, dl deadline, step func() error) stepResult {
+	if m.passed(dl) {
+		return stepResult{err: ErrDeadlinePassed}
+	}
 	var res stepResult
+	var refused error
 	for i := range schedule {
 		if d := schedule[i]; d > 0 {
 			m.wait(d)
-			budget.left -= d
 			res.waited += d
+			if m.passed(dl) {
+				res.err = &inUseError{err: refused, attempts: res.attempts, waited: res.waited}
+				return res
+			}
 		}
 		res.attempts++
 		err := step()
 		if err == nil {
 			return stepResult{attempts: res.attempts, waited: res.waited}
 		}
-		res.inUse = m.inUse(err)
-		again := res.inUse && i+1 < len(schedule) && schedule[i+1] <= budget.left
+		refused, res.inUse = err, m.inUse(err)
+		again := res.inUse && i+1 < len(schedule) && !m.now().Add(schedule[i+1]).After(dl.at)
 		var next time.Duration
 		if again {
 			next = schedule[i+1]
@@ -153,8 +182,8 @@ func (m moves) try(stage RenameStage, from, to string, schedule []time.Duration,
 }
 
 // once makes a step one time, where the binary is not in place or a marker is
-// armed and nothing may wait (the swap's vacate, either place): its refusal is
-// answered as it was, its kind recorded.
+// armed and nothing may wait (the swap's vacate, either place), whatever the
+// deadline says: its refusal is answered as it was, its kind recorded.
 func (m moves) once(stage RenameStage, from, to string) stepResult {
 	err := m.rename(from, to)
 	if err == nil {
@@ -165,19 +194,26 @@ func (m moves) once(stage RenameStage, from, to string) stepResult {
 }
 
 // renameStep is try for a rename of from to to.
-func (m moves) renameStep(stage RenameStage, from, to string, schedule []time.Duration, budget *waitBudget) stepResult {
-	return m.try(stage, from, to, schedule, budget, func() error { return m.rename(from, to) })
+func (m moves) renameStep(stage RenameStage, from, to string, schedule []time.Duration, dl deadline) stepResult {
+	return m.try(stage, from, to, schedule, dl, func() error { return m.rename(from, to) })
+}
+
+// putBack is the put-back of from to to on the recovery schedule, its
+// deadline set as it begins, so that it is always tried, and a rename that
+// lands is the put-back's success however late it lands.
+func (m moves) putBack(from, to string) stepResult {
+	return m.renameStep(StagePutBack, from, to, recoveryWaits, m.deadlineOf(recoveryWaits))
 }
 
 // probeStep is try for a probe of path on the forward schedule.
-func (m moves) probeStep(path string, budget *waitBudget) stepResult {
-	return m.try(StageProbe, path, "", forwardWaits, budget, func() error { return m.probe(path) })
+func (m moves) probeStep(path string, dl deadline) stepResult {
+	return m.try(StageProbe, path, "", forwardWaits, dl, func() error { return m.probe(path) })
 }
 
 // probeIfThere is probeStep for a rename's destination, which need not be
 // there: a probe that finds nothing at path passes.
-func (m moves) probeIfThere(path string, budget *waitBudget) stepResult {
-	return m.try(StageProbe, path, "", forwardWaits, budget, func() error {
+func (m moves) probeIfThere(path string, dl deadline) stepResult {
+	return m.try(StageProbe, path, "", forwardWaits, dl, func() error {
 		if err := m.probe(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -193,8 +229,10 @@ func observeRefusal(r RenameRefusal) {
 	}
 }
 
-// inUseError is a step's refusal for another process's hold past its schedule:
-// the hold's own error, and the attempts and waits made for it to end.
+// inUseError is a step's refusal for another process's hold past its schedule
+// or its deadline: the hold's own error, and the attempts and the waits made
+// for it to end, each wait at its length in the schedule, never the time the
+// clock read.
 type inUseError struct {
 	err      error
 	attempts int

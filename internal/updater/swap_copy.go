@@ -78,14 +78,16 @@ func stageForCheck(src, dst string) (string, error) {
 // stageIntoDirNamed is stageIntoDir, the staged file named after pattern as
 // os.CreateTemp names it.
 func stageIntoDirNamed(src, dst string, mode os.FileMode, pattern string) (staged string, err error) {
-	return liveMoves().stage(src, dst, mode, pattern, newBudget(forwardWaits))
+	m := liveMoves()
+	return m.stage(src, dst, mode, pattern, m.deadlineOf(forwardWaits))
 }
 
-// stage is stageIntoDirNamed through m, its rename's waits drawn from budget:
-// the swap's forward deadline where the swap stages, one of its own before
-// the install marker's lock (stageForCheck). Its rename's refusal is a
+// stage is stageIntoDirNamed through m, its rename tried by dl: the swap's
+// forward deadline where the swap stages, so that the time a staging takes
+// (a copy across volumes among it) is the steps' after it, or one of its own
+// before the install marker's lock (stageForCheck). Its rename's refusal is a
 // *SwapError, NothingMoved.
-func (m moves) stage(src, dst string, mode os.FileMode, pattern string, budget *waitBudget) (staged string, err error) {
+func (m moves) stage(src, dst string, mode os.FileMode, pattern string, dl deadline) (staged string, err error) {
 	tmp, err := os.CreateTemp(filepath.Dir(dst), pattern)
 	if err != nil {
 		return "", fmt.Errorf("create staging file beside %s: %w", dst, err)
@@ -113,7 +115,7 @@ func (m moves) stage(src, dst string, mode os.FileMode, pattern string, budget *
 		}
 	}()
 
-	if r := m.renameStep(StageStaging, src, tmpName, forwardWaits, budget); r.err != nil {
+	if r := m.renameStep(StageStaging, src, tmpName, forwardWaits, dl); r.err != nil {
 		rerr := r.err
 		if !isCrossDeviceErr(rerr) {
 			// Narrow on purpose. A rename refused for any other reason

@@ -2749,15 +2749,16 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 			st.TargetVersion, current)
 		if err := restore(binaryPath, ".bak"); err != nil {
 			// The vetoed marker stays where nothing was put back for another
-			// process's hold (backlog B898), for the next start to ask again
-			// within the window, and where no binary is left, which ends the
-			// start; any other failure clears the install, as before.
+			// process's hold or for the rollback's deadline (backlog B898), for
+			// the next start to ask again within the window, and where no
+			// binary is left, which ends the start; any other failure clears
+			// the install, as before.
 			switch {
 			case errors.Is(err, updater.ErrBinaryMissing):
 				fmt.Fprintf(stderr, "updater: rollback failed, and the bridge's program file is not at its path: %v; the install's marker "+
 					"is kept: %s\n", err, binaryMissing(err))
 				return err
-			case errors.Is(err, updater.ErrBinaryInUse):
+			case errors.Is(err, updater.ErrBinaryInUse), errors.Is(err, updater.ErrDeadlinePassed):
 				fmt.Fprintf(stderr, "updater: rollback failed: %v; the install's marker is kept, for the next start to ask again\n", err)
 				return nil
 			}

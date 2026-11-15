@@ -48,13 +48,19 @@ var (
 // it refuses either; -1 is every time), with errBackupHeld, or errBackupDenied
 // for a key in denied. Its waits are recorded, and slept only on Windows once
 // the script is spent, so that a scanner of the host's holding a file the
-// test has just written is waited out there too.
+// test has just written is waited out there too. Its clock (RestoreSeams.Now)
+// moves on by each wait's length, slept or not, and by took's time for a
+// call's key as that call is made, and by nothing else; answers is each call
+// made, its key and what it answered.
 type heldRestore struct {
-	bin    string
-	denied map[string]bool
-	mu     sync.Mutex
-	script map[string]int
-	waits  []time.Duration
+	bin     string
+	denied  map[string]bool
+	mu      sync.Mutex
+	script  map[string]int
+	waits   []time.Duration
+	clock   time.Time
+	took    map[string]time.Duration
+	answers []string
 }
 
 func newHeldRestore(bin string, script map[string]int) *heldRestore {
@@ -73,10 +79,12 @@ func (h *heldRestore) key(p string) string {
 	return filepath.Base(p)
 }
 
-// refuse answers a call by its key, then by its file's.
+// refuse answers a call by its key, then by its file's, the call taking
+// took's time.
 func (h *heldRestore) refuse(call, file string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.clock = h.clock.Add(h.took[call])
 	for _, k := range []string{call, file} {
 		n := h.script[k]
 		if n == 0 {
@@ -96,21 +104,30 @@ func (h *heldRestore) refuse(call, file string) error {
 func (h *heldRestore) restore() func(dst, ext string) error {
 	return updater.ReplaceRunningBinaryForTest(updater.RestoreSeams{
 		Rename: func(from, to string) error {
-			if err := h.refuse(h.key(from)+">"+h.key(to), h.key(from)); err != nil {
-				return &os.LinkError{Op: "rename", Old: from, New: to, Err: err}
+			call := h.key(from) + ">" + h.key(to)
+			err := h.refuse(call, h.key(from))
+			if err == nil {
+				err = os.Rename(from, to)
+			} else {
+				err = &os.LinkError{Op: "rename", Old: from, New: to, Err: err}
 			}
-			return os.Rename(from, to)
+			h.answer(call, err)
+			return err
 		},
 		Probe: func(p string) error {
-			if err := h.refuse("?"+h.key(p), h.key(p)); err != nil {
-				return &os.PathError{Op: "open", Path: p, Err: err}
+			call := "?" + h.key(p)
+			err := h.refuse(call, h.key(p))
+			if err != nil {
+				err = &os.PathError{Op: "open", Path: p, Err: err}
 			}
-			return nil
+			h.answer(call, err)
+			return err
 		},
 		InUse: func(err error) bool { return errors.Is(err, errBackupHeld) },
 		Wait: func(d time.Duration) {
 			h.mu.Lock()
 			h.waits = append(h.waits, d)
+			h.clock = h.clock.Add(d)
 			spent := true
 			for _, n := range h.script {
 				spent = spent && n == 0
@@ -120,7 +137,35 @@ func (h *heldRestore) restore() func(dst, ext string) error {
 				time.Sleep(d)
 			}
 		},
+		Now: func() time.Time {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return h.clock
+		},
 	})
+}
+
+// answer records what call answered: ok, held, denied, or the error.
+func (h *heldRestore) answer(call string, err error) {
+	word := "ok"
+	switch {
+	case errors.Is(err, errBackupHeld):
+		word = "held"
+	case errors.Is(err, errBackupDenied):
+		word = "denied"
+	case err != nil:
+		word = err.Error()
+	}
+	h.mu.Lock()
+	h.answers = append(h.answers, call+" "+word)
+	h.mu.Unlock()
+}
+
+// answered is every call h was asked, in order, with its answer.
+func (h *heldRestore) answered() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return strings.Join(h.answers, ", ")
 }
 
 func (h *heldRestore) waited() []time.Duration {
@@ -364,19 +409,30 @@ func TestABootRollbackThatLeavesNoBinaryEndsTheStart(t *testing.T) {
 }
 
 // TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse: a boot rollback
-// refused for a hold, with nothing moved or the binary put back, keeps its
-// vetoed marker for the next start to ask again; one refused otherwise
-// clears the install as before.
+// refused for a hold, with nothing moved or the binary put back, or whose
+// forward deadline passed before its vacate was tried, keeps its vetoed
+// marker for the next start to ask again; one whose place was refused
+// otherwise, the binary put back, clears the install as before. Each case's
+// put-back made exactly its calls, each with its answer, or on Windows, where
+// a scanner of the host's may hold a file too, ended with its last ones.
 func TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		script map[string]int
-		denied string
-		kept   bool
+		name     string
+		script   map[string]int
+		denied   string
+		took     map[string]time.Duration
+		kept     bool
+		answered string
+		last     string
 	}{
-		{"nothing moved", map[string]int{"bak": -1}, "", true},
-		{"put back", map[string]int{"bak>bin": 1}, "", true},
-		{"refused otherwise", map[string]int{"bak>bin": 1}, "bak>bin", false},
+		{"nothing moved", map[string]int{"bak": -1}, "", nil, true,
+			"?bin ok, " + strings.Repeat("?bak held, ", 7) + "?bak held", "?bak held"},
+		{"put back", map[string]int{"bak>bin": 1}, "", nil, true,
+			"?bin ok, ?bak ok, bin>aside ok, bak>bin held, aside>bin ok", "bak>bin held, aside>bin ok"},
+		{"refused otherwise", map[string]int{"bak>bin": 1}, "bak>bin", nil, false,
+			"?bin ok, ?bak ok, bin>aside ok, bak>bin denied, aside>bin ok", "bak>bin denied, aside>bin ok"},
+		{"out of time", nil, "", map[string]time.Duration{"?bak": 5 * time.Second}, true,
+			"?bin ok, ?bak ok", "?bak ok"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRefusedInstall(t, "")
@@ -386,9 +442,13 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse(t *testing.T) {
 			if tc.denied != "" {
 				h.denied[tc.denied] = true
 			}
+			h.took = tc.took
 			var stderr bytes.Buffer
 			if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, h.restore(), testBackupProbeTimeout); err != nil {
 				t.Fatalf("the housekeeping = %v; stderr=%s", err, stderr.String())
+			}
+			if got := h.answered(); (runtime.GOOS != "windows" && got != tc.answered) || !strings.HasSuffix(got, tc.last) {
+				t.Errorf("the put-back's calls: %s\nwant %s", got, tc.answered)
 			}
 			st := markerOf(t, r.dataDir)
 			if kept := st.Status == "installing" && st.MigrationVeto == "9.9.9"; kept != tc.kept {

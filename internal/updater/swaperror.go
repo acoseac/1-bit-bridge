@@ -22,6 +22,13 @@ var (
 	ErrBinaryMissing = errors.New("the bridge's binary is not at its path")
 	// ErrMarkerNotRestored is what a *MarkerNotRestoredError matches.
 	ErrMarkerNotRestored = errors.New("the install marker could not be put back as it was read")
+	// ErrDeadlinePassed is the error of a step its operation's forward
+	// deadline had passed before it was tried, and of a swap whose probes
+	// ended past it, which arms nothing: a *SwapError carrying it moved nothing
+	// (NothingMoved), or, where the rollback found no binary at its path,
+	// left it missing as it found it (BinaryMissing). It says nothing of a
+	// hold: such a *SwapError is not InUse.
+	ErrDeadlinePassed = errors.New("the operation's deadline passed before this step was tried")
 )
 
 // Outcome is what a failed swap or rollback left of the binary.

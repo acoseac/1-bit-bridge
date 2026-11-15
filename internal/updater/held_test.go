@@ -16,9 +16,10 @@ import (
 // Backlog B898: the updater's renames of the binary, and the probes before
 // them, wait out another process's hold only while the binary is in place and
 // nothing is armed. These tests run Windows' moves on every host through the
-// seams (renameFunc, probeMovable, renameInUse, renameWait): a hold is errHeld,
-// which the classification takes for one, and every wait is recorded, never
-// slept.
+// seams (renameFunc, probeMovable, renameInUse, renameWait, renameNow): a hold
+// is errHeld, which the classification takes for one, every wait is recorded,
+// never slept, and the clock the deadlines read is the rig's, which only a
+// wait, or a step a test says takes time, moves on.
 
 // errHeld stands in, on every host, for what Windows answers a rename of a file
 // another process holds without sharing its deletion.
@@ -62,6 +63,13 @@ type heldRig struct {
 	// onWait, where set, runs at each wait, once it is recorded: a test's
 	// hold on an operation there.
 	onWait func()
+	// clock is the moves' clock (renameNow): each wait moves it on by its
+	// length, the nth wait, from 1, by over[n] more (a wait the host
+	// overran), and each call by took's time for its key (a step that takes
+	// that long, landed or refused); nothing else moves it.
+	clock time.Time
+	took  map[string]time.Duration
+	over  map[int]time.Duration
 }
 
 // newHeldRig lays the files out as lay says: "" a binary and its backup, the
@@ -104,15 +112,19 @@ func heldRigAt(t *testing.T, dst string, script map[string]*refusals) *heldRig {
 // seams stands the rig in for the moves' seams until the test ends.
 func (r *heldRig) seams() {
 	t := r.t
-	prevRename, prevProbe, prevInUse, prevWait := renameFunc, probeMovable, renameInUse, renameWait
-	t.Cleanup(func() { renameFunc, probeMovable, renameInUse, renameWait = prevRename, prevProbe, prevInUse, prevWait })
+	prevRename, prevProbe, prevInUse, prevWait, prevNow := renameFunc, probeMovable, renameInUse, renameWait, renameNow
+	t.Cleanup(func() {
+		renameFunc, probeMovable, renameInUse, renameWait, renameNow = prevRename, prevProbe, prevInUse, prevWait, prevNow
+	})
 	renameFunc = func(from, to string) error {
 		return r.call(r.name(from)+">"+r.name(to), r.name(from), func() error { return os.Rename(from, to) })
 	}
 	probeMovable = func(p string) error { return r.call("?"+r.name(p), r.name(p), func() error { return nil }) }
 	renameInUse = func(err error) bool { return errors.Is(err, errHeld) }
+	renameNow = func() time.Time { return r.clock }
 	renameWait = func(d time.Duration) {
 		r.waits = append(r.waits, d)
+		r.clock = r.clock.Add(d + r.over[len(r.waits)])
 		if _, err := os.Lstat(r.dst); err != nil {
 			r.waitedWithoutDst += d
 		}
@@ -144,6 +156,7 @@ func (r *heldRig) name(p string) string {
 // and then by its file's.
 func (r *heldRig) call(key, file string, do func() error) error {
 	r.calls = append(r.calls, key)
+	r.clock = r.clock.Add(r.took[key])
 	for _, k := range []string{key, file} {
 		if s := r.script[k]; s != nil && s.n != 0 {
 			if s.n > 0 {
@@ -191,18 +204,22 @@ func (r *heldRig) expand(s string) string {
 		aside = m[0]
 	}
 	return strings.NewReplacer("{dst}", r.dst, "{bak}", r.bak, "{aside}", aside, "{staged}", r.staged, "{cand}", r.cand,
-		"{held}", errHeld.Error(), "{denied}", errDenied.Error()).Replace(s)
+		"{held}", errHeld.Error(), "{denied}", errDenied.Error(), "{deadline}", ErrDeadlinePassed.Error()).Replace(s)
 }
 
-// heldRow is one step of the rollback or the swap refused: what the rig is
-// asked, and what the operation must call, wait, leave and say.
+// heldRow is one step of the rollback or the swap refused, or taking time:
+// what the rig is asked, and what the operation must call, wait, leave and
+// say.
 type heldRow struct {
 	name, op, lay string
 	script        map[string]*refusals
+	took          map[string]time.Duration
+	over          map[int]time.Duration
 	calls, waits  string // calls by key; waits in ms, both space-separated
 	ok            bool
 	outcome       Outcome
 	inUse         bool
+	expired       bool
 	msg, recover  string
 	files         string
 }
@@ -304,6 +321,7 @@ func (row heldRow) run(t *testing.T) (*heldRig, error) {
 		script[k] = &c
 	}
 	r := newHeldRig(t, row.lay, script)
+	r.took, r.over = row.took, row.over
 	if row.op == "swap" {
 		return r, r.swap()
 	}
@@ -447,8 +465,10 @@ func TestNoWaitFollowsTheSwapsArming(t *testing.T) {
 }
 
 // TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed: the forward
-// deadline spent whole on the binary's probe, the put-back still makes every
-// attempt of its recovery schedule.
+// deadline spent whole on the binary's probe, whose last attempt is made and
+// lands at the deadline itself, the steps after it are tried at that instant,
+// which has not passed it, and the put-back still makes every attempt of its
+// recovery schedule on its own deadline.
 func TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed(t *testing.T) {
 	r := newHeldRig(t, "", map[string]*refusals{"?dst": held(7), "bak>dst": held(1), "aside>dst": held(-1)})
 	err := r.rollback()
@@ -460,6 +480,107 @@ func TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed(t *testing.T) {
 	}
 	if got := msString(r.waits); got != fwdWaits+" "+recWaits {
 		t.Errorf("waits = %q, want the forward schedule's then the recovery's whole", got)
+	}
+}
+
+// secs is n seconds.
+func secs(n int) time.Duration { return time.Duration(n) * time.Second }
+
+// deadlineRows are steps of the rollback and the swap that take time, or a
+// wait the host overran: once the forward deadline has passed, no step,
+// attempt or wait of the operation's is begun, but for the place after a
+// vacate that landed and the put-back after a refused place, and a put-back
+// that lands late is still a put-back.
+var deadlineRows = []heldRow{
+	{name: "a slow probe of the binary leaves the backup's untried", op: "rollback", took: map[string]time.Duration{"?dst": secs(5)},
+		calls: "?dst", outcome: NothingMoved, expired: true,
+		msg: "rollback rename {bak} -> {dst}: {deadline}; nothing was moved", files: "dst=N bak=P aside=- cand=C"},
+	{name: "a slow probe of the backup leaves the vacate untried", op: "rollback", took: map[string]time.Duration{"?bak": secs(5)},
+		calls: "?dst ?bak", outcome: NothingMoved, expired: true,
+		msg: "rollback move {dst} aside: {deadline}; nothing was moved", files: "dst=N bak=P aside=- cand=C"},
+	{name: "a vacate that lands late is followed by its place", op: "rollback", took: map[string]time.Duration{"dst>aside": secs(5)},
+		calls: "?dst ?bak dst>aside bak>dst", ok: true, files: "dst=P bak=- aside=- cand=C"},
+	{name: "a put-back that lands late is a put-back", op: "rollback", script: map[string]*refusals{"bak>dst": held(1)},
+		took: map[string]time.Duration{"aside>dst": secs(5)}, calls: "?dst ?bak dst>aside bak>dst aside>dst", outcome: PutBack, inUse: true,
+		msg: "rollback rename {bak} -> {dst}: {held} (restored)", files: "dst=N bak=P aside=- cand=C"},
+	{name: "no binary, a slow probe of the backup leaves its install untried", op: "rollback", lay: "no binary",
+		took: map[string]time.Duration{"?bak": secs(5)}, calls: "?bak", outcome: BinaryMissing, expired: true,
+		msg:     "rollback rename {bak} -> {dst}: {deadline}; the binary is not at its path: rename {bak} to {dst}",
+		recover: "rename {bak} to {dst}", files: "dst=- bak=P aside=- cand=C"},
+	{name: "a held probe whose every attempt takes a second", op: "rollback", script: map[string]*refusals{"?dst": held(-1)},
+		took: map[string]time.Duration{"?dst": secs(1)}, calls: x("?dst", 5), waits: "50 100 200 400", outcome: NothingMoved, inUse: true,
+		msg:   "rollback move {dst} aside: {held} (in use by another process: 5 attempts over 750ms); nothing was moved",
+		files: "dst=N bak=P aside=- cand=C"},
+	{name: "a wait the host overran leaves less to the waits after it", op: "rollback", script: map[string]*refusals{"?dst": held(-1)},
+		over: map[int]time.Duration{4: secs(3)}, calls: x("?dst", 6), waits: "50 100 200 400 800", outcome: NothingMoved, inUse: true,
+		msg:   "rollback move {dst} aside: {held} (in use by another process: 6 attempts over 1.55s); nothing was moved",
+		files: "dst=N bak=P aside=- cand=C"},
+	{name: "a wait the host overran past the deadline is followed by no attempt", op: "rollback",
+		script: map[string]*refusals{"?dst": held(-1)}, over: map[int]time.Duration{7: secs(1)}, calls: x("?dst", 7), waits: fwdWaits,
+		outcome: NothingMoved, inUse: true,
+		msg:   "rollback move {dst} aside: {held} (in use by another process: 7 attempts over 4.75s); nothing was moved",
+		files: "dst=N bak=P aside=- cand=C"},
+	{name: "a slow probe of the candidate leaves the binary's untried", op: "swap", took: map[string]time.Duration{"?staged": secs(5)},
+		calls: "?staged", outcome: NothingMoved, expired: true,
+		msg: "rename {dst} -> {bak}: {deadline}; nothing was moved", files: "dst=N bak=P aside=- cand=-"},
+	{name: "a final probe that lands late arms nothing", op: "swap", took: map[string]time.Duration{"?bak": secs(5)},
+		calls: "?staged ?dst ?bak", outcome: NothingMoved, expired: true,
+		msg: "rename {dst} -> {bak}: {deadline}; nothing was moved", files: "dst=N bak=P aside=- cand=-"},
+	{name: "a staging that takes long leaves the candidate's probe untried", op: "swap", lay: "elsewhere",
+		took: map[string]time.Duration{"src>staged": secs(5)}, calls: "src>staged", outcome: NothingMoved, expired: true,
+		msg: "install {staged} -> {dst}: {deadline}; nothing was moved", files: "dst=N bak=P aside=- cand=-"},
+	{name: "a put-back that lands late is a put-back", op: "swap", script: map[string]*refusals{"staged>dst": held(1)},
+		took: map[string]time.Duration{"bak>dst": secs(5)}, calls: "?staged ?dst ?bak arm dst>bak staged>dst bak>dst", outcome: PutBack,
+		inUse: true, msg: "install {staged} -> {dst}: {held} (rolled back)", files: "dst=N bak=- aside=- cand=-"},
+}
+
+// TestEveryStepIsTriedByItsOperationsDeadline is the deadline table: each
+// operation makes exactly its calls and its waits, and leaves and says
+// exactly what its row says; a step its deadline had passed before is
+// answered ErrDeadlinePassed, never as a hold, its outcome NothingMoved, or
+// BinaryMissing where the rollback found no binary.
+func TestEveryStepIsTriedByItsOperationsDeadline(t *testing.T) {
+	for _, row := range deadlineRows {
+		t.Run(row.op+": "+row.name, func(t *testing.T) {
+			r, err := row.run(t)
+			if got := strings.Join(r.calls, " "); got != row.calls {
+				t.Errorf("calls = %q, want %q", got, row.calls)
+			}
+			if got := msString(r.waits); got != row.waits {
+				t.Errorf("waits = %q ms, want %q", got, row.waits)
+			}
+			if got := r.files(); got != row.files {
+				t.Errorf("files = %s, want %s", got, row.files)
+			}
+			if row.ok {
+				if err != nil {
+					t.Fatalf("%s = %v, want it done", row.op, err)
+				}
+				return
+			}
+			var swapErr *SwapError
+			if !errors.As(err, &swapErr) {
+				t.Fatalf("%s = %v (%T), want a *SwapError", row.op, err, err)
+			}
+			if want := r.expand(row.msg); err.Error() != want {
+				t.Errorf("%s = %v\nwant %s", row.op, err, want)
+			}
+			if swapErr.Outcome != row.outcome || swapErr.InUse != row.inUse {
+				t.Errorf("outcome %v, in use %v; want %v, %v", swapErr.Outcome, swapErr.InUse, row.outcome, row.inUse)
+			}
+			if got := errors.Is(err, ErrDeadlinePassed); got != row.expired {
+				t.Errorf("errors.Is(ErrDeadlinePassed) = %v, want %v", got, row.expired)
+			}
+			if got, want := errors.Is(err, ErrBinaryInUse), row.inUse && row.outcome != BinaryMissing; got != want {
+				t.Errorf("errors.Is(ErrBinaryInUse) = %v, want %v", got, want)
+			}
+			if got, want := errors.Is(err, ErrBinaryMissing), row.outcome == BinaryMissing; got != want {
+				t.Errorf("errors.Is(ErrBinaryMissing) = %v, want %v", got, want)
+			}
+			if want := r.expand(row.recover); swapErr.Recover != want {
+				t.Errorf("Recover = %q, want %q", swapErr.Recover, want)
+			}
+		})
 	}
 }
 

@@ -36,19 +36,21 @@ import (
 //
 // A hold another process has on a file is waited out only while dst is in
 // place (backlog B898): dst and bak are probed, and dst moved aside, on one
-// forward deadline (forwardWaits), so the backup the rollbacks at a start have
-// just run is waited for before anything moves; the place then has one
-// attempt, adjacent to the vacate, and a refused place is put back on the
-// recovery schedule (recoveryWaits), the one wait with dst missing, which only
-// shortens that time against giving up. Each failure is a *SwapError saying
-// what it left; with dst missing it names the rename that puts it back.
+// forward deadline (forwardWaits), set as the rollback begins, so the backup
+// the rollbacks at a start have just run is waited for before anything moves,
+// and a step that deadline has passed before is not tried
+// (ErrDeadlinePassed); the place then has one attempt, adjacent to the vacate
+// whenever the vacate lands, and a refused place is put back on the recovery
+// schedule (recoveryWaits), the one wait with dst missing, which only shortens
+// that time against giving up. Each failure is a *SwapError saying what it
+// left; with dst missing it names the rename that puts it back.
 func replaceRunningBinary(dst, bak string) error {
 	return liveMoves().replace(dst, bak)
 }
 
 // replace is replaceRunningBinary through m.
 func (m moves) replace(dst, bak string) error {
-	fwd := newBudget(forwardWaits)
+	fwd := m.deadlineOf(forwardWaits)
 	if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
 		r := m.probeStep(bak, fwd)
 		if r.err == nil {
@@ -75,7 +77,7 @@ func (m moves) replace(dst, bak string) error {
 		return failed(NothingMoved, r, fmt.Sprintf("rollback move %s aside: %v; nothing was moved", dst, r.err))
 	}
 	if r := m.once(StagePlace, bak, dst); r.err != nil {
-		p := m.renameStep(StagePutBack, aside, dst, recoveryWaits, newBudget(recoveryWaits))
+		p := m.putBack(aside, dst)
 		if p.err != nil {
 			e := failed(BinaryMissing, p, fmt.Sprintf("rollback rename %s -> %s failed (%v); restore also failed (%v); "+
 				"manual recovery needed: rename %s to %s, then start the bridge", bak, dst, r.err, p.err, aside, dst))
@@ -94,13 +96,17 @@ func (m moves) replace(dst, bak string) error {
 // (ReplaceRunningBinaryForTest): Rename makes one rename (os.Rename where
 // nil), Probe is asked before each of the platform's own probes, its refusal
 // the probe's, InUse says which other refusals are a hold besides the
-// platform's own, and Wait makes the wait before an attempt (time.Sleep where
-// nil), or records it.
+// platform's own, Wait makes the wait before an attempt (time.Sleep where
+// nil), or records it, and Now reads the clock the deadlines are kept on
+// (time.Now where nil): a test whose Wait records a wait gives a clock that
+// wait moves on by its length, so that its schedule's attempts do not depend
+// on how long its steps take on the host.
 type RestoreSeams struct {
 	Rename func(oldpath, newpath string) error
 	Probe  func(path string) error
 	InUse  func(error) bool
 	Wait   func(time.Duration)
+	Now    func() time.Time
 }
 
 // ReplaceRunningBinaryForTest is Windows' put-back of a backup over its
@@ -127,6 +133,9 @@ func ReplaceRunningBinaryForTest(s RestoreSeams) func(dst, backupExt string) err
 	}
 	if m.wait == nil {
 		m.wait = time.Sleep
+	}
+	if m.now = s.Now; m.now == nil {
+		m.now = time.Now
 	}
 	return func(dst, backupExt string) error { return m.replace(dst, dst+backupExt) }
 }

@@ -34,14 +34,16 @@ const SCMStopWait = scmStopWait
 // the staging of a candidate beside it, a probe of a file a later rename moves,
 // the rollback's vacate. The first is at once, then 50 ms doubling to 1.6 s
 // twice: eight attempts over 4.75 s, the deadline every such step of one
-// operation shares (newBudget), so a hold one step waited out leaves less to
-// the next. The swap's vacate and either place have one attempt (moves.once).
+// operation shares, set as it begins (deadline), so that the time one step
+// took, waiting out a hold or not, is the next's. The swap's vacate and either
+// place have one attempt (moves.once).
 //
 // recoveryWaits is the put-back's, the one wait with the binary not in place,
-// made only once a place was refused: seven attempts over 3.15 s, its own
-// deadline, which no step before it draws on. Each of its waits can only
-// shorten the time with no binary on disk, against giving up, which leaves it
-// missing until someone renames it back.
+// made only once a place was refused: seven attempts over 3.15 s, on a
+// deadline of its own set as the put-back begins, which no step before it
+// draws on. Each of its waits can only shorten the time with no binary on
+// disk, against giving up, which leaves it missing until someone renames it
+// back.
 //
 // Here, beside scmStopWait, so that what an operation holds the install
 // marker's lock for is checked on every platform
@@ -64,7 +66,8 @@ func waitsTotal(schedule []time.Duration) time.Duration {
 
 // ForwardWait and RecoveryWait are what an operation waits at most, all its
 // steps before its first destructive rename together, and its put-back, for
-// cmd/bridge's pin of the rollbacks at a start.
+// cmd/bridge's pin of the rollbacks at a start: waits, each at its length in
+// the schedule, never the time a step under way takes.
 func ForwardWait() time.Duration { return waitsTotal(forwardWaits) }
 
 // RecoveryWait is ForwardWait's twin for the put-back.

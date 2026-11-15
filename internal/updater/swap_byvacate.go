@@ -24,11 +24,12 @@ import (
 // Nothing waits once anything is armed (backlog B898): the staging, where
 // there is one, and the probes of the candidate, of dst and of a bak already
 // there (a scanner holding the candidate it has just seen run for its settings
-// check) share one forward deadline before markSwapStarted; the vacate and
-// the place then have one attempt each, so a vacate refused after arming moved
-// nothing, and the install's marker, put back as it was read, disarms the
-// swap. A refused place is put back on the recovery schedule. Each failure is
-// a *SwapError saying what it left.
+// check) share one forward deadline, set as the swap begins, before
+// markSwapStarted, and a swap whose probes ended past it arms nothing
+// (ErrDeadlinePassed); the vacate and the place then have one attempt each,
+// so a vacate refused after arming moved nothing, and the install's marker,
+// put back as it was read, disarms the swap. A refused place is put back on
+// the recovery schedule. Each failure is a *SwapError saying what it left.
 //
 // markSwapStarted (nil in tests) runs immediately before the first rename and
 // aborts the swap on error; see State.SwapStarted.
@@ -39,7 +40,7 @@ func swapByVacate(dst, newBinary, backupExt string, markSwapStarted func() error
 // swap is swapByVacate through m.
 func (m moves) swap(dst, newBinary, backupExt string, markSwapStarted func() error) error {
 	bak := dst + backupExt
-	fwd := newBudget(forwardWaits)
+	fwd := m.deadlineOf(forwardWaits)
 	staged := newBinary
 	if !checkedBeside(newBinary, dst) {
 		// mode 0: NTFS has no executable bit to set.
@@ -64,6 +65,10 @@ func (m moves) swap(dst, newBinary, backupExt string, markSwapStarted func() err
 	if r := m.probeIfThere(bak, fwd); r.err != nil {
 		return failed(NothingMoved, r, fmt.Sprintf("rename %s -> %s: %v; nothing was moved", dst, bak, r.err))
 	}
+	if m.passed(fwd) {
+		return failed(NothingMoved, stepResult{err: ErrDeadlinePassed},
+			fmt.Sprintf("rename %s -> %s: %v; nothing was moved", dst, bak, ErrDeadlinePassed))
+	}
 	if err := armSwap(markSwapStarted); err != nil {
 		return err
 	}
@@ -75,9 +80,9 @@ func (m moves) swap(dst, newBinary, backupExt string, markSwapStarted func() err
 }
 
 // commit makes the swap's two adjacent renames, dst to bak and then staged to
-// dst, one attempt each, and where the place is refused puts bak back on the
-// recovery schedule: the Windows swap's, and the Unix swap's on a filesystem
-// that cannot hardlink (commitViaRename).
+// dst, one attempt each whatever the time, and where the place is refused
+// puts bak back on the recovery schedule (putBack): the Windows swap's, and
+// the Unix swap's on a filesystem that cannot hardlink (commitViaRename).
 func (m moves) commit(dst, staged, bak string) error {
 	if r := m.once(StageVacate, dst, bak); r.err != nil {
 		return failed(NothingMoved, r, fmt.Sprintf("rename %s -> %s: %v; nothing was moved", dst, bak, r.err))
@@ -86,7 +91,7 @@ func (m moves) commit(dst, staged, bak string) error {
 	if r.err == nil {
 		return nil
 	}
-	p := m.renameStep(StagePutBack, bak, dst, recoveryWaits, newBudget(recoveryWaits))
+	p := m.putBack(bak, dst)
 	if p.err != nil {
 		e := failed(BinaryMissing, p, fmt.Sprintf("install %s -> %s failed (%v); rollback also failed (%v); "+
 			"manual recovery needed: rename %s to %s, then start the bridge", staged, dst, r.err, p.err, bak, dst))
