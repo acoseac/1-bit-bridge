@@ -100527,3 +100527,17 @@ A read-only census; none of them changed. Lines are 172d511f's.
 No rules change. build-ci-tests.md's B849 and B851 bullet already says
 that a step that needs the folder's lock free waits for the worker's end
 through `unlockHold`, and asserts that a prune ran.
+
+### Runs
+
+At f4c1e106: 172d511f's code, and the record's first part. TMPDIR was
+`$HOME/onebit/tmp`.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=50 -timeout 30m -v -run 'TestTheTickerAndTheDoctorNameAPruneGivenUp' ./cmd/bridge/`, inside the build slot | 50 of 50, no race; ok in 87.2 s (89.3 s with its build) |
+| the same, outside the slot at nice 19, while another worker held the slot | 50 of 50, no race; ok in 88.6 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, inside the slot and outside it |
+| gofmt (`go run cmd/gofmt -l`) on the two test files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f4c1e106 and with this table |
+| `make docs-check` | exit 0, at f4c1e106 and with this table |
