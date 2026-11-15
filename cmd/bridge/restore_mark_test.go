@@ -163,6 +163,11 @@ func commandsSayWhatEndsAHold(t *testing.T, tc holdWordsCase, onSnapshot func(t 
 // test before let go at its drop can stand, passes through it, and the case
 // still parks and joins its own. Red on round 3's wrapper, installed before
 // the case and parking the first worker that came to it.
+//
+// Each of its waits for a worker, and parkAnEarlierWorker's, is 30 s at most,
+// capped by the test binary's deadline (restoreWaitWithin), so a worker held
+// past its wait fails the case at that wait, not at the package's deadline
+// (backlog B871's round 6).
 func TestEachHoldWordsCaseWaitsForItsVerificationsEnd(t *testing.T) {
 	for _, tc := range holdWordsCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -205,7 +210,7 @@ func TestEachHoldWordsCaseWaitsForItsVerificationsEnd(t *testing.T) {
 				case <-earlier.ended:
 				case <-parked:
 					t.Fatalf("the case's wrapper parked the worker of an earlier verification, of %s, as its own", earlier.dir)
-				case <-time.After(30 * time.Second):
+				case <-time.After(restoreWaitWithin(t, 30*time.Second)):
 					t.Fatal("the earlier verification's worker never passed the case's wrapper")
 				}
 			}
@@ -223,14 +228,14 @@ func TestEachHoldWordsCaseWaitsForItsVerificationsEnd(t *testing.T) {
 				}
 				select {
 				case <-passed:
-				case <-time.After(30 * time.Second):
+				case <-time.After(restoreWaitWithin(t, 30*time.Second)):
 					t.Error("the parked worker never passed its end")
 				}
 			})
 			t.Run("case", func(t *testing.T) { commandsSayWhatEndsAHold(t, tc, wrap) })
 			select {
 			case <-parked:
-			case <-time.After(30 * time.Second):
+			case <-time.After(restoreWaitWithin(t, 30*time.Second)):
 				t.Fatal("no verification's worker came to its end in the case")
 			}
 			select {
@@ -240,7 +245,7 @@ func TestEachHoldWordsCaseWaitsForItsVerificationsEnd(t *testing.T) {
 			}
 			select {
 			case <-passed:
-			case <-time.After(30 * time.Second):
+			case <-time.After(restoreWaitWithin(t, 30*time.Second)):
 				t.Fatal("the worker let go never passed its end")
 			}
 			if waitAtEnd != 5*time.Second {
@@ -289,7 +294,7 @@ func parkAnEarlierWorker(t *testing.T) earlierWorker {
 		letGo()
 		select {
 		case <-ended:
-		case <-time.After(30 * time.Second):
+		case <-time.After(restoreWaitWithin(t, 30*time.Second)):
 			t.Errorf("the earlier verification's worker, of %s, never ended", dir)
 		}
 	})
@@ -298,7 +303,7 @@ func parkAnEarlierWorker(t *testing.T) earlierWorker {
 	}
 	select {
 	case <-entered:
-	case <-time.After(30 * time.Second):
+	case <-time.After(restoreWaitWithin(t, 30*time.Second)):
 		t.Fatal("the earlier verification's worker never dropped its hold")
 	}
 	if n := backup.ActiveHoldsForTest(); n != 0 {
