@@ -100297,17 +100297,17 @@ and `move_entry.py`.
 
 ## 2026-11-15 — B898 PR 1: the updater waits out a held binary where it is in place
 
-Worker b898pr1, legion0, branch `fix/b898-updater-held-binary` from main
-3f4843e1. Commits: fbe92a26 (the tests first, over main's behaviour: a
+Branch `fix/b898-updater-held-binary` from main 3f4843e1, every run on the
+Linux test host. Commits: fbe92a26 (the tests first, over main's behaviour: a
 names-only shim per package, `b898_shim.go`, and `cmd/bridge/main.go` under
 the new signatures alone, so that the commit's own run shows each red at
 main, Windows' real-hold cases on windows-latest among them), 667c4277 (the
 fix, the shims removed), 93fb303f (the lock-wait pin names its exception by
 its id alone), then this record. The rules files, their History and the
-three entries moved out of `config-lifecycle.md` ship as a patch beside the
-branch, `rules-b898.patch` (this host's sandbox refuses an edit under
-`.claude/`). Every run: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`
-where a make target sets them, TMPDIR on the worktree's disk.
+three entries moved out of `config-lifecycle.md` are round 2's commit
+8f79e202 (the round 2 section below). Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus` where a make target sets them,
+TMPDIR on the worktree's disk.
 
 ### At main
 
@@ -100397,7 +100397,7 @@ on Linux; each prediction written before its run. Every prediction held.
   the unlocked start's path) and every test changed for its signatures alone.
   The stand-in restore holds the backup file, a probe or a rename of it alike,
   so main meets the hold at its place, as the CI runs did.
-- Windows, not run here: at fbe92a26 windows-latest should show red
+- Windows, not run on the Linux test host: at fbe92a26 windows-latest should show red
   `TestOnlyWindowsSharingAndLockViolationsAreAFileInUse`,
   `TestAnAccessDeniedRenameIsAnsweredAtOnceThroughThePredicate`,
   `TestARollbackWaitsOutAHandleThatSharesNoDeletion`,
@@ -100451,16 +100451,19 @@ predicted green stayed green:
   precedence answering first); the console's failure logged at Warn; a hold's
   words the error's text.
 
-Not run here: N1's real-hold cases 1 and 6, N3's Windows half
-(`ERROR_ACCESS_DENIED` in Windows' predicate, which builds for Windows), N6's
-case 3 and N8's case 6, all windows-latest's.
+Not run on the Linux test host: N1's real-hold cases 1 and 6, N3's Windows
+half (`ERROR_ACCESS_DENIED` in Windows' predicate, which builds for Windows),
+N6's case 3 and N8's case 6, all windows-latest's.
+
+N9 was withdrawn: the code it would mutate is backlog B898's PR 3's, not this
+PR's, and the other controls keep their numbers.
 
 ### The runs
 
 - The x50, 16:28 to 16:48: every test the PR adds or changes that runs on
-  this host, 51 in three packages, `-race -count=50` each alone, from race
-  test binaries built once (make test's tags), four lanes at GOMAXPROCS 4,
-  the host's load 3 to 6 (another worker's gate): all passed, the longest
+  the Linux test host, 51 in three packages, `-race -count=50` each alone,
+  from race test binaries built once (make test's tags), four lanes at
+  GOMAXPROCS 4, the host's load 3 to 6 (another build beside it): all passed, the longest
   `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (381 s) and
   `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (362 s).
 - The gate, in the build slot, 17:06 to 17:39, at 93fb303f: `go vet ./...`
@@ -100482,8 +100485,24 @@ case 3 and N8's case 6, all windows-latest's.
   declares, planted in its History file, failed the first, so it read the
   copy. Applied with git to a fresh copy of HEAD, the patch gives the same
   bytes.
-- Not run here: windows-latest (the real-hold cases, and the serve tests
-  whose Windows reds this PR answers) and the loaded experiment.
+- Not run on the Linux test host: windows-latest (the real-hold cases, and
+  the serve tests whose Windows reds this PR answers) and the loaded
+  experiment.
+
+### The Windows tests at fbe92a26
+
+fbe92a26's Windows tests are for a CI runner only, never a host with a
+registered bridge service: at that commit `RollbackBinary` is still main's,
+which asks the service manager to stop a registered bridge service once it has
+found the backup (`swap_windows.go` 284-290 there), and
+`TestRollbackBinary_Windows` and `TestRollbackBinaryReplacesARunningExe` call
+it without the `skipIfBridgeServiceRegistered` main gave them (the swap tests
+fbe92a26 moved onto `swapByVacate` reach no service manager). From 667c4277 on
+no rollback reaches the service manager (`TestTheRollbackStopsNoService`), and
+the one test that can reach an SCM wrapper, `TestSwapWindows_Composition` in
+`internal/updater/swap_windows_test.go` (`swapBinary` whole, through
+`stopServiceIfRunning`), keeps the fail-closed guard, which runs it only where
+the service manager answers that no bridge service exists.
 
 ### Size
 
