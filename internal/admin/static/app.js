@@ -13,11 +13,14 @@ const API = {
     if (!r.ok) throw await errorFromResponse(r);
     return r.json();
   },
-  async post(path, body) {
+  // signal, optional, ends the request when aborted: the Player page's test
+  // tone (B601), whose request lasts as long as the tone, passes its own.
+  async post(path, body, signal) {
     const r = await fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: body == null ? null : JSON.stringify(body),
+      signal,
     });
     if (!r.ok) throw await errorFromResponse(r);
     return r.status === 204 ? null : r.json();
@@ -7821,8 +7824,9 @@ const PLAYER_BINDING_WORDS = {
 
 // initOutput wires the Player page: its status, painted from GET
 // /api/output/player on load, every five seconds while the page is in view,
-// and after each change; the switch; the OpenHome switch; the DAC list and
-// its choice; and the restart. A public bridge's page renders none of it.
+// and after each change; the test tone; the switch; the OpenHome switch; the
+// DAC list and its choice; and the restart. A public bridge's page renders
+// none of it.
 function initOutput() {
   if (!document.getElementById("player-output-status")) return;
   playerOutputLatest = null;
@@ -7831,6 +7835,7 @@ function initOutput() {
     if (document.visibilityState === "visible") loadPlayerOutput();
   }, 5000);
   document.getElementById("player-output-refresh")?.addEventListener("click", () => loadPlayerOutput());
+  wirePlayerOutputTone();
   wirePlayerOutputSwitch();
   wirePlayerOutputOpenHome();
   wirePlayerOutputDACs();
@@ -7877,11 +7882,13 @@ function renderPlayerOutput(st) {
   show("player-output-switch-panel", st.available && !st.managed.enabled);
   show("player-output-openhome", !st.managed.openHome);
   show("player-output-dac-panel", st.available && !st.managed.device);
+  show("player-output-tone-panel", st.available && Boolean(st.running.tone));
   if (!shown) {
     show("player-output-pending-panel", false);
     return;
   }
   renderPlayerOutputRunning(st.running);
+  renderPlayerOutputTone(st.running);
   renderPlayerOutputTransports(st.transports);
   renderPlayerOutputConfigured(st.configured);
   renderPlayerOutputOpenHome(st.configured);
@@ -8315,6 +8322,238 @@ function renderPlayerOutputDACs(list) {
   });
   table.appendChild(body);
   host.appendChild(table);
+}
+
+// ---- The Player page's test tone (B601) ----
+
+// PLAYER_TONE_WORDS words each word a test tone is refused or ends with: the
+// console's view's (the player not running, sounding or busy; its output
+// withheld, unknown or unavailable; a release never confirmed) and the player
+// backend's. cmd/bridge's TestEveryToneWordIsWorded holds every word to a
+// sentence here. A refused open's cause is PLAYER_TONE_LAST_ERRORS'.
+const PLAYER_TONE_WORDS = {
+  player_not_running: "The player is not running, so it has no DAC to play the tone on.",
+  player_sounding: "The player is playing, or holds a pause: stop it from the 1-bit app, or the controller that plays it, first.",
+  player_busy: "The player is busy with its DAC (letting go of it, or held for maintenance): try again in a moment.",
+  withheld: "The player's output is withheld: the config turns it off, or names another DAC than the one it started with.",
+  output_unknown: "The player has not heard yet whether its DAC is there.",
+  output_unavailable: "The player's DAC is not available.",
+  output_changed: "The player's DAC changed (unplugged and plugged in again, or another in its place): play the tone again.",
+  snapshot_stale: "The box could not be read just now, so the player cannot vouch for its DAC: try again in a moment.",
+  release_unconfirmed: "The DAC's last release was never confirmed, so nothing opens it until it is, or until the bridge restarts.",
+  level_refused: "The level is a number from -90 to -30 dBFS.",
+  length_refused: "The tone lasts from 1 to 30 seconds.",
+  serve_stopping: "The bridge is stopping.",
+  probe_running: "The player is checking what its DAC takes: try again in a moment.",
+  choice_write: "A DSD choice for the DAC is being saved: try again in a moment.",
+  start_waiting: "The player is about to play.",
+  session_holds: "The player holds its DAC.",
+  tone_playing: "A test tone is playing already: stop it first, or wait for its end.",
+  request_ended: "The tone's request ended, and the tone with it.",
+  played: "The tone played to its end.",
+  preempted: "The player started to play, and the tone stopped.",
+  output_gone: "The DAC went away during the tone.",
+  device_error: "The DAC failed during the tone.",
+  wrong_device: "The DAC the player opened is not the one it is bound to, so the tone did not play.",
+  not_located: "The player's DAC could not be found on the box.",
+  open_refused: "The DAC did not open for the tone.",
+  failed: "The tone failed: the bridge's log says why.",
+  stop_unconfirmed: "The tone was stopped, and the DAC has not confirmed that it let go: nothing else opens the DAC until it does.",
+};
+
+// PLAYER_TONE_LAST_ERRORS words a refused open's cause: the tone's own
+// lastError (running.tone.lastError, and the tone's answer), never the
+// player's last play attempt, which renderPlayerOutputRunning words.
+const PLAYER_TONE_LAST_ERRORS = {
+  device_busy: "Another program holds the DAC.",
+  permission_denied: "The bridge's user may not open the DAC's node: the checks on the Diagnostics page (bridge doctor) name the user, the group and the commands that let it.",
+};
+
+// PLAYER_TONE_STATES words each state of the tone the status reads
+// (running.tone.state) but idle, whose line is how the last tone ended.
+const PLAYER_TONE_STATES = {
+  playing: "A test tone is playing",
+  stopping: "A test tone was stopped, and the DAC is letting go of it.",
+  stop_unconfirmed: "A test tone was stopped, and the DAC has not confirmed that it let go: nothing else opens the DAC until it does.",
+  release_unconfirmed: "A test tone's DAC did not close cleanly, so nothing opens the DAC until the bridge restarts.",
+};
+
+// playerTone is the page's own test tone: the controller of its request
+// while it is out, which Stop, the page's scope and its leaving abort; a
+// Stop's confirmation running, and the count that lets a later Play or Stop
+// end an earlier one; and whether the tone's line last showed a tone that was
+// not idle (renderPlayerOutputTone).
+const playerTone = { controller: null, confirming: false, stopSeq: 0, busyShown: false };
+
+// playerToneFormatText words what the kernel committed for a tone, as it
+// plays or played, "" before an open did.
+function playerToneFormatText(format, rateHz, validBits, verb) {
+  return format ? ` It ${verb} as ${format} at ${playerRateText(rateHz)}, ${validBits} valid bits.` : "";
+}
+
+// playerToneEndText words how a tone ended, or why it was refused, and a
+// refused open's cause.
+function playerToneEndText(outcome, lastError) {
+  let text = PLAYER_TONE_WORDS[outcome] || `The tone ended: ${outcome}.`;
+  if (lastError) text += ` ${PLAYER_TONE_LAST_ERRORS[lastError] || lastError}`;
+  return text;
+}
+
+// playerToneStatusText words the tone as the status reads it: a playing one
+// with its level, length and format; another state that is not idle by its
+// words; an idle one by how the last tone ended, "" before one ended.
+function playerToneStatusText(tone) {
+  if (tone.state === "playing") {
+    return `${PLAYER_TONE_STATES.playing} at ${tone.levelDBFS} dBFS for ${tone.seconds} seconds.` +
+      playerToneFormatText(tone.format, tone.rateHz, tone.validBits, "plays");
+  }
+  if (PLAYER_TONE_STATES[tone.state]) return PLAYER_TONE_STATES[tone.state];
+  if (!tone.outcome) return "";
+  return playerToneEndText(tone.outcome, tone.lastError) + playerToneFormatText(tone.format, tone.rateHz, tone.validBits, "played");
+}
+
+// showPlayerToneLine sets the tone's line, a live region, only where its
+// words or its kind change, so a repaint every five seconds announces
+// nothing new.
+function showPlayerToneLine(kind, text) {
+  const line = document.getElementById("player-output-tone-msg");
+  if (!line) return;
+  if (line.textContent !== text) line.textContent = text;
+  const cls = `status ${kind}`;
+  if (line.className !== cls) line.className = cls;
+}
+
+// renderPlayerOutputTone paints the tone's line from the running player's
+// tone (running.tone, whose panel renderPlayerOutput shows while it is there
+// and the page's controls apply) while the page has no tone of its own out
+// and no Stop's confirmation running: a tone that is not idle (another
+// page's, or one still letting go of the DAC), then, once it is idle again,
+// how it ended, and on a line still empty how the last tone ended; an idle
+// tone otherwise leaves the line as the page last set it.
+function renderPlayerOutputTone(run) {
+  const tone = run.tone;
+  if (!tone || playerTone.controller || playerTone.confirming) return;
+  const line = document.getElementById("player-output-tone-msg");
+  const busy = tone.state !== "idle";
+  if (busy || playerTone.busyShown || (line && !line.textContent)) {
+    showPlayerToneLine(busy && tone.state !== "playing" ? "warn" : "ok", playerToneStatusText(tone));
+  }
+  playerTone.busyShown = busy;
+}
+
+// wirePlayerOutputTone arms the test tone. Play posts
+// POST /api/output/player/tone through API.post with a signal of the tone's
+// own, and the request lasts as long as the tone: its answer is how the tone
+// ended, or why it was refused, in the page's own words. Stop aborts that
+// request, which ends the tone on the server, and posts nothing: no route
+// stops a tone. The page's scope (a navigation inside the console) and its
+// leaving (pagehide: a full navigation, a closed tab) abort it too. Play is
+// disabled only while the page's own tone is out: a tone another page plays
+// is the server's refusal (tone_playing), never the page's guess.
+function wirePlayerOutputTone() {
+  const play = document.getElementById("player-output-tone-play");
+  const stop = document.getElementById("player-output-tone-stop");
+  const level = document.getElementById("player-output-tone-level");
+  const seconds = document.getElementById("player-output-tone-seconds");
+  if (!play || !stop || !level || !seconds) return;
+  const scope = pageSignal();
+  const abortTone = () => playerTone.controller?.abort();
+  scope.addEventListener("abort", abortTone, { once: true });
+  window.addEventListener("pagehide", abortTone, { signal: scope });
+  playerTone.controller = null;
+  playerTone.confirming = false;
+  playerTone.busyShown = false;
+  play.addEventListener("click", async () => {
+    const st = playerOutputLatest;
+    if (!st || !st.available || playerTone.controller) return;
+    const controller = new AbortController();
+    playerTone.controller = controller;
+    playerTone.stopSeq++;
+    playerTone.confirming = false;
+    setDisabled(play, true);
+    setDisabled(stop, false);
+    const body = { level: Number(level.value), seconds: Number(seconds.value) };
+    showPlayerToneLine("ok", `Playing a 1 kHz tone at ${body.level} dBFS for ${body.seconds} seconds.`);
+    try {
+      const r = await API.post("/api/output/player/tone", body, controller.signal);
+      if (!scope.aborted) {
+        showPlayerToneLine(r.outcome === "played" ? "ok" : "warn",
+          playerToneEndText(r.outcome, r.lastError) + playerToneFormatText(r.format, r.rateHz, r.validBits, "played"));
+      }
+    } catch (err) {
+      // An abort is Stop's, whose confirmation says what followed, or the
+      // page's own going: nothing to say for it here.
+      if (!controller.signal.aborted && !scope.aborted) {
+        showPlayerToneLine("err", err.status === 409
+          ? `The tone did not play: ${PLAYER_TONE_WORDS[err.code] || err.message}`
+          : `The tone did not play: ${err.message}`);
+      }
+    } finally {
+      if (playerTone.controller === controller) playerTone.controller = null;
+      if (!scope.aborted) {
+        setDisabled(stop, true);
+        setDisabled(play, false);
+      }
+    }
+  });
+  stop.addEventListener("click", () => {
+    const controller = playerTone.controller;
+    if (!controller) return;
+    controller.abort();
+    confirmPlayerToneStop(scope);
+  });
+}
+
+// confirmPlayerToneStop reads the status at once and every 250 ms while the
+// tone reads playing or stopping, for at most three seconds (the backend's
+// two-second wait for the node's close, and one more): an abort reaches the
+// server only as its connection closes, which the page cannot see. It says
+// the stop was confirmed once the tone reads anything else, and past the
+// three seconds that it was not, never that it was. A later Play or Stop
+// ends it, and so does the page's going (scope).
+async function confirmPlayerToneStop(scope) {
+  const seq = ++playerTone.stopSeq;
+  playerTone.confirming = true;
+  const deadline = Date.now() + 3000;
+  const current = () => seq === playerTone.stopSeq && !scope.aborted;
+  showPlayerToneLine("ok", "Stopping the tone…");
+  for (;;) {
+    const st = await readPlayerOutputForTone();
+    if (!current()) return;
+    const tone = st && st.available && st.running ? st.running.tone : null;
+    const state = tone ? tone.state : "";
+    if (tone && state !== "playing" && state !== "stopping") {
+      playerTone.confirming = false;
+      playerTone.busyShown = false;
+      if (state === "idle") showPlayerToneLine("ok", "The tone stopped.");
+      else showPlayerToneLine("warn", playerToneStatusText(tone));
+      return;
+    }
+    if (Date.now() >= deadline) {
+      playerTone.confirming = false;
+      playerTone.busyShown = Boolean(tone);
+      showPlayerToneLine("warn", tone
+        ? `The stop is not confirmed: three seconds on, the bridge still reads the tone as ${state}.`
+        : "The stop is not confirmed: the bridge's status could not be read.");
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (!current()) return;
+  }
+}
+
+// readPlayerOutputForTone reads the status for a Stop's confirmation and
+// paints it unless a later paint overtook it; null where it could not be
+// read.
+async function readPlayerOutputForTone() {
+  const seq = ++playerOutputSeq;
+  try {
+    const st = await API.get("/api/output/player");
+    if (seq === playerOutputSeq) renderPlayerOutput(st);
+    return st;
+  } catch {
+    return null;
+  }
 }
 
 async function loadDiagnostics() {

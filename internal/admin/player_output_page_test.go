@@ -153,8 +153,9 @@ func TestThePlayerPageOffersTheRestartAsSettingsDoes(t *testing.T) {
 
 // TestThePlayerPageOffersNoDSDControl pins the owner's decision for this
 // release: the page says plainly that DSD on this player comes later, offers
-// no control for it and no command to copy, and its script writes nothing but
-// the switch, the OpenHome switch (B612) and the DAC.
+// no control for it and no command to copy, and its script posts nothing but
+// the switch, the OpenHome switch (B612), the DAC and the test tone (B601),
+// whose request writes nothing and which no second route stops.
 func TestThePlayerPageOffersNoDSDControl(t *testing.T) {
 	srv, _, _ := newPlayerTestServer(t)
 	page := renderOutputPage(t, srv)
@@ -175,8 +176,8 @@ func TestThePlayerPageOffersNoDSDControl(t *testing.T) {
 		got = append(got, w[1])
 	}
 	sort.Strings(got)
-	if strings.Join(got, " ") != "/api/output/player/dac /api/output/player/enabled /api/output/player/openhome" {
-		t.Errorf("the page's script writes %v, want the DAC, the switch and the OpenHome switch alone", got)
+	if strings.Join(got, " ") != "/api/output/player/dac /api/output/player/enabled /api/output/player/openhome /api/output/player/tone" {
+		t.Errorf("the page's script posts %v, want the DAC, the switch, the OpenHome switch and the test tone alone", got)
 	}
 }
 

@@ -279,14 +279,15 @@ type bridgePlayer struct {
 
 	// The supervisor's alone: the engine as it runs, the live config it
 	// follows, what it tells the engine of the output, the OpenHome surface,
-	// when the opt-in starts it, and the player's DSD state with the
-	// migration of the legacy keys (B728 B6).
+	// when the opt-in starts it, the player's DSD state with the migration of
+	// the legacy keys (B728 B6), and the console's test tone's gate (B601).
 	run     *playerRun
 	live    func() hotplug.Settings
 	changed func() <-chan struct{}
 	out     playerOutput
 	surface *openhome.Surface
 	dsd     *playerDSD
+	gate    toneGate
 
 	mu            sync.Mutex
 	closing       bool
@@ -611,8 +612,15 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the backend is asked to let go of the device; the release outcome follows")
 			return
 		case snap := <-run.sub.C():
+			// The tone's gate reads every snapshot, a republish at its
+			// generation included, which makes no report: a stale one shuts it
+			// before anything else is done with it, and whether it opens again
+			// is asked once the snapshot is reported, against the report the
+			// engine took (toneGate).
+			p.toneSnapshot(probeConditions(snap, p.device).Fresh)
 			p.dsd.resolve(ctx, snap)
 			p.report(snap)
+			p.toneOpenIfDue()
 			refresh(true)
 			probe(snap)
 		case <-cfgChanged:
@@ -740,8 +748,14 @@ func (o *playerOutput) fromConfig() (engine.OutputReport, bool) {
 }
 
 // send hands the engine rp and logs what it says of the output. The call
-// ends with serve's stop and with the engine's Run (playerRun.calls).
+// ends with serve's stop and with the engine's Run (playerRun.calls). The
+// console's test tone's gate shuts before the engine hears a report that
+// takes the output away or names another unit, and opens only once the engine
+// has taken an available one (toneGate).
 func (p *bridgePlayer) send(rp engine.OutputReport) {
+	if why, shut := toneShutFor(rp); shut {
+		p.toneShut(why)
+	}
 	if p.seams != nil && p.seams.reports != nil {
 		p.seams.reports(rp)
 	}
@@ -750,9 +764,11 @@ func (p *bridgePlayer) send(rp engine.OutputReport) {
 		if calls.Err() == nil && engine.ReasonOf(err) != engine.ReasonClosed {
 			playerLog.Warn("player: the engine refused the output's report", "report", rp.Generation, "err", err)
 		}
+		p.toneRefused()
 		return
 	}
 	p.out.sent, p.out.told = rp, true
+	p.toneTaken(rp)
 	attrs := []any{"report", rp.Generation}
 	if rp.UnitChanged {
 		attrs = append(attrs, "unitChanged", true)
@@ -764,10 +780,12 @@ func (p *bridgePlayer) send(rp engine.OutputReport) {
 	playerLog.Info("player: the output is unavailable", append(attrs, "reason", rp.Reason)...)
 }
 
-// shutdown stops the library index's build ahead of the first lookup and
-// the OpenHome surface, when the opt-in started them, so no request reaches
-// the engine as it stops (the surface refuses, shuts down within its grace,
-// and closes what is open); then it stops the engine and waits for it, then
+// shutdown closes the console's test tones first (CloseTones, B601), ending
+// the one that plays; then it stops the library index's build ahead of the
+// first lookup and the OpenHome surface, when the opt-in started them, so no
+// request reaches the engine as it stops (the surface refuses, shuts down
+// within its grace, and closes what is open); then it stops the engine and
+// waits for it, then
 // for the backend's goroutines, each within its bound, and says what it
 // left: an engine whose state write did not return, a write of the player's
 // DSD state (which keeps the lock's share) and any other goroutine of the
@@ -787,6 +805,12 @@ func (p *bridgePlayer) shutdown() {
 	}()
 	run := p.run
 	began := time.Now()
+	// The console's test tones first: none is counted from now on, and the
+	// one that plays ends, so nothing opens the DAC as the player stops; the
+	// backend's Wait below joins every tone it counted (CloseTones, B601).
+	if tb := tonesOf(run.be); tb != nil {
+		tb.CloseTones()
+	}
 	// The library index's build ahead of the first lookup is stopped at once:
 	// the player's context has ended it already, unless the engine stopped on
 	// its own. It is waited for last (joinWarm).

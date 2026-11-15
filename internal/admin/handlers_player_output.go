@@ -1,13 +1,16 @@
 // The console's Player page (B601): the bridge's own player (B470) as the
 // operator sees it, beside the web player that plays in the browser. It shows
 // the player's status, turns it on or off, lets the 1-bit app cast to it or
-// not (its OpenHome surface, output.player.openhome, B612), and chooses its
-// DAC; it offers no DSD control and no test tone (both later work, B602).
+// not (its OpenHome surface, output.player.openhome, B612), chooses its DAC,
+// and plays a quiet test tone through that DAC while the player is stopped
+// (POST /api/output/player/tone); it offers no DSD control (B602).
 //
 // The page asks the serving process alone. cmd/bridge implements PlayerOutput
-// over serve's player (its boot plan, its engine, GET /v1/outputs' own view of
-// it) and the box's DAC readings, so this package imports no player package
-// and the console and /v1/outputs say one thing.
+// over serve's player (its boot plan, its engine and backend, GET /v1/outputs'
+// own view of it) and the box's DAC readings, so this package imports no
+// player package and the console and /v1/outputs say one thing. The tone's
+// bounds are internal/tonebounds', outside internal/player, which the player's
+// backend refuses a tone by too.
 //
 // The three writes change output.player, which serve decides its player from
 // once, at boot: each goes through the live holder (CfgHolder.UpdateChecked),
@@ -39,6 +42,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/tonebounds"
 )
 
 // The managed-setting names of the page's three writes, as
@@ -62,8 +66,9 @@ const (
 )
 
 // PlayerOutput is the bridge's own player as the Player page asks it.
-// cmd/bridge implements it over serve's player; every method reads, and none
-// writes the config, which this package does.
+// cmd/bridge implements it over serve's player. None of its methods writes the
+// config, which this package does, and every one but Tone only reads: Tone
+// plays the console's test tone through the running player's DAC.
 type PlayerOutput interface {
 	// Platform is the host the player runs on: "linux" is the one that runs
 	// it.
@@ -98,6 +103,66 @@ type PlayerOutput interface {
 	// after withholds the running player's output where before did not: the
 	// player turned off, or another DAC than the one it started with.
 	Withholds(before, after *config.Config) bool
+	// Tone plays the console's test tone through the running player's DAC
+	// and answers once it has ended (B601): refused by its word, nothing
+	// opened, unless the player that runs is stopped with its output
+	// available and nothing withheld on live (the config the route loaded
+	// once) and its backend's device slot is free; ended by its length, ctx
+	// (the request's), a play the player starts, the output going, or serve's
+	// stop. It writes nothing, and never makes the player sound (Sounding).
+	Tone(ctx context.Context, live *config.Config, req PlayerToneRequest) PlayerToneResult
+}
+
+// PlayerToneRequest is the test tone the page asks for: its peak in dBFS, a
+// number from -90 to -30 (tonebounds.Check), and its length in whole seconds,
+// 1 to 30 (tonebounds.CheckSeconds).
+type PlayerToneRequest struct {
+	LevelDBFS float64
+	Seconds   int
+}
+
+// PlayerToneResult is a tone's answer, POST /api/output/player/tone's body
+// for one that took the DAC's slot (Admitted): the word it ended with, a
+// refused open's cause, what the kernel committed for it ("" and 0 before an
+// open did) and the frames it wrote. One refused before it took the slot is
+// answered 409 with its word as the code.
+type PlayerToneResult struct {
+	// Outcome is the word the tone ended or was refused with.
+	Outcome string `json:"outcome"`
+	// LastError is a refused open's cause, device_busy (another process holds
+	// the DAC) or permission_denied (this process may not open its node), ""
+	// otherwise: the tone's own, never the engine's (PlayerRunning.LastError).
+	LastError string `json:"lastError"`
+	Format    string `json:"format"`
+	RateHz    int    `json:"rateHz"`
+	ValidBits int    `json:"validBits"`
+	Frames    int64  `json:"frames"`
+	// Admitted is a tone that took the device slot.
+	Admitted bool `json:"-"`
+}
+
+// PlayerTone is the console's test tone now (PlayerRunning.Tone).
+type PlayerTone struct {
+	// State is idle, playing, stopping (ended, its node's close not answered
+	// yet), stop_unconfirmed (that close not answered past its wait: the DAC
+	// is still held) or release_unconfirmed (a tone's close did not answer
+	// cleanly: nothing opens the DAC until the bridge restarts).
+	State string `json:"state"`
+	// LevelDBFS and Seconds are the tone in the slot's request, 0 while none
+	// is.
+	LevelDBFS float64 `json:"levelDBFS"`
+	Seconds   int     `json:"seconds"`
+	// Format, RateHz and ValidBits are what the kernel committed for the tone
+	// in the slot, or for the last tone while none is ("" and 0 before an
+	// open did).
+	Format    string `json:"format"`
+	RateHz    int    `json:"rateHz"`
+	ValidBits int    `json:"validBits"`
+	// Outcome is the last tone's end and LastError its refused open's cause
+	// (device_busy, permission_denied), "" before one ended; both are cleared
+	// when the next tone takes the slot.
+	Outcome   string `json:"outcome"`
+	LastError string `json:"lastError"`
 }
 
 // Chosen's refusals, which the DAC route answers with their own codes.
@@ -191,6 +256,11 @@ type PlayerRunning struct {
 	// Signal is what the DAC receives, the backend's observation, nil while
 	// nothing is open.
 	Signal *PlayerSignal `json:"signal"`
+	// Tone is the console's test tone (B601): nil for a player serve did not
+	// start, one not running yet, and one whose backend plays none; idle
+	// while no tone plays. Its lastError is the tone's own: LastError above
+	// stays the engine's last play attempt alone.
+	Tone *PlayerTone `json:"tone"`
 }
 
 // PlayerBinding is a binding as the page shows it: the serial as its label
@@ -737,6 +807,58 @@ func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 // errPlayerUnchanged ends a DAC choice's turn with nothing saved: the config
 // names the chosen binding already.
 var errPlayerUnchanged = errors.New("the config names that DAC already")
+
+// playerToneRequest is POST /api/output/player/tone's body: the level in dBFS
+// and the length in whole seconds, both required. Each is a pointer, so a
+// field left out is told from 0, and a length that is no whole number does
+// not decode.
+type playerToneRequest struct {
+	Level   *float64 `json:"level"`
+	Seconds *int     `json:"seconds"`
+}
+
+// apiPlayerOutputTone handles POST /api/output/player/tone: the console's
+// test tone through the running player's DAC (B601), answered once it has
+// ended. In this order: the body, one JSON object (decodePlayerBody); its
+// fields, the level a number from -90 to -30 dBFS and the length 1 to 30
+// whole seconds, by the bounds the player's backend refuses a tone by
+// (internal/tonebounds), 400 otherwise; the page's refusals (playerRefusal)
+// on the config it loads once, which the provider judges the withholding on
+// too; then the provider's Tone on the request's context, which the page's
+// Stop, a navigation or a closed tab ends. A tone refused before it took the
+// DAC's device slot is 409 with its word as the code, nothing opened; one that
+// took it is 200 with its result alone, never the player's status. It writes
+// nothing and takes neither the console's lock nor bridge.yaml's: no route
+// stops a tone, and the page's Stop is the end of this request.
+func (s *Server) apiPlayerOutputTone(w http.ResponseWriter, r *http.Request) {
+	var req playerToneRequest
+	if !decodePlayerBody(w, r, &req) {
+		return
+	}
+	if req.Level == nil || tonebounds.Check(*req.Level) != nil {
+		writeError(w, http.StatusBadRequest, errCodeBadJSON, "level is required: a number of dBFS from -90 to -30")
+		return
+	}
+	if req.Seconds == nil || tonebounds.CheckSeconds(*req.Seconds) != nil {
+		writeError(w, http.StatusBadRequest, errCodeBadJSON, "seconds is required: a whole number from 1 to 30")
+		return
+	}
+	cfg := s.deps.CfgHolder.Load()
+	if why := s.playerRefusal(cfg, ""); why != nil {
+		writeError(w, why.status, why.code, why.msg)
+		return
+	}
+	res := s.deps.PlayerOutput.Tone(r.Context(), cfg, PlayerToneRequest{LevelDBFS: *req.Level, Seconds: *req.Seconds})
+	if !res.Admitted {
+		code := res.Outcome
+		if code == "" {
+			code = "failed"
+		}
+		writeError(w, http.StatusConflict, code, "the test tone did not play ("+code+")")
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
 
 // playerWouldInterrupt is the code of a write refused because it would stop
 // what the player plays or holds paused now and came without the operator's
