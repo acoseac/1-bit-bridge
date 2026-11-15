@@ -95691,6 +95691,12 @@ it.
 
 ## 2026-11-14 — B871 round 5: the stuck marker published whole, and a test reads it until it decodes
 
+**Reverted in round 6** (6b45ca75 and cb1c70c1, 2026-11-15): the
+publication, its three cases and its two History sections went, and the
+marker is written as main writes it; round 6's record says why. This
+record keeps what round 5 did and found, its removed cases named without
+their `Test` prefix.
+
 The rules are build-ci-tests.md's line on waiting for a stuck check's marker
 and the marker clause of cli-serve.md's B653 PR 1 round 12 line (round 5's
 patch); their long forms are in `ops/History-rules-build-ci-tests.md` and
@@ -95735,11 +95741,11 @@ writes of one folder's marker meet at the temporary name.
 
 Red first. A per-mark seam, `afterCreate` (nil in production), was put in
 445a2eca's writer right after its exclusive creation of the marker, with the
-new case, `TestAMarkerReadWhileItIsWrittenIsWholeOrNone`: a read of the
+new case, `…AMarkerReadWhileItIsWrittenIsWholeOrNone`: a read of the
 marker's raw bytes made while the write is parked there meets no marker
 (`os.ErrNotExist`) or bytes that decode whole, and once let go the marker
 stands, whole, said once, with no temporary file. `go test -race -count=3
--run '^TestAMarkerReadWhileItIsWrittenIsWholeOrNone$' ./internal/backup/`:
+-run '^…AMarkerReadWhileItIsWrittenIsWholeOrNone$' ./internal/backup/`:
 red 3 of 3, `stuck_marker_internal_test.go:100: a read of the marker while
 its write was under way met 0 bytes that do not decode: unexpected end of
 JSON input`. With the publication, green; the seam keeps its place after the
@@ -95747,9 +95753,9 @@ temporary file's creation, before its bytes. `beforeCreate`, whose one
 caller is `TestTheStuckMarkerNeverFollowsAReplacement`, keeps its place after
 the removal and before the creation: that test still finds the symlink it
 plants at the marker's name untouched, and now also no "writes" and no
-temporary file. `TestAMarkerWhoseWriteOrCloseFailsLeavesNothing` injects the
+temporary file. `…AMarkerWhoseWriteOrCloseFailsLeavesNothing` injects the
 write's and the close's failure (`failStep`, per mark, nil in production):
-no marker, no temporary file, no "writes". `TestTheMarkersTemporaryFileGoesWithIt`
+no marker, no temporary file, no "writes". `…TheMarkersTemporaryFileGoesWithIt`
 has `clearStaleMarker` and `removeMarker` take a temporary file left beside
 the marker, and `TestAGiveUpOnceTheLocksLetGoBeganWritesNoMarker`'s 300
 rounds of a give-up racing the let-go now find no temporary file either.
