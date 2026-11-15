@@ -340,12 +340,15 @@ func (b *Backend) reserveTone(ctx context.Context, req ToneRequest) (*toneHold, 
 
 // toneRun is what a tone's run opened and wrote: the device; an open whose
 // own cleanup is not confirmed (unknown: its release answered an error, or it
-// panicked); a refused open's cause; and the valid bits of the pair opened.
+// panicked); a refused open's cause; the valid bits of the pair opened; and
+// the error a cleanup not confirmed answered, the node's close's or a refused
+// open's whose own close failed (none for a panic, whose line is its own).
 type toneRun struct {
-	dev       *alsapcm.Device
-	unknown   bool
-	lastError string
-	bits      int
+	dev        *alsapcm.Device
+	unknown    bool
+	lastError  string
+	bits       int
+	cleanupErr error
 }
 
 // runTone is a tone's run, on the goroutine its count stands for, and its
@@ -502,7 +505,7 @@ func (b *Backend) openToneNode(run *toneRun, ep alsapcm.Endpoint, cfg alsapcm.Co
 	dev, err = b.cfg.OpenTone(ep, cfg)
 	switch {
 	case err != nil && errors.Is(err, alsapcm.ErrReleaseUnconfirmed):
-		run.unknown = true
+		run.unknown, run.cleanupErr = true, err
 	case err == nil && dev == nil:
 		err = errors.New("player backend: the test tone's open answered no device")
 	}
@@ -539,7 +542,11 @@ func (b *Backend) closeTone(run *toneRun) (confirmed bool) {
 			confirmed = false
 		}
 	}()
-	return run.dev.Close() == nil
+	if err := run.dev.Close(); err != nil {
+		run.cleanupErr = err
+		return false
+	}
+	return true
 }
 
 // endTone gives the slot back once the tone's node's close has answered, in
@@ -547,7 +554,8 @@ func (b *Backend) closeTone(run *toneRun) (confirmed bool) {
 // for a close not confirmed, the device fenced as a release never confirmed
 // fences it (terminalUnconfirmed: no tone, Start, probe or choice's write
 // until serve restarts), the end then release_unconfirmed; then done is
-// closed, the result handed to Tone, and the end said.
+// closed, the result handed to Tone, and the end said: a fence at Warn, with
+// the error its cleanup answered where it answered one.
 func (b *Backend) endTone(t *toneHold, run *toneRun, confirmed bool) {
 	res := ToneResult{Outcome: t.ended(), Admitted: true, LastError: run.lastError, Frames: t.frames.Load()}
 	b.mu.Lock()
@@ -569,8 +577,11 @@ func (b *Backend) endTone(t *toneHold, run *toneRun, confirmed bool) {
 		}
 	}()
 	if !confirmed {
-		b.log.Warn("player: the console's test tone's node did not close cleanly: nothing opens the DAC until bridge serve restarts",
-			"frames", res.Frames)
+		attrs := []any{"frames", res.Frames}
+		if run.cleanupErr != nil {
+			attrs = append(attrs, "err", run.cleanupErr.Error())
+		}
+		b.log.Warn("player: the console's test tone's node did not close cleanly: nothing opens the DAC until bridge serve restarts", attrs...)
 		return
 	}
 	b.log.Info("player: the console's test tone ended", "outcome", string(res.Outcome), "frames", res.Frames)

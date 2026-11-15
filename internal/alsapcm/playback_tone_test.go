@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -660,8 +661,10 @@ func (d *dsdRig) fenced(what string) {
 // refused open's own close fails or panics before any device reached the
 // tone, each ends release_unconfirmed and fences the device until serve
 // restarts: a later tone, a Start, a probe and a choice's write, nothing
-// opened by any; the refused open asks no second pair. A panic after a close
-// that answered nil fences nothing: a later tone and a later Start play.
+// opened by any; the refused open asks no second pair; and the fence is said
+// at Warn, with the error the close answered where it answered one. A panic
+// after a close that answered nil fences nothing: a later tone and a later
+// Start play.
 func TestAToneWhoseCleanupFailsFencesTonesStartsProbesAndLeases(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -669,14 +672,17 @@ func TestAToneWhoseCleanupFailsFencesTonesStartsProbesAndLeases(t *testing.T) {
 		// refused is a first pair the DAC refuses, so the close that fails is
 		// that refused open's own, before any device reaches the tone.
 		refused bool
+		// closeErr is a close that answers an error, which the Warn names.
+		closeErr bool
 	}{
-		{"its close answers an error", func(k *alsapcm.FakeKernel) { k.FailNextClose(syscall.EIO) }, false},
-		{"its close panics", func(k *alsapcm.FakeKernel) { k.PanicAtNextClose(panicValue) }, false},
-		{"a refused open's own close answers an error", func(k *alsapcm.FakeKernel) { k.FailNextClose(syscall.EIO) }, true},
-		{"a refused open's own close panics", func(k *alsapcm.FakeKernel) { k.PanicAtNextClose(panicValue) }, true},
+		{"its close answers an error", func(k *alsapcm.FakeKernel) { k.FailNextClose(syscall.EIO) }, false, true},
+		{"its close panics", func(k *alsapcm.FakeKernel) { k.PanicAtNextClose(panicValue) }, false, false},
+		{"a refused open's own close answers an error", func(k *alsapcm.FakeKernel) { k.FailNextClose(syscall.EIO) }, true, true},
+		{"a refused open's own close panics", func(k *alsapcm.FakeKernel) { k.PanicAtNextClose(panicValue) }, true, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			d := newDSDRig(t, initialPolicy(dsdstate.ModeNative))
+			logged := &lines{}
+			d := newDSDRig(t, initialPolicy(dsdstate.ModeNative), withLog(logged))
 			d.be.ToneOutput(true, "")
 			var tone *toneCall
 			if c.refused {
@@ -691,6 +697,14 @@ func TestAToneWhoseCleanupFailsFencesTonesStartsProbesAndLeases(t *testing.T) {
 			if res := tone.result(t); res.Outcome != playback.ToneReleaseUnconfirmed || !res.Admitted {
 				t.Errorf("the tone answered %+v; want release_unconfirmed", res)
 			}
+			// The tone's goroutine says the fence once it has handed Tone its
+			// answer: joined, the line is written.
+			ctx, cancel := context.WithTimeout(bg, alsapcm.Watchdog())
+			defer cancel()
+			if err := d.be.Wait(ctx); err != nil {
+				t.Fatalf("the tone's goroutine was not joined: %v", err)
+			}
+			logged.fenceSaid(t, c.closeErr)
 			if c.refused {
 				if v := d.k.View(); len(v.Asked) != 1 || v.Asked[0] != (alsapcm.Ask{Format: format.S243LE, RateHz: 48000}) {
 					t.Errorf("the tone asked %+v; want its first pair alone, the fallback stopped", v.Asked)
@@ -721,6 +735,31 @@ func TestAToneWhoseCleanupFailsFencesTonesStartsProbesAndLeases(t *testing.T) {
 		r.k.Free()
 		r.waitStopped(engine.ReasonEndOfQueue)
 	})
+}
+
+// toneFenceMessage is the line a tone whose cleanup was not confirmed is said
+// with.
+const toneFenceMessage = "player: the console's test tone's node did not close cleanly: nothing opens the DAC until bridge serve restarts"
+
+// fenceSaid requires the tone's fence said once, at Warn, naming the error its
+// close answered when closeErr (EIO, by its own words) and no error otherwise:
+// a panic is said by its own line.
+func (l *lines) fenceSaid(t *testing.T, closeErr bool) {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var found []string
+	for _, line := range l.lines {
+		if strings.Contains(line, toneFenceMessage) {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 || !strings.HasPrefix(found[0], "WARN ") {
+		t.Fatalf("the fence was said %q; want once, at Warn", found)
+	}
+	if named := strings.Contains(found[0], " err=") && strings.Contains(found[0], syscall.EIO.Error()); named != closeErr {
+		t.Errorf("the fence's line %q names the close's error: %v; want %v", found[0], named, closeErr)
+	}
 }
 
 // toneSample is frame n's sample of the 1 kHz sine this test computes for
