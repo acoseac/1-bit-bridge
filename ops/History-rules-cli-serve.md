@@ -2282,6 +2282,8 @@ mentions across the four `ops/audit-*.md` files.
 
 - **Serve installs the console's view of its player (`newConsolePlayer`, `admin.Deps.PlayerOutput`) beside GET /v1/outputs' view, over the same boot plan, `bridgePlayer` and `bridgeOutput`, the boot snapshot, whether it holds the data dir's lock and its player-state preflight, so the page's pending changes are `planServePlayer`'s answer on the live config** (B601, 2026-10-31). `runServe` builds it right after `apiSrv.WithBridgeOutput(playerView)`, from `playerPlan`, `player`, `playerView`, `cfg`, `opts.playerGOOS`, `lockErr == nil`, `playerStateErr`, `opts.playerTrees` (the zero value is `hostTrees`) and the manifest store, and hands it to the console as `Deps.PlayerOutput`. Its status reads the boot plan, `bridgeOutput.Facts` (the element's facts: one engine snapshot and the bounded DAC read), the engine's snapshot after `ready` (the transport, the occurrence heard and its position), the hotplug feed's latest resolution of the boot binding, and the live config the console hands it; the next start's decision is `planServePlayer` on that config (or the boot's player-state refusal again, which only a start can find gone), and the pending list is its difference from the boot plan. The track heard is named through `bridgePlayer.res` (`library.Resolver.StoredPath`, then the store's row), looked up once an occurrence within 500 ms. A DAC listing is one reading of the box at a time (`consolePlayer.read`: 3 s, its slot let go only when the reading returns, so a read stuck in the kernel holds the next back rather than doubling it), bracketed by a reading of sysfs's identities before /proc as `readPlayerDACObserved` is (a card whose unit or devnum moved between the two is set aside as transient, and so is one whose devnum either reading could not read, saying so; a transient card's /proc id and name, which the list shows, are redacted of both readings' serials and ports, as a USB row's are of its own), and refused whole when it is not whole (`CardsComplete`, `Partial`); each USB card's playback endpoint gets a token (128 random bits, 10 minutes, the newest 64 kept) for the unit as that reading read it, its devnum included, and the binding each kind builds there (`binding.For`), and a choice reads the box again, in the write's config turn just before the save, and requires the same unit (`binding.SameUnit`) at the same devnum building the same binding (`hotplug.SameBinding`). A transport row plays only while the player's output is open (`outputOpen`: the live config withholding nothing, GET /v1/outputs' element not unavailable, the engine's output report available): the engine runs on after the player is turned off, another DAC is chosen or its DAC is unplugged, and plays nothing then (Codex on the PR). **Never let the view write the config, start, dial or probe MPD, hand a serial out but as its label, read `eng` or `res` before `ready`, read the box but through its one bounded, bracketed reading at a time, or call a transport playable while the output is withheld or gone.** `TestTheConsoleShowsTheRunningPlayer`, `TestTheConsoleSaysNothingPlaysOnceTheDACIsUnplugged`, `TestTheConsoleTurnsAPlayerOnForTheNextStart`, `TestTheConsoleOffersNoPlayerOffLinux`, `TestTheConsoleListsEachPlaybackEndpointOfTheBox`, `TestAUnitSwappedWhileTheBoxIsReadIsNotOffered`, `TestAUnitWhoseEnumerationCannotBeReadIsOfferedNoToken` and `TestTheTokensAreBounded` pin it.
 
+- **Serve starts the player's hotplug watcher on Linux once the live config holder exists, and its teardown cancels and joins it** (B470 PR 4a2): `startPlayerHotplug` runs the `hotplug.Service` on the holder's `Load` and `Changed`, reading the box through `hostTrees` (a boot test's `serveOpts.playerTrees` in their place), so the player turned on or off, or its binding changed, while serve runs starts, stops or re-reads the watch; the service runs on a context its stop alone cancels (since B470 PR 4b3: on serve's own it stopped as the shutdown began, before the player its reports feed), the stop waits for it within `shutdownGrace`, and the service itself returns within its watch's stop deadline. Off Linux nothing starts. `serveOpts.playerGOOS`, `hotplugSource` and `hotplugBoot` let a boot test stand in for Linux, run the watcher on a source that hears nothing, and wait on the decision; `hotplugObserve` and `hotplugTiming` hold its readings and stretch its stop. The watcher reads the player block through `livePlayerSettings`, which serve's player reads too, with the OpenHome port clash judged on serve's boot snapshot (`playerHotplugWiring.BootConfig`, `config.PlayerEnabledAsBooted`; B612's second round), so neither the opt-in nor a listener's address reaches the watch before the next start. The console's Player page changes `output.player` while serve runs (B601: its switch and its DAC choice, and B612's OpenHome switch, through the holder). `TestServeRunsThePlayersWatcherWhileThePlayerIsOn`, `TestServeStartsNoPlayerWatcherOffLinux`, `TestServeStartsThePlayersWatcherWhenTheConfigTurnsItOn`, `TestThePlayersWatcherStopJoinsItsService` and `TestALiveClashWithTheOpenHomePortLeavesTheRunningPlayerAsItIs` pin the wiring. Rules in `player.md`.
+
 ## Scanner, deletion passes, and manifest writes
 
 - **Shutdown joins every background writer**, and the wait must be written
@@ -4076,7 +4078,7 @@ round 3.
 
 ## B749 — the embedded node's diagnostic-log uploads and its name (2026-11-09)
 
-- **The embedded Tailscale node (tsnet mode) uploads no diagnostic logs unless `tailscale.uploadDiagnosticLogs` is true, keeps the name a registered node has, and a tailnet that requires the logs is said in the bridge's words, at a start and while the node runs** (2026-11-09, backlog B749 part 3, and its rounds 2 to 5): every path that builds a node (serve, `bridge tsnet auth` and `status`, each after its mode gate) builds it through `tsnet.NewServer`, which sets `TS_NO_LOGS_NO_SUPPORT=true` through envknob unless the key is true, over whatever the process wrote there, unread, on the caller's goroutine before anything starts the node (`applyUploadPolicy`), leaves the environment as it is where the key is true, reading what it holds as Tailscale does (a true holds the uploads off, a false holds nothing, one written over an inherited true included), and refuses an inherited value `strconv.ParseBool` refuses, naming the variable and not its value (`tsnet.ErrNoLogsEnvUnreadable`), and, with the key true and nothing set, a value written in the process since that it refuses, in words that blame the process and never its launch environment (`tsnet.ErrNoLogsEnvWrittenUnreadable`); once the policy has set the variable, every later `NewServer` sets it again before anything reads it, until the process exits, so a node a process builds after one it built without the key (the menu's "Start now", and bridge init's start, run serve in their own process) starts with the uploads off whatever its config says, and the setting applies at a process restart; the policy reads what the process inherited once, at its first application whatever the config says (`policyRecord`), and its status (`Server.Uploads`, read live) tells three reasons apart, each in words of its own (`Uploads.HeldOff`): the launch environment held the variable, this process turned the uploads off earlier (quit the bridge, its menu included, and launch it again, or restart its service), or something else in it did (a new launch may restore them), which a tailnet's refusal says and the console's tile shows on a line of its own (`UploadsHeldOff`) whatever the tailnet says; what stays open is backlog B830; a mode-refused command and `tsnet logout` leave the environment alone; the key is process-restart-bound (the console's `tailscaleUploadDiagnosticLogs`, class D in `ops/settings-apply-semantics.md`), and `compose.yaml` forwards its variable empty where it is unset, which the load takes for no override (`TestAnEmptyVariableLeavesTheFilesConsent`). The node's name is `tailscale.hostname`, else what the state says at each start, read read-only through upstream's keys and types, never its store constructor (`readNodeState`: the current profile, listed among the known profiles, its prefs carrying a node ID): a registered node keeps its persisted hostname, a node not registered (no file, an empty one, `{}`, an authentication that never finished) is `tsnet.DefaultHostname` (`1-bit-bridge`), and a state that does not read keeps the library name with one line naming no path. A start the tailnet refuses for the logs (upstream's "tailnet requires logging to be enabled", the one substring matched, pinned to the resolved module source) ends in `tsnet.LogsRequiredError`, kept as the wrapper's last start error under `lifecycleMu`, and the console's tile says it in LastError, from a running node's health too (`Server.LogsRequired`), naming `TS_NO_LOGS_NO_SUPPORT` where an inherited true holds the uploads off; `tsnet.Config.BeforeStart` (`tsnetBeforeStart`, nil in production) is the seam just before the upstream start the tests read the environment and the name through. **Don't set the variable before a path's mode gate, from a refused command or `logout`, or once anything has started the node; let an absent key or an inherited false turn the uploads on, or the bridge turn them on itself; hand the variable back, or unset it, in a process that has set it, or read it in a later `NewServer` before setting it again, read a true something else set as the launch environment's, or a false written over an inherited true as holding the uploads off, refuse a node without the key over a value written in the process, blame the launch environment for a value written in the process, set the variable before reading what the process inherited, give Compose's forwarding of the key's variable a default other than empty, or advise a restart of serve in its process, or a bare restart, for a change of the key; count a node registered by the state file's existence, open the state through upstream's store constructor, or write, create or lock it; derive a new node's name from the library, the host, its user or a path; match the refusal on more than that substring, or show upstream's tailscaled advice; or set the hook in production.** `TestTheUploadPolicyByKeyAndInheritedValue`, `TestEveryPathAppliesTheUploadPolicyBeforeTheUpstreamStart`, `TestTheCommandsThatBuildNoNodeLeaveTheEnvironmentAlone`, `TestTheNodesNameOnEveryStart`, `TestTheTileSaysWhatATailnetThatRequiresLogsNeeds`, `TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`, `TestTheTileSaysWhatHoldsTheUploadsOff`, `TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks`, and internal/tsnet's `TestTheNodeNameIsTheRegisteredOneOrTheDefault`, `TestOnceThisProcessTurnsTheUploadsOffTheyStayOff`, `TestTheStateReaderWritesNothing`, `TestARefusedStartSaysWhatTheTailnetRequires` and `TestTheLogsRequirementIsUpstreamsWords` pin it; `scripts/tsnet-uploads/evidence.py` is the evidence from a production binary, confined by port and not by address, an upgraded install included. → History-rules-cli-serve.md
+- **The embedded Tailscale node (tsnet mode) uploads no diagnostic logs unless `tailscale.uploadDiagnosticLogs` is true, keeps the name a registered node has, and a tailnet that requires the logs is said in the bridge's words, at a start and while the node runs** (2026-11-09, backlog B749 part 3, and its rounds 2 to 5): every path that builds a node (serve, `bridge tsnet auth` and `status`, each after its mode gate) builds it through `tsnet.NewServer`, which sets `TS_NO_LOGS_NO_SUPPORT=true` through envknob unless the key is true, over whatever the process wrote there, unread, on the caller's goroutine before anything starts the node (`applyUploadPolicy`), leaves the environment as it is where the key is true, reading what it holds as Tailscale does (a true holds the uploads off, a false holds nothing, one written over an inherited true included), and refuses an inherited value `strconv.ParseBool` refuses, naming the variable and not its value (`tsnet.ErrNoLogsEnvUnreadable`), and, with the key true and nothing set, a value written in the process since that it refuses, in words that blame the process and never its launch environment (`tsnet.ErrNoLogsEnvWrittenUnreadable`); once the policy has set the variable, every later `NewServer` sets it again before anything reads it, until the process exits, so a node a process builds after one it built without the key (the menu's "Start now", and bridge init's start, run serve in their own process) starts with the uploads off whatever its config says, and the setting applies at a process restart; the policy reads what the process inherited once, at its first application whatever the config says (`policyRecord`), and its status (`Server.Uploads`, read live) tells three reasons apart, each in words of its own (`Uploads.HeldOff`): the launch environment held the variable, this process turned the uploads off earlier (quit the bridge, its menu included, and launch it again, or restart its service), or something else in it did (a new launch may restore them), which a tailnet's refusal says and the console's tile shows on a line of its own (`UploadsHeldOff`) whatever the tailnet says; what stays open is backlog B830; a mode-refused command and `tsnet logout` leave the environment alone; the key is process-restart-bound (the console's `tailscaleUploadDiagnosticLogs`, class D in `ops/settings-apply-semantics.md`), and `compose.yaml` forwards its variable empty where it is unset, which the load takes for no override (`TestAnEmptyVariableLeavesTheFilesConsent`). The node's name is `tailscale.hostname`, else what the state says at each start, read read-only through upstream's keys and types, never its store constructor (`readNodeState`: the current profile, listed among the known profiles, its prefs carrying a node ID): a registered node keeps its persisted hostname, a node not registered (no file, `{}`, an authentication that never finished) is `tsnet.DefaultHostname` (`1-bit-bridge`), a state file that holds nothing refuses the start (B828, the next bullet), and a state that does not read keeps the library name with one line naming no path. A start the tailnet refuses for the logs (upstream's "tailnet requires logging to be enabled", the one substring matched, pinned to the resolved module source) ends in `tsnet.LogsRequiredError`, kept as the wrapper's last start error under `lifecycleMu`, and the console's tile says it in LastError, from a running node's health too (`Server.LogsRequired`), naming `TS_NO_LOGS_NO_SUPPORT` where an inherited true holds the uploads off; `tsnet.Config.BeforeStart` (`tsnetBeforeStart`, nil in production) is the seam just before the upstream start the tests read the environment and the name through. **Don't set the variable before a path's mode gate, from a refused command or `logout`, or once anything has started the node; let an absent key or an inherited false turn the uploads on, or the bridge turn them on itself; hand the variable back, or unset it, in a process that has set it, or read it in a later `NewServer` before setting it again, read a true something else set as the launch environment's, or a false written over an inherited true as holding the uploads off, refuse a node without the key over a value written in the process, blame the launch environment for a value written in the process, set the variable before reading what the process inherited, give Compose's forwarding of the key's variable a default other than empty, or advise a restart of serve in its process, or a bare restart, for a change of the key; count a node registered by the state file's existence, open the state through upstream's store constructor, or write, create or lock it; derive a new node's name from the library, the host, its user or a path; match the refusal on more than that substring, or show upstream's tailscaled advice; or set the hook in production.** `TestTheUploadPolicyByKeyAndInheritedValue`, `TestEveryPathAppliesTheUploadPolicyBeforeTheUpstreamStart`, `TestTheCommandsThatBuildNoNodeLeaveTheEnvironmentAlone`, `TestTheNodesNameOnEveryStart`, `TestTheTileSaysWhatATailnetThatRequiresLogsNeeds`, `TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff`, `TestTheTileSaysWhatHoldsTheUploadsOff`, `TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks`, and internal/tsnet's `TestTheNodeNameIsTheRegisteredOneOrTheDefault`, `TestOnceThisProcessTurnsTheUploadsOffTheyStayOff`, `TestTheStateReaderWritesNothing`, `TestARefusedStartSaysWhatTheTailnetRequires` and `TestTheLogsRequirementIsUpstreamsWords` pin it; `scripts/tsnet-uploads/evidence.py` is the evidence from a production binary, confined by port and not by address, an upgraded install included. → History-rules-cli-serve.md
 
 *What uploaded.* tailscale.com v1.104.2's `tsnet.Server.Start` runs
 `startLogger` outside a test binary: it writes `tailscaled.log.conf` and a
@@ -4179,8 +4181,11 @@ the next (round 2's control R05b).
 *The name.* An explicit `tailscale.hostname` wins. Otherwise each start
 reads the state read-only (`readNodeState`): `<StateDir>/tailscaled.state`
 opened through `fsutil.OpenAsFile` (a named pipe or a directory refused at
-once) and read to 16 MiB at most, never through upstream's store
-constructor, which writes `{}` over a missing file; the JSON object of state
+once) and read to 16 MiB and one byte at most, nothing past them read (a
+larger file is a state that does not read, unless all that was read is white
+space, which refuses the start as a file that holds nothing: B828's round 2),
+never through upstream's store constructor, which writes `{}` over a missing
+file; the JSON object of state
 keys upstream's file store keeps; the profile key under
 `ipn.CurrentProfileStateKey`; that key listed among the profiles under
 `ipn.KnownProfilesStateKey`, since upstream's start takes an unlisted one
@@ -4191,12 +4196,14 @@ fallback, a pointer, which encoding/json follows into the interface; a
 non-pointer value there is an unmarshal error). Registered is a node ID in
 those prefs, and the name is then their `Hostname`, which tsnet writes from
 the name every start passes it. Not registered, so `tsnet.DefaultHostname`
-(`1-bit-bridge`): no file; an empty one; `{}`; a machine key alone (an
+(`1-bit-bridge`): no file; `{}`; a machine key alone (an
 abandoned authentication, or a first start that failed); a profile with no
 node ID; one a logout deleted; one not listed. A state that is there and does
 not read (it cannot be opened, it does not parse, a registered profile names
 no hostname) is taken for neither: the start keeps the library name earlier
 versions gave every node and says so in one Warn line naming no path.
+An empty file was a node not registered here until backlog B828: Tailscale's
+start refuses it, so it refuses the start (B828's section).
 `hasPersistedTsnetState`, the file's existence, is gone, and the
 interactive-auth warning asks the reading too. After `bridge tsnet logout`
 the state is gone and the next node is new. A backup does not carry the
@@ -4213,7 +4220,7 @@ tsnet passes `controlclient.LocalBackendStartKeyOSNeutral`, which
 `ipn.CurrentProfileStateKey` on Windows too. Until round 2 this said that
 Windows starts from `ipn.ServerModeStartKey`, from `readAutoStartKey` read
 without tsnet's flag (Codex on #1445). What stays open of the reading is
-backlog B828 and B829.
+backlog B829; B828, the empty file, is closed (B828's section).
 
 *The refusal.* Upstream refuses a node with the variable set on a tailnet
 carrying `nodecap.DataPlaneAuditLogs` (ipnlocal's local.go, about line
@@ -5615,3 +5622,442 @@ during the admin port's probe (`refuseIfBridgeMayBeRunning`) reads as a bridge
 answering there.
 
 The record is in `ops/engineering-log.md`, 2026-11-12, B871.
+
+## B650 — the doctor's bound on a library root (2026-11-13)
+
+- **`bridge doctor` and the console's doctor wait on no library root without a bound: every step of a run that touches a root or anything below it is a work of the runner's `doctor.RootProbes`, on a goroutine of its own, waited for five seconds from when it began (each root's stat and listing; the watch-budget counts; the config's load, whose validation resolves every root where `upscale.variantsDir` or `upscale.tempDir` is set, beside a probe of each root the file names, `config.LibraryRootsOf`); a root that does not answer is a fail naming it as configured, a load that does not finish fails config-file, a count that does not finish is never a low one, and the run goes on to every other check; the console's runner keeps its works across its runs (`adminDoctorRunnerWith`), one for a key until its worker returns, at most sixteen on the roots and four loads, and the CLI's commands share one for their process (`cliRootProbes`)** (2026-11-13, backlog B650). **Don't touch a root on a run's goroutine, keep the works anywhere but the runner, begin a second work for a key while one is out, say a root is stuck where the run's caller stopped the run, or name a path below a root.** → History-rules-cli-serve.md
+
+*The hazard.* A library root on a network mount whose server has gone (NFS,
+SMB), or on a disk that spun down badly, holds a stat of it in the kernel for
+as long as the mount waits: without end on a hard NFS mount, and nothing
+cancels the call. `bridge doctor` is what an operator runs, and the console's
+doctor page what an operator opens, to find out why the library is stuck, and
+both touched every root on the run's own goroutine: `checkLibraryRoots`
+stat'ed and listed each one and ignored its context; Linux's watch-budget
+count (`countDirs`) and kqueue's (`manifest.CountWatchSet`) walked every root,
+ignoring theirs; and, before any check ran, `buildDoctorDepsWith`'s
+`config.Load` resolved every root where `upscale.variantsDir` or
+`upscale.tempDir` is set (`validateVariantsDir`, `validateRenderTempDir`,
+`fsutil.IsUnderAny`). `doctor.Run` finishes every check before anything is
+printed, so `bridge doctor` printed nothing at all, and the console's GET
+/api/doctor never answered: the admin server sets no write timeout, the
+request's goroutine stayed in the stat after the browser went away,
+`/api/doctor` is not serialised, and the Settings page fetches it at every
+render (its prerequisite chips), so every render left another goroutine on the
+same stat. On a player box (the MPD gate open) the player checklist's outputs
+body proves each root's path rule (`mpd.ProveRoots`: a stat of the root, and
+of the entries of MPD's music directory), on the goroutine of the call that
+began the build, and held the run the same way (`output.md`'s line).
+
+*The works.* `internal/doctor/rootprobes.go`. A runner keeps a `RootProbes`,
+whose works are out under a key: a root's probe (`probeRoot`: the stat, then
+the listing of a directory, through its `stat` and `readDir` fields, which a
+test stands in for), a root's count to a cap (`beginCount`: this platform's
+`countRootWatches`, `countDirs` or `manifest.CountWatchSet` over that root
+alone), and a caller's work (`Bounded`: cmd/bridge's load of the config). One
+work a key at a time: a run that finds one out joins it rather than beginning
+another, and the work is held from when it begins until its worker returns,
+whatever the run that began it did meanwhile. Its worker keeps what it found
+and closes its done channel, so an answer that comes after every run stopped
+waiting blocks nothing, and it lets go of its key at once, so the next run
+begins afresh: a mount that answers again reads healthy at the next run. A
+panic the worker recovers is raised again on the goroutine of the run that
+waits for it, where it was raised before the work had a goroutine of its own
+(net/http recovers the console's; the CLI's ends the process). A run
+(`ProbeRun`, carried as `Deps.RootProbes`) keeps every work it has met, so each
+root is probed once a run, wherever the run first asks for it, as before
+B650.
+
+*The bound.* A run waits for a work until it answers, the bound from when the
+work began passes, or the run's context ends: five seconds
+(`rootProbeBound`), as `doctorBackupsBound` waits for the backups folder. A
+mount that answers at all answers a stat and a listing of one folder in far
+less (a local disk in microseconds, NFS or SMB over a LAN in milliseconds),
+and the run is an interactive diagnostic the console runs on every Settings
+render. A disk spinning up can take longer, which the line says: run the
+doctor again, and the next run finds that work answered and asks afresh.
+Counted from when the work began, the bound costs a later run nothing for a
+work already past it: that run says at once that the root still has not
+answered. `Run` begins every root's probe and every count a check will wait
+for at its start (`BeginRoots`, `beginWatchCounts`), and cmd/bridge begins
+the probes beside the config's load, so roots that do not answer cost a run
+one bound, not one each, and a stalled load and its root's probe one between
+them.
+
+*library-roots' words.* A root whose probe has not answered by its bound is a
+problem of the fail, named as configured and nothing below it: "library root
+<root> did not answer within 5s: its mount may be stalled", or, of a probe an
+earlier run began, "library root <root> still has not answered, <d> after the
+doctor first asked it: its mount may be stalled", followed once by what to do:
+check the server or the disk such a root is on, and its mount, before
+removing anything (B651: a volume not mounted yet reads as missing or empty,
+and the scan keeps the tracks it indexed there); until it answers the scan
+reads nothing under it, and a bridge serve started meanwhile waits for it (its
+start stats each root, `CheckLibraryRootsAccessible`); a disk spinning up can
+take this long, so run the doctor again; and, on Linux alone, that
+`cat /proc/mounts` lists the mounts without waiting on any of them (the
+kernel's table, read without asking any filesystem: the one command certain
+enough to name). The summary counts every problem ("N problem(s)"), and the
+line fails: a root that does not answer is at least what a missing one is,
+which fails, and `bridge doctor` exits 1, as for any fail; `bridge init`'s
+preflight refuses its run, as for a missing root (`--skip-doctor` passes it).
+A root the run did not wait for, its context ended within the bound (the
+console's request gone) or the runner's limit holding its probe back, is not
+checked, a warn ("N root(s) not checked"), never one that does not answer.
+Over roots that all answer, the line is what it was, word for word.
+
+*The watch-budget lines.* Each root's count is a work, to the cap the check
+asks (the inotify threshold plus one, or the kqueue budget plus one, in the
+work's key), and the counts are folded in the roots' order as the one walk
+counted them (`tallyWatches`): the first root's failure, the total reaching
+the cap, the sum, so the verdict is the one walk's whenever every count
+answers. A count that does not answer is never read as a low one: the line is
+a warn, "not checked: the folders under library root <root> were not all
+counted within 5s: a mount under it may be stalled, so whether the watcher
+fits its share of limit N is not known" (kqueue: the folders and entries, the
+budget and its share), with what to do; a failure after it is passed over,
+since no verdict is known there anyway; and a total that reaches the cap
+without it is still a verdict, the over-budget warning, with the count that
+did not finish added. A count is the walk the watcher itself makes, so a root
+whose own probe answers can still meet a folder below it on a mount that does
+not, which this line alone shows.
+
+*The config's load.* `loadDoctorConfig` runs `config.Load` as a `Bounded`
+work keyed by the path and a digest of what the load reads (the file's bytes
+and every BRIDGE_ variable, `doctorConfigKey`), so a load out over the file as
+it was, one a root that does not answer holds, is never taken for the file as
+it is now: once the console's operator removes that root, the next run loads
+the edited file. Before the load it reads the roots the file names without
+touching them (`config.LibraryRootsOf`: the file through `DecodeFile`,
+BRIDGE_LIBRARY_ROOTS, each entry resolved as `resolvePaths` resolves it) and
+begins their probes. A load that gives the run no answer is a
+`*doctor.UnfinishedLoadError`, and config-file fails in words of its own,
+never as a file that does not load: "<path>: its load did not finish within
+5s", or "its load still has not finished, <d> after the doctor began it", its
+hint saying that loading it checks those two settings against each library
+root, that a root whose mount does not answer holds the load (library-roots
+names it, from those roots), and that bridge serve, and every command that
+loads the config, waits for it too. The lines that grade what the config sets
+say they were not checked, "the config that sets <what> did not finish
+loading" (`NotGradedReason`: the ports, tls-cert, data-dir). A load the run
+stopped waiting for, or one the loads' limit held back, is not checked, a
+warn. A config that sets neither directory loads without touching a root, so
+a root that does not answer leaves every other line graded.
+
+*The runner's works.* The console's runner makes one `RootProbes` with the
+runner and keeps it across its runs (`adminDoctorRunnerWith`), whose Deps it
+rebuilds every time; its requests run unserialised, and each run is stopped
+by its request's context. The CLI's commands share one for their process
+(`cliRootProbes`): `bridge doctor`, whose `--fix` runs twice, and the
+launcher's doctor row and its Setup's preflight (`initPreflightDeps`), which
+run in the launcher's process as often as the operator asks. A work that does
+not answer holds its goroutine, and the thread under it, until the kernel
+lets go, the process's end included, and the console reloads its config at
+every run, so a dead root replaced by another, then by another, would each
+leave one behind: a runner keeps at most sixteen works on the roots and four
+of its callers' (the config's loads) out at once. Past a limit a run begins
+no more of that kind and says so: "library root <root> was not checked: 16
+earlier probes of the library roots have not answered yet, and the doctor
+begins no more until one does", and of a load, "4 earlier loads of the config
+have not finished yet, and the doctor begins no more until one does". A root
+removed and added again finds its work still out. The loads have a limit of
+their own so that roots that do not answer never hold back a load, which with
+no directory setting touches no root, nor the report that names them with
+it. `bridge doctor` keeps the player checklist's read of the outputs body
+the same way since round 2 (`output.md`'s line): a read the process keeps for
+each config (`cliOutputsReads`), which every gather over that config waits
+on, so a root that holds it holds one goroutine however often the
+launcher's doctor row runs; and since round 3 its builders' MPD inspections
+(`output.md`'s next line): one in flight for what it reads
+(`cliMPDInspections`, `api.MPDInspections`), which every gather's probe,
+the gate's or a build's, waits on rather than begin another. No use of the
+launcher's doctor row begins a runner or a config's load of its own: the
+runner is the process's (`cliRootProbes`), each use beginning a run of it,
+and the load a work of it keyed by the file's path, its bytes and the
+`BRIDGE_` variables (`doctorConfigKey`), which a later use joins while it
+is out; what each use still reads with no bound is the config file itself,
+its stat and its read, backlog B884's.
+
+*What it does not do.* No work is cancelled, nothing is unmounted, and no
+probe runs in another process: a stat the kernel holds is let go by the
+kernel, or by the process's end. The roots appear as configured in the
+doctor's report and the console's doctor page, and never in GET /v1/health.
+Three other waits on a root are outside the doctor and stay as they were, a
+follow-up's: bridge init's own load of an existing install's config
+(`withExistingInstallDeps`) and its save, the console's settings saves, whose
+validation resolves every root where either directory is set, and GET
+/v1/outputs, whose build a root that does not answer holds (the checklist's
+read of it is bounded). Nor does it bound the doctor's own files: the
+config file and the data directory on a dead mount are backlog B884's. A
+data directory under a library root is one: `buildDoctorDepsRun` stats its
+database on the run's goroutine before `doctor.Run` (`os.Stat(dbPath)`),
+the data-dir line and the player's, the store's and the sidecars' probes
+read it unbounded, and the player checklist stats the database inside its
+bounded read (`doctorOutputChecklist`) and reads the token file on the
+run's goroutine (`tokenFile`).
+
+*The tests.* `TestARunNamesARootThatDoesNotAnswerWithinItsBound`,
+`TestTheSecondOfTwoRootsDoesNotAnswer`,
+`TestRootsThatDoNotAnswerCostOneBoundTogether`,
+`TestARootWhoseListingDoesNotAnswerIsNamed`,
+`TestALaterRunFindsTheRootStillNotAnsweringAndAsksItNoMore`,
+`TestOverlappingRunsShareOneProbeOfARoot`,
+`TestARunStoppedByItsCallerSaysSoAndNotThatTheRootIsStuck`,
+`TestALateAnswerIsKeptAndTheNextRunAsksAfresh`,
+`TestConcurrentHealthyRunsAllAnswer`,
+`TestTheRunnersLimitHoldsNewProbesBackAcrossConfigChurn`,
+`TestHealthyRootsReadAsTheyAlwaysDid`,
+`TestTheCountsAreFoldedAsOneWalkCountedThem`,
+`TestALoadThatDidNotFinishFailsTheConfigLine`,
+`TestTheLoadsHaveALimitOfTheirOwn`, and on Linux
+`TestACountBelowARootThatAnswersIsNotReadAsALowOne` and
+`TestAHealthyLibrarysWatchLineIsAsItWas`, on macOS
+`TestACountBelowARootThatAnswersIsNotReadAsASmallOne`, in internal/doctor;
+`TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn`,
+`TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories`,
+`TestBridgeDoctorLoadsAConfigThatSetsNeitherDirectoryWithoutTheRoots`,
+`TestTheDoctorProbesTheRootsBesideItsLoadOfTheConfig`,
+`TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce`,
+`TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad`,
+`TestACancelledConsoleDoctorRunSaysItWasStopped`,
+`TestTheConsolesDoctorReadsARecoveredRootAsHealthy`,
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn`,
+`TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead`,
+`TestDoctorRunsInOneProcessShareOneReadOfTheBox`,
+`TestADoctorRunTakesOnlyTheReadOfItsOwnConfig`,
+`TestAWaitOnASharedReadEndsAloneWithItsContext`,
+`TestDoctorRunsInOneProcessShareOneMPDInspection` and
+`TestBridgeDoctorPrintsHealthyRootsAsBefore` in cmd/bridge;
+`TestBuildersSharingATableBeginOneInspection`,
+`TestAProbeWaitingOnASharedInspectionStopsWithItsOwnContext`,
+`TestAnEditedConfigurationBeginsAnInspectionOfItsOwn`,
+`TestASharedInspectionThatPanicsLetsItsKeyGo` and
+`TestTheBuildsProbeSharesTheTableToo` in internal/api; and
+`TestLibraryRootsOfIsTheRootsLoadGives` in internal/config. No filesystem a
+test can make stops answering, so each stands a root that does not answer in
+where the step touches it: the probe's `stat` and `readDir`
+(`doctor.NewRootProbesForTest`), the count (`RootProbes.countWatches`),
+`Validate`'s containment check (`config.SetRootContainmentForTest`), the
+checklist's build (`boxStall`: its read of the indexed tracks held), whose
+reads it counts, and MPD's inspection (`mpdConfHeld`, `heldInspection`),
+whose inspections begun they count. A run's time is its runner's
+(`RootProbes.now` and `timer`: `time.Now` and `time.NewTimer`'s in
+production), and since round 2 the four cases that held a run to how long
+it took read its waits on a test clock that moves only when the case moves
+it (`clockOf`): the wait a run sets, the instant its bound passes, and a
+wait it should not set, none of which a loaded host's scheduling moves.
+Since round 3 cmd/bridge's stopped console run is stopped once it waits on
+the root that does not answer (`RootProbes.SetOnRootWaitForTest`) and the
+other root's probe has made its stat and its listing (`rootStall.probed`),
+under its 90 s deadline, below its root's ten-minute bound; a case that
+gives a wait on the checklist's read up does so through the wait's timer
+(`outputsReads.timer`, `readTimers`) once the read it waits on is held at
+the box, every other wait keeping bridge doctor's bound; and the shared
+inspection's cases read its deadline on the builder's clock
+(`lockedClock`). The record is in `ops/engineering-log.md`: B650 on
+2026-11-13, and its rounds 2 and 3 on 2026-11-14.
+
+## B650FIX — bridge doctor --fix's second report is a run of its own (2026-11-14)
+
+- **…and each report is a run of its own: `bridge doctor --fix` runs the checks again after its remediations as a new run of the CLI's works (`cliRootProbes.BeginRun()` in `runDoctorReport`), which asks again every root whose probe has ended and joins one still out, whose bound counts from when it began** (2026-11-14, backlog B650FIX). **Don't give a second report the first one's run, which keeps every work it has met, or a new runner, which begins a second work for a root still out.** → History-rules-cli-serve.md
+
+*The hazard.* `runDoctorReport` runs the checks (`doctor.Run`), applies
+`--fix`'s remediations (`runFixes`), and runs the checks again, on the same
+Deps, so that the report it prints is of what the remediations left. B650 gave
+those Deps one run of the CLI's works on the roots (`buildDoctorDepsWith`:
+`cliRootProbes.BeginRun()`), and a run keeps every work it has met
+(`ProbeRun.met`), so the second report was handed back the first one's root
+probes and watch counts, made before the remediations; before B650 every run
+of the checks read every root. In production: a config directory that is
+enter-only (0100) and is itself a library root fails config-dir, which this
+user cannot write, and library-roots, whose listing is refused; `--fix` sets
+the directory to 0700; and the second report still failed library-roots with
+the first listing's error, so the command exited 1. Nothing was written, and
+the next `bridge doctor` was right.
+
+*The fix.* The second report is a new run of the same runner
+(`d.RootProbes = cliRootProbes.BeginRun()`), the one every caller's Deps carry
+a run of (`doctorCmd` and the launcher's row, both through
+`buildDoctorDepsWith`), never a runner of its own. A work that has ended has
+left the runner's works, its worker deleting its key before it closes its done
+channel, so the new run begins that root's probe afresh. One still out is
+joined (`beginOut` returns it), never begun twice, and its bound counts from
+when it began, which the first report's wait saw pass, so the second report
+sets no wait on it and says at once that the root still has not answered.
+
+*What a run keeps, and what a remediation changes.* A run keeps three kinds of
+work, each under its key: a root's probe (the root as configured: its stat,
+and of a directory its listing), a root's watch count (its cap and the root,
+with the library watcher on: the folders below it, on kqueue with their
+entries), and a caller's work (cmd/bridge's load of the config, keyed by its
+path and a digest of its bytes and every `BRIDGE_` variable). `runFixes` takes
+one action, config-dir's, where that line is not ok and names a directory: an
+`os.MkdirAll` of it at 0700, which makes nothing config-dir's own check had not
+made in the first run, and an `os.Chmod` to 0700. The roots come from a config
+this user read in that directory, so it grants search permission already (one
+that does not leaves the config unreadable, config-dir not checked and nothing
+remediated), and the Chmod adds read and write permission alone, which
+changes no stat and no walk below it. It can change a listing of the directory
+itself: what the probe of a root that is the config directory finds (its
+listing needs read permission there), what that root's count finds, and what
+the count of a root above it finds, whose walk lists it. The new run asks each
+of them again, as it asks every other.
+
+*What it leaves.* The config is loaded once, as the Deps are built before
+either report, and what the load gave is copied into them
+(`ConfigFile.LoadErr`, the roots, the ports), so the second report grades the
+same load. No remediation changes the file or the environment, but a load that
+did not finish within its bound in the first report and finished afterwards is
+still reported as unfinished: retained state outside this fix, which predates
+B650 (the Deps were always built once).
+
+*Two limits of the new run.* The second report begins a new probe of every
+root whose probe has ended, and the runner begins no work on the roots while
+sixteen are out, probes and watch counts together (`beginOut`, `outOfKind`),
+so a root the first report probed can be one the second cannot. With the watch
+counts begun (Linux or a kqueue platform with its limit read, none on Windows,
+and `libraryWatch.enabled`), eight library roots on mounts that do not answer,
+each with its probe and an admitted count that stays blocked, and a local root
+listed last, whose count the limit holds back in the first report, `--fix`'s
+report says the local root "was not checked: 16 earlier probes of the library
+roots have not answered yet, and the doctor begins no more until one does",
+where a plain `bridge doctor` reads it ok; the exit code is the same,
+library-roots failing already for the eight. And the new run is taken from
+`cliRootProbes`, not from the runner behind `d.RootProbes`, which a `ProbeRun`
+does not expose: the two are one runner only because every caller builds its
+Deps through `buildDoctorDepsWith` (`doctorCmd`, the launcher's row), which
+the comment at that line says.
+
+*The tests.* `TestBridgeDoctorFixReadsTheRootsAgainForItsSecondReport` (a root
+whose first listing is refused, and whose next one answers, is reachable in
+what `--fix` prints), `TestBridgeDoctorFixReportsTheRootItsRemediationLetItList`
+(the enter-only config directory that is the library's root: its mode 0700
+afterwards, config-dir and library-roots ok, its listings refused and then
+answered) and `TestBridgeDoctorFixJoinsTheProbeOfARootStillOut` (a held root
+joined, the root that answers read again, the probes begun counted once the
+root has answered and every work has ended), each through
+`bridge doctor --json --fix`, in cmd/bridge. And since B650FIX
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn` runs its runner
+on a clock of its own (`RootProbes.SetClockForTest`, `rootWaitClock`), whose
+time moves only at a run's wait on a root, so the wait on each config load ends
+by the load's answer: under its real 100 ms bound, its config-file ok past the
+probes' limit needed the load within 100 ms of real time. Since round 2 it
+counts the probes begun once the roots have answered and every work has ended
+(`DrainForTest`): on its clock a run can return before a probe's goroutine
+reaches the stat that counts it. The record is in `ops/engineering-log.md`,
+B650FIX and its round 2, on 2026-11-14.
+
+## B828 — a state file that holds nothing refuses the start in the bridge's words (2026-11-13)
+
+- **…and a state file that holds nothing, empty or JSON's white space alone (of a file larger than the 16 MiB and one byte it is read to, all that was read, nothing past it read), refuses the node's start before the node is built, whatever `tailscale.hostname` or the auth key says, in the bridge's words (`tsnet.EmptyStateError`, naming no path: a copy of the file keeps the node; moved aside, a new device follows, and what that costs), which serve's tailnet line and `bridge tsnet auth` and `status` (exit 1) print and the console's tile shows in LastError (`tsnetAdminStatus`, from `LastStartError`); Tailscale's own start refuses that file, in words about a TPM-sealed state, and the bridge moves and replaces nothing** (2026-11-13, backlog B828, the review of its brief, and its round 2). **Don't take a state file that holds nothing for no node, build or start the upstream node over it, ask `tailscale.hostname` before it, move, replace or write the file, name a path in its words, count a byte JSON does not skip as nothing, or read past the bound to decide it.** `TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode`, `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`, and cmd/bridge's `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` and `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` pin it. → History-rules-cli-serve.md
+
+*What upstream does.* tailscale.com v1.104.2's `tsnet.Server.Start`
+(tsnet/tsnet.go, 556 to 559; `doInit`, 709 to 714) runs `start` (805), which
+starts its logger (875: outside a test binary it writes `tailscaled.log.conf`
+and its log buffers into the state dir), its network monitor, its userspace
+engine and netstack before it opens its store, `store.New(tsLogf,
+<Dir>/tailscaled.state)` (956 to 963). `store.New` (ipn/store/stores.go, 59 to
+82) first runs `maybeMigrateLocalStateFile` (259 to 273), which reads the file
+and unmarshals it into a map to tell a TPM-sealed file from a plain one: an
+empty file, or one of white space alone, fails there with "unexpected end of
+JSON input", and the start with `failed to migrate existing TPM-sealed state
+file to plaintext format: failed to unmarshal "<the file's path>": unexpected
+end of JSON input`. The file store's own tolerance of an empty file
+(`NewFileStore`, 157 to 183, Tailscale's issue 895) is never reached that way,
+and B749's reading had taken it for upstream's answer ("Upstream's store takes
+an empty file for none"). On main a throwaway program ran the bridge's own
+Start over an empty file: `tsnet: server start: tsnet: failed to migrate
+existing TPM-sealed state file to plaintext format: …`, which serve prints
+after `tsnet: bring node up:`, and the state dir gained `tailscaled.log.conf`,
+`tailscaled.log1.txt` and `tailscaled.log2.txt`. Upstream's writer syncs the
+file before its rename (atomicfile.go, line 45), so an empty file comes from
+outside it: a truncation by hand, a copy, a sync tool, a filesystem's repair.
+
+*The choice.* The brief offered (a), the empty file a state that does not
+read, and (b), serve moving it aside and starting a new node. Its review bound
+(a) as a refusal of the start, not a warning, since a state that does not read
+changes only the name and leaves upstream's start to fail, and ruled (b) out:
+a new registration is a new device, whose MagicDNS name and certificate can
+change, against B749's rules that the node keeps its identity and that the
+reading changes nothing. So the start refuses, its words say how to recover
+and what that costs, and the bridge does none of it.
+
+*As built.* `readNodeState` answers a file whose bytes are all JSON's white
+space (space, tab, carriage return and line feed, what Go's decoder skips; RFC
+8259, section 2), none at all included, with `*tsnet.EmptyStateError`
+(`WhiteSpace` set where it holds any). `nodeName` returns it before it asks
+`tailscale.hostname`, and `startUnlocked` returns it before it builds the
+upstream server, so neither the hook before the upstream start nor the
+upstream start runs, whatever the hostname or the auth key, and `Start` keeps
+it as the last start error. Its words name the file, and its folder by its
+role, and say that Tailscale does not start from it, that a copy of the file
+keeps the node, that moving the file aside and restarting the bridge gives a
+new device, which authenticates as on a first run, takes a new tailnet address
+and can take a new MagicDNS name, which paired apps hold, and that the bridge
+moves and replaces nothing. They name no path, so the console's tile shows
+them as they are (`auth-tls.md`: a console error body names no path). Serve
+prints them on its tailnet line (`tsnet: bring node up: … (LAN listener still
+active)`), `bridge tsnet auth` and `status` print them and exit 1, and
+`tsnetAdminStatus` reads them from `LastStartError` beside
+`LogsRequiredError`, where the tile said `tsnet status: tsnet: Status called
+before Start`.
+
+*The other states.* A missing file and `{}` are a new node, before and after.
+White space alone was a state that does not parse, so the start took the
+library's name, said so, and failed in upstream's words as an empty file did;
+it is refused with it now. Any other byte, a vertical tab, a form feed, a
+no-break space or a byte-order mark among them, is a state that does not
+parse, as before (`TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing` pins the
+line). What stays open of the reading is backlog B829 and the follow-ups
+B828's report names.
+
+*Red first and the controls.* At a2a3d3fe, main's code under the new tests:
+every row of `TestAStateFileThatHoldsNothingRefusesTheStart` red (upstream's
+words with the file's path, the node built and started, the hook reached,
+`tailscaled.log.conf` in the state dir; the white space rows the library-name
+line too), every row of the two cmd/bridge tests red (`tsnet: before start:
+the test stopped the node before its upstream start` on each path, and the
+tile's `tsnet status: tsnet: Status called before Start`), and
+`TestAStateFileThatIsNotThereStillStartsANewNode` green. The node
+internal/tsnet stands in for does what upstream's start did there
+(`upstreamOverState`), since a test binary's own upstream start skips the
+logger. Eight controls, each predicted before it ran, were red where predicted
+and nowhere else: the fix removed (every refusal row, the reader's three rows
+that hold nothing, every cmd/bridge row), the refusal taken for a state that
+does not read (the refusal rows and cmd/bridge's), the refusal asked only
+without `tailscale.hostname` (the hostname rows alone), the tile without it
+(serve's two rows, on the tile alone), the file moved aside and a new node
+started, the brief's (b) (the refusal rows, the state dir's comparison among
+their assertions, and cmd/bridge's), the refusal wrapped (the exact words
+alone), the line drawn at `bytes.TrimSpace` (the vertical tab, form feed and
+no-break space rows) and the upstream node built though never started (the
+refusal rows' count of nodes alone). The record is in
+`ops/engineering-log.md`, 2026-11-13, B828.
+
+*Round 2: white space past the read's bound.* The reading reads 16 MiB and one
+byte at most, and its size guard ran before its white-space check, so a file
+of 16 MiB and one byte of white space was "larger than the 16777216 bytes it
+is read to", a state that does not read: the start took the library's name,
+said so, built the upstream node and ended in upstream's TPM-worded failure,
+its logger's file written into the state dir (Codex and Claude on round 1).
+The check now comes first, of the same bounded read, its errors and its cap as
+they were (a chunked read would lift the cap, which the brief's review ruled
+out): where all that was read is white space, the file holds nothing,
+`Oversized` set where it is larger than the read, and nothing past it is read.
+Its words say the file holds no state in its first 16 MiB, which is as far as
+the bridge reads it, and that the bridge does not start the node from it; they
+leave out "Tailscale does not start from it", since of such a file the bridge
+knows only what it read. The edge: a file with JSON past its first 16 MiB of
+white space, which Tailscale might start from, is refused with it, where it
+reached upstream before; a state file is a few KiB, so that file is broken
+anyway. Anything else in what was read keeps a larger file a state that does
+not read, as before. `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`'s rows
+at the bound, past it, and past it with an x in its first 16 MiB pin it, each
+row that holds nothing driving a start that must be refused before anything is
+built (`startRefused`). The row past the bound was red at 88b06153 on the
+reader's "is larger than the 16777216 bytes it is read to", the upstream node
+built and started and the logger's file in the state dir; three controls, each
+predicted, were red where predicted: the check asked only within the bound
+(the row past it), `Oversized` set at the bound (the row at it), and the words
+without `Oversized` (the row past it). The record is in
+`ops/engineering-log.md`, 2026-11-13, B828 round 2.

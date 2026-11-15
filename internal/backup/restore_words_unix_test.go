@@ -59,8 +59,8 @@ func TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore(t *testing.T)
 	c.requireUntouched(t, "the restore of B refused beside A's restore given up")
 
 	// Read until it decodes as A's restore, never taken once it is there
-	// (backlog B871's rounds 2 and 5): no hold before A's was given up in
-	// root, and B's restore, refused by this process's mark, held nothing.
+	// (backlog B899): no hold before A's was given up in root, and B's
+	// restore, refused by this process's mark, held nothing.
 	awaitMarker(t, root, "A's restore", func(s backup.StuckCheck) bool {
 		return s.Restoring() && s.Snapshot == filepath.Base(snapA)
 	})

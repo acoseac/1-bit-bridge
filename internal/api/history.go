@@ -258,8 +258,11 @@ func (s *Server) historyList(w http.ResponseWriter, r *http.Request) {
 	}
 	q := safeQuery(r)
 	// Default/cap mirror the store's own clamp; resolving them here too
-	// lets the short-page check below emit a definitive nextCursor=0 on
-	// the last non-empty page (saves the client one empty-page fetch).
+	// lets the check below tell a full page from a short one. A short
+	// page is definitively the last and answers nextCursor=0; a full page
+	// answers its last event's id even when nothing lies past it, so a
+	// feed whose length is a multiple of the limit ends with an empty
+	// page answering 0 (PROTOCOL.md).
 	limit := 200
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
