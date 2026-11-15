@@ -99505,3 +99505,185 @@ Each control fails on the unfixed test and passes with the fix:
   clean.
 - **The files:** `git diff --name-only 9acee209..HEAD` names the three
   test files and this log.
+
+## 2026-11-15 — B871 round 6: round 5's publication reverted, main merged with its marker wait, the hold-words waits capped
+
+The rules are round 6's patch (`rules-b871-r6.patch`, uncommitted):
+build-ci-tests.md's line on waiting for a stuck check's marker, cli-serve.md's
+B653 PR 1 round 12 line back to main's wording, and one long form moved out of
+cli-serve.md; what main's marker write leaves is under "B871 round 6" in
+`ops/History-rules-cli-serve.md`; this is the evidence. Linux amd64 (legion0),
+Go 1.27.3, the Makefile's tags, TMPDIR `~/onebit/tmp`, every run pinned to CPUs
+0 to 7. Each control's prediction was written before it ran
+(`.tmp/_b871/r6/*predictions.txt`); each is an uncommitted edit of a committed
+file, its bytes put back from memory (`ctl_r6.py`, `ctl_helper_r6.py`).
+
+Commits: 6b45ca75 and cb1c70c1 (the revert, by blobs: `git revert` needs an
+approval this session cannot give), 956bc367 (round 5's record, below),
+2bed9ea3 (the merge), ce3f418f (the capped waits), 18fa4799 and 050a44b1 (the
+History), then this record.
+
+### The base
+
+The brief's `origin/main` cannot be had: the clone has no remote. Main is the
+local `main`, a7167add (B901, #1474), the newest ref here (the `base/main-*`
+branches are of 2026-11-08); 92288694 is its ancestor, and `git diff --stat
+92288694 a7167add` over `stuck.go`, `verify_lock.go`, `hold.go`,
+`restore_source.go`, `cmd/bridge/backup.go` and `verify_stuck_test.go` is
+empty, so no premise moved. BASE is a7167add for the merge, every comparison
+below and the cumulative diff.
+
+### Item 1: the publication reverted
+
+6b45ca75 puts back 39ad984f's parent blobs of its five files and removes
+`stuck_marker_internal_test.go` (`git diff --cached 39ad984f^` over them was
+empty before the commit); cb1c70c1 does the same for 79ae33fa's three files
+(`docs/backup.md` and the two History files). The three defects, at 6191017c:
+the link named the temporary file by its path (`stuck.go` 342, 358), so a racer
+that replaced it between the create and the link had its file published; a
+filesystem that makes no hard link never had a marker; and the temporary file a
+crash left outlived the next holder's cleanup on two exceptional paths, the
+normal one removing both names: a removal that failed, whose error
+`clearStaleMarker` drops (`stuck.go` 481-482), and a restore's hold given up
+before its removal began, whose `clearStale` skips it (`hold.go` 166-168), each
+leaving it, and every exclusive create of it refused, until a later holder's
+removal succeeds.
+
+`git log -S` over 4678b983..956bc367 for `.check-still-running.tmp`,
+`stuckMarkerTmpName`, `os.Link`, `afterCreate`, `failStep`, "published whole"
+and "hard link" finds 39ad984f, 79ae33fa and 53170036 (round 5) and the two
+reverts, nothing of rounds 1 to 4. Before the merge, `git diff 445a2eca
+956bc367` named six files: `.claude/rules/build-ci-tests.md` and `cli-serve.md`
+(6191017c, round 5's rules commit, which only the r6 patch changes),
+`verify_stuck_test.go`, `restore_source_unix_test.go` and
+`restore_words_unix_test.go` (c37d4c95, round 5's `awaitMarker`, which the
+merge replaces with main's), and this log (round 5's record, kept). Round 5's
+record now says it was reverted and names its three removed cases without their
+`Test` prefix (956bc367), since `TestEveryCitedTestNameExists` reads every
+tracked `.md`; `build-ci-tests.md` 67 cites the first of them until the patch
+lands.
+
+### Item 2: main merged
+
+Merge base 4678b983; the branch changed 59 files, main 83, both 19. The merge
+was made by hand (`git merge` needs approval here): `git merge-tree
+--write-tree`'s tree for the 74 paths it merged cleanly, and `git merge-file
+--diff3` for its nine conflicts, resolved block by block (`resolve.py`):
+`verify_stuck_test.go` main's `awaitMarker`, `awaitMarkerWithin`,
+`onMarkerRead`, `setOnMarkerRead`, `markerBytes` and `sameHold`, less the two
+lines that ended round 5's count of reads, which the merge left unreachable
+below main's loop; the two callers main's; `restore_mark_test.go`'s
+`waitWithin` and `waitReserve` as both sides have them, `awaitEvent`'s comment
+the branch's; `verify_hold_test.go` main's switch over the retry's cases (B872,
+B901), then round 4's release and join ahead of the assertions on its answer;
+the rules file, both History files and this log both sides' entries, the
+branch's first. 2bed9ea3's tree differs from merge-tree's in those nine paths
+alone, each its resolution; it differs from BASE in 58 paths, every one the
+branch's own, and from its first parent in 82, every one main's.
+
+At HEAD, against BASE: `writeMarker` (`stuck.go` 289-325, its comment
+included), `stuckMarker` (437-449), `removeMarker`, `clearStaleMarker` and
+`lockBackupsWith`, whose marker poll is `verify_lock.go` 214-220, are byte for
+byte main's (`merge_proof.py`); `StuckCheckOf` differs by round 1's prober.
+`git diff a7167add HEAD -- internal/backup/verify_stuck_test.go` is eight
+hunks, rounds 3 and 4's joins and round 1's prober, none in a helper, and
+`awaitMarker`, `awaitMarkerWithin`, `setOnMarkerRead`, `markerBytes` and
+`sameHold` are byte for byte main's.
+
+Round 2's item 2: its call sites in this package (`restore_words_unix_test.go`
+~62, `TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore`, the read
+round 2's I2W control turned red and main's macOS CI later failed, B899; the
+brief calls it the B738 red, which no B738 record here names) are served by
+main's helper after the merge, those files byte for byte main's. Its other half
+stays the branch's own: a check in a process of its own says so on a line of
+its own once its write's "writes" hook has run (`backup_round3_test.go`
+102-106), for the doctor's one read in
+`TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds`, which B899
+did not touch. So the item is not dropped as a duplicate.
+
+The residual and the three readers that ask the marker without the lock are
+named in the History (18fa4799, 050a44b1).
+
+### Item 3: the hold-words waits capped
+
+ce3f418f. `TestEachHoldWordsCaseWaitsForItsVerificationsEnd` and
+`parkAnEarlierWorker` (`cmd/bridge/restore_mark_test.go` 213, 231, 238, 248,
+297, 306) wait `restoreWaitWithin(t, 30*time.Second)`, the cap round 1 gave the
+restore tests: 30 s at most, never past the test binary's deadline less
+`restoreWaitReserve` (10 s). The control holds the earlier worker (the
+wrapper's `earlier.letGo()` dropped) and runs a_restore's case alone, `-race
+-timeout 25s`: A, as committed, failed at the wait, `restore_mark_test.go:214:
+the earlier verification's worker never passed the case's wrapper`, 13.91 s
+into the case, the package at 15.05 s, with no timeout panic; B, the six waits
+a bare 30 s again, ended `panic: test timed out after 25s`. As predicted. Past
+the reserve every later wait is zero, so after A's report the case's next wait
+(:239) and the earlier worker's cleanup (:298) reported at once too, the second
+before the worker it had just let go could end: the cap the brief asked for,
+said here.
+
+### Item 4: the proof
+
+The helper's control (`ctl_helper_r6.py`): main's `awaitMarkerWithin` replaced
+by the old helper, a wait for the file and one decode (`readStuckMarker`), the
+fixture as it is: `TestTheMarkerWaitReadsAnEmptyMarkerUntilItDecodes` red 20 of
+20, each at once, `the marker does not read: unexpected end of JSON input` at
+the case's call (784 in the edited file, 803 as committed); main's helper,
+green 20 of 20. As predicted. It covers main's helper and main's case, B899's:
+it pins nothing of B871's own.
+
+The touched tests at `-race -count=50`, one race binary per package, four lanes
+in the build slot: `TestTheStaleMarkersRemovalNeverTakesAwayARestoresMarker`
+(449 s), `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` (368 s),
+`TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore` (273 s),
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo` (282 s),
+`TestACheckThatDidNotEndInAnotherProcessHoldsTheFolderUntilItEnds` (188 s),
+`TestEachHoldWordsCaseWaitsForItsVerificationsEnd` (333 s), main's three
+marker-wait cases (`TestTheMarkerWaitReadsAnEmptyMarkerUntilItDecodes`,
+`TestTheMarkerWaitReadsAnotherHoldsMarkerUntilItsOwnReplacesIt`,
+`TestTheMarkerWaitFailsAtItsDeadlineNamingWhatItsLastReadMet`) with
+`TestTheStuckMarkerNeverFollowsAReplacement` and
+`TestAGiveUpOnceTheLocksLetGoBeganWritesNoMarker` (43 s),
+`TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` (881 s)
+and `TestARecheckGivenUpLeavesTheVetoItMade` (225 s): every test 50 of 50, no
+data race.
+
+`go test -race -count=1 -timeout 120m ./internal/backup/ ./cmd/bridge/`, with
+the rules patch applied for the run and taken back after it: ok,
+`internal/backup` in 802.8 s and `cmd/bridge` in 1,636.3 s (1,639 s wall), the
+tree clean after. `TestEveryCitedTestNameExists`: red at HEAD without the
+patch, "no test function of this name exists" for round 5's removed
+`…AMarkerReadWhileItIsWrittenIsWholeOrNone`, "(cited by
+.claude/rules/build-ci-tests.md)", green with it, and `make docs-check` ok with
+it (`validate_r6.py`, the patch taken back, the tree clean). `go vet ./...`
+with the tags as linux/amd64, darwin/arm64 and windows/amd64: clean; go1.27.3's
+gofmt lists none of the 52 Go files the branch changes against main. `git diff
+a7167add...HEAD --stat`: 58 files, every one a file rounds 1 to 4 changed
+(round 2's `restore_words_unix_test.go` is main's now, and not listed); round
+5's terms are left only in its record here and, until the patch lands, in
+`build-ci-tests.md` 67.
+
+### The rules patch
+
+`rules-b871-r6.patch` (10,217 bytes, sha256
+74051b15c3c9792409b659c15d3d037c2b11b5b76a8650e990844e645918111f), made in a
+git-archive copy of HEAD (`rules_r6.py`): build-ci-tests.md 67, round 5's line,
+replaced by round 2's own rule with its first clause as the merged code reads
+(the wait in this process main's `awaitMarker`, a check in a process of its own
+its "writes" line), citing no removed test and with no pointer, round 5's long
+form gone with cb1c70c1; cli-serve.md's round 12 line back to main's, byte for
+byte; and, since the merge took cli-serve.md to 101,240 bytes, over its 100,000
+(main 98,921, the branch 99,609), 100,948 with main's clause back, the long
+form of its largest entry `move_entry.py` can move whole, the OpenHome
+surface's (B470 PR 5a2a), moved verbatim into `ops/History-rules-cli-serve.md`
+with its pointer left: 99,601 bytes. In the copy `check-doc-budgets.py` passes
+and `verify_moves.py --base HEAD` passes with the two edited lines named. `git
+apply --check` takes it at this record's commit.
+
+### Left open
+
+`cmd/bridge/backup_join_test.go` 45 (`awaitVerifyEndOnCleanup`), 82
+(`joinBoundedReadsOnCleanup`) and 145
+(`TestADrainWaitsForTheBackupWorkerItsLoopLeft`), rounds 3 and 4's, still wait
+a bare 30 s, outside the brief's six. B899's own rules patch, not on main, adds
+a bullet on the same wait; with both landed, the in-process clause of line 67
+says it twice.
