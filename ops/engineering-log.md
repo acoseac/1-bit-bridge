@@ -100419,3 +100419,220 @@ redaction. `git apply --check` takes it, and on a `git archive` copy of the
 tree with it the budgets check is clean (the worst load from 77.4% to 77.5%,
 `player.md` at 98,849 bytes), as are its self-test and those of `rules-for.py`
 and `move_entry.py`.
+
+## 2026-11-15 — B601: the console's quiet PCM test tone, through the player's backend
+
+Worker b601, legion0, branch `feat/b601-pcm-tone` from main ca4473ff. Commits:
+86a6043d (the backend's tone), 8d3bcd71 (the bounds outside internal/player,
+the builder inside), 7b4d05e7 (serve's gate, the console's view and route, the
+page's panel), f4b02ff7 (the tones close as serve's stop begins; the serve and
+console tests), c48597e9 (the tests fail at the base by what they assert),
+b4096d7e (a refused open's answer pinned in alsapcm; qualificationVersion 52),
+c1a3d24b (CLAUDE.md), c91dcdba and f7683bd2 (two tests the controls found
+blind), b2a7433b (the fence names its error), 01dfa550 (the tone's status
+apart from the protocol's census), then this record. Every run: Go
+1.27.3, TMPDIR on disk (`.tmp/_b601/tmp`: /tmp is tmpfs here, which the
+player's durable writer refuses, so a serve test of the player waits there for
+an engine that never starts, to its deadline).
+
+### The tone, and why the device slot
+
+A console click plays a 1 kHz sine through the DAC while serve runs its own
+player on that DAC. An open that passes says nothing of the player: a pause
+that let the device go would fail the player's next resume, Start or probe,
+and on a DAC with a second free substream (an onboard codec) the tone would
+play beside the music. So the tone is the backend's third holder of its device
+slot (`playback.Backend.Tone`, `toning`), beside a session (`holder`) and the
+silent probe (`probing`). It is counted among the backend's goroutines before
+it takes the slot (`toneEnter`, under `gmu` alone), because serve's stop joins
+only what the backend counts (`Wait`): a tone that took the slot uncounted
+could open the DAC after `Wait` returned. The slot is taken in one step under
+`b.mu` alone (`reserveTone`) that refuses by word and never waits: the gate
+shut, a release never confirmed, a probe, a choice's lease, a Start waiting, a
+session's record or the device's holder, another tone, the request ended. The
+two locks are never taken one under the other, the order `publishProbe`'s doc
+gives. `CloseTones` sets its flag under `gmu`, then shuts the gate for good and
+ends the tone in the slot under `b.mu`: a tone counted before the flag is
+refused at its slot or ended, and joined either way
+(`TestAToneBesideServesStopIsJoinedOrRefused` holds a tone before its count,
+after it and in the slot, and runs `CloseTones` and `Wait` at each). A Start
+preempts it (`hold`: ended `preempted` on the record found under the lock,
+waited for at most `ToneYield`, 1 s, then the device busy, holding nothing); a
+probe it holds the slot from is skipped `tone_holds`, one of `probeSlotSkips`,
+so it stays owed (a refusal left out of that list is published as a probe made,
+and the unit was not probed again until a replug, a migration's part or a
+choice); a choice's lease and a tone refuse each other. Every end is a cause on
+the tone's own context (`context.WithCancelCause` of the request's), set on the
+record found under the lock, the first standing, so a late end of an earlier
+tone's request ends nothing of the next.
+
+### The gate
+
+The supervisor keeps the tone's gate (`toneGate`): `avail`, the last report the
+engine took was available; `fresh`, the latest snapshot was; `open`, as it last
+set it. The watch loop reads a snapshot's freshness first (`toneSnapshot`: a
+stale one shuts an open gate, `snapshot_stale`, and never takes another shut's
+word), then reports it (`send`: a report that takes the output away shuts the
+gate before the engine hears it, `withheld` for the live config's reason and
+`output_unavailable` otherwise, and so does an available report that names a
+unit change, `output_changed`; a report the engine refused shuts an open gate,
+`output_unknown`), then asks whether to open it (`toneOpenIfDue`), so a
+snapshot fresh again and unavailable or re-enumerated opens nothing before its
+report's shut. A stale snapshot makes no report (the watcher republishes its
+last at its generation), which is why the gate reads every one the
+subscription delivers. `CloseTones` runs as serve's stop begins
+(`context.AfterFunc` on serve's context), so a tone answers its request while
+the console still serves, and again first in each teardown, the player's stop
+and the supervisor's shutdown.
+
+### The cleanup's failure, and close(2)
+
+The slot is given back only once the node's close has answered. Completion is
+nothing opened, or `Close` answering nil. Failure is a close that answered an
+error, a cleanup that panicked before it answered, or an open whose own close
+answered an error or that panicked: until B601 alsapcm's open dropped the error
+of the close it made of a node whose setup it refused, and it now carries
+`ErrReleaseUnconfirmed` and that error beside its refusal, its Reason still
+the refusal's (`TestARefusedOpenWhoseCloseFailsSaysItsReleaseIsUnconfirmed`).
+A PCM session's open goes on to its next packing by the Reason as before; the
+native sink's reopen, which takes `ErrReleaseUnconfirmed` for its cleanup's
+failure, hears it in that case too where it heard the refusal alone; the tone
+stops there and asks no other pair. Failure sets `terminalUnconfirmed`, which
+fences tones, Starts, probes and choices' leases until serve restarts, and
+says it at Warn with the error the cleanup answered. What close(2) leaves held
+is not readable from this host, which holds the kernel's headers alone (no
+`fs/` or `sound/` sources under `/usr/src`): upstream, unverified, the
+descriptor is gone whatever close answers and the driver's release runs at the
+last reference, so a close's error rarely leaves the node held; the bridge
+cannot tell, and fences rather than guess, the design's default for its open
+question 7. A close the kernel holds keeps the slot: a Start answers busy at
+`ToneYield`, and `Tone` answers `stop_unconfirmed` at `ToneStopWait` (2 s), the
+status saying so until the close answers.
+
+### The format sequence and the level
+
+The kernel is asked a rate and a format alone (`alsapcm.Config`), so the tone
+asks eight pairs, each once: at 48 kHz, then 44.1 kHz, S24_3LE, S24_LE and
+S32_LE at 24 valid bits, then S16_LE at 16; a refine refused or a mismatch
+tries the next, a busy or denied open ends `open_refused` with its cause
+(`device_busy`, `permission_denied`). The node is checked after open before a
+frame. The bounds are `internal/tonebounds`'s (the standard library alone,
+outside `internal/player`, so the console checks them importing no player
+package): 1 kHz, -90 to -30 dBFS, 1 to 30 seconds. `testtone.Build`, pcm-test's
+builder moved unchanged, asks `tonebounds.Check` before it computes anything.
+At -30 dBFS no frame's top byte is 0x05 or 0xFA at any rate and packing
+pcm-test allows. Nothing is written to the DSD state or the packing memory, no
+observation is published, and no serial is logged.
+
+### The console
+
+`POST /api/output/player/tone` checks its body, then its fields (pointers, so a
+field left out is told from 0), then `playerRefusal` on the config it loads
+once, which `PlayerOutput.Tone` takes, so the view judges the withholding on
+that same config; it answers 409 with the word of a tone refused before the
+slot, and 200 with the result alone of one that took it. The view
+(`consolePlayer.Tone`) asks the backend only for a running player stopped with
+nothing pending, its output known and available, nothing withheld and no stream
+open, each refusal its word; `Sounding` and `Withholds` are unchanged.
+`running.tone` is the backend's `ToneStatus`, its `lastError` apart from the
+engine's `running.lastError`. The page's Stop aborts the tone's request and
+posts nothing; the page's scope and `pagehide` abort it too; and after a Stop
+the page reads the status at once and every 250 ms while the tone reads
+`playing` or `stopping`, three seconds at most, saying past them that the stop
+is not confirmed.
+
+### The brief's review
+
+Its twelve findings were taken: the open's cleanup uncertainty exposed in
+alsapcm and fenced on (the refused-open cases of the cleanup test); the gate's
+open asked after the report, against the snapshot processed; `pagehide`; the
+stop's confirmation read through `playing` and `stopping`, unconfirmed at
+expiry; the route's one config handed to the view; the bounds outside
+`internal/player`; the route's refusals in `playerRefusal`'s own order; the
+length an int, refused `length_refused`, the body's fields pointers;
+`PlayerOutput`'s doc and `running.tone`'s shape (none for a player that does
+not run, `idle` with nothing playing); the gate's state, so a stale snapshot
+never takes another word and nothing reopens before the report; and a cancel
+in the drain answering the tone's cause, with `stop_unconfirmed` marked by the
+timer and cleared by the close. Deviations from the brief: the builder is
+`internal/player/testtone`, the bounds `internal/tonebounds`; two words the
+brief did not list, `length_refused` and `not_located`; `ToneResult.Admitted`,
+which tells the route a refusal from a tone that ran; `qualificationVersion`
+52, since `internal/alsapcm` is a guarded prefix.
+
+### Tests, reds and controls
+
+Each new test was shown red at the base by its assertion, through a copy of
+the base's tree with the branch's test files and a names-only shim of each new
+identifier (`.tmp/_b601/red.py`): every one but the builder's two pins
+(`TestTheToneNeverCarriesADoPMarker`, `TestTheToneIsTheSineItsLevelNames`: the
+builder moved unchanged) and `TestAnOpenHomeStopLeavesTheToneToItsEnd`, which
+pins a residual as it is. 23 negative controls, the brief's 18 and five for
+what the review added and the Warn's error, each predicted in a file before it
+ran (`.tmp/_b601/controls_def.py`) and run by a script that puts the bytes
+back: all 23 red as predicted, after two tests the controls found blind were
+fixed. The ceiling raised to -20 made the backend's bounds test wait out the
+package's ten minutes: it asked each tone on the test's own goroutine, and the
+tone the mutation admitted played on a DAC the test never lets play. It now
+asks each on a goroutine of its own and fails at the first open (c91dcdba). And
+`Sounding` counting a tone stayed green: the serve tests' stand-in answered
+only a status the test set, so a tone it held read as none; it now says its
+own tone's status where a test sets none, and the withhold test reads the tone
+`playing` before its writes (f7683bd2).
+
+### Review of the diff
+
+One finding refuted: a 30-second tone's request ended by the console server's
+`ReadTimeout` (30 s). net/http clears the read deadline before its background
+read starts (`startBackgroundRead`, `server.go` line 741 at go1.27.3), so the
+deadline ends nothing once the body is read; a scratch server with a 1 s
+`ReadTimeout` ran a 3 s handler to its end. One Low fixed (b2a7433b): the
+fence's Warn named no cause; it names the cleanup's error, and the cleanup test
+requires it (a 23rd control red).
+
+### The first gate
+
+The gate's first run (`make test`, every package) failed one test, in a
+package the branch does not touch: internal/api's
+`TestDSDOutputProtocolTokens` reads every assignment to a `State` or a
+`state` in the player backend's source as an observation state the protocol
+names, and `ToneStatus` assigned its own state four times, from constants the
+census cannot read as strings. The single-package runs had not run
+internal/api, so they could not see it (`build-ci-tests.md`, a package-local
+run and a tree-wide guard). `ToneStatus` now picks its state in a local of
+its own and is built in one literal (01dfa550), and the census passes; the
+gate was run again on that head.
+
+### Runs
+
+Single packages under `-race -count=1`, in parallel lanes at b2a7433b:
+testtone 1.0 s, playback 3.4 s, alsapcm 87.6 s, engine 31.3 s, hotplug 2.5
+s, qualification 4.4 s, admin 1,233.3 s, cmd/bridge 1,674.7 s; at 01dfa550,
+internal/api 155.5 s, playback 3.1 s and alsapcm's tone tests. The ordering
+tests 50 times each under `-race` (alsapcm's six, playback's three,
+cmd/bridge's three, a lane a package): every run green, no race (36.4 s,
+1.1 s, 166.3 s). The test binaries of tonebounds, testtone, playback,
+alsapcm, admin and cmd/bridge build for darwin and windows. go1.27.3's gofmt
+lists none of the changed files. `scripts/qualification-version` is red at
+c48597e9 (51 to 51) and OK once the version is 52. In the build slot at
+01dfa550: `GOOS=linux GOARCH=386 make vet` clean, and `make fmt vet test
+build-all` passed, its fmt rewriting nothing (cmd/bridge 1,706.8 s of make
+test's 30 minutes, admin 1,259.4 s, api 163.7 s; `check-build-tags: OK`; the
+six builds). `make docs-check` is clean on the tree.
+
+### The rules
+
+The rules are `rules-b601.patch`, uncommitted: in `output.md` a section, "The
+console's test tone in the player's backend (B601)", of five bullets, and the
+glob `internal/tonebounds/**`; in `cli-serve.md` one line beside the console
+view's bullet, after `bridge update`'s entry's long form moved to
+`ops/History-rules-cli-serve.md` with a hand-written pointer (the largest entry
+cannot move whole: its own Don't needs more than a pointer holds); in
+`admin-console.md` one bullet after the Player page's; and their long forms in
+`ops/History-rules-output.md` and `ops/History-rules-cli-serve.md`. On a copy
+of the tree with it the budgets check is clean (`output.md` 89,402,
+`cli-serve.md` 98,781, `admin-console.md` 96,395 bytes; the worst load 83.3%),
+`verify_moves.py --base HEAD` passes (one block moved), the self-tests of
+`check-doc-budgets.py`, `rules-for.py` and `move_entry.py` pass, and
+cmd/bridge's `TestEveryCitedTestNameExists` passes over it and fails on a ghost
+planted in its History.
