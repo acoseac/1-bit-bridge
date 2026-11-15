@@ -99336,3 +99336,121 @@ platform's files on every host.
 
 The warn off Windows and in the console's doctor is not built: the brief makes it a separate backlog item if it is
 wanted, and this round filed none.
+
+## 2026-11-15 — B618: main merged in at bfa11227, the log's choice through B650's runs of the doctor
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` (PR #1470) from round 3's head ee9e7470, whose last merge
+was of main fe5e331d. Main moved since by B899, B886, B650, B903, B650FIX, B904, B895, B901 and B650FU. Commits
+532272ef (the merge, parents ee9e7470 and bfa11227) and the one that carries this record (main's B650 tests' calls).
+The rules ship as `rules-b618-merge.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`). Neither side's
+behaviour changes, and nothing new is built.
+
+### How the merge was made
+
+`git merge` needs an approval a headless session on legion0 cannot get, so the merge was assembled by hand: the base
+from `git merge-base` (fe5e331d); `git merge-tree --write-tree bfa11227 ee9e7470` (tree 872aa111, three files in
+conflict); the 46 paths main changed with no conflict checked out of that tree, which holds main's blob where main
+alone changed a path and git's own clean three-way merge where both did (`cmd/bridge/backup_round2_test.go`,
+`cmd/bridge/backup_verify_test.go`, `internal/doctor/doctor.go`, `ops/History-rules-cli-serve.md`); `cli-serve.md`
+main's blob; `doctor.go` and this log resolved from `git merge-file -p --diff3` by a script that checks each block's
+three parts before it replaces the block (`.tmp/_b618/m/resolve.py`, not committed); `MERGE_HEAD` written, then
+`git commit`. Before the commit the index was proven (`.tmp/_b618/m/mkmerge.py check`): HEAD was ee9e7470; every path
+the index changed against HEAD was one main changed; each path main alone changed held main's blob, each path both
+changed git's clean merge or its resolution, and each path the branch alone changed HEAD's.
+
+### The conflicts, and what each side meant
+
+| File | Main | This branch | Resolution |
+|---|---|---|---|
+| `cmd/bridge/doctor.go` (3 blocks) | B650: `buildDoctorDepsWith(cfgPath, absentIsPreSetup, dacHost)` a run of `cliRootProbes` through `buildDoctorDepsRun(ctx, …, dacHost, run *doctor.ProbeRun)`, which holds the body; `adminDoctorRunnerFor(…, dacHost)` a call of `adminDoctorRunnerWith(…, dacHost, probes *doctor.RootProbes)`, whose runs call `buildDoctorDepsRun(ctx, …, probes.BeginRun())` | B618: `buildDoctorDepsWith` takes `logs doctorLogs` and chooses the log file first (`lf := logs.choose()`); `adminDoctorRunnerFor` takes `logs logsHost` and builds `doctorLogs{host: logs, console: true}` | `logs` through both pairs: `buildDoctorDepsWith(…, dacHost, logs)` calls `buildDoctorDepsRun(ctx, …, dacHost, logs, run)`, whose first statement is the branch's `lf := logs.choose()`; `adminDoctorRunnerFor(…, dacHost, logs)` calls `adminDoctorRunnerWith(…, dacHost, logs, probes)`, whose runs pass `doctorLogs{host: logs, console: true}` to `buildDoctorDepsRun`. Each side's docs stay: the branch's of `buildDoctorDepsWith`, closed by main's sentence, and of `adminDoctorRunnerFor`; main's of `cliRootProbes`, `buildDoctorDepsRun` and `adminDoctorRunnerWith` |
+| `.claude/rules/cli-serve.md` (1) | B650's and B650FIX's bullets after the `player-dac` bullet | B618's bullet there, and two `paths:` globs | main's file in the merge commit; the three bullets, main's two and then the branch's, unchanged, and the globs, in the rules patch |
+| `ops/engineering-log.md` (1) | its entries from B650 round 2 to B904, appended | B618's three, appended | main's, whole, then the branch's |
+
+`lf := logs.choose()` stays ahead of the `doctor.Deps` literal, which now carries main's run, as it was ahead of the
+literal in the branch's `buildDoctorDepsWith`: it stats the log files and touches no library root, so it is no work
+of the run's. `adminDoctorRunner` keeps passing `hostLogs()`. The docs that say `adminDoctorRunnerFor` sets the
+console's flag (its own, and `doctorLogs`' in `logs.go`) hold as written: the runner it returns, `adminDoctorRunnerWith`'s,
+sets it. The four files both sides changed without a conflict were read for meaning: in `internal/doctor/doctor.go`
+B650's `RootProbes`, `Run`'s start of every root's probe and `checkLibraryRoots` sit beside B618's `LogPath`,
+`LogNote` and `LogUnresolved`, no hunk near another; in each backup test main's changes sit beside the branch's one
+line, its call of `buildDoctorDepsWith` with the shell's `doctorLogs`; the History file is taken up below.
+
+### The call sites
+
+Changed in the commit that carries this record, in `cmd/bridge/doctor_roots_test.go`, main's B650 tests of the
+console's runner: each is now `adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), hostLogs(),
+<its probes>)`, the probes it stands in for roots with kept:
+
+- 428, `TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce`: `stallProbes(t, s, doctorRootsBound)`;
+- 457, `TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad`: `stallProbes(t, s, doctorRootsBound)`;
+- 508, `TestACancelledConsoleDoctorRunSaysItWasStopped`: `probes`;
+- 557, `TestTheConsolesDoctorReadsARecoveredRootAsHealthy`: `p`;
+- 654, `TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn`: `probes`.
+
+`hostLogs()` is the logs host production's `adminDoctorRunner` passes, and with the console's flag the line grades
+`consoleLogPath(hostLogs())`, which is `adminLogPath()`, the path main's `buildDoctorDepsRun` set: each case's Deps
+are what they were on main. None of the five reads the log line.
+
+Changed in the merge commit, its conflicts: `doctor.go` 288 (`buildDoctorDepsWith`'s call of `buildDoctorDepsRun`),
+296 (`buildDoctorDepsRun`'s parameters), 1129 (`adminDoctorRunnerFor`'s call of `adminDoctorRunnerWith`), 1140
+(`adminDoctorRunnerWith`'s parameters) and 1142 (its runs' call of `buildDoctorDepsRun`).
+
+Unchanged, compiling as they stand: production's `doctor.go` 267 (`buildDoctorDepsFor`, `doctorLogs{host:
+hostLogs()}`) and 1118 (`adminDoctorRunner`, `hostLogs()`), and serve's `main.go` 6381 (`adminDoctorRunnerFor(…,
+doctorDAC, hostLogs())`), whose parameters are the branch's; B618's tests, each with the logs host it stands in
+with: `doctor_logs_test.go` 25 and 257 (`buildDoctorDepsWith("", false, doctorDACHost(), logs)` and `doctorLogs{host:
+host}`) and 35 (`adminDoctorRunnerFor("", nil, nil, servingDACHost(hostTrees, nil), host)`); `doctor_player_dac_test.go`
+586 and 615 (`adminDoctorRunnerFor(…, hostLogs())`); `backup_round2_test.go` 408 and `backup_verify_test.go` 467
+(`buildDoctorDepsWith(cfgPath, false, doctorDACHost(), doctorLogs{host: hostLogs()})`, the branch's lines, merged
+cleanly); and `doctor_roots_test.go` 827 (`buildDoctorDepsFor(path, true)`, whose parameters neither side changed).
+No test calls `buildDoctorDepsRun`.
+
+### The rules
+
+`rules-b618-merge.patch` (13,391 bytes) applies to the merge commit (`git apply --check`). In `cli-serve.md` it puts
+back B618's two globs (`internal/packaging/logpath*.go`, `internal/packaging/scm_*.go`) and B618's bullet after
+main's B650FIX bullet, both byte for byte the branch's, and makes one move. Main's file is 98,921 bytes, and with the
+globs and the bullet 100,152, over the 100,000 a rules file may hold. `scripts/doc-split/move_entry.py --largest`,
+on a copy of the tree at the merge commit, lists seven entries that can move:
+
+- L75 (4,795 B): refused, its Don't (729 characters) over a pointer's 600 bytes.
+- L61, L62, L60 and L59 (1,828, 1,703, 1,143 and 1,044 B): their pointers with their titles are 1,525, 1,013, 955
+  and 869 bytes, so each moves only with a `--text` line that drops its title, and each title is its rule.
+- L121 (1,602 B, serve's OpenHome surface): its default pointer is its title alone, and the sentences that state
+  its rules in other words (the opt-in on and the player off is `openhomeOff`, one Warn and nothing started; a
+  surface that cannot start leaves the player running without it; `stopOpenHome` comes first, after only the
+  cancel of the library index's build; `hostLAN` is the one name for the host's interfaces) make it 730 bytes,
+  refused, and those still leave out its start's UDN and its stop's bounds.
+- L112 (985 B, the loopback track route and the console's checklist): its default pointer leaves out three rules
+  not worded "Don't" or "Never": the gate is asked once at boot and `OnActive` covers an MPD that appears later;
+  every request asks the gate's answer as it stands and none dials MPD; `adminDoctorRunner` takes
+  `checklistDoctorChecks` over the serving source, never bridge doctor's one-shot builder.
+
+L112 moved (`move_entry.py --line 112 --text …`), its pointer built from exact pieces of the entry (578 bytes): its
+title and the parenthesis after it, those three rules and "Rules in `output.md`." The long form alone keeps its
+mechanism and its tests: the route's `Enabled` is `apiSrv.LocalOutputsActiveNow`, what the checklist's source
+reads, the boot test's seams and the two tests that pin it. `cli-serve.md` is then 99,745 bytes. The entry lands
+verbatim at the end of its section of `ops/History-rules-cli-serve.md`, after main's hotplug entry, that section's
+last (476,856 bytes).
+
+### Proofs
+
+- `git show --remerge-diff --diff-algorithm=histogram --stat 532272ef`: `.claude/rules/cli-serve.md` 6 lines (out:
+  the globs, the branch's bullet and the markers), `cmd/bridge/doctor.go` 45 (conflicts 1 and 2),
+  `ops/engineering-log.md` 810 (the branch's 404 lines moved after main's 2,402, and the markers). Git's default
+  diff algorithm shows the same log as 4,942 lines, main's block taken out and put back.
+- `.tmp/_b618/m/union_check.py`, for this log and for `ops/History-rules-cli-serve.md`, against fe5e331d and both
+  parents: each side's additions are pure insertions; every block either side added is in the merged file whole and
+  in order (the log: main's 159-line B650 entry at line 95,031 and its 2,402 lines from 96,533, the branch's 404
+  from 98,935; the History file: main's 2 lines at 2,285 and its 326 at 5,368, the branch's 175 at 5,808); the
+  merged file is byte for byte the base with every block put in at its base position, main's first; and with the
+  other side's blocks taken out it is, line for line, each parent. By count: the log 96,373 lines + 2,561 + 404 =
+  99,338, the History file 5,479 + 328 + 175 = 5,982.
+- Compile, on this commit's code (the tree before this record was appended), in the build lock: `go build ./...`
+  and `go vet ./...` with `-tags ts_omit_webclient,ts_omit_debugeventbus` for linux, darwin and windows (amd64),
+  and `go vet ./...` for linux/386 and linux/arm, all clean. At the merge commit `go build ./...` is clean for the
+  three and `go vet ./cmd/bridge/` stops at `doctor_roots_test.go:428`, the first call this commit changes.
+- go1.27.3's gofmt lists none of the Go files the merge or this commit touches.
+
+The test runs on this commit come after it, so they are not in this record: a record cannot carry the results of
+runs made on the commit that holds it.

@@ -425,7 +425,7 @@ func TestBridgeDoctorLoadsAConfigThatSetsNeitherDirectoryWithoutTheRoots(t *test
 func TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce(t *testing.T) {
 	path, _, dead := rootsInstall(t, true)
 	s := newRootStall(dead)
-	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), stallProbes(t, s, doctorRootsBound))
+	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), hostLogs(), stallProbes(t, s, doctorRootsBound))
 	first, _ := consoleRun(t, context.Background(), runner)
 	if c := first["config-file"]; c.Status != "fail" || c.Summary != fmt.Sprintf("%s: its load did not finish within %s", path, doctorRootsBound) {
 		t.Errorf("the first run's config-file = %+v", c)
@@ -454,7 +454,7 @@ func TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce(t *testing.T) {
 func TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad(t *testing.T) {
 	path, _, dead := rootsInstall(t, true)
 	s := newRootStall(dead)
-	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), stallProbes(t, s, doctorRootsBound))
+	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), hostLogs(), stallProbes(t, s, doctorRootsBound))
 	const runs = 6
 	reports := make(chan *admin.DoctorReport, runs)
 	var wg sync.WaitGroup
@@ -505,7 +505,7 @@ func TestACancelledConsoleDoctorRunSaysItWasStopped(t *testing.T) {
 		default:
 		}
 	})
-	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), probes)
+	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), hostLogs(), probes)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	reports := make(chan *admin.DoctorReport, 1)
@@ -554,7 +554,7 @@ func TestTheConsolesDoctorReadsARecoveredRootAsHealthy(t *testing.T) {
 	path, _, dead := rootsInstall(t, true)
 	s := newRootStall(dead)
 	p := stallProbes(t, s, doctorRootsBound)
-	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), p)
+	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), hostLogs(), p)
 	if lines, _ := consoleRun(t, context.Background(), runner); lines["library-roots"].Status != "fail" {
 		t.Fatalf("library-roots = %+v, want the root not answering", lines["library-roots"])
 	}
@@ -651,7 +651,7 @@ func TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn(t *testing.T) 
 	s := newRootStall(roots...)
 	probes := stallProbes(t, s, bound)
 	onRootWaitClock(probes)
-	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), probes)
+	runner := adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), hostLogs(), probes)
 	for _, r := range roots[:limit] {
 		setRoot(r)
 		lines, _ := consoleRun(t, context.Background(), runner)
