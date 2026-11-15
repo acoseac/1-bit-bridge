@@ -772,10 +772,13 @@ func TestATonesPeakIsBoundedOnTheDevice(t *testing.T) {
 // TestTheBackendRefusesALevelAboveMinus30BeforeAnyOpen (B601): a tone louder
 // than -30 dBFS, below -90 or no number is refused level_refused, and one
 // shorter than a second or longer than 30 length_refused, before anything is
-// counted, locked or opened.
+// counted, locked or opened. Each is asked on a goroutine of its own, so a
+// tone its bounds should refuse that opens the DAC fails the case at that
+// open, rather than playing on a DAC the test never lets play.
 func TestTheBackendRefusesALevelAboveMinus30BeforeAnyOpen(t *testing.T) {
 	r := newRig(t)
 	r.be.ToneOutput(true, "")
+	opened := func(v alsapcm.KernelView) bool { return len(v.Opened) > 0 }
 	for _, c := range []struct {
 		req  playback.ToneRequest
 		want playback.ToneOutcome
@@ -789,7 +792,19 @@ func TestTheBackendRefusesALevelAboveMinus30BeforeAnyOpen(t *testing.T) {
 		{toneOf(-40, 0), playback.ToneLengthRefused},
 		{toneOf(-40, 31), playback.ToneLengthRefused},
 	} {
-		if res := r.be.Tone(bg, c.req); res.Outcome != c.want || res.Admitted {
+		call := r.startTone(c.req)
+		var res playback.ToneResult
+		watchdog := time.NewTimer(alsapcm.Watchdog())
+		select {
+		case res = <-call.answer:
+			watchdog.Stop()
+		case <-r.k.When(opened):
+			call.cancel()
+			t.Fatalf("a tone %+v opened the DAC; want %s before anything is opened", c.req, c.want)
+		case <-watchdog.C:
+			t.Fatalf("a tone %+v never answered; want %s at once", c.req, c.want)
+		}
+		if res.Outcome != c.want || res.Admitted {
 			t.Errorf("a tone %+v answered %+v; want %s", c.req, res, c.want)
 		}
 		if n, _ := r.be.Running(); n != 0 {
