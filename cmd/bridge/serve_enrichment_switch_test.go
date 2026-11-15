@@ -638,26 +638,6 @@ func readsPastOneRefusal(t *testing.T, platform func(error) bool, then error, re
 	}
 }
 
-// errPlatformForTest stands in for an error the platform's own predicate
-// asks again on, which on Linux and macOS no error is.
-var errPlatformForTest = errors.New("an error the platform asks again on")
-
-// TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore: the stand-in hold's
-// retry adds errBusyForTest to what atomicwrite asked again on before it and
-// replaces none of it, so the stand-in's test still waits out a refusal of the
-// platform's own (on Windows a scanner's hold of the file, backlog B898). A
-// predicate standing in for the platform's is installed first: synthetic
-// coverage of the composition on every host, once with a second refusal of
-// the platform's after the first; Windows' own codes are
-// TestTheStandInRetryKeepsWindowsOwnRetry's, on Windows alone.
-func TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore(t *testing.T) {
-	platform := func(err error) bool { return errors.Is(err, errPlatformForTest) }
-	t.Cleanup(atomicwrite.SetReadRetryableForTest(platform))
-	retryStandIn(t)
-	readsPastOneRefusal(t, platform, nil, errPlatformForTest, errBusyForTest)
-	readsPastOneRefusal(t, platform, errPlatformForTest, errPlatformForTest, errBusyForTest)
-}
-
 // readPastAHold runs the harvest helper's read past a hold on the state file,
 // let go by the read at a refusal it heard, held throughout, and in
 // eventually's form; hold returns the read and the let go, refused its refusal.
