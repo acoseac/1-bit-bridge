@@ -100534,7 +100534,7 @@ clean; the linux/amd64 and windows/amd64 test binaries build; go1.27.3's
 gofmt lists none of the three files. The two controls are red as in round 3
 (the exact count back: the pass with a second refusal; the seam replacing
 again: `errPlatformForTest` in both passes and `errBusyForTest` in the
-second). Outside the build slot, another worker holding it,
+second). Outside the build slot, the slot being in use,
 `TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` and the stand-in hold's
 test 50 times each under -race at GOMAXPROCS 4: 50 of 50, no data race (0.43
 to 0.45 s and 1.57 to 1.59 s a run). cmd/bridge's
@@ -100543,7 +100543,7 @@ to 0.45 s and 1.57 to 1.59 s a run). cmd/bridge's
 
 ## 2026-11-15 — B898 PR 3, round 5: the real-hold case leaves the PR, and what the tests still prove
 
-Branch `test/b898-harvest-read`, test files and this log only. Commits:
+Branch `test/b898-harvest-read`; this round, test files and this log only (the branch also carries round 2's test seam in `internal/atomicwrite/read.go`). Commits:
 58927057 (the case removed, `readPastAHold` folded into its one remaining
 caller, and round 1's entry citing the removed case with its `Test` prefix
 elided and naming no worker or host), then this entry.

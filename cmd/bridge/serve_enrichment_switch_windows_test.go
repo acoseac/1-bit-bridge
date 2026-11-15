@@ -13,7 +13,7 @@ import (
 // place, as TestTheHarvestHelperReadsPastAStandInHold has it, a read refused
 // once with Windows' sharing violation, then once with access denied, is
 // still asked again and returns the covers, and so is one refused a second
-// time with the sharing violation, as a scanner's hold would (backlog B898).
+// time with the sharing violation, as a hold of the file would (backlog B898).
 func TestTheStandInRetryKeepsWindowsOwnRetry(t *testing.T) {
 	retryStandIn(t)
 	platform := func(err error) bool {

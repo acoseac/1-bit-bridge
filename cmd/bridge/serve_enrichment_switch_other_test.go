@@ -16,7 +16,7 @@ var errPlatformForTest = errors.New("an error the platform asks again on")
 // TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore: the stand-in hold's
 // retry adds errBusyForTest to what atomicwrite asked again on before it and
 // replaces none of it, so the stand-in's test still waits out a refusal of the
-// platform's own (on Windows a scanner's hold of the file, backlog B898). A
+// platform's own (on Windows a sharing violation during the settle write, backlog B898). A
 // predicate standing in for the platform's is installed first: synthetic
 // coverage of the composition off Windows, once with a second refusal of the
 // platform's after the first. It does not build on Windows, where a real
