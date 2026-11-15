@@ -40,7 +40,8 @@ const logSizeWarnBytes int64 = 256 << 20
 //
 // Skipped entirely when the path is unset or absent — a foreground
 // `bridge serve` has no log file at all, and reporting on one would be
-// reporting on something that does not exist.
+// reporting on something that does not exist. A log that should have been
+// named and could not be is not that: it is a warn saying why (backlog B618).
 func checkLogSize(_ context.Context, d Deps) Check {
 	// A managed bridge's log is the host's, in every sense that matters
 	// here: the remedy this check points at is the platform's rotation
@@ -51,17 +52,34 @@ func checkLogSize(_ context.Context, d Deps) Check {
 	if d.Managed {
 		return ok(checkNameLogSize, "log kept by the host — check skipped")
 	}
+	// Asked before the empty path below, which reads as a bridge that logs
+	// to its terminal.
+	if d.LogUnresolved != "" {
+		return warn(checkNameLogSize, "not checked: "+d.LogUnresolved, d.LogNote)
+	}
 	if d.LogPath == "" {
 		return ok(checkNameLogSize, "no log file configured (logs go to the terminal)")
 	}
-	info, err := os.Stat(d.LogPath)
+	c := gradeLogFile(d.LogPath)
+	// How the file was chosen goes on the summary, which every surface
+	// prints whatever the status: the table prints a hint under a warn or
+	// a fail alone.
+	if d.LogNote != "" {
+		c.Summary += "; " + d.LogNote
+	}
+	return c
+}
+
+// gradeLogFile is the log-file-size line for the log file at path.
+func gradeLogFile(path string) Check {
+	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Normal for a foreground run, and for a service that has not
 			// started yet. Not a problem to report.
 			return ok(checkNameLogSize, "no log file yet")
 		}
-		return warn(checkNameLogSize, "cannot stat "+d.LogPath, err.Error())
+		return warn(checkNameLogSize, "cannot stat "+path, err.Error())
 	}
 	if info.IsDir() {
 		// Stat succeeds on a directory and reports a small size, so without
@@ -69,14 +87,14 @@ func checkLogSize(_ context.Context, d Deps) Check {
 		// — and the operator would be told their logging is fine while the
 		// service redirect fails. Mirrors resolveLogFile on the admin side.
 		// (Gemini, PR #708.)
-		return warn(checkNameLogSize, d.LogPath+" is a directory, not a log file",
+		return warn(checkNameLogSize, path+" is a directory, not a log file",
 			"point the service's log redirect at a file path")
 	}
 	if info.Size() < logSizeWarnBytes {
-		return ok(checkNameLogSize, fmt.Sprintf("%s (%s)", humanBytes(info.Size()), d.LogPath))
+		return ok(checkNameLogSize, fmt.Sprintf("%s (%s)", humanBytes(info.Size()), path))
 	}
 	return warn(checkNameLogSize,
-		fmt.Sprintf("%s at %s", humanBytes(info.Size()), d.LogPath),
+		fmt.Sprintf("%s at %s", humanBytes(info.Size()), path),
 		"nothing rotates this file — the bridge writes to stderr and the service "+
 			"redirects it, so rotation belongs to the OS. "+rotationHint()+
 			" A log this size usually means something is logging on a timer; "+

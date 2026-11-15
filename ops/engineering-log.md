@@ -99588,6 +99588,528 @@ Each control fails on the unfixed test and passes with the fix:
   clean.
 - **The files:** `git diff --name-only 9acee209..HEAD` names the three
   test files and this log.
+
+## 2026-11-13 — B618: on Windows, bridge logs reads the file the installed bridge writes
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` from main 2bebca26. Commits 779bdfc3 (the seams, the
+two Windows logs' paths, the install check and every case, red where the selection changes), 56347aff (the
+selection, for `bridge logs` and the console), and the one that carries this record. The rules line and its long
+form ship as `rules-b618-r1.patch` (`cli-serve.md`, which gains `internal/packaging/logpath*.go` and
+`internal/packaging/scm_*.go` among its paths, and `ops/History-rules-cli-serve.md`).
+
+### What was true (Step 0, at 2bebca26)
+
+Where each Windows install's bridge writes its log:
+
+- The service. `bridge init --service` (`init.go` 1307 to 1318) registers it through `InstallWindowsService`
+  (`internal/packaging/service_windows.go` 26 to 120) as `com.acoseac.1-bit-bridge`, display name `1-bit-bridge`,
+  `bridge.exe serve --config <cfg>` run as LocalSystem, and prepares `%PROGRAMDATA%\1-bit-bridge` (73 to 82). The
+  service's `main` calls `redirectServiceIO` first (`main.go` 2698 to 2699), which opens
+  `%PROGRAMDATA%\1-bit-bridge\bridge.log`, `C:\ProgramData` where `PROGRAMDATA` is empty
+  (`cmd/bridge/service_io_windows.go` 29 to 56), `O_CREATE|O_APPEND|O_WRONLY`, 0644, and points the std handles at
+  it. LocalSystem's `%LOCALAPPDATA%` is under `C:\Windows\System32\config\systemprofile`.
+- The Startup-folder install. `bridge init` without `--service` (`InstallStartup`, `init.go` 1336 to 1337; the
+  menu's `packaging.Install`, which tries the service manager first, `menu.go` 465 to 485) writes
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\com.acoseac.1-bit-bridge.cmd` (`windows_startup.go` 19
+  to 52), whose line runs `start "1-bit-bridge" /min "<bridge.exe>" serve --config "<cfg>" 1>>"<LogPath>" 2>&1`
+  (`startup.cmd.tmpl` 6), LogPath DefaultLogPath (`init.go` 1284 to 1298): `%LOCALAPPDATA%\1-bit-bridge\bridge.log`,
+  the home's `AppData\Local` where `LOCALAPPDATA` is empty (`packaging.go` 517 to 525). Init's start of it
+  (`spawnNowOrWarn`, `init.go` 1356 to 1357 and 1386 to 1399) runs the same line through `cmd /c`
+  (`spawn_windows.go` 30 to 49).
+- A foreground `bridge serve`, the menu's "Start now" (`menu.go` 141 and 407) and init's run in its terminal
+  (`init.go` 1269) included: `logging.Init(os.Stderr)` and serve's output go to the terminal (`main.go` 2725 to
+  2733), and no file is made.
+
+`bridge logs` opened DefaultLogPath alone (`logs.go` 35), so on a service install it said "does not exist (yet)"
+and "run `bridge start` (or `bridge serve` in the foreground)" to an operator whose service was running, or
+printed a file an earlier install left.
+
+Telling the kind without elevation: `packaging.InstalledKind` (`state.go` 77 to 79, `state_windows.go` 23 to 48),
+which `bridge start`, `stop` and `restart` ask (`lifecycle.go` 75 and 82 to 96) and the menu shows, connects with
+`mgr.Connect` (x/sys v0.49.0 `svc/mgr/mgr.go` 43, `SC_MANAGER_ALL_ACCESS`) and opens with `OpenService` (195,
+`SERVICE_ALL_ACCESS`). A standard user's connect answers access denied, which falls through to the Startup-folder
+probe (`state_windows.go` 35), and any failure of the open reads as no service (32 to 34). `bridge status`
+(`status.go` 39 to 68) reads the invoking user's config and asks its admin port: it says nothing of the service. A
+query without elevation is allowed: by Microsoft's "Service Security and Access Rights" a local authenticated user
+holds `SC_MANAGER_CONNECT` (with `ENUMERATE_SERVICE`, `QUERY_LOCK_STATUS` and read control) of the manager, and
+`SERVICE_QUERY_STATUS` (with `QUERY_CONFIG`, `ENUMERATE_DEPENDENTS`, `INTERROGATE`, `USER_DEFINED_CONTROL` and
+read control) of a service `CreateService` registers with the default security, as `InstallWindowsService` does.
+legion0 has no Windows, so that is the documentation's word, which the tests' stand-in models; the query asks the
+local manager and nothing of the network.
+
+The other readers of DefaultLogPath on Windows:
+
+- `adminLogPath` (`logs.go` 226 to 232), into `admin.Deps.LogPath` (`main.go` 6345): the console's log status,
+  export and the support bundle's tail (`internal/admin/handlers_logs.go` 61 to 89, 178 to 206 and 366 to 391).
+  Inside the service it was LocalSystem's DefaultLogPath, while the service writes `%PROGRAMDATA%`'s: the same
+  mismatch, fixed here (the brief's review).
+- `adminLogPath` into `doctor.Deps.LogPath` (`doctor.go` 269), for `log-file-size` (`internal/doctor/logsize.go`
+  44 to 84). The console's doctor builds it in the serving process (`adminDoctorRunnerFor`, `doctor.go` 1021 to
+  1023), so it shares the console's path and is fixed with it. `bridge doctor` run from a shell is no service and
+  grades the user's log, which on a service install is not the log: left, and named in the report.
+- `init.go` 1284 and `menu.go` 465: the launcher's and init's start's redirect target, right for them. But
+  `bridge init --service` prints `Logs:` with it (`init.go` 1361) after installing the service, which never
+  writes it: left, and named in the report.
+
+### The choice, as built
+
+`packaging.CheckWindowsInstall` connects with `SC_MANAGER_CONNECT` alone and opens the service with
+`SERVICE_QUERY_STATUS` alone: a service it opens is registered, running or not; `ERROR_SERVICE_DOES_NOT_EXIST` is
+not registered; any other failure (the connect refused or out of reach, the service's security refusing the open)
+cannot tell, and keeps its error. It finds the Startup-folder launcher by its path. Its calls are a struct of the
+service manager's three calls (`serviceManager`), Windows's own in `scm_windows.go`, so a stand-in carries every
+case on any host. It is not `InstalledKind`, whose callers are other commands', left as they were.
+
+`chooseWindowsLog` decides from the registration and the directories alone: the service's log while the service
+is registered, the user's otherwise, the service's first where the check cannot tell. Choosing the service's needs
+nothing of the user's path: a home that cannot be read leaves only the other unnamed. `openWindowsLog` reads it;
+where the other is there too it says so in one line on stderr; where the check cannot tell it reads the service's
+log where that is there and the user's otherwise, each said in one line with the check's error, so the user's is
+never chosen in silence; where it finds no log it names the path it looked at, or both, and what writes it:
+Services (the service shows there as `1-bit-bridge`) or `sc.exe query com.acoseac.1-bit-bridge` for the service,
+the sign-in launcher, `com.acoseac.1-bit-bridge.cmd` in the Startup folder, for its log, and, with nothing
+installed, that a bridge run in the foreground logs to its terminal; never `bridge serve`, `bridge start` or
+`bridge status` (the brief's review). The paths are `packaging.WindowsLogDirs`'s: `C:\ProgramData`
+where `PROGRAMDATA` is empty, as the service took it, and the home's `AppData\Local` where `LOCALAPPDATA` is, as
+DefaultLogPath took it, the home asked only then. `redirectServiceIO` and `InstallWindowsService` take the
+service's folder and file from it and the service's open from `packaging.OpenServiceLog`, and DefaultLogPath's
+Windows answer is its `UserLog` (home first, as before, so its errors are as they were). Off Windows, `bridge logs`
+reads DefaultLogPath in its words of before, byte for byte.
+
+The console's path, `consoleLogPath`, takes `chooseWindowsLog` with whether its process runs as the service
+(`isWindowsService`) for the check: the service's log inside the service, the user's otherwise, DefaultLogPath off
+Windows, `""` where the path cannot be made, as before. The comments that said the console, the doctor and
+`bridge logs` read one file (`adminLogPath`'s, `admin.Deps.LogPath`'s and the `LogPath:` line's in `doctor.go`)
+say where they part, and `doctor.Deps.LogPath`'s and the log handlers' name the service's own log.
+
+### Red first
+
+At 779bdfc3 (the cases over main's selection, DefaultLogPath alone), `go test -count=1 -v -run '…' ./cmd/bridge/`
+with the release tags and TMPDIR `~/onebit/tmp`, predictions written first (`.tmp/_b618/red.predictions.txt`, not
+committed), every top-level verdict as predicted:
+
+- red: `TestBridgeLogsReadsTheServicesLogWhileTheServiceIsRegistered` (its 3 rows; the first "bridge logs printed
+  "a line of a bridge its sign-in launcher started\n" want "the service's first line\nthe service's last line\n""
+  and the stderr line missing), `TestBridgeLogsSaysWhichLogItReadsWhereTheServiceIsNotRegistered` (2 rows, the
+  line missing), `TestBridgeLogsSaysWhereTheServicesLogWillBe` (2: main's words name the user's path),
+  `TestBridgeLogsSaysWhatWritesTheUserLog` (2: "bridge logs offered a command as the way to make the file"),
+  `TestBridgeLogsReadsTheServicesLogWhereTheCheckCannotTell` (5), `TestBridgeLogsChoosesTheServicesLogWithoutTheHome`
+  (its registered row: "logs: resolve path"), `TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt`,
+  `TestTheConsolesLogIsTheFileItsProcessWrites` ("inside the service the console's log is "…/AppData/Local/1-bit-
+  bridge/bridge.log", want the service's") and `TestTheWindowsLogChoiceInWindowsPaths` (the console's half of its
+  4 registered rows);
+- green, the guards: `TestBridgeLogsReadsTheUserLogOfAStartupFolderInstall`, `TestBridgeLogsOffWindowsIsAsItWas`,
+  `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`, and the existing
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`.
+
+internal/packaging's new tests are of new code and green there. At 56347aff every test is green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b618/controls.predictions.txt`, not committed), at 56347aff, an uncommitted
+edit of the clean tree restored with `git checkout --` and its bytes compared with HEAD's, the touched tests run
+from test binaries built for it (`.tmp/_b618/controls.py`). The run with no mutation was green (63 verdicts). Each
+was red where predicted and nowhere else, and `git status` was clean after:
+
+| | mutation | red |
+|---|---|---|
+| C1 | the brief's: `openLog`'s Windows call site back to the old selection (`openDefaultLog`, DefaultLogPath alone) | the service, not-registered, no-file, cannot-tell, held-log and registered-without-home rows (22 verdicts); the Startup-folder, off-Windows and entry-point guards and the console green |
+| C2 | `consoleLogPath`'s Windows branch removed (`adminLogPath` as at main) | `TestTheConsolesLogIsTheFileItsProcessWrites`, the 4 registered rows' console half |
+| C3 | the check connects with `SC_MANAGER_ALL_ACCESS` (`InstalledKind`'s) | the standard user and administrator rows, three of the cannot-tell table's, the stopped service, every both-artifacts row |
+| C3b | the service opened with `SERVICE_ALL_ACCESS` | both access rows, the stopped service, the three both-artifacts rows with a service |
+| C4 | every open failure read as not registered (`InstalledKind`'s shape) | the two rows whose failure is not a missing service |
+| C5 | a check that cannot tell read as not registered (the user's log in silence) | every cannot-tell row |
+| C6 | the line naming both logs dropped where the service is registered | the two rows with both logs |
+| C9 | the choice needs the user's path | the registered row without a home, the two no-home path rows, the console's |
+| C9b | `UserLog` asks the home first | the two path rows with `LOCALAPPDATA` set |
+| C10 | no `C:\ProgramData` where `PROGRAMDATA` is empty | the path rows with no `PROGRAMDATA` (both packages) |
+| C11 | the home's fallback without `AppData\Local` | the path rows with no `LOCALAPPDATA` (both packages) |
+
+### The gates
+
+At 56347aff, TMPDIR `~/onebit/tmp` and the release tags on every command. In one use of the build lock (19:16:04
+to 19:16:19): `go vet ./...` clean for linux/amd64, darwin/amd64 and windows/amd64, and of cmd/bridge,
+internal/packaging, internal/admin and internal/doctor for linux/386 (cached results of this session's own vets of
+the same sources). go1.27.3's gofmt lists none of the changed Go files. Outside the lock, one package per
+`go test`, `-p 8 -parallel 8`: `-race -count=50` of internal/packaging's 9 touched tests ok (450 runs, 900 subtest
+passes, none failed or skipped) and of cmd/bridge's 13 (the 12 new and
+`TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`; 650 runs, 1,650 subtest passes); `go test -race
+-count=1 -timeout 120m` of internal/packaging ok (1.4 s) and of cmd/bridge ok (2,456 s, under a load near 26 from
+the host's other workers), which holds `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers`; no race reported anywhere. The rules patch applies to HEAD (`git apply --check`); on a copy
+of the tracked tree with it applied, outside any checkout, the copy's `make docs-check` steps are clean
+(`cli-serve.md` 99,859 bytes), and `TestEveryCitedTestNameExists` passes there and fails with a ghost citation
+planted in the patched History. `make test` and `make build-all` were not run: the brief asked for the packages.
+Windows and macOS are CI's to run.
+
+### What only windows-latest shows
+
+internal/packaging's `TestTheStandInsRightsAreWindowsOwn` (the stand-in's access values against x/sys/windows's),
+`TestTheServiceManagerAnswersTheInstallCheck` (the real manager: `EventLog` registered, a made-up name not) and
+`TestTheWindowsLogsAreTheHostsOwn` (DefaultLogPath equal to `UserLog`, and the service's log under `PROGRAMDATA`
+or `C:\ProgramData`) build only there. `TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt` reads the log
+while a handle holds it with the service's own open, whose subject is Windows's sharing modes (Go opens with
+`FILE_SHARE_READ|FILE_SHARE_WRITE` both ways, go1.27.3 `syscall/syscall_windows.go` 395); on legion0 nothing
+refuses it. `TestTheWindowsLogChoiceInWindowsPaths` and `TestTheWindowsLogsAreMadeFromTheirDirectories` run with
+Windows's own `filepath.Join` there beside the tests' joiner, and `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`
+runs `bridge logs` over the real install check there. A standard user's rights are shown by neither host: CI's
+runner is elevated.
+
+## 2026-11-14 — B618 round 2: bridge doctor from a shell grades the log bridge logs reads
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` from round 1's head 14d95141 (its rules included).
+Commits 9fd10270 (the seams and every case, red first), be77499d (the choice), and the one that carries this record.
+The rules line and its long form ship as `rules-b618-r2.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`).
+
+### What was true (at 14d95141)
+
+`buildDoctorDepsWith` set `LogPath: adminLogPath()` (`cmd/bridge/doctor.go` 267 to 272) for both doctors, and
+`adminLogPath` is `consoleLogPath` on the host (`logs.go` 450 to 484), which asks whether the process runs as the
+Windows service. Bridge doctor run from a shell, and the launcher menu's doctor through `buildDoctorDepsFor`, never
+does, so on a service install their `log-file-size` line graded the user's log under `%LOCALAPPDATA%` while `bridge
+logs` and the console inside the service read the service's under `%PROGRAMDATA%`; round 1 had said so in comments
+(`doctor.go` 267 to 271, `consoleLogPath`'s) and in its History text, and left it. `checkLogSize`
+(`internal/doctor/logsize.go` 43 to 84) reads an empty `LogPath` as ok "no log file configured (logs go to the
+terminal)", and `consoleLogPath` answers `""` where a path cannot be made, so a home that could not be read was that
+ok, in both doctors. The console's doctor builds its report in the serving process (`adminDoctorRunnerFor`, 1021 to
+1023) through the same builder, so a change of the builder alone would have reached it too (the brief's review,
+the review). `printReport` prints a hint under a warn or a fail alone (`doctor.go` 897), and `--json` and
+the console copy the summary and the hint (`jsonReportEnvelope`, `adminDoctorRunnerFor`).
+
+### The choice, as built
+
+`buildDoctorDepsWith` takes `doctorLogs`, its seam on every host: a `logsHost` (the platform, the directories, the
+install check) and whether the console's doctor asks. `buildDoctorDepsFor` (bridge doctor and the menu's) passes the
+shell's, `doctorLogs{host: hostLogs()}`; `adminDoctorRunnerFor` the console's, `console: true`. The shell's line
+grades the log `bridge logs` reads (`shellDoctorLog`): off Windows DefaultLogPath; on Windows the service's log while
+the install check finds the service registered, the user's otherwise (`chooseWindowsLog`), and where the check cannot
+tell, the service's where it is there and the user's where only that is, each with a note, and neither, said, where
+neither is there. A stat that fails otherwise than for a file not there leaves the service's log chosen, for the line
+to say why it cannot be graded, as `bridge logs` says why it cannot open it. The console's doctor grades its own
+process's log (`consoleLog`, `consoleLogPath`'s with its error) and asks no install check, so a console of a bridge
+run another way beside a registered service grades the file it writes (the review's regression case).
+
+How the choice reaches the report (the review): `doctor.Deps` gains `LogNote` and
+`LogUnresolved` beside `LogPath`. `checkLogSize` puts the note after its summary whatever the line found, so the
+table, which prints no hint under an ok, `--json` and the console all carry it; where `LogUnresolved` is set, a log
+that could not be named (a path that cannot be made, or neither Windows log there where the check cannot tell), the
+line is a warn, "not checked: " and why, its note the hint, asked before the empty path that reads as the terminal's
+ok. That holds in the console's doctor and off Windows too: a home that cannot be read is a warn there now, not the
+terminal's ok. The words are `bridge logs`' own: "cannot tell whether the bridge's Windows service is installed
+(<the check's error>), so this is its log, the one `bridge logs` reads", "…, and its log, <path>, is not there, so
+this is the one `bridge logs` reads", and for neither "not checked: neither <the service's log> nor <the user's>
+exists", hinted "…; the service writes the first once it starts, and a bridge its sign-in launcher starts the
+second". Round 1's comments on the divergence go (`doctor.go`'s `LogPath:` line, `consoleLogPath`'s, which is
+`consoleLog`'s now, and `doctor.Deps.LogPath`'s).
+
+### Item 2: two tests
+
+`TestAStoppedServiceIsRegistered` (internal/packaging) could not fail: the install check asks no service's state,
+so the stand-in's "stopped" changed nothing it read. It moved to cmd/bridge under its name, which round 1's History
+cites: the service registered, its log made older than the user's (`os.Chtimes`), `bridge logs` must read the
+service's and bridge doctor grade it, so a choice by modification time, or by whether the service seems to run, goes
+red (controls D5 and D5b). The stand-in keeps registered names alone (`registered map[string]bool`), and
+`TestTheInstallCheckAsksOnlyWhatAStandardUserHolds` says its calls hold no status query.
+`TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint` asked the real service manager on Windows: `hostLogs` takes its
+check from `logsInstallCheck` now (`inContainerFunc`'s precedent), which the test sets to "not registered" and
+counts, asked once on Windows and never elsewhere, as `TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint` does
+for the doctor's entry point (`doctorCmd --json`), its check "registered".
+
+### Red first
+
+At 9fd10270 (the seams; both doctors still graded `consoleLogPath`'s file and `checkLogSize` read neither new field),
+`go test -count=1 -v -run '…'` of internal/doctor and cmd/bridge with the release tags and TMPDIR `~/onebit/tmp`,
+predictions written first (`.tmp/_b618/r2_red.predictions.txt`, not committed), every verdict as predicted:
+
+- red: `TestBridgeDoctorFromAShellGradesTheServicesLogWhileItIsRegistered` (both rows: "the log-file-size line is ok
+  "48 B (…/Users/me/AppData/Local/1-bit-bridge/bridge.log)" … want ok "49 B (…/ProgramData/1-bit-bridge/bridge.log)""),
+  `TestBridgeDoctorFromAShellSaysWhereTheCheckCannotTell` (5 rows), `TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade`
+  (5 rows, each the terminal's ok), `TestTheDoctorsLogNoteSurvivesItsRendering` (3 rows),
+  `TestAStoppedServiceIsRegistered` (its doctor half alone), and internal/doctor's
+  `TestALogNoteIsCarriedWhateverTheLineFinds` (4 rows) and `TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK` (2);
+- green, the guards: `TestBridgeDoctorFromAShellGradesTheUserLogOfAStartupFolderInstall`,
+  `TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` (both rows, the check never asked),
+  `TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint` and `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`
+  (off Windows), and every round-1 test.
+
+At be77499d every test is green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b618/r2_controls.predictions.txt`, not committed), at be77499d, an uncommitted
+edit of the clean tree restored with `git checkout --` and its bytes compared with HEAD's, cmd/bridge's and
+internal/doctor's touched tests run from test binaries built for it (`.tmp/_b618/r2_controls.py`). The run with no
+mutation was green (96 verdicts); `git status` was clean after.
+
+| | mutation | red verdicts, parent tests counted |
+|---|---|---|
+| D1 | the brief's: the shell's choice back to the old `adminLogPath()` | 20: both Service rows, the Startup-folder guard (`adminLogPath` reads the real host), the 5 cannot-tell rows, the 4 shell cannot-be-made rows, the 3 rendering rows, the stopped service; the console's rows and the entry point green |
+| D1b | the shell's choice back to `consoleLogPath` over the test's host (round 1's selection through the seam) | 19: as D1 but the Startup-folder guard green |
+| D2 | the console's doctor takes the shell's choice on Windows | 5: the console's two rows and its cannot-be-made row |
+| D3 | the note no longer put after the summary | 12: internal/doctor's 4 note rows, the 4 cannot-tell rows that grade a file, the rendering's noted row |
+| D4 | an unresolved log read as the terminal's ok | 14: internal/doctor's 2 rows, the cannot-tell neither row, the 5 cannot-be-made rows, the rendering's 2 |
+| D5 | bridge doctor's registered case grades the newer log by modification time | 4: the stopped service, both Service rows |
+| D5b | bridge logs' registered case reads the newer log | 6: the stopped service and `TestBridgeLogsReadsTheServicesLogWhileTheServiceIsRegistered`'s two rows with both logs, as predicted, and one more the prediction missed: `TestBridgeLogsSaysWhereTheServicesLogWillBe`'s row with a user's log there, since the newer of a missing service log and a user's log is the user's ("bridge logs exited 0, want 1") |
+| D6 | where the check cannot tell, the service's log only where the user's is not there | 2: the cannot-tell row with both logs |
+
+Not run: the entry points' seam bypassed (`hostLogs` asking `packaging.CheckWindowsInstall`): off Windows neither
+entry point asks a check, so only windows-latest can see it, where both entry-point tests count the check's calls.
+
+### The gates
+
+At be77499d, TMPDIR `~/onebit/tmp` and the release tags on every command. In one use of the build lock (02:28:22
+to 02:28:27): `go vet ./...` clean for linux/amd64, darwin/amd64 and windows/amd64, and of cmd/bridge,
+internal/packaging, internal/admin and internal/doctor for linux/386. go1.27.3's gofmt lists none of the changed Go
+files. Outside the lock, one package per `go test`, `-p 8 -parallel 8`: `-race -count=50` of internal/packaging's 7
+touched tests (350 runs, 900 subtest passes), internal/doctor's 8 (400 runs, 550 subtest passes) and cmd/bridge's 14
+(the 8 new, the bridge logs entry point, `TestTheConsolesLogIsTheFileItsProcessWrites`,
+`TestTheWindowsLogChoiceInWindowsPaths`, `TestBothDoctorsCarryTheBackupLines` and
+`TestABackupsFolderGrantingNoLockGrowsByOneSnapshotAndTheDoctorSaysWhy`, whose calls of the builder changed, and
+`TestPrintedHintsSpeakToTheOperator`; 700 runs, 1,400 subtest passes), none failed or skipped; `go test -race
+-count=1 -timeout 120m` of internal/packaging ok (1.4 s), internal/doctor ok (7.1 s) and cmd/bridge ok (1,653 s),
+which holds `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers`; no
+race reported anywhere. The rules patch applies to HEAD (`git apply --check`); on a copy of the tracked tree with it
+applied, outside any checkout, the copy's `make docs-check` steps are clean (`cli-serve.md` 99,976 bytes), and
+`TestEveryCitedTestNameExists` passes there and fails with a ghost citation planted in the patched History. `make
+test` and `make build-all` were not run: the brief asked for the packages. Windows and macOS are CI's to run.
+
+### What only windows-latest shows
+
+Round 1's Windows-only cases still stand. Of round 2's, `TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint`
+grades the service's log under the `PROGRAMDATA` given and asks `logsInstallCheck` once only there, and
+`TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint` asks it once only there; every other round-2 case models
+Windows through `logsHost` and runs on every host. A standard user's rights stay Microsoft's documentation, which
+neither host shows.
+
+## 2026-11-14 — B618 round 3: the log line's warn is the Windows shell's alone
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` from round 2's head b8d777c5 (its rules included).
+Commits 18289911 (the seam and every case, red first), 0be3563a (the fix), and the one that carries this record.
+The rules line and its long form ship as `rules-b618-r3.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`).
+
+### What was true (at b8d777c5)
+
+Round 2 made a log whose path cannot be made a warn wherever a doctor grades one: `doctorLogs.choose`'s console
+branch (`cmd/bridge/logs.go` 514 to 523) and `shellDoctorLog`'s branch off Windows (533 to 540) answered
+`doctorLog{unresolved: …}`, which `checkLogSize` reads as a warn. So `env -u HOME bridge doctor` on Linux and macOS,
+and the console's doctor of a Windows bridge run outside the service whose home cannot be read, said "[warn]
+log-file-size not checked: the log's path cannot be made (…)", where round 1 said "[ok] no log file configured (logs
+go to the terminal)", as `adminLogPath`'s empty path still makes the console's export say. The brief had put the
+warn in bridge doctor from a shell on Windows alone. `adminDoctorRunnerFor` (`doctor.go` 1028 to 1030) built
+`hostLogs()` itself, so no test could run the console's doctor over a host of its own:
+`TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` set the console flag itself through
+`buildDoctorDepsWith` and stayed green with the flag dropped from the runner. `requireLogLine`
+(`doctor_logs_test.go` 35 to 44) refused the terminal's ok whatever the case wanted, so no case could ask for it.
+`logsInstallCheck`'s doc said production never changes it, which nothing held.
+
+### As built
+
+Item 1. The console's branch grades `consoleLogPath`'s file, "" where its path cannot be made (the terminal's ok);
+round 2's `consoleLog`, whose error nobody reads now, folds back into it, round 1's body. `shellDoctorLog` off
+Windows answers no file where DefaultLogPath fails. The Windows branches keep `LogUnresolved`: a user's log with no
+path where the service is not registered, and the two cases where the check cannot tell. The docs of `doctorLog`,
+`doctorLogs`, `shellDoctorLog`, `adminLogPath` and `doctor.Deps`' `LogPath` and `LogUnresolved` say so.
+`TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade` (`doctor_logs_test.go` 184): its console row and its two
+off-Windows rows (the shell's line and the console's) want the ok, its two Windows rows the warn.
+`TestTheDoctorsLogNoteSurvivesItsRendering` (247) keeps its three Windows rows and adds "a path that cannot be made
+off Windows on darwin" and "on linux" (bridge doctor's table, "[ok] log-file-size … no log file configured (logs go
+to the terminal)" with no hint under it, and its --json) and "a path that cannot be made in the console's doctor"
+(the report `adminDoctorRunnerFor` hands the console, on Windows outside the service and on Linux). `requireLogLine`
+(57) refuses the terminal's ok only where the summary it wants is another.
+
+Item 2. `adminDoctorRunnerFor` (`doctor.go` 1031) takes `logs logsHost` from its caller and sets `console: true`
+itself; `adminDoctorRunner` (1020) and serve's wiring (`main.go` 6381) pass `hostLogs()`, serve once as it wires the
+console, as it hands it `doctorDAC`: `hostLogs` reads PROGRAMDATA and LOCALAPPDATA as it builds the host, and a
+serving process's environment does not change. `consolesLogLine` (`doctor_logs_test.go` 32) runs
+`adminDoctorRunnerFor` over the serving process's DAC host and the test's logs host and takes its report's line, and
+`TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` (218) runs through it: beside a registered service,
+the user's log outside the service and the service's inside, the install check asked no time. A guard, green at
+18289911; its red is control E1.
+
+Item 3. `logsInstallCheck` stays. `TestNoProductionCodeReassignsTheLogsInstallCheck` (`logs_test.go` 427) parses every
+non-test Go file of cmd/bridge the go tool builds, whatever its platform: one declaration, of
+`packaging.CheckWindowsInstall`, and no assignment or address taken anywhere else; the variable's doc cites it.
+
+The brief's binding review dropped its fifth item, and nothing was built for it.
+
+### Red first
+
+At 18289911 (the seam and every case; the console's branch and the branch off Windows still answered
+`LogUnresolved`, as at b8d777c5), `go test -count=1 -v -run '…'` of cmd/bridge with the release tags and TMPDIR
+`~/onebit/tmp`, predictions written first (`.tmp/_b618/r3_red.predictions.txt`, not committed), 70 verdicts, every
+one as predicted:
+
+- red: `TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade`'s console row ("the log-file-size line is warn "not checked:
+  the log's path cannot be made (%USERPROFILE% is not defined)" (hint ""), want ok "no log file configured (logs go
+  to the terminal)" (hint "")") and both off-Windows rows (each twice, the shell's line and the console's: "warn "not
+  checked: the log's path cannot be made ($HOME is not defined)""), and `TestTheDoctorsLogNoteSurvivesItsRendering`'s
+  four new rows (the table's "[warn] log-file-size       not checked: …", --json's warn, the console's report's
+  warn);
+- green: the other rows of both tests, the console's guard (both rows, the check never asked), the pin, and every
+  other touched test.
+
+At 0be3563a all 70 are green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b618/r3_controls.predictions.txt`, not committed), at 0be3563a, an uncommitted
+edit of the clean tree restored with `git checkout --` and its bytes compared with HEAD's, cmd/bridge's test binary
+built for it and the 70 touched verdicts run (`.tmp/_b618/r3_controls.py`). Every control was red where predicted
+and nowhere else; `git status` was clean after.
+
+| | mutation | red verdicts, parent tests counted |
+|---|---|---|
+| E0 | none | 0 |
+| E1 | the brief's: `console: true` dropped from `adminDoctorRunnerFor` | 8: the console's guard's two rows (outside the service "49 B (…/ProgramData/…)" for the user's "48 B", and the install check asked once in each), the console row of the cannot-be-made test ("no log file yet", the service's log) and the rendering's console row on Windows; the off-Windows console rows green, the shell's choice there being the terminal's ok too |
+| E2 | the console's doctor warns again where its path cannot be made | 8: the console row and both off-Windows rows (their console halves), the rendering's two console rows |
+| E3 | bridge doctor off Windows warns again | 6: both off-Windows rows (their shell halves), the rendering's two off-Windows rows |
+| E4 | the Windows shell names no file for a user's log with no path | 4: the "service not registered" row and the rendering's Windows row |
+| E6 | an `init` in logs.go assigns `logsInstallCheck` | 1: the pin ("logs.go:585:15 assigns it") |
+| E6b | a package variable takes its address | 1: the pin ("takes its address") |
+| E6c | its declaration wraps `packaging.CheckWindowsInstall` | 1: the pin ("declares logsInstallCheck as something other than packaging.CheckWindowsInstall") |
+
+### The gates
+
+At 0be3563a, TMPDIR `~/onebit/tmp` and the release tags on every command. In one use of the build lock (06:25:45 to
+06:26:12, the slot taken after 505 s): `go vet ./...` clean for linux/amd64, darwin/amd64 and windows/amd64, and of
+cmd/bridge and internal/doctor for linux/386; `GOOS=windows go test -c ./cmd/bridge/` built, with the release tags
+and without. go1.27.3's gofmt lists none of the changed Go files. Outside the lock, one package per `go test`, `-p 8
+-parallel 8`: `-race -count=50` of cmd/bridge's 13 touched tests (650 runs, 1,450 subtest passes, 43 s), none failed
+or skipped; `go test -race -count=1` of internal/doctor ok (9 s) and of cmd/bridge with `-timeout 120m` ok
+(1,714 s), which holds `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers`; no race reported. The rules patch applies to HEAD (`git apply --check`); on a copy of the
+tracked tree with it applied, outside any checkout, the copy's `make docs-check` steps are clean (`cli-serve.md`
+99,996 bytes), and `TestEveryCitedTestNameExists` passes there and fails with a ghost citation planted in the
+patched History. `make test` and `make build-all` were not run: the brief asked for the packages. Windows and macOS
+are CI's to run.
+
+### What only windows-latest shows
+
+Nothing new. Round 3's cases model Windows through `logsHost` and run on every host, and the pin reads every
+platform's files on every host.
+
+### Left open
+
+The warn off Windows and in the console's doctor is not built: the brief makes it a separate backlog item if it is
+wanted, and this round filed none.
+
+## 2026-11-15 — B618: main merged in at bfa11227, the log's choice through B650's runs of the doctor
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` (PR #1470) from round 3's head ee9e7470, whose last merge
+was of main fe5e331d. Main moved since by B899, B886, B650, B903, B650FIX, B904, B895, B901 and B650FU. Commits
+532272ef (the merge, parents ee9e7470 and bfa11227) and the one that carries this record (main's B650 tests' calls).
+The rules ship as `rules-b618-merge.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`). Neither side's
+behaviour changes, and nothing new is built.
+
+### How the merge was made
+
+`git merge` needs an approval a headless session on legion0 cannot get, so the merge was assembled by hand: the base
+from `git merge-base` (fe5e331d); `git merge-tree --write-tree bfa11227 ee9e7470` (tree 872aa111, three files in
+conflict); the 46 paths main changed with no conflict checked out of that tree, which holds main's blob where main
+alone changed a path and git's own clean three-way merge where both did (`cmd/bridge/backup_round2_test.go`,
+`cmd/bridge/backup_verify_test.go`, `internal/doctor/doctor.go`, `ops/History-rules-cli-serve.md`); `cli-serve.md`
+main's blob; `doctor.go` and this log resolved from `git merge-file -p --diff3` by a script that checks each block's
+three parts before it replaces the block (`.tmp/_b618/m/resolve.py`, not committed); `MERGE_HEAD` written, then
+`git commit`. Before the commit the index was proven (`.tmp/_b618/m/mkmerge.py check`): HEAD was ee9e7470; every path
+the index changed against HEAD was one main changed; each path main alone changed held main's blob, each path both
+changed git's clean merge or its resolution, and each path the branch alone changed HEAD's.
+
+### The conflicts, and what each side meant
+
+| File | Main | This branch | Resolution |
+|---|---|---|---|
+| `cmd/bridge/doctor.go` (3 blocks) | B650: `buildDoctorDepsWith(cfgPath, absentIsPreSetup, dacHost)` a run of `cliRootProbes` through `buildDoctorDepsRun(ctx, …, dacHost, run *doctor.ProbeRun)`, which holds the body; `adminDoctorRunnerFor(…, dacHost)` a call of `adminDoctorRunnerWith(…, dacHost, probes *doctor.RootProbes)`, whose runs call `buildDoctorDepsRun(ctx, …, probes.BeginRun())` | B618: `buildDoctorDepsWith` takes `logs doctorLogs` and chooses the log file first (`lf := logs.choose()`); `adminDoctorRunnerFor` takes `logs logsHost` and builds `doctorLogs{host: logs, console: true}` | `logs` through both pairs: `buildDoctorDepsWith(…, dacHost, logs)` calls `buildDoctorDepsRun(ctx, …, dacHost, logs, run)`, whose first statement is the branch's `lf := logs.choose()`; `adminDoctorRunnerFor(…, dacHost, logs)` calls `adminDoctorRunnerWith(…, dacHost, logs, probes)`, whose runs pass `doctorLogs{host: logs, console: true}` to `buildDoctorDepsRun`. Each side's docs stay: the branch's of `buildDoctorDepsWith`, closed by main's sentence, and of `adminDoctorRunnerFor`; main's of `cliRootProbes`, `buildDoctorDepsRun` and `adminDoctorRunnerWith` |
+| `.claude/rules/cli-serve.md` (1) | B650's and B650FIX's bullets after the `player-dac` bullet | B618's bullet there, and two `paths:` globs | main's file in the merge commit; the three bullets, main's two and then the branch's, unchanged, and the globs, in the rules patch |
+| `ops/engineering-log.md` (1) | its entries from B650 round 2 to B904, appended | B618's three, appended | main's, whole, then the branch's |
+
+`lf := logs.choose()` stays ahead of the `doctor.Deps` literal, which now carries main's run, as it was ahead of the
+literal in the branch's `buildDoctorDepsWith`: it stats the log files and touches no library root, so it is no work
+of the run's. `adminDoctorRunner` keeps passing `hostLogs()`. The docs that say `adminDoctorRunnerFor` sets the
+console's flag (its own, and `doctorLogs`' in `logs.go`) hold as written: the runner it returns, `adminDoctorRunnerWith`'s,
+sets it. The four files both sides changed without a conflict were read for meaning: in `internal/doctor/doctor.go`
+B650's `RootProbes`, `Run`'s start of every root's probe and `checkLibraryRoots` sit beside B618's `LogPath`,
+`LogNote` and `LogUnresolved`, no hunk near another; in each backup test main's changes sit beside the branch's one
+line, its call of `buildDoctorDepsWith` with the shell's `doctorLogs`; the History file is taken up below.
+
+### The call sites
+
+Changed in the commit that carries this record, in `cmd/bridge/doctor_roots_test.go`, main's B650 tests of the
+console's runner: each is now `adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), hostLogs(),
+<its probes>)`, the probes it stands in for roots with kept:
+
+- 428, `TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce`: `stallProbes(t, s, doctorRootsBound)`;
+- 457, `TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad`: `stallProbes(t, s, doctorRootsBound)`;
+- 508, `TestACancelledConsoleDoctorRunSaysItWasStopped`: `probes`;
+- 557, `TestTheConsolesDoctorReadsARecoveredRootAsHealthy`: `p`;
+- 654, `TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn`: `probes`.
+
+`hostLogs()` is the logs host production's `adminDoctorRunner` passes, and with the console's flag the line grades
+`consoleLogPath(hostLogs())`, which is `adminLogPath()`, the path main's `buildDoctorDepsRun` set: each case's Deps
+are what they were on main. None of the five reads the log line.
+
+Changed in the merge commit, its conflicts: `doctor.go` 288 (`buildDoctorDepsWith`'s call of `buildDoctorDepsRun`),
+296 (`buildDoctorDepsRun`'s parameters), 1129 (`adminDoctorRunnerFor`'s call of `adminDoctorRunnerWith`), 1140
+(`adminDoctorRunnerWith`'s parameters) and 1142 (its runs' call of `buildDoctorDepsRun`).
+
+Unchanged, compiling as they stand: production's `doctor.go` 267 (`buildDoctorDepsFor`, `doctorLogs{host:
+hostLogs()}`) and 1118 (`adminDoctorRunner`, `hostLogs()`), and serve's `main.go` 6381 (`adminDoctorRunnerFor(…,
+doctorDAC, hostLogs())`), whose parameters are the branch's; B618's tests, each with the logs host it stands in
+with: `doctor_logs_test.go` 25 and 257 (`buildDoctorDepsWith("", false, doctorDACHost(), logs)` and `doctorLogs{host:
+host}`) and 35 (`adminDoctorRunnerFor("", nil, nil, servingDACHost(hostTrees, nil), host)`); `doctor_player_dac_test.go`
+586 and 615 (`adminDoctorRunnerFor(…, hostLogs())`); `backup_round2_test.go` 408 and `backup_verify_test.go` 467
+(`buildDoctorDepsWith(cfgPath, false, doctorDACHost(), doctorLogs{host: hostLogs()})`, the branch's lines, merged
+cleanly); and `doctor_roots_test.go` 827 (`buildDoctorDepsFor(path, true)`, whose parameters neither side changed).
+No test calls `buildDoctorDepsRun`.
+
+### The rules
+
+`rules-b618-merge.patch` (13,391 bytes) applies to the merge commit (`git apply --check`). In `cli-serve.md` it puts
+back B618's two globs (`internal/packaging/logpath*.go`, `internal/packaging/scm_*.go`) and B618's bullet after
+main's B650FIX bullet, both byte for byte the branch's, and makes one move. Main's file is 98,921 bytes, and with the
+globs and the bullet 100,152, over the 100,000 a rules file may hold. `scripts/doc-split/move_entry.py --largest`,
+on a copy of the tree at the merge commit, lists seven entries that can move:
+
+- L75 (4,795 B): refused, its Don't (729 characters) over a pointer's 600 bytes.
+- L61, L62, L60 and L59 (1,828, 1,703, 1,143 and 1,044 B): their pointers with their titles are 1,525, 1,013, 955
+  and 869 bytes, so each moves only with a `--text` line that drops its title, and each title is its rule.
+- L121 (1,602 B, serve's OpenHome surface): its default pointer is its title alone, and the sentences that state
+  its rules in other words (the opt-in on and the player off is `openhomeOff`, one Warn and nothing started; a
+  surface that cannot start leaves the player running without it; `stopOpenHome` comes first, after only the
+  cancel of the library index's build; `hostLAN` is the one name for the host's interfaces) make it 730 bytes,
+  refused, and those still leave out its start's UDN and its stop's bounds.
+- L112 (985 B, the loopback track route and the console's checklist): its default pointer leaves out three rules
+  not worded "Don't" or "Never": the gate is asked once at boot and `OnActive` covers an MPD that appears later;
+  every request asks the gate's answer as it stands and none dials MPD; `adminDoctorRunner` takes
+  `checklistDoctorChecks` over the serving source, never bridge doctor's one-shot builder.
+
+L112 moved (`move_entry.py --line 112 --text …`), its pointer built from exact pieces of the entry (578 bytes): its
+title and the parenthesis after it, those three rules and "Rules in `output.md`." The long form alone keeps its
+mechanism and its tests: the route's `Enabled` is `apiSrv.LocalOutputsActiveNow`, what the checklist's source
+reads, the boot test's seams and the two tests that pin it. `cli-serve.md` is then 99,745 bytes. The entry lands
+verbatim at the end of its section of `ops/History-rules-cli-serve.md`, after main's hotplug entry, that section's
+last (476,856 bytes).
+
+### Proofs
+
+- `git show --remerge-diff --diff-algorithm=histogram --stat 532272ef`: `.claude/rules/cli-serve.md` 6 lines (out:
+  the globs, the branch's bullet and the markers), `cmd/bridge/doctor.go` 45 (conflicts 1 and 2),
+  `ops/engineering-log.md` 810 (the branch's 404 lines moved after main's 2,402, and the markers). Git's default
+  diff algorithm shows the same log as 4,942 lines, main's block taken out and put back.
+- `.tmp/_b618/m/union_check.py`, for this log and for `ops/History-rules-cli-serve.md`, against fe5e331d and both
+  parents: each side's additions are pure insertions; every block either side added is in the merged file whole and
+  in order (the log: main's 159-line B650 entry at line 95,031 and its 2,402 lines from 96,533, the branch's 404
+  from 98,935; the History file: main's 2 lines at 2,285 and its 326 at 5,368, the branch's 175 at 5,808); the
+  merged file is byte for byte the base with every block put in at its base position, main's first; and with the
+  other side's blocks taken out it is, line for line, each parent. By count: the log 96,373 lines + 2,561 + 404 =
+  99,338, the History file 5,479 + 328 + 175 = 5,982.
+- Compile, on this commit's code (the tree before this record was appended), in the build lock: `go build ./...`
+  and `go vet ./...` with `-tags ts_omit_webclient,ts_omit_debugeventbus` for linux, darwin and windows (amd64),
+  and `go vet ./...` for linux/386 and linux/arm, all clean. At the merge commit `go build ./...` is clean for the
+  three and `go vet ./cmd/bridge/` stops at `doctor_roots_test.go:428`, the first call this commit changes.
+- go1.27.3's gofmt lists none of the Go files the merge or this commit touches.
+
+The test runs on this commit come after it, so they are not in this record: a record cannot carry the results of
+runs made on the commit that holds it.
 ## 2026-11-14 — B882L: the DSD migration's lines name a DAC by its USB IDs and a cleaned product string, and the redacted export keeps a dac attribute's IDs alone
 
 Worker b882l, legion0, branch `fix/b882l-dac-labels` from main 0ddfda75.
