@@ -8359,6 +8359,7 @@ const PLAYER_TONE_WORDS = {
   wrong_device: "The DAC the player opened is not the one it is bound to, so the tone did not play.",
   not_located: "The player's DAC could not be found on the box.",
   open_refused: "The DAC did not open for the tone.",
+  no_format: "The DAC takes none of the tone's formats: 48 or 44.1 kHz, at 24 or 16 bits.",
   failed: "The tone failed: the bridge's log says why.",
   stop_unconfirmed: "The tone was stopped, and the DAC has not confirmed that it let go: nothing else opens the DAC until it does.",
 };

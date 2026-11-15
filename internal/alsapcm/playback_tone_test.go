@@ -879,8 +879,8 @@ func TestTheToneOpensPCMAloneBesideADSDSet(t *testing.T) {
 	writes, revision := d.store.Writes(), p.DSD.DAC.Choice.Revision
 	d.k.Rates(88200)
 	d.be.ToneOutput(true, "")
-	if res := d.startTone(toneOf(-40, 1)).result(t); res.Outcome != playback.ToneOpenRefused {
-		t.Fatalf("the tone on a DAC that takes none of its pairs answered %+v; want open_refused", res)
+	if res := d.startTone(toneOf(-40, 1)).result(t); res.Outcome != playback.ToneNoFormat {
+		t.Fatalf("the tone on a DAC that takes none of its pairs answered %+v; want no_format", res)
 	}
 	want := []alsapcm.Ask{}
 	for _, rate := range []int{48000, 44100} {
@@ -948,6 +948,28 @@ func TestTheToneTriesEachRateAndContainerOnce(t *testing.T) {
 		if v := r.k.View(); !slices.Equal(v.Asked, want) {
 			t.Errorf("the tone asked %+v; want %+v", v.Asked, want)
 		}
+	})
+	// None of the eight taken is a word of its own (B601's round 2), told
+	// from a refusal of the DAC's own (busy, denied, gone), which open_refused
+	// says: the DAC takes none of the tone's formats.
+	t.Run("none of the eight taken", func(t *testing.T) {
+		r := newRig(t)
+		r.k.Rates(88200)
+		r.be.ToneOutput(true, "")
+		res := r.startTone(toneOf(-40, 1)).result(t)
+		if res.Outcome != playback.ToneNoFormat || !res.Admitted || res.LastError != "" || res.Format != "" {
+			t.Errorf("the tone on a DAC that takes none of its pairs answered %+v; want no_format, admitted, no cause and no format", res)
+		}
+		var want []alsapcm.Ask
+		for _, rate := range []int{48000, 44100} {
+			for _, f := range []format.ALSAFormat{format.S243LE, format.S24LE, format.S32LE, format.S16LE} {
+				want = append(want, alsapcm.Ask{Format: f, RateHz: rate})
+			}
+		}
+		if v := r.k.View(); !slices.Equal(v.Asked, want) || v.Opens != 8 || v.Closes != 8 {
+			t.Errorf("the tone asked %+v (%d opens, %d closes); want the eight pairs in order, each closed", v.Asked, v.Opens, v.Closes)
+		}
+		r.joinTone()
 	})
 }
 

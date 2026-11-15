@@ -100,8 +100,11 @@ const (
 	// ToneNotLocated is a binding that resolves to no unit now.
 	ToneNotLocated ToneOutcome = "not_located"
 	// ToneOpenRefused is an open the DAC refused: busy, denied (LastError),
-	// any other refusal, or none of the tone's eight pairs taken.
+	// or any other refusal of its own.
 	ToneOpenRefused ToneOutcome = "open_refused"
+	// ToneNoFormat is none of the tone's eight pairs taken: the DAC takes
+	// none of its formats, each refused or committed otherwise.
+	ToneNoFormat ToneOutcome = "no_format"
 	// ToneFailed is the backend's own failure, a panic whose cleanup closed
 	// the node among them.
 	ToneFailed ToneOutcome = "failed"
@@ -117,7 +120,7 @@ func ToneWords() []ToneOutcome {
 		ToneLevelRefused, ToneLengthRefused, ToneServeStopping,
 		ToneOutputUnknown, ToneWithheld, ToneOutputUnavailable, ToneOutputChanged, ToneSnapshotStale,
 		ToneReleaseUnconfirmed, ToneProbeRunning, ToneChoiceWrite, ToneStartWaiting, ToneSessionHolds, TonePlaying, ToneRequestEnded,
-		TonePlayed, TonePreempted, ToneOutputGone, ToneDeviceError, ToneWrongDevice, ToneNotLocated, ToneOpenRefused, ToneFailed, ToneStopUnconfirmed,
+		TonePlayed, TonePreempted, ToneOutputGone, ToneDeviceError, ToneWrongDevice, ToneNotLocated, ToneOpenRefused, ToneNoFormat, ToneFailed, ToneStopUnconfirmed,
 	}
 }
 
@@ -456,9 +459,9 @@ func (b *Backend) playTone(t *toneHold, run *toneRun) {
 // openTone opens the bound unit's node for the tone: the first of its eight
 // (rate, format) pairs the kernel commits exactly, a refine it refuses or a
 // mismatch trying the next (alsapcm closes the refused node). A busy or denied
-// open ends the tone open_refused, its cause recorded; any other refusal, and
-// none of the eight taken, open_refused. An open whose own cleanup is not
-// confirmed stops there: the cleanup fences the device.
+// open ends the tone open_refused, its cause recorded; any other refusal
+// open_refused; none of the eight taken no_format. An open whose own cleanup
+// is not confirmed stops there: the cleanup fences the device.
 func (b *Backend) openTone(t *toneHold, run *toneRun, ep alsapcm.Endpoint) bool {
 	for _, rate := range toneRates {
 		for _, pk := range tonePackings {
@@ -486,7 +489,7 @@ func (b *Backend) openTone(t *toneHold, run *toneRun, ep alsapcm.Endpoint) bool 
 			return false
 		}
 	}
-	t.end(ToneOpenRefused)
+	t.end(ToneNoFormat)
 	return false
 }
 
