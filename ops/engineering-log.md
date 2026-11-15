@@ -99664,12 +99664,13 @@ The poll loop is not the cause:
     loop's goroutine does not give up between the hand-off and the
     take, so no run went red.
   - Every red's dump carries one of the two forced signatures. Between
-    its hand-off and its take, the loop's goroutine was held 10-30 µs
-    for :544 and up to 3.7 ms for :551.
+    its hand-off and its take, the loop's goroutine was held 24 µs to
+    3.7 ms: a median of 41 µs over the 50 at :544, and of 34 µs over the
+    20 at :551.
 - **Red first, e7fea4b2.** The seam keeps its order and gains three
   things: a hook just after the hand-off (`tickSeam.handed`,
   `parkAfterHanding`), arming numbers, and holds that record the arming
-  that took them.
+  that took them. The lines below are e7fea4b2's.
   - `TestAHoldSetOnceAnArmingIsHandedHoldsTheNextArming` parks the loop
     just after it hands arming 1 over and sets a hold there. It fails at
     :647: the hold was taken by arming 1, want arming 2.
@@ -99692,7 +99693,8 @@ The poll loop is not the cause:
     160,000.
   - `./internal/updater` once: 262 of 262, 0 races, 36.2 s.
 - **Controls.** Each mutation was made in memory and the bytes put
-  back, with the predictions written before each run.
+  back, with the predictions written before each run. The lines are
+  cb3b2268's.
   - **C1, the schedule protection removed** (updater.go 593 reduced to
     `!u.checksEnabled()`):
     - `TestAWakeAndAnOldTickReadyTogetherAskNothing` was red in 51 of
