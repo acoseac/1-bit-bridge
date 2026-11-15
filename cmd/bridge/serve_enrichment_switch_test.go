@@ -543,11 +543,16 @@ func harvestPendingCovers(t *testing.T, dataDir string) map[string]int {
 	return covers
 }
 
-// readPendingCovers is harvestPendingCovers' read, through read: os.ReadFile,
-// or a test's hold on the file.
+// readPendingCovers is harvestPendingCovers' read through read (os.ReadFile,
+// or a test's hold), asked again while Windows refuses the open, as it did at
+// the poll for the settled covers (backlog B898); a read refused past
+// atomicwrite's bound matches atomicwrite.ErrReadBusy.
 func readPendingCovers(ctx context.Context, dataDir string, read func(string) ([]byte, error)) (map[string]int, error) {
-	raw, err := read(harvestStatePath(dataDir))
-	if err != nil {
+	var raw []byte
+	if err := atomicwrite.ReadWithRetryCtx(ctx, func() (err error) {
+		raw, err = read(harvestStatePath(dataDir))
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	var st atlasharvest.State
@@ -557,11 +562,15 @@ func readPendingCovers(ctx context.Context, dataDir string, read func(string) ([
 	return st.PendingCovers, nil
 }
 
-// pendingCoversNow is readPendingCovers for eventually's condition: any
-// error fails the test.
+// pendingCoversNow is readPendingCovers for eventually's condition: a read
+// still busy answers not yet (ok false), which the next poll asks again; any
+// other error fails the test.
 func pendingCoversNow(t *testing.T, dataDir string, read func(string) ([]byte, error)) (covers map[string]int, ok bool) {
 	t.Helper()
 	covers, err := readPendingCovers(t.Context(), dataDir, read)
+	if errors.Is(err, atomicwrite.ErrReadBusy) {
+		return nil, false
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
