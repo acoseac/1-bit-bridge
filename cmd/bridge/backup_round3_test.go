@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -189,11 +190,16 @@ type unlockHold struct {
 // holdUnlockOf installs an unlockHold on the backups folder at root, not
 // armed, before any verification there begins: SetOnLockReleaseForTest's seam
 // is read without a lock, and is put back once every holder that read it has
-// ended, the cleanups a test registers after this one running first. Its
-// other cleanup, which runs before that, lets a held unlock go and waits a
-// bounded time for the end of the verification it was armed for, so a test
-// that fails while its fixture is made leaves no worker behind for the
-// removal of its folders or the next test's hooks.
+// ended, the cleanups a test registers after this one running first. A held
+// unlock is let go as the test's body ends (its context's end, which comes
+// before any cleanup), so no cleanup the test registers once it has its
+// snapshot, which runs before this hold's own, waits on the worker it holds.
+// Its other cleanup, which runs before the seam's restore, lets a held unlock
+// go and waits a bounded time for the end of the verification it was armed
+// for, so a test that fails while its fixture is made leaves no worker behind
+// for the removal of its folders or the next test's hooks; past that bound it
+// ends the run (endTheRun) rather than let the seam's restore and the
+// fixture's removal run beside that worker (backlog B869).
 func holdUnlockOf(t *testing.T, root string) *unlockHold {
 	t.Helper()
 	u := &unlockHold{root: root, entered: make(chan struct{}), out: make(chan struct{}), ended: make(chan struct{})}
@@ -203,19 +209,33 @@ func holdUnlockOf(t *testing.T, root string) *unlockHold {
 			<-u.out
 		}
 	}))
+	context.AfterFunc(t.Context(), u.letGo)
 	t.Cleanup(func() {
-		u.armed.Store(false)
-		u.release()
+		u.letGo()
 		if !u.owed.Load() {
 			return
 		}
 		select {
 		case <-u.ended:
 		case <-time.After(30 * time.Second):
-			t.Error("the snapshot's verification never ended")
+			endTheRun(t, "the snapshot's verification did not end within 30 s of its unlock's let-go")
 		}
 	})
 	return u
+}
+
+// endTheRun ends the test binary, saying what and printing every goroutine,
+// for a cleanup whose later cleanups must not run: here a worker it waited for
+// still runs beside them. A t.Fatal or a panic in a cleanup does not stop
+// them, since testing's runCleanup runs the cleanups left on its way out of
+// either; so the panic is raised on a goroutine of its own, as the binary's
+// own -timeout raises its, and the cleanup waits there until it lands.
+func endTheRun(t *testing.T, what string) {
+	t.Helper()
+	msg := t.Name() + ": " + what
+	debug.SetTraceback("all")
+	go func() { panic(msg) }()
+	select {}
 }
 
 // arm holds the next unlock of the folder's lock, and sets the end hook for
@@ -271,6 +291,12 @@ func (u *unlockHold) letGoAndAwaitEnd(t *testing.T) {
 
 // release lets the unlock go.
 func (u *unlockHold) release() { u.leaving.Do(func() { close(u.out) }) }
+
+// letGo disarms the hold and lets a held unlock go: the test's end.
+func (u *unlockHold) letGo() {
+	u.armed.Store(false)
+	u.release()
+}
 
 // backupsLockHeld reports whether the lock of the backups folder at root is
 // held, asked as another process asks it: an exclusive try through an open of
