@@ -8,8 +8,10 @@
 "use strict";
 
 const API = {
-  async get(path) {
-    const r = await fetch(path, { headers: { accept: "application/json" } });
+  // signal, optional, ends the request when aborted: a Stop's confirmation of
+  // the Player page's test tone (B601) bounds each read of the status by it.
+  async get(path, signal) {
+    const r = await fetch(path, { headers: { accept: "application/json" }, signal });
     if (!r.ok) throw await errorFromResponse(r);
     return r.json();
   },
@@ -8446,8 +8448,12 @@ function renderPlayerOutputTone(run) {
 // own, and the request lasts as long as the tone: its answer is how the tone
 // ended, or why it was refused, in the page's own words. Stop aborts that
 // request, which ends the tone on the server, and posts nothing: no route
-// stops a tone. The page's scope (a navigation inside the console) and its
-// leaving (pagehide: a full navigation, a closed tab) abort it too. Play is
+// stops a tone. A navigation inside the console ends it as it begins, as Stop
+// does (pageLeaving): the page's scope ends only once the next page is in,
+// which a stalled fetch can hold back, and aborts what is left then. The
+// page's being hidden (pagehide: a full navigation, a closed tab, the
+// back/forward cache) ends it too, and a page the cache shows again says
+// nothing of a tone before it has read the status (pageshow). Play is
 // disabled only while the page's own tone is out: a tone another page plays
 // is the server's refusal (tone_playing), never the page's guess.
 function wirePlayerOutputTone() {
@@ -8457,9 +8463,12 @@ function wirePlayerOutputTone() {
   const seconds = document.getElementById("player-output-tone-seconds");
   if (!play || !stop || !level || !seconds) return;
   const scope = pageSignal();
-  const abortTone = () => playerTone.controller?.abort();
-  scope.addEventListener("abort", abortTone, { once: true });
-  window.addEventListener("pagehide", abortTone, { signal: scope });
+  scope.addEventListener("abort", () => playerTone.controller?.abort(), { once: true });
+  pageLeaving.addEventListener("leave", () => stopPlayerTone(scope), { signal: scope });
+  window.addEventListener("pagehide", hidePlayerTone, { signal: scope });
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) showPlayerToneAgain(play, stop);
+  }, { signal: scope });
   playerTone.controller = null;
   playerTone.confirming = false;
   playerTone.busyShown = false;
@@ -8496,31 +8505,68 @@ function wirePlayerOutputTone() {
       }
     }
   });
-  stop.addEventListener("click", () => {
-    const controller = playerTone.controller;
-    if (!controller) return;
-    controller.abort();
-    confirmPlayerToneStop(scope);
-  });
+  stop.addEventListener("click", () => stopPlayerTone(scope));
+}
+
+// stopPlayerTone ends the page's own tone as Stop does: it aborts the tone's
+// request, which ends the tone on the server, and confirms the stop from the
+// status (confirmPlayerToneStop). Nothing while the page has no tone out.
+function stopPlayerTone(scope) {
+  const controller = playerTone.controller;
+  if (!controller) return;
+  controller.abort();
+  confirmPlayerToneStop(scope);
+}
+
+// hidePlayerTone is the page's being hidden (pagehide): it ends the page's
+// tone and a Stop's confirmation, which a hidden page's timers do not run and
+// which, resumed by the back/forward cache, would speak of a stop long past,
+// and leaves the tone's line for the status to say again (busyShown).
+function hidePlayerTone() {
+  playerTone.controller?.abort();
+  playerTone.stopSeq++;
+  playerTone.confirming = false;
+  playerTone.busyShown = true;
+}
+
+// showPlayerToneAgain is a page the back/forward cache shows again (pageshow,
+// persisted), on the DOM and with the listeners it had: what its tone's line
+// said before the page was hidden may no longer hold, so the line is emptied,
+// the controls are those of a page with no tone out (its tone was ended as
+// it was hidden), a Stop's confirmation still out is ended, and the status
+// is read at once, whose tone renderPlayerOutputTone then says whatever its
+// state, idle included (busyShown).
+function showPlayerToneAgain(play, stop) {
+  playerTone.controller?.abort();
+  playerTone.controller = null;
+  playerTone.stopSeq++;
+  playerTone.confirming = false;
+  playerTone.busyShown = true;
+  showPlayerToneLine("ok", "");
+  setDisabled(stop, true);
+  setDisabled(play, false);
+  loadPlayerOutput();
 }
 
 // confirmPlayerToneStop reads the status at once and every 250 ms while the
 // tone reads playing or stopping, for at most three seconds (the backend's
-// two-second wait for the node's close, and one more): an abort reaches the
-// server only as its connection closes, which the page cannot see. It says
-// the stop was confirmed once the tone reads anything else, and past the
-// three seconds that it was not, never that it was. A later Play or Stop
-// ends it, and so does the page's going (scope).
+// two-second wait for the node's close, and one more), each read bounded by
+// what is left of them: an abort reaches the server only as its connection
+// closes, which the page cannot see. It says the stop was confirmed once the
+// tone reads anything else, and past the three seconds that it was not, never
+// that it was. A later Play or Stop ends it, and so do the page's going
+// (scope) and its being hidden.
 async function confirmPlayerToneStop(scope) {
   const seq = ++playerTone.stopSeq;
   playerTone.confirming = true;
   const deadline = Date.now() + 3000;
   const current = () => seq === playerTone.stopSeq && !scope.aborted;
   showPlayerToneLine("ok", "Stopping the tone…");
+  let tone = null;
   for (;;) {
-    const st = await readPlayerOutputForTone();
+    const st = await readPlayerOutputForTone(scope, deadline - Date.now());
     if (!current()) return;
-    const tone = st && st.available && st.running ? st.running.tone : null;
+    tone = st && st.available && st.running ? st.running.tone : null;
     const state = tone ? tone.state : "";
     if (tone && state !== "playing" && state !== "stopping") {
       playerTone.confirming = false;
@@ -8529,30 +8575,37 @@ async function confirmPlayerToneStop(scope) {
       else showPlayerToneLine("warn", playerToneStatusText(tone));
       return;
     }
-    if (Date.now() >= deadline) {
-      playerTone.confirming = false;
-      playerTone.busyShown = Boolean(tone);
-      showPlayerToneLine("warn", tone
-        ? `The stop is not confirmed: three seconds on, the bridge still reads the tone as ${state}.`
-        : "The stop is not confirmed: the bridge's status could not be read.");
-      return;
-    }
+    if (Date.now() >= deadline) break;
     await new Promise((resolve) => setTimeout(resolve, 250));
     if (!current()) return;
+    if (Date.now() >= deadline) break;
   }
+  playerTone.confirming = false;
+  playerTone.busyShown = Boolean(tone);
+  showPlayerToneLine("warn", tone
+    ? `The stop is not confirmed: three seconds on, the bridge still reads the tone as ${tone.state}.`
+    : "The stop is not confirmed: the bridge's status could not be read.");
 }
 
-// readPlayerOutputForTone reads the status for a Stop's confirmation and
-// paints it unless a later paint overtook it; null where it could not be
-// read.
-async function readPlayerOutputForTone() {
+// readPlayerOutputForTone reads the status for a Stop's confirmation within
+// ms and the page's scope, a read past either answering null as one that
+// failed does, and paints it unless a later paint overtook it; null where it
+// could not be read.
+async function readPlayerOutputForTone(scope, ms) {
   const seq = ++playerOutputSeq;
+  const bound = new AbortController();
+  const end = () => bound.abort();
+  const timer = setTimeout(end, Math.max(0, ms));
+  scope.addEventListener("abort", end, { once: true });
   try {
-    const st = await API.get("/api/output/player");
+    const st = await API.get("/api/output/player", bound.signal);
     if (seq === playerOutputSeq) renderPlayerOutput(st);
     return st;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
+    scope.removeEventListener("abort", end);
   }
 }
 
@@ -9488,6 +9541,13 @@ function initDuplicates() {
 // next page's init.
 let pageAbort = null;
 
+// pageLeaving tells the mounted page that a navigation away from it begins:
+// boostSwap dispatches "leave" on it before its fetch, which can stall, while
+// the page's scope is torn down only once the incoming page is in. A page
+// listens with its scope's signal (pageSignal), so its listeners go with it.
+// The Player page's test tone ends there, as its Stop ends it (B601).
+const pageLeaving = new EventTarget();
+
 function pageSignal() {
   if (!pageAbort) pageAbort = new AbortController();
   return pageAbort.signal;
@@ -9695,6 +9755,9 @@ let boostGen = 0;
 // that falls back to a hard load leaves no phantom entry.
 async function boostSwap(url, opts = {}) {
   const gen = ++boostGen;
+  // The outgoing page hears the navigation begin now, before the fetch: what
+  // it ends at once (the Player page's tone) cannot wait for the swap.
+  pageLeaving.dispatchEvent(new Event("leave"));
   let resp;
   try {
     resp = await fetch(url, {

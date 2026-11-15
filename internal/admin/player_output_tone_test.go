@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -304,17 +305,37 @@ func TestTheTonesLastErrorIsItsOwn(t *testing.T) {
 // toneLineRe is a one-line top-level const of app.js.
 var toneLineRe = regexp.MustCompile(`(?m)^const playerTone = \{[^\n]*\};$`)
 
+// requireInOrder fails the test unless code holds each of parts, in that
+// order: where a call stands against another is what the test pins.
+func requireInOrder(t *testing.T, what, code string, parts ...string) {
+	t.Helper()
+	at := 0
+	for _, p := range parts {
+		i := strings.Index(code[at:], p)
+		if i < 0 {
+			t.Errorf("%s has no %s after what comes before it (%q)", what, p, parts)
+			return
+		}
+		at += i + len(p)
+	}
+}
+
 // TestThePageStopsItsToneByItsRequestAlone pins the page's tone (B601):
 // Play posts the tone's one route through API.post with a signal of the
 // tone's own; Stop aborts that signal and posts nothing, no route stopping a
-// tone; the page's scope (a navigation inside the console) and its leaving
-// (pagehide) abort it too; and after a Stop the page reads the status at once
-// and every 250 ms while the tone reads playing or stopping, for at most three
-// seconds, saying whether the stop was confirmed. Where node is installed it
-// runs the shipped functions: a stop the status confirms through playing and
-// stopping to idle, one it reads playing or stopping to the end of its three
-// seconds, said not confirmed, and the request aborted by pagehide and by the
-// page's scope, with no read and no second post.
+// tone; the page's scope (a navigation inside the console, once the next page
+// is in) and its being hidden (pagehide) abort it too; and after a Stop the
+// page reads the status at once and every 250 ms while the tone reads playing
+// or stopping, for at most three seconds, each read bounded by what is left of
+// them and by the page's scope (API.get takes the read's signal), saying
+// whether the stop was confirmed. Where node is installed it runs the shipped
+// functions on a clock only the run moves: a stop the status confirms through
+// playing and stopping to idle, one it reads playing or stopping to the end of
+// its three seconds, said not confirmed, one whose read never answers, said
+// not confirmed at the three seconds and no later (B601's round 2: the read
+// was unbounded, and the deadline was asked only after it), and the request
+// aborted by pagehide and by the page's scope, with no read and no second
+// post.
 func TestThePageStopsItsToneByItsRequestAlone(t *testing.T) {
 	src := readConsoleJS(t, "static/app.js")
 	code := stripJSComments(src)
@@ -324,42 +345,39 @@ func TestThePageStopsItsToneByItsRequestAlone(t *testing.T) {
 	wire := stripJSComments(extractJSFunction(t, src, "wirePlayerOutputTone"))
 	for _, want := range []string{
 		`API.post("/api/output/player/tone", body, controller.signal)`,
-		`scope.addEventListener("abort", abortTone, { once: true });`,
-		`window.addEventListener("pagehide", abortTone, { signal: scope });`,
+		`scope.addEventListener("abort", () => playerTone.controller?.abort(), { once: true });`,
+		`window.addEventListener("pagehide", hidePlayerTone, { signal: scope });`,
+		`stop.addEventListener("click", () => stopPlayerTone(scope));`,
 	} {
 		if !strings.Contains(wire, want) {
 			t.Errorf("wirePlayerOutputTone has no %s", want)
 		}
 	}
-	_, stop, ok := strings.Cut(wire, `stop.addEventListener("click"`)
-	if !ok {
-		t.Fatal("wirePlayerOutputTone arms no Stop")
-	}
-	if !strings.Contains(stop, "controller.abort();") || !strings.Contains(stop, "confirmPlayerToneStop(scope);") {
-		t.Errorf("Stop does not abort the tone's request and confirm it: %s", stop)
-	}
+	stop := stripJSComments(extractJSFunction(t, src, "stopPlayerTone"))
+	requireInOrder(t, "stopPlayerTone", stop, "controller.abort();", "confirmPlayerToneStop(scope);")
 	for _, sink := range []string{"API.post", "API.patch", "API.delete", "fetch("} {
 		if strings.Contains(stop, sink) {
 			t.Errorf("Stop sends a request (%s): it ends the tone by its request's end alone", sink)
 		}
 	}
 	confirm := stripJSComments(extractJSFunction(t, src, "confirmPlayerToneStop"))
-	for _, want := range []string{"Date.now() + 3000", "setTimeout(resolve, 250)", `state !== "playing" && state !== "stopping"`, "The stop is not confirmed"} {
+	for _, want := range []string{"Date.now() + 3000", "readPlayerOutputForTone(scope, deadline - Date.now())", "setTimeout(resolve, 250)",
+		`state !== "playing" && state !== "stopping"`, "The stop is not confirmed"} {
 		if !strings.Contains(confirm, want) {
 			t.Errorf("confirmPlayerToneStop has no %s", want)
 		}
 	}
+	read := stripJSComments(extractJSFunction(t, src, "readPlayerOutputForTone"))
+	requireInOrder(t, "readPlayerOutputForTone", read, "setTimeout(end, Math.max(0, ms))", `scope.addEventListener("abort", end`,
+		`API.get("/api/output/player", bound.signal)`, "clearTimeout(timer)", `scope.removeEventListener("abort", end)`)
+	if api := stripJSComments(extractJSConst(t, src, "API")); !strings.Contains(api, "async get(path, signal)") ||
+		!strings.Contains(api, `fetch(path, { headers: { accept: "application/json" }, signal })`) {
+		t.Errorf("API.get does not hand its fetch the signal it is given: %s", api)
+	}
 	// The script node runs is assembled, and checked for what it would not
 	// carry, on every host: the shipped functions the tone reaches, after the
 	// harness and its run.
-	line := toneLineRe.FindString(src)
-	if line == "" {
-		t.Fatal("app.js declares no one-line playerTone")
-	}
-	script := tonePageHarness + line + "\n" + extractJSConst(t, src, "PLAYER_TONE_WORDS") + extractJSConst(t, src, "PLAYER_TONE_LAST_ERRORS") +
-		extractJSConst(t, src, "PLAYER_TONE_STATES") + tonePageRun
-	assembled := withReachedFunctions(t, script, src, "wirePlayerOutputTone", "confirmPlayerToneStop", "readPlayerOutputForTone",
-		"showPlayerToneLine", "playerToneStatusText", "playerToneEndText", "playerToneFormatText", "playerRateText", "setDisabled", "pageSignal")
+	script, assembled := tonePageScript(t, src, tonePageRun)
 	requireCarried(t, script, assembled[len(script):], src)
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -372,10 +390,11 @@ func TestThePageStopsItsToneByItsRequestAlone(t *testing.T) {
 		Aborted bool     `json:"aborted"`
 		Gets    int      `json:"gets"`
 		Line    string   `json:"line"`
+		LineAt  int      `json:"lineAt"`
 		PlayOff bool     `json:"playDisabled"`
 		StopOff bool     `json:"stopDisabled"`
 	}
-	if err := json.Unmarshal(raw, &runs); err != nil || len(runs) != 5 {
+	if err := json.Unmarshal(raw, &runs); err != nil || len(runs) != 6 {
 		t.Fatalf("node answered %s: %v", raw, err)
 	}
 	for _, r := range runs {
@@ -383,19 +402,23 @@ func TestThePageStopsItsToneByItsRequestAlone(t *testing.T) {
 			t.Errorf("%s: posted %v, aborted %v; want the tone's one post, aborted", r.Name, r.Posts, r.Aborted)
 		}
 	}
-	confirmed, playing, stopping, hidden, scoped := runs[0], runs[1], runs[2], runs[3], runs[4]
-	if confirmed.Gets != 3 || confirmed.Line != "The tone stopped." || confirmed.PlayOff || !confirmed.StopOff {
-		t.Errorf("a stop the status confirms through playing and stopping: %+v; want three reads, the stop confirmed, Play back and Stop off", confirmed)
+	confirmed, playing, stopping, stalled, hidden, scoped := runs[0], runs[1], runs[2], runs[3], runs[4], runs[5]
+	if confirmed.Gets != 3 || confirmed.Line != "The tone stopped." || confirmed.LineAt != 500 || confirmed.PlayOff || !confirmed.StopOff {
+		t.Errorf("a stop the status confirms through playing and stopping: %+v; want three reads, the stop confirmed at 500 ms, Play back and Stop off", confirmed)
 	}
 	for _, r := range []struct {
 		run   any
 		gets  int
 		line  string
+		at    int
 		state string
-	}{{playing, playing.Gets, playing.Line, "playing"}, {stopping, stopping.Gets, stopping.Line, "stopping"}} {
-		if r.gets < 12 || r.gets > 14 || !strings.Contains(r.line, "The stop is not confirmed") || !strings.Contains(r.line, r.state) {
-			t.Errorf("a stop the status reads %s throughout: %+v; want a read every 250 ms for three seconds, then the stop said not confirmed", r.state, r.run)
+	}{{playing, playing.Gets, playing.Line, playing.LineAt, "playing"}, {stopping, stopping.Gets, stopping.Line, stopping.LineAt, "stopping"}} {
+		if r.gets != 12 || r.at != 3000 || !strings.Contains(r.line, "The stop is not confirmed") || !strings.Contains(r.line, r.state) {
+			t.Errorf("a stop the status reads %s throughout: %+v; want a read every 250 ms for three seconds, then the stop said not confirmed at 3 s", r.state, r.run)
 		}
+	}
+	if stalled.Gets != 1 || stalled.LineAt != 3000 || stalled.Line != "The stop is not confirmed: the bridge's status could not be read." {
+		t.Errorf("a stop whose read never answers: %+v; want its one read ended at the three seconds, said not confirmed then", stalled)
 	}
 	for _, r := range []struct {
 		what string
@@ -407,13 +430,174 @@ func TestThePageStopsItsToneByItsRequestAlone(t *testing.T) {
 	}
 }
 
+// tonePageScript is tonePageHarness and the playerTone line and the tone's
+// constants of app.js, then run, and the assembled script: that, then the
+// shipped functions the tone's page reaches (with the router's when run asks
+// for it).
+func tonePageScript(t *testing.T, src, run string, entries ...string) (script, assembled string) {
+	t.Helper()
+	line := toneLineRe.FindString(src)
+	if line == "" {
+		t.Fatal("app.js declares no one-line playerTone")
+	}
+	script = tonePageHarness + line + "\n" + jsStatement(t, src, "const pageLeaving = ") + "\n" +
+		extractJSConst(t, src, "PLAYER_TONE_WORDS") + extractJSConst(t, src, "PLAYER_TONE_LAST_ERRORS") +
+		extractJSConst(t, src, "PLAYER_TONE_STATES") + run
+	entries = append([]string{"wirePlayerOutputTone", "stopPlayerTone", "hidePlayerTone", "showPlayerToneAgain", "confirmPlayerToneStop",
+		"readPlayerOutputForTone", "loadPlayerOutput", "renderPlayerOutput", "renderPlayerOutputTone", "showPlayerToneLine", "showMsg",
+		"playerToneStatusText", "playerToneEndText", "playerToneFormatText", "playerRateText", "setDisabled", "pageSignal"}, entries...)
+	return script, withReachedFunctions(t, script, src, entries...)
+}
+
+// TestANavigationEndsTheToneAsItBegins (B601's round 2): a navigation inside
+// the console ends the page's tone as it begins, as Stop does, before the
+// next page's fetch answers: boostSwap tells the page (pageLeaving) before its
+// fetch, and tears the page's scope down only once the next page's body is in,
+// as it did, so the page stays live while a navigation stalls. Until then the
+// tone played on until the swap, its whole length where the fetch stalled.
+// The router's refusals start no navigation and end nothing. Where node is
+// installed it runs the shipped router and page: a link and a popstate to
+// another page, each held at the fetch's headers and at its body, end the
+// tone before either answers, the page's scope standing and Stop's
+// confirmation reading the status; a modified click, another target, a
+// download, another origin, an anchor on the page, the page's own address and
+// a popstate within the page start no fetch and leave the tone playing.
+func TestANavigationEndsTheToneAsItBegins(t *testing.T) {
+	src := readConsoleJS(t, "static/app.js")
+	swap := stripJSComments(extractJSFunction(t, src, "boostSwap"))
+	requireInOrder(t, "boostSwap", swap, `pageLeaving.dispatchEvent(new Event("leave"));`, "await fetch(", "await resp.text()", "pageAbort.abort()")
+	if !regexp.MustCompile(`(?m)^const pageLeaving = new EventTarget\(\);$`).MatchString(src) {
+		t.Error("app.js declares no pageLeaving at the top level")
+	}
+	wire := stripJSComments(extractJSFunction(t, src, "wirePlayerOutputTone"))
+	if !strings.Contains(wire, `pageLeaving.addEventListener("leave", () => stopPlayerTone(scope), { signal: scope });`) {
+		t.Error("wirePlayerOutputTone does not end its tone as a navigation begins, with the page's scope")
+	}
+	router := stripJSComments(extractJSFunction(t, src, "wireBoostRouter"))
+	requireInOrder(t, "wireBoostRouter's click", router, `if (a.hasAttribute("download")) return;`, `if (a.target && a.target !== "_self") return;`,
+		"if (url.origin !== location.origin) return;", "if (url.pathname === location.pathname && url.hash) return;",
+		"if (url.href === location.href) { e.preventDefault(); return; }", "boostNavigate(url.href);")
+	if strings.Contains(router, "pageLeaving") || strings.Contains(router, "stopPlayerTone") {
+		t.Error("the router ends the tone itself: a navigation's start is boostSwap's alone, past the router's refusals")
+	}
+	script, assembled := tonePageScript(t, src, toneRouterRun, "wireBoostRouter", "boostNavigate", "boostSwap", "boostIsPlayerPath")
+	requireCarried(t, script, assembled[len(script):], src)
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; the rest runs the shipped router and page")
+	}
+	raw := runScriptUnderNode(t, node, assembled, struct{}{})
+	var runs []struct {
+		Name     string   `json:"name"`
+		Started  bool     `json:"started"`
+		Aborted  bool     `json:"aborted"`
+		Scope    bool     `json:"scopeAborted"`
+		Pending  bool     `json:"pending"`
+		Gets     int      `json:"gets"`
+		Line     string   `json:"line"`
+		Assigned []string `json:"assigned"`
+		Fetches  int      `json:"fetches"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil || len(runs) != 11 {
+		t.Fatalf("node answered %s: %v", raw, err)
+	}
+	for _, r := range runs[:4] {
+		if !r.Started || !r.Pending || !r.Aborted || r.Scope || r.Gets != 1 || r.Line != "Stopping the tone…" || r.Fetches != 1 || len(r.Assigned) != 1 {
+			t.Errorf("%s: %+v; want the tone's request aborted while the navigation's fetch is held, the page's scope standing, Stop's confirmation reading the status, then the fallback's load", r.Name, r)
+		}
+	}
+	for _, r := range runs[4:] {
+		if r.Started || r.Aborted || r.Fetches != 0 || r.Gets != 0 || len(r.Assigned) != 0 {
+			t.Errorf("%s: %+v; want no navigation, no fetch, and the tone playing on", r.Name, r)
+		}
+	}
+}
+
+// TestAPageTheCacheShowsAgainSaysWhatTheStatusSays (B601's round 2): a page
+// the back/forward cache shows again (pageshow, persisted) after pagehide
+// says nothing of a tone before it has read the status: its tone and a Stop's
+// confirmation were ended as it was hidden (hidePlayerTone), and once shown
+// again its tone's line is emptied, Play and Stop are those of a page with no
+// tone out, a confirmation still out is ended, and the status is read at once,
+// whose tone the shipped renderPlayerOutputTone then says, idle included
+// (showPlayerToneAgain). Until then the line said "Playing…" over an idle
+// tone, which the five-second paint left as it was. Where node is installed it
+// runs the shipped page on one DOM, its listeners wired once: hidden with a
+// Stop's confirmation out (its read held across the cache, then answering a
+// tone still playing, late), and with its tone out, each shown again on an
+// idle first status; shown again where the status cannot be read; and a
+// pageshow that is not the cache's, which changes nothing.
+func TestAPageTheCacheShowsAgainSaysWhatTheStatusSays(t *testing.T) {
+	src := readConsoleJS(t, "static/app.js")
+	wire := stripJSComments(extractJSFunction(t, src, "wirePlayerOutputTone"))
+	requireInOrder(t, "wirePlayerOutputTone", wire, `window.addEventListener("pageshow", (e) => {`,
+		"if (e.persisted) showPlayerToneAgain(play, stop);", "}, { signal: scope });")
+	hide := stripJSComments(extractJSFunction(t, src, "hidePlayerTone"))
+	for _, want := range []string{"playerTone.controller?.abort();", "playerTone.stopSeq++;", "playerTone.confirming = false;", "playerTone.busyShown = true;"} {
+		if !strings.Contains(hide, want) {
+			t.Errorf("hidePlayerTone has no %s", want)
+		}
+	}
+	show := stripJSComments(extractJSFunction(t, src, "showPlayerToneAgain"))
+	requireInOrder(t, "showPlayerToneAgain", show, "playerTone.controller = null;", "playerTone.stopSeq++;", "playerTone.confirming = false;",
+		"playerTone.busyShown = true;", `showPlayerToneLine("ok", "");`, "setDisabled(stop, true);", "setDisabled(play, false);", "loadPlayerOutput();")
+	script, assembled := tonePageScript(t, src, toneShownAgainRun)
+	requireCarried(t, script, assembled[len(script):], src)
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; the rest runs the shipped page")
+	}
+	raw := runScriptUnderNode(t, node, assembled, struct{}{})
+	var runs []struct {
+		Name      string   `json:"name"`
+		Posts     []string `json:"posts"`
+		Aborted   bool     `json:"aborted"`
+		Line      string   `json:"line"`
+		Idle      string   `json:"idle"`
+		Msg       string   `json:"msg"`
+		PlayOff   bool     `json:"playDisabled"`
+		StopOff   bool     `json:"stopDisabled"`
+		Listeners []int    `json:"listeners"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil || len(runs) != 4 {
+		t.Fatalf("node answered %s: %v", raw, err)
+	}
+	for _, r := range runs {
+		if strings.Join(r.Posts, " ") != toneRoute {
+			t.Errorf("%s: posted %v; want the tone's one post", r.Name, r.Posts)
+		}
+		if fmt.Sprint(r.Listeners) != "[1 1 1 1]" {
+			t.Errorf("%s: Play, Stop, pagehide and pageshow have %v listeners; want one each, never wired again", r.Name, r.Listeners)
+		}
+	}
+	confirming, playing, unread, notCached := runs[0], runs[1], runs[2], runs[3]
+	for _, r := range []struct {
+		name string
+		got  any
+		ok   bool
+	}{
+		{"hidden with a Stop's confirmation out", confirming, confirming.Aborted && confirming.Idle != "" && confirming.Line == confirming.Idle && !confirming.PlayOff && confirming.StopOff},
+		{"hidden with its tone out", playing, playing.Aborted && playing.Idle != "" && playing.Line == playing.Idle && !playing.PlayOff && playing.StopOff},
+		{"shown again where the status cannot be read", unread, unread.Aborted && unread.Line == "" && strings.HasPrefix(unread.Msg, "Couldn't read the player") && !unread.PlayOff && unread.StopOff},
+		{"a pageshow that is not the cache's", notCached, !notCached.Aborted && strings.HasPrefix(notCached.Line, "Playing a 1 kHz tone") && notCached.PlayOff && !notCached.StopOff},
+	} {
+		if !r.ok {
+			t.Errorf("%s: %+v", r.name, r.got)
+		}
+	}
+}
+
 // tonePageHarness is the tone's page as the shipped functions see it: buttons
-// and selects by id, whose click runs their listeners; a window whose
-// listeners a scope's signal removes; the page's scope (pageAbort, as
-// dispatchPageInit keeps it); the console's API, whose post never answers
-// until its signal aborts it and whose get answers the statuses queued, the
-// last one again and again; and a clock that each timer moves by its delay,
-// at once.
+// and selects by id, whose click runs their listeners; a document and a window
+// whose listeners a scope's signal removes and whose events the run
+// dispatches; the page's scope (pageAbort, as dispatchPageInit keeps it); the
+// console's API, whose post never answers until its signal aborts it and
+// whose get answers the statuses queued, the last one again and again, a held
+// one when the run releases it or its signal aborts it, a failed one with an
+// error; fetch, which a navigation's run holds and answers; a clock that the
+// run's advance alone moves, firing each timer due in turn; and the Player
+// page's status painted by the shipped renderPlayerOutput, what it paints
+// beside the tone stubbed.
 const tonePageHarness = `
 class El {
   constructor(id) {
@@ -426,55 +610,104 @@ class El {
 }
 const els = new Map();
 const el = (id) => { if (!els.has(id)) els.set(id, new El(id)); return els.get(id); };
-globalThis.document = { getElementById: (id) => el(id), activeElement: null, body: {} };
+const docListeners = [];
 const windowListeners = [];
-globalThis.window = { addEventListener: (type, handler, opts) => { windowListeners.push({ type, handler, signal: opts && opts.signal }); } };
-function dispatchWindow(type) {
-  for (const l of windowListeners) if (l.type === type && !(l.signal && l.signal.aborted)) l.handler.call(globalThis.window);
+const listen = (list) => (type, handler, opts) => { list.push({ type, handler, signal: opts && opts.signal }); };
+globalThis.document = { getElementById: (id) => el(id), activeElement: null, body: { dataset: {} }, addEventListener: listen(docListeners) };
+globalThis.window = { addEventListener: listen(windowListeners) };
+function dispatchTo(list, target, type, ev) {
+  for (const l of [...list]) if (l.type === type && !(l.signal && l.signal.aborted)) l.handler.call(target, ev);
 }
+const dispatchWindow = (type, ev) => dispatchTo(windowListeners, globalThis.window, type, ev || { type });
+const liveListeners = (list, type) => list.filter((l) => l.type === type && !(l.signal && l.signal.aborted)).length;
 const realSetTimeout = setTimeout;
 let now = 0;
 const RealDate = Date;
 globalThis.Date = class extends RealDate { static now() { return now; } };
-globalThis.setTimeout = (fn, ms) => { now += ms; queueMicrotask(fn); return 0; };
+let timers = [];
+let timerSeq = 0;
+globalThis.setTimeout = (fn, ms) => { const id = ++timerSeq; timers.push({ id, at: now + Math.max(0, Number(ms) || 0), fn }); return id; };
+globalThis.clearTimeout = (id) => { timers = timers.filter((x) => x.id !== id); };
 const settle = () => new Promise((resolve) => realSetTimeout(resolve, 0));
+async function advance(until) {
+  for (;;) {
+    await settle();
+    timers.sort((a, b) => a.at - b.at || a.id - b.id);
+    const due = timers[0];
+    if (!due || due.at > until) break;
+    timers.shift();
+    now = Math.max(now, due.at);
+    due.fn();
+  }
+  now = Math.max(now, until);
+  await settle();
+}
 const posts = [];
 const gets = [];
 let statuses = [];
+const HOLD = "hold";
+const FAIL = "fail";
+const held = [];
+function release(st) {
+  const h = held.shift();
+  if (h) h.resolve(st);
+}
+const abortError = () => { const e = new Error("aborted"); e.name = "AbortError"; return e; };
 const API = {
   post(path, body, signal) {
     posts.push({ path, body, signal });
     return new Promise((resolve, reject) => {
-      if (signal) signal.addEventListener("abort", () => { const e = new Error("aborted"); e.name = "AbortError"; reject(e); });
+      if (signal) signal.addEventListener("abort", () => reject(abortError()));
     });
   },
-  async get(path) {
+  get(path, signal) {
     gets.push(path);
-    return statuses.length > 1 ? statuses.shift() : statuses[0];
+    const next = statuses.length > 1 ? statuses.shift() : statuses[0];
+    if (next === FAIL) return Promise.reject(new Error("the bridge did not answer"));
+    if (next !== HOLD) return Promise.resolve(next);
+    return new Promise((resolve, reject) => {
+      held.push({ resolve });
+      if (signal) signal.addEventListener("abort", () => reject(abortError()));
+    });
   },
 };
+const fetches = [];
+globalThis.fetch = (url) => new Promise((resolve, reject) => { fetches.push({ url, resolve, reject }); });
 let pageAbort = null;
 let playerOutputLatest = null;
 let playerOutputSeq = 0;
-function renderPlayerOutput(st) { playerOutputLatest = st; }
-`
-
-// tonePageRun plays a tone on a fresh page for each case and ends it as the
-// case does, printing what the page posted and read and what its line says.
-const tonePageRun = `
-const status = (state) => ({ available: true, running: { tone: { state, levelDBFS: -40, seconds: 10,
+let lineAt = -1;
+function renderPlayerOutputRunning() {}
+function renderPlayerOutputTransports() {}
+function renderPlayerOutputConfigured() {}
+function renderPlayerOutputOpenHome() {}
+function playerOpenHomeNote() { return ""; }
+function renderPlayerOutputPending() {}
+const status = (state) => ({ available: true, managed: {}, running: { tone: { state, levelDBFS: -40, seconds: 10,
   format: "S24_3LE", rateHz: 48000, validBits: 24, outcome: state === "idle" ? "request_ended" : "", lastError: "" } } });
+// freshPage wires the tone on a page of its own: a line that notes when it
+// was last set, its controls, and its scope.
 function freshPage() {
-  els.clear(); posts.length = 0; gets.length = 0; windowListeners.length = 0; now = 0;
+  els.clear(); posts.length = 0; gets.length = 0; held.length = 0; fetches.length = 0;
+  docListeners.length = 0; windowListeners.length = 0; timers = []; now = 0; lineAt = -1;
   if (pageAbort) pageAbort.abort();
   pageAbort = new AbortController();
+  const line = el("player-output-tone-msg");
+  let text = "";
+  Object.defineProperty(line, "textContent", { get: () => text, set: (v) => { text = String(v); lineAt = now; } });
   el("player-output-tone-level").value = "-40";
   el("player-output-tone-seconds").value = "10";
   el("player-output-tone-stop").disabled = true;
-  playerOutputLatest = { available: true, running: {} };
+  playerOutputLatest = { available: true, managed: {}, running: {} };
   wirePlayerOutputTone();
 }
 const out = [];
+`
+
+// tonePageRun plays a tone on a fresh page for each case and ends it as the
+// case does, the clock run on past every timer, printing what the page posted
+// and read, what its line says and when it was last set.
+const tonePageRun = `
 async function run(name, queued, end) {
   freshPage();
   statuses = queued;
@@ -482,16 +715,118 @@ async function run(name, queued, end) {
   await settle();
   const signal = posts[0] && posts[0].signal;
   end();
-  await settle();
+  await advance(10000);
   out.push({ name, posts: posts.map((p) => p.path), aborted: Boolean(signal && signal.aborted), gets: gets.length,
-    line: el("player-output-tone-msg").textContent, playDisabled: el("player-output-tone-play").disabled,
+    line: el("player-output-tone-msg").textContent, lineAt, playDisabled: el("player-output-tone-play").disabled,
     stopDisabled: el("player-output-tone-stop").disabled });
 }
 const stop = () => el("player-output-tone-stop").click();
 await run("confirmed", [status("playing"), status("stopping"), status("idle")], stop);
 await run("playing to the end", [status("playing")], stop);
 await run("stopping to the end", [status("stopping")], stop);
+await run("a read that never answers", [HOLD], stop);
 await run("pagehide", [status("playing")], () => dispatchWindow("pagehide"));
 await run("the page's scope", [status("playing")], () => pageAbort.abort());
+console.log(JSON.stringify(out));
+`
+
+// toneRouterRun plays a tone on a fresh page with the console's router wired
+// for each case, starts a navigation as the case does (a click on a link the
+// router takes, or a popstate to another page, held at the fetch's headers or
+// at its body; or one of the router's refusals), and prints, while the
+// navigation is held, whether the tone's request was aborted and the page's
+// scope stands, what Stop's confirmation read and said, then what the
+// navigation's fallback loaded once its fetch failed.
+const toneRouterRun = `
+const BOOST_ENABLED = true;
+let boostGen = 0;
+let lastBoostPath = "/output";
+const assigned = [];
+const origin = "http://127.0.0.1:7789";
+globalThis.location = { origin, pathname: "/output", hash: "", search: "", href: origin + "/output", assign: (h) => { assigned.push(h); } };
+globalThis.history = { pushState() {} };
+function boostUpdateTopNav() {}
+function runInlineScripts() {}
+function boostFocusMain() {}
+function dispatchPageInit() {}
+function recycleEventStream() {}
+const goTo = (path) => { location.pathname = path; location.href = origin + path; };
+function clickLink(href, opts) {
+  const o = opts || {};
+  const a = { href: new URL(href, origin).href, target: o.target || "", hasAttribute: (n) => n === "download" && Boolean(o.download) };
+  const ev = { defaultPrevented: false, button: 0, metaKey: Boolean(o.metaKey), ctrlKey: false, shiftKey: false, altKey: false,
+    target: { closest: () => a }, preventDefault() { this.defaultPrevented = true; } };
+  dispatchTo(docListeners, globalThis.document, "click", ev);
+}
+const bodies = [];
+const answerHeaders = () => fetches[0].resolve({ ok: true, redirected: false,
+  headers: { get: (h) => ({ "X-Bridge-Active": "settings", "X-Bridge-Section": "operator" })[h] || null },
+  text: () => new Promise((resolve, reject) => { bodies.push({ resolve, reject }); }) });
+async function navigate(name, start, holdBody) {
+  freshPage();
+  goTo("/output"); lastBoostPath = "/output"; assigned.length = 0; bodies.length = 0;
+  wireBoostRouter();
+  statuses = [status("playing")];
+  el("player-output-tone-play").click();
+  await settle();
+  const signal = posts[0].signal;
+  const scope = pageAbort.signal;
+  start();
+  await settle();
+  const started = fetches.length > 0;
+  if (started && holdBody) { answerHeaders(); await settle(); }
+  const pending = started && (holdBody ? bodies.length === 1 : true);
+  const seen = { name, started, pending, aborted: signal.aborted, scopeAborted: scope.aborted, gets: gets.length,
+    line: el("player-output-tone-msg").textContent, fetches: fetches.length };
+  if (started) {
+    if (holdBody) bodies[0].reject(new Error("cut")); else fetches[0].reject(new Error("cut"));
+    await settle();
+  }
+  out.push({ ...seen, assigned: [...assigned] });
+}
+await navigate("a link, its headers held", () => clickLink("/settings"), false);
+await navigate("a link, its body held", () => clickLink("/settings"), true);
+await navigate("a popstate to another page, its headers held", () => { goTo("/settings"); dispatchWindow("popstate"); }, false);
+await navigate("a popstate to another page, its body held", () => { goTo("/settings"); dispatchWindow("popstate"); }, true);
+await navigate("a modified click", () => clickLink("/settings", { metaKey: true }), false);
+await navigate("another target", () => clickLink("/settings", { target: "_blank" }), false);
+await navigate("a download", () => clickLink("/settings", { download: true }), false);
+await navigate("another origin", () => clickLink("https://elsewhere.example/settings"), false);
+await navigate("an anchor on the page", () => clickLink("/output#tone"), false);
+await navigate("the page's own address", () => clickLink("/output"), false);
+await navigate("a popstate within the page", () => dispatchWindow("popstate"), false);
+console.log(JSON.stringify(out));
+`
+
+// toneShownAgainRun hides a page and shows it again from the back/forward
+// cache for each case, on the DOM and listeners its one wiring made, and
+// prints what its line says against what the shipped words say of the idle
+// tone the status reads, the page's message line, its controls, and how many
+// listeners Play, Stop, pagehide and pageshow have.
+const toneShownAgainRun = `
+const shownAgain = { type: "pageshow", persisted: true };
+async function cached(name, queued, before, after) {
+  freshPage();
+  statuses = queued;
+  el("player-output-tone-play").click();
+  await settle();
+  const signal = posts[0].signal;
+  before();
+  await settle();
+  after();
+  await settle();
+  release(status("playing"));
+  await advance(10000);
+  out.push({ name, posts: posts.map((p) => p.path), aborted: signal.aborted, line: el("player-output-tone-msg").textContent,
+    idle: playerToneStatusText(status("idle").running.tone), msg: el("player-output-msg").textContent,
+    playDisabled: el("player-output-tone-play").disabled, stopDisabled: el("player-output-tone-stop").disabled,
+    listeners: [(el("player-output-tone-play").listeners.click || []).length, (el("player-output-tone-stop").listeners.click || []).length,
+      liveListeners(windowListeners, "pagehide"), liveListeners(windowListeners, "pageshow")] });
+}
+const hideAndShow = () => { dispatchWindow("pagehide"); dispatchWindow("pageshow", shownAgain); };
+await cached("hidden with a Stop's confirmation out", [HOLD, status("idle")], () => el("player-output-tone-stop").click(), hideAndShow);
+await cached("hidden with its tone out", [status("idle")], () => {}, hideAndShow);
+await cached("shown again where the status cannot be read", [FAIL], () => {}, hideAndShow);
+await cached("a pageshow that is not the cache's", [status("idle")], () => {}, () => dispatchWindow("pageshow", { type: "pageshow", persisted: false }));
 console.log(JSON.stringify(out));
 `
