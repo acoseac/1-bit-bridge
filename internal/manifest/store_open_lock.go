@@ -106,8 +106,8 @@ var storeLocks = struct {
 // storeLockKey keys the registry: the database's path made absolute and
 // cleaned, its directory resolved where it is there (filepath.EvalSymlinks:
 // macOS's /var reached as /private/var, a Windows short name), so two
-// spellings of one data directory meet one hold (Carbon on B653 PR 2a's
-// brief); a directory not there yet keys as written. The bridge opens its
+// spellings of one data directory meet one hold (B653 PR 2a's brief
+// review); a directory not there yet keys as written. The bridge opens its
 // store at DefaultDBPath(dataDir) alone
 // (TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase), so serve's store and
 // its ticker's snapshot meet one key either way; two spellings through a
@@ -344,7 +344,7 @@ var (
 // SQLite holds for it has closed, after db.Close has returned: database/sql
 // closes the idle connections at its Close, and one a transaction, a Conn or
 // an open Rows holds when it returns it, so a transaction under way at Close
-// can still commit after Close has returned (Codex on B653 PR 2a's brief).
+// can still commit after Close has returned (B653 PR 2a's brief review).
 // Where none is open the hold goes at once; otherwise a goroutine waits for
 // the last one, never Close's caller.
 func (s *Store) letGoOfTheHold() {

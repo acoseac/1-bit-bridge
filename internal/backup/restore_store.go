@@ -50,7 +50,7 @@ func snapshotUserVersion(path string) (int, error) {
 // database: its target is set, the snapshot lists the database, and its file
 // is there (one whose stat fails otherwise is attempted, and fails, in the
 // loop). That, and nothing else, is what records a store change in an armed
-// install (Codex on B653 PR 2a's brief, finding 4): a snapshot that holds no
+// install (B653 PR 2a's brief review, finding 4): a snapshot that holds no
 // database, or a restore whose targets leave it out, changes no store.
 func restoreReplacesDatabase(snapshotDir, dbTarget string, files []string) bool {
 	if dbTarget == "" || !slices.Contains(files, ManifestDBFileName) {

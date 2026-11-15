@@ -141,7 +141,7 @@ func writeJournal(t *testing.T, path, kind string) {
 // none of the database's files is made, where OpenStore precreated an empty
 // store before (internal/manifest/store.go's Precreate). And a link at the
 // lifetime lock's own file, leading to where the database would be, makes
-// nothing either, a journal standing beside it (Codex on PR 2a's brief).
+// nothing either, a journal standing beside it (PR 2a's brief review).
 func TestAnOpenOverAnUnfinishedRestoreRefusesAndMakesNothing(t *testing.T) {
 	for _, kind := range []string{"file", "dir", "link"} {
 		t.Run("a journal that is a "+kind, func(t *testing.T) {
@@ -346,7 +346,7 @@ func TestOneProcessHoldsTheStoreOnce(t *testing.T) {
 	// (macOS's /var and /private/var), are one hold: an open through the link
 	// counts on the exclusive hold taken by the real path, where a hold keyed
 	// by spelling would try a second descriptor and meet its own process's
-	// exclusive lock (Carbon on PR 2a's brief).
+	// exclusive lock (PR 2a's brief review).
 	t.Run("two spellings of one data directory are one hold", func(t *testing.T) {
 		real := t.TempDir()
 		link := filepath.Join(t.TempDir(), "data")
@@ -516,8 +516,8 @@ func TestALockFileThisUserMayOnlyReadStillHoldsTheStore(t *testing.T) {
 	hold.Release()
 }
 
-// TestAClosedStoreHoldsItsLockUntilItsLastTransactionEnds (Codex on PR 2a's
-// brief, finding 1): database/sql's Close closes the idle connections, and a
+// TestAClosedStoreHoldsItsLockUntilItsLastTransactionEnds (PR 2a's brief
+// review, finding 1): database/sql's Close closes the idle connections, and a
 // transaction under way keeps its own until it ends, so a store closed while
 // a SetUpscaleTarget is parked before its commit keeps another process's
 // restore out until that transaction has ended, and then lets go.

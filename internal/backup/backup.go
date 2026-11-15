@@ -263,7 +263,7 @@ func captureInto(ctx context.Context, src Sources, own **owner) (snapDir string,
 	// before it writes anything, the player seal's completion, the backups
 	// folder and the snapshot's directory included, until its source has
 	// closed, and asks the restore's journal under it (backlog B653 PR 2a;
-	// Codex on its brief): a restore's hold refuses the capture
+	// its brief's review): a restore's hold refuses the capture
 	// (manifest.ErrStoreRestoring), and so does an unfinished restore
 	// (manifest.ErrRestoreIncomplete), so no snapshot without its database
 	// is published. Serve's ticker counts on serve's own hold.
@@ -556,7 +556,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 		wait = VerifyCmdLockWait
 	}
 	// The store's lifetime lock, exclusively, before anything else (backlog
-	// B653 PR 2a; Carbon on its brief): bridge restore holds it from before
+	// B653 PR 2a; its brief's review): bridge restore holds it from before
 	// its prompt, and is counted on here; any other caller takes it here. A
 	// command that has the database open refuses the restore, nothing
 	// restored (manifest.ErrStoreHeld), and so does storage that grants no

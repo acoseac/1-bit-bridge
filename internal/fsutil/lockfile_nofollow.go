@@ -20,7 +20,7 @@ var ErrLockFileNotAFile = errors.New("the lock file is not a regular file")
 // regular file. OpenLockFileLike opens through dir's os.Root, which follows a
 // link that stays inside dir, so a dangling `bridge.db-open.lock` link to
 // `bridge.db` would make the database at the lock's first open, before the
-// store's own link check ran (Codex on B653 PR 2a's brief). The directories
+// store's own link check ran (B653 PR 2a's brief review). The directories
 // above name are followed as the path names them: a data dir that is a link
 // is the operator's.
 //

@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestResetBackupEpochReadsItsCheckpointsAnswer (T36's decoding half, Codex
-// on PR 2a's brief, finding 5): the epoch's TRUNCATE checkpoint answers a
+// TestResetBackupEpochReadsItsCheckpointsAnswer (T36's decoding half,
+// PR 2a's brief review, finding 5): the epoch's TRUNCATE checkpoint answers a
 // row (busy, log, checkpointed), and ResetBackupEpoch answers
 // ErrEpochCheckpointBusy unless busy is 0 and every frame of the WAL was
 // checkpointed, so its caller keeps a WAL that holds commits. The real

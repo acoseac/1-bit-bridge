@@ -197,7 +197,7 @@ func requireSealStillOwed(t *testing.T, dir string) {
 // another process's restore holding the store's lifetime lock exclusively, a
 // live snapshot is refused (manifest.ErrStoreRestoring) before it writes
 // anything: no backups folder made, a player seal it owes not completed, the
-// data directory byte for byte as it was (Codex on PR 2a's brief, finding 3).
+// data directory byte for byte as it was (PR 2a's brief review, finding 3).
 func TestARestoreHoldKeepsEveryOpenerOut(t *testing.T) {
 	reservationStorage(t)
 	dir := loneSealBox(t)
@@ -269,7 +269,7 @@ func TestTheFullRestoreRefusesWhileADatabaseRestoreIsUnfinished(t *testing.T) {
 	requireSealStillOwed(t, dir)
 }
 
-// TestEveryRestoreTakesTheStoresLockItself (Carbon on PR 2a's brief, its
+// TestEveryRestoreTakesTheStoresLockItself (PR 2a's brief review, its
 // first finding): RestoreWithOptions, called by any caller and not bridge
 // restore alone, takes the store's lifetime lock exclusively before it
 // touches anything: beside a store another process has open it is refused
@@ -306,7 +306,7 @@ func armedInstall(failedStarts int) updater.State {
 // its first write to the restored files, and where its record is due and the
 // marker's lock cannot be taken it refuses with nothing written. A snapshot
 // that holds no database, and a restore that leaves the database out, record
-// nothing (Codex on the brief, finding 4). Until B653 PR 2a nothing was
+// nothing (the brief's review, finding 4). Until B653 PR 2a nothing was
 // recorded for a snapshot at the top (the only recording case was a migrating
 // one).
 func TestARestoreOverAnArmedInstallKeepsEveryRollbackOff(t *testing.T) {
@@ -477,8 +477,8 @@ func epochOf(t *testing.T, path string) string {
 	return epoch
 }
 
-// TestTheFullRestoreKeepsAWALWhoseEpochDidNotCheckpoint (T36, Codex on the
-// brief, finding 5): a real reader transaction, taken once the restored
+// TestTheFullRestoreKeepsAWALWhoseEpochDidNotCheckpoint (T36, the brief's
+// review, finding 5): a real reader transaction, taken once the restored
 // store is open and before its epoch is minted, keeps the TRUNCATE
 // checkpoint from completing; the restore then keeps the -wal and -shm, says
 // the epoch is still in the WAL, and returns, the new epoch in the WAL alone

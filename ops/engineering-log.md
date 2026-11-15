@@ -100480,18 +100480,18 @@ The lock file is opened without following a link at its name
 descriptor's own kind on unix, `FILE_FLAG_OPEN_REPARSE_POINT` and the handle's
 attributes on Windows), for writing and, where that open is refused for want
 of the right to write, for reading (a shared lock takes a read descriptor), so
-a dangling `bridge.db-open.lock` link to `bridge.db` makes nothing (Codex on
-the brief, finding 2); it is a store sidecar for the link check too.
+a dangling `bridge.db-open.lock` link to `bridge.db` makes nothing (the
+brief's review, finding 2); it is a store sidecar for the link check too.
 `Store.Close` lets the hold go once `database/sql` has closed every
 connection, not at its return: Close closes the idle connections and a
-transaction keeps its own until it ends (Codex on the brief, finding 1).
+transaction keeps its own until it ends (the brief's review, finding 1).
 
 ### The journal's refusal (inert until PR 2b)
 
 `manifest.RestoreJournalPath` (`<db>-restore.json`): any entry there refuses,
 with `ErrRestoreIncomplete` and nothing made, every opener (asked under the
 shared hold, before the link check and `Precreate`, carbon-2), the live
-snapshot (before its first write, Codex on the brief, finding 3), the full
+snapshot (before its first write, the brief's review, finding 3), the full
 restore (right after `holdSource`, before the player seal's completion),
 `bridge restore` (before any snapshot is looked at, codex-4), and serve's
 crash and early rollbacks (before any marker write or rename).
@@ -100500,7 +100500,7 @@ crash and early rollbacks (before any marker write or rename).
 
 `RestoreWithOptions` calls `updater.DisarmBeforeMigrating` before its first
 write to the restored files wherever it replaces the database (the target
-set, the snapshot listing it and holding its file, Codex on the brief,
+set, the snapshot listing it and holding its file, the brief's review,
 finding 4), whatever the snapshot's version: an armed install records
 `StoreMigratedBy` and `DataDirOpenedBy`, and every rollback refuses after it.
 `restoreMigrationHeld` reads the snapshot's `user_version` through the
@@ -100508,7 +100508,7 @@ snapshot reader (`openSnapshotReader`, the one-file VFS with `immutable=1`),
 so the lifetime lock never makes a file in a snapshot. `ResetBackupEpoch`
 reads its checkpoint's row and answers `ErrEpochCheckpointBusy` unless busy is
 0 and every frame was checkpointed; the restore then keeps the `-wal` and
-`-shm` and says so (Carbon on the brief, its third finding).
+`-shm` and says so (the brief's review, its third finding).
 
 ### The rename that never replaces, measured on this host
 

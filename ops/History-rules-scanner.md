@@ -3936,14 +3936,14 @@
   under this process's exclusive hold counts on it (the full restore's own epoch open), and an exclusive
   acquire under its shared hold refuses (`ErrStoreHeld`). The registry keys a hold by the database's
   path with its directory resolved (`filepath.EvalSymlinks`), so two spellings of one data directory,
-  macOS's /var and /private/var, meet one hold (Carbon on the brief). The journal (`manifest.RestoreJournalPath`,
+  macOS's /var and /private/var, meet one hold (the brief's review). The journal (`manifest.RestoreJournalPath`,
   `<db>-restore.json`, written by PR 2b's database-only restore) is asked under the hold, so a restore,
   which needs the lock exclusively first, cannot write it between an opener's check and its
   `Precreate`, which would make an empty store where the restore moved the database out (carbon-2).
   The lock file is opened without following a link at its name (`fsutil.OpenLockFileNoFollow`), for
   writing and, where that open is refused for want of the right to write, for reading, which a shared
   lock takes (a doctor run by another user); a link there makes nothing, and the lock file is a store
-  sidecar for the link check (Codex on the brief, finding 2). `Store.Close` lets the hold go once
+  sidecar for the link check (the brief's review, finding 2). `Store.Close` lets the hold go once
   `database/sql` has closed every connection, since a transaction keeps its own past Close (finding
   1). ENOLCK refuses because Linux also answers it on a filesystem that keeps locks, beside a holder,
   when it cannot allocate a lock record (`fsutil.NoLockToGive`, the one reading the config file's lock

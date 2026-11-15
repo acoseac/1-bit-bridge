@@ -33,7 +33,7 @@ var sqlOpenSites = map[sqlOpenSite]string{
 
 // The admission functions, each with the calls that must come in this order
 // by their position in its body: the hold first, the journal under it, and
-// the call that leads to the open last (Codex on PR 2a's brief, finding 6:
+// the call that leads to the open last (PR 2a's brief review, finding 6:
 // the hold and the open are in different functions, so the order is checked
 // where the hold is taken, and the chain to the open apart).
 var admissionOrder = map[sqlOpenSite][]string{
