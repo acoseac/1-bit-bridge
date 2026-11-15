@@ -100512,3 +100512,180 @@ Against 3f4843e1: production +1,203 −185 lines (code +641 −94), tests +2,243
 ### What stays open
 
 Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
+
+## 2026-11-15 — B898 PR 1, round 2: each step tried by its operation's deadline
+
+Branch `fix/b898-updater-held-binary` from round 1's head 046cd677, every run
+on the Linux test host, Go 1.27.3, TMPDIR outside the worktree. Commits:
+a2ba28ab (the deadlines and their tests), 2f9c9f81 (the Windows hold tests),
+8f79e202 (the rules, their History twins and the moves), 64b1e977 (round 1's
+record reworded, N9, fbe92a26's Windows tests), then this record.
+
+### The findings and what changed
+
+1. The forward and recovery bounds were budgets of nominal waits: a step's
+   own time (a slow probe, a slow staging copy, a rename that takes time, a
+   wait the host overran) cost nothing, so an operation could go on with its
+   whole schedule after its time had run out. Each is now a deadline on a
+   monotonic clock (`deadline` in `held.go`): the forward one set as the swap
+   or the rollback begins, shared by its staging, its probes and the
+   rollback's vacate; the recovery one set as the put-back begins; both read
+   on the moves' clock (`moves.now`; `renameNow`, `time.Now` in production,
+   whose monotonic reading `time.Time`'s comparisons use). A wait is made only
+   where it ends at or before its deadline, and an attempt begun only at or
+   before it, so where the steps take no time the schedules are as before:
+   eight attempts, the last at 4.75 s, and seven, the last at 3.15 s, and
+   `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed` keeps its
+   expectations, the steps after the spent deadline tried at the deadline
+   itself. Once the deadline is seen to have passed, no further step, attempt
+   or wait of the operation's is begun: a step not tried answers
+   `ErrDeadlinePassed`, a `*SwapError` that is `NothingMoved` (or
+   `BinaryMissing` on the rollback's missing-binary path) and never `InUse`,
+   since no hold was seen; a wait the host overran past the deadline is
+   followed by no attempt; a swap whose last probe landed past it arms
+   nothing. Two transitions complete whatever the time: the place after a
+   vacate that landed (`once` asks no deadline), and the put-back, whose
+   deadline is set as it begins and whose late landing is its success. A
+   step under way is not cut short, so a deadline bounds what is begun, and
+   `inUseError` counts its waits at their lengths in the schedule. The boot's
+   rollback keeps its vetoed marker for `ErrDeadlinePassed` as for a hold.
+   `RestoreSeams.Now` gives a test's put-back a clock its waits move
+   (`time.Now` where nil), and the rigs' clocks move only by their waits and
+   by a step a case says takes time (`heldRig`'s `took` and `over`,
+   `heldRestore`'s `took`, Windows' `realHolds`).
+2. Two of Windows' hold tests read files they still held:
+   `TestARollbackHeldThroughItsWaitMovesNothing` read the backup through its
+   share-mode-0 handle, and `TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre`
+   the aside and the backup through theirs (the backup held at the place, the
+   aside at its first put-back attempt). `readBytes` answered a read that
+   failed with "", so each failed on a byte comparison, as if a file had
+   moved. Each now keeps its let-go and calls it once the rollback has
+   returned, before any read, as does the held-throughout case of
+   `TestAnInstallWaitsForItsCheckedCandidateBeforeItArms`, and `readBytes`
+   fails the test on a read that fails ("read <path>: <error>"). The PR's
+   other Windows tests let a hold go at its first refusal (`letGoAtRefusalOf`)
+   before they read, or hold nothing.
+3. The rules were not on the branch: 8f79e202 is the patch, committed. Its
+   moves were made by `move_entry.py` and proven by `verify_moves.py --base
+   HEAD` with its four edited blocks (the B613 and B707 lines and their
+   History twins) put back to the base's words (PASS); the B898 line is
+   condensed in `config-lifecycle.md` (99,436 bytes of its 100,000), its long
+   form in the History file's B898 section. At 8f79e202 `make docs-check` is
+   clean, and cmd/bridge's `TestEveryCitedTestNameExists`,
+   `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass; a
+   citation of a test nothing declares, planted in the History file of a copy,
+   failed the first.
+4. Round 1's record named who ran it and where; it now says the Linux test
+   host.
+5. `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse`'s "refused
+   otherwise" case passed with the restore skipped, since a cleared install
+   is what it asserted: each case now asserts every call its put-back made and
+   what each answered (exactly off Windows; on Windows, where a scanner of the
+   host's may hold a file too, its last calls), so that case needs the place
+   denied and the put-back landed. Its new "out of time" case is a slow probe
+   of the backup.
+6. `defaultStateLockWait`'s list names the boot's backup version and the
+   crash rollback (backlog B898's F1), and says how a rename's waits are
+   bounded: the schedules' waits, no attempt begun past a deadline, a step
+   under way taking what its filesystem takes.
+7. N9's withdrawal is said under round 1's controls.
+8. `TestAnInstallWaitsForItsCheckedCandidateBeforeItArms` runs each case
+   under `t.Run`; `holdShareNone` puts a file whose premise rename landed
+   back, its handle closed first, before the case fails.
+9. The statement on fbe92a26's Windows tests is under round 1's record.
+
+### Reds at round 1's head
+
+Each new or changed test ran over 046cd677's code through `go test
+-overlay`: the production files at 046cd677, a names-only shim
+(`renameNow` and `ErrDeadlinePassed` declared and unused) and 046cd677's
+`RestoreSeams` with a `Now` field declared; each prediction written before
+its run. Every prediction held.
+
+- `internal/updater`: `TestEveryStepIsTriedByItsOperationsDeadline` red on
+  nine rows of twelve (a slow probe of the binary, of the backup, and of the
+  backup on the missing-binary path; a held probe whose attempts each take a
+  second, eight attempts where five fit; a wait overrun inside the deadline
+  and one past it, eight attempts where six and seven fit; the candidate's
+  slow probe; a final probe that lands late, after which it armed; a slow
+  staging), green on the three boundaries the old code keeps too (a vacate
+  that lands late, then its place; a put-back that lands late, the
+  rollback's and the swap's); `TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried`
+  red (the swap landed); every row of the unchanged schedule table and
+  `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed` green.
+- `cmd/bridge`: `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse`'s
+  "out of time" red ("the put-back's calls: ?bin ok, ?bak ok, bin>aside ok,
+  bak>bin ok", the install cleared); its other three cases green.
+- Windows, not run on the Linux test host: at 046cd677 windows-latest should
+  show `TestARollbackHeldThroughItsWaitMovesNothing` red ("a file moved") and
+  `TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre` red ("asides … want
+  the binary aside and the backup where it was"), each from a read of a file
+  the case still held, and both green at 2f9c9f81.
+
+### Negative controls
+
+Each an uncommitted mutation of the committed round, applied by a runner that
+reads each file's bytes first and writes them back after the run, `git
+status` empty after the batch; each prediction written before the run; every
+mutation built. Nine of ten went red exactly where predicted, the cases
+predicted green staying green; R3 went red where predicted and once more:
+
+- R1, the deadline subtracting only the schedule again (round 1's budget):
+  every row of the deadline table a step's time decides, the slow copy and
+  the boot's "out of time"; the boundaries, the schedule table, the put-back
+  case and "refused otherwise" green.
+- R2, the swap armed whatever its probes' time: the final probe's row alone.
+- R3, the rollback's place tried by the forward deadline: the late vacate's
+  row (the place untried, the aside put back), and, not predicted, the
+  rollback's late put-back row, whose message gains the in-use words `try`
+  gives the place's refusal.
+- R4, a put-back that lands past its deadline taken for a failure: both late
+  put-back rows.
+- R5, a step left untried read as one that landed: the rollback's two
+  slow-probe rows (the place then renames the backup over the binary), the
+  missing-binary row (answered nil), the slow staging's row (answered by the
+  arming check, in other words) and the boot's "out of time".
+- R6, the boot clearing its marker for `ErrDeadlinePassed`: "out of time"
+  alone.
+- R7, finding 5's: the boot skipping its restore and still clearing the
+  install: all four cases, "refused otherwise" by its calls, none made.
+- R8, an attempt after a wait the host overran past the deadline: that row
+  alone.
+- R9, a wait that ends exactly at the deadline not made: every
+  held-throughout row (seven attempts) and the put-back case.
+- R10, an attempt exactly at the deadline not made: the put-back case and
+  the shared-deadline row.
+- W1, `TestARollbackHeldThroughItsWaitMovesNothing` reading the backup before
+  its hold is let go, and W2, `readBytes` ignoring a read that fails: both
+  build for Windows (vet); W1's red is windows-latest's ("read …bridge.exe.bak:
+  The process cannot access the file because it is being used by another
+  process."), and W2 turns nothing red at 2f9c9f81, where no read meets a
+  hold.
+
+### The runs
+
+- The x50, 19:12 to 19:32, at 64b1e977: every test the PR adds or changes
+  that runs on the Linux test host, 53 in three packages (round 1's 51 and
+  round 2's two), `-race -count=50` each alone, from race test binaries built
+  once (make test's tags), four lanes at GOMAXPROCS 4, another build in the
+  slot beside them: all passed, the longest
+  `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (371 s) and
+  `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (363 s).
+- The gate, in the build slot, 20:00 to 20:32, at 64b1e977: `go vet ./...`
+  for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64 (cgo off for
+  the cross targets) and `GOOS=linux GOARCH=386 make vet`, clean; the three
+  packages' tests built for Windows; `make test P=8` with
+  `TEST_PKGS='-count=1 -timeout 45m ./...'`, 89 packages ok in 1,812 s
+  (cmd/bridge 1,760 s, manifest 1,697 s, admin 1,176 s, updater 42 s);
+  `make build-all` clean; the pinned gofmt over every Go file the PR touches
+  listed nothing; `make docs-check` clean.
+- Not run on the Linux test host: windows-latest (the hold tests, and W1's
+  red).
+
+### Size
+
+Round 2 against 046cd677: production +145 −75 lines, tests +308 −70.
+
+### What stays open
+
+Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
