@@ -633,26 +633,30 @@ func (b *Backend) CloseTones() {
 // ToneStatus is the console's tone now, read under the backend's lock, with
 // no I/O: playing, stopping (ended, its close not answered), stop_unconfirmed
 // (ended more than ToneStopWait ago, its close not answered),
-// release_unconfirmed (a tone's cleanup did not answer cleanly) or idle.
+// release_unconfirmed (a tone's cleanup did not answer cleanly) or idle. It
+// is built in one literal from a phase of its own: internal/api's census of
+// the protocol's observation states reads every assignment to a State in
+// this package as one.
 func (b *Backend) ToneStatus() ToneStatus {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	st := ToneStatus{State: ToneIdle, Last: b.toneLast}
+	phase := ToneIdle
 	if b.toneFenced {
-		st.State = ToneStateReleaseUnconfirmed
+		phase = ToneStateReleaseUnconfirmed
 	}
-	if t := b.toning; t != nil {
-		st.Request, st.Format, st.RateHz, st.ValidBits = t.req, t.format, t.rate, t.bits
-		switch {
-		case t.stopUnconfirmed:
-			st.State = ToneStateStopUnconfirmed
-		case t.ctx.Err() != nil:
-			st.State = ToneStateStopping
-		default:
-			st.State = ToneStatePlaying
-		}
+	t := b.toning
+	if t == nil {
+		return ToneStatus{State: phase, Last: b.toneLast}
 	}
-	return st
+	switch {
+	case t.stopUnconfirmed:
+		phase = ToneStateStopUnconfirmed
+	case t.ctx.Err() != nil:
+		phase = ToneStateStopping
+	default:
+		phase = ToneStatePlaying
+	}
+	return ToneStatus{State: phase, Request: t.req, Format: t.format, RateHz: t.rate, ValidBits: t.bits, Last: b.toneLast}
 }
 
 // The tone's seams (Seams.ToneEntering and the rest).
