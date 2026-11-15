@@ -18,7 +18,7 @@ import (
 // by its file, relative to the module root, and its name.
 type sqlOpenSite struct{ file, fn string }
 
-// liveOpeners are the sql.Open sites of production code, each with why it may
+// sqlOpenSites are the sql.Open sites of production code, each with why it may
 // open what it opens (backlog B653 PR 2a, T6): a fourth site must be added
 // here with its reason, and a site that opens the live database only behind
 // the lifetime lock's hold.

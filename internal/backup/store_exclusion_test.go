@@ -183,7 +183,7 @@ func ladderTopSnapshot(t *testing.T) string {
 	return snap
 }
 
-// requireNoSeal requires the box at dir's lone seal still owed: the restore
+// requireSealStillOwed requires the box at dir's lone seal still owed: the restore
 // or the capture never reached its completion, which writes the initialized
 // marker.
 func requireSealStillOwed(t *testing.T, dir string) {
