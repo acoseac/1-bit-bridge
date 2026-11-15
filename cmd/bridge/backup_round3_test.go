@@ -183,6 +183,11 @@ type unlockHold struct {
 	over  atomic.Bool
 	heard sync.Once
 	ended chan struct{}
+	// probe asks the folder's lock where the end is heard: backupsLockHeld,
+	// or a test's stand-in that parks there. asks counts the asks begun and
+	// not ended, each announced before the hook reads over (awaitAsks).
+	probe func(root string) (bool, error)
+	asks  atomic.Int32
 	// held and heldErr are what the end found of the folder's lock, written
 	// before ended closes.
 	held    bool
@@ -204,18 +209,21 @@ type unlockHold struct {
 // here. A held unlock is let go as the test's body ends (its context's end,
 // which comes before any cleanup), so no cleanup the test registers once it
 // has its snapshot waits on the worker it holds. The other cleanup, which
-// runs before the seam's restore, lets a held unlock go and waits until no
-// hold is left: the debt is the holders', counted by the backup package from
-// before a verification takes its slot until its worker has let go of all it
-// held, never the hook's, which a worker parked before its unlock, a
-// verification refused before its worker began, and the worker that writes the
-// INCOMPLETE of one abandoned in its slot's wait (which runs no end hook) never
-// enter. Past its bound it ends the run (awaitNoHolds' endTheRun) rather than
-// let the seam's restore and the fixture's removal run beside a holder still
-// running (backlog B869).
+// runs before the seam's restore, marks the test's end and lets a held unlock
+// go (letGo), waits for an ask of the folder's lock the end hook began before
+// that mark (awaitAsks: a worker runs its end hook once it has dropped its
+// hold, so no hold counts it), and then waits until no hold and no refused
+// verification's let-go is left (awaitNoHolds): the debt is the holders',
+// counted by the backup package from before a verification takes its slot
+// until its worker has let go of all it held, never the hook's, which a
+// worker parked before its unlock, a verification refused before its worker
+// began, and the worker that writes the INCOMPLETE of one abandoned in its
+// slot's wait (which runs no end hook) never enter. Past either bound it ends
+// the run (endTheRun) rather than let the seam's restore and the fixture's
+// removal run beside what is still running (backlog B869).
 func holdUnlockOf(t *testing.T, root string) *unlockHold {
 	t.Helper()
-	u := &unlockHold{root: root, entered: make(chan struct{}), out: make(chan struct{}), ended: make(chan struct{})}
+	u := &unlockHold{root: root, entered: make(chan struct{}), out: make(chan struct{}), ended: make(chan struct{}), probe: backupsLockHeld}
 	u.restore = backup.SetOnLockReleaseForTest(func(dir string) {
 		if dir == u.root && u.armed.CompareAndSwap(true, false) {
 			u.entering.Do(func() { close(u.entered) })
@@ -226,26 +234,36 @@ func holdUnlockOf(t *testing.T, root string) *unlockHold {
 	context.AfterFunc(t.Context(), u.letGo)
 	t.Cleanup(func() {
 		u.letGo()
+		u.awaitAsks(t)
 		awaitNoHolds(t, "a backup holder kept its hold after the snapshot's unlock was let go")
 	})
 	return u
 }
 
 // awaitNoHolds waits until no backup holder in this process keeps a hold
-// (backup.ActiveHoldsForTest): a verification's worker, the one that writes an
-// abandoned verification's INCOMPLETE, a prune's, a claim's and a restore's,
-// each counted from before it takes anything until it has let go of all of it,
-// its folder's lock and its unlock's seam among them. Past 30 s it ends the run
-// (endTheRun), saying what, so that no cleanup after it restores a seam such a
-// holder reads, or removes the folders it works in.
+// (backup.ActiveHoldsForTest), and no verification refused before its worker
+// began still lets go of its capture's ownership (backup.ActiveReleasesForTest,
+// a let-go its caller answers without once StopWriteBound has passed). A
+// holder, a verification's worker, the one that writes an abandoned
+// verification's INCOMPLETE, a prune's, a claim's or a restore's, is counted
+// from before it takes anything until it has let go of all of it, its
+// folder's lock and its unlock's seam among them. Past holdDrainBound it ends
+// the run (endTheRun), saying what, so that no cleanup after it restores a
+// seam they read, or removes the folders they work in.
 func awaitNoHolds(t *testing.T, what string) {
 	t.Helper()
-	for deadline := time.Now().Add(30 * time.Second); backup.ActiveHoldsForTest() != 0; time.Sleep(time.Millisecond) {
+	busy := func() bool { return backup.ActiveHoldsForTest() != 0 || backup.ActiveReleasesForTest() != 0 }
+	for deadline := time.Now().Add(holdDrainBound); busy(); time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
-			endTheRun(t, fmt.Sprintf("%s: %d still held 30 s on", what, backup.ActiveHoldsForTest()))
+			endTheRun(t, fmt.Sprintf("%s: %d holds and %d refused verifications' let-goes still running %v on",
+				what, backup.ActiveHoldsForTest(), backup.ActiveReleasesForTest(), holdDrainBound))
 		}
 	}
 }
+
+// holdDrainBound is how long awaitNoHolds and awaitAsks wait before they end
+// the run: 30 s, and less in a case process whose run is to end there.
+var holdDrainBound = 30 * time.Second
 
 // endTheRun ends the test binary, saying what and printing every goroutine,
 // for a cleanup whose later cleanups must not run: here a worker it waited for
@@ -275,15 +293,32 @@ func (u *unlockHold) arm(t *testing.T, snapshot string) {
 	t.Cleanup(backup.SetOnVerifyEndForTest(func(dir string) {
 		if dir == snapshot {
 			u.heard.Do(func() {
+				// Announced before over is read: either this reads over set and
+				// asks nothing, or the cleanup, which sets over first, finds
+				// the ask counted and waits for it (awaitAsks).
+				u.asks.Add(1)
 				if !u.over.Load() {
 					// Asked where the end happens, on the worker's goroutine.
-					u.held, u.heldErr = backupsLockHeld(u.root)
+					u.held, u.heldErr = u.probe(u.root)
 				}
+				u.asks.Add(-1)
 				close(u.ended)
 			})
 		}
 	}))
 	u.armed.Store(true)
+}
+
+// awaitAsks waits until no ask of the folder's lock the end hook began is
+// still running, past holdDrainBound ending the run (endTheRun), the test's
+// end marked first (letGo), so that no ask begins once the count reads 0.
+func (u *unlockHold) awaitAsks(t *testing.T) {
+	t.Helper()
+	for deadline := time.Now().Add(holdDrainBound); u.asks.Load() != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			endTheRun(t, fmt.Sprintf("the end hook's ask of the backups folder's lock was still running %v after the test's end", holdDrainBound))
+		}
+	}
 }
 
 // requireHeld waits until the unlock is held: the verification has answered,

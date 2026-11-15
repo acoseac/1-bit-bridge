@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -198,10 +200,7 @@ func parkedBeforeItsUnlock(t *testing.T) {
 			<-out
 		}
 	}))
-	context.AfterFunc(t.Context(), func() {
-		time.Sleep(time.Second)
-		close(out)
-	})
+	letParkedGo(t, &parked, out)
 	u := holdUnlockOf(t, root)
 	snapshotInstall(t, cfgPath, func(dir string) {
 		kept.Store(true)
@@ -213,4 +212,305 @@ func parkedBeforeItsUnlock(t *testing.T) {
 		t.Fatal("the worker never came to its ownership's let-go")
 	}
 	t.Fatal("the test fails here, its verification's worker parked before its unlock")
+}
+
+// letParkedGo closes out a second after the test's body ends where parked is
+// set by then, and at once where it is not: a case that failed before
+// anything parked leaves no goroutine asleep behind it.
+func letParkedGo(t *testing.T, parked *atomic.Bool, out chan struct{}) {
+	t.Helper()
+	context.AfterFunc(t.Context(), func() {
+		if parked.Load() {
+			time.Sleep(time.Second)
+		}
+		close(out)
+	})
+}
+
+// requireTheRunEnded fails the test unless the case's process ended the run,
+// exit 2 with a panic saying what, no race, and no line from the cleanup it
+// registered before its hold, which runs only once the hold's own have.
+func requireTheRunEnded(t *testing.T, out string, code int, what string) {
+	t.Helper()
+	if code != 2 || !strings.Contains(out, "panic: ") || !strings.Contains(out, what) || strings.Contains(out, "DATA RACE") {
+		t.Fatalf("the case's process exited %d, want 2, the run ended saying %q:\n%s", code, what, out)
+	}
+	if strings.Contains(out, holdCaseMark) {
+		t.Errorf("a cleanup after the hold's ran, though the run was to end there:\n%s", out)
+	}
+}
+
+// TestAnEndHooksAskUnderWayHoldsTheHoldsCleanup: an end hook that has begun to
+// ask the backups folder's lock (its probe) when the test's body ends holds
+// the hold's cleanup until the ask ends, so no cleanup after the hold's, the
+// fixture's removal among them, runs beside it: the worker drops its hold
+// before it runs its end hook, so the count of holds says nothing of it
+// (backlog B869). The ask is parked until a second after the body ends.
+func TestAnEndHooksAskUnderWayHoldsTheHoldsCleanup(t *testing.T) {
+	cfgPath, _, root := backupInstall(t)
+	var askEnded atomic.Bool
+	t.Cleanup(func() {
+		if !askEnded.Load() {
+			t.Error("the end hook's ask of the folder's lock was still running when the cleanup before the fixture's removal ran")
+		}
+	})
+	u := holdUnlockOf(t, root)
+	asking, out := make(chan struct{}), make(chan struct{})
+	var parked atomic.Bool
+	u.probe = func(root string) (bool, error) {
+		parked.Store(true)
+		close(asking)
+		<-out
+		held, err := backupsLockHeld(root)
+		askEnded.Store(true)
+		return held, err
+	}
+	letParkedGo(t, &parked, out)
+	snapshotInstall(t, cfgPath, func(dir string) { u.arm(t, dir) })
+	u.requireHeld(t)
+	u.release()
+	select {
+	case <-asking:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the end hook never began its ask")
+	}
+}
+
+// TestAnEndHookThatComesAfterTheTestsEndAsksNothing: an end hook that comes
+// once the test's end is marked (letGo) asks nothing of the backups folder's
+// lock, so it opens nothing in the folders the cleanups remove, and still
+// closes the end it owes (backlog B869). The worker is held at its last step,
+// its end hook's call, until the end is marked.
+func TestAnEndHookThatComesAfterTheTestsEndAsksNothing(t *testing.T) {
+	cfgPath, _, root := backupInstall(t)
+	u := holdUnlockOf(t, root)
+	var asks atomic.Int32
+	u.probe = func(root string) (bool, error) {
+		asks.Add(1)
+		return backupsLockHeld(root)
+	}
+	var kept atomic.Pointer[string]
+	atEnd, goOn := make(chan struct{}), make(chan struct{})
+	var arrived, gone sync.Once
+	t.Cleanup(backup.SetAroundVerifyEndForTest(func(dir string, end func()) {
+		if k := kept.Load(); k != nil && dir == *k {
+			arrived.Do(func() { close(atEnd) })
+			<-goOn
+		}
+		end()
+	}))
+	letOn := func() { gone.Do(func() { close(goOn) }) }
+	t.Cleanup(letOn)
+	snapshotInstall(t, cfgPath, func(dir string) {
+		kept.Store(&dir)
+		u.arm(t, dir)
+	})
+	u.requireHeld(t)
+	u.release()
+	select {
+	case <-atEnd:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the worker never came to its last step")
+	}
+	// The test's end, as its context's end marks it.
+	u.letGo()
+	letOn()
+	select {
+	case <-u.ended:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the end hook never closed the end it owes")
+	}
+	if n := asks.Load(); n != 0 {
+		t.Errorf("an end hook that came once the test's end was marked asked the folder's lock %d times, want none", n)
+	}
+}
+
+// TestAnEndHooksAskThatNeverEndsEndsTheRun: an end hook's ask of the backups
+// folder's lock that never ends, begun before the test's body ended, ends the
+// run at the hold's cleanup's bound, saying so, and no cleanup after the
+// hold's runs: a t.Fatal there would let them all run (backlog B869). The
+// case runs as a process of its own (askThatNeverEnds).
+func TestAnEndHooksAskThatNeverEndsEndsTheRun(t *testing.T) {
+	if os.Getenv(holdCaseEnv) == "ask" {
+		askThatNeverEnds(t)
+		return
+	}
+	out, code := runHoldCase(t, "ask", "^TestAnEndHooksAskThatNeverEndsEndsTheRun$")
+	requireTheRunEnded(t, out, code, "the end hook's ask of the backups folder's lock was still running")
+}
+
+// askThatNeverEnds is that case, its drain bound a second.
+func askThatNeverEnds(t *testing.T) {
+	holdDrainBound = time.Second
+	cfgPath, _, root := backupInstall(t)
+	t.Cleanup(func() { fmt.Fprintf(os.Stderr, "%s\n", holdCaseMark) })
+	u := holdUnlockOf(t, root)
+	asking := make(chan struct{})
+	u.probe = func(string) (bool, error) {
+		close(asking)
+		select {}
+	}
+	snapshotInstall(t, cfgPath, func(dir string) { u.arm(t, dir) })
+	u.requireHeld(t)
+	u.release()
+	select {
+	case <-asking:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the end hook never began its ask")
+	}
+}
+
+// checkGivenUpIn gives up a check of a snapshot of the install at dataDir,
+// whose backups folder is root, parked on its thread past a deadline of
+// 300 ms: a hold that marks that folder and holds this process's slot until
+// letGo lets the check go. Its seams are put back by the cleanups it
+// registers, which let the check go first.
+func checkGivenUpIn(t *testing.T, dataDir, root string) (letGo func()) {
+	t.Helper()
+	snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
+	out := make(chan struct{})
+	var once sync.Once
+	letGo = func() { once.Do(func() { close(out) }) }
+	t.Cleanup(backup.SetOnLowPriorityForTest(func() { <-out }))
+	t.Cleanup(letGo)
+	given := make(chan error, 1)
+	go func() {
+		_, err := backup.VerifySnapshot(context.Background(), snap, backup.VerifyOptions{BackupsRoot: root})
+		given <- err
+	}()
+	select {
+	case err := <-given:
+		if !errors.Is(err, backup.ErrCheckGivenUp) {
+			t.Fatalf("the blocking check answered %v, want it given up", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the blocking check was never given up")
+	}
+	return letGo
+}
+
+// refusedLetGo is a snapshot of the install at dataDir, its backups folder
+// root, whose verification is refused before its worker begins, at the
+// folder's mark or at the slot, a check given up there or in another folder
+// blocking it, with its capture's ownership let go on a goroutine of its own
+// (letGoWithin) and parked in that let-go, until out closes, in the
+// ownership seam, which comes before its unlock. Once the refusal is
+// answered the blocker is let go and every hold is dropped, so only that
+// let-go is left (backup.ActiveReleasesForTest). It answers the snapshot.
+// The ownership seam is put back by a cleanup registered here, before the
+// hold's, so after the hold's cleanups.
+func refusedLetGo(t *testing.T, refusal, dataDir, root string, out chan struct{}, parked *atomic.Bool) (u *unlockHold, kept string) {
+	t.Helper()
+	var dir atomic.Pointer[string]
+	entered := make(chan struct{})
+	t.Cleanup(backup.SetOnOwnerReleaseForTest(func(key string) {
+		if d := dir.Load(); d != nil && filepath.Base(key) == filepath.Base(*d) && parked.CompareAndSwap(false, true) {
+			close(entered)
+			<-out
+		}
+	}))
+	u = holdUnlockOf(t, root)
+	blockerData, blockerRoot := dataDir, root
+	if refusal == "at the slot" {
+		_, blockerData, blockerRoot = backupInstall(t)
+	}
+	letBlockerGo := checkGivenUpIn(t, blockerData, blockerRoot)
+	res := backup.SnapshotAndVerify(context.Background(), backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)},
+		backup.SnapshotOptions{OnKept: func(d string) {
+			dir.Store(&d)
+			u.arm(t, d)
+		}})
+	if !res.Kept() || !errors.Is(res.VerifyErr, backup.ErrCheckStillRunning) {
+		t.Fatalf("the snapshot: kept %v, %v; want it kept and its verification refused", res.Kept(), res.VerifyErr)
+	}
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the refused verification never let its ownership go")
+	}
+	// Refused, the verification owes the hold no unlock: disarmed, so the
+	// blocker's own, in this folder at its mark, is not held.
+	u.armed.Store(false)
+	letBlockerGo()
+	for deadline := time.Now().Add(30 * time.Second); backup.ActiveHoldsForTest() != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d holds were left once the blocker was let go", backup.ActiveHoldsForTest())
+		}
+	}
+	if n := backup.ActiveReleasesForTest(); n != 1 {
+		t.Fatalf("with the refused verification's let-go parked, %d let-goes are counted, want 1", n)
+	}
+	return u, res.Dir
+}
+
+// TestARefusedVerificationsLetGoHoldsTheHoldsCleanup: a verification refused
+// before its worker began, at its folder's mark or at the slot a check given
+// up holds, leaves its capture's ownership to a let-go its caller answers
+// without once StopWriteBound has passed (letGoWithin). The hold's cleanup
+// waits for that let-go too (backup.ActiveReleasesForTest), so the cleanup
+// after it finds the ownership let go, the snapshot's owner lock free
+// (backlog B869). The blocker is let go and every hold dropped before the
+// test's body ends, so only that let-go is left to wait for; it is parked
+// until a second after the body ends.
+func TestARefusedVerificationsLetGoHoldsTheHoldsCleanup(t *testing.T) {
+	for _, refusal := range []string{"at its folder's mark", "at the slot"} {
+		t.Run(refusal, func(t *testing.T) {
+			_, dataDir, root := backupInstall(t)
+			var kept string
+			t.Cleanup(func() {
+				if kept == "" {
+					return
+				}
+				release, err := backup.TakeOwnerForTest(kept)
+				if err == nil {
+					release()
+					return
+				}
+				t.Errorf("the refused verification's let-go of its ownership was still running when the cleanup before the fixture's removal ran: %v", err)
+				// Waited for here, bounded, so the cleanups after this one run
+				// beside nothing.
+				for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+					if release, err := backup.TakeOwnerForTest(kept); err == nil {
+						release()
+						return
+					}
+					if time.Now().After(deadline) {
+						endTheRun(t, "the refused verification's let-go of its ownership never ended")
+					}
+				}
+			})
+			out := make(chan struct{})
+			var parked atomic.Bool
+			letParkedGo(t, &parked, out)
+			_, kept = refusedLetGo(t, refusal, dataDir, root, out, &parked)
+		})
+	}
+}
+
+// TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun: the let-go of a
+// refused verification's capture's ownership that never ends ends the run at
+// the hold's cleanup's bound, saying so, and no cleanup after the hold's
+// runs (backlog B869). The case runs as a process of its own
+// (letGoThatNeverEnds).
+func TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun(t *testing.T) {
+	if os.Getenv(holdCaseEnv) == "letgo" {
+		letGoThatNeverEnds(t)
+		return
+	}
+	out, code := runHoldCase(t, "letgo", "^TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun$")
+	requireTheRunEnded(t, out, code, "0 holds and 1 refused verifications' let-goes still running")
+}
+
+// letGoThatNeverEnds is that case, refused at the slot, its drain bound a
+// second.
+func letGoThatNeverEnds(t *testing.T) {
+	holdDrainBound = time.Second
+	_, dataDir, root := backupInstall(t)
+	t.Cleanup(func() { fmt.Fprintf(os.Stderr, "%s\n", holdCaseMark) })
+	var parked atomic.Bool
+	refusedLetGo(t, "at the slot", dataDir, root, make(chan struct{}), &parked)
 }

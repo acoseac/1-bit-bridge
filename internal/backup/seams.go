@@ -378,6 +378,14 @@ func SetAroundVerifyEndForTest(fn func(dir string, end func())) (restore func())
 // Tests join their callers before waiting for this count to reach zero.
 func ActiveHoldsForTest() int64 { return activeHolds.Load() }
 
+// ActiveReleasesForTest counts the let-goes of a capture's ownership still
+// running for a verification refused before its worker began, at its
+// folder's mark or at the slot (letGoWithin): its caller is answered once
+// StopWriteBound has passed whatever the let-go does, and no hold counts it
+// (ActiveHoldsForTest). A test that drains the holds before it removes the
+// folders they work in waits for these too.
+func ActiveReleasesForTest() int64 { return activeReleases.Load() }
+
 // VerifyExpiryErrorForTest returns the outer expiry's production error for
 // stopErr (nil for watchdog expiry), so reporter tests use its actual wrapper.
 func VerifyExpiryErrorForTest(stopErr error) error { return verifyExpiryError(stopErr) }
