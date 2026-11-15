@@ -330,6 +330,37 @@ func (c *convSteps) heldWithin(t *testing.T, bound time.Duration) {
 	}
 }
 
+// undecidedAtLook waits for the producer's look held at its wait (looked) and
+// fails the test unless o's window is undecided then; a decision fails it at
+// once, whenever it comes. A producer that decided early has gone on to wait
+// for what follows, which no reporter's step wakes (it wakes a producer
+// holding a window), so the look would never come, and a wait for it alone
+// would run the watchdog out and fail in other words (backlog B872's second
+// round).
+func undecidedAtLook(t *testing.T, steps *convSteps, o engine.OccurrenceID, looked <-chan struct{}) {
+	t.Helper()
+	decided := func() {
+		if steps.has("decided", o) {
+			t.Fatal("a's window was decided while the lookahead the sink measured was above its floor")
+		}
+	}
+	timer := time.NewTimer(alsapcm.Ordered())
+	defer timer.Stop()
+	for {
+		changed := steps.ch()
+		decided()
+		select {
+		case <-looked:
+			decided()
+			return
+		case <-changed:
+		case <-timer.C:
+			alsapcm.LogGoroutines(t)
+			t.Fatalf("waited %v for the producer's look at a's window, held at its wait", alsapcm.Ordered())
+		}
+	}
+}
+
 // firstOcc is the occurrence the session's Start began with.
 func (d *dsdRig) firstOcc() engine.OccurrenceID {
 	d.t.Helper()
@@ -557,7 +588,8 @@ func TestConvertedDSDReachesTheDACPackedByTheTable(t *testing.T) {
 // included, those one converter gives; each occurrence's length its own. A
 // successor that settles only once the sink's lookahead is at its floor
 // abuts: the window ends zero-padded, and the successor's converter starts
-// afresh.
+// afresh; the window is decided at the producer's first look at the floor or
+// below it, whatever wakes the producer, and never at a look above it.
 func TestConvertedTracksJoinContinuouslyAtOneRate(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -605,44 +637,87 @@ func TestConvertedTracksJoinContinuouslyAtOneRate(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a successor that settles after the floor abuts", func(t *testing.T) {
-		steps := newConvSteps(t, "")
-		d := newConvRig(t, withSteps(steps))
-		a, b := track(playbacktest.DSD64, 0.5, noise(1)), track(playbacktest.DSD64, 0.5, noise(2))
-		d.files.add("a", a)
-		d.files.add("b", b)
-		held, release := d.files.holdOpen("b")
-		t.Cleanup(release)
-		d.insert("a", "b")
-		d.play()
-		select {
-		case <-held:
-		case <-time.After(alsapcm.Watchdog()):
-			t.Fatalf("b's open did not begin within %v", alsapcm.Watchdog())
-		}
-		oa := d.firstOcc()
-		// Every frame of a but its window in the sink: the DAC plays only what
-		// the producer has given it.
-		steps.wait(t, "holding", oa)
-		d.k.Await(t, "the writer to fill the hardware buffer and wait on the DAC", runningAndWaiting)
-		// 450 ms of a's 500 played: what the sink holds of a, all but its
-		// window, falls below the 100 ms floor.
-		d.k.Play(t, 450*time.Millisecond)
-		if steps.has("decided", oa) {
-			t.Fatal("a's window was decided before the lookahead fell to its floor")
-		}
-		d.tick()
-		steps.wait(t, "ended", oa)
-		release()
-		d.k.Free()
-		d.waitStopped(engine.ReasonEndOfQueue)
-		wantA, _ := converted(t, a, convPlan)
-		wantB, _ := converted(t, b, convPlan)
-		same(t, "the DAC was given", unpack(t, d.k.Heard(), format.S243LE, 24), cat(wantA, wantB))
-		if v := d.k.View(); v.Opens != 1 {
-			t.Errorf("%d opens: an abutting successor follows in the same sink", v.Opens)
-		}
-	})
+	// a's window waits while the lookahead the sink measures is above the
+	// floor, which a look of the producer's once 300 ms of a's 500 have played
+	// shows, held at its wait; and it is decided at the producer's first look
+	// at or below the floor, whatever wakes it: a reporter's step, or its own
+	// next step, the producer held at a's window point until the DAC has
+	// played past the floor. Backlog B872: the case asserted no decision right
+	// after the DAC had played past the floor, and on macOS's CI a reporter's
+	// step left from the producer's last write woke the producer there, which
+	// decided the window, as it should, before the test's tick.
+	for _, order := range []struct {
+		name string
+		// heldPastTheFloor holds the producer at a's window point until the
+		// DAC has played past the floor: its first look is below it.
+		heldPastTheFloor bool
+	}{{"looking as the DAC plays", false}, {"first looking past the floor", true}} {
+		t.Run("a successor that settles after the floor abuts/"+order.name, func(t *testing.T) {
+			holdAt := ""
+			if order.heldPastTheFloor {
+				holdAt = "holding"
+			}
+			steps, p := newConvSteps(t, holdAt), newProducerHold(t)
+			d := newConvRig(t, func(o *rigOptions) {
+				if o.seams == nil {
+					o.seams = &playback.Seams{}
+				}
+				o.seams.Converting, o.seams.ProducerStep = steps.seam, p.note
+			})
+			// Registered after the rig, so run before its teardown: a producer
+			// held is let go first.
+			t.Cleanup(steps.letGo)
+			p.gate.letGo()
+			a, b := track(playbacktest.DSD64, 0.5, noise(1)), track(playbacktest.DSD64, 0.5, noise(2))
+			d.files.add("a", a)
+			d.files.add("b", b)
+			held, release := d.files.holdOpen("b")
+			t.Cleanup(release)
+			d.insert("a", "b")
+			d.play()
+			select {
+			case <-held:
+			case <-time.After(alsapcm.Watchdog()):
+				t.Fatalf("b's open did not begin within %v", alsapcm.Watchdog())
+			}
+			oa := d.firstOcc()
+			// Every frame of a but its window in the sink: the DAC plays only
+			// what the producer has given it.
+			steps.wait(t, "holding", oa)
+			d.k.Await(t, "the writer to fill the hardware buffer and wait on the DAC", runningAndWaiting)
+			if order.heldPastTheFloor {
+				// 450 ms of a's 500 played: what the sink holds of a, all but
+				// its window, is below the 100 ms floor, and the producer,
+				// let go, looks at it before any reporter's step need come.
+				d.k.Play(t, 450*time.Millisecond)
+				steps.letGo()
+			} else {
+				// 300 ms played: what the sink holds of a, all but its window,
+				// is above the floor at every measurement the writer has made
+				// since a's window point; a reporter's step wakes the producer,
+				// which looks, waits, and is held at its wait.
+				d.k.Play(t, 300*time.Millisecond)
+				look := p.holdWait(t)
+				d.tickOnce(alsapcm.Ordered())
+				undecidedAtLook(t, steps, oa, look.in)
+				look.letGo()
+				// 150 ms more: below the floor, and the next look decides.
+				d.k.Play(t, 150*time.Millisecond)
+				d.tick()
+			}
+			steps.wait(t, "decided", oa)
+			steps.wait(t, "ended", oa)
+			release()
+			d.k.Free()
+			d.waitStopped(engine.ReasonEndOfQueue)
+			wantA, _ := converted(t, a, convPlan)
+			wantB, _ := converted(t, b, convPlan)
+			same(t, "the DAC was given", unpack(t, d.k.Heard(), format.S243LE, 24), cat(wantA, wantB))
+			if v := d.k.View(); v.Opens != 1 {
+				t.Errorf("%d opens: an abutting successor follows in the same sink", v.Opens)
+			}
+		})
+	}
 }
 
 // TestDSD64ThenDSD128ConvertedShareTheSink (B728 B11; the design's section

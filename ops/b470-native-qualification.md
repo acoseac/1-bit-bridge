@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **49**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **51**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **49**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **51**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=49; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=51; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 49 invalidates older evidence.
+An admitted command alone is insufficient. Version 51 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 49. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 51. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -961,11 +961,16 @@ activation/drop/revocation fences and immediate policy-failure containment. A
 failed device or close cannot be reported as a clean cancellation, a dropped
 successor cannot write past its activation fence, and retiring sinks stop on the
 first failed policy reading. Re-run the native and DoP lifecycle qualification:
-older harness evidence is invalid. The harness admits version 48 records alone;
-legacy migration accepts versions 35 through 48 (`LegacyVersion` remains 35).
+older harness evidence is invalid.
 The portable fake-kernel regressions do not qualify physical DAC behavior.
 
-Version 49 covers B728 B9 PR 2 (2026-11-12). The production player's backend writes
+Version 49 (B872) changes no implementation: a test under the guarded
+`internal/alsapcm/` prefix (`playback_convert_test.go`) changed, and the guard counts
+every file there. Version 48 evidence is stale to the harness, as at every bump. The
+harness admits version 49 records alone; legacy migration accepts versions 35
+through 49 (`LegacyVersion` remains 35).
+
+Version 51 covers B728 B9 PR 2 (2026-11-12; it was 49 on its branch, renumbered at its merge with main, where B872 took 49 and B886 50). The production player's backend writes
 a DAC's DSD choice only while it holds no session and no release is unconfirmed
 (`playback.Backend.ChooseDSD`, its configuration lease); a silent probe the lease
 finds holding the device slot is waited for, and no probe takes the slot while the
@@ -987,5 +992,5 @@ same words; the contained reconciliation revokes the authorization it was replac
 No byte a DAC is given changes; the guarded files changed (`Revoke` and
 `openNativeContent`, the probe cache's words, `internal/alsapcm`'s tests), so older
 harness evidence is invalid all the same, as at every bump. The harness admits
-version 49 records alone; legacy migration accepts versions 35 through 49
+version 51 records alone; legacy migration accepts versions 35 through 51
 (`LegacyVersion` remains 35). No hardware check was run.

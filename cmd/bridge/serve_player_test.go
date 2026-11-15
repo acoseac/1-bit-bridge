@@ -292,6 +292,10 @@ type playerServeCase struct {
 	// writes no console address over a held console's, and a held API
 	// listener is the file's listenAddress, with no --addr override.
 	lan, admin *heldLoopback
+	// stall, when set, is the case's hold on the player's start (its hold is
+	// the case's engineConfig seam): its end is a cleanup from before serve's
+	// banner is waited for (playerStall.end).
+	stall *playerStall
 }
 
 // playerServe is a serve a test booted with its player.
@@ -437,15 +441,98 @@ func bootPlayerServeAt(t *testing.T, c playerServeCase, root, music, dataDir str
 	if c.with != nil {
 		c.with(&opts)
 	}
+	var beforeBanner []func(context.CancelFunc, <-chan struct{})
+	if c.stall != nil {
+		decided := func() *bridgePlayer {
+			mu.Lock()
+			defer mu.Unlock()
+			return ps.player
+		}
+		beforeBanner = append(beforeBanner, func(stop context.CancelFunc, exited <-chan struct{}) {
+			t.Cleanup(func() { c.stall.end(t, stop, exited, decided) })
+		})
+	}
 	ps.servedBridge = launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
 		return runServe(ctx, opts, stdout, stderr)
-	})
+	}, beforeBanner...)
 	mu.Lock()
 	defer mu.Unlock()
 	if ps.player == nil {
 		t.Fatalf("serve listens and has not decided about its player; stderr=%s", ps.stderr.String())
 	}
 	return ps
+}
+
+// playerStall holds the player's start at the engine's config, after the
+// start's last look at its stop (serve_player.go, start), until it is let go,
+// as storage that never answers holds it: entered is closed once the start is
+// held there.
+type playerStall struct {
+	entered, starts    chan struct{}
+	enterOnce, letOnce sync.Once
+}
+
+func newPlayerStall() *playerStall {
+	return &playerStall{entered: make(chan struct{}), starts: make(chan struct{})}
+}
+
+// hold is the engineConfig seam: it says the start is held, and holds it
+// until the stall is let go.
+func (s *playerStall) hold(*engine.Config) {
+	s.enterOnce.Do(func() { close(s.entered) })
+	<-s.starts
+}
+
+// letGo ends the stall, once.
+func (s *playerStall) letGo() { s.letOnce.Do(func() { close(s.starts) }) }
+
+// await returns once the player's start is held, and fails the test when the
+// start ends first or when serve's waits give up (serveGiveUp).
+func (s *playerStall) await(t *testing.T, ps *playerServe) {
+	t.Helper()
+	select {
+	case <-s.entered:
+	case <-ps.player.ready:
+		t.Fatalf("the player's start ended before its storage stalled: plan %+v, failed %q; stderr=%s", ps.player.plan, ps.player.failed, ps.stderr.String())
+	case <-serveGiveUp(t):
+		t.Fatalf("the player's start never reached its stall; stderr=%s\nserve's goroutines:\n%s", ps.stderr.String(), serveStacks())
+	}
+}
+
+// end is the stall's cleanup, which bootPlayerServeAt registers before serve's
+// banner is waited for, so it runs however the boot or the test ended, ahead
+// of serve's drain and of the removal of the case's directories. It stops
+// serve, and the player as serve's stop does first, before it lets the stall
+// go, so the start it held sees its stop and runs no engine; only then does it
+// join the player, until a drain's give-up (serveDrainGiveUp): nothing waits
+// for a player nobody has stopped, and the start has ended before its
+// directories go and the medium's seam is restored. A serve that has not
+// decided its player may still decide it as it returns: the stall is let go
+// first, and the player is taken once serve has returned.
+func (s *playerStall) end(t *testing.T, stop context.CancelFunc, exited <-chan struct{}, decided func() *bridgePlayer) {
+	t.Helper()
+	stop()
+	p := decided()
+	if p == nil {
+		s.letGo()
+		select {
+		case <-exited:
+		case <-serveDrainGiveUp(t):
+			return // the drain, next, reports the serve that did not return
+		}
+		if p = decided(); p == nil {
+			return
+		}
+	}
+	if p.cancel != nil {
+		p.cancel()
+	}
+	s.letGo()
+	select {
+	case <-p.settled:
+	case <-serveDrainGiveUp(t):
+		t.Errorf("the player did not end once it was stopped and its stall let go\nserve's goroutines:\n%s", serveStacks())
+	}
 }
 
 // engine waits for the player to run or fail, and returns its engine, nil

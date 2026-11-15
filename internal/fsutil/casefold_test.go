@@ -2,6 +2,7 @@ package fsutil
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -165,10 +166,14 @@ func TestFoldingInAnswersAsThisHostsVolumeLooksNamesUp(t *testing.T) {
 // listing as the probe reads it, the files its names name now (two names of
 // one file, a hard link's, share an id), whether it folds case, the spellings
 // os.SameFile could not open a lookup by (on Windows it opens the path the
-// lookup was asked for, and answers false where it cannot), and what happens
-// to it before each lookup (change, handed the name looked up) and before each
-// read of its whole listing (relist, the probe's re-read), so that a test can
-// change it between the probe's lookups, or between them and the re-read.
+// lookup was asked for, and answers false where it cannot), what happens to
+// it before each lookup (change, handed the name looked up) and before each
+// read of its listing after the first (relist, the probe's re-reads, never
+// within one), so that a test can change it between the probe's lookups, or
+// between them and a re-read, the reads that come back short with no error
+// (short: how many names the read of that index answers, the first read's
+// index 0), and how many entries each read of its listing asked for (reads,
+// each n as readDir was handed it, one a listing).
 type probeFolder struct {
 	listing    []string
 	ids        map[string]int
@@ -176,6 +181,8 @@ type probeFolder struct {
 	cannotOpen map[string]bool
 	change     func(f *probeFolder, name string)
 	relist     func(f *probeFolder)
+	short      map[int]int
+	reads      []int
 }
 
 // probeInfo is a probeFolder's lookup: the spelling it was asked for and the
@@ -192,21 +199,32 @@ func (probeInfo) ModTime() (t time.Time) { return t }
 func (probeInfo) IsDir() bool            { return false }
 func (probeInfo) Sys() any               { return nil }
 
-// readDir answers the listing, n names of it at most where n > 0, as
-// os.File.ReadDir does: fewer than n only at its end.
+// readDir answers the listing as osFolding's readDir does, one listing a
+// call: where n > 0, its first n names at most, with io.EOF where it ends
+// before n and no error where it holds n or more; where n <= 0, all of it,
+// with no error. A read short holds a count for answers that many names and
+// no error, whatever follows them, as a reader that came back short does.
 func (f *probeFolder) readDir(_ string, n int) ([]fs.DirEntry, error) {
-	if n <= 0 && f.relist != nil {
+	if len(f.reads) > 0 && f.relist != nil {
 		f.relist(f)
 	}
-	names := f.listing
-	if n > 0 && len(names) > n {
+	read := len(f.reads)
+	f.reads = append(f.reads, n)
+	names, err := f.listing, error(nil)
+	switch {
+	case n > 0 && len(names) < n:
+		err = io.EOF
+	case n > 0:
 		names = names[:n]
+	}
+	if m, ok := f.short[read]; ok && m < len(names) {
+		names, err = names[:m], nil
 	}
 	out := make([]fs.DirEntry, len(names))
 	for i, name := range names {
 		out[i] = fs.FileInfoToDirEntry(probeInfo{name: name})
 	}
-	return out, nil
+	return out, err
 }
 
 func (f *probeFolder) lstat(p string) (fs.FileInfo, error) {
@@ -271,34 +289,50 @@ func TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase(t *testing.T) {
 	}
 }
 
-// TestAListingThatChangedBeforeItsReReadTellsNothing: where the probe reads
-// the whole listing again for the swapped spelling (its first read was not
-// all of it), it answers case-sensitive only where the re-read holds both
-// spellings, and case-insensitive only where it holds the probed one alone;
-// one that holds the swapped spelling alone, or neither, says the entry
-// changed between the lookups and the re-read, and the next entry is asked,
-// the probe answering Unknown once every one is spent, never case-sensitive
-// (B651's tenth round, Codex and Claude on round 9). A rename of Abba to ABBA
-// on a volume that folds made it answer case-sensitive, the direction that
-// keeps rows a scan must spare exact; the hard link's two names removed on a
-// case-sensitive volume made it answer case-insensitive. A re-read that lacks
-// the swapped spelling answers case-insensitive only once a lookup of that
-// spelling after it still finds the file: the hard link's second name alone
-// removed on a case-sensitive volume left the first, and the probe answered
+// TestAListingThatChangedBeforeItsReReadTellsNothing: the probe reads the
+// listing again for the swapped spelling, after the lookups, and answers
+// case-sensitive only where the re-read holds both spellings, and
+// case-insensitive only where it holds the probed one alone; one that holds
+// the swapped spelling alone, or neither, says the entry changed between the
+// lookups and the re-read, and the next entry is asked, the probe answering
+// Unknown once every one is spent, never case-sensitive (B651's tenth round,
+// Codex and Claude on round 9). A rename of Abba to ABBA on a volume that
+// folds made it answer case-sensitive, the direction that keeps rows a scan
+// must spare exact; the hard link's two names removed on a case-sensitive
+// volume made it answer case-insensitive. A re-read that lacks the swapped
+// spelling answers case-insensitive only once a lookup of that spelling after
+// it still finds the file: the hard link's second name alone removed on a
+// case-sensitive volume left the first, and the probe answered
 // case-insensitive (B651's eleventh round, Codex and Claude on round 10).
+// Each case runs in a folder the probe's first read is not all of, and in one
+// it is all of, which the probe settled by that first read until B738 and
+// reads again now as well.
 func TestAListingThatChangedBeforeItsReReadTellsNothing(t *testing.T) {
-	renamed := func(next ...string) *probeFolder {
+	// listed is the folder's listing: first and then rest where the probe's
+	// first read is all of it (small); else first at the end of that read,
+	// after names with no letter, and rest past it.
+	listed := func(small bool, first []string, rest ...string) []string {
+		if small {
+			return append(slices.Clone(first), rest...)
+		}
+		return append(append(caseless(foldingProbeEntries-len(first)), first...), append(caseless(10), rest...)...)
+	}
+	once := func(do func(f *probeFolder)) func(*probeFolder) {
+		done := false
+		return func(f *probeFolder) {
+			if !done {
+				done = true
+				do(f)
+			}
+		}
+	}
+	renamed := func(small bool, next ...string) *probeFolder {
 		f := &probeFolder{
-			listing: append(append(caseless(foldingProbeEntries-1-len(next)), append([]string{"Abba"}, next...)...), caseless(10)...),
+			listing: listed(small, append([]string{"Abba"}, next...)),
 			ids:     map[string]int{"Abba": 1, "Band": 2},
 			folds:   true,
 		}
-		done := false
-		f.relist = func(f *probeFolder) {
-			if done {
-				return
-			}
-			done = true
+		f.relist = once(func(f *probeFolder) {
 			for i, n := range f.listing {
 				if n == "Abba" {
 					f.listing[i] = "ABBA"
@@ -306,49 +340,260 @@ func TestAListingThatChangedBeforeItsReReadTellsNothing(t *testing.T) {
 			}
 			delete(f.ids, "Abba")
 			f.ids["ABBA"] = 1
-		}
+		})
 		return f
 	}
-	removed := &probeFolder{
-		listing: append(append(caseless(foldingProbeEntries-1), "folder.jpg"), append(caseless(10), "FOLDER.JPG")...),
-		ids:     map[string]int{"folder.jpg": 1, "FOLDER.JPG": 1},
-	}
-	removedOnce := false
-	removed.relist = func(f *probeFolder) {
-		if removedOnce {
-			return
+	// links is a hard link's two names, folder.jpg and FOLDER.JPG, in a
+	// case-sensitive folder, those gone removed before the re-read.
+	links := func(small bool, gone ...string) *probeFolder {
+		f := &probeFolder{
+			listing: listed(small, []string{"folder.jpg"}, "FOLDER.JPG"),
+			ids:     map[string]int{"folder.jpg": 1, "FOLDER.JPG": 1},
 		}
-		removedOnce = true
-		f.listing = slices.DeleteFunc(f.listing, func(n string) bool { return n == "folder.jpg" || n == "FOLDER.JPG" })
-		clear(f.ids)
+		f.relist = once(func(f *probeFolder) {
+			f.listing = slices.DeleteFunc(f.listing, func(n string) bool { return slices.Contains(gone, n) })
+			for _, n := range gone {
+				delete(f.ids, n)
+			}
+		})
+		return f
 	}
-	unlinked := &probeFolder{
-		listing: append(append(caseless(foldingProbeEntries-1), "folder.jpg"), append(caseless(10), "FOLDER.JPG")...),
-		ids:     map[string]int{"folder.jpg": 1, "FOLDER.JPG": 1},
-	}
-	unlinkedOnce := false
-	unlinked.relist = func(f *probeFolder) {
-		if unlinkedOnce {
-			return
+	for _, small := range []bool{false, true} {
+		folder := "a folder the first read is not all of"
+		if small {
+			folder = "a folder the first read is all of"
 		}
-		unlinkedOnce = true
-		f.listing = slices.DeleteFunc(f.listing, func(n string) bool { return n == "FOLDER.JPG" })
-		delete(f.ids, "FOLDER.JPG")
+		for _, c := range []struct {
+			name string
+			f    *probeFolder
+			want CaseFolding
+		}{
+			{"an entry renamed to its other spelling before the re-read, in a folder that folds, another entry after it", renamed(small, "Band"), CaseInsensitive},
+			{"an entry renamed to its other spelling before the re-read, in a folder that folds, no other entry", renamed(small), CaseUnknown},
+			{"a hard link's two names removed before the re-read, in a case-sensitive folder", links(small, "folder.jpg", "FOLDER.JPG"), CaseUnknown},
+			{"a hard link's other name alone removed before the re-read, in a case-sensitive folder", links(small, "FOLDER.JPG"), CaseUnknown},
+		} {
+			if got := foldingIn(c.f, "/music"); got != c.want {
+				t.Errorf("%s, %s: the folder answered %s, want %s", folder, c.name, got, c.want)
+			}
+		}
+	}
+}
+
+// TestASecondNameMadeBeforeTheLookupsIsInTheListingThatSettles: the listing
+// that tells a hard link's two names from one entry found under two
+// spellings is read after the lookups it settles (B738, Codex on #1397): in a
+// case-sensitive folder whose listing the probe's first read was all of, a
+// hard link FOLDER.JPG made beside folder.jpg between that read and the
+// lookups is found by both lookups as one file and is in no listing read
+// before them, and the probe, which settled by its first read, answered
+// case-insensitive. The second name is added to the listing and to the
+// lookups at the probe's first lookup (change), either way round, and beside
+// names with no letter.
+func TestASecondNameMadeBeforeTheLookupsIsInTheListingThatSettles(t *testing.T) {
+	linkMade := func(listed, made string, others ...string) *probeFolder {
+		f := &probeFolder{listing: append([]string{listed}, others...), ids: map[string]int{listed: 1}}
+		done := false
+		f.change = func(f *probeFolder, _ string) {
+			if !done {
+				done = true
+				f.listing = append(f.listing, made)
+				f.ids[made] = 1
+			}
+		}
+		return f
 	}
 	for _, c := range []struct {
 		name string
 		f    *probeFolder
-		want CaseFolding
 	}{
-		{"an entry renamed to its other spelling before the re-read, in a folder that folds, another entry after it", renamed("Band"), CaseInsensitive},
-		{"an entry renamed to its other spelling before the re-read, in a folder that folds, no other entry", renamed(), CaseUnknown},
-		{"a hard link's two names removed before the re-read, in a case-sensitive folder", removed, CaseUnknown},
-		{"a hard link's other name alone removed before the re-read, in a case-sensitive folder", unlinked, CaseUnknown},
+		{"FOLDER.JPG made beside folder.jpg", linkMade("folder.jpg", "FOLDER.JPG")},
+		{"folder.jpg made beside FOLDER.JPG", linkMade("FOLDER.JPG", "folder.jpg")},
+		{"FOLDER.JPG made beside folder.jpg and names with no letter", linkMade("folder.jpg", "FOLDER.JPG", caseless(10)...)},
+	} {
+		if got := foldingIn(c.f, "/music"); got != CaseSensitive {
+			t.Errorf("%s between the first read and the lookups: the folder answered %s, want %s", c.name, got, CaseSensitive)
+		}
+	}
+}
+
+// TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups: the probe
+// reads the listing again for each entry it asks, after that entry's own
+// lookups, and never settles one by a listing read for an entry asked before
+// it, as one re-read kept for the probe would, which is the first read's
+// fault again (the brief's review, Codex and Carbon): a hard link's two
+// names Abba and ABBA, Abba removed before the re-read made for it, which so
+// settles nothing, and a hard link FOLDER.JPG made beside folder.jpg before
+// folder.jpg's lookups, which only a listing read after them holds.
+func TestEachEntryAskedIsSettledByAListingReadAfterItsOwnLookups(t *testing.T) {
+	f := &probeFolder{
+		listing: []string{"Abba", "folder.jpg", "ABBA"},
+		ids:     map[string]int{"Abba": 1, "ABBA": 1, "folder.jpg": 2},
+	}
+	relisted, linked := false, false
+	f.relist = func(f *probeFolder) {
+		if !relisted {
+			relisted = true
+			f.listing = slices.DeleteFunc(f.listing, func(n string) bool { return n == "Abba" })
+			delete(f.ids, "Abba")
+		}
+	}
+	f.change = func(f *probeFolder, name string) {
+		if name == "folder.jpg" && !linked {
+			linked = true
+			f.listing = append(f.listing, "FOLDER.JPG")
+			f.ids["FOLDER.JPG"] = 2
+		}
+	}
+	if got := foldingIn(f, "/music"); got != CaseSensitive {
+		t.Errorf("the folder answered %s, want %s", got, CaseSensitive)
+	}
+	if want := []int{foldingProbeEntries, foldingProbeEntries + 1, foldingProbeEntries + 1}; !slices.Equal(f.reads, want) {
+		t.Errorf("the reads of the listing asked for %v entries, want %v: the first read, then one for each of the two entries asked", f.reads, want)
+	}
+}
+
+// TestAFolderReadWholeIsReadAgainForOneEntryMoreAtMost: where the probe's
+// first read was all of the listing, its re-read after an entry's lookups
+// takes at most foldingProbeEntries+1 entries, which tell a folder still
+// within that bound from one that grew past it since (the brief's review,
+// Codex and Carbon). A folder that grew past it is never read whole, and its
+// re-read settles nothing: the next entry is asked, with a re-read of its
+// own, so a folder that folds answers Unknown, and a hard link's second name
+// made past the bound, which no read the probe makes holds, is never taken
+// for absent (a probe that took that re-read for the whole listing answered
+// case-insensitive). A folder grown to foldingProbeEntries entries is read
+// whole by it, and its second name found.
+func TestAFolderReadWholeIsReadAgainForOneEntryMoreAtMost(t *testing.T) {
+	// grown is f with made added to its listing at the probe's first
+	// lookup, each name of link a second name of the file folder.jpg names.
+	grown := func(f *probeFolder, made []string, link ...string) *probeFolder {
+		done := false
+		f.change = func(f *probeFolder, _ string) {
+			if !done {
+				done = true
+				f.listing = append(f.listing, made...)
+				for _, n := range link {
+					f.ids[n] = f.ids["folder.jpg"]
+				}
+			}
+		}
+		return f
+	}
+	linked := func() *probeFolder {
+		return &probeFolder{listing: []string{"folder.jpg"}, ids: map[string]int{"folder.jpg": 1}}
+	}
+	reread := foldingProbeEntries + 1
+	for _, c := range []struct {
+		name  string
+		f     *probeFolder
+		want  CaseFolding
+		reads []int
+	}{
+		{"a hard link's second name made with the folder grown to the bound",
+			grown(linked(), append(caseless(foldingProbeEntries-2), "FOLDER.JPG"), "FOLDER.JPG"),
+			CaseSensitive, []int{foldingProbeEntries, reread}},
+		{"a hard link's second name made past the bound",
+			grown(linked(), append(caseless(foldingProbeEntries), "FOLDER.JPG"), "FOLDER.JPG"),
+			CaseUnknown, []int{foldingProbeEntries, reread}},
+		{"a hard link's second name made past the bound, and an entry after that tells",
+			grown(&probeFolder{listing: []string{"folder.jpg", "Band"}, ids: map[string]int{"folder.jpg": 1, "Band": 2}},
+				append(caseless(foldingProbeEntries), "FOLDER.JPG"), "FOLDER.JPG"),
+			CaseSensitive, []int{foldingProbeEntries, reread}},
+		{"a folder that folds, grown past the bound",
+			grown(&probeFolder{listing: []string{"Folder.jpg", "Band"}, ids: map[string]int{"Folder.jpg": 1, "Band": 2}, folds: true},
+				caseless(foldingProbeEntries)),
+			CaseUnknown, []int{foldingProbeEntries, reread, reread}},
 	} {
 		if got := foldingIn(c.f, "/music"); got != c.want {
 			t.Errorf("%s: the folder answered %s, want %s", c.name, got, c.want)
 		}
+		if !slices.Equal(c.f.reads, c.reads) {
+			t.Errorf("%s: the reads of the listing asked for %v entries, want %v", c.name, c.f.reads, c.reads)
+		}
 	}
+}
+
+// TestAListingThatCameBackShortWithNoErrorIsNotWhole: a listing is whole only
+// where its read reached the end, never because it came back with fewer
+// entries than it asked for (B738's round 2, CodeRabbit on #1454). On Linux
+// os.File's ReadDir counts an entry before it stats it, and leaves out one gone
+// in between without giving its place back, so a folder its first read was
+// all of, grown past the bound, can come back from its re-read with 256 of the
+// 257 entries asked for and no error, the hard link FOLDER.JPG made beside
+// folder.jpg past them unread: the probe took that for the whole listing and
+// answered case-insensitive. Here the re-read comes back short so (short).
+func TestAListingThatCameBackShortWithNoErrorIsNotWhole(t *testing.T) {
+	f := &probeFolder{
+		listing: []string{"folder.jpg"},
+		ids:     map[string]int{"folder.jpg": 1},
+		short:   map[int]int{1: foldingProbeEntries},
+	}
+	done := false
+	f.change = func(f *probeFolder, _ string) {
+		if !done {
+			done = true
+			f.listing = append(append(f.listing, caseless(foldingProbeEntries)...), "FOLDER.JPG")
+			f.ids["FOLDER.JPG"] = 1
+		}
+	}
+	if got := foldingIn(f, "/music"); got != CaseUnknown {
+		t.Errorf("a re-read that came back short with no error, FOLDER.JPG unread, made the folder answer %s, want %s", got, CaseUnknown)
+	}
+	if want := []int{foldingProbeEntries, foldingProbeEntries + 1}; !slices.Equal(f.reads, want) {
+		t.Errorf("the reads of the listing asked for %v entries, want %v", f.reads, want)
+	}
+}
+
+// TestAHardLinkMadeBeforeTheLookupsOnThisHostsVolume: on this host's own
+// volume, where it holds two names of one file that differ in case alone (a
+// case-sensitive one: ext4, tmpfs, a case-sensitive APFS), a folder holding
+// folder.jpg and its hard link FOLDER.JPG answers case-sensitive, and so does
+// one where FOLDER.JPG is made between the probe's first read and its lookups
+// (B738), read and looked up through the os package's calls
+// (linkAtFirstLookup makes the link). It skips, saying why, where the volume
+// makes no such name: one that folds case, or makes no hard links.
+func TestAHardLinkMadeBeforeTheLookupsOnThisHostsVolume(t *testing.T) {
+	dir := t.TempDir()
+	lower, upper := filepath.Join(dir, "folder.jpg"), filepath.Join(dir, "FOLDER.JPG")
+	if err := os.WriteFile(lower, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(lower, upper); err != nil {
+		t.Skipf("this host's volume makes no second name of a file that differs in case alone: %v", err)
+	}
+	if got := FoldingIn(dir); got != CaseSensitive {
+		t.Errorf("a folder holding folder.jpg and its hard link FOLDER.JPG answered %s, want %s", got, CaseSensitive)
+	}
+	if err := os.Remove(upper); err != nil {
+		t.Fatal(err)
+	}
+	l := &linkAtFirstLookup{from: lower, to: upper}
+	got := foldingIn(l, dir)
+	if !l.made || l.err != nil {
+		t.Fatalf("FOLDER.JPG was not made at the first lookup (looked up: %v): %v", l.made, l.err)
+	}
+	if got != CaseSensitive {
+		t.Errorf("a folder whose FOLDER.JPG was made between the first read and the lookups answered %s, want %s", got, CaseSensitive)
+	}
+}
+
+// linkAtFirstLookup is foldingFS over the os package, which makes the hard
+// link to (a second name of the file from names) just before the probe's
+// first lookup, after its first read.
+type linkAtFirstLookup struct {
+	osFolding
+	from, to string
+	made     bool
+	err      error
+}
+
+func (l *linkAtFirstLookup) lstat(name string) (fs.FileInfo, error) {
+	if !l.made {
+		l.made = true
+		l.err = os.Link(l.from, l.to)
+	}
+	return os.Lstat(name)
 }
 
 // TestAnEntryThatChangesBetweenTheLookupsTellsNothing: the probe answers only
