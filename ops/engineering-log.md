@@ -100513,3 +100513,30 @@ Windows case, named in the selection, does not build on this host, and its
 run is windows-latest's. cmd/bridge's `TestEveryCitedTestNameExists`,
 `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
 the tree with this update.
+
+### Round 4: the portable composition case builds off Windows only
+
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` ran on Windows too, and
+its assertion takes only `errPlatformForTest` as a refusal after the first:
+a real sharing violation on one of its later reads there, which the composed
+predicate asks again on as it should, would fail the case with the code
+right. The case and `errPlatformForTest` now live in
+`cmd/bridge/serve_enrichment_switch_other_test.go`, under `//go:build
+!windows` (82e25753); the helpers the Windows file uses (`readPastAHold`,
+`retryStandIn`, `readsPastOneRefusal`) stay in the untagged file. Windows'
+own codes are `TestTheStandInRetryKeepsWindowsOwnRetry`'s, which windows-latest
+has not run yet; this host only builds it.
+
+On 82e25753: `go list` names the untagged file and the Windows one for
+windows/amd64, the untagged file and the new one for linux/amd64; `go vet
+./cmd/bridge/` with the tags for linux/amd64, linux/386 and windows/amd64,
+clean; the linux/amd64 and windows/amd64 test binaries build; go1.27.3's
+gofmt lists none of the three files. The two controls are red as in round 3
+(the exact count back: the pass with a second refusal; the seam replacing
+again: `errPlatformForTest` in both passes and `errBusyForTest` in the
+second). Outside the build slot, another worker holding it,
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` and the stand-in hold's
+test 50 times each under -race at GOMAXPROCS 4: 50 of 50, no data race (0.43
+to 0.45 s and 1.57 to 1.59 s a run). cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass over the tree with this update.
