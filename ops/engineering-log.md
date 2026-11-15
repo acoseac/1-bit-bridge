@@ -100649,3 +100649,90 @@ At cab61276: 34a9977a's code, and this record but its runs. TMPDIR was
 | gofmt (`go run cmd/gofmt -l`) on the five test files | nothing listed |
 | `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at cab61276 and with this table |
 | `make docs-check` | exit 0, at cab61276 and with this table |
+
+## 2026-11-15 — B869A round 3: the hold's cleanup waits for its end hook's ask and for a refused verification's let-go
+
+Branch `fix/b869a-prune-given-up`, round 2 at 13415a6e. Commits: 38c29935
+(one counter and its accessor in internal/backup; the rest test code, and
+the tests), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`. Every red
+and control was built through `go test -c -overlay` from edits made in
+memory, so no tracked file was written; `git status` was empty after each,
+and the predictions were written to a file before each round. Line numbers
+are 38c29935's.
+
+The tests: I is internal/backup's
+`TestARefusedVerificationsLetGoIsCountedUntilItEnds`; in cmd/bridge, W1a is
+`TestAnEndHooksAskUnderWayHoldsTheHoldsCleanup`, W1b
+`TestAnEndHookThatComesAfterTheTestsEndAsksNothing`, W1c
+`TestAnEndHooksAskThatNeverEndsEndsTheRun`, W2e
+`TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` and W2f
+`TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun`. W1c and W2f run
+their case as a process of their own, with a one-second drain bound
+(`holdDrainBound`, 30 s elsewhere), and require the run ended there, saying
+so, with no line from a cleanup registered before the hold.
+
+### The two windows
+
+1. **The end hook's ask ran beside the cleanup.**
+   - A worker runs its end hook once it has dropped its hold: the hook's
+     defer is registered first (finish.go:317) and runs after `h.drop()`
+     (finish.go:329). So `ActiveHoldsForTest` read 0 while the hook could be
+     inside its ask of the folder's lock (`backupsLockHeld`), and `over` was
+     read with no ordering against `letGo`.
+   - The hook now announces its ask (an atomic count, `asks`) before it reads
+     `over`, and asks through `probe`, which a test can stand in for. The
+     hold's cleanup waits for `asks` to read 0 once `letGo` has stored `over`,
+     bounded, and ends the run past the bound (`awaitAsks`). Go's atomics
+     are sequentially consistent, so either the hook's load of `over` comes
+     after the cleanup's store and it asks nothing, or its count comes before
+     the cleanup's read and the cleanup waits for it.
+   - The count is atomic, not a `sync.WaitGroup`: the hook can come after
+     the cleanup has begun to wait, and a WaitGroup's `Add` from zero beside
+     its `Wait` breaks that type's rules. `letGo` stays non-blocking, since
+     it also runs on the test context's `AfterFunc` goroutine; the wait is in
+     the cleanup.
+2. **A refused verification's let-go outlived the drain.**
+   - A verification refused at its folder's mark, before any hold
+     (finish.go:288-291), or at the slot, once its hold is dropped
+     (finish.go:297-302), hands its capture's ownership release to
+     `letGoWithin`. That waits StopWriteBound and leaves the release running
+     (finish.go:752-769), counted by no hold.
+   - `letGoWithin` now counts it, from before its goroutine starts until
+     `end` returns (`activeReleases`, hold.go:106; finish.go:756, 760),
+     exposed as `backup.ActiveReleasesForTest` (seams.go:387). It still
+     answers at its bound.
+   - `awaitNoHolds`, which `awaitHoldsLetGo` and `awaitVerificationsEnd` go
+     through, waits for both counts. The count is a separate accessor, not
+     folded into `ActiveHoldsForTest`, so internal/backup's own drains are
+     unchanged.
+   - The helper that makes a refused snapshot disarms the hold once the
+     refusal is answered. Without that, a blocker in the same folder had its
+     own unlock held by it (the first red run's "1 holds were left").
+
+### The two Lows of round 2
+
+1. `parkedBeforeItsUnlock` let its park go a second after the body's end even
+   where nothing had parked. It now does so through `letParkedGo`, which
+   sleeps only where the park was entered.
+2. `letGoAndAwaitEnd` calls `awaitNoHolds` once its end is heard. Nothing to
+   change: the worker's `h.drop()` runs before its end hook on its own
+   goroutine (finish.go:317-331), so its hold is gone by then, and the wait
+   covers other holders alone, as intended.
+
+### Reds, greens and controls
+
+| Run | Build | Result |
+|---|---|---|
+| reds | 13415a6e's helpers and a names-only shim: a `probe` the hook calls, `ActiveReleasesForTest` answering 0 | I red in both cases, "0 let-goes are counted, want 1" (release_count_internal_test.go:86); W1a red, the ask still running at the cleanup before the fixture's removal (backup_unlock_hold_test.go:254); W1b green (round 2 read `over` before asking); W1c red, its case exiting 0 with the later cleanup's line printed; W2e red in both cases and W2f red, at the let-go count |
+| greens | 38c29935 | I, W1a, W1b, W1c, W2e, W2f, round 2's three and the fixed test green |
+| W1-ctl | `awaitAsks` taken out of the hold's cleanup | W1a red at :254; W1c red, exit 0, the line printed |
+| W1b-ctl | the hook asking whatever `over` says | W1b red, "asked the folder's lock 1 times, want none" |
+| W2-ctl | `awaitNoHolds` waiting for holds alone | W2e red in both cases at the release-completion assertion (:473, "another verification owes this snapshot its check"); W2f red, exit 0, the line printed |
+| I-ctl | `letGoWithin` counting nothing | I red in both cases, "0 let-goes are counted, want 1" |
+| round 2's | 38c29935 | C-ctl red 3 of 3 (:99); B-ctl red, "holds 1"; F1b ended the run at `awaitHoldsLetGo`'s bound, exit 2, no race, 31.8 s |
+| round 1's | 38c29935, R1 at main | G green 3 of 3; C1 red 3 of 3 at backup_round5_test.go:190 on the skipped-prune assertion alone; C2 ended the run at the hold's drain, exit 2, "1 holds and 0 refused verifications' let-goes still running 30s on", 61.5 s; R1 red 3 of 3 at :183 |
+
+No test shows the announce-before-check order itself, since no seam parks
+the hook between its count and its load; the argument for it is the
+sequential consistency above.
