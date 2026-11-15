@@ -6061,3 +6061,41 @@ predicted, were red where predicted: the check asked only within the bound
 (the row past it), `Oversized` set at the bound (the row at it), and the words
 without `Oversized` (the row past it). The record is in
 `ops/engineering-log.md`, 2026-11-13, B828 round 2.
+
+## B871 round 6 — the stuck marker as main writes it, and what that leaves (2026-11-15)
+
+Round 5's publication of the stuck marker (its bytes in a temporary file
+created exclusively beside it, then linked to the marker's name) was reverted
+in round 6, with the two History sections that described it, and the B653 PR 1
+round 12 line is main's again: `writeMarker` removes the old entry, creates the
+marker exclusively, writes it and closes it (`internal/backup/stuck.go`
+293-325, byte for byte main's at a7167add). The publication had three defects:
+the link named the temporary file by its path, so a racer that replaced that
+file between its create and the link had its own file published; a filesystem
+that makes no hard link (FAT, exFAT) never had a marker; and a temporary file
+that a write or its cleanup left behind (the next holder's `clearStaleMarker`
+drops its errors, and a hold given up skips its own `clearStale`) refused every
+later exclusive create.
+
+Main's residual, which round 6 keeps. Between a holder's create (:315) and its
+write (:320) the marker is an empty file, which `stuckMarker` (:439-449) reads
+as no marker. Another process waiting for the folder's lock asks the marker
+once a second (`lockBackupsWith`, `internal/backup/verify_lock.go` 214-220,
+`markerPoll`; a verification's, a restore's admission, a claim and the prune,
+which tries once): where its last ask before its wait ends falls in that
+window, it answers `ErrBackupsBusy` (:229), a "busy" that names no hold, where
+an ask after the write names the hold given up (`ErrCheckStillRunning`). It is
+cosmetic: the folder's lock still protects what it protects, since no process
+takes the lock while the hold holds it, and it is main's behaviour today.
+
+Three readers ask the marker without the lock, each through `StuckCheckOf`
+(`stuck.go` 467-485), and in that window read no hold given up: the ticker's
+`captureHeldBack` (`cmd/bridge/backup.go` 1050-1063), whose pass then goes on
+as beside a hold not given up, to a capture whose verification waits for the
+lock, reads the marker at its next ask and is refused by the hold, the snapshot
+kept unverified; bridge restore's look before its prompt, `checkSource`
+(`internal/backup/restore_source.go` 611-621), after which the restore's
+admission waits for the lock and is refused there, after the prompt, nothing
+restored; and the doctor's stuck-hold warning (`cmd/bridge/doctor_backups.go`
+111-113), whose reading then names no hold given up. The record is in
+`ops/engineering-log.md`, 2026-11-15, B871 round 6.
