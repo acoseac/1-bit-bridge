@@ -38,6 +38,24 @@
 // that comes while it holds the slot waits for it, at most ProbeWait, and its
 // answers, which a Start came beside, are dropped and the probe owed.
 //
+// # A DAC's DSD choice, written while the player is stopped (B728 B9)
+//
+// ChooseDSD writes the bound DAC's choice in the player's DSD state, one
+// write at a time, only while the player is stopped ("Stop playback to change
+// DSD"): it takes the configuration lease, the backend's one admission point
+// beside it, in the step under the backend's lock that finds no session's
+// record, nothing holding the device and no release left unconfirmed, and
+// refuses playback_not_stopped otherwise. While it holds the lease a Start
+// waits before it registers (and then plays under the set the write
+// published), a probe is refused and stays owed, and a probe that held the
+// slot as the lease was taken is waited for. The policy's checks run inside the
+// state's one write (policy.Choose), then the set is published, a probe owed,
+// and the write answered from the epoch it published. A write that landed and
+// is not known to be durable holds every later set to what both states play
+// alike until the next start, and fences every later write. The lease cannot
+// see the engine between an acknowledged Release and the Start that follows
+// it: its caller holds the engine's own configuration reservation (B9 PR 3).
+//
 // # DSD converted to PCM (B728 B11)
 //
 // A rate the effective set converts opens through the PCM output path: the
@@ -127,10 +145,15 @@
 // session still holds the device (ErrOverlap, Stats.Overlaps): under the
 // engine's contract it never happens, so a defect shows as a refusal a test
 // sees, never as the kernel's busy refusal of the bridge's own second open.
+// A Start that comes while a choice's write holds the configuration lease
+// waits for it before it registers; given up at its release or its context's
+// end, it acquires nothing and leaves the record its Release meets, in either
+// order (session.abandon).
 //
 // The silent probe (Probe, B728 B4) shares that device slot: it takes it in
 // the step that finds no session holding it (none plays, opens, is paused or
-// is being released, and no release was left unconfirmed), holds it from
+// is being released, no release was left unconfirmed, and no choice's write
+// holds the configuration lease, B728 B9), holds it from
 // the binding's location to its node's close, and a Start that comes
 // meanwhile waits for it, at most ProbeWait, holding nothing, then answers
 // the device busy. A probe never waits: one the slot refuses opens nothing.

@@ -48,6 +48,10 @@ type dsdRig struct {
 	mu    sync.Mutex
 	opens []alsapcm.DSDConfig // every native or DoP open asked, in order
 	pcm   int                 // every PCM open asked
+	// cleanup, when set, is where each native or DoP sink opened from now on
+	// fails its teardown (FakeKernel.OpenNativeSinkWithCleanupError): "close"
+	// leaves its release unconfirmed.
+	cleanup string
 }
 
 // card is the fake node's card, where the box has the test DAC.
@@ -76,7 +80,11 @@ func newDSDRigWith(t *testing.T, st dsdstate.State, edit func(*playback.DSDPolic
 			cfg.OpenNative = func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
 				d.mu.Lock()
 				d.opens = append(d.opens, c)
+				cleanup := d.cleanup
 				d.mu.Unlock()
+				if cleanup != "" {
+					return r.k.OpenNativeSinkWithCleanupError(ctx, c, cleanup)
+				}
 				return r.k.OpenNativeSink(ctx, c)
 			}
 			open := cfg.OpenSink
