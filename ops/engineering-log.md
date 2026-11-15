@@ -100422,18 +100422,19 @@ and `move_entry.py`.
 
 ## 2026-11-15 — B601: the console's quiet PCM test tone, through the player's backend
 
-Worker b601, legion0, branch `feat/b601-pcm-tone` from main ca4473ff. Commits:
-86a6043d (the backend's tone), 8d3bcd71 (the bounds outside internal/player,
-the builder inside), 7b4d05e7 (serve's gate, the console's view and route, the
-page's panel), f4b02ff7 (the tones close as serve's stop begins; the serve and
+Branch `feat/b601-pcm-tone` from main ca4473ff. Commits: 86a6043d (the
+backend's tone), 8d3bcd71 (the bounds outside internal/player, the builder
+inside), 7b4d05e7 (serve's gate, the console's view and route, the page's
+panel), f4b02ff7 (the tones close as serve's stop begins; the serve and
 console tests), c48597e9 (the tests fail at the base by what they assert),
 b4096d7e (a refused open's answer pinned in alsapcm; qualificationVersion 52),
 c1a3d24b (CLAUDE.md), c91dcdba and f7683bd2 (two tests the controls found
 blind), b2a7433b (the fence names its error), 01dfa550 (the tone's status
-apart from the protocol's census), then this record. Every run: Go
-1.27.3, TMPDIR on disk (`.tmp/_b601/tmp`: /tmp is tmpfs here, which the
-player's durable writer refuses, so a serve test of the player waits there for
-an engine that never starts, to its deadline).
+apart from the protocol's census), c4b104d8 (this record) and 40059a0f (the
+rules and their long forms). Every run: Go 1.27.3, TMPDIR on a disk-backed
+directory: the player's durable writer refuses tmpfs, so a serve test of the
+player whose temporary directory is on tmpfs waits for an engine that never
+starts, to its deadline.
 
 ### The tone, and why the device slot
 
@@ -100500,9 +100501,8 @@ failure, hears it in that case too where it heard the refusal alone; the tone
 stops there and asks no other pair. Failure sets `terminalUnconfirmed`, which
 fences tones, Starts, probes and choices' leases until serve restarts, and
 says it at Warn with the error the cleanup answered. What close(2) leaves held
-is not readable from this host, which holds the kernel's headers alone (no
-`fs/` or `sound/` sources under `/usr/src`): upstream, unverified, the
-descriptor is gone whatever close answers and the driver's release runs at the
+could not be checked: the kernel's sources were not available, its headers
+alone. Upstream, unverified, the descriptor is gone whatever close answers and the driver's release runs at the
 last reference, so a close's error rarely leaves the node held; the bridge
 cannot tell, and fences rather than guess, the design's default for its open
 question 7. A close the kernel holds keeps the slot: a Start answers busy at
@@ -100564,13 +100564,12 @@ which tells the route a refusal from a tone that ran; `qualificationVersion`
 
 Each new test was shown red at the base by its assertion, through a copy of
 the base's tree with the branch's test files and a names-only shim of each new
-identifier (`.tmp/_b601/red.py`): every one but the builder's two pins
+identifier: every one but the builder's two pins
 (`TestTheToneNeverCarriesADoPMarker`, `TestTheToneIsTheSineItsLevelNames`: the
 builder moved unchanged) and `TestAnOpenHomeStopLeavesTheToneToItsEnd`, which
 pins a residual as it is. 23 negative controls, the brief's 18 and five for
 what the review added and the Warn's error, each predicted in a file before it
-ran (`.tmp/_b601/controls_def.py`) and run by a script that puts the bytes
-back: all 23 red as predicted, after two tests the controls found blind were
+ran and run by a script that puts the bytes back: all 23 red as predicted, after two tests the controls found blind were
 fixed. The ceiling raised to -20 made the backend's bounds test wait out the
 package's ten minutes: it asked each tone on the test's own goroutine, and the
 tone the mutation admitted played on a DAC the test never lets play. It now
@@ -100614,23 +100613,23 @@ cmd/bridge's three, a lane a package): every run green, no race (36.4 s,
 1.1 s, 166.3 s). The test binaries of tonebounds, testtone, playback,
 alsapcm, admin and cmd/bridge build for darwin and windows. go1.27.3's gofmt
 lists none of the changed files. `scripts/qualification-version` is red at
-c48597e9 (51 to 51) and OK once the version is 52. In the build slot at
-01dfa550: `GOOS=linux GOARCH=386 make vet` clean, and `make fmt vet test
+c48597e9 (51 to 51) and OK once the version is 52. At 01dfa550, one run at a
+time: `GOOS=linux GOARCH=386 make vet` clean, and `make fmt vet test
 build-all` passed, its fmt rewriting nothing (cmd/bridge 1,706.8 s of make
 test's 30 minutes, admin 1,259.4 s, api 163.7 s; `check-build-tags: OK`; the
 six builds). `make docs-check` is clean on the tree.
 
 ### The rules
 
-The rules are `rules-b601.patch`, uncommitted: in `output.md` a section, "The
+The rules land in 40059a0f: in `output.md` a section, "The
 console's test tone in the player's backend (B601)", of five bullets, and the
 glob `internal/tonebounds/**`; in `cli-serve.md` one line beside the console
 view's bullet, after `bridge update`'s entry's long form moved to
 `ops/History-rules-cli-serve.md` with a hand-written pointer (the largest entry
 cannot move whole: its own Don't needs more than a pointer holds); in
 `admin-console.md` one bullet after the Player page's; and their long forms in
-`ops/History-rules-output.md` and `ops/History-rules-cli-serve.md`. On a copy
-of the tree with it the budgets check is clean (`output.md` 89,402,
+`ops/History-rules-output.md` and `ops/History-rules-cli-serve.md`. On the
+tree with them the budgets check is clean (`output.md` 89,402,
 `cli-serve.md` 98,781, `admin-console.md` 96,395 bytes; the worst load 83.3%),
 `verify_moves.py --base HEAD` passes (one block moved), the self-tests of
 `check-doc-budgets.py`, `rules-for.py` and `move_entry.py` pass, and
