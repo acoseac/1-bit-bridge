@@ -99589,6 +99589,131 @@ Each control fails on the unfixed test and passes with the fix:
 - **The files:** `git diff --name-only 9acee209..HEAD` names the three
   test files and this log.
 
+## 2026-11-15 — B872U: the updater's tick seam takes its hold before it hands an arming over
+
+Branch `diag/b872u-updater-wake`, from main at bf622968. Commits:
+e7fea4b2 (the red: two seam tests and what they need), cb3b2268 (the
+fix), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, 16 CPUs,
+`-race`. The stressor and the runs were pinned to CPUs 0-7. The
+diagnostic edit (a record of the armings and holds, parks, a goroutine
+dump on `waitArmed`'s give-up) was never committed.
+
+### The hazard
+
+`TestAWakeAndAnOldTickReadyTogetherAskNothing` (check_switch_test.go
+535-571 at bf622968) waited out its minute, failing with "the poll loop
+never asked for its next wait", twice:
+
+- on Windows' CI at main 3a6b924e, at :544 (60.00 s; `internal/updater`
+  is the same at bf622968);
+- on a Linux `test -race (rest)` leg of PR #1470 (60.06 s; that log is
+  not on this host).
+
+The tick seam hands the test each arming's wait (`s.asked <- w`, :194),
+then takes the hold the test set (`s.hold.Swap(nil)`, :195), then waits
+on it (:196). The test sets a hold once it has been handed a wait, for
+the next arming. While the loop's goroutine was between :194 and :195,
+one of two things could happen:
+
+- **The arming already handed took that hold (:544).** Arming 1 waited
+  at :196 for the release at :550, which comes after the test's wait at
+  :544.
+- **The next hold replaced one its arming had not taken yet (:551).**
+  `inspect`'s hold (:549) replaced `release`'s, and arming 2 took
+  `inspect`'s. That hold is released at :558, after the wait at :551.
+
+The poll loop is not the cause:
+
+- Production's `after` is `time.After` (updater.go 469): there is no
+  hold and no hand-off.
+- With an old tick and a wake ready together, its select (529-540) takes
+  either, and each leads to the next arming. The old tick is refused at
+  593, and `finishDeferredRestart` waits only on the install marker's
+  bounded lock, only where a committed swap's restart is pending, and
+  never past its context.
+- "Check now" (1171-1182) never touches the loop's wait or wake.
+
+### Proofs
+
+- **Forced:** the diagnostic edit parks the loop between the hand-off
+  and the take.
+  - Parked at arming 1 until the test had set its hold: red at :544
+    after 60.05 s.
+  - Parked at arming 2 until the second hold, with arming 1 left to take
+    its hold first: red at :551 after 60.01 s.
+  - Both dumps show the loop `[chan receive]` at :196 in the seam's
+    `after`, called from `Run` at updater.go:528, and the test in
+    `waitArmed`'s give-up, called from :544 or :551. The record names
+    the arming that took each hold.
+- **Natural, at main:** the same build with no park.
+  - 4,400 runs of ×200 to ×1,000, unloaded and beside 8 busy loops, at
+    GOMAXPROCS 8, 2 and 1: 0 red.
+  - The long loaded batch (8 busy loops, each configuration capped at
+    480 s): 70 red in 108,634 runs, 50 at :544 and 20 at :551.
+
+    | configuration | red | runs |
+    |---|---|---|
+    | one lane, GOMAXPROCS 8 | 7 | 15,168 |
+    | one lane, GOMAXPROCS 2 | 7 | 21,077 |
+    | four lanes, GOMAXPROCS 2 | 28 | 23,037 |
+    | four lanes, GOMAXPROCS 8 | 28 | 29,352 |
+    | one lane, GOMAXPROCS 1 | 0 | 20,000 |
+
+    At GOMAXPROCS 1 the woken test goroutine waits for the P, which the
+    loop's goroutine does not give up between the hand-off and the
+    take, so no run went red.
+  - Every red's dump carries one of the two forced signatures. Between
+    its hand-off and its take, the loop's goroutine was held 24 µs to
+    3.7 ms: a median of 41 µs over the 50 at :544, and of 34 µs over the
+    20 at :551.
+- **Red first, e7fea4b2.** The seam keeps its order and gains three
+  things: a hook just after the hand-off (`tickSeam.handed`,
+  `parkAfterHanding`), arming numbers, and holds that record the arming
+  that took them. The lines below are e7fea4b2's.
+  - `TestAHoldSetOnceAnArmingIsHandedHoldsTheNextArming` parks the loop
+    just after it hands arming 1 over and sets a hold there. It fails at
+    :647: the hold was taken by arming 1, want arming 2.
+  - `TestAHoldSetBeforeAnArmingIsThatArmingsAlone` does the same with a
+    hold set before the loop runs. It fails at :679 (the first hold was
+    taken by no arming) and :682 (the second was taken by arming 1).
+  - Both are red 20 of 20, in 0.00 s each. Every hold is released before
+    the loop goes on, so a red ends at once.
+- **The fix, cb3b2268.** An arming takes its hold, then hands over its
+  wait carrying that hold (`armedWait.held`), then waits on it.
+  - `TestAWakeAndAnOldTickReadyTogetherAskNothing` keeps its property:
+    the old tick and the wake are ready together while the loop is held
+    before its select, and the current wait's tick asks once. It now
+    also asserts that each held arming took the hold set for it.
+  - The two seam tests pass 20/20. Everything
+    `-run 'Update|Tick|Wake|CheckNow|Hold'` selects passes: 47 tests and
+    39 subtests.
+  - The test alone: 1,200 of 1,200 (×200 in six configurations), and
+    the long loaded batch, the same five configurations: 0 red in
+    160,000.
+  - `./internal/updater` once: 262 of 262, 0 races, 36.2 s.
+- **Controls.** Each mutation was made in memory and the bytes put
+  back, with the predictions written before each run. The lines are
+  cb3b2268's.
+  - **C1, the schedule protection removed** (updater.go 593 reduced to
+    `!u.checksEnabled()`):
+    - `TestAWakeAndAnOldTickReadyTogetherAskNothing` was red in 51 of
+      100 runs at :627 (one request when the select took the old tick)
+      and green in 49;
+    - `TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn`
+      and
+      `TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain`
+      were red 100/100.
+  - **C2, the take moved to between the hand-off and the hook:** the
+    held assertion was red 20/20 at :614, at once. The seam tests stayed
+    green, against the prediction: their park sits after that take.
+  - **C3, the red commit's order** (hand-off, hook, take): all three
+    were red 20/20, at once.
+- **Guarded files:** `internal/updater` is not a guarded path
+  (`internal/player/qualification/version_gate.go`).
+
+The rule is a bullet after build-ci-tests.md's tickSeam bullet, in this
+branch's rules patch.
 ## 2026-11-13 — B618: on Windows, bridge logs reads the file the installed bridge writes
 
 Worker b618, legion0, branch `fix/b618-windows-logs-path` from main 2bebca26. Commits 779bdfc3 (the seams, the
