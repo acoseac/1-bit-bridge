@@ -20,6 +20,7 @@ const (
 
 // ErrReleaseUnconfirmed means cleanup still owns the device, or failed. Never
 // open a successor on this answer; Done is the actual cleanup completion fence.
+// A refused PCM open whose own close failed carries it too (open, B601).
 var ErrReleaseUnconfirmed = errors.New("native release unconfirmed")
 
 // ErrActivationFenced identifies an activation stopped by the sink's own fence.

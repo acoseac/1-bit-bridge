@@ -298,16 +298,16 @@ type configLease struct{ free chan struct{} }
 // registration and its hold of the device included; playing; paused, the
 // device open or let go by the pause's release; releasing, a retiring native
 // tail included; or a Start whose Release came first), nothing holds the
-// device and no release was left unconfirmed: otherwise it answers
-// playback_not_stopped at once, nothing taken. From then on no Start
-// registers and no probe takes the slot. A probe that held the slot as the
-// lease was taken is waited for, the lease held, at most until ctx ends:
-// then the lease is let go, persist_failed. The lease is its caller's only
-// once this returns it: let go here on every other way out, a panic's
-// included.
+// device, the console's test tone included (B601), and no release was left
+// unconfirmed: otherwise it answers playback_not_stopped at once, nothing
+// taken. From then on no Start registers, no probe takes the slot and no tone
+// is admitted. A probe that held the slot as the lease was taken is waited
+// for, the lease held, at most until ctx ends: then the lease is let go,
+// persist_failed. The lease is its caller's only once this returns it: let go
+// here on every other way out, a panic's included.
 func (b *Backend) takeLease(ctx context.Context, j *choiceJournal) (*configLease, ChoiceOutcome) {
 	b.mu.Lock()
-	if len(b.sessions) > 0 || b.holder != nil || b.terminalUnconfirmed {
+	if len(b.sessions) > 0 || b.holder != nil || b.terminalUnconfirmed || b.toning != nil {
 		b.mu.Unlock()
 		return nil, ChoicePlaybackNotStopped
 	}
