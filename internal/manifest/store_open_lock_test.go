@@ -167,6 +167,25 @@ func TestAnOpenOverAnUnfinishedRestoreRefusesAndMakesNothing(t *testing.T) {
 		})
 	}
 
+	// Precreate makes the database's empty file only as root (a process that
+	// is not root leaves it to SQLite), so the journal's place before it is
+	// shown by an open run as root: an open that asked the journal after
+	// Precreate would leave the empty store behind.
+	t.Run("a journal, the open run as root", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a file takes its directory's ACL on Windows; Precreate makes nothing there")
+		}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "bridge.db")
+		writeJournal(t, path, "file")
+		_, restore := fsutil.SimulateRootForTest(os.Getuid(), os.Getgid())
+		defer restore()
+		if _, err := OpenStore(path); !errors.Is(err, ErrRestoreIncomplete) {
+			t.Errorf("OpenStore as root over an unfinished restore = %v, want ErrRestoreIncomplete", err)
+		}
+		requireNoDatabaseFiles(t, path)
+	})
+
 	t.Run("a link at the lock file to the database, a journal standing", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "bridge.db")
