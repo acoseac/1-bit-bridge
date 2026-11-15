@@ -98240,3 +98240,80 @@ over the head's, green ×50 at the head.
   reach the fake kernel"; the native-integration overlay reaches it too, as
   `native_integration_test.go` did before this round. Not corrected here,
   beside this round's rule.
+
+## 2026-11-15 — B904: the stalled-storage stop test waits for the stall before it stops serve
+
+Branch `fix/b904-serve-stop-stall-test`, from main at 9acee209. Commits:
+fdc91a18 (the fix: three test files under `cmd/bridge`), then this record.
+Every run: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`,
+darwin/arm64, GOMAXPROCS=6 of 12 cores. The fix was first built and proved
+as an uncommitted prototype on 9acee209, with its controls as an overlay
+that is not part of the fix; fdc91a18 is that prototype's diff, applied
+unchanged.
+
+### The hazard
+
+`TestServeStopWithThePlayersStorageStalled` failed on `test (macos-latest)`
+(run 43647029825, attempt 1, 11-14) with "the abandonment logged [], want
+once" and "a second serve lock with the player stalled: <nil>, want it
+held" (`serve_player_unix_test.go` 60 and 66 at 9acee209). The test relies
+on the supervisor being parked in the `engineConfig` seam, past the
+start's last stop checks (`serve_player.go` 439 and 445), when serve's stop
+cancels the player (377). Nothing ordered the stop after that hold. When
+the cancel lands first, the start returns at 446-447 and logs nothing,
+`supervise` settles at once (876-878), `stop` returns before its bound
+with no warning (381-382), and runServe lets the last share of the lock
+go: CI's pair. Repeated runs failed for other reasons: each pass waited out
+the 12.6 s stop bound, a boot failure left its supervisor parked, and
+iteration n's player could still run while n+1 set the global medium seam
+(`atomicwrite.mediumOf`). That was a test seam, not production.
+
+### The fix
+
+- `launchServe` takes optional hooks that run once the drain is
+  registered and before `waitForListening`, the call that can fail. A
+  cleanup registered there exists whatever the boot does, and runs before
+  the drain.
+- `playerStall` holds the start at the `engineConfig` seam. `await` waits
+  until the stall is entered: it fails at once if the start ends first,
+  and at `serveGiveUp` with serve's stacks. `end`, the one cleanup,
+  cancels serve, cancels the player (`p.cancel()`, not `p.stop()`, which
+  would wait out the bound), lets the stall go and joins `settled` until
+  `serveDrainGiveUp`. All of that happens before the directories and the
+  medium seam go.
+- The test waits for the stall before its health check and its stop, and
+  bounds its stop at 1.9 s (surface, discovery and warm at 100 ms each; the
+  engine never runs and OpenHome is off here) instead of 12.6 s.
+
+A premise of the brief was wrong. Letting the stall go does not reach
+`EnsurePlayerUUID` (`serve_player.go` 449, before the seam at 501). It
+reaches `engine.New`, whose `atomicwrite.ProbeDurable` reads the medium
+seam. So the player is joined before `persistentMedium`'s restore.
+
+### Proofs
+
+Each control fails on the unfixed test and passes with the fix:
+
+- **A boot failure** (the handed listener refused after the start is
+  held): unfixed, 10/10 leave the parked supervisor (1, 2 … 10
+  accumulate). Fixed, 10/10 settled, with 0 supervisors left.
+- **Health failing**, two ways: unfixed, the cleanup waits until
+  `serveGiveUp`. Fixed, 10/10 for each report only the injected failure,
+  in under 1 s.
+- **CI's red, deterministic:** a migration hold released only by the stop
+  or by the test's own wait, with no timer. Unfixed, 10/10 fail with
+  exactly CI's two messages, in two builds. Fixed, 10/10 pass.
+- **Health after the stall:** 20/20 fixed, 0/10 unfixed.
+- **The stall wait's bound:** a start that ends early fails in 0.83-0.86
+  s. A hang gives up at `serveGiveUp`, and the cleanup then joins.
+- **×200,** `-race -count=200 -timeout 30m`:
+  - quiet: 200/200, 0 races, 0 panics, 2.76-2.92 s each;
+  - beside 16 busy loops: 200/200, 0 races, 0 panics, 2.94-3.49 s each,
+    627 s in all; the load average reached 58.
+- **`./cmd/bridge` once,** `-race -timeout 120m`: 1548 of 1548 tests ran,
+  1544 pass, 4 skip (root-only and case-insensitive-volume), 0 fail, 0
+  races.
+- **`go vet`** with the tags (linux amd64 and arm64, darwin, windows):
+  clean.
+- **The files:** `git diff --name-only 9acee209..HEAD` names the three
+  test files and this log.
