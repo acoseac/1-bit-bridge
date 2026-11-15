@@ -164,13 +164,23 @@ func (h heldRequest) waitEnded(t *testing.T) {
 // arms it. holdNext holds the loop at its next arming, its schedule taken
 // and its select not yet reached, so that a test can make a tick and a
 // notification ready together.
+//
+// An arming takes the hold set for it before it hands the test its wait, and
+// says in the wait which hold it took (armedWait.held), so that a hold the
+// test sets once it has been handed a wait is the next arming's, never the
+// arming already handed, and a hold set before an arming is that arming's
+// before the test can set another (backlog B872U). Taken after the hand-off,
+// a hold the test set for the next arming could be taken by the one it had
+// been handed, or could replace the hold that arming had not taken yet, and
+// either held the loop before its select until a release the test makes only
+// after its next wait for an arming.
 type tickSeam struct {
 	asked chan armedWait
 	hold  atomic.Pointer[seamHold]
 
 	// handed, nil but in the seam's own tests, runs on the loop's goroutine
-	// once the loop has handed the test an arming, before it goes on: a test
-	// parks the loop there (parkAfterHanding).
+	// once the loop has handed the test an arming, before it waits on the
+	// hold the arming took: a test parks the loop there (parkAfterHanding).
 	handed func(armedWait)
 
 	mu      sync.Mutex
@@ -178,16 +188,19 @@ type tickSeam struct {
 	armings int
 }
 
-// armedWait is one wait the loop armed: its length, its own channel, and
-// which of the loop's armings it is, counted from 1.
+// armedWait is one wait the loop armed: its length, its own channel, which of
+// the loop's armings it is, counted from 1, and the hold the arming took
+// before the wait was handed over, nil for none: the loop waits on it, between
+// the hand-off and its select, until it is released.
 type armedWait struct {
 	d    time.Duration
 	tick chan time.Time
 	n    int
+	held *seamHold
 }
 
 // seamHold is a hold holdNext set: the arming that takes it records itself
-// in it and waits until it is released.
+// in it before it hands the test its wait, and waits until it is released.
 type seamHold struct {
 	ch      chan struct{}
 	once    sync.Once
@@ -214,13 +227,15 @@ func installTickSeam(u *Updater) *tickSeam {
 		s.armings++
 		w := armedWait{d: d, tick: make(chan time.Time, 1), n: s.armings}
 		s.mu.Unlock()
+		if w.held = s.hold.Swap(nil); w.held != nil {
+			w.held.takenBy.Store(int64(w.n))
+		}
 		s.asked <- w
 		if s.handed != nil {
 			s.handed(w)
 		}
-		if h := s.hold.Swap(nil); h != nil {
-			h.takenBy.Store(int64(w.n))
-			<-h.ch
+		if w.held != nil {
+			<-w.held.ch
 		}
 		return w.tick
 	}
@@ -228,8 +243,10 @@ func installTickSeam(u *Updater) *tickSeam {
 }
 
 // holdNext holds the loop at its next arming, inside the seam's after, until
-// the hold is released (or the test's end). Called once the loop runs, so
-// that the release at the test's end comes before runLoop's stop.
+// the hold is released (or the test's end): the next arming whose wait the
+// test has not been handed yet, which names the hold in that wait. Called once
+// the loop runs, so that the release at the test's end comes before runLoop's
+// stop.
 func (s *tickSeam) holdNext(t *testing.T) *seamHold {
 	h := &seamHold{ch: make(chan struct{})}
 	t.Cleanup(h.release)
@@ -579,7 +596,10 @@ func TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain(t *tes
 // GitHub: the old wait's tick is refused, being armed under another schedule,
 // and the notification rearms; the wait the loop then waits on is a full
 // interval, and its tick checks. Without the schedule the select takes the
-// tick about half the time, so a few runs show it.
+// tick about half the time, so a few runs show it. Each arming the test holds
+// says it took the hold set for it (armedWait.held, backlog B872U), so a hold
+// taken by another arming fails here at once rather than leave the test
+// waiting for an arming the held loop cannot make.
 func TestAWakeAndAnOldTickReadyTogetherAskNothing(t *testing.T) {
 	gh := newReleaseStandIn(t, "v9.9.9")
 	sw := &testSwitch{}
@@ -587,23 +607,29 @@ func TestAWakeAndAnOldTickReadyTogetherAskNothing(t *testing.T) {
 	u, ticks := switchedUpdater(t, gh, sw, Options{LiveCheckInterval: func() time.Duration { return 3 * time.Hour }})
 	runLoop(t, u)
 	first := ticks.waitArmed(t)
-	release := ticks.holdNext(t).release
+	hold := ticks.holdNext(t)
 	first.fire() // a tick while off; the loop's next arming is held
 	old := ticks.waitArmed(t)
+	if old.held != hold {
+		t.Fatalf("arming %d, the old wait's, did not take the hold set for it", old.n)
+	}
 
 	sw.off.Store(false)
 	u.ChecksSwitched() // the notification, ready
 	old.fire()         // and the old wait's tick, ready too
-	inspect := ticks.holdNext(t).release
-	release()
+	inspect := ticks.holdNext(t)
+	hold.release()
 	next := ticks.waitArmed(t)
+	if next.held != inspect {
+		t.Fatalf("arming %d, the one after the old wait's, did not take the hold set for it", next.n)
+	}
 	if n := gh.requests.Load(); n != 0 {
 		t.Fatalf("with the notification and a tick armed while off ready together GitHub was asked %d time(s), want 0", n)
 	}
 	// The loop is held at this arming: a notification it has not taken yet
 	// rearms it once more.
 	pending := len(u.wake) > 0
-	inspect()
+	inspect.release()
 	if pending {
 		next = ticks.waitArmed(t)
 	}
