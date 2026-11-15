@@ -201,6 +201,21 @@ func (f *logFilter) render(line string) string {
 }
 
 var (
+	// dacTextRe and dacJSONRe match the dac attribute the player's DSD
+	// migration names a DAC by (cmd/bridge's dacLabel: the DAC's USB IDs,
+	// vvvv:pppp, then its product string), quoted, as slog's text handler
+	// writes it (dac="…", the key at the line's start or after white space)
+	// and as its JSON handler does ("dac":"…", the key at the line's start or
+	// after white space, a { or a ,), with any spacing around the key and the
+	// = or the :. The quoted value is read whole, to its own closing quote:
+	// both handlers escape a quote and a backslash in it (\" and \\), and a
+	// product string may hold either (dacprofile's checkProduct refuses only
+	// an empty string, white space around it, NUL, CR, LF and bytes that are
+	// not UTF-8), so a rule that stopped at the next quote would leave the
+	// rest of the product string behind. Only a value that begins with the
+	// IDs, then a space or its end, is matched, and the IDs are kept.
+	dacTextRe = regexp.MustCompile(`(^|\s)(dac\s*=\s*)"([0-9a-fA-F]{4}:[0-9a-fA-F]{4})(?: (?:[^"\\]|\\.)*)?"`)
+	dacJSONRe = regexp.MustCompile(`(^|[\s{,])("dac"\s*:\s*)"([0-9a-fA-F]{4}:[0-9a-fA-F]{4})(?: (?:[^"\\]|\\.)*)?"`)
 	// quotedPathRe matches an absolute path inside a quoted value, to the
 	// CLOSING QUOTE rather than to the first space.
 	//
@@ -250,6 +265,11 @@ var (
 // Loopback addresses survive on purpose: 127.0.0.1 and ::1 identify nobody,
 // and blanking them would make the admin/listener lines unreadable for no
 // privacy gain.
+//
+// Beside those, it drops a DAC's product string from the player's lines that
+// name a DAC and keeps the DAC's USB IDs (dacTextRe, dacJSONRe; B882L): a
+// unit's product string can hold its serial and its port.
+//
 // Known limitation, stated rather than hidden: an UNQUOTED absolute path
 // containing a space leaves its tail behind, because the unquoted rule stops
 // at whitespace and there is no closing delimiter to run to. In practice the
@@ -258,6 +278,13 @@ var (
 // the unquoted rule past whitespace would swallow the rest of the LINE, which
 // is the worse failure: it would eat the log message itself.
 func redactLogLine(line string) string {
+	// The DAC's attribute before every other rule: quotedPathRe reads a
+	// quoted path to the next quote, escaped or not, so inside a product
+	// string that holds one it would end the dac value's escaping early, and
+	// a DAC rule run after it would stop at that quote with the rest of the
+	// product string left behind.
+	line = dacTextRe.ReplaceAllString(line, `${1}${2}"${3}"`)
+	line = dacJSONRe.ReplaceAllString(line, `${1}${2}"${3}"`)
 	// Quoted first: it is the more specific rule, and once it has replaced a
 	// value there is no '/' left inside for the unquoted rules to re-match.
 	line = quotedPathRe.ReplaceAllString(line, `"<path>"`)

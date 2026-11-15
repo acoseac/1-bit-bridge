@@ -71,6 +71,52 @@ func (s Serial) Redact(text string) string {
 	return strings.ReplaceAll(text, *s.v, redacted)
 }
 
+// HeldIn reports whether text holds s in any spelling, without handing the
+// serial to the caller: s's letters and digits, in their order and with their
+// case folded, stand in a row among text's letters and digits once whatever
+// else either holds is set aside. So it finds what Redact's exact match
+// passes over: the serial in another case, or with spaces, dashes or other
+// marks between its letters and digits ("ab 12 cd 34" holds AB12-CD34). An
+// absent serial is held in nothing.
+//
+// A serial with no letter or digit leaves nothing to compare, and no text can
+// be shown not to hold it in some spelling, so HeldIn answers true for it
+// whatever the text, the empty one included: it fails closed. A caller that
+// drops every text holding the serial drops every text beside such a serial;
+// the other answer would keep text that may carry it.
+func (s Serial) HeldIn(text string) bool {
+	if s.v == nil {
+		return false
+	}
+	return strings.Contains(foldedAlnum(text), foldedAlnum(*s.v))
+}
+
+// foldedAlnum is text's letters and digits alone, in their order, each
+// written as the least rune of its unicode.SimpleFold orbit, the cycle of
+// runes that fold to one another, so every case of a letter is one rune: K,
+// k and the Kelvin sign (U+212A) alike, and S, s and the long s (U+017F).
+// White space, punctuation, symbols and marks are left out.
+func foldedAlnum(text string) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(leastOfOrbit(r))
+		}
+	}
+	return b.String()
+}
+
+// leastOfOrbit is the least rune of r's unicode.SimpleFold orbit, r itself
+// when no other rune folds to it.
+func leastOfOrbit(r rune) rune {
+	least := r
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		least = min(least, f)
+	}
+	return least
+}
+
 // labelMin is the shortest serial whose label shows its tail: a shorter
 // one is not shown at all.
 const labelMin = 12
