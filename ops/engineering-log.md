@@ -100469,31 +100469,31 @@ calls the reservation yet: the DSD choice's route (B9 PR 3b) will.
 
 ### The brief's reviews
 
-- **Codex 1, C6 could not go red.** Confirmed: past `ReleaseTimeout`,
+- **First review, 1: C6 could not go red.** Confirmed: past `ReleaseTimeout`,
   `releaseDeadline` clears `o.sess` and keeps the session in `o.sessions`,
   so the unconfirmed-release term alone is covered by the sessions term.
   C6 removes both; each alone (C6a, C6b) is the other's defence in depth.
-- **Codex 2, the overlay could not reach `o.configs` or the errors.go a test
+- **First review, 2: the overlay could not reach `o.configs` or the errors.go a test
   reads.** The red runs overlaid main's owner.go with the field and its make
   (nothing reads it) and main's errors.go with the two reasons in the file
   itself; T8 and T9 ran in a disposable copy of the tree with main's files on
   disk and the two reasons in its errors.go.
-- **Codex 3, T6 passed against the no-op shim.** T6 now requires the
+- **First review, 3: T6 passed against the no-op shim.** T6 now requires the
   reservation shown and a Play refused `configuring` before the release.
-- **Codex 4, the cancellation exception.** Documented where the rule it
+- **First review, 4: the cancellation exception.** Documented where the rule it
   breaks is written (above), and T4 requires WithAdmission's channel closed
   while the method answers `ErrNotAdmitted`.
-- **Carbon 1, maintenance beside a held reservation.** The finding's second
+- **Second review, 1: maintenance beside a held reservation.** The finding's second
   option: the brief keeps it a named residual (design 5.5), so the rule,
   doc.go and `EnterMaintenance`'s doc say a maintenance entered while one is
   held is not refused. The shutdown keeps the leases on purpose: nothing
   starts once it has begun, and the release, dispatched first, still clears
   one (T7).
-- **Carbon 2, the brief's unbound `err`.** `if err := ctx.Err(); err != nil`,
+- **Second review, 2: the brief's unbound `err`.** `if err := ctx.Err(); err != nil`,
   the chain notAdmitted's (`fmt.Errorf("%w: %w", ErrNotAdmitted, err)`).
-- **Carbon 3, a release of a lease not held.** Deletes and touches only a
+- **Second review, 3: a release of a lease not held.** Deletes and touches only a
   lease held; T5 requires a second release to publish no snapshot.
-- **Carbon 4, `o.starting` and `r.output`.** `o.starting` is set only in
+- **Second review, 4: `o.starting` and `r.output`.** `o.starting` is set only in
   `startSession`, with `o.sess` and state Playing, and cleared in
   `releaseSession` and `onAudible`; `o.sess` is cleared only by
   `releaseDeadline` and `acked`, after `releaseSession`. So the grant's
@@ -100502,7 +100502,7 @@ calls the reservation yet: the DSD choice's route (B9 PR 3b) will.
   start, resume or carry a play; a seek that plays); `startSession`'s two
   callers are `transport()`'s start and `afterRelease`; `do` answers closed
   at `e.done` before and while it waits, so a release after Run returns.
-- **Carbon 5, T6 tested no path of its own.** T6 holds the owner as it
+- **Second review, 5: T6 tested no path of its own.** T6 holds the owner as it
   admits the release (the `admitted` seam): the release has not returned and
   the lease is shown; once it returns, at once none is shown and a Play is
   admitted. A posted release fails it at once, every time (C11).

@@ -431,7 +431,7 @@ func TestTheReservationIsAskedWhereverASessionWouldStart(t *testing.T) {
 }
 
 // TestAReservationGrantedAsItsCallerLeavesIsLetGo pins a grant never lost to
-// its caller (B728 B9 PR 3, Codex D4): the owner, having granted the
+// its caller (B728 B9 PR 3, review finding D4): the owner, having granted the
 // reservation and published it, is held as it sends the reply, and the
 // caller's context ends there. A command context that could end would let its
 // caller give up and the lease stand for ever, so where the command's context
