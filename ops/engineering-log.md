@@ -100736,3 +100736,21 @@ so, with no line from a cleanup registered before the hold.
 No test shows the announce-before-check order itself, since no seam parks
 the hook between its count and its load; the argument for it is the
 sequential consistency above.
+
+### Runs
+
+At 597ef073: 38c29935's code, and this record but its runs. TMPDIR was
+`$HOME/onebit/tmp`.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=50 -timeout 30m -v -run '^TestTheTickerAndTheDoctorNameAPruneGivenUp$' ./cmd/bridge/`, inside the build slot | 50 of 50, no race; ok in 88.0 s |
+| the same, outside the slot at nice 19, before the slot came free | 50 of 50, no race; ok in 88.8 s |
+| the new cmd/bridge tests, round 2's three and this round's five, `-race -count=10`, inside the slot and outside it | 80 of 80 each, no race; ok in 336.2 s and 350.7 s |
+| I, `-race -count=10`, inside the slot and outside it | 10 of 10 each, no race; ok in 41.1 s and 41.2 s |
+| every test of cmd/bridge's backup test files (70), `-race -count=1`, inside the slot and outside it | 70 of 70 each, no race; ok in 191.9 s and 214.5 s |
+| internal/backup's whole suite, `-race -count=1 -timeout 60m`, inside the slot | 291 of 291, no race; ok in 748.1 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, inside the slot and outside it |
+| gofmt (`go run cmd/gofmt -l`) on the six files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at 597ef073 and with this table |
+| `make docs-check` | exit 0, at 597ef073 and with this table |
