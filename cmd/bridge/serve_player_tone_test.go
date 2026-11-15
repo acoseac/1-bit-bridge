@@ -113,7 +113,8 @@ func (l *toneLog) expect(t *testing.T, what string, want ...string) {
 // with the engine's output generation as it is made; a Tone that holds, while
 // the gate is open and no tone plays, until the gate shuts, CloseTones runs or
 // its context ends, answering the word that ended it, or answers at once
-// (answer); a ToneStatus the test sets (status); and Facts, an observation of
+// (answer); a ToneStatus the test sets (status), or, where it sets none, its
+// own tone's, playing while one is held; and Facts, an observation of
 // a stream (stream, "" for none). player is the bridgePlayer serve decided,
 // told by its boot hook before the supervisor starts, whose engine the
 // supervisor's goroutine set before it sets the gate.
@@ -129,6 +130,7 @@ type toneStandIn struct {
 	shut      playback.ToneOutcome
 	closed    bool
 	ends      chan playback.ToneOutcome
+	req       playback.ToneRequest
 	tones     int
 	admitted  int
 	closes    int
@@ -213,7 +215,7 @@ func (s *toneStandIn) Tone(ctx context.Context, req playback.ToneRequest) playba
 		return playback.ToneResult{Outcome: why}
 	}
 	ends := make(chan playback.ToneOutcome, 1)
-	s.ends = ends
+	s.ends, s.req = ends, req
 	s.admitted++
 	s.signalT()
 	s.tmu.Unlock()
@@ -270,10 +272,19 @@ func (s *toneStandIn) CloseTones() {
 	s.signalT()
 }
 
+// ToneStatus is the status the test set (status), or, where it set none, the
+// stand-in's own tone as the backend's ToneStatus says one: playing, with its
+// request, while a tone is held, and idle otherwise.
 func (s *toneStandIn) ToneStatus() playback.ToneStatus {
 	s.tmu.Lock()
 	defer s.tmu.Unlock()
-	return s.status
+	switch {
+	case s.status.State != "":
+		return s.status
+	case s.ends != nil:
+		return playback.ToneStatus{State: playback.ToneStatePlaying, Request: s.req}
+	}
+	return playback.ToneStatus{State: playback.ToneIdle}
 }
 
 func (s *toneStandIn) Facts() (playback.PlayerPolicy, *playback.PlaybackFacts) {
@@ -668,9 +679,9 @@ func TestTheConsoleViewAllowsAToneInOneStateAlone(t *testing.T) {
 	if offView.toneView() != nil || noTones.view.toneView() != nil {
 		t.Errorf("running.tone for a player with no tone to offer: want none")
 	}
-	if v := unknown.view.toneView(); v == nil || v.State != "" {
-		// The stand-in's status is the zero one until a test sets it.
-		t.Errorf("running.tone for a running player: %+v", v)
+	if v := unknown.view.toneView(); v == nil || v.State != "idle" {
+		// The stand-in's own status: no tone held, and none set by the test.
+		t.Errorf("running.tone for a running player with no tone: %+v; want idle", v)
 	}
 }
 
@@ -841,6 +852,9 @@ func TestAWithholdEndsTheToneAndTheWriteAnswersNotInterrupted(t *testing.T) {
 	cs, tone := bootToneServe(t)
 	call := toneCall(cs.console)
 	tone.awaitTone(t, "the first tone admitted", func(s *toneStandIn) bool { return s.admitted == 1 })
+	if st := cs.status(t); st.Running.Tone == nil || st.Running.Tone.State != "playing" {
+		t.Fatalf("the status beside a tone held in the backend: tone %+v; want playing", st.Running.Tone)
+	}
 	off := cs.change(t, "/api/output/player/enabled", `{"enabled":false}`, "restart")
 	if off.Interrupted {
 		t.Errorf("turning the player off beside a tone answered interrupted")
