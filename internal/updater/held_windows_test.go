@@ -71,8 +71,9 @@ func TestAnAccessDeniedRenameIsAnsweredAtOnceThroughThePredicate(t *testing.T) {
 
 // holdShareNone opens path sharing nothing with any other handle, as a
 // scanner may hold a file it reads, and requires that Windows now refuses a
-// rename of it with a sharing violation; letGo closes the handle, once, and
-// the test's end does too.
+// rename of it with a sharing violation, a rename that lands put back once the
+// handle is closed; letGo closes the handle, once, and the test's end does
+// too.
 func holdShareNone(t *testing.T, path string) (letGo func()) {
 	t.Helper()
 	p, err := windows.UTF16PtrFromString(path)
@@ -90,26 +91,38 @@ func holdShareNone(t *testing.T, path string) (letGo func()) {
 		}
 	}
 	t.Cleanup(letGo)
-	if err := os.Rename(path, path+".elsewhere"); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+	err = os.Rename(path, path+".elsewhere")
+	if err == nil {
+		letGo()
+		if perr := os.Rename(path+".elsewhere", path); perr != nil {
+			t.Errorf("put the held %s back: %v", filepath.Base(path), perr)
+		}
+	}
+	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		t.Fatalf("a rename of the held %s = %v, want a sharing violation: the case shows nothing", filepath.Base(path), err)
 	}
 	return letGo
 }
 
-// realHolds stands in for the moves' waits: each recorded, and slept for real
-// once the test's own hold is let go (released), so that a scanner of the
-// host's holding the file a moment longer is waited out as in production.
+// realHolds stands in for the moves' waits and their clock: each wait
+// recorded, and slept for real once the test's own hold is let go (released),
+// so that a scanner of the host's holding the file a moment longer is waited
+// out as in production, and the clock the deadlines read moved on by each
+// wait's length, slept or not, and by nothing else.
 func realHolds(t *testing.T, released *atomic.Bool) *[]time.Duration {
 	t.Helper()
 	var waits []time.Duration
-	prev := renameWait
-	t.Cleanup(func() { renameWait = prev })
+	clock := time.Now()
+	prevWait, prevNow := renameWait, renameNow
+	t.Cleanup(func() { renameWait, renameNow = prevWait, prevNow })
 	renameWait = func(d time.Duration) {
 		waits = append(waits, d)
 		if released.Load() {
 			time.Sleep(d)
 		}
+		clock = clock.Add(d)
 	}
+	renameNow = func() time.Time { return clock }
 	return &waits
 }
 
@@ -171,14 +184,16 @@ func TestARollbackWaitsOutAHandleThatSharesNoDeletion(t *testing.T) {
 }
 
 // TestARollbackHeldThroughItsWaitMovesNothing: the backup held through the
-// whole forward schedule, the rollback moves nothing, the hold its answer.
+// whole forward schedule, the rollback moves nothing, the hold its answer;
+// the hold is let go once the rollback has returned, before a file is read.
 func TestARollbackHeldThroughItsWaitMovesNothing(t *testing.T) {
 	dst, bak := rollbackFiles(t)
 	var released atomic.Bool
-	holdShareNone(t, bak)
+	letGo := holdShareNone(t, bak)
 	waits := realHolds(t, &released)
 	heard := letGoAtRefusalOf(t, bak, nil, &released)
 	err := replaceRunningBinary(dst, bak)
+	letGo()
 	var swapErr *SwapError
 	if !errors.As(err, &swapErr) || swapErr.Outcome != NothingMoved || !swapErr.InUse || !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		t.Fatalf("the rollback = %v, want nothing moved for the hold", err)
@@ -195,7 +210,8 @@ func TestARollbackHeldThroughItsWaitMovesNothing(t *testing.T) {
 // the place is made, and on the aside as it is put back, as a new holder
 // between a probe and its rename would: Windows' own sharing violation refuses
 // both, the binary is missing, and the error names the rename that puts it
-// back.
+// back. Both holds are let go once the rollback has returned, before a file is
+// read.
 func TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre(t *testing.T) {
 	dst, bak := rollbackFiles(t)
 	var released atomic.Bool
@@ -203,14 +219,21 @@ func TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre(t *testing.T) {
 	prev := renameFunc
 	t.Cleanup(func() { renameFunc = prev })
 	held := map[string]bool{}
+	var letGos []func()
 	renameFunc = func(from, to string) error {
 		if to == dst && !held[from] {
 			held[from] = true
-			holdShareNone(t, from)
+			letGos = append(letGos, holdShareNone(t, from))
 		}
 		return os.Rename(from, to)
 	}
 	err := replaceRunningBinary(dst, bak)
+	for _, letGo := range letGos {
+		letGo()
+	}
+	if len(letGos) != 2 {
+		t.Errorf("held %d files, want the backup at the place and the aside at its put-back", len(letGos))
+	}
 	var swapErr *SwapError
 	if !errors.As(err, &swapErr) || swapErr.Outcome != BinaryMissing || !errors.Is(err, ErrBinaryMissing) {
 		t.Fatalf("the rollback = %v, want the binary missing", err)
@@ -287,33 +310,41 @@ func TestARenameOntoTheRunningImageIsAnsweredAtOnce(t *testing.T) {
 
 // TestAnInstallWaitsForItsCheckedCandidateBeforeItArms: the candidate the
 // settings check ran, held: let go after a refusal, the swap arms and lands;
-// held throughout, nothing moved and nothing armed.
+// held throughout, nothing moved and nothing armed, the hold let go once the
+// swap has returned, before a file is read.
 func TestAnInstallWaitsForItsCheckedCandidateBeforeItArms(t *testing.T) {
-	for _, letGoOnRefusal := range []bool{true, false} {
-		dir := t.TempDir()
-		dst, cand := filepath.Join(dir, "bridge.exe"), filepath.Join(dir, checkStagePrefix+"1.exe")
-		writeAll(t, dst, cand)
-		var released atomic.Bool
-		letGo := holdShareNone(t, cand)
-		realHolds(t, &released)
-		if !letGoOnRefusal {
-			letGo = nil
-		}
-		heard := letGoAtRefusalOf(t, cand, letGo, &released)
-		armed := 0
-		err := swapByVacate(dst, cand, ".bak", func() error {
-			if heard.Load() < 1 {
-				t.Error("the swap armed before it heard the candidate refused")
+	for _, tc := range []struct {
+		name           string
+		letGoOnRefusal bool
+	}{{"let go after a refusal", true}, {"held throughout", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dst, cand := filepath.Join(dir, "bridge.exe"), filepath.Join(dir, checkStagePrefix+"1.exe")
+			writeAll(t, dst, cand)
+			var released atomic.Bool
+			hold := holdShareNone(t, cand)
+			realHolds(t, &released)
+			var letGo func()
+			if tc.letGoOnRefusal {
+				letGo = hold
 			}
-			armed++
-			return nil
+			heard := letGoAtRefusalOf(t, cand, letGo, &released)
+			armed := 0
+			err := swapByVacate(dst, cand, ".bak", func() error {
+				if heard.Load() < 1 {
+					t.Error("the swap armed before it heard the candidate refused")
+				}
+				armed++
+				return nil
+			})
+			hold()
+			switch {
+			case tc.letGoOnRefusal && (err != nil || armed != 1 || readBytes(t, dst) != "C"):
+				t.Errorf("let go: the swap = %v, armed %d", err, armed)
+			case !tc.letGoOnRefusal && (!errors.Is(err, ErrBinaryInUse) || armed != 0 || readBytes(t, dst) != "bridge.exe"):
+				t.Errorf("held throughout: the swap = %v, armed %d; want nothing moved and nothing armed", err, armed)
+			}
 		})
-		switch {
-		case letGoOnRefusal && (err != nil || armed != 1 || readBytes(t, dst) != "C"):
-			t.Errorf("let go: the swap = %v, armed %d", err, armed)
-		case !letGoOnRefusal && (!errors.Is(err, ErrBinaryInUse) || armed != 0):
-			t.Errorf("held throughout: the swap = %v, armed %d; want nothing moved and nothing armed", err, armed)
-		}
 	}
 }
 
@@ -351,9 +382,13 @@ func runUntilReady(t *testing.T, exe, dir string) {
 	}
 }
 
+// readBytes is path's bytes; a read that fails fails the test.
 func readBytes(t *testing.T, path string) string {
 	t.Helper()
-	b, _ := os.ReadFile(path)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
 	return string(b)
 }
 
