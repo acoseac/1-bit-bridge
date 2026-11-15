@@ -627,8 +627,8 @@ func TestBridgeUpdateSaysTheRenameThatPutsTheBinaryBack(t *testing.T) {
 // row the terms its function makes, run at its worst (the forward deadline
 // spent whole, the place refused, the put-back landing at its last attempt),
 // the writes, the waits and the bounds asked for recorded. Every row fits
-// inside the wait every other taker gives the lock but the crash rollback's,
-// whose settings check alone is that wait (backlog B898's F1).
+// inside the wait every other taker gives the lock but the one backlog B898's
+// F1 names.
 func TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait(t *testing.T) {
 	var mu sync.Mutex
 	writes := 0
