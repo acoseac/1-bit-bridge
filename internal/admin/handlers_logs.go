@@ -271,7 +271,9 @@ func (s *Server) writeBundleHeader(w http.ResponseWriter, redacted bool) {
 	}
 	fmt.Fprintf(w, "redacted:         %t\n", redacted)
 	if redacted {
-		fmt.Fprintf(w, "                  absolute paths and non-loopback IPs replaced.\n")
+		fmt.Fprintf(w, "                  absolute paths and non-loopback IPs replaced, and\n")
+		fmt.Fprintf(w, "                  a DAC's product string dropped from the player's\n")
+		fmt.Fprintf(w, "                  lines that name a DAC, its USB IDs kept.\n")
 		fmt.Fprintf(w, "                  This is a courtesy pass, not an anonymiser — read\n")
 		fmt.Fprintf(w, "                  the file before posting it somewhere public.\n")
 	}

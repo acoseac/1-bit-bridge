@@ -100110,3 +100110,187 @@ last (476,856 bytes).
 
 The test runs on this commit come after it, so they are not in this record: a record cannot carry the results of
 runs made on the commit that holds it.
+## 2026-11-14 — B882L: the DSD migration's lines name a DAC by its USB IDs and a cleaned product string, and the redacted export keeps a dac attribute's IDs alone
+
+Worker b882l, legion0, branch `fix/b882l-dac-labels` from main 0ddfda75.
+Commits: ac06c649 (`usbid.Serial.HeldIn`), 0d85231a (`dacLabel` takes the
+unit `boundOf` read), fc5da5c2 (`redactLogLine`'s `dac` rule), 13e53e42 (the
+bundle's header and the Diagnostics page's text for the redacted export),
+4cd09537 (the `HeldIn` pin's table names its field `serial`), then this
+record. Every run: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`,
+TMPDIR `~/onebit/tmp`, 8 of the host's 16 cores. Each red first ran main's
+code through `go test -overlay` (main's file, under the new signature where
+one changed), the tree as committed; each control is an uncommitted edit to
+the committed tree, its bytes put back from memory, `git status` empty after
+every batch (`.tmp/_b882l/control_run.py`, which also names the cases that
+must stay green).
+
+### At main
+
+`dacLabel` (`cmd/bridge/serve_player_dsd.go` 463-471 at 0ddfda75) named a
+DAC by its key: the USB IDs, then the key's product string, which is the
+unit's sysfs `product` (`dsdstate.KeyOf`, `record.go` 51-57), at the four
+lines that name the bound DAC (309, 320, 330, 435). A unit can put its serial
+or its port in its product string; `playerDACText`
+(`serve_player_output_dac.go` 142-151) takes both out of the console's DACs
+and GET /v1/outputs' dac element. `redactLogLine` (`internal/admin/logexport.go`
+260-279) replaces absolute paths and IPs.
+
+### `usbid.Serial.HeldIn` (ac06c649)
+
+`HeldIn(text)` compares the serial's letters and digits, in order, each
+folded to the least rune of its `unicode.SimpleFold` orbit (K, k and the
+Kelvin sign alike; S, s and the long s), with the text's letters and digits,
+whatever stands between them in either. An absent serial is held in nothing;
+one with no letter or digit in every text, the empty one included, which its
+doc says fails closed. It is in `serial.go`, never `port.go`, which
+`version_gate.go`'s `GuardedPaths` lists. The tests
+(`serial_held_test.go`): the serial as it is, in another case, its K and S as
+the Kelvin sign and the long s, with spaces, dots, slashes, underscores,
+dashes, a tab and a no-break space between, and inside a longer word, held;
+another serial, a part of it, its groups in another order, one letter
+changed, `[redacted]` and every text for an absent serial, not held; five
+serials with no letter or digit (dashes, symbols, an en and an em dash,
+bytes that are not UTF-8, a control byte between dots), held in every text;
+and a pin of Redact, Label, String, MarshalJSON and LogValue on seven
+serials, with main's answers written out.
+
+Red first, main's `serial.go` and a names-only shim: with `HeldIn` false, the
+held cases (13 texts) and the no-letter cases (20) failed, the rest passed;
+with it true, the not-held cases failed (11 texts, and 5 for an absent
+serial). The pin passed against main's methods. Controls, 9 of 9 red as
+predicted: no fold (the texts in another case); `unicode.ToUpper` in place of the
+orbit (the Kelvin sign's two texts) and `unicode.ToLower` (the long s's);
+marks kept (the spaced and marked texts, and the no-letter case); an absent
+serial held; no fail-closed answer; and, for the pin, Redact replacing the
+lower-case copy too, MarshalJSON of an absent serial `"[none]"`, LogValue the
+Label. After 4cd09537 the pin's three controls were red again.
+
+### `dacLabel` (0d85231a)
+
+`boundOf` returns the unit its card's identity read as (`*card.USB`) beside
+the bound DAC, and `ask`, `migrate` and `say` hand it to `dacLabel`; the
+start's step, serve's (`serve_player.go`) and `bridge output play`'s
+(`output_play.go`), names no DAC and passes none. `dacLabel(k, unit)` is the
+IDs, then the key's product string through `playerDACText(p, *unit)`; the
+IDs alone where `unit.Serial.HeldIn` still finds the serial in what is left,
+or with no unit. `say` hands a warning's DAC the unit only where its key is
+the bound DAC's; `Migrate` writes a warning for the bound DAC alone, so that
+case is pinned on `say` (`TestAWarningOfAnotherModelIsNamedByItsUSBIDs`).
+Two cases drop the product string by design, as `dacLabel`'s comment says: a
+serial whose letters and digits stand inside `[redacted]` once folded (ACT),
+which the cleaned text then holds, and a serial with no letter or digit.
+
+`TestTheMigrationsLinesNameTheBoundDACByItsCleanedProductString` runs eleven
+cases, each three ways: the Pi 5's GO bar laid out by `sysfstest` with the
+case's serial and product string, the player's DSD state opened in a data
+directory of its own, the start's step made, the binding resolved on one
+reading of the box (`binding.Settled`) and the part asked through `ask`,
+whose `boundOf` reads the tree; the part saved (the warning's line and the
+Info line, 320 and 330 at main), its write landed and its barrier failed
+(`atomicwrite.SetSyncDirForTest`: the landed line and the warning's, 309 and
+320) and its write refused before it landed (`atomicwrite.SetMediumForTest`:
+`ask`'s own line, 435). The journal is slog's text handler and its JSON
+handler at Info, as `logging.Init` installs them, through
+`slog.NewMultiHandler` beside a `loggingtest` recorder at every level
+(`loggingtest.SetDefault`); each line naming the DAC is read back from both,
+its message and its `dac` value, and no string a handler could write holds
+the case's serial or port in the spelling the case put in the product
+string. The cases: the serial in another case, with spaces between its
+groups and with other marks between its letters and digits (the IDs alone);
+the port as sysfs gives it (`platform-xhci-hcd.0/usb2-1:1.0`) and as a
+binding names it, the serial once as the unit has it, the serial and the
+port together, a product string without the serial, and a unit with no
+serial (the product string cleaned); and the two by design (the IDs alone).
+
+Red first, `dacLabel`'s body as main's under the new signature, with main's
+`serial.go`: 30 of the 33 subtests failed, each line naming the DAC by the
+product string as the unit wrote it, the three of "a product string without
+the serial stays" passed (main's label is the same), and the other model's
+test failed. Controls, 11 of 11 red exactly where predicted, every case
+predicted green passing: main's `dacLabel` back (30 subtests and the other
+model's test); `HeldIn` always false (the three other spellings and the two
+by-design cases, 15); `HeldIn` as `s.Present()` (the five kept cases with a
+serial, 15, and the other model's test); `ask` passing nil (the six kept
+cases, 18); each line handed nil alone, the landed line (6), the warning's
+(12, and the other model's test), the Info line (6) and `ask`'s (6);
+`migrate` handing `say` nil (12); `boundOf` returning a zero unit (30); and
+a warning of any model given the unit (the other model's test alone).
+
+### The redaction (fc5da5c2, 13e53e42)
+
+`redactLogLine`'s first rule, `dacTextRe` then `dacJSONRe`, takes a quoted
+`dac` value as slog's text handler writes it (the key at the line's start or
+after white space) and as its JSON handler does (after the line's start,
+white space, `{` or `,`), with any spacing around the key and the `=` or the
+`:`, when the value begins with `vvvv:pppp` and then a space or its end, and
+keeps `dac="vvvv:pppp"`; it reads the value to its own closing quote,
+`(?:[^"\\]|\\.)*`, since both handlers escape a quote and a backslash and a
+product string may hold either (`dacprofile`'s `checkProduct`), and it runs
+before `quotedPathRe`, which reads a quoted path to the next quote whatever
+escapes it. An unquoted `dac=vvvv:pppp`, a value that does not begin with
+the IDs, and a `dac` inside another value's escaped text are left as they
+are. The bundle's header, redacted, and the Diagnostics page's hint say the
+redacted export drops a DAC's product string from the player's lines that
+name a DAC, keeping its USB IDs.
+
+The fixture's lines are written by the two handlers themselves, with
+product strings holding a quote, a trailing backslash, an escaped quote,
+`Model "/srv/Music" TAIL` and a serial, plus each handler's line with the
+IDs alone; the expected redaction of each is the handler's own line with the
+IDs alone (the text handler's value quoted). Red first, at main's
+`logexport.go`: the redacted export and the bundle failed on all ten
+product-string lines and matched the two with the IDs alone; the hand-written
+cases (spacing, escapes, a path beside, values left alone) failed where a
+product string was to go; the unredacted pin and the fixture's premise
+passed. Red first for the text, the header and the hint as fc5da5c2 had
+them, through the overlay: the text's test failed with both, and with each
+alone on its own assertion (the hint through the embed). Controls, 6 of 6 red as
+predicted: the rule removed (its three tests); the rule after `quotedPathRe`
+(the quoted path's lines alone, text and JSON, in both downloads, and the
+two hand-written quoted-path cases); the value read to the next quote (the
+three product strings holding a quote, each in both handlers' lines); a
+backslash not taken as its own escape (`(?:\\"|[^"])*`: the JSON line of the
+trailing backslash, whose match ran on to the next attribute's quote, and the
+hand-written `a\\` case; the text line, with no quote after it, still
+matched); the header's lines out; the hint's sentence out. The unredacted
+export, its default and `redact=false`, and the bundle with `redact=false`
+give every line as written.
+
+### Runs
+
+In the build slot at 13e53e42 (`.tmp/_b882l/slot_session.py`): `go vet ./...`
+with the tags as linux/amd64, linux/arm64, darwin/arm64 and windows/amd64
+(`CGO_ENABLED=0` for the three cross targets), clean (4.6, 9.3, 7.6 and 7.6
+s); then `go test -race -count=1 -timeout 120m -p 3 ./cmd/bridge/
+./internal/admin/ ./internal/usbid/`: ok, 1612.0 s, 1081.7 s and 1.0 s, the
+tree clean after. At 4cd09537, `go test -race ./internal/usbid/`: ok.
+
+At 4cd09537, the touched tests 50 times each under `-race`, one test binary
+a package, four lanes at once at GOMAXPROCS 2 (`.tmp/_b882l/lanes.py`):
+cmd/bridge's two new tests (63 s), `TestARefusedRecordLeavesAWarning` (295
+s), the four other serve tests that read a DAC's label off the migration's
+lines (`TestAPendingDACPartIsAskedAgainOnceItsDescriptorsRead`,
+`TestADACPartsRefusedWriteIsAskedAgainInThisRun`,
+`TestADACPartsLandedWriteIsNotMadeAgainInThisRun` and
+`TestAProbeTheMigrationForcesOnTheTickRuns`; 272 s), internal/admin's six
+new tests and the nine log export tests beside them (520 s), and
+internal/usbid's fourteen (1 s): every test 50 of 50, no data race.
+
+go1.27.3's gofmt lists none of the changed Go files. `git diff --name-only
+0ddfda75..HEAD` names eleven paths (`cmd/bridge/output_play.go`,
+`serve_player.go`, `serve_player_dsd.go` and its new test,
+`internal/admin/handlers_logs.go`, `logexport.go` and its two new tests,
+`templates/diagnostics.html`, `internal/usbid/serial.go` and its new test),
+none under `version_gate.go`'s `guardedPrefixes` or in its `GuardedPaths`, so
+`qualificationVersion` stays 50. cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` and
+`TestNoTestSetsTheDefaultLoggerByHand` pass over the tree with this record.
+
+The rules are `rules-b882l.patch`, uncommitted: a line in `player.md`'s B728
+section, its long form in `ops/History-rules-player.md`'s, for the
+migration's lines and `HeldIn`, and an entry in `admin-console.md` for the
+redaction. `git apply --check` takes it, and on a `git archive` copy of the
+tree with it the budgets check is clean (the worst load from 77.4% to 77.5%,
+`player.md` at 98,849 bytes), as are its self-test and those of `rules-for.py`
+and `move_entry.py`.
