@@ -602,21 +602,32 @@ func retryStandIn(t *testing.T) func(error) bool {
 	return busy
 }
 
+// readAttempts is the attempts of atomicwrite's read retry: five over 750 ms.
+const readAttempts = 5
+
 // readsPastOneRefusal reads the covers of a state file of its own through a
-// read refused once with each refusal in turn, and wants them after a second.
-func readsPastOneRefusal(t *testing.T, refusals ...error) {
+// read that answers its first call with each refusal in turn and, where then
+// is not nil, its second with then, an error platform takes standing in for a
+// scanner's refusal of the fresh file, and reads the file on every other call.
+func readsPastOneRefusal(t *testing.T, platform func(error) bool, then error, refusals ...error) {
 	t.Helper()
 	dataDir := pendingCoverState(t)
 	for _, refusal := range refusals {
-		reads := 0
+		injected := []error{refusal, then}
+		var answers []error
 		covers, err := readPendingCovers(t.Context(), dataDir, func(p string) ([]byte, error) {
-			if reads++; reads == 1 {
-				return nil, &os.PathError{Op: "open", Path: p, Err: refusal}
+			var b []byte
+			var err error
+			if n := len(answers); n < len(injected) && injected[n] != nil {
+				err = &os.PathError{Op: "open", Path: p, Err: injected[n]}
+			} else {
+				b, err = os.ReadFile(p)
 			}
-			return os.ReadFile(p)
+			answers = append(answers, err)
+			return b, err
 		})
-		if err != nil || reads != 2 || len(covers) != 1 || covers[heldCover] != 0 {
-			t.Errorf("a read refused once with %q = %v, %v after %d reads; want %s at 0 attempts after 2", refusal, covers, err, reads, heldCover)
+		if err != nil || len(answers) != 2 || len(covers) != 1 || covers[heldCover] != 0 {
+			t.Errorf("a read refused with %q, then %v = %v, %v, its calls answering %v; want %s at 0 attempts after 2 calls", refusal, then, covers, err, answers, heldCover)
 		}
 	}
 }
@@ -630,12 +641,15 @@ var errPlatformForTest = errors.New("an error the platform asks again on")
 // replaces none of it, so the stand-in's test still waits out a refusal of the
 // platform's own (on Windows a scanner's hold of the file, backlog B898). A
 // predicate standing in for the platform's is installed first: synthetic
-// coverage of the composition on every host; Windows' own codes are
+// coverage of the composition on every host, once with a second refusal of
+// the platform's after the first; Windows' own codes are
 // TestTheStandInRetryKeepsWindowsOwnRetry's, on Windows alone.
 func TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore(t *testing.T) {
-	t.Cleanup(atomicwrite.SetReadRetryableForTest(func(err error) bool { return errors.Is(err, errPlatformForTest) }))
+	platform := func(err error) bool { return errors.Is(err, errPlatformForTest) }
+	t.Cleanup(atomicwrite.SetReadRetryableForTest(platform))
 	retryStandIn(t)
-	readsPastOneRefusal(t, errPlatformForTest, errBusyForTest)
+	readsPastOneRefusal(t, platform, nil, errPlatformForTest, errBusyForTest)
+	readsPastOneRefusal(t, platform, errPlatformForTest, errPlatformForTest, errBusyForTest)
 }
 
 // readPastAHold runs the harvest helper's read past a hold on the state file,
