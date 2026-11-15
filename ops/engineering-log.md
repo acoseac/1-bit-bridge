@@ -98986,7 +98986,7 @@ The other readers of DefaultLogPath on Windows:
 - `adminLogPath` (`logs.go` 226 to 232), into `admin.Deps.LogPath` (`main.go` 6345): the console's log status,
   export and the support bundle's tail (`internal/admin/handlers_logs.go` 61 to 89, 178 to 206 and 366 to 391).
   Inside the service it was LocalSystem's DefaultLogPath, while the service writes `%PROGRAMDATA%`'s: the same
-  mismatch, fixed here (the brief's review, Carbon 1).
+  mismatch, fixed here (the brief's review).
 - `adminLogPath` into `doctor.Deps.LogPath` (`doctor.go` 269), for `log-file-size` (`internal/doctor/logsize.go`
   44 to 84). The console's doctor builds it in the serving process (`adminDoctorRunnerFor`, `doctor.go` 1021 to
   1023), so it shares the console's path and is fixed with it. `bridge doctor` run from a shell is no service and
@@ -99013,7 +99013,7 @@ never chosen in silence; where it finds no log it names the path it looked at, o
 Services (the service shows there as `1-bit-bridge`) or `sc.exe query com.acoseac.1-bit-bridge` for the service,
 the sign-in launcher, `com.acoseac.1-bit-bridge.cmd` in the Startup folder, for its log, and, with nothing
 installed, that a bridge run in the foreground logs to its terminal; never `bridge serve`, `bridge start` or
-`bridge status` (the brief's review, Codex 4 and 5). The paths are `packaging.WindowsLogDirs`'s: `C:\ProgramData`
+`bridge status` (the brief's review). The paths are `packaging.WindowsLogDirs`'s: `C:\ProgramData`
 where `PROGRAMDATA` is empty, as the service took it, and the home's `AppData\Local` where `LOCALAPPDATA` is, as
 DefaultLogPath took it, the home asked only then. `redirectServiceIO` and `InstallWindowsService` take the
 service's folder and file from it and the service's open from `packaging.OpenServiceLog`, and DefaultLogPath's
@@ -99117,7 +99117,7 @@ logs` and the console inside the service read the service's under `%PROGRAMDATA%
 terminal)", and `consoleLogPath` answers `""` where a path cannot be made, so a home that could not be read was that
 ok, in both doctors. The console's doctor builds its report in the serving process (`adminDoctorRunnerFor`, 1021 to
 1023) through the same builder, so a change of the builder alone would have reached it too (the brief's review,
-Codex 1 and Carbon 1). `printReport` prints a hint under a warn or a fail alone (`doctor.go` 897), and `--json` and
+the review). `printReport` prints a hint under a warn or a fail alone (`doctor.go` 897), and `--json` and
 the console copy the summary and the hint (`jsonReportEnvelope`, `adminDoctorRunnerFor`).
 
 ### The choice, as built
@@ -99133,7 +99133,7 @@ to say why it cannot be graded, as `bridge logs` says why it cannot open it. The
 process's log (`consoleLog`, `consoleLogPath`'s with its error) and asks no install check, so a console of a bridge
 run another way beside a registered service grades the file it writes (the review's regression case).
 
-How the choice reaches the report (the review's Codex 2 and Carbon 2): `doctor.Deps` gains `LogNote` and
+How the choice reaches the report (the review): `doctor.Deps` gains `LogNote` and
 `LogUnresolved` beside `LogPath`. `checkLogSize` puts the note after its summary whatever the line found, so the
 table, which prints no hint under an ok, `--json` and the console all carry it; where `LogUnresolved` is set, a log
 that could not be named (a path that cannot be made, or neither Windows log there where the check cannot tell), the
