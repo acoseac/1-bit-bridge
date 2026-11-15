@@ -100419,3 +100419,111 @@ redaction. `git apply --check` takes it, and on a `git archive` copy of the
 tree with it the budgets check is clean (the worst load from 77.4% to 77.5%,
 `player.md` at 98,849 bytes), as are its self-test and those of `rules-for.py`
 and `move_entry.py`.
+
+## 2026-11-15 — B869A: the prune given up waits for the snapshot's verification to end
+
+Branch `fix/b869a-prune-given-up`, from main at ca4473ff. Test-only.
+Commits: 52f0533d (B869's 3a976ffc from the parked
+`fix/b869-prune-waits`, applied as `git cherry-pick -x` would, its diff
+unchanged), 172d511f (its cleanup with the unlock still held, and a drain
+past its bound), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`.
+
+### The hazard
+
+`TestTheTickerAndTheDoctorNameAPruneGivenUp` (cmd/bridge) failed main's
+CI in two runs in a row, "the prune answered <nil>, want it given up"
+(backup_round5_test.go:183 at ca4473ff): at 47e44f7f on `test -race`
+(bridge 2/4), and at ca4473ff on `test (macos-latest)`. Neither run's log
+is on this host, so their run ids are not recorded here.
+
+It pruned right after `verifiedInstallSnapshot`, which returns on
+`backup.SnapshotAndVerify`'s answer. The verification answers before its
+worker lets go of the backups folder's lock (`verifyAndThen`), and a prune
+that meets that lock answers `Skipped` with no error, so it is never given
+up. B851's record named this site, and backlog B869 took it as its item 1.
+
+### The fix (52f0533d, from 3a976ffc)
+
+The test takes its snapshot through `endedInstallSnapshot`
+(backup_round3_test.go:139). cmd/bridge's `unlockHold` is installed before
+the snapshot and armed in `SnapshotOptions.OnKept`. It holds the worker's
+unlock from the answer (`requireHeld`) until the test lets it go and hears
+the worker's end (`letGoAndAwaitEnd`), where it asks the folder's lock.
+
+The order this relies on, on this base: `SnapshotAndVerify` calls `OnKept`
+(finish.go:901-903) before `FinishCapture` (907), whose `verifyAndThen`
+reads the end hook as it begins (finish.go:280), and a worker runs the hook
+that stood then (seams.go:339-342). The prune's failure now prints its
+`PruneResult`.
+
+### What 172d511f adds (the brief's review, binding)
+
+- **A held unlock goes as the test's body ends.** With the end's wait
+  removed (C1 below), the test failed a second time 30 s after its skipped
+  prune, at its own cleanup (backup_round5_test.go:175, `awaitHoldsLetGo`'s
+  `backuptest.AwaitIdle`): "backup workers did not release their holds".
+  That cleanup runs before `holdUnlockOf`'s, and only `holdUnlockOf`'s let
+  the parked worker go. `holdUnlockOf` now also lets it go at the end of
+  the test's context (`context.AfterFunc(t.Context(), u.letGo)`, :212),
+  which comes before any cleanup.
+- **A drain past its bound ends the run.** 3a976ffc's drain reported its
+  30 s bound with `t.Error`, and the cleanups after it then ran beside the
+  worker: the lock-release seam put back, which that worker reads with no
+  lock (verify_lock.go:199), and the fixture's folders removed. The review
+  asked for a `t.Fatal` there, or for the hook to be kept until the end is
+  heard. On Go 1.27.3 neither a `t.Fatal` nor a panic in a cleanup stops
+  the cleanups after it: `runCleanup` runs the ones left from a deferred
+  call (testing.go:1795-1804), on a Goexit and on a panic alike, and a
+  two-cleanup scratch test showed both. So past its bound the drain ends
+  the run (`endTheRun`, :233). It raises a panic on a goroutine of its
+  own, as the binary's own `-timeout` does (testing.go:2947-2961), with
+  every goroutine printed, and the cleanup waits until it lands. The
+  seam's restore and the fixture's removal never run.
+
+### Reds, greens and controls
+
+Each variant was built with `go test -c -race -overlay` from edits made in
+memory over the committed bytes (`git show`), so no tracked file was
+written. `git status` was empty before and after every build and run. Each
+run was a process of its own with a TMPDIR of its own, and the predictions
+were written to a file before each round. "The delay" is B851's: in
+internal/backup/verify_lock.go's release closure, after the release hook
+and before the unlock (lines 199-202):
+
+```go
+				if onLockRelease != nil {
+					onLockRelease(dir)
+				}
+				time.Sleep(time.Second)
+				_ = fsutil.Unlock(f)
+```
+
+| Run | Build | Result |
+|---|---|---|
+| R1 | main's two test files (ca4473ff), the delay | red 3 of 3 at backup_round5_test.go:183, "the prune answered <nil>, want it given up"; 2.4 s each, no race |
+| G1 | 52f0533d, the delay | green 3 of 3, 3.7 s each |
+| C1 | 52f0533d, the delay, the whole `unlock.letGoAndAwaitEnd(t)` call removed (`requireHeld` and the cleanup kept) | red 3 of 3 at :190, "the prune answered {Deleted:0 Reaped:0 ReapErr:<nil> Skipped:true SkippedFor:another verification or prune of these snapshots holds their lock}, <nil>; want it given up", and again at :175, "backup workers did not release their holds"; 32.4 s each, no race |
+| C2 | 52f0533d, no delay, the hold's hook parked for good (`<-u.out` replaced by a receive from a channel nothing closes) | :165, "the verification's worker never let go of what it held", then the drain's "the snapshot's verification never ended" (backup_round3_test.go:215); the binary ran on to its exit 1, the test's temp folder removed with the worker still parked; 61.5 s |
+| G2 | 172d511f, the delay | green 3 of 3, 3.8 s each |
+| C1b | 172d511f, as C1 | red 3 of 3 at :190, C1's first failure alone; 2.4 to 2.6 s each, no race |
+| C2b | 172d511f, as C2 | the binary ended at the drain's bound, exit 2, after 61.5 s: "panic: TestTheTickerAndTheDoctorNameAPruneGivenUp: the snapshot's verification did not end within 30 s of its unlock's let-go", every goroutine printed, the worker's unlock parked in the hold's hook (made by `(*hold).release`); no cleanup after the drain ran, and the test's temp folder was still on disk |
+
+The parked branch's record ran C1 without `requireHeld` too, and quoted
+its first failure alone.
+
+### The other callers of `verifiedInstallSnapshot`
+
+A read-only census; none of them changed. Lines are 172d511f's.
+
+| Caller | What follows the snapshot | Needs the end's wait |
+|---|---|---|
+| backup_round3_test.go:432 and :434, `TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord` | a second snapshot, whose verification waits for this process's slot; then `bridge backup --verify` in a process of its own, which waits for the folder's lock (`VerifyCmdLockWait`); its prune (:524) runs once that process has exited | no; but that prune asserts its error alone and then reads what it kept, so a skip would pass it blind (B851's assertion) |
+| backup_round4_test.go:100, `TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded` | `bridge backup --verify` in this process, which waits its turn for the slot and the lock; no prune | no |
+| backup_round6_test.go:102, `TestBridgeBackupVerifySaysTheWriteAndTheReadBackApart` (its two recheck cases) | the same; no prune | no |
+| backup_round12_test.go:66, :93 and :181 | `awaitHoldsLetGo(t, root)` first: the holds drained (a worker drops its hold after its unlock and its slot) and every snapshot's ownership taken | no |
+| backup_round13_test.go:19 | `awaitHoldsLetGo(t, root)` first | no |
+
+No rules change. build-ci-tests.md's B849 and B851 bullet already says
+that a step that needs the folder's lock free waits for the worker's end
+through `unlockHold`, and asserts that a prune ran.
