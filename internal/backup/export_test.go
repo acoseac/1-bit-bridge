@@ -236,16 +236,3 @@ func SetOnSourceStepForTest(fn func(dir, step string)) (restore func()) {
 	prev := onSourceStep.Swap(p)
 	return func() { onSourceStep.Store(prev) }
 }
-
-// SetOnSourceWorkerEndForTest installs the hook a restore's source worker
-// runs last, given the snapshot as the restore was given it, once it has
-// handed its hold over or let go of what it took, and returns the restore.
-// Its callback must return, and ignore every snapshot but its test's.
-func SetOnSourceWorkerEndForTest(fn func(dir string)) (restore func()) {
-	var p *func(string)
-	if fn != nil {
-		p = &fn
-	}
-	prev := onSourceWorkerEnd.Swap(p)
-	return func() { onSourceWorkerEnd.Store(prev) }
-}

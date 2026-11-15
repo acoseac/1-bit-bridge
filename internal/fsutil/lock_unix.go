@@ -46,6 +46,11 @@ func keepsNoLocks(err error) bool {
 		errors.Is(err, errors.ErrUnsupported)
 }
 
+// noLockToGive is NoLockToGive on these platforms: flock's ENOLCK.
+func noLockToGive(err error) bool {
+	return errors.Is(err, unix.ENOLCK)
+}
+
 func unlock(f *os.File) error {
 	return controlFD(f, "flock", func(fd uintptr) error {
 		return flockRetryingEINTR(fd, unix.LOCK_UN)
