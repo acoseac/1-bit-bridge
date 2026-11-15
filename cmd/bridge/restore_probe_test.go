@@ -222,7 +222,7 @@ func TestTheDoctorAndTheTickerNameTheirOwnProbesStalledRelease(t *testing.T) {
 }
 
 // TestTheTickerTakesNoSnapshotWhileItsOwnProbesReleaseDoesNotEnd is backlog
-// B871's round 2 (Codex): with no marker beside the backups folder's lock, the
+// B871's round 2: with no marker beside the backups folder's lock, the
 // ticker's look for a check that did not end makes no probe
 // (backup.StuckCheckOf), and its probe of the lock (backup.ProbeBackupsLock)
 // takes it, its release does not end (its unlock, or separately its close,

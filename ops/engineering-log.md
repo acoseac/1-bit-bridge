@@ -95557,7 +95557,7 @@ committed files, put back with `git checkout --` (`.tmp/_b871/r4/ctl_r4.py`),
 and the reds that needed another version of a test ran in scratch copies of
 the tree, never the worktree (`probe1.py`, `probe2.py`, `probe3.py`).
 
-### The Windows branch (Codex, Medium)
+### The Windows branch (Medium)
 
 `TestVerifyingAWALHeaderDatabaseTwiceCreatesNoFile` (verify_test.go:503 at
 76fa0536) calls `VerifySnapshot` itself on its second run where
@@ -95602,7 +95602,7 @@ an assertion could skip (lines at 76fa0536):
 - verify_hold_test.go:438, `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries`: two "did not reach the case" fatals before its `awaitClean`, in the four cases without the given-up retry's cleanup.
 
 Each is joined right after the call (7e2a46aa). The second unjoined direct
-call Carbon named in verify_test.go was not there: the file's platform
+call a review named in verify_test.go was not there: the file's platform
 branches at 76fa0536 are a `t.Skip` before any worker (:435), an assertion
 after `verifyT` (:972) and `TestTwoVerificationsOfOneSnapshotWriteOneAtATime`'s
 outcomes (:1115), whose calls run in callers `joinBackupCallers` (:1075)
@@ -95613,7 +95613,7 @@ worker), the stuck check's child process (`runStuckCheck`), and the tests
 whose goroutine's call a last-registered cleanup joins. The touched tests
 passed once under `-race` before the commit.
 
-### The wrapper (Codex, Medium; Carbon's handle and seam)
+### The wrapper (Medium; with its handle and seam)
 
 `TestEachHoldWordsCaseWaitsForItsVerificationsEnd`'s wrapper
 (restore_mark_test.go:166 at 76fa0536) took the first worker that came to
@@ -95647,7 +95647,7 @@ red in 6 of 6 as predicted, restore_mark_test.go:207 (the case's line) and
 :239 (the outer's: its worker was never let go by the case's wait), no
 race.
 
-### The drain (Codex and Claude, Low)
+### The drain (Low)
 
 At d69b8312 the polling loop of `awaitBackupHoldsDropped` removed, its
 opening callback kept (`probe3.py 5`): `TestADrainWaitsForTheBackupWorkerItsLoopLeft`
