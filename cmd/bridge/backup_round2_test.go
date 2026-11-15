@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
-	"github.com/acoseac/1-bit-bridge/internal/backup/backuptest"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -512,12 +511,15 @@ func requireOnlyTheSnapshotsLine(t *testing.T, stdout *safeBuffer, root string) 
 	}
 }
 
-// awaitVerificationsEnd waits until no verification owes a snapshot under
-// root its check any more, each capture's ownership let go, which comes
-// once its verification, abandoned or not, has ended and let its lock go.
+// awaitVerificationsEnd waits until no backup holder keeps a hold
+// (awaitNoHolds) and no verification owes a snapshot under root its check any
+// more, each capture's ownership let go, which comes once its verification,
+// abandoned or not, has ended and let its lock go; past either bound it ends
+// the run (endTheRun), as awaitHoldsLetGo does, so no cleanup after it runs
+// beside what still holds.
 func awaitVerificationsEnd(t *testing.T, root string) {
 	t.Helper()
-	backuptest.AwaitIdle(t)
+	awaitNoHolds(t, "backup workers did not release their holds")
 	deadline := time.Now().Add(30 * time.Second)
 	for _, dir := range snapshotDirs(t, root) {
 		for {
@@ -530,7 +532,7 @@ func awaitVerificationsEnd(t *testing.T, root string) {
 				t.Fatal(err)
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("the verification of %s never ended", filepath.Base(dir))
+				endTheRun(t, fmt.Sprintf("the verification of %s never ended", filepath.Base(dir)))
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
