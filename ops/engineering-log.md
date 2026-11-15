@@ -100633,3 +100633,19 @@ the loop's drain instead of from the test's own cleanup, so that cleanup's
 | G | 34a9977a, the delay | green 3 of 3, 3.8 s |
 | C1 | 34a9977a, the delay, the whole `unlock.letGoAndAwaitEnd(t)` call taken out | red 3 of 3 at :190 with the skipped-prune assertion alone, 2.4 to 2.6 s, no race |
 | C2 | 34a9977a, the hold's hook parked for good | the run ended at the hold's drain, exit 2, "a backup holder kept its hold after the snapshot's unlock was let go: 1 still held 30 s on"; 61.5 s |
+
+### Runs
+
+At cab61276: 34a9977a's code, and this record but its runs. TMPDIR was
+`$HOME/onebit/tmp`.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=50 -timeout 30m -v -run '^TestTheTickerAndTheDoctorNameAPruneGivenUp$' ./cmd/bridge/`, inside the build slot | 50 of 50, no race; ok in 88.8 s |
+| the same, outside the slot at nice 19, while another worker held the slot | 50 of 50, no race; ok in 89.9 s |
+| the three new tests, `-race -count=10`, inside the slot | 30 of 30, 10 each, no race; ok in 83.3 s |
+| every test of cmd/bridge's backup test files (`backup_*_test.go`, `restore_source_test.go`: 65, the 41 calls of the two drains among them), `-race -count=1`, inside the slot and outside it at nice 19 | 65 of 65 each, no race; ok in 170.4 s and 169.1 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, inside the slot and outside it |
+| gofmt (`go run cmd/gofmt -l`) on the five test files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at cab61276 and with this table |
+| `make docs-check` | exit 0, at cab61276 and with this table |
