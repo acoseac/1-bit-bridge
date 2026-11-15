@@ -100689,3 +100689,138 @@ Round 2 against 046cd677: production +145 −75 lines, tests +308 −70.
 ### What stays open
 
 Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
+
+## 2026-11-15 — B898 PR 1, round 3: the deadline keeps every attempt it promises
+
+Branch `fix/b898-updater-held-binary` from round 2's head bae55650, every run
+on the Linux test host, Go 1.27.3, TMPDIR outside the worktree. Commits:
+5c32976e (the deadline's waits shortened to what remains, the put-back's
+first attempt, their tests), 635de172 (the rules, their History twins and
+the moves), then this record.
+
+### The findings and what changed
+
+1. High: on a real clock the last attempt of each schedule never happened.
+   Round 2's deadline was the schedule's total from the operation's start,
+   and a wait was made only where it ended at or before it; every call takes
+   time and every sleep overruns, so the last wait always ended past the
+   deadline: the forward schedule made seven attempts, the put-back six over
+   about 1.55 s. Now a wait is admitted only while some of its deadline
+   remains, shortened to what remains, and the attempt after an admitted
+   wait is made however long the wait took (round 2's check after the wait
+   is gone), so each schedule keeps its count, its last attempt at the
+   deadline, past it by no more than the last sleep overran. A step's
+   waits, `RenameRefusal.Wait` and `SwapError.Waited` are the waits as asked
+   of the clock, the last one shortened; on a rig whose steps take no time
+   they are the schedules', so the exact totals the serve tests assert (4.75
+   s, 3.15 s, their sum) stand. Round 2's two overrun rows change on
+   purpose: a wait the host overran inside the deadline shortens the ones
+   after it to what remains (seven attempts over 1.75 s, where round 2 made
+   six), and one that overran past the deadline is still followed by its
+   attempt (eight, where round 2 made seven).
+2. P2: the deadline could skip the first put-back. `putBack` set its
+   deadline and then asked it before its first attempt, so a stall of more
+   than 3.15 s between the two reads, after a landed vacate and a refused
+   place, left the binary missing with a put-back possible. The put-back's
+   first attempt is now made whatever its deadline says (`retry`, which
+   `try` calls once it has asked the deadline); only its later attempts are
+   bounded by it.
+3. Low: the Windows check of the boot rollback's record failed on a
+   scanner's refusal of the real put-back. `heldRestore` does wait out
+   Windows' own holds (`ReplaceRunningBinaryForTest` takes Windows' `inUse`
+   beside the test's, and calls `movable` after the test's probe), but it
+   recorded such a refusal as its error's text. On Windows the record is now
+   compared once each run of one call's answers stands as its last
+   (`answered(true)`; `TestTheHeldRestoresCollapsedRecordKeepsEachCallsLastAnswer`).
+4. Low: the three new rules bullets. `cli-serve.md` and `build-ci-tests.md`
+   are condensed files ("Each long entry here is one line … ending
+   → History-rules-<name>.md"), so their B898 bullets moved verbatim to
+   their History files (`move_entry.py`), each line a shorter title and
+   every Don't; `admin-console.md` keeps its entries whole and has no
+   History file, so its bullet stays. The B898 line and its long form say
+   the shortened wait and the put-back's first attempt.
+
+The brief's own reviews decided what changed with them: round 2's check
+after the wait went, with its row; the waits recorded are those asked; the
+clock rows assert each shortened wait and total, so that the unclamped
+control fails on a duration and not on a count; outcome rows cover a hold
+that clears on a last attempt at the final probe (nothing proceeds, nothing
+arms), at the vacate (its place follows, and the put-back where the place is
+refused) and at the put-back (`PutBack`, the binary in its place); finding
+2's test drives `putBack` on a clock that moves 4 s at every read after the
+first.
+
+### Reds at round 2's head
+
+Each new or changed test ran over bae55650's `held.go`, `swapbound.go` and
+`statelock.go` through `go test -overlay`, with no shim (every name the tests
+use is bae55650's); each prediction written before its run. Every prediction
+held.
+
+- `internal/updater`: `TestEveryAttemptIsMadeOnAClockTheStepsMove` red on
+  all eight rows (seven forward attempts, six put-back attempts, and the
+  holds that clear on a last attempt answered as holds);
+  `TestThePutBacksFirstAttemptIsMadeHoweverLateItComes` red both ways ("the
+  operation's deadline passed before this step was tried", no attempt);
+  `TestEveryStepIsTriedByItsOperationsDeadline` red on its two changed rows
+  alone; the schedule tables and
+  `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed` green.
+- `cmd/bridge`: `TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt` red both
+  ways (waits ending at 1.6 s with no 1.586 s; no 1.589 s); the collapse's
+  test and the boot rollback's green.
+- Windows, not run on the Linux test host: at bae55650 windows-latest should
+  show `TestARollbackHeldThroughItsWaitMovesNothing` red on `realHolds`'
+  clock, which now overruns every sleep (seven attempts).
+
+### Negative controls
+
+Each an uncommitted mutation of the committed round, applied by a runner that
+reads each file's bytes first and writes them back after the run, `git
+status` empty after the batch; each prediction written before the run; every
+mutation built; each went red exactly where predicted, the cases predicted
+green staying green.
+
+- Q1, the unclamped wait, an admitted wait at its whole length: every clock
+  row on its waits and words, the counts unchanged ("50 100 200 400 800 1600
+  1600" ms, want "… 1587"), the deadline table's shortened-wait row, and both
+  cmd/bridge cases on their waits; the schedule tables green.
+- Q2, the put-back's first attempt asking its deadline: both cases of the
+  first-attempt test; the clock rows green.
+- Q3, round 2's rule back, no attempt after a wait that ended past the
+  deadline: every clock row and the overrun-past row.
+- Q4, a wait admitted once the deadline has passed: the row whose attempts
+  each take a second (eight attempts, not five).
+- W3, `realHolds` without its overrun, builds for Windows; its red is
+  windows-latest's.
+
+### The runs
+
+- The x50, 21:09 to 21:28, at 635de172: every test the PR adds or changes
+  that runs on the Linux test host, 57 in three packages (round 2's 53 and
+  round 3's four), `-race -count=50` each alone, from race test binaries
+  built once (make test's tags), four lanes at GOMAXPROCS 4: all passed, the
+  longest `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (359 s) and
+  `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (350 s).
+- The gate, in the build slot, 21:28 to 22:00, at 635de172: `go vet ./...`
+  for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64 (cgo off for
+  the cross targets) and `GOOS=linux GOARCH=386 make vet`, clean; the three
+  packages' tests built for Windows; `make test P=8` with
+  `TEST_PKGS='-count=1 -timeout 45m ./...'`, 89 packages ok in 1,837 s
+  (cmd/bridge 1,771 s, manifest 1,724 s, admin 1,194 s, updater 42 s);
+  `make build-all` clean; the pinned gofmt over every Go file the PR touches
+  listed nothing; `make docs-check` clean.
+- The rules, on a copy of 5c32976e: `verify_moves.py --base HEAD` PASS with
+  round 3's edited blocks put back to the base's words (two blocks moved,
+  1,976 bytes), the copy's docs-check clean, and the three sweeps green over
+  it, a citation of a test nothing declares failing the first; applied with
+  git to a fresh copy, the patch gives the same bytes.
+- Not run on the Linux test host: windows-latest (the hold tests, and W3's
+  red).
+
+### Size
+
+Round 3 against bae55650: production +60 −50 lines, tests +274 −79.
+
+### What stays open
+
+Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
