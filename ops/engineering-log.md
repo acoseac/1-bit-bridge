@@ -100502,7 +100502,7 @@ removed ("busy" alone, exit 1 through the generic line). The Windows cases
 (`TestTheStateFileIsReadPastAHoldThatSharesNothing`,
 `TestTheLookBeforeThePromptReadsPastAHoldThatSharesNothing`: a handle that
 shares nothing, its refusal heard by the real `os.ReadFile` before it is let
-go, five reads held throughout) compile here and run on windows-latest.
+go, five reads held throughout) compile here and run on the PR's Windows leg.
 
 **Runs** in the build slot at e414c34a, one session (`.tmp/_b898pr2/gate.sh`):
 `go vet` with the tags as linux/amd64, windows/amd64 and darwin/arm64
@@ -100528,15 +100528,12 @@ and the six bridge restore tests that pass through the look
 `TestBridgeRestoreNamesTheSnapshotAsItWasTypedBesideARestoreThatHoldsIt`),
 350 of 350 in 1,384.0 s; no data race. `GOOS=windows go test -c` of the three
 packages compiles. go1.27.3's own gofmt lists none of the nine changed Go
-files. The Windows cases run on the PR's windows-latest leg.
+files. The Windows cases run on the PR's Windows leg.
 
-**Rules.** The rules are `rules-b898-pr2.patch`, uncommitted, since this
-session cannot write `.claude/`: a line beside `enrichment.md`'s harvest
+**Rules.** The rules land in 0fdc4af5, one commit with their long form: a line beside `enrichment.md`'s harvest
 bullets, and in `cli-serve.md` the B826 line with its long form in
 `ops/History-rules-cli-serve.md` (the look's busy manifest and its stop, and a
-paragraph on them), so a line and its long form land in one commit. `git
-apply --check` takes it, and on a `git archive` copy with it applied `make
-docs-check`'s four steps pass: the worst load 82.0% before and 82.1% after,
+paragraph on them), and `make docs-check`'s four steps pass at that commit: the worst load 82.0% before and 82.1% after,
 `cli-serve.md` 98,886 bytes before and 99,314 after, `enrichment.md` 45,011
 and 45,703.
 
