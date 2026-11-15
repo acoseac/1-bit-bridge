@@ -486,7 +486,7 @@ func TestTheRestampRefusedForTheMarkersLockWritesNothing(t *testing.T) {
 			AttemptedAt: stale, SwapStarted: true}); err != nil {
 			t.Fatal(err)
 		}
-		return New(Options{AutoInstallOpts: &InstallOptions{DataDir: dir}}), dir
+		return New(Options{AutoInstallOpts: &InstallOptions{DataDir: dir, BinaryPath: runningBinary(t)}}), dir
 	}
 	for _, tc := range theMarkerLockRefusals {
 		t.Run(tc.name, func(t *testing.T) {

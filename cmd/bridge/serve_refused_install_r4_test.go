@@ -116,7 +116,7 @@ func TestALaterCommandOfTheVersionRolledBackRefusesToMigrateOnceThePreviousVersi
 		t.Errorf("the previous version's own migration = %v, want it to go on", err)
 	}
 	var housekeeping bytes.Buffer
-	if err := bootHousekeeping(t.Context(), &housekeeping, r.dataDir, r.bin, previousVersion, nil); err != nil {
+	if err := bootHousekeeping(t.Context(), &housekeeping, r.dataDir, r.bin, previousVersion, nil, testBackupProbeTimeout); err != nil {
 		t.Fatalf("the previous version's housekeeping = %v; stderr=%s", err, housekeeping.String())
 	}
 	if st, err := updater.LoadState(r.dataDir); err != nil || updater.InstallArmed(st) || st.RejectedVersion != version.ServerVersion {
@@ -175,7 +175,7 @@ func TestAMigrationThatHoldsTheMarkersLockFirstStopsTheBootRollback(t *testing.T
 	housekept, housekeepingDone := make(chan error, 1), make(chan struct{})
 	go func() {
 		defer close(housekeepingDone)
-		housekept <- bootHousekeeping(ctx, &stderr, r.dataDir, r.bin, previousVersion, nil)
+		housekept <- bootHousekeeping(ctx, &stderr, r.dataDir, r.bin, previousVersion, nil, testBackupProbeTimeout)
 	}()
 	drainLoopOnCleanup(t, cancel, housekeepingDone, "the boot's housekeeping")
 	t.Cleanup(release.close)
@@ -227,7 +227,7 @@ func TestABootRollbackThatHoldsTheMarkersLockFirstStopsTheMigration(t *testing.T
 	housekept, housekeepingDone := make(chan error, 1), make(chan struct{})
 	go func() {
 		defer close(housekeepingDone)
-		housekept <- bootHousekeeping(ctx, &stderr, r.dataDir, r.bin, previousVersion, restore)
+		housekept <- bootHousekeeping(ctx, &stderr, r.dataDir, r.bin, previousVersion, restore, testBackupProbeTimeout)
 	}()
 	drainLoopOnCleanup(t, cancel, housekeepingDone, "the boot's housekeeping")
 	select {
@@ -295,7 +295,7 @@ func TestTheBootLeavesTheInstallWhereItCannotHoldTheMarkersLock(t *testing.T) {
 			tc.lay(t, r.dataDir)
 			files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
 			var stderr bytes.Buffer
-			if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, nil); err == nil {
+			if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, nil, testBackupProbeTimeout); err == nil {
 				t.Errorf("the housekeeping without the marker's lock = nil, want its refusal; stderr=%s", stderr.String())
 			}
 			files.requireUnchanged(t)
@@ -395,7 +395,7 @@ func TestAStopWhileServeWaitsForTheMarkersLockEndsTheStartThere(t *testing.T) {
 		housekept, done := make(chan error, 1), make(chan struct{})
 		go func() {
 			defer close(done)
-			housekept <- bootHousekeeping(ctx, &stderr, r.dataDir, r.bin, previousVersion, nil)
+			housekept <- bootHousekeeping(ctx, &stderr, r.dataDir, r.bin, previousVersion, nil, testBackupProbeTimeout)
 		}()
 		drainLoopOnCleanup(t, cancel, done, "the boot's housekeeping")
 		select {
@@ -425,7 +425,7 @@ func TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord(t *testi
 	r.saveMarker(t, r.dataDir)
 	files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
 	var stderr bytes.Buffer
-	if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil); err == nil {
+	if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil, testBackupProbeTimeout); err == nil {
 		t.Errorf("the housekeeping over a record no admission of this version wrote = nil, want its refusal; stderr=%s", stderr.String())
 	}
 	files.requireUnchanged(t)
@@ -437,7 +437,7 @@ func TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord(t *testi
 	r.marker.MigrationVeto = ""
 	r.saveMarker(t, r.dataDir)
 	stderr.Reset()
-	if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil); err != nil {
+	if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil, testBackupProbeTimeout); err != nil {
 		t.Fatalf("the housekeeping over this version's own record = %v; stderr=%s", err, stderr.String())
 	}
 	if st, err := updater.LoadState(r.dataDir); err != nil || st.Status != "installing" || st.RollbackStarted {

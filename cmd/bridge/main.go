@@ -2338,7 +2338,7 @@ func (a updateInfoAdapter) backupPresent() bool {
 // check they stopped, as admin.ErrUpdateChecksOff (backlog B761).
 func (a updateInfoAdapter) CheckNow(ctx context.Context) (admin.UpdateStatus, error) {
 	_, err := a.u.CheckNow(ctx)
-	return a.Status(), mapUpdaterError(err)
+	return a.Status(), mapUpdaterError(err, updaterInstall)
 }
 
 func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.UpdateStatus, error) {
@@ -2378,7 +2378,7 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		RejectedReason:   m.st.RejectedReason,
 		InstallWarning:   st.InstallWarning,
 		CheckEnabled:     st.CheckEnabled,
-	}, mapUpdaterError(err)
+	}, mapUpdaterError(err, updaterInstall)
 }
 
 func (a updateInfoAdapter) Rollback(ctx context.Context, force bool) error {
@@ -2387,7 +2387,7 @@ func (a updateInfoAdapter) Rollback(ctx context.Context, force bool) error {
 		BinaryPath: a.binaryPath,
 		Force:      force,
 		Sessions:   a.sessions,
-	}))
+	}), updaterRollback)
 }
 
 // mapUpdaterError translates internal/updater's typed sentinel
@@ -2398,7 +2398,7 @@ func (a updateInfoAdapter) Rollback(ctx context.Context, force bool) error {
 //
 // New sentinel pairings land here as the Phase C / future work
 // expands the install error surface.
-func mapUpdaterError(err error) error {
+func mapUpdaterError(err error, _ updaterAction) error {
 	if err == nil {
 		return nil
 	}
@@ -2511,8 +2511,8 @@ const backupShutdownWait = 45 * time.Second
 // to give, a filesystem that keeps none, a failure, serve's stop), leaves the
 // marker and both binaries as they are, said on one line: the boot after it
 // asks again.
-func maybeRollbackOnBoot(ctx context.Context, stderr io.Writer, dataDir, binaryPath string) {
-	_ = bootHousekeeping(ctx, stderr, dataDir, binaryPath, version.ServerVersion, nil)
+func maybeRollbackOnBoot(ctx context.Context, stderr io.Writer, dataDir, binaryPath string, _ serveOpts) {
+	_ = bootHousekeeping(ctx, stderr, dataDir, binaryPath, version.ServerVersion, nil, 0)
 }
 
 // bootHousekeeping is maybeRollbackOnBoot as the boot of version current,
@@ -2521,14 +2521,15 @@ func maybeRollbackOnBoot(ctx context.Context, stderr io.Writer, dataDir, binaryP
 // restore. It returns why it left the marker as it is, where it did for a
 // reason of its own: the install marker's lock it could not hold, or an
 // interrupted rollback's record it would not confirm.
-func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, restore func(dst, suffix string) error) error {
-	return bootHousekeepingWith(ctx, stderr, dataDir, binaryPath, current, restore, nil)
+func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, restore func(dst, suffix string) error, _ time.Duration) error {
+	return bootHousekeepingWith(ctx, stderr, dataDir, binaryPath, current, bootSeams{restore: restore})
 }
 
 // bootHousekeepingWith is bootHousekeeping removing the backup after a
 // confirmed install through remove (nil is updater.RemoveBackup): a test runs
 // it with a removal that fails, as one can on Windows.
-func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, restore, remove func(dst, suffix string) error) error {
+func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, seams bootSeams) error {
+	restore, remove := seams.restore, seams.remove
 	if restore == nil {
 		restore = updater.RollbackBinary
 	}
@@ -3090,6 +3091,8 @@ type serveOpts struct {
 	// and updater.SaveState in the early rollback and its disarm, so a
 	// boot test can make either fail. Nil (the updater's) in production.
 	restoreBackup   func(dst, backupExt string) error
+	probeVersion    func(ctx context.Context, binary string, within time.Duration) (string, error)
+	checkConfig     func(ctx context.Context, binary, configPath string) updater.ConfigCheck
 	saveUpdateState func(dataDir string, st updater.State) error
 	// updateReleases is the releases API serve's updater asks (its Client):
 	// nil, GitHub's, everywhere but the boot tests, which point it at a
@@ -4373,7 +4376,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// started once ServeTLS runs). Nothing listens yet here, so this
 	// confirms nothing. Failures are logged but non-fatal — operator can
 	// still recover by hand.
-	maybeRollbackOnBoot(ctx, stderr, cfg.DataDir, binaryPath)
+	maybeRollbackOnBoot(ctx, stderr, cfg.DataDir, binaryPath, opts)
 
 	// Background updater: polls GitHub Releases on a configurable
 	// cadence (Phase A), exposes operator-triggered Install via the

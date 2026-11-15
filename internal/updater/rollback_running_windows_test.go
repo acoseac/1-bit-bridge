@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -27,73 +28,46 @@ func helperReadyGiveUp(t *testing.T) <-chan time.Time {
 }
 
 // TestRollbackBinaryReplacesARunningExe is the rollback the console and
-// the boot path both run inside the bridge process. The SCM stop is
-// skipped when this process is the service, and the rename then replaces
-// the mapped image. Windows refuses that ("Access is denied"). The
-// helper is a real process started from dst, so the image is mapped the
-// way bridge.exe is during those two callers.
+// the boot path both run inside the bridge process, which stops no
+// service (backlog B898), so the rename replaces the mapped image.
+// Windows refuses that ("Access is denied"). The helper is a real
+// process started from dst, so the image is mapped the way bridge.exe is
+// during those callers. In the second case the backup is held as well,
+// sharing nothing, as a scanner holds the backup a start has just run,
+// and let go once its refusal is heard.
 func TestRollbackBinaryReplacesARunningExe(t *testing.T) {
-	skipIfBridgeServiceRegistered(t)
-	dir := t.TempDir()
-	dst := buildSleepingExe(t, dir)
-	bak := dst + ".bak"
-	const good = "KNOWN-GOOD-ROLLBACK"
-	if err := os.WriteFile(bak, []byte(good), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	ready := filepath.Join(dir, "ready")
-	cmd := exec.Command(dst, ready)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start helper: %v", err)
-	}
-	// One Wait, in the watcher. Cleanup kills and then joins that Wait.
-	exited := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(exited)
-	}()
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	for _, backupHeld := range []bool{false, true} {
+		dir := t.TempDir()
+		dst := buildSleepingExe(t, dir)
+		bak := dst + ".bak"
+		const good = "KNOWN-GOOD-ROLLBACK"
+		if err := os.WriteFile(bak, []byte(good), 0o755); err != nil {
+			t.Fatal(err)
 		}
-		<-exited
-	})
-
-	giveUp := helperReadyGiveUp(t)
-	poll := time.NewTicker(20 * time.Millisecond)
-	defer poll.Stop()
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
+		runUntilReady(t, dst, dir)
+		var released atomic.Bool
+		realHolds(t, &released)
+		var heard *atomic.Int32
+		if backupHeld {
+			heard = letGoAtRefusalOf(t, bak, holdShareNone(t, bak), &released)
 		}
-		select {
-		case <-exited:
-			t.Fatal("helper exited before it became ready")
-		case <-giveUp:
-			t.Fatal("helper never became ready")
-		case <-poll.C:
+
+		if err := RollbackBinary(dst, ".bak"); err != nil {
+			t.Fatalf("backup held %v: RollbackBinary: %v", backupHeld, err)
 		}
-	}
-
-	if err := RollbackBinary(dst, ".bak"); err != nil {
-		t.Fatalf("RollbackBinary: %v", err)
-	}
-	got, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != good {
-		t.Fatalf("dst = %q, want the .bak bytes", got)
-	}
-	if _, err := os.Stat(bak); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf(".bak should be consumed; stat = %v", err)
-	}
-
-	select {
-	case <-exited:
-		t.Fatal("helper exited during rollback")
-	case <-time.After(500 * time.Millisecond):
+		if heard != nil && heard.Load() < 1 {
+			t.Error("the held backup was never refused")
+		}
+		got, err := os.ReadFile(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != good {
+			t.Fatalf("dst = %q, want the .bak bytes", got)
+		}
+		if _, err := os.Stat(bak); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf(".bak should be consumed; stat = %v", err)
+		}
 	}
 }
 
