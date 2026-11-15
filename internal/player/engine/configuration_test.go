@@ -506,7 +506,7 @@ func TestAReservationGrantedAsItsCallerLeavesIsLetGo(t *testing.T) {
 		err = h.result("the reservation whose caller left", answered)
 	}
 	if !errors.Is(err, ErrNotAdmitted) || ReasonOf(err) != ReasonCancelled || !errors.Is(err, context.Canceled) {
-		t.Fatalf("a reservation granted as its caller left: %v; want a cancellation wrapping ErrNotAdmitted and the context's error", err)
+		t.Errorf("a reservation granted as its caller left: %v; want a cancellation wrapping ErrNotAdmitted and the context's error", err)
 	}
 	if h.snap().ConfigurationReserved() {
 		t.Fatal("the reservation granted as its caller left is still held")
