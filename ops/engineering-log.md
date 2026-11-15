@@ -100294,3 +100294,123 @@ redaction. `git apply --check` takes it, and on a `git archive` copy of the
 tree with it the budgets check is clean (the worst load from 77.4% to 77.5%,
 `player.md` at 98,849 bytes), as are its self-test and those of `rules-for.py`
 and `move_entry.py`.
+
+## 2026-11-15 — B898 PR 3: the harvest test reads past Windows' refusal of its open of the state file
+
+Worker b898pr3, legion0, branch `test/b898-harvest-read` from main 3f4843e1,
+test files only. Commits: 2b20bcf1 (the helper reads through a core that
+takes its read function, main's single read kept, and the hold cases: red),
+fd8c4648 (one state file for the three cases, still red), 84cf147b (the read
+through `atomicwrite.ReadWithRetryCtx`, and a busy read inside `eventually`
+answers not yet), 79ba8921 (the Windows hold's own open waits out a scanner,
+and the cases take a scanner's extra refusals), then this record. Every run:
+Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR
+`~/onebit/tmp`.
+
+### The red on main's gate (Step 0)
+
+Main bf622968's gate.yml run 43695739923, attempt 1, job `test (windows-latest)`;
+attempt 2 of the run failed on the rollback red instead, not on this test:
+
+```
+--- FAIL: TestTheHarvestRunsWithEnrichmentOff (1.60s)
+    serve_enrichment_switch_test.go:654: open C:\Users\RUNNER~1\AppData\Local\Temp\…\001\data\atlas-harvest.json: The process cannot access the file because it is being used by another process.
+```
+
+(The temporary directory's name, the test's name and digits, is elided.)
+`:654`, at bf622968 and at 3f4843e1 alike, is the call of
+`harvestPendingCovers` inside `eventually`'s condition, which reads the state
+file every 5 ms once Atlas has been asked for the premium cover; the helper
+calls `t.Helper()`, so its `t.Fatal` is reported at its caller's line. Its
+open was `os.ReadFile`, which on Windows shares reading and writing and not
+deletion (go1.27.3 `src/syscall/syscall_windows.go:395`). The job's lines
+just before the failure are serve's upgrade of that cover and its settle:
+`atlas premium cover upgraded … mbid=77777777-7777-4777-8777-777777777777`
+and `atlasharvest.covers_upgraded … count=1`. No "timed out waiting for"
+line, so the production boot read (B898's PR 2) is not this red.
+
+### What writes the state file in this test
+
+At 3f4843e1 serve writes `atlas-harvest.json` twice at the harvest's first
+tick, the submit's stamp (`internal/atlasharvest/client.go:319`; a submit is
+due every 6 h, `client.go:258-263`, and the test shortens only the poll,
+`cmd/bridge/main.go:4872-4873`) and the booklet check's (`client.go:371`;
+the fake Atlas answers the check 404, stamped once, `booklets.go:145-147`,
+`:92-94`), and once more when the premium cover settles after the switch
+(`SettlePendingCovers`, `client.go:442`, whose persist renames a staged file
+over the state file, `state.go:354`). The ticks between write nothing: an
+empty results page adds no cover (`state.go:289-291`) and its cursor of 0 is
+no advance (`client.go:648-653`), and a paused cover leg returns before it
+settles (`client.go:423-424`, `:439-441`). So the direct call (`:641`), after
+eight polls, reads beside no write of the bridge's, and the poll at `:654`
+reads in the window of the settle's write. The log does not say whether the
+open met that rename or a scanner's hold of the file the rename put in place,
+and nothing here claims more than that window.
+
+### The change
+
+`harvestPendingCovers` reads through `readPendingCovers`, which takes its
+read function (`os.ReadFile`, or a test's hold) and reads through
+`atomicwrite.ReadWithRetryCtx` on the test's context: Windows' sharing
+violation and access denied are asked again, five attempts over 750 ms, and
+any other host reads once. The direct call fails the test on any error left
+after that. `eventually`'s condition reads through `pendingCoversNow`, still
+only once the cover was asked: a read still busy past the bound
+(`atomicwrite.ErrReadBusy`) answers not yet and the next poll asks again,
+within `eventually`'s 10 s, and any other error fails the test, checked
+before the map's length.
+
+`readPastAHold` runs the read past a hold on a state file holding one
+pending cover, written once through `atlasharvest.OpenStateStore`: let go by
+the read at a refusal it heard, the covers come back; held throughout, the
+read is busy with the hold's refusal; in `eventually`'s form a poll whose
+read is refused throughout answers not yet, and a later one, whose read lets
+the hold go, the covers. `TestTheHarvestHelperReadsPastAHoldOnTheStateFile`
+(Windows) holds the file with a handle that shares nothing, its own open
+through the same retry so that a scanner's hold of the fixture just written
+is waited out, checks before anything else that `os.ReadFile` beside it
+answers `ERROR_SHARING_VIOLATION`, and lets it go from the read or the
+cleanup, never by time. `TestTheHarvestHelperReadsPastAStandInHold` runs the
+same cases on every host, its hold a read answering a stand-in for that
+refusal until it is let go, which `atomicwrite.SetReadRetryableForTest` makes
+the retry ask again on (a process-global seam, so the test does not call
+`t.Parallel`). The hold shows the read waits out a refusal; it does not show
+who held the file in the gate's run. The two test files add 150 lines and
+remove 3 (3f4843e1..79ba8921).
+
+### Red first, and the controls
+
+At 2b20bcf1 and again at fd8c4648, main's single read, the stand-in's three
+cases failed on this host by their own assertions: the let-go case with the
+refusal returned after one refusal, the held case with an error that is not
+busy, and eventually's form with the test failed at its first poll;
+`TestTheHarvestRunsWithEnrichmentOff` passed. The Windows case's red is the
+windows-latest leg at the tests-only commit, which this host cannot run.
+
+Controls on 79ba8921, each an uncommitted mutation of the test file, its test
+binary built and its bytes put back from memory before the run, each
+predicted in a file first, `git status` empty after: 3 of 3 red as predicted,
+every case predicted green passing.
+- The helper's read without its retry: the stand-in's three cases.
+- A busy read inside `eventually` taken as a fatal: eventually's form alone
+  (`file was busy: open …`).
+- A busy read inside `eventually` taken as settled, the nil map as no pending
+  cover: eventually's form alone (one poll answered, no covers).
+
+### Runs
+
+On 79ba8921, outside the slot: `go vet ./cmd/bridge/` with the tags for
+linux/amd64 and for windows/amd64, clean; `go test -c` of `./cmd/bridge` for
+windows/amd64 with the tags builds. go1.27.3's gofmt lists neither changed
+file (a misformatted probe beside them was listed). In the build slot, the
+host otherwise idle: `go test -race -count=50 -run
+'TestTheHarvestRunsWithEnrichmentOff' ./cmd/bridge/`, 50 of 50, no data race,
+1.48 to 1.57 s a run (the package 77.2 s); the stand-in's test the same way,
+50 of 50, no data race, 1.58 to 1.59 s a run (80.5 s); then `make test`
+(`go test -race -p 4 -timeout 30m ./...` with the tags), ok, 89 packages,
+cmd/bridge in 1,694.2 s, 2,169.1 s in all, the tree clean after. No path
+under `version_gate.go`'s `guardedPrefixes` or in its `GuardedPaths` changed.
+cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this record. The windows-latest leg, where the Windows case
+runs, is the PR's.
