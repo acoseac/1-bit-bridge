@@ -45,8 +45,9 @@ const stateLockRetry = 50 * time.Millisecond
 // for the SCM to stop the service; an operator's rollback, across a read, a
 // write and the backup's rename; each rename and its probes waiting out
 // another process's hold, backlog B898, with waits of swapbound.go's
-// schedules and no attempt begun past its operation's deadline, a step under
-// way taking what its filesystem takes).
+// schedules, none admitted once its operation's deadline has passed nor
+// longer than what remains of it, a step under way taking what its
+// filesystem takes).
 const defaultStateLockWait = 30 * time.Second
 
 // StateLockWait is defaultStateLockWait, for cmd/bridge's pin of the

@@ -49,18 +49,19 @@ var (
 // for a key in denied. Its waits are recorded, and slept only on Windows once
 // the script is spent, so that a scanner of the host's holding a file the
 // test has just written is waited out there too. Its clock (RestoreSeams.Now)
-// moves on by each wait's length, slept or not, and by took's time for a
-// call's key as that call is made, and by nothing else; answers is each call
-// made, its key and what it answered.
+// moves on by each wait's length and by sleep more, slept or not, and by step
+// and took's time for a call's key as that call is made, and by nothing else;
+// answers is each call made, its key and what it answered.
 type heldRestore struct {
-	bin     string
-	denied  map[string]bool
-	mu      sync.Mutex
-	script  map[string]int
-	waits   []time.Duration
-	clock   time.Time
-	took    map[string]time.Duration
-	answers []string
+	bin         string
+	denied      map[string]bool
+	mu          sync.Mutex
+	script      map[string]int
+	waits       []time.Duration
+	clock       time.Time
+	took        map[string]time.Duration
+	step, sleep time.Duration
+	answers     []string
 }
 
 func newHeldRestore(bin string, script map[string]int) *heldRestore {
@@ -84,7 +85,7 @@ func (h *heldRestore) key(p string) string {
 func (h *heldRestore) refuse(call, file string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.clock = h.clock.Add(h.took[call])
+	h.clock = h.clock.Add(h.step + h.took[call])
 	for _, k := range []string{call, file} {
 		n := h.script[k]
 		if n == 0 {
@@ -127,7 +128,7 @@ func (h *heldRestore) restore() func(dst, ext string) error {
 		Wait: func(d time.Duration) {
 			h.mu.Lock()
 			h.waits = append(h.waits, d)
-			h.clock = h.clock.Add(d)
+			h.clock = h.clock.Add(d + h.sleep)
 			spent := true
 			for _, n := range h.script {
 				spent = spent && n == 0
@@ -161,11 +162,37 @@ func (h *heldRestore) answer(call string, err error) {
 	h.mu.Unlock()
 }
 
-// answered is every call h was asked, in order, with its answer.
-func (h *heldRestore) answered() string {
+// answered is every call h was asked, in order, with its answer; collapsed,
+// each run of one call's answers stands as its last, so that a refusal the
+// platform's own predicate waits out (a scanner of the host's holding a file
+// the test made) leaves the record as the script alone would.
+func (h *heldRestore) answered(collapsed bool) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return strings.Join(h.answers, ", ")
+	var out []string
+	for _, a := range h.answers {
+		call, _, _ := strings.Cut(a, " ")
+		if n := len(out); collapsed && n > 0 && strings.HasPrefix(out[n-1], call+" ") {
+			out[n-1] = a
+			continue
+		}
+		out = append(out, a)
+	}
+	return strings.Join(out, ", ")
+}
+
+// TestTheHeldRestoresCollapsedRecordKeepsEachCallsLastAnswer: a run of one
+// call's answers, as a scanner's refusal of the put-back adds one, stands as
+// its last, and nothing else changes.
+func TestTheHeldRestoresCollapsedRecordKeepsEachCallsLastAnswer(t *testing.T) {
+	h := &heldRestore{answers: []string{"?bin ok", "?bin ok", "bak>bin held",
+		"aside>bin The process cannot access the file because it is being used by another process.", "aside>bin ok"}}
+	if got, want := h.answered(true), "?bin ok, bak>bin held, aside>bin ok"; got != want {
+		t.Errorf("collapsed: %s, want %s", got, want)
+	}
+	if got := h.answered(false); got != strings.Join(h.answers, ", ") {
+		t.Errorf("as made: %s, want every answer", got)
+	}
 }
 
 func (h *heldRestore) waited() []time.Duration {
@@ -414,7 +441,9 @@ func TestABootRollbackThatLeavesNoBinaryEndsTheStart(t *testing.T) {
 // marker for the next start to ask again; one whose place was refused
 // otherwise, the binary put back, clears the install as before. Each case's
 // put-back made exactly its calls, each with its answer, or on Windows, where
-// a scanner of the host's may hold a file too, ended with its last ones.
+// a scanner of the host's may hold a file too and the platform's own
+// predicate waits it out, ended with its last ones once each run of one
+// call's answers stands as its last.
 func TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -447,12 +476,56 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse(t *testing.T) {
 			if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, h.restore(), testBackupProbeTimeout); err != nil {
 				t.Fatalf("the housekeeping = %v; stderr=%s", err, stderr.String())
 			}
-			if got := h.answered(); (runtime.GOOS != "windows" && got != tc.answered) || !strings.HasSuffix(got, tc.last) {
+			if got := h.answered(false); (runtime.GOOS != "windows" && got != tc.answered) || !strings.HasSuffix(h.answered(true), tc.last) {
 				t.Errorf("the put-back's calls: %s\nwant %s", got, tc.answered)
 			}
 			st := markerOf(t, r.dataDir)
 			if kept := st.Status == "installing" && st.MigrationVeto == "9.9.9"; kept != tc.kept {
 				t.Errorf("the marker = %+v: kept %v, want %v; stderr=%s", st, kept, tc.kept, stderr.String())
+			}
+		})
+	}
+}
+
+// TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt: Windows' put-back on
+// any host, on a clock every call and every sleep moves on by a millisecond,
+// as a host's does: held at the backup throughout, the rollback makes all
+// eight of its forward attempts, its last wait shortened to what remained,
+// and its put-back held throughout all seven, each said.
+func TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt(t *testing.T) {
+	ms := func(ns ...int) []time.Duration {
+		var ds []time.Duration
+		for _, n := range ns {
+			ds = append(ds, time.Duration(n)*time.Millisecond)
+		}
+		return ds
+	}
+	for _, tc := range []struct {
+		name   string
+		script map[string]int
+		said   string
+		waits  []time.Duration
+	}{
+		{"held at the backup", map[string]int{"bak": -1}, "in use by another process: 8 attempts over 4.736s",
+			ms(50, 100, 200, 400, 800, 1600, 1586)},
+		{"its put-back held", leftNoBinary(), "in use by another process: 7 attempts over 3.139s",
+			ms(50, 100, 200, 400, 800, 1589)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := filepath.Join(t.TempDir(), "bridge")
+			for _, p := range []string{bin, bin + ".bak"} {
+				if err := os.WriteFile(p, []byte(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h := newHeldRestore(bin, tc.script)
+			h.step, h.sleep = time.Millisecond, time.Millisecond
+			err := h.restore()(bin, ".bak")
+			if err == nil || !strings.Contains(err.Error(), tc.said) {
+				t.Errorf("the put-back = %v, want it to say %q", err, tc.said)
+			}
+			if got := h.waited(); !slices.Equal(got, tc.waits) {
+				t.Errorf("the put-back waited %v, want %v", got, tc.waits)
 			}
 		})
 	}

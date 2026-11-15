@@ -35,15 +35,16 @@ const SCMStopWait = scmStopWait
 // the rollback's vacate. The first is at once, then 50 ms doubling to 1.6 s
 // twice: eight attempts over 4.75 s, the deadline every such step of one
 // operation shares, set as it begins (deadline), so that the time one step
-// took, waiting out a hold or not, is the next's. The swap's vacate and either
-// place have one attempt (moves.once).
+// took, waiting out a hold or not, is the next's, each wait shortened to what
+// remains of it, so that the last attempt comes at the deadline. The swap's
+// vacate and either place have one attempt (moves.once).
 //
 // recoveryWaits is the put-back's, the one wait with the binary not in place,
 // made only once a place was refused: seven attempts over 3.15 s, on a
 // deadline of its own set as the put-back begins, which no step before it
-// draws on. Each of its waits can only shorten the time with no binary on
-// disk, against giving up, which leaves it missing until someone renames it
-// back.
+// draws on and which never leaves its first attempt unmade. Each of its waits
+// can only shorten the time with no binary on disk, against giving up, which
+// leaves it missing until someone renames it back.
 //
 // Here, beside scmStopWait, so that what an operation holds the install
 // marker's lock for is checked on every platform

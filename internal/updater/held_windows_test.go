@@ -108,7 +108,8 @@ func holdShareNone(t *testing.T, path string) (letGo func()) {
 // recorded, and slept for real once the test's own hold is let go (released),
 // so that a scanner of the host's holding the file a moment longer is waited
 // out as in production, and the clock the deadlines read moved on by each
-// wait's length, slept or not, and by nothing else.
+// wait's length and a millisecond more, slept or not, as a host's sleep
+// overruns, and by nothing else.
 func realHolds(t *testing.T, released *atomic.Bool) *[]time.Duration {
 	t.Helper()
 	var waits []time.Duration
@@ -120,7 +121,7 @@ func realHolds(t *testing.T, released *atomic.Bool) *[]time.Duration {
 		if released.Load() {
 			time.Sleep(d)
 		}
-		clock = clock.Add(d)
+		clock = clock.Add(d + time.Millisecond)
 	}
 	renameNow = func() time.Time { return clock }
 	return &waits
@@ -184,8 +185,10 @@ func TestARollbackWaitsOutAHandleThatSharesNoDeletion(t *testing.T) {
 }
 
 // TestARollbackHeldThroughItsWaitMovesNothing: the backup held through the
-// whole forward schedule, the rollback moves nothing, the hold its answer;
-// the hold is let go once the rollback has returned, before a file is read.
+// whole forward schedule, its eight attempts kept on a clock each sleep
+// overruns, the last wait shortened to what remained, the rollback moves
+// nothing, the hold its answer; the hold is let go once the rollback has
+// returned, before a file is read.
 func TestARollbackHeldThroughItsWaitMovesNothing(t *testing.T) {
 	dst, bak := rollbackFiles(t)
 	var released atomic.Bool
@@ -198,8 +201,8 @@ func TestARollbackHeldThroughItsWaitMovesNothing(t *testing.T) {
 	if !errors.As(err, &swapErr) || swapErr.Outcome != NothingMoved || !swapErr.InUse || !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		t.Fatalf("the rollback = %v, want nothing moved for the hold", err)
 	}
-	if int(heard.Load()) != len(forwardWaits) || waitsTotal(*waits) != ForwardWait() {
-		t.Errorf("heard %d refusals over %v, want %d over %s", heard.Load(), *waits, len(forwardWaits), ForwardWait())
+	if want := "50 100 200 400 800 1600 1594"; int(heard.Load()) != len(forwardWaits) || msString(*waits) != want {
+		t.Errorf("heard %d refusals over %s ms, want %d over %s", heard.Load(), msString(*waits), len(forwardWaits), want)
 	}
 	if readBytes(t, dst) != "RUNNING" || readBytes(t, bak) != "KNOWN-GOOD" {
 		t.Error("a file moved")

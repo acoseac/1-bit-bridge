@@ -41,8 +41,9 @@ const (
 
 // RenameRefusal is one refused attempt at a step: its stage, the file it moves
 // (From) and where to (To, empty for a probe), the error, which attempt it was,
-// from 1, and the wait before the next, 0 where none is made; a wait that
-// ends past the step's deadline is followed by no attempt.
+// from 1, and the wait admitted before the next, as it is asked of the clock
+// (the schedule's, or what remains of the deadline where that is less), 0
+// where none is: an admitted wait is always followed by its attempt.
 type RenameRefusal struct {
 	Stage    RenameStage
 	From, To string
@@ -103,16 +104,19 @@ func liveMoves() moves {
 	return moves{rename: renameFunc, probe: probeMovable, inUse: renameInUse, wait: renameWait, now: renameNow}
 }
 
-// deadline is the time past which an operation tries no step: the forward
-// one, set as the operation begins and shared by every step made while the
-// binary is in place and nothing is armed, or the recovery one, set as the
-// put-back begins. A wait is made only where it ends at or before it, and an
-// attempt is begun only at or before it, so that the last of a schedule's
-// attempts, at its whole total, is made where nothing else took time. A step
-// under way is never cut short (a rename takes no context): once the
-// deadline is seen to have passed, no further step, attempt or wait of the
-// operation's is begun, but for the two its destructive renames need, the
-// place after a vacate that landed and the put-back after a refused place.
+// deadline is the time past which an operation admits no wait and begins no
+// step: the forward one, set as the operation begins and shared by every step
+// made while the binary is in place and nothing is armed, or the recovery
+// one, set as the put-back begins. A wait is admitted only while some of it
+// remains, and shortened to what remains, and the attempt after an admitted
+// wait is made however long the wait or the steps before it took, so that a
+// schedule's last attempt comes at the deadline, past it by no more than its
+// wait overran, and on a clock nothing but the waits moves the schedules are
+// exact: eight attempts, the last at 4.75 s, and seven, the last at 3.15 s.
+// A step under way is never cut short (a rename takes no context): once the
+// deadline is seen to have passed, no further step is begun and no wait
+// admitted, but for the two the destructive renames need, the place after a
+// vacate that landed and the put-back's first attempt after a refused place.
 type deadline struct{ at time.Time }
 
 // deadlineOf is the deadline schedule's waits set from now.
@@ -124,9 +128,10 @@ func (m moves) deadlineOf(schedule []time.Duration) deadline {
 func (m moves) passed(d deadline) bool { return m.now().After(d.at) }
 
 // stepResult is a step's answer: its error, nil where it landed, the attempts
-// it made and its waits between them (each at its length in the schedule, a
-// wait the clock overran included), and whether its last refusal was a hold.
-// A step not tried for its deadline made no attempt, and its error is
+// it made and its waits between them, each as it was asked of the clock (the
+// schedule's, or what remained of the deadline where that was less; never
+// what the clock read after it), and whether its last refusal was a hold. A
+// step not tried for its deadline made no attempt, and its error is
 // ErrDeadlinePassed.
 type stepResult struct {
 	err      error
@@ -135,42 +140,42 @@ type stepResult struct {
 	inUse    bool
 }
 
-// try makes a step at once, and again after each of schedule's waits while it
-// is refused for a hold and the wait ends by dl; a refusal of any other kind
-// ends it at once, as it was answered, and a hold past the schedule or the
-// deadline ends it saying so (inUseError), a wait the clock overran past dl
-// followed by no attempt. A step whose deadline has passed before its first
-// attempt is not tried at all (ErrDeadlinePassed). The renames take no
-// context: a step's waits are bounded by its schedule, and a stop waits at
-// most those.
+// try makes a step whose deadline has not passed (retry); one it has
+// passed before its first attempt is not tried at all (ErrDeadlinePassed).
 func (m moves) try(stage RenameStage, from, to string, schedule []time.Duration, dl deadline, step func() error) stepResult {
 	if m.passed(dl) {
 		return stepResult{err: ErrDeadlinePassed}
 	}
+	return m.retry(stage, from, to, schedule, dl, step)
+}
+
+// retry makes a step at once, whatever dl says, and again after each of
+// schedule's waits while it is refused for a hold: a wait is admitted only
+// while some of dl remains, shortened to what remains, and the attempt after
+// it is made however long the wait took. A refusal of any other kind ends the
+// step at once, as it was answered, and a hold past the schedule, or once dl
+// leaves no wait to admit, ends it saying so (inUseError). The renames take no
+// context: a step's waits are bounded by its schedule, and a stop waits at
+// most those.
+func (m moves) retry(stage RenameStage, from, to string, schedule []time.Duration, dl deadline, step func() error) stepResult {
 	var res stepResult
-	var refused error
+	var wait time.Duration
 	for i := range schedule {
-		if d := schedule[i]; d > 0 {
-			m.wait(d)
-			res.waited += d
-			if m.passed(dl) {
-				res.err = &inUseError{err: refused, attempts: res.attempts, waited: res.waited}
-				return res
-			}
+		if wait > 0 {
+			m.wait(wait)
+			res.waited += wait
 		}
 		res.attempts++
 		err := step()
 		if err == nil {
 			return stepResult{attempts: res.attempts, waited: res.waited}
 		}
-		refused, res.inUse = err, m.inUse(err)
-		again := res.inUse && i+1 < len(schedule) && !m.now().Add(schedule[i+1]).After(dl.at)
-		var next time.Duration
-		if again {
-			next = schedule[i+1]
+		res.inUse, wait = m.inUse(err), 0
+		if left := dl.at.Sub(m.now()); res.inUse && i+1 < len(schedule) && left > 0 {
+			wait = min(schedule[i+1], left)
 		}
-		observeRefusal(RenameRefusal{Stage: stage, From: from, To: to, Err: err, Attempt: res.attempts, Wait: next})
-		if !again {
+		observeRefusal(RenameRefusal{Stage: stage, From: from, To: to, Err: err, Attempt: res.attempts, Wait: wait})
+		if wait == 0 {
 			res.err = err
 			if res.inUse {
 				res.err = &inUseError{err: err, attempts: res.attempts, waited: res.waited}
@@ -199,10 +204,13 @@ func (m moves) renameStep(stage RenameStage, from, to string, schedule []time.Du
 }
 
 // putBack is the put-back of from to to on the recovery schedule, its
-// deadline set as it begins, so that it is always tried, and a rename that
-// lands is the put-back's success however late it lands.
+// deadline set as it begins and its first attempt made whatever the clock
+// reads by then, so that no deadline leaves it untried; only its later
+// attempts are bounded by that deadline, and a rename that lands is the
+// put-back's success however late it lands.
 func (m moves) putBack(from, to string) stepResult {
-	return m.renameStep(StagePutBack, from, to, recoveryWaits, m.deadlineOf(recoveryWaits))
+	return m.retry(StagePutBack, from, to, recoveryWaits, m.deadlineOf(recoveryWaits),
+		func() error { return m.rename(from, to) })
 }
 
 // probeStep is try for a probe of path on the forward schedule.
@@ -231,8 +239,8 @@ func observeRefusal(r RenameRefusal) {
 
 // inUseError is a step's refusal for another process's hold past its schedule
 // or its deadline: the hold's own error, and the attempts and the waits made
-// for it to end, each wait at its length in the schedule, never the time the
-// clock read.
+// for it to end, each wait as it was asked of the clock (stepResult), never
+// the time the clock read.
 type inUseError struct {
 	err      error
 	attempts int
