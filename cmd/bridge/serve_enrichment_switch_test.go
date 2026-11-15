@@ -19,6 +19,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
@@ -531,18 +532,119 @@ func seedAWaitingArtist(t *testing.T, dataDir, artist string) {
 }
 
 // harvestPendingCovers reads the pending premium covers, with their attempt
-// counts, from the harvest state file serve keeps in dataDir.
+// counts, from the harvest state file serve keeps in dataDir, and fails the
+// test on any error its read leaves.
 func harvestPendingCovers(t *testing.T, dataDir string) map[string]int {
 	t.Helper()
-	raw, err := os.ReadFile(harvestStatePath(dataDir))
+	covers, err := readPendingCovers(t.Context(), dataDir, os.ReadFile)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return covers
+}
+
+// readPendingCovers is harvestPendingCovers' read, through read: os.ReadFile,
+// or a test's hold on the file.
+func readPendingCovers(ctx context.Context, dataDir string, read func(string) ([]byte, error)) (map[string]int, error) {
+	raw, err := read(harvestStatePath(dataDir))
+	if err != nil {
+		return nil, err
+	}
 	var st atlasharvest.State
 	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, err
+	}
+	return st.PendingCovers, nil
+}
+
+// pendingCoversNow is readPendingCovers for eventually's condition: any
+// error fails the test.
+func pendingCoversNow(t *testing.T, dataDir string, read func(string) ([]byte, error)) (covers map[string]int, ok bool) {
+	t.Helper()
+	covers, err := readPendingCovers(t.Context(), dataDir, read)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return st.PendingCovers
+	return covers, true
+}
+
+// readPastAHold runs the harvest helper's read past a hold on the state file:
+// let go by the read at a refusal it heard, the covers come back; held
+// throughout, the read is busy; in eventually's form a poll refused throughout
+// answers not yet, and the next, whose read lets the hold go, the covers. hold
+// returns the read that meets its hold and the let go; refused tells its refusal.
+func readPastAHold(t *testing.T, hold func(t *testing.T, path string) (read func(string) ([]byte, error), letGo func()), refused func(error) bool) {
+	const mbid = "77777777-7777-4777-8777-777777777777"
+	held := func(t *testing.T) (string, func(string) ([]byte, error), func()) {
+		dataDir := t.TempDir()
+		state, err := atlasharvest.OpenStateStore(harvestStatePath(dataDir))
+		if err == nil {
+			err = state.AddPendingCovers([]string{mbid})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		read, letGo := hold(t, harvestStatePath(dataDir))
+		return dataDir, read, letGo
+	}
+	t.Run("let go at a refusal its read heard", func(t *testing.T) {
+		dataDir, read, letGo := held(t)
+		refusals := 0
+		covers, err := readPendingCovers(t.Context(), dataDir, func(p string) ([]byte, error) {
+			b, err := read(p)
+			if refused(err) {
+				refusals++
+				letGo()
+			}
+			return b, err
+		})
+		if err != nil || refusals != 1 || len(covers) != 1 || covers[mbid] != 0 {
+			t.Errorf("the covers past a hold let go at its first refusal = %v, %v after %d refusals; want %s at 0 attempts after 1", covers, err, refusals, mbid)
+		}
+	})
+	t.Run("held throughout", func(t *testing.T) {
+		dataDir, read, _ := held(t)
+		if _, err := readPendingCovers(t.Context(), dataDir, read); !errors.Is(err, atomicwrite.ErrReadBusy) || !refused(err) {
+			t.Errorf("the read held throughout = %v, want busy with the hold's refusal", err)
+		}
+	})
+	t.Run("in eventually's form", func(t *testing.T) {
+		dataDir, read, letGo := held(t)
+		var answers []bool
+		var covers map[string]int
+		eventually(t, func() bool {
+			poll := len(answers)
+			got, ok := pendingCoversNow(t, dataDir, func(p string) ([]byte, error) {
+				if poll > 0 {
+					letGo()
+				}
+				return read(p)
+			})
+			answers, covers = append(answers, ok), got
+			return ok
+		}, "the covers past a hold let go at the second poll")
+		if len(answers) != 2 || answers[0] || len(covers) != 1 || covers[mbid] != 0 {
+			t.Errorf("the polls answered %v, then %v; want not yet, then %s at 0 attempts", answers, covers, mbid)
+		}
+	})
+}
+
+// TestTheHarvestHelperReadsPastAStandInHold runs
+// TestTheHarvestHelperReadsPastAHoldOnTheStateFile's cases on every host, the
+// hold a read answering errBusyForTest until it is let go, which atomicwrite
+// asks again on through a process-global seam: it does not call t.Parallel.
+func TestTheHarvestHelperReadsPastAStandInHold(t *testing.T) {
+	busy := func(err error) bool { return errors.Is(err, errBusyForTest) }
+	t.Cleanup(atomicwrite.SetReadRetryableForTest(busy))
+	readPastAHold(t, func(t *testing.T, path string) (func(string) ([]byte, error), func()) {
+		held := true
+		return func(p string) ([]byte, error) {
+			if held {
+				return nil, &os.PathError{Op: "open", Path: p, Err: errBusyForTest}
+			}
+			return os.ReadFile(p)
+		}, func() { held = false }
+	}, busy)
 }
 
 // TestTheHarvestRunsWithEnrichmentOff: enrich.enabled stops the enricher's
@@ -651,6 +753,10 @@ func TestTheHarvestRunsWithEnrichmentOff(t *testing.T) {
 		t.Fatalf("switching enrichment on from the console answered %d %s", code, body)
 	}
 	eventually(t, func() bool {
-		return atlas.asked("GET /release/"+release+"/front-") > 0 && len(harvestPendingCovers(t, dataDir)) == 0
+		if atlas.asked("GET /release/"+release+"/front-") == 0 {
+			return false
+		}
+		covers, ok := pendingCoversNow(t, dataDir, os.ReadFile)
+		return ok && len(covers) == 0
 	}, "the premium cover to be fetched and settled once enrichment is on")
 }
