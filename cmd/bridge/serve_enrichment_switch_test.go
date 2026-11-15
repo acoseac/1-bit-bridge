@@ -532,8 +532,7 @@ func seedAWaitingArtist(t *testing.T, dataDir, artist string) {
 }
 
 // harvestPendingCovers reads the pending premium covers, with their attempt
-// counts, from the harvest state file serve keeps in dataDir, and fails the
-// test on any error its read leaves.
+// counts, from the harvest state file serve keeps in dataDir.
 func harvestPendingCovers(t *testing.T, dataDir string) map[string]int {
 	t.Helper()
 	covers, err := readPendingCovers(t.Context(), dataDir, os.ReadFile)
@@ -543,10 +542,9 @@ func harvestPendingCovers(t *testing.T, dataDir string) map[string]int {
 	return covers
 }
 
-// readPendingCovers is harvestPendingCovers' read through read (os.ReadFile,
-// or a test's hold), asked again while Windows refuses the open, as it did at
-// the poll for the settled covers (backlog B898); a read refused past
-// atomicwrite's bound matches atomicwrite.ErrReadBusy.
+// readPendingCovers is harvestPendingCovers' read through read (os.ReadFile or
+// a test's hold), asked again while Windows refuses the open as it did at the
+// poll for the settled covers (backlog B898), then atomicwrite.ErrReadBusy.
 func readPendingCovers(ctx context.Context, dataDir string, read func(string) ([]byte, error)) (map[string]int, error) {
 	var raw []byte
 	if err := atomicwrite.ReadWithRetryCtx(ctx, func() (err error) {
@@ -577,11 +575,9 @@ func pendingCoversNow(t *testing.T, dataDir string, read func(string) ([]byte, e
 	return covers, true
 }
 
-// readPastAHold runs the harvest helper's read past a hold on the state file:
-// let go by the read at a refusal it heard, the covers come back; held
-// throughout, the read is busy; in eventually's form a poll refused throughout
-// answers not yet, and the next, whose read lets go, the covers. hold returns
-// the read that meets its hold and the let go; refused tells its refusal.
+// readPastAHold runs the harvest helper's read past a hold on the state file,
+// let go by the read at a refusal it heard, held throughout, and in
+// eventually's form; hold returns the read and the let go, refused its refusal.
 func readPastAHold(t *testing.T, hold func(t *testing.T, path string) (read func(string) ([]byte, error), letGo func()), refused func(error) bool) {
 	const mbid = "77777777-7777-4777-8777-777777777777"
 	dataDir := t.TempDir()
@@ -603,8 +599,8 @@ func readPastAHold(t *testing.T, hold func(t *testing.T, path string) (read func
 			}
 			return b, err
 		})
-		if err != nil || refusals != 1 || len(covers) != 1 || covers[mbid] != 0 {
-			t.Errorf("the covers past a hold let go at its first refusal = %v, %v after %d refusals; want %s at 0 attempts after 1", covers, err, refusals, mbid)
+		if err != nil || refusals == 0 || len(covers) != 1 || covers[mbid] != 0 {
+			t.Errorf("the covers past a hold let go at its first refusal = %v, %v after %d refusals; want %s at 0 attempts, past a refusal", covers, err, refusals, mbid)
 		}
 	})
 	t.Run("held throughout", func(t *testing.T) {
@@ -626,8 +622,8 @@ func readPastAHold(t *testing.T, hold func(t *testing.T, path string) (read func
 			})
 			answers, covers = append(answers, ok), got
 			return ok
-		}, "the covers past a hold let go at the second poll")
-		if len(answers) != 2 || answers[0] || len(covers) != 1 || covers[mbid] != 0 {
+		}, "the covers past a hold let go once a poll was refused throughout")
+		if len(answers) < 2 || answers[0] || len(covers) != 1 || covers[mbid] != 0 {
 			t.Errorf("the polls answered %v, then %v; want not yet, then %s at 0 attempts", answers, covers, mbid)
 		}
 	})

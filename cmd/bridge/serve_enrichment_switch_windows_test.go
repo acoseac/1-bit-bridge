@@ -9,22 +9,26 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 // TestTheHarvestHelperReadsPastAHoldOnTheStateFile: the harvest helper's read
-// waits out a handle on the state file that shares nothing, the sharing
-// violation main bf622968's gate met at its poll for the settled covers
-// (backlog B898), let go by the read alone at a refusal it heard, never by
-// time, and by the cleanup whatever the case did.
+// waits out a handle on the state file that shares nothing, the refusal main
+// bf622968's gate met at its poll for the settled covers (backlog B898), let
+// go by the read at a refusal it heard, never by time, or by the cleanup.
 func TestTheHarvestHelperReadsPastAHoldOnTheStateFile(t *testing.T) {
 	sharing := func(err error) bool { return errors.Is(err, windows.ERROR_SHARING_VIOLATION) }
 	readPastAHold(t, func(t *testing.T, path string) (func(string) ([]byte, error), func()) {
-		name, err := windows.UTF16PtrFromString(path)
 		var h windows.Handle
-		if err == nil {
-			h, err = windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
-		}
-		if err != nil {
+		// The open waits out a scanner's hold of the file the fixture wrote.
+		if err := atomicwrite.ReadWithRetryCtx(t.Context(), func() error {
+			name, err := windows.UTF16PtrFromString(path)
+			if err == nil {
+				h, err = windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+			}
+			return err
+		}); err != nil {
 			t.Fatal(err)
 		}
 		var once sync.Once
