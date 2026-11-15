@@ -29,7 +29,13 @@ func TestPolicyReadPanicIsContainedOnItsFirstCall(t *testing.T) {
 	if panicked {
 		t.Error("the first policy-read panic escaped RefreshDSD")
 	}
-	s.mu.Lock()
+	// The first acquisition after the containment, which nothing else can
+	// hold (the session runs nothing): asserted free at once, so a lock the
+	// containment kept fails the case, where a Lock waited to the package's
+	// timeout (backlog B853, round 4).
+	if !s.mu.TryLock() {
+		t.Fatal("the session's lock is held once the contained reading returned")
+	}
 	defer s.mu.Unlock()
 	if s.fault == nil || !s.nativeRevoked {
 		t.Errorf("first failed reading left DSD running: fault %+v, revoked %v", s.fault, s.nativeRevoked)
@@ -103,7 +109,10 @@ func TestFirstReconciliationPanicIsContainedAndStopsItsSession(t *testing.T) {
 	if panicked {
 		t.Error("first reconciliation panic escaped the refresh")
 	}
-	s.mu.Lock()
+	// As the reading's case: asserted free at once (backlog B853, round 4).
+	if !s.mu.TryLock() {
+		t.Fatal("the session's lock is held once the contained reconciliation returned")
+	}
 	defer s.mu.Unlock()
 	if s.fault == nil || !s.nativeRevoked {
 		t.Errorf("first reconciliation failure left DSD running: fault %+v, revoked %v", s.fault, s.nativeRevoked)

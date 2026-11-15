@@ -30,14 +30,28 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 		return
 	}
 	admit := b.nativeAdmission
+	harness := admit == nil && b.cfg.DSD == nil
+	if harness {
+		// The harness's path: a session whose DSD was stopped refuses the
+		// entry for the cause recorded, as admitDSD does first, before a
+		// selector answers its revoked permission as no approval (backlog
+		// B853, round 2).
+		if u := o.stoppedCause(); u != nil {
+			o.refused = u
+			return
+		}
+		b.selecting(o.id)
+	}
 	switch {
 	case admit != nil:
 	case b.cfg.DSD != nil:
 		// Production (B728 B7): the effective DSD policy's set, never a record.
 		admit = func(f format.NativeDSD) (engine.NativePlan, error) { return b.admitDSD(o, f) }
 	case o.permission == nil && o.dsdRefusal != nil:
+		// The session's cached refusal, or the cause a revocation since the
+		// first ask recorded (round 3).
 		u := *o.dsdRefusal
-		o.refused = &u
+		o.refuseAfterSelection(&u)
 		return
 	case b.transitions != nil:
 		admit = func(f format.NativeDSD) (engine.NativePlan, error) {
@@ -49,11 +63,17 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 	plan, err := admit(o.nativeFormat)
 	if err != nil {
 		var u *engine.Unplayable
-		if errors.As(err, &u) {
-			o.refused = u
-		} else {
-			o.refused = &engine.Unplayable{Reason: ReasonDSD, Detail: err.Error()}
+		if !errors.As(err, &u) {
+			u = &engine.Unplayable{Reason: ReasonDSD, Detail: err.Error()}
 		}
+		if harness {
+			// A revocation since the cause's first ask revoked the permission
+			// the selector answered as no approval: the cause recorded is
+			// asked again in the step that refuses the entry (B853 round 3).
+			o.refuseAfterSelection(u)
+			return
+		}
+		o.refused = u
 		return
 	}
 	if o.converts() {
@@ -441,15 +461,27 @@ func (b *Backend) EscalateNative(r engine.ReleaseRequest) {
 // dropped at once, as a native sink is released, the session faulting; a PCM
 // sink holds no such frames while it plays PCM alone, and plays on.
 func (b *Backend) Revoke(r engine.RevokeInput) {
+	b.revoke(r)
+}
+
+// revoke is Revoke, answering the count of the cause it recorded where it
+// stopped the session's DSD (revokeDSDLocked), 0 where an earlier cause stood
+// or the session is unknown: the producer's gapless check tells by it, in the
+// step that records it, whether its own revocation is the cause recorded
+// (B853 round 3).
+func (b *Backend) revoke(r engine.RevokeInput) uint64 {
 	s := b.known(r.Session)
 	if s == nil {
-		return
+		return 0
 	}
 	l := s.hold()
 	defer l.release()
 	l.lock()
 	b.revoking(r.Session)
-	s.nativeRevoked = true
+	// A DSD entry of the session is refused from now on as the successor
+	// dropped below is, for this revocation's reason (B853), unless an earlier
+	// cause stands.
+	recorded := s.revokeDSDLocked(engine.Unplayable{Reason: "native_revoked", Detail: r.Reason})
 	if s.permission != nil {
 		s.permission.revoked.Store(true)
 	}
@@ -467,8 +499,11 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 			continue
 		}
 		if o.out == nil {
+			// Dropped for the cause recorded: this revocation's, unless an
+			// earlier one stands (B853 round 2: it was this one's whatever
+			// stood).
 			o.dropped = true
-			o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: r.Reason}
+			o.refused = s.dsdRevokedLocked()
 			continue
 		}
 		if out := o.out; o.conv != nil && out.native == nil && !out.closed && !out.drained && !slices.Contains(pcm, out) &&
@@ -500,6 +535,7 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	b.policyMu.Unlock()
 	wake(s.wakeP)
 	wake(s.wakeR)
+	return recorded
 }
 
 type retiringEvents struct {
