@@ -369,6 +369,42 @@ func TestARestoreOverAnArmedInstallKeepsEveryRollbackOff(t *testing.T) {
 		}
 	})
 
+	// A restore stopped once its record is made and before its first write
+	// to the restored files leaves the record, durable (SaveState's barrier),
+	// and nothing else: the record step is made here as the restore makes it
+	// (updater.DisarmBeforeMigrating, recordRestoredStore's call), standing in
+	// for a kill right after it. The rerun records nothing more, completes,
+	// and every rollback still refuses.
+	t.Run("a rerun after a restore stopped once its record was made", func(t *testing.T) {
+		dst := t.TempDir()
+		live := filepath.Join(dst, backup.ManifestDBFileName)
+		liveStore(t, live)
+		if err := updater.SaveState(dst, armedInstall(0)); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(live)
+		if _, err := updater.DisarmBeforeMigrating(dst, version.ServerVersion); err != nil {
+			t.Fatal(err)
+		}
+		st, err := updater.LoadState(dst)
+		if err != nil || st.StoreMigratedBy != version.ServerVersion {
+			t.Fatalf("the marker the stopped restore left = %+v, %v; want its record", st, err)
+		}
+		if after, _ := os.ReadFile(live); !bytes.Equal(before, after) {
+			t.Fatal("the record step wrote the database")
+		}
+		if err := backup.RestoreWithOptions(snap, backup.Targets{ManifestDB: live}, backup.RestoreOptions{}); err != nil {
+			t.Fatalf("the rerun over the record = %v, want it done", err)
+		}
+		st, err = updater.LoadState(dst)
+		if err != nil || st.StoreMigratedBy != version.ServerVersion || st.DataDirOpenedBy != version.ServerVersion {
+			t.Fatalf("the marker after the rerun = %+v, %v; want the record kept", st, err)
+		}
+		if ok, _ := updater.CrashRollbackAtLimit(st, version.ServerVersion); ok {
+			t.Error("the crash rollback would put the backup back after the rerun")
+		}
+	})
+
 	t.Run("the marker's lock held past its wait", func(t *testing.T) {
 		dst := t.TempDir()
 		live := filepath.Join(dst, backup.ManifestDBFileName)
