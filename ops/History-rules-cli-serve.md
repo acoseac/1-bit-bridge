@@ -2282,6 +2282,8 @@ mentions across the four `ops/audit-*.md` files.
 
 - **Serve installs the console's view of its player (`newConsolePlayer`, `admin.Deps.PlayerOutput`) beside GET /v1/outputs' view, over the same boot plan, `bridgePlayer` and `bridgeOutput`, the boot snapshot, whether it holds the data dir's lock and its player-state preflight, so the page's pending changes are `planServePlayer`'s answer on the live config** (B601, 2026-10-31). `runServe` builds it right after `apiSrv.WithBridgeOutput(playerView)`, from `playerPlan`, `player`, `playerView`, `cfg`, `opts.playerGOOS`, `lockErr == nil`, `playerStateErr`, `opts.playerTrees` (the zero value is `hostTrees`) and the manifest store, and hands it to the console as `Deps.PlayerOutput`. Its status reads the boot plan, `bridgeOutput.Facts` (the element's facts: one engine snapshot and the bounded DAC read), the engine's snapshot after `ready` (the transport, the occurrence heard and its position), the hotplug feed's latest resolution of the boot binding, and the live config the console hands it; the next start's decision is `planServePlayer` on that config (or the boot's player-state refusal again, which only a start can find gone), and the pending list is its difference from the boot plan. The track heard is named through `bridgePlayer.res` (`library.Resolver.StoredPath`, then the store's row), looked up once an occurrence within 500 ms. A DAC listing is one reading of the box at a time (`consolePlayer.read`: 3 s, its slot let go only when the reading returns, so a read stuck in the kernel holds the next back rather than doubling it), bracketed by a reading of sysfs's identities before /proc as `readPlayerDACObserved` is (a card whose unit or devnum moved between the two is set aside as transient, and so is one whose devnum either reading could not read, saying so; a transient card's /proc id and name, which the list shows, are redacted of both readings' serials and ports, as a USB row's are of its own), and refused whole when it is not whole (`CardsComplete`, `Partial`); each USB card's playback endpoint gets a token (128 random bits, 10 minutes, the newest 64 kept) for the unit as that reading read it, its devnum included, and the binding each kind builds there (`binding.For`), and a choice reads the box again, in the write's config turn just before the save, and requires the same unit (`binding.SameUnit`) at the same devnum building the same binding (`hotplug.SameBinding`). A transport row plays only while the player's output is open (`outputOpen`: the live config withholding nothing, GET /v1/outputs' element not unavailable, the engine's output report available): the engine runs on after the player is turned off, another DAC is chosen or its DAC is unplugged, and plays nothing then (Codex on the PR). **Never let the view write the config, start, dial or probe MPD, hand a serial out but as its label, read `eng` or `res` before `ready`, read the box but through its one bounded, bracketed reading at a time, or call a transport playable while the output is withheld or gone.** `TestTheConsoleShowsTheRunningPlayer`, `TestTheConsoleSaysNothingPlaysOnceTheDACIsUnplugged`, `TestTheConsoleTurnsAPlayerOnForTheNextStart`, `TestTheConsoleOffersNoPlayerOffLinux`, `TestTheConsoleListsEachPlaybackEndpointOfTheBox`, `TestAUnitSwappedWhileTheBoxIsReadIsNotOffered`, `TestAUnitWhoseEnumerationCannotBeReadIsOfferedNoToken` and `TestTheTokensAreBounded` pin it.
 
+- **Serve starts the player's hotplug watcher on Linux once the live config holder exists, and its teardown cancels and joins it** (B470 PR 4a2): `startPlayerHotplug` runs the `hotplug.Service` on the holder's `Load` and `Changed`, reading the box through `hostTrees` (a boot test's `serveOpts.playerTrees` in their place), so the player turned on or off, or its binding changed, while serve runs starts, stops or re-reads the watch; the service runs on a context its stop alone cancels (since B470 PR 4b3: on serve's own it stopped as the shutdown began, before the player its reports feed), the stop waits for it within `shutdownGrace`, and the service itself returns within its watch's stop deadline. Off Linux nothing starts. `serveOpts.playerGOOS`, `hotplugSource` and `hotplugBoot` let a boot test stand in for Linux, run the watcher on a source that hears nothing, and wait on the decision; `hotplugObserve` and `hotplugTiming` hold its readings and stretch its stop. The watcher reads the player block through `livePlayerSettings`, which serve's player reads too, with the OpenHome port clash judged on serve's boot snapshot (`playerHotplugWiring.BootConfig`, `config.PlayerEnabledAsBooted`; B612's second round), so neither the opt-in nor a listener's address reaches the watch before the next start. The console's Player page changes `output.player` while serve runs (B601: its switch and its DAC choice, and B612's OpenHome switch, through the holder). `TestServeRunsThePlayersWatcherWhileThePlayerIsOn`, `TestServeStartsNoPlayerWatcherOffLinux`, `TestServeStartsThePlayersWatcherWhenTheConfigTurnsItOn`, `TestThePlayersWatcherStopJoinsItsService` and `TestALiveClashWithTheOpenHomePortLeavesTheRunningPlayerAsItIs` pin the wiring. Rules in `player.md`.
+
 ## Scanner, deletion passes, and manifest writes
 
 - **Shutdown joins every background writer**, and the wait must be written
@@ -5362,6 +5364,332 @@ Forty-nine sites: twenty whose words changed, twenty-nine that named the
 snapshot as given already or name no path in it.
 
 The record is in `ops/engineering-log.md`, 2026-11-12, B826.
+
+## B650 — the doctor's bound on a library root (2026-11-13)
+
+- **`bridge doctor` and the console's doctor wait on no library root without a bound: every step of a run that touches a root or anything below it is a work of the runner's `doctor.RootProbes`, on a goroutine of its own, waited for five seconds from when it began (each root's stat and listing; the watch-budget counts; the config's load, whose validation resolves every root where `upscale.variantsDir` or `upscale.tempDir` is set, beside a probe of each root the file names, `config.LibraryRootsOf`); a root that does not answer is a fail naming it as configured, a load that does not finish fails config-file, a count that does not finish is never a low one, and the run goes on to every other check; the console's runner keeps its works across its runs (`adminDoctorRunnerWith`), one for a key until its worker returns, at most sixteen on the roots and four loads, and the CLI's commands share one for their process (`cliRootProbes`)** (2026-11-13, backlog B650). **Don't touch a root on a run's goroutine, keep the works anywhere but the runner, begin a second work for a key while one is out, say a root is stuck where the run's caller stopped the run, or name a path below a root.** → History-rules-cli-serve.md
+
+*The hazard.* A library root on a network mount whose server has gone (NFS,
+SMB), or on a disk that spun down badly, holds a stat of it in the kernel for
+as long as the mount waits: without end on a hard NFS mount, and nothing
+cancels the call. `bridge doctor` is what an operator runs, and the console's
+doctor page what an operator opens, to find out why the library is stuck, and
+both touched every root on the run's own goroutine: `checkLibraryRoots`
+stat'ed and listed each one and ignored its context; Linux's watch-budget
+count (`countDirs`) and kqueue's (`manifest.CountWatchSet`) walked every root,
+ignoring theirs; and, before any check ran, `buildDoctorDepsWith`'s
+`config.Load` resolved every root where `upscale.variantsDir` or
+`upscale.tempDir` is set (`validateVariantsDir`, `validateRenderTempDir`,
+`fsutil.IsUnderAny`). `doctor.Run` finishes every check before anything is
+printed, so `bridge doctor` printed nothing at all, and the console's GET
+/api/doctor never answered: the admin server sets no write timeout, the
+request's goroutine stayed in the stat after the browser went away,
+`/api/doctor` is not serialised, and the Settings page fetches it at every
+render (its prerequisite chips), so every render left another goroutine on the
+same stat. On a player box (the MPD gate open) the player checklist's outputs
+body proves each root's path rule (`mpd.ProveRoots`: a stat of the root, and
+of the entries of MPD's music directory), on the goroutine of the call that
+began the build, and held the run the same way (`output.md`'s line).
+
+*The works.* `internal/doctor/rootprobes.go`. A runner keeps a `RootProbes`,
+whose works are out under a key: a root's probe (`probeRoot`: the stat, then
+the listing of a directory, through its `stat` and `readDir` fields, which a
+test stands in for), a root's count to a cap (`beginCount`: this platform's
+`countRootWatches`, `countDirs` or `manifest.CountWatchSet` over that root
+alone), and a caller's work (`Bounded`: cmd/bridge's load of the config). One
+work a key at a time: a run that finds one out joins it rather than beginning
+another, and the work is held from when it begins until its worker returns,
+whatever the run that began it did meanwhile. Its worker keeps what it found
+and closes its done channel, so an answer that comes after every run stopped
+waiting blocks nothing, and it lets go of its key at once, so the next run
+begins afresh: a mount that answers again reads healthy at the next run. A
+panic the worker recovers is raised again on the goroutine of the run that
+waits for it, where it was raised before the work had a goroutine of its own
+(net/http recovers the console's; the CLI's ends the process). A run
+(`ProbeRun`, carried as `Deps.RootProbes`) keeps every work it has met, so each
+root is probed once a run, wherever the run first asks for it, as before
+B650.
+
+*The bound.* A run waits for a work until it answers, the bound from when the
+work began passes, or the run's context ends: five seconds
+(`rootProbeBound`), as `doctorBackupsBound` waits for the backups folder. A
+mount that answers at all answers a stat and a listing of one folder in far
+less (a local disk in microseconds, NFS or SMB over a LAN in milliseconds),
+and the run is an interactive diagnostic the console runs on every Settings
+render. A disk spinning up can take longer, which the line says: run the
+doctor again, and the next run finds that work answered and asks afresh.
+Counted from when the work began, the bound costs a later run nothing for a
+work already past it: that run says at once that the root still has not
+answered. `Run` begins every root's probe and every count a check will wait
+for at its start (`BeginRoots`, `beginWatchCounts`), and cmd/bridge begins
+the probes beside the config's load, so roots that do not answer cost a run
+one bound, not one each, and a stalled load and its root's probe one between
+them.
+
+*library-roots' words.* A root whose probe has not answered by its bound is a
+problem of the fail, named as configured and nothing below it: "library root
+<root> did not answer within 5s: its mount may be stalled", or, of a probe an
+earlier run began, "library root <root> still has not answered, <d> after the
+doctor first asked it: its mount may be stalled", followed once by what to do:
+check the server or the disk such a root is on, and its mount, before
+removing anything (B651: a volume not mounted yet reads as missing or empty,
+and the scan keeps the tracks it indexed there); until it answers the scan
+reads nothing under it, and a bridge serve started meanwhile waits for it (its
+start stats each root, `CheckLibraryRootsAccessible`); a disk spinning up can
+take this long, so run the doctor again; and, on Linux alone, that
+`cat /proc/mounts` lists the mounts without waiting on any of them (the
+kernel's table, read without asking any filesystem: the one command certain
+enough to name). The summary counts every problem ("N problem(s)"), and the
+line fails: a root that does not answer is at least what a missing one is,
+which fails, and `bridge doctor` exits 1, as for any fail; `bridge init`'s
+preflight refuses its run, as for a missing root (`--skip-doctor` passes it).
+A root the run did not wait for, its context ended within the bound (the
+console's request gone) or the runner's limit holding its probe back, is not
+checked, a warn ("N root(s) not checked"), never one that does not answer.
+Over roots that all answer, the line is what it was, word for word.
+
+*The watch-budget lines.* Each root's count is a work, to the cap the check
+asks (the inotify threshold plus one, or the kqueue budget plus one, in the
+work's key), and the counts are folded in the roots' order as the one walk
+counted them (`tallyWatches`): the first root's failure, the total reaching
+the cap, the sum, so the verdict is the one walk's whenever every count
+answers. A count that does not answer is never read as a low one: the line is
+a warn, "not checked: the folders under library root <root> were not all
+counted within 5s: a mount under it may be stalled, so whether the watcher
+fits its share of limit N is not known" (kqueue: the folders and entries, the
+budget and its share), with what to do; a failure after it is passed over,
+since no verdict is known there anyway; and a total that reaches the cap
+without it is still a verdict, the over-budget warning, with the count that
+did not finish added. A count is the walk the watcher itself makes, so a root
+whose own probe answers can still meet a folder below it on a mount that does
+not, which this line alone shows.
+
+*The config's load.* `loadDoctorConfig` runs `config.Load` as a `Bounded`
+work keyed by the path and a digest of what the load reads (the file's bytes
+and every BRIDGE_ variable, `doctorConfigKey`), so a load out over the file as
+it was, one a root that does not answer holds, is never taken for the file as
+it is now: once the console's operator removes that root, the next run loads
+the edited file. Before the load it reads the roots the file names without
+touching them (`config.LibraryRootsOf`: the file through `DecodeFile`,
+BRIDGE_LIBRARY_ROOTS, each entry resolved as `resolvePaths` resolves it) and
+begins their probes. A load that gives the run no answer is a
+`*doctor.UnfinishedLoadError`, and config-file fails in words of its own,
+never as a file that does not load: "<path>: its load did not finish within
+5s", or "its load still has not finished, <d> after the doctor began it", its
+hint saying that root validation, or the load's slow read of the file, holds
+it: that loading it checks those two settings against each library root,
+which a root whose mount does not answer holds (library-roots names it, from
+those roots), and reads the file, which a mount slow to answer holds (the
+read named since B650FU), and that bridge serve, and every command that
+loads the config, waits for it too. The lines that grade what the config sets
+say they were not checked, "the config that sets <what> did not finish
+loading" (`NotGradedReason`: the ports, tls-cert, data-dir). A load the run
+stopped waiting for, or one the loads' limit held back, is not checked, a
+warn. A config that sets neither directory loads without touching a root, so
+a root that does not answer leaves every other line graded.
+
+*The runner's works.* The console's runner makes one `RootProbes` with the
+runner and keeps it across its runs (`adminDoctorRunnerWith`), whose Deps it
+rebuilds every time; its requests run unserialised, and each run is stopped
+by its request's context. The CLI's commands share one for their process
+(`cliRootProbes`): `bridge doctor`, whose `--fix` runs twice, and the
+launcher's doctor row and its Setup's preflight (`initPreflightDeps`), which
+run in the launcher's process as often as the operator asks. A work that does
+not answer holds its goroutine, and the thread under it, until the kernel
+lets go, the process's end included, and the console reloads its config at
+every run, so a dead root replaced by another, then by another, would each
+leave one behind: a runner keeps at most sixteen works on the roots and four
+of its callers' (the config's loads) out at once. Past a limit a run begins
+no more of that kind and says so: "library root <root> was not checked: 16
+earlier probes of the library roots have not answered yet, and the doctor
+begins no more until one does", and of a load, "4 earlier loads of the config
+have not finished yet, and the doctor begins no more until one does". A root
+removed and added again finds its work still out. The loads have a limit of
+their own so that roots that do not answer never hold back a load, which with
+no directory setting touches no root, nor the report that names them with
+it. `bridge doctor` keeps the player checklist's read of the outputs body
+the same way since round 2 (`output.md`'s line): a read the process keeps for
+each config (`cliOutputsReads`), which every gather over that config waits
+on, so a root that holds it holds one goroutine however often the
+launcher's doctor row runs; and since round 3 its builders' MPD inspections
+(`output.md`'s next line): one in flight for what it reads
+(`cliMPDInspections`, `api.MPDInspections`), which every gather's probe,
+the gate's or a build's, waits on rather than begin another. No use of the
+launcher's doctor row begins a runner or a config's load of its own: the
+runner is the process's (`cliRootProbes`), each use beginning a run of it,
+and the load a work of it keyed by the file's path, its bytes and the
+`BRIDGE_` variables (`doctorConfigKey`), which a later use joins while it
+is out; what each use still reads with no bound is the config file itself,
+its stat and its read, backlog B884's.
+
+*What it does not do.* No work is cancelled, nothing is unmounted, and no
+probe runs in another process: a stat the kernel holds is let go by the
+kernel, or by the process's end. The roots appear as configured in the
+doctor's report and the console's doctor page, and never in GET /v1/health.
+Three other waits on a root are outside the doctor and stay as they were, a
+follow-up's: bridge init's own load of an existing install's config
+(`withExistingInstallDeps`) and its save, the console's settings saves, whose
+validation resolves every root where either directory is set, and GET
+/v1/outputs, whose build a root that does not answer holds (the checklist's
+read of it is bounded). Nor does it bound the doctor's own files: the
+config file and the data directory on a dead mount are backlog B884's. A
+data directory under a library root is one: `buildDoctorDepsRun` stats its
+database on the run's goroutine before `doctor.Run` (`os.Stat(dbPath)`),
+the data-dir line and the player's, the store's and the sidecars' probes
+read it unbounded, and the player checklist stats the database inside its
+bounded read (`doctorOutputChecklist`) and reads the token file on the
+run's goroutine (`tokenFile`).
+
+*The tests.* `TestARunNamesARootThatDoesNotAnswerWithinItsBound`,
+`TestTheSecondOfTwoRootsDoesNotAnswer`,
+`TestRootsThatDoNotAnswerCostOneBoundTogether`,
+`TestARootWhoseListingDoesNotAnswerIsNamed`,
+`TestALaterRunFindsTheRootStillNotAnsweringAndAsksItNoMore`,
+`TestOverlappingRunsShareOneProbeOfARoot`,
+`TestARunStoppedByItsCallerSaysSoAndNotThatTheRootIsStuck`,
+`TestALateAnswerIsKeptAndTheNextRunAsksAfresh`,
+`TestConcurrentHealthyRunsAllAnswer`,
+`TestTheRunnersLimitHoldsNewProbesBackAcrossConfigChurn`,
+`TestHealthyRootsReadAsTheyAlwaysDid`,
+`TestTheCountsAreFoldedAsOneWalkCountedThem`,
+`TestALoadThatDidNotFinishFailsTheConfigLine`,
+`TestTheLoadsHaveALimitOfTheirOwn`, and on Linux
+`TestACountBelowARootThatAnswersIsNotReadAsALowOne` and
+`TestAHealthyLibrarysWatchLineIsAsItWas`, on macOS
+`TestACountBelowARootThatAnswersIsNotReadAsASmallOne`, in internal/doctor;
+`TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn`,
+`TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories`,
+`TestBridgeDoctorLoadsAConfigThatSetsNeitherDirectoryWithoutTheRoots`,
+`TestTheDoctorProbesTheRootsBesideItsLoadOfTheConfig`,
+`TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce`,
+`TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad`,
+`TestACancelledConsoleDoctorRunSaysItWasStopped`,
+`TestTheConsolesDoctorReadsARecoveredRootAsHealthy`,
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn`,
+`TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead`,
+`TestDoctorRunsInOneProcessShareOneReadOfTheBox`,
+`TestADoctorRunTakesOnlyTheReadOfItsOwnConfig`,
+`TestAWaitOnASharedReadEndsAloneWithItsContext`,
+`TestDoctorRunsInOneProcessShareOneMPDInspection` and
+`TestBridgeDoctorPrintsHealthyRootsAsBefore` in cmd/bridge;
+`TestBuildersSharingATableBeginOneInspection`,
+`TestAProbeWaitingOnASharedInspectionStopsWithItsOwnContext`,
+`TestAnEditedConfigurationBeginsAnInspectionOfItsOwn`,
+`TestASharedInspectionThatPanicsLetsItsKeyGo` and
+`TestTheBuildsProbeSharesTheTableToo` in internal/api; and
+`TestLibraryRootsOfIsTheRootsLoadGives` in internal/config. No filesystem a
+test can make stops answering, so each stands a root that does not answer in
+where the step touches it: the probe's `stat` and `readDir`
+(`doctor.NewRootProbesForTest`), the count (`RootProbes.countWatches`),
+`Validate`'s containment check (`config.SetRootContainmentForTest`), the
+checklist's build (`boxStall`: its read of the indexed tracks held), whose
+reads it counts, and MPD's inspection (`mpdConfHeld`, `heldInspection`),
+whose inspections begun they count. A run's time is its runner's
+(`RootProbes.now` and `timer`: `time.Now` and `time.NewTimer`'s in
+production), and since round 2 the four cases that held a run to how long
+it took read its waits on a test clock that moves only when the case moves
+it (`clockOf`): the wait a run sets, the instant its bound passes, and a
+wait it should not set, none of which a loaded host's scheduling moves.
+Since round 3 cmd/bridge's stopped console run is stopped once it waits on
+the root that does not answer (`RootProbes.SetOnRootWaitForTest`) and the
+other root's probe has made its stat and its listing (`rootStall.probed`),
+under its 90 s deadline, below its root's ten-minute bound; a case that
+gives a wait on the checklist's read up does so through the wait's timer
+(`outputsReads.timer`, `readTimers`) once the read it waits on is held at
+the box, every other wait keeping bridge doctor's bound; and the shared
+inspection's cases read its deadline on the builder's clock
+(`lockedClock`). The record is in `ops/engineering-log.md`: B650 on
+2026-11-13, and its rounds 2 and 3 on 2026-11-14.
+
+## B650FIX — bridge doctor --fix's second report is a run of its own (2026-11-14)
+
+- **…and each report is a run of its own: `bridge doctor --fix` runs the checks again after its remediations as a new run of the CLI's works (`cliRootProbes.BeginRun()` in `runDoctorReport`), which asks again every root whose probe has ended and joins one still out, whose bound counts from when it began** (2026-11-14, backlog B650FIX). **Don't give a second report the first one's run, which keeps every work it has met, or a new runner, which begins a second work for a root still out.** → History-rules-cli-serve.md
+
+*The hazard.* `runDoctorReport` runs the checks (`doctor.Run`), applies
+`--fix`'s remediations (`runFixes`), and runs the checks again, on the same
+Deps, so that the report it prints is of what the remediations left. B650 gave
+those Deps one run of the CLI's works on the roots (`buildDoctorDepsWith`:
+`cliRootProbes.BeginRun()`), and a run keeps every work it has met
+(`ProbeRun.met`), so the second report was handed back the first one's root
+probes and watch counts, made before the remediations; before B650 every run
+of the checks read every root. In production: a config directory that is
+enter-only (0100) and is itself a library root fails config-dir, which this
+user cannot write, and library-roots, whose listing is refused; `--fix` sets
+the directory to 0700; and the second report still failed library-roots with
+the first listing's error, so the command exited 1. Nothing was written, and
+the next `bridge doctor` was right.
+
+*The fix.* The second report is a new run of the same runner
+(`d.RootProbes = cliRootProbes.BeginRun()`), the one every caller's Deps carry
+a run of (`doctorCmd` and the launcher's row, both through
+`buildDoctorDepsWith`), never a runner of its own. A work that has ended has
+left the runner's works, its worker deleting its key before it closes its done
+channel, so the new run begins that root's probe afresh. One still out is
+joined (`beginOut` returns it), never begun twice, and its bound counts from
+when it began, which the first report's wait saw pass, so the second report
+sets no wait on it and says at once that the root still has not answered.
+
+*What a run keeps, and what a remediation changes.* A run keeps three kinds of
+work, each under its key: a root's probe (the root as configured: its stat,
+and of a directory its listing), a root's watch count (its cap and the root,
+with the library watcher on: the folders below it, on kqueue with their
+entries), and a caller's work (cmd/bridge's load of the config, keyed by its
+path and a digest of its bytes and every `BRIDGE_` variable). `runFixes` takes
+one action, config-dir's, where that line is not ok and names a directory: an
+`os.MkdirAll` of it at 0700, which makes nothing config-dir's own check had not
+made in the first run, and an `os.Chmod` to 0700. The roots come from a config
+this user read in that directory, so it grants search permission already (one
+that does not leaves the config unreadable, config-dir not checked and nothing
+remediated), and the Chmod adds read and write permission alone, which
+changes no stat and no walk below it. It can change a listing of the directory
+itself: what the probe of a root that is the config directory finds (its
+listing needs read permission there), what that root's count finds, and what
+the count of a root above it finds, whose walk lists it. The new run asks each
+of them again, as it asks every other.
+
+*What it leaves.* The config is loaded once, as the Deps are built before
+either report, and what the load gave is copied into them
+(`ConfigFile.LoadErr`, the roots, the ports), so the second report grades the
+same load. No remediation changes the file or the environment, but a load that
+did not finish within its bound in the first report and finished afterwards is
+still reported as unfinished: retained state outside this fix, which predates
+B650 (the Deps were always built once).
+
+*Two limits of the new run.* The second report begins a new probe of every
+root whose probe has ended, and the runner begins no work on the roots while
+sixteen are out, probes and watch counts together (`beginOut`, `outOfKind`),
+so a root the first report probed can be one the second cannot. With the watch
+counts begun (Linux or a kqueue platform with its limit read, none on Windows,
+and `libraryWatch.enabled`), eight library roots on mounts that do not answer,
+each with its probe and an admitted count that stays blocked, and a local root
+listed last, whose count the limit holds back in the first report, `--fix`'s
+report says the local root "was not checked: 16 earlier probes of the library
+roots have not answered yet, and the doctor begins no more until one does",
+where a plain `bridge doctor` reads it ok; the exit code is the same,
+library-roots failing already for the eight. And the new run is taken from
+`cliRootProbes`, not from the runner behind `d.RootProbes`, which a `ProbeRun`
+does not expose: the two are one runner only because every caller builds its
+Deps through `buildDoctorDepsWith` (`doctorCmd`, the launcher's row), which
+the comment at that line says.
+
+*The tests.* `TestBridgeDoctorFixReadsTheRootsAgainForItsSecondReport` (a root
+whose first listing is refused, and whose next one answers, is reachable in
+what `--fix` prints), `TestBridgeDoctorFixReportsTheRootItsRemediationLetItList`
+(the enter-only config directory that is the library's root: its mode 0700
+afterwards, config-dir and library-roots ok, its listings refused and then
+answered) and `TestBridgeDoctorFixJoinsTheProbeOfARootStillOut` (a held root
+joined, the root that answers read again, the probes begun counted once the
+root has answered and every work has ended), each through
+`bridge doctor --json --fix`, in cmd/bridge. And since B650FIX
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn` runs its runner
+on a clock of its own (`RootProbes.SetClockForTest`, `rootWaitClock`), whose
+time moves only at a run's wait on a root, so the wait on each config load ends
+by the load's answer: under its real 100 ms bound, its config-file ok past the
+probes' limit needed the load within 100 ms of real time. Since round 2 it
+counts the probes begun once the roots have answered and every work has ended
+(`DrainForTest`): on its clock a run can return before a probe's goroutine
+reaches the stat that counts it. The record is in `ops/engineering-log.md`,
+B650FIX and its round 2, on 2026-11-14.
 
 ## B828 — a state file that holds nothing refuses the start in the bridge's words (2026-11-13)
 

@@ -425,7 +425,19 @@ func TestABackupsFolderGrantingNoLockGrowsByOneSnapshotAndTheDoctorSaysWhy(t *te
 // backlog B653's second round's case for serve's backup drain: the ticker,
 // stopped while its verification's read of the manifest, or its open of the
 // backups folder's lock, does not answer (a hung mount), returns within
-// backup.StopWriteBound of the stop, and says nothing of the stop.
+// backup.StopWriteBound of the stop, and says nothing of the stop: its one
+// line is the snapshot it wrote.
+//
+// A stop arms two bounds of StopWriteBound at once: the caller's expiry
+// (verifyAndThen), which the ticker says nothing of, and the step's own
+// (runStep), whose give-up it reports; which fires first is the scheduler's
+// choice (backlog B895). So the read is held at its gate (SetStepGateForTest,
+// by the backups folder, for whichever snapshot the ticker makes), which
+// nothing fires before the test's joins: neither its bound nor the stop gives
+// it up, and only the caller's expiry ends the ticker's wait for it. A step
+// given up first is said as a give-up, B895's production defect, which this
+// test does not reach. The lock's open comes before the hold's first step
+// (verifyHeld), so only the caller's expiry ends it already.
 func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *testing.T) {
 	for _, step := range []string{"its manifest's read", "its lock's open"} {
 		t.Run(step, func(t *testing.T) {
@@ -440,18 +452,24 @@ func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *test
 				})
 			}
 			letGo := func() { released.Do(func() { close(release) }) }
+			// The cleanups run last-registered first, whatever the test
+			// found: the hang let go (never the gate), the stop, the ticker
+			// and then every worker joined, and the seams put back last.
 			if step == "its manifest's read" {
 				t.Cleanup(backup.SetOnManifestReadForTest(func(string) { hang() }))
+				_, restoreGate := backup.SetStepGateForTest(root, "", "its read of the snapshot's record")
+				t.Cleanup(restoreGate)
 			} else {
 				t.Cleanup(backup.SetOpenBackupsLockForTest(func(dir, name string) (*os.File, error) {
 					hang()
 					return fsutil.OpenLockFile(dir, name)
 				}))
 			}
+			t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			drainLoopOnCleanup(t, cancel, done, "the backup ticker")
-			t.Cleanup(func() { letGo(); cancel(); waitClosed(t, done, "the backup ticker"); awaitVerificationsEnd(t, root) })
+			t.Cleanup(func() { letGo(); cancel() })
 			var stdout, stderr safeBuffer
 			go func() {
 				defer close(done)
@@ -475,9 +493,22 @@ func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *test
 			if got := stderr.String(); got != "" {
 				t.Errorf("a stopped verification was reported: %s", got)
 			}
-			letGo()
-			awaitVerificationsEnd(t, root)
+			requireOnlyTheSnapshotsLine(t, &stdout, root)
 		})
+	}
+}
+
+// requireOnlyTheSnapshotsLine fails the test unless the ticker's stdout is
+// the line for the one snapshot it wrote under root (its OnKept) and nothing
+// else: a verification its caller's expiry ended says nothing of itself.
+func requireOnlyTheSnapshotsLine(t *testing.T, stdout *safeBuffer, root string) {
+	t.Helper()
+	dirs := snapshotDirs(t, root)
+	if len(dirs) != 1 {
+		t.Fatalf("%d snapshots, want the ticker's one", len(dirs))
+	}
+	if got, want := stdout.String(), "backup (startup): wrote "+dirs[0]+"\n"; got != want {
+		t.Errorf("stdout %q, want the snapshot's line alone, %q", got, want)
 	}
 }
 
