@@ -145,10 +145,15 @@ func TestTheToneRouteChecksItsBodyThenItsFieldsThenThePlayer(t *testing.T) {
 }
 
 // TestTheToneRouteIsGuardedLikeEveryConsoleWrite pins the console's guards on
-// the tone route (B601): a Host that names another host is 421, another
-// Origin and a null one 403 cross_origin, a body that is not JSON 415; none
-// reaches the provider's Tone.
+// the tone route (B601): the page's own request reaches the provider's Tone;
+// a Host that names another host is 421, another Origin and a null one 403
+// cross_origin, a body that is not JSON 415, and none of those reaches it.
 func TestTheToneRouteIsGuardedLikeEveryConsoleWrite(t *testing.T) {
+	srv, fake, _ := newPlayerTestServer(t)
+	fake.tone = PlayerToneResult{Outcome: "played", Admitted: true}
+	if code, raw := playerRequest(t, srv.Handler(), http.MethodPost, toneRoute, `{"level":-40,"seconds":10}`, nil); code != http.StatusOK || fake.called("tone") != 1 {
+		t.Fatalf("the page's own request = %d: %s, %d tones; want the provider's one Tone", code, raw, fake.called("tone"))
+	}
 	for _, tc := range []struct {
 		name   string
 		change func(*http.Request)

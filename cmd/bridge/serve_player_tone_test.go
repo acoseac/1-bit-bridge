@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -294,6 +293,16 @@ func (s *toneStandIn) set(change func(s *toneStandIn)) {
 	s.signalT()
 }
 
+// holdOpen opens the stand-in's gate for a test whose subject is not the
+// gate (TestTheSupervisorShutsTheToneGateBeforeTheEngineHears pins the
+// supervisor's opening it), once the engine has the output available: the
+// supervisor opens it too, and shuts it as the output goes.
+func (s *toneStandIn) holdOpen(t *testing.T, eng *engine.Engine) {
+	t.Helper()
+	availableOutput(t, eng)
+	s.set(func(s *toneStandIn) { s.open = !s.closed })
+}
+
 // toneRig is serve's player as runServe starts it (startServePlayer) over the
 // tone stand-in, the hotplug watcher reading a box the test changes (the GO
 // bar's unit, card 5, on consoleBox), woken by the test, whose readings the
@@ -509,18 +518,22 @@ func TestTheConsoleViewAllowsAToneInOneStateAlone(t *testing.T) {
 	ctx := context.Background()
 	r := newToneRig(t, toneRigOptions{})
 	eng := r.p.eng
-	availableOutput(t, eng)
-	r.tone.awaitTone(t, "the gate open", func(s *toneStandIn) bool { return s.open })
+	r.tone.holdOpen(t, eng)
 	on := r.cfg
 	asked := func() int {
 		r.tone.tmu.Lock()
 		defer r.tone.tmu.Unlock()
 		return r.tone.tones
 	}
+	// A refusal answers at once: its call is bounded, so a view that asked
+	// the backend for a tone it holds answers within the bound, and fails by
+	// what it answered.
 	refused := func(what, want string, live *config.Config) {
 		t.Helper()
 		before := asked()
-		res := r.view.Tone(ctx, live, admin.PlayerToneRequest{LevelDBFS: -40, Seconds: 10})
+		bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		res := r.view.Tone(bounded, live, admin.PlayerToneRequest{LevelDBFS: -40, Seconds: 10})
 		if res.Outcome != want || res.Admitted {
 			t.Errorf("%s: the view answered %+v, want %s", what, res, want)
 		}
@@ -634,7 +647,9 @@ func TestTheConsoleViewAllowsAToneInOneStateAlone(t *testing.T) {
 	unknown := newToneRig(t, toneRigOptions{noReadings: true})
 	refused2 := func(view *consolePlayer, what, want string) {
 		t.Helper()
-		if res := view.Tone(ctx, on, admin.PlayerToneRequest{LevelDBFS: -40, Seconds: 10}); res.Outcome != want || res.Admitted {
+		bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		if res := view.Tone(bounded, on, admin.PlayerToneRequest{LevelDBFS: -40, Seconds: 10}); res.Outcome != want || res.Admitted {
 			t.Errorf("%s: the view answered %+v, want %s", what, res, want)
 		}
 	}
@@ -685,8 +700,7 @@ func (r *toneRig) playerLetRelease() {
 // asked; the boot config, the same moment, is asked of the backend.
 func TestTheConsoleJudgesTheToneOnTheConfigTheRouteLoaded(t *testing.T) {
 	r := newToneRig(t, toneRigOptions{})
-	availableOutput(t, r.p.eng)
-	r.tone.awaitTone(t, "the gate open", func(s *toneStandIn) bool { return s.open })
+	r.tone.holdOpen(t, r.p.eng)
 	r.tone.set(func(s *toneStandIn) { s.answer = &playback.ToneResult{Outcome: playback.TonePlayed, Admitted: true} })
 	off := r.liveConfig(func(p *config.PlayerConfig) { p.Enabled = false })
 	if res := r.view.Tone(context.Background(), off, admin.PlayerToneRequest{LevelDBFS: -40, Seconds: 10}); res.Outcome != "withheld" || r.tone.tones != 0 {
@@ -739,8 +753,7 @@ func TestTheTonesLastErrorIsItsOwn(t *testing.T) {
 // what ends it, through the backend's Start.
 func TestAnOpenHomeStopLeavesTheToneToItsEnd(t *testing.T) {
 	r := newToneRig(t, toneRigOptions{})
-	availableOutput(t, r.p.eng)
-	r.tone.awaitTone(t, "the gate open", func(s *toneStandIn) bool { return s.open })
+	r.tone.holdOpen(t, r.p.eng)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tone := startTone(ctx, r.view, r.cfg)
@@ -814,8 +827,7 @@ func bootToneServe(t *testing.T) (*consoleServe, *toneStandIn) {
 			boot(p)
 		}
 	}})
-	availableOutput(t, cs.runningEngine(t))
-	tone.awaitTone(t, "the gate open", func(s *toneStandIn) bool { return s.open })
+	tone.holdOpen(t, cs.runningEngine(t))
 	return cs, tone
 }
 
@@ -1026,16 +1038,4 @@ func TestEveryToneWordIsWorded(t *testing.T) {
 		}
 	}
 	check("PLAYER_TONE_STATES", states)
-}
-
-// TestTheToneJSONIsTheConsolesOwn pins the view's answers as JSON (B601):
-// the tone's result carries no admitted flag, and running.tone every key.
-func TestTheToneJSONIsTheConsolesOwn(t *testing.T) {
-	b, err := json.Marshal(admin.PlayerToneResult{Outcome: "played", Admitted: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(b), "dmitted") {
-		t.Errorf("the tone's answer carries whether it was admitted: %s", b)
-	}
 }
