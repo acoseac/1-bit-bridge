@@ -3613,7 +3613,7 @@ round 5.
 
 ## The updater waits out a held binary where it is in place (backlog B898 PR 1, 2026-11-15)
 
-- **The updater's renames of the binary, and the probes before them, wait out another process's hold only while the binary is in place and nothing is armed, each step tried by its operation's deadline, and a binary a failed put-back left missing refuses every install, rollback and deferred restart until it is back** (2026-11-15, backlog B898 PR 1): a hold is Windows' sharing or lock violation (`inUse`), never Access is denied; each step is retried alone on `forwardWaits` (eight attempts over 4.75 s of waits) by the operation's forward deadline, a monotonic time set as the operation begins (`deadline`, read on the moves' clock, `time.Now` through `renameNow` in production), so that the time each step takes, waiting or not, is the next one's; a wait is made only where it ends at or before the deadline and an attempt begun only at or before it, so the schedule's last attempt, at 4.75 s, is made where nothing else took time; once the deadline is seen to have passed no step, attempt or wait of the operation's is begun, a step not tried answering `ErrDeadlinePassed` (`NothingMoved`, or `BinaryMissing` on the rollback's missing-binary path, never `InUse`) and a swap whose probes ended past it arming nothing; the swap's vacate and either place have one attempt, the place after a vacate that landed is made whatever the time, and a refused place is put back on `recoveryWaits` (seven attempts over 3.15 s) by a deadline set as the put-back begins, a put-back that lands late being a put-back; a step under way is never cut short (a rename takes no context), so each bound counts the waits at their lengths in the schedule, never a step's own time; each failure is a `*SwapError` saying what it left (`NothingMoved`, `PutBack`, `BinaryMissing` and its `Recover`); the latch asks the disk under the install marker's lock (`binaryLatch`, `ErrBinaryMissing`; the Updates panel through `RollbackRefusalAt`); a rollback whose put-back left no binary keeps its record, the boot's keeps its marker where a hold or its deadline left the binary where it was, an install answers a marker it could not put back (`MarkerNotRestoredError`), and `RollbackBinary` stops no service. **Don't wait with the binary vacated but for the put-back, wait once a swap is armed, retry a swap or a rollback whole, take Access is denied for a hold, draw the put-back's waits from the forward deadline, begin a step, an attempt or a wait once its deadline has passed, read a step its deadline left untried as one that landed or as a hold, arm a swap whose probes ended past its deadline, leave the place after a landed vacate untried or take a put-back that landed late for a failure, put a marker back as read where the put-back left no binary, install, roll back or restart while the binary is not on disk, wrap the latch's refusal in another, or stop a service in a rollback.** `TestEachHeldRenameIsWaitedForWhereTheBinaryIsInPlace`, `TestEachSwapOutcomeSaysWhatItLeft`, `TestEveryStepIsTriedByItsOperationsDeadline`, `TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried`, `TestNothingWaitsWithNoBinaryButThePutBack`, `TestNoWaitFollowsTheSwapsArming`, `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed`, `TestAMissingBinaryRefusesEveryInstallAndRollback`, `TestARollbackThatLeavesNoBinaryKeepsItsRecord`, `TestAnInstallWhoseMarkerCannotBePutBackSaysSo`, `TestADeferredRestartIsNotRequestedWhileTheBinaryIsMissing`, `TestTheRollbackStopsNoService`, `TestEveryProtectedOperationFitsInsideTheMarkersLockWait`, cmd/bridge's `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse` and Windows' `held_windows_test.go` pin it.
+- **The updater's renames of the binary, and the probes before them, wait out another process's hold only while the binary is in place and nothing is armed, each step tried by its operation's deadline, and a binary a failed put-back left missing refuses every install, rollback and deferred restart until it is back** (2026-11-15, backlog B898 PR 1): a hold is Windows' sharing or lock violation (`inUse`), never Access is denied; each step is retried alone on `forwardWaits` (eight attempts over 4.75 s of waits) by the operation's forward deadline, a monotonic time set as the operation begins (`deadline`, read on the moves' clock, `time.Now` through `renameNow` in production), so that the time each step takes, waiting or not, is the next one's; a wait is admitted only while some of the deadline remains, shortened to what remains, and the attempt after an admitted wait is made however long the wait took, so the schedule's last attempt comes at the deadline, past it by no more than its wait overran; once the deadline is seen to have passed no step is begun and no wait admitted, a step not tried answering `ErrDeadlinePassed` (`NothingMoved`, or `BinaryMissing` on the rollback's missing-binary path, never `InUse`) and a swap whose probes ended past it arming nothing; the swap's vacate and either place have one attempt, the place after a vacate that landed is made whatever the time, and a refused place is put back on `recoveryWaits` (seven attempts over 3.15 s) by a deadline set as the put-back begins, its first attempt made whatever that deadline says, a put-back that lands late being a put-back; a step under way is never cut short (a rename takes no context), so each bound counts the waits as they were asked of the clock, never a step's own time; each failure is a `*SwapError` saying what it left (`NothingMoved`, `PutBack`, `BinaryMissing` and its `Recover`); the latch asks the disk under the install marker's lock (`binaryLatch`, `ErrBinaryMissing`; the Updates panel through `RollbackRefusalAt`); a rollback whose put-back left no binary keeps its record, the boot's keeps its marker where a hold or its deadline left the binary where it was, an install answers a marker it could not put back (`MarkerNotRestoredError`), and `RollbackBinary` stops no service. **Don't wait with the binary vacated but for the put-back, wait once a swap is armed, retry a swap or a rollback whole, take Access is denied for a hold, draw the put-back's waits from the forward deadline, begin a step or admit a wait once its deadline has passed, make an admitted wait longer than what remains of its deadline or skip the attempt after it, leave the put-back's first attempt to its deadline, read a step its deadline left untried as one that landed or as a hold, arm a swap whose probes ended past its deadline, leave the place after a landed vacate untried or take a put-back that landed late for a failure, put a marker back as read where the put-back left no binary, install, roll back or restart while the binary is not on disk, wrap the latch's refusal in another, or stop a service in a rollback.** `TestEachHeldRenameIsWaitedForWhereTheBinaryIsInPlace`, `TestEachSwapOutcomeSaysWhatItLeft`, `TestEveryStepIsTriedByItsOperationsDeadline`, `TestEveryAttemptIsMadeOnAClockTheStepsMove`, `TestThePutBacksFirstAttemptIsMadeHoweverLateItComes`, `TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried`, `TestNothingWaitsWithNoBinaryButThePutBack`, `TestNoWaitFollowsTheSwapsArming`, `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed`, `TestAMissingBinaryRefusesEveryInstallAndRollback`, `TestARollbackThatLeavesNoBinaryKeepsItsRecord`, `TestAnInstallWhoseMarkerCannotBePutBackSaysSo`, `TestADeferredRestartIsNotRequestedWhileTheBinaryIsMissing`, `TestTheRollbackStopsNoService`, `TestEveryProtectedOperationFitsInsideTheMarkersLockWait`, cmd/bridge's `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse` and `TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt`, and Windows' `held_windows_test.go`, pin it.
 
 *The hazard.* Windows' `os.Rename` is `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`,
 which opens its source for delete access: another handle on the source that
@@ -3663,32 +3663,43 @@ took seconds left the steps after it their whole schedule. Since round 2 each
 is a time on a monotonic clock (`deadline`; `moves.now`, `time.Now` in
 production, whose monotonic reading `time.Time`'s comparisons use): the
 forward one set as the operation begins and shared by its staging, its probes
-and the rollback's vacate, the recovery one set as the put-back begins. A wait
-is made only where it ends at or before its deadline, and an attempt begun
-only at or before it, so where the steps take no time the schedules are
-exactly as before: eight attempts, the last at 4.75 s, and seven, the last at
-3.15 s, and a step after the forward deadline was spent whole on its
+and the rollback's vacate, the recovery one set as the put-back begins. Round
+2 made a wait only where it ended at or before its deadline, which a host's
+clock never allows the last one: every call takes time and every sleep
+overruns, so the last wait always ended past the deadline, and the forward
+schedule lost its eighth attempt and the put-back its seventh, the 1.6 s that
+keeps a binary from being left missing. Since round 3 a wait is admitted only
+while some of its deadline remains, shortened to what remains, and the attempt
+after an admitted wait is made however long the wait took: the last attempt
+comes at the deadline, past it by no more than its wait overran, and on a
+clock nothing but the waits moves the schedules are exact, eight attempts, the
+last at 4.75 s, and seven, the last at 3.15 s
+(`TestEveryAttemptIsMadeOnAClockTheStepsMove` keeps every count on a clock
+each call and each sleep moves on by a millisecond, the last wait the
+remainder); a step after the forward deadline was spent whole on its
 predecessors' waits is still tried at that instant
 (`TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed`). Once the deadline
-is seen to have passed, no further step, attempt or wait of the operation's is
-begun: a wait the host overran past it is followed by no attempt, a step whose
-deadline passed before its first attempt is not tried and answers
-`ErrDeadlinePassed`, a `*SwapError` that is `NothingMoved` (or `BinaryMissing`
-on the rollback's missing-binary path, which it leaves as it found it), never
-`InUse`, since no hold was seen, and a swap whose last probe landed past the
-deadline arms nothing. Two transitions are completed whatever the time,
-because stopping in them is what leaves no binary: the place after a vacate
-that landed (`moves.once`, which asks no deadline), and the put-back, whose
-deadline is set as it begins, so it is always tried, and a rename of it that
-lands late is the put-back's success. A step under way is never cut short: a
-rename takes no context, and a staging's copy across volumes is ordinary I/O,
-so a deadline bounds the work begun, not the time a begun step takes. An
-`inUseError` counts the waits it made at their lengths in the schedule, a wait
-the clock overran included, never the time the clock read. The boot's rollback
-keeps its vetoed marker for `ErrDeadlinePassed` as for a hold, for the next
-start to ask again; the early and crash rollbacks, and the console's, put the
-marker back as read after any failure that left the binary in place, as
-before.
+is seen to have passed, no further step is begun and no wait admitted: a step
+whose deadline passed before its first attempt is not tried and answers
+`ErrDeadlinePassed`, a `*SwapError` that is `NothingMoved` (or
+`BinaryMissing` on the rollback's missing-binary path, which it leaves as it
+found it), never `InUse`, since no hold was seen, and a swap whose last probe
+landed past the deadline arms nothing, a probe whose hold clears on its last
+attempt included. Two transitions are completed whatever the time, because
+stopping in them is what leaves no binary: the place after a vacate that
+landed (`moves.once`, which asks no deadline), and the put-back, whose
+deadline is set as it begins and whose first attempt is made whatever that
+deadline says by then (round 2 asked it first, so a stall of more than 3.15 s
+between the two reads left the binary missing with a put-back possible), a
+rename of it that lands late being the put-back's success. A step under way is
+never cut short: a rename takes no context, and a staging's copy across
+volumes is ordinary I/O, so a deadline bounds the work begun, not the time a
+begun step takes. An `inUseError` counts its waits as they were asked of the
+clock, the last one shortened to what remained, never the time the clock read.
+The boot's rollback keeps its vetoed marker for `ErrDeadlinePassed` as for a
+hold, for the next start to ask again; the early and crash rollbacks, and the
+console's, put the marker back as read after any failure that left the binary
+in place, as before.
 
 *What each failure says.* A `*SwapError`: `NothingMoved`, `PutBack` (the
 binary put back), or `BinaryMissing` with `Recover`, the one rename that puts
@@ -3766,15 +3777,17 @@ start's boot rollback.
 `renameInUse`, `renameWait`, `renameNow`, and the observer
 `SetRenameObserverForTest`, which hears each refused attempt), on a clock that
 only the waits move, and a step a case says takes time (`heldRig`'s `took`,
-and `over` for a wait the host overran); cmd/bridge's through
+`over` for a wait the host overran, and `step` and `sleep` for a clock every
+call and every sleep moves); cmd/bridge's through
 `updater.ReplaceRunningBinaryForTest`, Windows' put-back on any host, on the
 test's clock (`RestoreSeams.Now`); on Windows, real holds
 (`held_windows_test.go`: a handle the test opens with share mode 0, let go from
 the observer after a refusal it heard, or, where the case holds the file
 throughout, once the operation has returned and before any file is read), the
-waits on a clock only they move (`realHolds`). The reds at main and at round
-1's head, and the negative controls, are in `ops/engineering-log.md`,
-2026-11-15, B898 PR 1 and its round 2. What stays open is backlog B898's F1,
+waits on a clock they move, each sleep overrunning by a millisecond
+(`realHolds`). The reds at main and at round
+1's and round 2's heads, and the negative controls, are in `ops/engineering-log.md`,
+2026-11-15, B898 PR 1 and its rounds 2 and 3. What stays open is backlog B898's F1,
 F2, F3, F4, F7, F8 and F9.
 
 ## Config, settings and process lifecycle
