@@ -38,6 +38,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 
@@ -542,23 +543,97 @@ func (s *Server) apiPlayerOutputDACs(w http.ResponseWriter, r *http.Request) {
 // a second value, which must be the end of the body (io.EOF): Decoder.More
 // answers false for a closing brace or bracket, so it let `{...}}` through
 // (B612).
+//
+// A body its reader could not read whole is no fault of its JSON, and the
+// decoder hands the reader's error back as it is: a client that stops sending
+// until the read times out, or resets the connection, gives a *net.OpError
+// whose words name both ends of the socket, which the response carried until
+// B601's round 2. The reader's own failure (bodyReader) decides it, in either
+// decode, and is answered in fixed words and logged without an address
+// (writePlayerBodyUnread). A fault of the JSON itself (a syntax error, a value
+// of another type, a key it does not take, a body cut short) or of its size
+// (*http.MaxBytesError, inside the object or after it) keeps the decoder's
+// words, which name nothing but the body.
 func decodePlayerBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes))
+	body := &bodyReader{r: r.Body}
+	dec := json.NewDecoder(http.MaxBytesReader(w, body, adminMaxBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		msg := err.Error()
-		if errors.Is(err, io.EOF) {
-			msg = "a JSON body is required"
+		switch {
+		case body.err != nil:
+			writePlayerBodyUnread(w, r, body.err)
+		case errors.Is(err, io.EOF):
+			writeError(w, http.StatusBadRequest, errCodeBadJSON, "a JSON body is required")
+		default:
+			writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
 		}
-		writeError(w, http.StatusBadRequest, errCodeBadJSON, msg)
 		return false
 	}
 	var after json.RawMessage
 	if err := dec.Decode(&after); !errors.Is(err, io.EOF) {
-		writeError(w, http.StatusBadRequest, errCodeBadJSON, "one JSON object, and nothing after it")
+		var tooLarge *http.MaxBytesError
+		switch {
+		case body.err != nil:
+			writePlayerBodyUnread(w, r, body.err)
+		case errors.As(err, &tooLarge):
+			writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, errCodeBadJSON, "one JSON object, and nothing after it")
+		}
 		return false
 	}
 	return true
+}
+
+// The words and the log line for a write whose body could not be read.
+const (
+	playerBodyUnread     = "the request's body could not be read"
+	playerBodyUnreadLine = "admin: a player write's body could not be read"
+)
+
+// bodyReader is a request body that keeps the first error its reader answered
+// other than the body's end, under the bound decodePlayerBody puts over it, so
+// that *http.MaxBytesError, which the bound makes, is never one.
+type bodyReader struct {
+	r   io.ReadCloser
+	err error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && b.err == nil {
+		b.err = err
+	}
+	return n, err
+}
+
+func (b *bodyReader) Close() error { return b.r.Close() }
+
+// writePlayerBodyUnread answers a write whose body's reader failed with err:
+// 400 bad_json in fixed words, the status and the code any refused body has,
+// and a line at Info, the client's doing (it stopped sending, or reset the
+// connection), that names the route and what bodyReadFault says of err.
+func writePlayerBodyUnread(w http.ResponseWriter, r *http.Request, err error) {
+	logger.Info(playerBodyUnreadLine, "path", r.URL.Path, "err", bodyReadFault(err))
+	writeError(w, http.StatusBadRequest, errCodeBadJSON, playerBodyUnread)
+}
+
+// bodyReadFault is what a log line says of err, the error a request body's
+// reader answered: its words with a socket error's two ends left out (a
+// *net.OpError's "read tcp <local>-><remote>: <cause>" is "read tcp: <cause>"),
+// and every address the log export redacts left in them replaced (a dotted
+// IPv4 one, a bracketed IPv6 one), loopback's too, so the line names no
+// client however the error was made.
+func bodyReadFault(err error) string {
+	text := err.Error()
+	var op *net.OpError
+	if errors.As(err, &op) && op.Err != nil {
+		bare := *op
+		bare.Source, bare.Addr = nil, nil
+		text = strings.ReplaceAll(text, op.Error(), bare.Error())
+	}
+	text = ipv4Re.ReplaceAllString(text, "<ip>")
+	return ipv6Re.ReplaceAllString(text, "<ip>")
 }
 
 // playerEnabledRequest is POST /api/output/player/enabled's body.
