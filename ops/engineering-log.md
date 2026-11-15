@@ -100384,8 +100384,9 @@ At 2b20bcf1 and again at fd8c4648, main's single read, the stand-in's three
 cases failed on this host by their own assertions: the let-go case with the
 refusal returned after one refusal, the held case with an error that is not
 busy, and eventually's form with the test failed at its first poll;
-`TestTheHarvestRunsWithEnrichmentOff` passed. The Windows case's red is the
-windows-latest leg at the tests-only commit, which this host cannot run.
+`TestTheHarvestRunsWithEnrichmentOff` passed. The Windows case did not run
+at the tests-only commits (this host cannot run it), so no red of it was
+seen; its runs are the PR's, on windows-latest.
 
 Controls on 79ba8921, each an uncommitted mutation of the test file, its test
 binary built and its bytes put back from memory before the run, each
@@ -100414,3 +100415,58 @@ cmd/bridge's `TestEveryCitedTestNameExists`,
 `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
 the tree with this record. The windows-latest leg, where the Windows case
 runs, is the PR's.
+
+### Round 2: the stand-in's retry keeps the platform's
+
+`atomicwrite.SetReadRetryableForTest` replaced the read predicate
+(`readRetryable = fn`), so `TestTheHarvestHelperReadsPastAStandInHold` asked
+again on `errBusyForTest` alone. By the code, its real reads of the state file
+on Windows (`os.ReadFile`, once the stand-in hold is let go) were then no
+longer asked again on the sharing violation and access denied, and a
+scanner's hold of the file would fail the case there. No such failure was
+seen: it is the hazard this round closes. B898's observed red is still main's
+`TestTheHarvestRunsWithEnrichmentOff`, above. Commits: 68ef1c97 (the tests,
+red first), 64600c84 (the seam), then this update.
+
+The seam now installs `fn(err) || prev(err)`, prev the predicate in place
+before it (the platform's, or an earlier call's), and its restore puts prev
+back (`internal/atomicwrite/read.go`). Production never calls it. Every
+caller adds a stand-in for Windows' refusal (cmd/bridge's bind and stand-in
+tests, internal/config's turn-read tests) and none relies on the platform's
+predicate being dropped, so no replacing form is kept. `retryStandIn`
+installs the stand-in's predicate for both stand-in tests.
+
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` installs a predicate
+standing in for the platform's (`errPlatformForTest`), then the stand-in's,
+and wants a read refused once with each asked again and the covers back:
+synthetic coverage of the composition on every host, since the predicate of
+Linux and macOS takes no error. `TestTheStandInRetryKeepsWindowsOwnRetry`
+(Windows) wants a read refused once with `ERROR_SHARING_VIOLATION`, then once
+with `ERROR_ACCESS_DENIED`, asked again with the stand-in's retry in place:
+the platform's own predicate kept, which only windows-latest can show, and
+which has not run yet.
+
+Red first at 68ef1c97, main's seam: the every-host case failed for
+`errPlatformForTest` alone, answered after one read; the stand-in's test and
+the harvest test passed. Controls on 64600c84, each predicted in a file
+first, read.go's bytes put back from memory, `git status` empty after:
+- The seam replacing again: the every-host case red for `errPlatformForTest`
+  alone, as predicted; the stand-in's test and the harvest test green.
+- The seam keeping only the predicate before it: the stand-in's test red in
+  all three cases, as predicted, and the every-host case red for both its
+  errors where `errBusyForTest` alone was predicted (the case installs its
+  stand-in for the platform through the same seam, which the control drops
+  too); the harvest test green.
+
+Runs on 64600c84: `go vet` with the tags of `./internal/atomicwrite/`,
+`./cmd/bridge/` and `./internal/config/` for linux/amd64, linux/386 and
+windows/amd64, clean; the windows/amd64 test binaries of cmd/bridge and
+internal/atomicwrite build; go1.27.3's gofmt lists none of the changed files;
+internal/atomicwrite's tests, internal/config's three turn-read tests and
+cmd/bridge's two bind tests pass. In the build slot, the host otherwise idle,
+the three harvest tests 50 times under -race in one go test: 50 of 50 each,
+no data race (`TestTheHarvestRunsWithEnrichmentOff` 1.49 to 1.67 s a run,
+the stand-in's test 1.57 to 1.59 s, the composition case 0.11 to 0.13 s;
+the package 163.1 s). cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this update.
