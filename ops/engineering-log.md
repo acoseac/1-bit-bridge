@@ -100540,3 +100540,60 @@ test 50 times each under -race at GOMAXPROCS 4: 50 of 50, no data race (0.43
 to 0.45 s and 1.57 to 1.59 s a run). cmd/bridge's
 `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
 `TestNoBlankKeepers` pass over the tree with this update.
+
+## 2026-11-15 — B898 PR 3, round 5: the real-hold case leaves the PR, and what the tests still prove
+
+Branch `test/b898-harvest-read`, test files and this log only. Commits:
+58927057 (the case removed, `readPastAHold` folded into its one remaining
+caller, and round 1's entry citing the removed case with its `Test` prefix
+elided and naming no worker or host), then this entry.
+
+Two reds, kept apart:
+- Main bf622968's gate (run 43695739923, attempt 1, windows-latest):
+  `TestTheHarvestRunsWithEnrichmentOff` failed with a sharing-violation
+  failure of the helper's single read during the settle-write window; the
+  holder and the precise cause were not established. This PR's fix, the
+  helper's read through `atomicwrite.ReadWithRetryCtx`, is unchanged.
+- The PR's head 918185a0 (run 43733404123, windows-latest):
+  `…HarvestHelperReadsPastAHoldOnTheStateFile` failed in all three subtests
+  at its own premise check (`serve_enrichment_switch_windows_test.go:52` at
+  that head): a read beside the handle that shares nothing answered nil, so
+  the case held nothing there. A test premise that did not hold on the
+  runner, not a defect found in the retry.
+
+Why the case was removed: its premise failed in every subtest of that run,
+and why a handle opened sharing nothing did not refuse the read there is not
+known. That diagnosis is filed as B898FU2. Every other leg of the run was
+green.
+
+What still proves what:
+- The production predicate's classification of `ERROR_SHARING_VIOLATION`
+  and `ERROR_ACCESS_DENIED` is pinned on Windows by
+  `TestReadRetryWindowsErrors` (`internal/atomicwrite/read_windows_test.go`,
+  on main).
+- `TestTheHarvestHelperReadsPastAStandInHold`, on every host, shows that the
+  helper reads through the retry: the covers past a stand-in refusal its read
+  lets go, the read busy past the bound, and not yet inside `eventually`.
+- `TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` (off Windows,
+  synthetic) and `TestTheStandInRetryKeepsWindowsOwnRetry` (Windows, the
+  codes injected) show that the stand-in's retry adds to the platform's
+  predicate.
+
+The residual: no remaining test deliberately holds the harvest state file
+with a conflicting Windows handle; the harvest helper's behaviour under that
+actual hold remains unverified.
+
+Runs on 58927057: `go vet ./cmd/bridge/` with the tags and `CGO_ENABLED=0`
+for linux/amd64 and windows/amd64, clean; `GOOS=linux GOARCH=386 make vet`,
+clean; `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go test -tags
+ts_omit_webclient,ts_omit_debugeventbus -c -o /dev/null ./cmd/bridge/`
+builds; go1.27.3's gofmt lists none of the three harvest test files. In the
+build slot, the harvest tests 50 times under -race:
+`TestTheHarvestRunsWithEnrichmentOff`, `TestTheHarvestHelperReadsPastAStandInHold`
+and `TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` 50 of 50 each, no
+data race (1.50 to 1.71 s, 1.57 to 1.59 s and 0.43 to 0.45 s a run; the
+package 180.8 s).
+`TestTheStandInRetryKeepsWindowsOwnRetry`, named in that selection, builds
+only on Windows, where CI on the PR is the check. cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass over the tree with this entry.
