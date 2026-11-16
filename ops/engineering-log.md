@@ -100502,8 +100502,9 @@ stops there and asks no other pair. Failure sets `terminalUnconfirmed`, which
 fences tones, Starts, probes and choices' leases until serve restarts, and
 says it at Warn with the error the cleanup answered. What close(2) leaves held
 could not be checked: the kernel's sources were not available, its headers
-alone. Upstream, unverified, the descriptor is gone whatever close answers and the driver's release runs at the
-last reference, so a close's error rarely leaves the node held; the bridge
+alone. Upstream, unverified, the descriptor is gone whatever close answers
+and the driver's release runs at the last reference, so a close's error
+rarely leaves the node held; the bridge
 cannot tell, and fences rather than guess, the design's default for its open
 question 7. A close the kernel holds keeps the slot: a Start answers busy at
 `ToneYield`, and `Tone` answers `stop_unconfirmed` at `ToneStopWait` (2 s), the
@@ -100661,10 +100662,12 @@ write answers 400 `bad_json` in fixed words and logs one Info line with the
 route and the cause: a socket error's words with its two ends left out, and
 any dotted IPv4 or bracketed IPv6 address left in them replaced, loopback's
 too (the console's login security log is the one place a client's address
-is kept). A fault of the JSON (a syntax error, a value of another type, a key
-the write does not take, a body cut short) or of its size keeps the
-decoder's words, and a body past the bound after its object says so, where
-it said "one JSON object, and nothing after it". Before the fix
+is kept). A fault of the JSON inside the object (a syntax error, a value of
+another type, a key the write does not take, a body cut short), or of its
+size inside it or after it, keeps the decoder's words, a body past the bound
+after its object saying so where it said "one JSON object, and nothing after
+it"; trailing JSON or content after the object (a second value, a stray
+character) still answers those fixed words. Before the fix
 `TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress` failed all 40 of its
 cases (five errors, four routes, the read failing inside the object and after
 it), the response carrying `read tcp 192.0.2.10:47789->198.51.100.23:54321:
