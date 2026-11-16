@@ -18,7 +18,10 @@ const (
 	// owner admitted it (it did not run, and the refusal wraps
 	// ErrNotAdmitted), or while the caller waited for the reply once it was
 	// admitted (it may have run: the snapshot says, and the refusal does not
-	// wrap ErrNotAdmitted).
+	// wrap ErrNotAdmitted). ReserveConfiguration is the one exception: a
+	// grant its caller's context outlived is let go before the method
+	// returns, so its refusal wraps ErrNotAdmitted though the owner admitted
+	// the command.
 	ReasonCancelled Reason = "cancelled"
 	// ReasonConflict is a command whose expected generation is not the
 	// engine's: another change came first, or the pair is from another run.
@@ -71,6 +74,15 @@ const (
 	// a session's release is unconfirmed: two of the engine's own sessions
 	// never hold or race for the device.
 	ReasonReleaseUnconfirmed Reason = "release_unconfirmed"
+	// ReasonNotStopped is a configuration reservation asked while the
+	// transport is not stopped with nothing under way: a session starting,
+	// playing, paused or releasing, or a release unconfirmed
+	// (ReserveConfiguration, B728 B9 PR 3).
+	ReasonNotStopped Reason = "not_stopped"
+	// ReasonConfiguring is a command that would start a session while a
+	// configuration reservation is held: nothing starts until it is let go
+	// (ReserveConfiguration, B728 B9 PR 3).
+	ReasonConfiguring Reason = "configuring"
 	// ReasonBackend is a backend call that failed, for a reason the
 	// backend's error carries (a busy device, the identity check, …).
 	ReasonBackend Reason = "backend_error"
@@ -156,7 +168,10 @@ const (
 // was called, it ended before the owner took the command, or the owner took
 // it and found it ended, or abandoned by its caller, before admitting it. A
 // ReasonCancelled refusal that does not wrap it is of a command the owner
-// admitted, which may have run. errors.Is finds it.
+// admitted, which may have run. ReserveConfiguration's refusal of a grant its
+// caller's context outlived wraps it too, the one refusal of a command the
+// owner admitted that does: the method lets that grant go before it returns,
+// so nothing of it stands. errors.Is finds it.
 var ErrNotAdmitted = errors.New("not admitted")
 
 // Error is a refused command, or a failure the engine reports for one.

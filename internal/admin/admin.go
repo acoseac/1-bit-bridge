@@ -1424,6 +1424,20 @@ var (
 	// read (its round 4), so nothing was saved, failing closed. A 409,
 	// `update-checks-off-unchecked`, in words of each case's own.
 	ErrUpdateChecksOffUnchecked = errors.New("whether an off saved now would keep a crash rollback from putting the backup back could not be told")
+	// ErrUpdateBinaryInUse: another program held a file of the install or the
+	// rollback past its wait, and the bridge's binary is where it was, so
+	// nothing was done (backlog B898). A 409, `binary-in-use`: trying again
+	// is the remedy.
+	ErrUpdateBinaryInUse = errors.New("a file of the update was in use by another program")
+	// ErrUpdateBinaryMissing: the bridge's binary is not on disk, left so by
+	// a put-back that failed, or found so by the recovery latch, which
+	// refuses every install and rollback until it is back. A 500,
+	// `recovery-required`: the bridge log names the rename that puts it back.
+	ErrUpdateBinaryMissing = errors.New("the bridge's program file is not on disk")
+	// ErrUpdateMarkerNotRestored: an install or a rollback that failed could
+	// not put the install marker back as it read it. A 500,
+	// `marker-not-restored`, never `binary-in-use`, whatever ended it.
+	ErrUpdateMarkerNotRestored = errors.New("the install marker could not be put back")
 )
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from

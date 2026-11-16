@@ -60,7 +60,7 @@ func TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo(t *
 	}
 
 	var housekeeping bytes.Buffer
-	if err := bootHousekeeping(t.Context(), &housekeeping, r.dataDir, r.bin, version.ServerVersion, nil); err != nil {
+	if err := bootHousekeeping(t.Context(), &housekeeping, r.dataDir, r.bin, version.ServerVersion, nil, testBackupProbeTimeout); err != nil {
 		t.Fatalf("the housekeeping = %v; stderr=%s", err, housekeeping.String())
 	}
 	select {
@@ -127,7 +127,7 @@ func TestABootThatHoldsTheMarkersLockFirstLeavesTheManualRollbackNothingToPutBac
 	housekept, housekeepingDone := make(chan error, 1), make(chan struct{})
 	go func() {
 		defer close(housekeepingDone)
-		housekept <- bootHousekeeping(ctx, &stderr, r.dataDir, r.bin, previousVersion, restore)
+		housekept <- bootHousekeeping(ctx, &stderr, r.dataDir, r.bin, previousVersion, restore, testBackupProbeTimeout)
 	}()
 	drainLoopOnCleanup(t, cancel, housekeepingDone, "the boot's housekeeping")
 	t.Cleanup(release.close)

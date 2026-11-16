@@ -167,7 +167,8 @@ type rule struct {
 	act  act
 	then Intent
 	// output is a rule that starts a session, or will: refused while the
-	// output is unknown or unavailable.
+	// output is unknown or unavailable, or while a configuration reservation
+	// is held.
 	output bool
 	// refuse is actRefuse's reason.
 	refuse Reason
@@ -298,6 +299,10 @@ func (e *Engine) transport(c *command) {
 			e.answer(c, reply{err: why})
 			return
 		}
+		if why := e.configRefusal(name); why != nil {
+			e.answer(c, reply{err: why})
+			return
+		}
 	}
 	sel := o.selected
 	switch r.move {
@@ -371,6 +376,16 @@ func (e *Engine) outputRefusal(op string) error {
 		return refuse(op, ReasonOutputUnknown, "the output has not been reported yet")
 	case !out.Available:
 		return refuse(op, ReasonOutputUnavailable, out.Reason)
+	}
+	return nil
+}
+
+// configRefusal is why nothing may start while a configuration reservation is
+// held (ReserveConfiguration), or nil. It is asked wherever the output's
+// refusal is, after it, so a command refused for the output keeps that word.
+func (e *Engine) configRefusal(op string) error {
+	if len(e.o.configs) > 0 {
+		return refuse(op, ReasonConfiguring, "a configuration is being written: nothing starts until it is")
 	}
 	return nil
 }
@@ -830,6 +845,11 @@ func (e *Engine) afterRelease() {
 		o.state = Stopped
 	case then == IntentPlay:
 		if why := e.outputRefusal("play"); why != nil {
+			e.playFailed(why)
+			o.state = Stopped
+			return
+		}
+		if why := e.configRefusal("play"); why != nil {
 			e.playFailed(why)
 			o.state = Stopped
 			return

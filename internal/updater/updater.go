@@ -960,6 +960,13 @@ func rejectionBlocks(candidate, rejected string) bool {
 // Codex on round 2): ctx is asked again once the restamp has returned,
 // just before the restart is requested. What is left is the few
 // statements from that ask to the request.
+//
+// And no restart is requested while the binary is not at its path (the
+// recovery latch, backlog B898): the restart has passed its gates, and may
+// have waited for the install marker's lock behind a rollback or a swap that
+// left none, which it asks under that lock (refreshInstallAttemptedAt), and
+// again just before the request; the process the restart ends is the one
+// bridge running, and nothing could start again.
 func (u *Updater) restartWhenDrained(ctx context.Context) {
 	if n := u.inflightSessions(); n > 0 {
 		logger.Info("auto-install restart deferred", "reason", activeDownloadsReason, "inflight", n)
@@ -969,7 +976,15 @@ func (u *Updater) restartWhenDrained(ctx context.Context) {
 	if err == nil {
 		err = ctx.Err()
 	}
-	if err != nil {
+	if err == nil && u.autoInstallOpts != nil {
+		err = binaryLatch(u.autoInstallOpts.BinaryPath)
+	}
+	var latch *latchError
+	switch {
+	case errors.As(err, &latch):
+		logger.Error("auto-install restart not requested: the bridge would not start again", "err", err)
+		return
+	case err != nil:
 		logger.Info("auto-install restart not requested: the bridge is stopping")
 		return
 	}
@@ -1002,7 +1017,10 @@ func (u *Updater) restartWhenDrained(ctx context.Context) {
 // wait, no lock to give, a failure, a filesystem that keeps none) the marker
 // is left as it is and the restart goes on. A stop in the wait, or one
 // before an uncontended take, writes nothing and is returned, ctx's error,
-// for the caller to request no restart (round 2); it returns nothing else.
+// for the caller to request no restart (round 2); so is the recovery
+// latch's refusal (binaryLatch, backlog B898), asked once the lock is
+// held, before the marker is read, where it orders the restart against a
+// rollback or a swap that held the lock first; it returns nothing else.
 func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) error {
 	if u.autoInstallOpts == nil || u.autoInstallOpts.DataDir == "" {
 		return nil
@@ -1018,6 +1036,9 @@ func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) error {
 		return nil
 	}
 	defer lock.Release()
+	if err := binaryLatch(u.autoInstallOpts.BinaryPath); err != nil {
+		return err
+	}
 	st, err := LoadState(dir)
 	if err != nil || st.Status != "installing" {
 		return nil

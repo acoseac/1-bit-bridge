@@ -52,6 +52,9 @@ type owner struct {
 	output      OutputState
 	maint       *maintHold
 	persist     PersistState
+	// configs are the configuration reservations held, by lease
+	// (ReserveConfiguration): while one is, nothing starts.
+	configs map[ConfigLease]struct{}
 
 	waiters []waiter
 	outbox  []answered
@@ -126,6 +129,7 @@ func (e *Engine) start() error {
 	o := &e.o
 	o.q = emptyQueue
 	o.sessions = map[SessionID]*session{}
+	o.configs = map[ConfigLease]struct{}{}
 	o.calls = map[uint64]*call{}
 	o.gen = 1
 	o.drainAt = -1
@@ -398,7 +402,7 @@ type lane int
 
 const (
 	// laneNone never waits: Stop, the output's reports, the maintenance
-	// commands and the modes.
+	// commands, the modes and the configuration reservation's two commands.
 	laneNone lane = iota
 	// laneValues is the edits that take new IDs or tokens: they wait for a
 	// reservation write that has not landed, at most ReserveTimeout.
@@ -557,12 +561,15 @@ func (e *Engine) supersedeParked(why func(c *command) error) {
 	o.parked = kept
 }
 
-// dispatch runs c.
+// dispatch runs c. A configuration reservation's release runs first, in
+// every state, so its holder can always let it go.
 func (e *Engine) dispatch(c *command) {
 	o := &e.o
 	c.parked = false
 	name := c.op.String()
 	switch {
+	case c.op == opReleaseConfig:
+		e.releaseConfiguration(c)
 	case o.closing:
 		e.answer(c, reply{err: closing(c)})
 	case c.op == opOutput:
@@ -593,6 +600,8 @@ func (e *Engine) dispatch(c *command) {
 			e.setRepeat(c)
 		case opSetShuffle:
 			e.setShuffle(c)
+		case opReserveConfig:
+			e.reserveConfiguration(c)
 		default:
 			e.transport(c)
 		}
@@ -600,6 +609,50 @@ func (e *Engine) dispatch(c *command) {
 	if !c.parked && e.sm.applied != nil {
 		e.o.notes = append(e.o.notes, note{what: name, applied: true})
 	}
+}
+
+// reserveConfiguration grants a configuration reservation in this one step
+// when the transport is stopped with nothing under way: no session starting,
+// live, paused or releasing (o.sess), none whose release is not acknowledged
+// (o.sessions), and no release unconfirmed; maintenance and the shutdown were
+// dispatch's to refuse. A backend call of no session (a Discard) holds no
+// device and refuses nothing. A refusal changes nothing; a grant moves no
+// generation, since it changes nothing a controller reads, and draws a lease
+// that is not zero and not held already.
+func (e *Engine) reserveConfiguration(c *command) {
+	o := &e.o
+	if o.state != Stopped || o.sess != nil || len(o.sessions) > 0 || o.unconfirmed != nil {
+		detail := "the player is " + o.state.String()
+		switch u := o.unconfirmed; {
+		case u != nil:
+			detail = fmt.Sprintf("session %d's release is not confirmed", u.Session)
+		case o.state == Stopped:
+			detail = "a session's release is not acknowledged yet"
+		}
+		e.answer(c, reply{err: refuse(c.op.String(), ReasonNotStopped, detail+": a configuration is written only while the player is stopped with nothing under way")})
+		return
+	}
+	var l ConfigLease
+	for {
+		e.sm.random(l.b[:])
+		if _, held := o.configs[l]; l != (ConfigLease{}) && !held {
+			break
+		}
+	}
+	o.configs[l] = struct{}{}
+	e.touched()
+	e.answer(c, reply{config: l})
+}
+
+// releaseConfiguration lets go of the configuration reservation c's lease
+// names, when it is held; a lease not held changes nothing and publishes
+// nothing.
+func (e *Engine) releaseConfiguration(c *command) {
+	if _, held := e.o.configs[c.config]; held {
+		delete(e.o.configs, c.config)
+		e.touched()
+	}
+	e.answer(c, reply{})
 }
 
 // generation is the generation as published, with the changes of this step
@@ -744,6 +797,7 @@ func (e *Engine) snapshot() *Snapshot {
 	if o.maint != nil {
 		sn.maint = &MaintenanceInfo{Reason: o.maint.reason, Since: o.maint.since, Expires: o.maint.expires, ReleaseConfirmed: o.maint.confirmed}
 	}
+	sn.configured = len(o.configs) > 0
 	if o.unconfirmed != nil {
 		u := *o.unconfirmed
 		sn.unconfirmed = &u
