@@ -525,9 +525,9 @@ func yamlTypedTag(tag string) bool {
 // are an exact set, never a glob. Any replacement needs a fresh review.
 var reviewedEmbeds = map[string][]string{
 	"google.golang.org/protobuf@v1.36.12 google.golang.org/protobuf/internal/editiondefaults": {"editions_defaults.binpb"},
-	"tailscale.com@v1.104.2 tailscale.com":                                                    {"ALPINE.txt", "VERSION.txt", "go.toolchain.next.rev", "go.toolchain.rev"},
-	"tailscale.com@v1.104.2 tailscale.com/net/dns":                                            {"resolvconf-workaround.sh"},
-	"tailscale.com@v1.104.2 tailscale.com/net/dnsfallback":                                    {"dns-fallback-servers.json"},
+	"tailscale.com@v1.104.5 tailscale.com":                                                    {"ALPINE.txt", "VERSION.txt", "go.toolchain.next.rev", "go.toolchain.rev"},
+	"tailscale.com@v1.104.5 tailscale.com/net/dns":                                            {"resolvconf-workaround.sh"},
+	"tailscale.com@v1.104.5 tailscale.com/net/dnsfallback":                                    {"dns-fallback-servers.json"},
 }
 
 func checkPackageEmbeds(m *module, pkg string, files []string) error {
