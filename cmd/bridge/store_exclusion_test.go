@@ -215,8 +215,12 @@ func TestTheDoctorSaysNotCheckedWhereTheStoreLockRefuses(t *testing.T) {
 // command that has the library database open (a store open in this process
 // stands in for it; the kernel's answer across processes is internal/
 // manifest's T1) is refused before it looks at its snapshot and before its
-// prompt, exit 1, naming why: no prompt on either stream, and the source's
-// worker, which looks at the snapshot (backup.CheckRestoreSource), never run.
+// prompt, exit 1, naming why: no prompt on either stream, and the restore's
+// own source worker never run. The look before the prompt
+// (backup.CheckRestoreSource) runs no such hook, so a directory that is no
+// snapshot shows the order: it is refused for the lock, never as no snapshot
+// (exit 2), which a hold taken after the look, still before the prompt,
+// would answer.
 func TestEveryRestoreTakesTheStoresLockBeforeItsPrompt(t *testing.T) {
 	cfgPath, dataDir, snap := seedRestorableInstall(t, closedAdminAddr(t))
 	var looked atomic.Int32
@@ -238,5 +242,13 @@ func TestEveryRestoreTakesTheStoresLockBeforeItsPrompt(t *testing.T) {
 	}
 	if n := looked.Load(); n != 0 {
 		t.Errorf("bridge restore looked at its snapshot %d time(s) before the store's lock refused it", n)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = restoreCmd(context.Background(), []string{"--config", cfgPath, t.TempDir()}, strings.NewReader("yes\n"), &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "a bridge command has the library database open") ||
+		strings.Contains(stderr.String(), "not a recognized snapshot") {
+		t.Fatalf("bridge restore of a directory that is no snapshot, beside an open store = %d, want 1 for the lock before the snapshot is looked at\nstdout:\n%s\nstderr:\n%s",
+			code, stdout.String(), stderr.String())
 	}
 }
