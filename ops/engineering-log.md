@@ -100420,6 +100420,124 @@ tree with it the budgets check is clean (the worst load from 77.4% to 77.5%,
 `player.md` at 98,849 bytes), as are its self-test and those of `rules-for.py`
 and `move_entry.py`.
 
+## 2026-11-15 — B898 PR 2: the harvest state's open and bridge restore's look before its prompt wait out a read Windows refuses for a moment
+
+**The hazard.** Two production reads met Windows' refusal of an open once and
+gave up. `atlasharvest.OpenStateStore` read `atlas-harvest.json` with a bare
+`os.ReadFile`: a scanner's handle on it, or another writer's rename in
+flight, refused the open with ERROR_SHARING_VIOLATION (32) or
+ERROR_ACCESS_DENIED (5), and serve said "atlas harvest: open state: …
+(feature disabled)" and ran the whole session without the harvest; the
+revoke while the harvest is off (`ClearStoredCredential`) opens the file the
+same way and answered 500. bridge restore's look at the snapshot before its
+prompt (`backup.CheckRestoreSource`, its worker's `checkSource`) read
+`manifest.json` through `readManifest`, a bare read too: beside a serving
+bridge whose verification renames that manifest, it answered "is not a
+recognized snapshot directory", exit 2, for a moment's hold.
+
+**The change.** Both read through `atomicwrite.ReadWithRetryCtx`: five
+attempts with 750 ms of scheduled waits between them, 32 and 5 alone asked
+again (on Windows; nothing is elsewhere), cancellable between attempts. The
+waits bound the schedule, never the call: an attempt that blocks waits as
+long as the filesystem does.
+
+- `OpenStateStore(path)` and `ClearStoredCredential(path)` keep their
+  signatures, the read on `context.Background()` through a seam
+  (`readStateFile`, `os.ReadFile` in production). An absent file answers at
+  once. A refusal past the schedule is the open's error still, and turns the
+  harvest off for the session.
+- `checkSource` reads on the context `CheckRestoreSource` is given, handed to
+  its worker, through a seam (`readSourceManifest`), and decodes what it read
+  itself; `readManifest` is unchanged. A refusal past the schedule is
+  `backup.ErrSnapshotBusy`, wrapping the read's error spelled as given
+  (`spelledAsGiven`), which bridge restore says in its own words, exit 1:
+  `restore: "<snapshot>" was busy (its manifest was being written, or held by
+  another program, most likely a virus scanner): run this again in a moment`,
+  the error's own words not printed, as the not-a-snapshot line prints none.
+  A stop in the waits is told apart before the not-a-snapshot branch: "the
+  restore was stopped while it read the snapshot …, before its prompt:
+  <the context's error>; nothing was restored", neither refusal, exit 1, no
+  prompt. Any other read error, and a manifest that does not decode, is
+  `ErrNotASnapshot` at its first read, as before.
+- The look's worker runs the source worker's end hook (`sourceWorkerEnded`,
+  which `holdSource`'s worker runs too), so a test joins it before it puts a
+  seam back: `lookAt` waits for that end, bounded at 30 s, before its cleanup
+  puts back the read seam, the typed read's predicate
+  (`atomicwrite.SetReadRetryableForTest`) and the hook, and leaves them as
+  they are, failing, where the worker never ends, since it may read them
+  still. No new test calls `t.Parallel`. bridge restore reaches the look
+  through a seam of its own (`checkRestoreSource`), read on the command's
+  goroutine alone, which only a test sets.
+
+**Red first**, each prediction written before its run
+(`.tmp/_b898pr2/predictions-red.md`), at ca4473ff through `go test -overlay`:
+main's three files with a baseline instrumentation that routes each read
+through its seam, keeping main's one attempt and main's classification, has
+the look's worker run the end hook (it observes and changes nothing), and
+declares `ErrSnapshotBusy` and `checkRestoreSource` as names alone. Every
+red carries the injected refusal's words and one read. The harvest's
+"refused once" and "refused at every read" failed after one read with the
+refusal itself (not `ErrReadBusy`), "not there" passed; the look's "refused
+once" and "refused at every read" answered `ErrNotASnapshot` after one read,
+"stopped as it waits" `ErrNotASnapshot` wrapping the refusal, not the
+context's error, and "not there" and "not a manifest" passed; bridge restore's
+"busy" exited 1 through main's generic line without the busy sentence, and
+"stopped" passed. All as predicted, run again identically once the tests
+moved into the files they now sit in.
+
+**Controls**, each an uncommitted mutation of e414c34a, its bytes put back from
+memory and the file checked against HEAD after each, predicted before the
+runs (`.tmp/_b898pr2/controls-predictions.md`): 7 of 7 red exactly where
+predicted, every other row green. The harvest's read made once ("refused
+once" and "refused at every read"); the look's read made once ("refused
+once", "refused at every read" and "stopped as it waits", each
+`ErrNotASnapshot` after one read); the busy refusal returned as
+`ErrNotASnapshot` ("refused at every read" alone); the look's context dropped,
+its worker handed `context.Background()` ("stopped as it waits" alone: five
+reads, `ErrSnapshotBusy`, not the context's error); and three more: the stop's
+case removed from the switch ("stopped as it waits" alone: `ErrNotASnapshot`
+beside `context.Canceled`), the look's worker running no end hook (the join
+failing at its 30 s bound, the seams left), and bridge restore's busy case
+removed ("busy" alone, exit 1 through the generic line). The Windows cases
+(`TestTheStateFileIsReadPastAHoldThatSharesNothing`,
+`TestTheLookBeforeThePromptReadsPastAHoldThatSharesNothing`: a handle that
+shares nothing, its refusal heard by the real `os.ReadFile` before it is let
+go, five reads held throughout) compile here and run on the PR's Windows leg.
+
+**Runs** in the build slot at e414c34a, one session (`.tmp/_b898pr2/gate.sh`):
+`go vet` with the tags as linux/amd64, windows/amd64 and darwin/arm64
+(`CGO_ENABLED=0` for the two cross targets) and `GOOS=linux GOARCH=386 make
+vet`, each clean; `make build-all`, ok; `make test TEST_PKGS='-count=1
+-timeout 45m ./...'` (the later `-timeout` over the Makefile's 30 m, since
+cmd/bridge under `-race` runs near 30 min on this host): 89 packages ok, 14
+with no test files, cmd/bridge 1,775.4 s, internal/manifest 1,728.9 s,
+internal/admin 1,162.4 s, internal/backup 789.1 s, internal/atlasharvest
+11.9 s. Then the touched tests `-race -count=50`, three lanes at once:
+internal/atlasharvest's five that open the state (the new test,
+`TestClearStoredCredential`, `TestARevokeLeavesNoStoredBaseBehind`,
+`TestOpeningAStoreThatCannotDropItsBaseFails`,
+`TestTheStoreHoldsABaseInItsCanonicalForm`), 250 of 250 in 52.8 s;
+internal/backup's new test and `TestARestoreWhoseSourceDoesNotAnswerIsRefusedWithinItsBound`
+(the end hook's other worker), 100 of 100 in 1,300.0 s; cmd/bridge's new test
+and the six bridge restore tests that pass through the look
+(`TestBridgeRestoreRefusesBeforeItsPromptWhileAHoldGivenUpHoldsTheSnapshot`,
+`TestBridgeRestoreSaysWhyTheSnapshotsFolderRefusedIt`,
+`TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked`,
+`TestBridgeRestoreAnswersAStalledSnapshotWithinItsBoundBeforeItsPrompt`,
+`TestBridgeRestoreAsksTheMarkerAgainstTheLockBeforeItsPrompt`,
+`TestBridgeRestoreNamesTheSnapshotAsItWasTypedBesideARestoreThatHoldsIt`),
+350 of 350 in 1,384.0 s; no data race. `GOOS=windows go test -c` of the three
+packages compiles. go1.27.3's own gofmt lists none of the nine changed Go
+files. The Windows cases run on the PR's Windows leg.
+
+**Rules.** The rules land in 0fdc4af5, one commit with their long form: a line beside `enrichment.md`'s harvest
+bullets, and in `cli-serve.md` the B826 line with its long form in
+`ops/History-rules-cli-serve.md` (the look's busy manifest and its stop, and a
+paragraph on them), and `make docs-check`'s four steps pass at that commit: the worst load 82.0% before and 82.1% after,
+`cli-serve.md` 98,886 bytes before and 99,314 after, `enrichment.md` 45,011
+and 45,703.
+
+What stays open is follow-up F3.
 ## 2026-11-15 — B898 PR 3: the harvest test reads past Windows' refusal of its open of the state file
 
 Branch `test/b898-harvest-read` from main 3f4843e1,

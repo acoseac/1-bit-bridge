@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -208,4 +209,61 @@ func TestSnapshotRefusesAReservationStillHeldOrCancelled(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTheLookBeforeThePromptReadsPastAHoldThatSharesNothing: a handle on a
+// snapshot's manifest that shares nothing, as a scanner's can, refuses the
+// look's read with ERROR_SHARING_VIOLATION (backlog B898). Let go from the
+// read once it has heard that refusal, never by time, the look answers at its
+// next read; held throughout, ErrSnapshotBusy after the schedule's five reads,
+// each refused by Windows itself, never ErrNotASnapshot.
+func TestTheLookBeforeThePromptReadsPastAHoldThatSharesNothing(t *testing.T) {
+	for _, letGo := range []bool{true, false} {
+		t.Run(map[bool]string{true: "let go after a refusal", false: "held throughout"}[letGo], func(t *testing.T) {
+			dir := lookableSnapshot(t, `{"schemaVersion":2}`)
+			manifest := filepath.Join(dir, backup.ManifestFile)
+			release := holdSharingNothing(t, manifest)
+			if _, err := os.ReadFile(manifest); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+				t.Fatalf("premise: the held manifest's read answered %v, want ERROR_SHARING_VIOLATION", err)
+			}
+			reads, refused := 0, 0
+			err := lookAt(t, context.Background(), dir, func(p string) ([]byte, error) {
+				reads++
+				data, err := os.ReadFile(p)
+				if errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+					refused++
+					if letGo {
+						release()
+					}
+				}
+				return data, err
+			}, nil)
+			if letGo && (err != nil || reads != 2 || refused != 1) ||
+				!letGo && (!errors.Is(err, backup.ErrSnapshotBusy) || errors.Is(err, backup.ErrNotASnapshot) ||
+					!errors.Is(err, windows.ERROR_SHARING_VIOLATION) || reads != 5 || refused != 5) {
+				t.Fatalf("the look answered %v after %d reads, %d refused", err, reads, refused)
+			}
+		})
+	}
+}
+
+// holdSharingNothing opens path sharing nothing, as a scanner's handle can,
+// and answers its release, which the test's end makes too. The open is asked
+// again as the typed read is: a scanner may hold a file just written.
+func holdSharingNothing(t *testing.T, path string) (release func()) {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h windows.Handle
+	if err := atomicwrite.ReadWithRetryCtx(t.Context(), func() (err error) {
+		h, err = windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	release = sync.OnceFunc(func() { _ = windows.CloseHandle(h) })
+	t.Cleanup(release)
+	return release
 }

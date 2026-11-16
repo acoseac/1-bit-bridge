@@ -239,8 +239,10 @@ func SetOnSourceStepForTest(fn func(dir, step string)) (restore func()) {
 
 // SetOnSourceWorkerEndForTest installs the hook a restore's source worker
 // runs last, given the snapshot as the restore was given it, once it has
-// handed its hold over or let go of what it took, and returns the restore.
-// Its callback must return, and ignore every snapshot but its test's.
+// handed its hold over or let go of what it took, and bridge restore's look
+// before its prompt (CheckRestoreSource) once its look has answered, and
+// returns the restore. Its callback must return, and ignore every snapshot
+// but its test's.
 func SetOnSourceWorkerEndForTest(fn func(dir string)) (restore func()) {
 	var p *func(string)
 	if fn != nil {
@@ -248,4 +250,14 @@ func SetOnSourceWorkerEndForTest(fn func(dir string)) (restore func()) {
 	}
 	prev := onSourceWorkerEnd.Swap(p)
 	return func() { onSourceWorkerEnd.Store(prev) }
+}
+
+// SetReadSourceManifestForTest replaces the read of the manifest that bridge
+// restore's look before its prompt makes (os.ReadFile), and returns the
+// restore, which runs once the look's worker has ended
+// (SetOnSourceWorkerEndForTest): the worker reads the seam.
+func SetReadSourceManifestForTest(fn func(path string) ([]byte, error)) (restore func()) {
+	prev := readSourceManifest
+	readSourceManifest = fn
+	return func() { readSourceManifest = prev }
 }
