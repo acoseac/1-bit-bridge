@@ -104,6 +104,13 @@ type Store struct {
 	// round); the zero value, every other open's, has none.
 	migrationPermit updater.MigrationPermit
 
+	// releaseHold lets the store's shared hold of the lifetime lock go
+	// (holdStoreShared; backlog B653 PR 2a), which Close does once every
+	// connection has closed (letGoOfTheHold), once (holdOnce). Nil for a
+	// Store no OpenStoreAdmitted made.
+	releaseHold func()
+	holdOnce    sync.Once
+
 	// ftsAvailable caches whether the `tracks_fts` virtual table exists,
 	// probed once in OpenStore after migrate(). The FTS5 module is either
 	// compiled into the driver or not for the process lifetime, and the
@@ -262,7 +269,7 @@ func callOpenStoreBeforeSQLite(path string) {
 }
 
 func storeOpenPaths(path string) []string {
-	return []string{path, path + "-wal", path + "-shm", path + "-journal", path + ladderLockSuffix}
+	return []string{path, path + "-wal", path + "-shm", path + "-journal", path + ladderLockSuffix, path + storeOpenLockSuffix}
 }
 
 // storeOpenErr returns the symlink refusal when one of the store files is
@@ -289,9 +296,10 @@ func symlinkAtStore(path string) (string, bool) {
 	return "", false
 }
 
-// A symlink at the database or a sidecar (-wal, -shm, -journal, and the
-// ladder lock's -migrate.lock) is refused. The check below catches one
-// present when OpenStore starts. The open uses
+// A symlink at the database or a sidecar (-wal, -shm, -journal, the ladder
+// lock's -migrate.lock and the lifetime lock's -open.lock) is refused. The
+// check below catches one present when OpenStore starts, and the lifetime
+// lock's own open refuses one at its file before it (OpenStoreAdmitted). The open uses
 // storeVFSName, so on unix a final-component symlink at the database, -wal
 // or -shm is also refused by SQLite's own open (O_NOFOLLOW). -journal is
 // not opened in WAL mode. None of the four is a symlink in any supported
@@ -312,9 +320,39 @@ func OpenStore(path string) (*Store, error) {
 // permission its admission gave it (updater.AdmitBoot, DisarmResult.Permit):
 // it migrates the store whatever the install's count, since the start the
 // count is for is this one.
+//
+// Every open, OpenStore's too, holds the store's lifetime lock shared for as
+// long as the Store is open (holdStoreShared; backlog B653 PR 2a), taken
+// right after the directory is made and before anything of the database is
+// touched, in this order: the directory, the hold, the restore's
+// journal (CheckRestoreJournal: an unfinished restore refuses the open with
+// ErrRestoreIncomplete before Precreate could make an empty store where the
+// restore moved the database out), the link check, Precreate, the ladder.
+// The journal is asked under the hold, so a restore, which needs the lock
+// exclusively first, cannot write its journal between this check and the
+// Precreate. A hold another process's restore keeps refuses the open
+// (ErrStoreRestoring), and so does a lock that cannot be taken
+// (ErrStoreLockUnavailable), ENOLCK included; only the filesystem's
+// definitive answer that it keeps no locks lets the open go on without it.
+// Every error return lets the hold go, and Close lets it go once every
+// connection has closed.
 func OpenStoreAdmitted(path string, permit updater.MigrationPermit) (*Store, error) {
 	if err := fsutil.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir store dir: %w", err)
+	}
+	release, err := holdStoreShared(path)
+	if err != nil {
+		return nil, err
+	}
+	kept := false
+	defer func() {
+		if !kept {
+			release()
+		}
+	}()
+	callStoreHoldTaken(path)
+	if err := CheckRestoreJournal(path); err != nil {
+		return nil, err
 	}
 	if name, ok := symlinkAtStore(path); ok {
 		return nil, fmt.Errorf("%w at %s", errStoreSymlink, name)
@@ -353,7 +391,7 @@ func OpenStoreAdmitted(path string, permit updater.MigrationPermit) (*Store, err
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, now: time.Now, path: path, migrationPermit: permit}
+	s := &Store{db: db, now: time.Now, path: path, migrationPermit: permit, releaseHold: release}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, storeOpenErr(path, "", err)
@@ -368,6 +406,7 @@ func OpenStoreAdmitted(path string, permit updater.MigrationPermit) (*Store, err
 		logger.Warn("fts availability probe failed; library search disabled", "err", err)
 		s.ftsAvailable = false
 	}
+	kept = true
 	return s, nil
 }
 
@@ -384,8 +423,15 @@ func (s *Store) probeFTSAvailable() error {
 	return nil
 }
 
-// Close releases the underlying DB handle.
-func (s *Store) Close() error { return s.db.Close() }
+// Close releases the underlying DB handle, and the store's hold of its
+// lifetime lock once every connection SQLite holds for it has closed
+// (letGoOfTheHold): a transaction under way at Close keeps a restore out
+// until it has ended.
+func (s *Store) Close() error {
+	err := s.db.Close()
+	s.letGoOfTheHold()
+	return err
+}
 
 // migration is one step in the schema ladder. `sql` is executed as a
 // single multi-statement Exec; `post` runs afterwards for cases where

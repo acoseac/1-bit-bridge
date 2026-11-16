@@ -421,6 +421,13 @@ var checkRestoreSource = backup.CheckRestoreSource
 // (backup.CheckRestoreSource): a folder that does not answer, and one a hold
 // given up holds (another process's marker counted only while the folder's
 // lock is held), are refused before anything is asked.
+//
+// Its order (backlog B653 PR 2a): the flags, the config, the data dir's lock
+// and the admin probe, the store's lifetime lock exclusively
+// (manifest.HoldStoreExclusive: a command that has the library database open
+// refuses the restore), the restore's journal (an unfinished database restore
+// refuses it, before any snapshot is looked at), the snapshot's
+// look, the prompt, and the probe again.
 func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -436,29 +443,6 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		return 2
 	}
 	snapshotDir := backup.CleanSnapshotPath(fs.Arg(0))
-
-	// The snapshot is looked at before anything else, bounded as the
-	// restore's admission is (backup.CheckRestoreSource, backlog B826's second
-	// round): a hold given up in this process, asked first of no filesystem,
-	// then on a worker the folder it resolves into, another process's marker
-	// there counted only while that folder's lock is held, and the manifest; a
-	// folder that does not answer is refused within the bound, before any
-	// prompt, and a manifest Windows keeps busy past its read's retries is
-	// refused as busy, exit 1, never as no snapshot (backlog B898). The restore
-	// asks again, under the folder's lock, once confirmed.
-	switch err := checkRestoreSource(ctx, snapshotDir, verifyCmdLockWait); {
-	case errors.Is(err, backup.ErrNotASnapshot):
-		fmt.Fprintf(stderr, "restore: %q is not a recognized snapshot directory (no readable manifest.json with a supported schema)\n", snapshotDir)
-		return 2
-	case errors.Is(err, backup.ErrSnapshotBusy):
-		fmt.Fprintf(stderr, "restore: %q was busy (its manifest was being written, or held by another program, most likely a virus scanner): run this again in a moment\n", snapshotDir)
-		return 1
-	case err != nil:
-		if !sayRestoreRefusal(stderr, err) {
-			fmt.Fprintf(stderr, "restore: %v\n", err)
-		}
-		return 1
-	}
 
 	// The bytes the config is read from go to the restore (ConfigAsRead):
 	// the targets below come from this read, its data dir and its TLS pair,
@@ -488,6 +472,58 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		return 1
 	}
 	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
+		return 1
+	}
+
+	// The store's lifetime lock, exclusively, held to the command's end
+	// (backlog B653 PR 2a): serve is kept out by the data dir's lock, and
+	// every other command that has the library database open (a scan, an
+	// analyze, the doctor's probes, a live backup) by this one. A try, never
+	// a wait; any failure to take it refuses, storage that grants no lock
+	// included, since the restore could not show that nothing has the
+	// database open. RestoreWithOptions counts on it.
+	dbPath := manifest.DefaultDBPath(cfg.DataDir)
+	storeHold, err := manifest.HoldStoreExclusive(dbPath)
+	if err != nil {
+		switch {
+		case errors.Is(err, manifest.ErrStoreHeld):
+			fmt.Fprintf(stderr, "restore: %v (a scan, an analyze, a backup, the doctor or another command); nothing was restored\n", err)
+		default:
+			fmt.Fprintf(stderr, "restore: %v; the restore cannot show that nothing has the library database open, so nothing was restored\n", err)
+		}
+		return 1
+	}
+	defer storeHold.Release()
+
+	// An unfinished restore of the database is found before any snapshot is
+	// looked at (backlog B653 PR 2a): finishing it needs no snapshot,
+	// and one that is gone must not stand in its way.
+	if err := manifest.CheckRestoreJournal(dbPath); err != nil {
+		fmt.Fprintf(stderr, "restore: %v; nothing was restored\n", err)
+		return 1
+	}
+
+	// The snapshot is looked at now, bounded as the restore's admission is
+	// (backup.CheckRestoreSource, backlog B826's second round): a hold given
+	// up in this process, asked first of no filesystem, then on a worker the
+	// folder it resolves into, another process's marker there counted only
+	// while that folder's lock is held, and the manifest; a folder that does
+	// not answer is refused within the bound, before any prompt, and a
+	// manifest Windows keeps busy past its read's retries is refused as busy,
+	// exit 1, never as no snapshot (backlog B898). The restore asks again,
+	// under the folder's lock, once confirmed. It follows the config, the
+	// data dir's lock and the store's (backlog B653 PR 2a).
+	switch err := checkRestoreSource(ctx, snapshotDir, verifyCmdLockWait); {
+	case errors.Is(err, backup.ErrNotASnapshot):
+		fmt.Fprintf(stderr, "restore: %q is not a recognized snapshot directory (no readable manifest.json with a supported schema)\n", snapshotDir)
+		return 2
+	case errors.Is(err, backup.ErrSnapshotBusy):
+		fmt.Fprintf(stderr, "restore: %q was busy (its manifest was being written, or held by another program, most likely a virus scanner): run this again in a moment\n", snapshotDir)
+		return 1
+	case err != nil:
+		if !sayRestoreRefusal(stderr, err) {
+			fmt.Fprintf(stderr, "restore: %v\n", err)
+		}
 		return 1
 	}
 

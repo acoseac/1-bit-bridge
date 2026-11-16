@@ -18,6 +18,9 @@ func tryLockShared(f *os.File) error { return tryLock(f) }
 
 func unlock(*os.File) error { return nil }
 
+// noLockToGive is NoLockToGive where this package has no lock: none.
+func noLockToGive(error) bool { return false }
+
 // keepsNoLocks is KeepsNoLocks where this package has no lock: tryLock's own
 // errors.ErrUnsupported.
 func keepsNoLocks(err error) bool { return errors.Is(err, errors.ErrUnsupported) }

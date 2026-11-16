@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -74,10 +75,21 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		// The admission removes a marker it cannot read, and says so.
 		return 0, false
 	}
-	if ok, why := updater.CrashRollback(st, current); !ok {
-		if why != "" {
-			refuseCrashRollbackOnARead(ctx, dataDir, current, why, then, opts, stderr)
-		}
+	ok, why := updater.CrashRollback(st, current)
+	if !ok && why == "" {
+		return 0, false
+	}
+	// An unfinished restore of the database leaves the install as it is,
+	// before any marker write or rename, said on the rollback's line
+	// (backlog B653 PR 2a): the backup's binary may not know the restore's
+	// journal, and would open the half-done swap. The start then meets the
+	// journal again at its store's open, and exits 1.
+	if waits := rollbackWaitsForTheRestore(dataDir); waits != "" {
+		crashRollbackLine(stderr, st, waits, then)
+		return 0, false
+	}
+	if !ok {
+		refuseCrashRollbackOnARead(ctx, dataDir, current, why, then, opts, stderr)
 		return 0, false
 	}
 	say := func(st updater.State, why string) { crashRollbackLine(stderr, st, why, then) }
@@ -205,6 +217,19 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		"and %s is held back from the auto-installer; exiting for the service manager to start %s (where nothing starts it, "+
 		"run bridge serve again)\n", st.FailedStarts, current, st.PreviousVersion, binaryPath, current, st.PreviousVersion)
 	return supervision.RestartExitCode, true
+}
+
+// rollbackWaitsForTheRestore is why a rollback leaves an install where an
+// unfinished restore of the database stands in dataDir (its journal,
+// manifest.CheckRestoreJournal; backlog B653 PR 2a), or "" where none does.
+// The crash rollback and the early rollback ask it before any marker write or
+// rename: a rollback over a half-done restore would hand the data dir to a
+// binary that may not know the journal.
+func rollbackWaitsForTheRestore(dataDir string) string {
+	if err := manifest.CheckRestoreJournal(manifest.DefaultDBPath(dataDir)); err != nil {
+		return fmt.Sprintf("the rollback waits for the unfinished restore of the library database (%v)", err)
+	}
+	return ""
 }
 
 // What a start does where its crash rollback leaves the install, with which

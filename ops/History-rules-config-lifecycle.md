@@ -2490,7 +2490,7 @@ record is in `ops/engineering-log.md`, 2026-11-04, B707.
 
 ## An install counted healthy only once it has answered and stayed up (backlog B660, 2026-11-06)
 
-- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly make the next start try to roll it back, before it writes anything, which a migration of the store begun, or a backup that cannot be shown to run here, prevents** (2026-11-06, backlog B660; its rounds 2 and 3, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, or dial an IPv6 wildcard on IPv4's loopback alone, don't count a stop (take its count back as the stop arrives once the start has answered as ready and once the teardown has run before that, so a start killed before it is ready stays counted; ask whether an end is a stop of the caller's context and the restart request once the teardown has run, never of serve's own context or of the stop's notice; ask for the marker's lock again within one budget for the teardown and the take-back, inside the shortest stop wait of systemd, launchd and the SCM, a take-back begun once a teardown past the budget has run two seconds still, below the SCM's wait; and join it before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or an end of the tailnet listener serve did not begin, don't read a start as running from the data dir's lock, a command's too, from a marker read before the install marker's lock, or from an exclusive try, which another probe's hold refuses (a start runs only where the marker's token names a lock that start holds exclusively, which every probe tries shared, its token cleared at every return), don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
+- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly make the next start try to roll it back, before it writes anything, which a migration of the store begun, a restore of the store (recorded as a migration is, `State.StoreMigratedBy`, and refused to the version the install replaces, which that record would not cover: `updater.ErrRestoreByPreviousVersion`; the install marker's lock held from the restore's admission through the database's replacement, so no install is armed unrecorded meanwhile), or a backup that cannot be shown to run here, prevents, and neither the crash rollback nor the early rollback acts while an unfinished restore of the database's journal stands (B653 PR 2a)** (2026-11-06, backlog B660; its rounds 2 and 3, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, or dial an IPv6 wildcard on IPv4's loopback alone, don't count a stop (take its count back as the stop arrives once the start has answered as ready and once the teardown has run before that, so a start killed before it is ready stays counted; ask whether an end is a stop of the caller's context and the restart request once the teardown has run, never of serve's own context or of the stop's notice; ask for the marker's lock again within one budget for the teardown and the take-back, inside the shortest stop wait of systemd, launchd and the SCM, a take-back begun once a teardown past the budget has run two seconds still, below the SCM's wait; and join it before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or an end of the tailnet listener serve did not begin, don't read a start as running from the data dir's lock, a command's too, from a marker read before the install marker's lock, or from an exclusive try, which another probe's hold refuses (a start runs only where the marker's token names a lock that start holds exclusively, which every probe tries shared, its token cleared at every return), don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
 
 *The defect* (the self-healing study of 2026-11-02, read from the code;
 B613's "Not here" above; B198's scenario). `DecideBootAction` answered
@@ -4060,6 +4060,35 @@ F2, F3, F4, F7, F8 and F9.
   skips and dido's container runs. With the six writers reverted, the
   end-to-end test names exactly those six files.
 
+- **…and a reload before the staging is not enough: every `tokens.json` write
+  re-reads the file just before its rename** (#1043), adminauth's #1039 rule
+  (under Auth, pairing, TLS) on the bearer-token store. All seven writers (the
+  debounced Validate and RecordClientVersion writes, the shutdown flush, and
+  Mint, Revoke, Rotate, SetExpiry) reloaded, then staged (a temp file, a write,
+  an fsync: a median of 0.6 to 0.7 ms on ext4, 2.3 to 3.8 ms on APFS) and
+  renamed with no further check. A `bridge pair` or
+  `bridge token revoke|rotate|expire` committing inside the staging was renamed
+  over: the paired device's token vanished (401 from then on) or the revoked one
+  came back, on disk and in the running bridge. Measured with two processes and
+  no test seams, against a writer every 20 ms: 24 of 200 mints lost and 30 of
+  200 revokes undone on APFS (16 and 11 on ext4), and 1 and 2 after the fix (2
+  and 1). `commitLocked` builds from the last read, stages, compares the file's
+  BYTES with what that read or this process's last write saw (`Store.raw`), and
+  on a change reloads (whose per-token merge keeps unwritten LastUsedAt and
+  client-version bumps), rebuilds and restages, up to three attempts. A re-read
+  or reload that fails ends the write with nothing written. **Bytes, not
+  mtime+size**: a write is rare enough to afford the read, and a same-size
+  sibling write in the same mtime tick passes a stat. A write adopts its list
+  only once its rename lands, and a Rotate or SetExpiry of a token revoked
+  meanwhile answers ErrNotFound rather than writing it back. **What a write
+  records as its file is the STAGED file's stat**, after its Close and before
+  the rename: RenameWithRetry fsyncs the directory after renaming (0.5 ms ext4,
+  2.8 ms APFS), and a stat of the path after that took a sibling's commit in the
+  fsync for this process's own, so Validate refused a device paired there until
+  the next write. What remains is the rename itself (a median of 50 µs on ext4
+  and 170 µs on APFS from the re-read to the rename's return; 2 of 1,600 mints
+  lost against a 10 Hz writer) and, on Windows, its retries. A kernel lock would
+  close it, as for adminauth.json, and is not taken.
 - **A Windows rollback moves the running exe aside before it renames
   `.bak` into place** (2026-10-09, backlog B202). `RollbackBinary` on
   Windows was one `os.Rename` of the backup onto `dst`. Both callers

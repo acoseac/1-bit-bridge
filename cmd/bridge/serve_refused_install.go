@@ -177,6 +177,13 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 		noRollback(stderr, st, why)
 		return 0, false
 	}
+	// An unfinished restore of the database leaves the install as it is,
+	// before any marker write or rename (backlog B653 PR 2a): serve then
+	// refuses its settings as it always has, exit 2, never 75.
+	if waits := rollbackWaitsForTheRestore(dataDir); waits != "" {
+		noRollback(stderr, st, waits)
+		return 0, false
+	}
 	if fi, err := os.Lstat(backup); err != nil || !fi.Mode().IsRegular() {
 		noRollback(stderr, st, fmt.Sprintf("there is no backup to put back, a regular file at %s", backup))
 		return 0, false

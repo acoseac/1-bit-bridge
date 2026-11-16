@@ -162,21 +162,12 @@ func checkSQLite(ctx context.Context, f *os.File, level CheckLevel, p *pacer) db
 	if onDatabaseOpen != nil {
 		onDatabaseOpen()
 	}
-	name, fsys, err := vfs.New(dbFS{f: f, p: p})
+	db, closeReader, err := openSnapshotReader(f, p)
 	if err != nil {
 		return failed(ReasonOpenFailed)
 	}
-	db, err := sql.Open("sqlite", "file:"+dbFSName+"?vfs="+name+"&mode=ro&immutable=1&_pragma=temp_store(2)")
-	if err != nil {
-		_ = fsys.Close()
-		return failed(ReasonOpenFailed)
-	}
-	db.SetMaxOpenConns(1)
 	got := runChecks(ctx, db, level)
-	// Every connection closed before the VFS is: its Close refuses while one
-	// is open, and SQLite keeps a pointer to it in each.
-	_ = db.Close()
-	_ = fsys.Close()
+	closeReader()
 	if got.state != StateIncomplete {
 		if why, ok := stopped(ctx); ok && got.state == StateFailed {
 			// A read the stop refused fails the statement it was in: that is
@@ -185,6 +176,31 @@ func checkSQLite(ctx context.Context, f *os.File, level CheckLevel, p *pacer) db
 		}
 	}
 	return got
+}
+
+// openSnapshotReader opens the snapshot's database that f holds read-only,
+// on one connection, through modernc's read-only VFS over a filesystem that
+// serves that one file (dbFS), with mode=ro&immutable=1, so SQLite reads the
+// file as it is and opens or makes nothing beside it: the one open of a
+// snapshot's database, which the verification's check and the restore's
+// read of its user_version share (backlog B653 PR 2a). close closes every
+// connection, then the VFS: its Close refuses while one is open, and SQLite
+// keeps a pointer to it in each.
+func openSnapshotReader(f *os.File, p *pacer) (db *sql.DB, close func(), err error) {
+	name, fsys, err := vfs.New(dbFS{f: f, p: p})
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err = sql.Open("sqlite", "file:"+dbFSName+"?vfs="+name+"&mode=ro&immutable=1&_pragma=temp_store(2)")
+	if err != nil {
+		_ = fsys.Close()
+		return nil, nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, func() {
+		_ = db.Close()
+		_ = fsys.Close()
+	}, nil
 }
 
 // maxCheckRows bounds how many rows of quick_check's or integrity_check's

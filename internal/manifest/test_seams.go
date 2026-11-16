@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 )
@@ -46,6 +47,59 @@ func WriteDatabaseAtVersionForTest(path string, version int) error {
 // t.Parallel(), and restores it in a t.Cleanup.
 func SetBeforeMigrationLockForTest(fn func(dbPath string)) (restore func()) {
 	return setOpenStoreBeforeSQLite(fn)
+}
+
+// SetStoreLockTryForTest makes every try at the store's lifetime lock answer
+// what fn answers (exclusive says which kind: a restore's, or an opener's),
+// fn standing in for a filesystem's answers (ENOLCK, an I/O error, a
+// definitive no-locks answer) in another package's tests, and
+// SetStoreLockOpenForTest the lock file's open (write says for writing). Each
+// returns what puts the seam before it back. Process-global: a test that uses
+// one MUST NOT call t.Parallel(), and restores it in a t.Cleanup. Production
+// code never calls them.
+func SetStoreLockTryForTest(fn func(f *os.File, exclusive bool) error) (restore func()) {
+	storeLockSeamMu.Lock()
+	prev := storeLockTry
+	storeLockTry = fn
+	storeLockSeamMu.Unlock()
+	return func() {
+		storeLockSeamMu.Lock()
+		storeLockTry = prev
+		storeLockSeamMu.Unlock()
+	}
+}
+
+// SetStoreLockOpenForTest: see SetStoreLockTryForTest. fn is handed the
+// platform's own open, to answer for the opens it does not stand in for.
+func SetStoreLockOpenForTest(fn func(real func(dir, name, like string, write bool) (*os.File, error), dir, name, like string, write bool) (*os.File, error)) (restore func()) {
+	storeLockSeamMu.Lock()
+	prev := storeLockOpen
+	storeLockOpen = func(dir, name, like string, write bool) (*os.File, error) {
+		return fn(prev, dir, name, like, write)
+	}
+	storeLockSeamMu.Unlock()
+	return func() {
+		storeLockSeamMu.Lock()
+		storeLockOpen = prev
+		storeLockSeamMu.Unlock()
+	}
+}
+
+// SetStoreHoldTakenForTest makes fn run in every opener of the live database
+// once its shared hold of the store's lifetime lock is taken and before it
+// asks the restore's journal (OpenStoreAdmitted, PendingMigrations), with the
+// database's path: a test's park in that window. Process-global, restored as
+// SetStoreLockTryForTest's.
+func SetStoreHoldTakenForTest(fn func(dbPath string)) (restore func()) {
+	storeLockSeamMu.Lock()
+	prev := storeHoldTaken
+	storeHoldTaken = fn
+	storeLockSeamMu.Unlock()
+	return func() {
+		storeLockSeamMu.Lock()
+		storeHoldTaken = prev
+		storeLockSeamMu.Unlock()
+	}
 }
 
 // SetUpscaleTargetBeforeCommitForTest makes fn run in every SetUpscaleTarget

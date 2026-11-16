@@ -227,6 +227,29 @@ it makes a data directory that is not there yet, and refuses one it cannot
 make or use (a regular file or a link to nothing where it goes, or above it),
 naming the path, before it writes anything.
 
+Restore also refuses, before it asks you to confirm and with nothing
+restored, while any bridge command has the library database open: a `bridge
+scan`, `analyze` or `upscale`, a `bridge library add` or `remove`, a `bridge
+backup`, or `bridge doctor`. Stop it, then restore again. It refuses as well
+where the data directory's storage grants no file locks, since it cannot then
+show that nothing has the database open: put the data directory on storage
+that grants them. While restore runs, every other bridge command refuses to
+open the database. A bridge from before this lock was added takes no lock
+that restore can see, so stop every bridge process of an earlier version,
+and every command one of them runs, before you restore.
+
+While an update the bridge installed waits to be confirmed after a start that
+did not end cleanly, restore refuses to replace the database, with nothing
+restored. A restore made while an update is on probation keeps that update
+from being rolled back: the previous version may not read the database the
+restore put in place. For the same reason, while an update is on probation,
+the version it replaced (a `bridge` you kept, or the update's backup) refuses
+to restore the database, with nothing restored: restore with the updated
+bridge, or once the update is confirmed or rolled back. While restore replaces
+the database, an update waits for it to finish (`bridge update` says to try
+again if the restore takes longer than its wait), and a restore that an update
+being installed keeps waiting is refused the same way, with nothing restored.
+
 Before it asks you to confirm, restore looks at the snapshot. It refuses at
 once, with nothing restored, while a check, a prune or a restore of those
 snapshots that did not end still holds them, and it refuses a snapshot whose
