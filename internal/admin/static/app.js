@@ -7812,7 +7812,9 @@ function renderPlayerChecklist(list, lines, openPair) {
 // playerOutputLatest is the status the page last painted, which its
 // controls decide from (on or off; whether a change stops what plays), and
 // playerOutputSeq numbers the paints, so a status fetched before a change
-// cannot paint over the status the change answered.
+// cannot paint over the status the change answered. A test tone's start and
+// its result are such changes (wirePlayerOutputTone): a status read before
+// either cannot paint over what the page says of the tone.
 let playerOutputLatest = null;
 let playerOutputSeq = 0;
 
@@ -8384,8 +8386,9 @@ const PLAYER_TONE_STATES = {
 // playerTone is the page's own test tone: the controller of its request
 // while it is out, which Stop, the page's scope and its leaving abort; a
 // Stop's confirmation running, and the count that lets a later Play or Stop
-// end an earlier one; and whether the tone's line last showed a tone that was
-// not idle (renderPlayerOutputTone).
+// end an earlier one; and whether the tone's line holds what the next status
+// must say again (renderPlayerOutputTone): a tone that was not idle, or a stop
+// not confirmed.
 const playerTone = { controller: null, confirming: false, stopSeq: 0, busyShown: false };
 
 // playerToneFormatText words what the kernel committed for a tone, as it
@@ -8480,6 +8483,10 @@ function wirePlayerOutputTone() {
     playerTone.controller = controller;
     playerTone.stopSeq++;
     playerTone.confirming = false;
+    // A status read before the tone starts, or while it plays, would paint
+    // over what the page says of it once it answers: the tone's start, and
+    // its result below, end every read still out (playerOutputSeq).
+    playerOutputSeq++;
     setDisabled(play, true);
     setDisabled(stop, false);
     const body = { level: Number(level.value), seconds: Number(seconds.value) };
@@ -8487,6 +8494,7 @@ function wirePlayerOutputTone() {
     try {
       const r = await API.post("/api/output/player/tone", body, controller.signal);
       if (!scope.aborted) {
+        playerOutputSeq++;
         showPlayerToneLine(r.outcome === "played" ? "ok" : "warn",
           playerToneEndText(r.outcome, r.lastError) + playerToneFormatText(r.format, r.rateHz, r.validBits, "played"));
       }
@@ -8494,6 +8502,7 @@ function wirePlayerOutputTone() {
       // An abort is Stop's, whose confirmation says what followed, or the
       // page's own going: nothing to say for it here.
       if (!controller.signal.aborted && !scope.aborted) {
+        playerOutputSeq++;
         showPlayerToneLine("err", err.status === 409
           ? `The tone did not play: ${PLAYER_TONE_WORDS[err.code] || err.message}`
           : `The tone did not play: ${err.message}`);
@@ -8555,8 +8564,12 @@ function showPlayerToneAgain(play, stop) {
 // what is left of them: an abort reaches the server only as its connection
 // closes, which the page cannot see. It says the stop was confirmed once the
 // tone reads anything else, and past the three seconds that it was not, never
-// that it was. A later Play or Stop ends it, and so do the page's going
-// (scope) and its being hidden.
+// that it was, by the last tone a read answered: a read that failed, or was
+// cut off at the three seconds, keeps the tone read before it, and one that
+// answered replaces it, with none where no tone runs. A stop not confirmed
+// leaves its line for the next status to say again (busyShown). A later Play
+// or Stop ends it, and so do the page's going (scope) and its being hidden;
+// a read it made paints only while it stands (current).
 async function confirmPlayerToneStop(scope) {
   const seq = ++playerTone.stopSeq;
   playerTone.confirming = true;
@@ -8564,16 +8577,19 @@ async function confirmPlayerToneStop(scope) {
   const current = () => seq === playerTone.stopSeq && !scope.aborted;
   showPlayerToneLine("ok", "Stopping the tone…");
   let tone = null;
+  let answered = false;
   for (;;) {
-    const st = await readPlayerOutputForTone(scope, deadline - Date.now());
+    const st = await readPlayerOutputForTone(scope, deadline - Date.now(), current);
     if (!current()) return;
-    tone = st && st.available && st.running ? st.running.tone : null;
-    const state = tone ? tone.state : "";
-    if (tone && state !== "playing" && state !== "stopping") {
+    const t = st && st.available && st.running ? st.running.tone : null;
+    if (st) tone = t;
+    answered = answered || Boolean(st);
+    const state = t ? t.state : "";
+    if (t && state !== "playing" && state !== "stopping") {
       playerTone.confirming = false;
       playerTone.busyShown = false;
       if (state === "idle") showPlayerToneLine("ok", "The tone stopped.");
-      else showPlayerToneLine("warn", playerToneStatusText(tone));
+      else showPlayerToneLine("warn", playerToneStatusText(t));
       return;
     }
     if (Date.now() >= deadline) break;
@@ -8582,17 +8598,18 @@ async function confirmPlayerToneStop(scope) {
     if (Date.now() >= deadline) break;
   }
   playerTone.confirming = false;
-  playerTone.busyShown = Boolean(tone);
-  showPlayerToneLine("warn", tone
-    ? `The stop is not confirmed: three seconds on, the bridge still reads the tone as ${tone.state}.`
-    : "The stop is not confirmed: the bridge's status could not be read.");
+  playerTone.busyShown = true;
+  let text = "The stop is not confirmed: the bridge's status could not be read.";
+  if (tone) text = `The stop is not confirmed: three seconds on, the bridge still reads the tone as ${tone.state}.`;
+  else if (answered) text = "The stop is not confirmed: the bridge's player is not running, and its status says nothing of the tone.";
+  showPlayerToneLine("warn", text);
 }
 
 // readPlayerOutputForTone reads the status for a Stop's confirmation within
 // ms and the page's scope, a read past either answering null as one that
-// failed does, and paints it unless a later paint overtook it; null where it
-// could not be read.
-async function readPlayerOutputForTone(scope, ms) {
+// failed does, and paints it only while the confirmation stands (current)
+// and no later paint overtook it; null where it could not be read.
+async function readPlayerOutputForTone(scope, ms, current) {
   const seq = ++playerOutputSeq;
   const bound = new AbortController();
   const end = () => bound.abort();
@@ -8600,7 +8617,7 @@ async function readPlayerOutputForTone(scope, ms) {
   scope.addEventListener("abort", end, { once: true });
   try {
     const st = await API.get("/api/output/player", bound.signal);
-    if (seq === playerOutputSeq) renderPlayerOutput(st);
+    if (current() && seq === playerOutputSeq) renderPlayerOutput(st);
     return st;
   } catch {
     return null;
