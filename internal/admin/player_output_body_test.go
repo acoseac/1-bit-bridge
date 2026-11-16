@@ -102,10 +102,15 @@ func TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress(t *testing.T) {
 			"read tcp6: i/o timeout", []string{"2001:db8::10", "2001:db8::23", "47789", "54321"}},
 		{"a timeout over IPv6 loopback",
 			&net.OpError{Op: "read", Net: "tcp6", Source: tcpAddr("::1", 47789), Addr: tcpAddr("::1", 54321), Err: os.ErrDeadlineExceeded},
-			"read tcp6: i/o timeout", []string{"[::1]", "47789", "54321"}},
+			"read tcp6: i/o timeout", []string{"::1", "47789", "54321"}},
 		{"an error whose own words name addresses",
 			errors.New("stream from 203.0.113.7:443 and [2001:db8::7]:443 cut short"),
 			"cut short", []string{"203.0.113.7", "2001:db8::7"}},
+		// An IPv6 address in an error's words with no brackets, beside a time
+		// of day the scrub must leave as it is (B601's round 3).
+		{"an error whose own words name IPv6 addresses bare",
+			errors.New("a reset from 2001:db8::9 and ::1, seen at 10:42:07"),
+			"seen at 10:42:07", []string{"2001:db8::9", "::1"}},
 	} {
 		for _, route := range playerBodyRoutes {
 			for _, at := range []struct{ name, head string }{
@@ -136,6 +141,25 @@ func TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress(t *testing.T) {
 					requireNothingAsked(t, fake)
 				})
 			}
+		}
+	}
+}
+
+// TestTheBodyReadScrubTakesOnlyWhatParsesAsAnIPv6Address (B601's round 3):
+// scrubBareIPv6 replaces an IPv6 address written without brackets, a zone
+// with it and a colon after it kept, and leaves a run of colons that is no
+// address (a time of day, a hardware address) as it is.
+func TestTheBodyReadScrubTakesOnlyWhatParsesAsAnIPv6Address(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"a reset from 2001:db8::9 and ::1, seen at 10:42:07", "a reset from <ip> and <ip>, seen at 10:42:07"},
+		{"read from 2001:db8::9: connection reset", "read from <ip>: connection reset"},
+		{"from fe80::1%eth0 at 10:42", "from <ip> at 10:42"},
+		{"the full form 2001:0db8:0000:0000:0000:0000:0000:0001.", "the full form <ip>."},
+		{"a hardware address 00:1a:2b:3c:4d:5e", "a hardware address 00:1a:2b:3c:4d:5e"},
+		{"read tcp6: i/o timeout", "read tcp6: i/o timeout"},
+	} {
+		if got := scrubBareIPv6(tc.in); got != tc.want {
+			t.Errorf("scrubBareIPv6(%q) = %q; want %q", tc.in, got, tc.want)
 		}
 	}
 }

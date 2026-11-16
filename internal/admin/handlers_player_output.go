@@ -40,6 +40,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -621,9 +622,10 @@ func writePlayerBodyUnread(w http.ResponseWriter, r *http.Request, err error) {
 // bodyReadFault is what a log line says of err, the error a request body's
 // reader answered: its words with a socket error's two ends left out (a
 // *net.OpError's "read tcp <local>-><remote>: <cause>" is "read tcp: <cause>"),
-// and every address the log export redacts left in them replaced (a dotted
-// IPv4 one, a bracketed IPv6 one), loopback's too, so the line names no
-// client however the error was made.
+// and every address left in them replaced, loopback's too: a dotted IPv4 one
+// and a bracketed IPv6 one, as the log export redacts them, and an IPv6 one
+// written bare (scrubBareIPv6), so the line names no client however the
+// error was made.
 func bodyReadFault(err error) string {
 	text := err.Error()
 	var op *net.OpError
@@ -633,7 +635,32 @@ func bodyReadFault(err error) string {
 		text = strings.ReplaceAll(text, op.Error(), bare.Error())
 	}
 	text = ipv4Re.ReplaceAllString(text, "<ip>")
-	return ipv6Re.ReplaceAllString(text, "<ip>")
+	return scrubBareIPv6(ipv6Re.ReplaceAllString(text, "<ip>"))
+}
+
+// bareIPv6Run is a run of text that may be an IPv6 address written without
+// brackets (hex digits, colons and dots, two colons at least), with a zone
+// after it.
+var bareIPv6Run = regexp.MustCompile(`[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*(?:%[0-9A-Za-z._-]+)?`)
+
+// scrubBareIPv6 replaces each run of text (bareIPv6Run) that net.ParseIP takes
+// for an IPv6 address, its zone with it, and leaves any other run as it is: a
+// time of day, a hardware address. A colon or a dot that ends the run, as the
+// colon after an address before an error's own words does, stays after the
+// replacement.
+func scrubBareIPv6(text string) string {
+	return bareIPv6Run.ReplaceAllStringFunc(text, func(run string) string {
+		addr, _, zoned := strings.Cut(run, "%")
+		tail := ""
+		for !zoned && addr != "" && net.ParseIP(addr) == nil && strings.ContainsAny(addr[len(addr)-1:], ":.") {
+			tail = addr[len(addr)-1:] + tail
+			addr = addr[:len(addr)-1]
+		}
+		if !strings.Contains(addr, ":") || net.ParseIP(addr) == nil {
+			return run
+		}
+		return "<ip>" + tail
+	})
 }
 
 // playerEnabledRequest is POST /api/output/player/enabled's body.
