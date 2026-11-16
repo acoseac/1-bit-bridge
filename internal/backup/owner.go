@@ -82,8 +82,12 @@ func (o *owner) release() {
 		_ = o.f.Close()
 		o.f = nil
 	}
+	key := o.key
 	ownedHere.Delete(o.key)
 	o.key = ""
+	if hook := afterOwnerRelease.Load(); hook != nil {
+		(*hook)(key)
+	}
 }
 
 // ownerKey is dir as ownedHere keys it.
