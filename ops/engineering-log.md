@@ -100420,6 +100420,227 @@ tree with it the budgets check is clean (the worst load from 77.4% to 77.5%,
 `player.md` at 98,849 bytes), as are its self-test and those of `rules-for.py`
 and `move_entry.py`.
 
+## 2026-11-15 — B728 B9 PR 3a: the engine reserves the player's configuration while a choice is written
+
+Branch `feat/b728-b9-pr3a-reservation`, from main at ca4473ff (3f4843e1,
+the brief's main, and B872U, which touches `internal/updater` alone).
+Commits: 2fd8ba6f (the reservation, its tests, `CLAUDE.md`'s two rows and
+the two History files), 25986504 (the lost-grant test goes on past a wrong
+refusal, so a control shows both of its findings), then this record. The
+rules lines of `output.md` and `openhome.md` are in this branch's rules
+patch. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, TMPDIR on disk.
+
+### The hazard
+
+The player's backend writes a DAC's DSD choice only while it holds no
+session's record (B9 PR 2's configuration lease). Between a release the
+engine has acknowledged and the Start that follows it, the backend holds
+none: a seek, a Next or a Previous, a PlayID while playing, a skip past an
+entry refused at its start, a Play during a release to play. A write let in
+there would run in the middle of a transition, so the check must be the
+engine owner's, in the one step that finds the transport stopped. Nothing
+calls the reservation yet: the DSD choice's route (B9 PR 3b) will.
+
+### What was built
+
+- `Engine.ReserveConfiguration(ctx) (ConfigLease, error)` and
+  `Engine.ReleaseConfiguration(ConfigLease)`, two commands of no lane;
+  `owner.configs`, the set of leases held; `Snapshot.ConfigurationReserved`;
+  the reasons `not_stopped` and `configuring`.
+- The grant (`reserveConfiguration`, owner.go) is refused `not_stopped`
+  unless the state is Stopped, `o.sess` is nil, `o.sessions` is empty and no
+  release is unconfirmed; maintenance and the shutdown refuse it in
+  `dispatch` before it. It moves no generation (`touched`), and draws a lease
+  from the engine's randomness that is neither zero nor held already.
+- The release is dispatched before `case o.closing`, in every state; a lease
+  not held changes nothing and publishes nothing.
+- `configRefusal` (transport.go), asked right after `outputRefusal` at its
+  three sites: `transport()` before the move and `selectEntry`; `seek()`; and
+  `afterRelease`'s play.
+- `ReserveConfiguration` asks the owner on `context.WithoutCancel(ctx)` and
+  lets go a grant `ctx` outlived, answering `ReasonCancelled` wrapping
+  `ErrNotAdmitted` and the context's error. `ReasonCancelled`'s,
+  `ErrNotAdmitted`'s and `WithAdmission`'s docs and doc.go's say so.
+- OpenHome's fault table answers both reasons 501.
+- `EnterMaintenance` is not refused while a lease is held, a residual its
+  doc, doc.go and the rule name: only the harness's `bridge output play`
+  enters maintenance (`cmd/bridge/output_play.go`), and it holds none.
+
+### The brief's reviews
+
+- **First review, 1: C6 could not go red.** Confirmed: past `ReleaseTimeout`,
+  `releaseDeadline` clears `o.sess` and keeps the session in `o.sessions`,
+  so the unconfirmed-release term alone is covered by the sessions term.
+  C6 removes both; each alone (C6a, C6b) is the other's defence in depth.
+- **First review, 2: the overlay could not reach `o.configs` or the errors.go a test
+  reads.** The red runs overlaid main's owner.go with the field and its make
+  (nothing reads it) and main's errors.go with the two reasons in the file
+  itself; T8 and T9 ran in a disposable copy of the tree with main's files on
+  disk and the two reasons in its errors.go.
+- **First review, 3: T6 passed against the no-op shim.** T6 now requires the
+  reservation shown and a Play refused `configuring` before the release.
+- **First review, 4: the cancellation exception.** Documented where the rule it
+  breaks is written (above), and T4 requires WithAdmission's channel closed
+  while the method answers `ErrNotAdmitted`.
+- **Second review, 1: maintenance beside a held reservation.** The finding's second
+  option: the brief keeps it a named residual (design 5.5), so the rule,
+  doc.go and `EnterMaintenance`'s doc say a maintenance entered while one is
+  held is not refused. The shutdown keeps the leases on purpose: nothing
+  starts once it has begun, and the release, dispatched first, still clears
+  one (T7).
+- **Second review, 2: the brief's unbound `err`.** `if err := ctx.Err(); err != nil`,
+  the chain notAdmitted's (`fmt.Errorf("%w: %w", ErrNotAdmitted, err)`).
+- **Second review, 3: a release of a lease not held.** Deletes and touches only a
+  lease held; T5 requires a second release to publish no snapshot.
+- **Second review, 4: `o.starting` and `r.output`.** `o.starting` is set only in
+  `startSession`, with `o.sess` and state Playing, and cleared in
+  `releaseSession` and `onAudible`; `o.sess` is cleared only by
+  `releaseDeadline` and `acked`, after `releaseSession`. So the grant's
+  Stopped term excludes a start under way. Every rule that starts a session
+  or will has `output` set (Play, Next, Previous, PlayID and PlayIndex that
+  start, resume or carry a play; a seek that plays); `startSession`'s two
+  callers are `transport()`'s start and `afterRelease`; `do` answers closed
+  at `e.done` before and while it waits, so a release after Run returns.
+- **Second review, 5: T6 tested no path of its own.** T6 holds the owner as it
+  admits the release (the `admitted` seam): the release has not returned and
+  the lease is shown; once it returns, at once none is shown and a Play is
+  admitted. A posted release fails it at once, every time (C11).
+
+### Red first
+
+At main, each new test failed by its own assertion, never a missing name.
+The engine's seven ran through `go test -overlay` from the worktree: main's
+seven touched files, owner.go and errors.go structural as above, and a shim
+of the remaining names with main's behaviour (`ReserveConfiguration`
+answers the zero lease and nil, `ReleaseConfiguration` does nothing,
+`ConfigurationReserved` is false). The lines are this branch's
+configuration_test.go and writes_test.go.
+
+| Test | Line | Failure at main |
+|---|---|---|
+| T1 `TestAConfigurationReservationIsGrantedOnlyWhileStopped`, stopped with entries | :143 | granted, and the snapshot shows no reservation held |
+| T1, a start the backend holds; playing; paused with its session; paused with no session | :173, :180, :186, :194 | `<nil>`, want a refusal `not_stopped` |
+| T1, releasing to stop, to pause, to play; a release left unconfirmed | :204, :217, :229, :253 | `<nil>`, want `not_stopped` |
+| T1, maintenance; the shutdown | :260, :271 | `<nil>`, want `maintenance`; `<nil>`, want `closed` |
+| T2 `TestWhateverWouldStartASessionIsRefusedWhileAReservationIsHeld` | :307 | play while a reservation is held: `<nil>`, want configuring |
+| T3 `TestTheReservationIsAskedWhereverASessionWouldStart`, the seek; the release's play | :393, :418 | got `<nil>`, want `configuring` |
+| T4 `TestAReservationGrantedAsItsCallerLeavesIsLetGo` | :483 | the reservation answered `<nil>` before the owner sent its reply |
+| T5 `TestTwoReservationsHoldUntilBothAreLetGo` | :535 | two grants share one lease |
+| T6 `TestAReleasedReservationIsGoneWhenItsReleaseReturns` | :590 | granted, and the snapshot shows no reservation held |
+| T7 `TestAReservationAfterRunIsClosedAndItsReleaseReturns` | :662 | a reservation once the shutdown began: `<nil>`, want closed |
+| T8 `TestEveryEngineReasonHasItsFault` | writes_test.go:554 | `engine.ReasonNotStopped` and `engine.ReasonConfiguring` have no row |
+| T9 `TestATransportWriteWhileTheConfigurationIsReservedIsRefused` | writes_test.go:620 | Playlist#Play: 200, want a fault |
+
+The engine's run took 0.73 s and OpenHome's 0.06 s. Every failure was the
+one written down before the run.
+
+### Controls
+
+Each control was an exact-once edit of the committed files (25986504), made
+in memory, its test binaries built without `-race`, the nine tests run by
+name, and the bytes written back from memory; `git status` was clean after
+every batch. The predictions were written before the runs. Each control took
+3.2-5.1 s.
+
+| # | Mutation | Predicted | Result |
+|---|---|---|---|
+| C1 | `configRefusal` not asked in `transport()` | T2, T5, T6 and T9 red | as predicted |
+| C2 | asked after `selectEntry` | T2's next, previous, play id and play index rows; T9 at Id | T2's four rows, the play row green; T9 red one write earlier, at Next (see below) |
+| C3 | not asked in `seek()` | T3's seek | as predicted |
+| C4 | not asked in `afterRelease` | T3's release | as predicted |
+| C5 | `do` handed the caller's ctx | T4: the refusal without `ErrNotAdmitted`, the lease held | as predicted, both lines |
+| C6 | the grant without the sessions and unconfirmed terms | T1's unconfirmed release | as predicted |
+| C6a, C6b | each of those terms alone removed | all green | as predicted |
+| C7 | `visible()` for `touched()` in the grant | T1's generation | as predicted |
+| C8 | OpenHome's two rows removed | T8; T9 green | as predicted |
+| C9 | the release dispatched after `case o.closing` | T7 | as predicted |
+| C10 | a release deletes and touches whatever the lease | T5 | as predicted |
+| C11 | the release posted as a message | T6 at once; others racy, not predicted | T6 red 20 of 20 at its first select; T1, T4, T5 and T7 red too |
+| C12 | a grant ctx outlived kept | T4 | as predicted |
+| C13 | the grant without the Stopped term | T1's paused with no session | as predicted |
+| C14 | the grant without the `o.sess` term | all green | as predicted |
+
+- **C2.** The prediction placed T9's failure at Id. SeekId moved the
+  selection to the last entry before its refusal, which made the Next after
+  it a Next past the end, which no rule refuses. So T9 failed at Next.
+- **C11.** The prediction listed T1, T2, T3, T5, T7 and T9 as possibly red
+  by the race. T4 went red as well: the release inside
+  `ReserveConfiguration` is the same posted message.
+- **Defence in depth.** C6a, C6b and C14 are the terms each covered by
+  another in every state the engine reaches. The seek's and afterRelease's
+  sites are unreachable while a grant holds, which T3 reaches through a lease
+  a hook on the owner's goroutine puts in.
+
+### Runs
+
+- **gofmt.** The pinned gofmt (`go run cmd/gofmt -l`) listed none of the
+  ten changed Go files, and `make fmt` rewrote nothing.
+- **The new tests.** Under `-race`, the engine's seven took 1.75 s and
+  OpenHome's two 1.08 s. Each package alone under `-race`: the engine 25.1 s,
+  OpenHome 37.5 s. At `-race -count=50`, the engine's seven took 37.3 s and
+  OpenHome's two 3.8 s, every run a PASS. OpenHome's player skips on tmpfs,
+  so TMPDIR was on disk and the PASS lines were counted.
+- **The gate**, at 25986504, in one slot session (15:57-16:36).
+  - `make fmt`: 1 s. `make vet`: 6 s. `GOOS=linux GOARCH=arm make vet`: 8 s.
+    `GOOS=linux GOARCH=386 make vet`: 10 s.
+  - `GOOS=windows` and `GOOS=darwin` `go vet` of the two packages: 3 s each.
+  - The qualification version gate (`scripts/qualification-version`): OK
+    against 3f4843e1 and against ca4473ff.
+  - `make test`: 2,292 s, 88 packages ok. Among them: the engine 41.6 s,
+    OpenHome 40.9 s, `internal/manifest` 1,777 s, `internal/admin` 1,197 s.
+  - `make test`'s cmd/bridge: FAIL at 1,793.97 s of its 30-minute cap. The
+    failures were `TestMixedCaseConcurrentLookupsEnqueueOnce` and four cases
+    of `TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, each "the
+    analysis pool never settled", at 16:27:42-56. That is the binary's last
+    30 s, where `regenFixture.settle` waits until `serveGiveUpTime` (the
+    deadline less 30 s) and so gives up at once: the cap, not the change.
+    cmd/bridge alone, as B897's split runs it (`-race -p 1 -timeout 45m`, in
+    the slot): ok, 1,741.5 s.
+  - `make build-all`: 52 s.
+- **Docs.** `make docs-check` passed on the commit. On a copy of HEAD with
+  the rules patch applied, each file was byte-equal to what was built, and:
+  - the budgets passed;
+  - `verify_moves.py` passed against HEAD and against 3f4843e1, with the
+    edited blocks declared (openhome.md's write bullet, its History long
+    form, CLAUDE.md's two tables);
+  - cmd/bridge's `TestEveryCitedTestNameExists`,
+    `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` passed.
+    A ghost citation planted in the copy's output.md failed the first
+    ("cited by .claude/rules/output.md"), so it read the copy.
+- **After this record.** The three sweeps ran over this record before its
+  commit, on the worktree and on the patched copy, and passed.
+
+### Budgets
+
+- `output.md`: 84,132 to 86,108 bytes (the rules patch).
+- `openhome.md`: 44,178 to 44,318 bytes (the patch).
+- `CLAUDE.md`: 53,440 to 53,664 bytes, 83.8%.
+- The worst load, `output_dac_bind_test.go`: 82.4% with the patch.
+- The History files: output 88,895 to 96,775 bytes; openhome 110,909 to
+  111,316 bytes.
+
+### Addendum: the branch as it merges
+
+After this record the branch took four more commits, none of them code:
+- bf80b8d4 names this record's review findings by number, and a test
+  comment's, where it named who found them;
+- a2124345 commits the rules lines of `output.md` and `openhome.md`, so the
+  patch the record names is no longer separate;
+- b381015b corrects the `output.md` bullet and its long form: a grant that
+  outlived its caller's context, answered as a cancellation wrapping
+  `ErrNotAdmitted`; the stalled owner's delay of the release, a residual;
+  the holder's half stated as what a holder must do, none running in
+  production until B728 B9 PR 3b;
+- 8a2c3b4d turns the last reversed phrase of that long form.
+
+Run again on the tree as it merges, this addendum included: `make
+docs-check` (the budgets and both self-tests) and cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` passed. `verify_moves.py` was not run again: the later
+commits move nothing, they edit one bullet and its long form in place. The
+sizes as merged: `output.md` 86,328 bytes, `openhome.md` 44,318 bytes, the
+History files 97,039 (output) and 111,316 (openhome) bytes.
 ## 2026-11-15 — B898 PR 2: the harvest state's open and bridge restore's look before its prompt wait out a read Windows refuses for a moment
 
 **The hazard.** Two production reads met Windows' refusal of an open once and
