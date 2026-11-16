@@ -164,33 +164,45 @@ func TestTheBodyReadScrubTakesOnlyWhatParsesAsAnIPv6Address(t *testing.T) {
 	}
 }
 
-// TestAPlayerWritesJSONFaultKeepsItsWords (B601's round 2): what
-// decodePlayerBody refuses in the JSON itself or for its size keeps the
+// TestAPlayerWritesJSONFaultKeepsItsWords (B601's round 2): a fault of the JSON
+// inside the object, or of its size inside it or after it, keeps the
 // decoder's words, which name nothing but the body (a syntax error, a value
 // of another type, a key the write does not take, a body cut short, one past
-// the bound inside its object or after it, none at all), and logs no read
-// failure: only a body whose reader failed is answered in fixed words. A body
-// past the bound after its object said "one JSON object, and nothing after
-// it" until then, which it may well be.
+// the bound inside its object or after it, none at all); trailing JSON or
+// content after the object (a stray character, a second value) is "one JSON
+// object, and nothing after it", word for word (B601's round 3); and none of
+// them logs a read failure, whose fixed words are a failed reader's alone. A
+// body past the bound after its object said "one JSON object, and nothing
+// after it" until round 2, which it may well be.
 func TestAPlayerWritesJSONFaultKeepsItsWords(t *testing.T) {
+	const trailing = "one JSON object, and nothing after it"
 	for _, route := range playerBodyRoutes {
 		open := route.object[:len(route.object)-1]
-		for _, tc := range []struct{ name, body, words string }{
-			{"a syntax error", open + "]", "invalid character"},
-			{"a value of another type", route.wrongType, "cannot unmarshal"},
-			{"a key it does not take", open + `,"x":1}`, `unknown field "x"`},
-			{"a body cut short", open, "unexpected EOF"},
-			{"a body past the bound inside its object", open + `,"x":"` + strings.Repeat("a", adminMaxBodyBytes) + `"}`, "request body too large"},
-			{"a body past the bound after its object", route.object + strings.Repeat(" ", adminMaxBodyBytes), "request body too large"},
-			{"no body", "", "a JSON body is required"},
+		for _, tc := range []struct {
+			name, body, words string
+			exact             bool // the message is words, not merely holds them
+		}{
+			{"a syntax error", open + "]", "invalid character", false},
+			{"a value of another type", route.wrongType, "cannot unmarshal", false},
+			{"a key it does not take", open + `,"x":1}`, `unknown field "x"`, false},
+			{"a body cut short", open, "unexpected EOF", false},
+			{"a body past the bound inside its object", open + `,"x":"` + strings.Repeat("a", adminMaxBodyBytes) + `"}`, "request body too large", false},
+			{"a body past the bound after its object", route.object + strings.Repeat(" ", adminMaxBodyBytes), "request body too large", false},
+			{"no body", "", "a JSON body is required", true},
+			{"a stray character after the object", route.object + "x", trailing, true},
+			{"a second value after the object", route.object + " 1", trailing, true},
 		} {
 			t.Run(route.path+"/"+tc.name, func(t *testing.T) {
 				srv, fake, cfgPath := newPlayerTestServer(t)
 				want := readFileOrNil(cfgPath)
 				logs := loggingtest.Record(t)
 				w, env := playerBodyRequest(t, srv, route.path, &unreadBody{head: tc.body, err: io.EOF})
-				if w.Code != http.StatusBadRequest || env.Error != errCodeBadJSON || !strings.Contains(env.Message, tc.words) {
-					t.Errorf("= %d %q %q; want 400 %s in the decoder's words, %q", w.Code, env.Error, env.Message, errCodeBadJSON, tc.words)
+				said := strings.Contains(env.Message, tc.words)
+				if tc.exact {
+					said = env.Message == tc.words
+				}
+				if w.Code != http.StatusBadRequest || env.Error != errCodeBadJSON || !said {
+					t.Errorf("= %d %q %q; want 400 %s, %q", w.Code, env.Error, env.Message, errCodeBadJSON, tc.words)
 				}
 				if lines := logs.Lines(playerBodyUnreadLine); len(lines) != 0 {
 					t.Errorf("a fault of the JSON was logged as a body not read: %q", lines)

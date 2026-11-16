@@ -551,10 +551,13 @@ func (s *Server) apiPlayerOutputDACs(w http.ResponseWriter, r *http.Request) {
 // whose words name both ends of the socket, which the response carried until
 // B601's round 2. The reader's own failure (bodyReader) decides it, in either
 // decode, and is answered in fixed words and logged without an address
-// (writePlayerBodyUnread). A fault of the JSON itself (a syntax error, a value
-// of another type, a key it does not take, a body cut short) or of its size
-// (*http.MaxBytesError, inside the object or after it) keeps the decoder's
-// words, which name nothing but the body.
+// (writePlayerBodyUnread). A fault of the JSON inside the object (a syntax
+// error, a value of another type, a key it does not take, a body cut short),
+// or of its size inside it or after it (*http.MaxBytesError), keeps the
+// decoder's words, which name nothing but the body; trailing JSON or content
+// after the object (a second value, a stray character) is "one JSON object,
+// and nothing after it", and a reader's failure, inside the object or after
+// it, playerBodyUnread.
 func decodePlayerBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	body := &bodyReader{r: r.Body}
 	dec := json.NewDecoder(http.MaxBytesReader(w, body, adminMaxBodyBytes))
