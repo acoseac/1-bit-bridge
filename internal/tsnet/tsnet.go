@@ -155,13 +155,15 @@ type Config struct {
 	// See startUnlocked for the resolution code.
 	AuthKey string
 	// Hostname, when set, is the name the node registers with and keeps
-	// (tailscale.hostname), whatever its state holds. Empty, the state
-	// decides at each Start (startUnlocked, nodeName): a node registered in
-	// StateDir keeps the name its current profile carries, so neither an
-	// upgrade nor a library rename renames it (a rename can change its
-	// MagicDNS name and its certificate's, which paired apps hold); a node
-	// not registered yet is DefaultHostname; and a state that is there and
-	// cannot be read is UnreadableStateHostname, with one line saying why.
+	// (tailscale.hostname), whatever its state holds, but for a state file
+	// that holds nothing, which refuses the start whatever Hostname says
+	// (EmptyStateError). Empty, the state decides at each Start
+	// (startUnlocked, nodeName): a node registered in StateDir keeps the name
+	// its current profile carries, so neither an upgrade nor a library
+	// rename renames it (a rename can change its MagicDNS name and its
+	// certificate's, which paired apps hold); a node not registered yet is
+	// DefaultHostname; and a state that is there and cannot be read is
+	// UnreadableStateHostname, with one line saying why.
 	Hostname string
 	// UnreadableStateHostname is the name a Start gives the node when
 	// Hostname is empty and its state is there and cannot be read: the
@@ -249,6 +251,10 @@ func NewServer(cfg Config) (*Server, error) {
 // Subsequent runs (state persisted) re-authenticate from the state
 // store and return as soon as the tailnet is reachable.
 //
+// A state file that holds nothing (empty, or white space alone) ends the
+// start before anything is built, with *EmptyStateError: Tailscale's start
+// refuses that file, and the bridge says so in its own words (nodeName).
+//
 // Start builds nothing on a context that is already done (it returns
 // the context's error) or after Close, and a Close that lands while
 // it runs stops it: see Server.
@@ -323,8 +329,9 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // LastStartError is the error the last Start that ended returned (a
-// *LogsRequiredError for a start the tailnet refused), or nil before any has
-// ended and once one has succeeded. A Start the caller's context or Close
+// *LogsRequiredError for a start the tailnet refused, an *EmptyStateError
+// for one refused over a state file that holds nothing), or nil before any
+// has ended and once one has succeeded. A Start the caller's context or Close
 // stopped is kept too.
 func (s *Server) LastStartError() error {
 	s.lifecycleMu.Lock()
@@ -360,7 +367,14 @@ func (s *Server) startUnlocked(ctx context.Context) (node, error) {
 		authKey = s.cfg.AuthKey
 	}
 
-	hostname, registered := s.nodeName()
+	// The state names the node, and a state file that holds nothing ends the
+	// start here, before the node is built, whatever the name or the key:
+	// Tailscale's start refuses that file in its own words, and the bridge
+	// never moves or replaces it (nodeName, EmptyStateError).
+	hostname, registered, err := s.nodeName()
+	if err != nil {
+		return nil, err
+	}
 	if registered == stateNotRegistered && authKey == "" {
 		s.log.Warn("tsnet: no registered node in the state dir and no AuthKey — interactive auth required",
 			slog.String("stateDir", s.cfg.StateDir))
@@ -642,24 +656,30 @@ func extractTailscaleAuthURL(msg string) string {
 type registration int
 
 const (
-	stateNotRegistered registration = iota // no file, an empty one, "{}", an authentication that never finished
+	stateNotRegistered registration = iota // no file, "{}", an authentication that never finished
 	stateRegistered                        // the current profile carries a node identity
 	stateUnreadable                        // the state is there and could not be read for either answer
 )
 
 // nodeName is the name startUnlocked registers the node with, and what the
-// state dir says of its registration. Config.Hostname wins whatever the state
-// holds. Otherwise a registered node keeps the name its persisted current
-// profile carries, a node not registered yet is DefaultHostname, and a state
-// that is there and cannot be read is taken for neither: the start gives the
-// node Config.UnreadableStateHostname, the name earlier versions gave every
-// node, and says so in one line naming no path.
+// state dir says of its registration. A state file that holds nothing names
+// no node at all: nodeName returns its refusal (*EmptyStateError), whatever
+// Config.Hostname says, and the start builds nothing. Otherwise
+// Config.Hostname wins whatever the state holds; a registered node keeps the
+// name its persisted current profile carries, a node not registered yet is
+// DefaultHostname, and a state that is there and cannot be read is taken for
+// neither: the start gives the node Config.UnreadableStateHostname, the name
+// earlier versions gave every node, and says so in one line naming no path.
 //
 // The state is not the file's existence: upstream writes "{}" before any
 // authentication, so a first start that failed, or an authentication that was
 // abandoned, leaves a file and no registered node (readNodeState).
-func (s *Server) nodeName() (string, registration) {
+func (s *Server) nodeName() (string, registration, error) {
 	st, err := readNodeState(s.cfg.StateDir)
+	var empty *EmptyStateError
+	if errors.As(err, &empty) {
+		return "", stateNotRegistered, empty
+	}
 	reg := stateNotRegistered
 	switch {
 	case err != nil:
@@ -668,11 +688,11 @@ func (s *Server) nodeName() (string, registration) {
 		reg = stateRegistered
 	}
 	if s.cfg.Hostname != "" {
-		return s.cfg.Hostname, reg
+		return s.cfg.Hostname, reg, nil
 	}
 	switch reg {
 	case stateRegistered:
-		return st.hostname, reg
+		return st.hostname, reg, nil
 	case stateUnreadable:
 		name := s.cfg.UnreadableStateHostname
 		if name == "" {
@@ -681,7 +701,7 @@ func (s *Server) nodeName() (string, registration) {
 		s.log.Warn("tsnet: "+err.Error()+", so this start cannot tell which name the node has, and registers it as "+
 			"earlier versions did; set tailscale.hostname to choose the node's name",
 			slog.String("name", name))
-		return name, reg
+		return name, reg, nil
 	}
-	return DefaultHostname, reg
+	return DefaultHostname, reg, nil
 }

@@ -441,7 +441,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 		return false
 	}
 	p.dsd = openPlayerDSD(cfg.DataDir, player, w.Trees.or(hostTrees), p.seams)
-	_ = p.dsd.migrate(ctx, nil)
+	_ = p.dsd.migrate(ctx, nil, nil)
 	if ctx.Err() != nil {
 		p.markReady()
 		return false

@@ -4212,10 +4212,29 @@ func validateVariantsDir(variantsDir string, libraryRoots []string) error {
 	// filepath.EvalSymlinks stopped following one (Go 1.23). fsutil.IsUnderAny is the single canonical form, shared with the
 	// admin handler + the `bridge variants move` CLI so all three stay in
 	// lockstep.
-	if matched := fsutil.IsUnderAny(variantsDir, libraryRoots); matched != "" {
+	if matched := rootContainment(variantsDir, libraryRoots); matched != "" {
 		return fmt.Errorf("must not be under a library root, %s (variants would tangle with source files)", libraryRootIndex(matched, libraryRoots))
 	}
 	return nil
+}
+
+// rootContainment is how Validate asks whether a directory setting resolves
+// under a library root: fsutil.IsUnderAny, which resolves each root, so a
+// load of a config that sets upscale.variantsDir or upscale.tempDir waits on
+// every root, one whose mount does not answer included (bridge doctor bounds
+// its load for that, backlog B650). SetRootContainmentForTest replaces it.
+var rootContainment = fsutil.IsUnderAny
+
+// SetRootContainmentForTest makes Validate's checks of upscale.variantsDir
+// and upscale.tempDir against the library roots ask fn in place of
+// fsutil.IsUnderAny, and returns what puts it back: a test stands in for a
+// root whose resolution does not answer, which no filesystem a test can make
+// provides. Tests only, and process-global: a test that sets it does not call
+// t.Parallel, and puts it back once every load it started has returned.
+func SetRootContainmentForTest(fn func(candidate string, roots []string) string) (restore func()) {
+	prev := rootContainment
+	rootContainment = fn
+	return func() { rootContainment = prev }
 }
 
 // libraryRootIndex names the library root matched, one of roots, by its
@@ -4244,7 +4263,7 @@ func validateRenderTempDir(tempDir string, libraryRoots []string) error {
 	if !filepath.IsAbs(tempDir) {
 		return errors.New("must be an absolute path")
 	}
-	if matched := fsutil.IsUnderAny(tempDir, libraryRoots); matched != "" {
+	if matched := rootContainment(tempDir, libraryRoots); matched != "" {
 		return fmt.Errorf("must not be under a library root, %s (render scratch would land inside the read-only library)", libraryRootIndex(matched, libraryRoots))
 	}
 	return nil

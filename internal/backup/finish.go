@@ -747,14 +747,17 @@ func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), 
 // goroutine of its own, and waits for it StopWriteBound at most: the end of
 // a verification refused before it held anything, which a filesystem that
 // does not answer must not hold up; past it, end is left to end on its own,
-// holding nothing else. A nil end does nothing.
+// holding nothing else, and counted until it does (activeReleases). A nil
+// end does nothing.
 func letGoWithin(end func()) {
 	if end == nil {
 		return
 	}
+	activeReleases.Add(1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer activeReleases.Add(-1)
 		end()
 	}()
 	t := time.NewTimer(StopWriteBound)
@@ -768,14 +771,20 @@ func letGoWithin(end func()) {
 // runCheck runs checkBundle on a goroutine of its own whose OS thread takes
 // the lowest priority (runLowPriority), and waits for it: until it returns,
 // or, once checkCtx has ended (the caller's stop, or the deadline), for half
-// of StopWriteBound more, then gives up on it (gaveUp), a read the stop cannot
-// reach (a hung mount) left to it, so that the INCOMPLETE written after it
-// still comes within the caller's bound; what it would answer then is
-// dropped. finished closes once the check's goroutine has ended. A check that
-// panics answers INCOMPLETE (ReasonAborted).
+// of StopWriteBound more (a test's grace in its place, SetCheckGraceForTest),
+// then gives up on it (gaveUp), a read the stop cannot reach (a hung mount)
+// left to it, so that the INCOMPLETE written after it still comes within the
+// caller's bound; what it would answer then is dropped. finished closes once
+// the check's goroutine has ended. A check that panics answers INCOMPLETE
+// (ReasonAborted).
 func runCheck(checkCtx context.Context, dir string, m Manifest, level CheckLevel) (v Verification, gaveUp bool, finished <-chan struct{}) {
 	out := make(chan Verification, 1)
-	finished = runLowPriority(func() { out <- checkBundle(checkCtx, dir, m, level) }, func(any) { out <- abortedVerdict() })
+	finished = runLowPriority(func() {
+		if hook := onCheckEntry.Load(); hook != nil {
+			(*hook)(dir)
+		}
+		out <- checkBundle(checkCtx, dir, m, level)
+	}, func(any) { out <- abortedVerdict() })
 	select {
 	case v = <-out:
 		return v, false, finished
@@ -783,10 +792,20 @@ func runCheck(checkCtx context.Context, dir string, m Manifest, level CheckLevel
 	}
 	t := time.NewTimer(StopWriteBound / 2)
 	defer t.Stop()
+	expired := t.C
+	var grace <-chan struct{}
+	if fn := checkGraceForTest.Load(); fn != nil {
+		if g := (*fn)(dir); g != nil {
+			// A test's grace in the timer's place (SetCheckGraceForTest).
+			expired, grace = nil, g
+		}
+	}
 	select {
 	case v = <-out:
 		return v, false, finished
-	case <-t.C:
+	case <-expired:
+		return Verification{}, true, finished
+	case <-grace:
 		return Verification{}, true, finished
 	}
 }

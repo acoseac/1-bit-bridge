@@ -8,7 +8,9 @@
 //
 // The bridge logs to STDERR (logging.Init), and only a SERVICE install
 // redirects that to a file — the unit templates set StandardOutput/
-// StandardError to packaging.DefaultLogPath(). An operator running
+// StandardError to packaging.DefaultLogPath(), the Windows sign-in
+// launcher redirects to it, and the Windows service opens its own under
+// %PROGRAMDATA% (Deps.LogPath). An operator running
 // `bridge serve` in a terminal has no log file whatsoever, and a Download
 // button that 404s with no explanation would read as a bug rather than as the
 // truth about how this bridge was started. The status call lets the UI say
@@ -269,7 +271,9 @@ func (s *Server) writeBundleHeader(w http.ResponseWriter, redacted bool) {
 	}
 	fmt.Fprintf(w, "redacted:         %t\n", redacted)
 	if redacted {
-		fmt.Fprintf(w, "                  absolute paths and non-loopback IPs replaced.\n")
+		fmt.Fprintf(w, "                  absolute paths and non-loopback IPs replaced, and\n")
+		fmt.Fprintf(w, "                  a DAC's product string dropped from the player's\n")
+		fmt.Fprintf(w, "                  lines that name a DAC, its USB IDs kept.\n")
 		fmt.Fprintf(w, "                  This is a courtesy pass, not an anonymiser — read\n")
 		fmt.Fprintf(w, "                  the file before posting it somewhere public.\n")
 	}

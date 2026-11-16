@@ -95028,6 +95028,1191 @@ the brief asked for the packages. The rules patch applies at the round's
 commit, and `scripts/check-doc-budgets.py` is clean on a copy with it applied
 (`cli-serve.md` 97,290 bytes). Windows is the PR's CI windows job's to show.
 
+## 2026-11-12 — B728 B9 PR 2: a DAC's DSD choice written only while the player is stopped, and B853
+
+Base: main at 3a6b924e (B9 PR 1, #1448, at 4b21e2ce); branch `feat/b728-b9-pr2`. The owner
+(2026-11-10): "Stop playback to change DSD". A DAC's choice is written only while the player is
+quiescent; #1434's write beside what plays (19 review rounds, its tip 0df60ade) is withdrawn, PR 1
+moved its lifecycle fixes to main, and this PR rebuilds the write in the backend, stop-only, with
+B853's fix. The route `PUT /v1/outputs/{id}/dsd`, `bridgeDSDChoice`, serve's adapter, PROTOCOL.md
+and its iOS mirror are PR 3's; the console is B13's, the app I4's. No hardware check was run.
+
+**What came back from #1434, by behaviour, never by cherry-pick.** `policy/choice.go`,
+`Inputs.WithState` and `choice_test.go`'s 16 cases, as they were (`Choose`: the four checks that
+read the state, in order, then the write; `StoredRevision`; `Intersect`; `dsd_choice_uncertain`).
+In the backend: the outcomes, `would_interrupt` dropped and `playback_not_stopped` added;
+`ChoiceRequest` without `Interrupt`; `ChoiceResult`; the log line (the key and the modes, no
+serial or port); the writes' turn, taken before the lease, so a second write waits within its
+context and answers `stale` with the revision the first made durable; `choiceFenced`;
+`dsdWrite`; `readBox` and `setOver`, `landedChoice` and the intersection; `oweProbe`, with
+`dsdProbe.asked` split from the generation; `playbacktest.MemStore`'s `Land`, `LandedState` and
+`Landed`, and `SetSeamsForTest`. #1434's `dsd_choice_test.go` (its 14 cases, adapted, beside the
+new `TestARefreshAfterALandedWriteKeepsTheIntersection`), its `dsd_choice_work_test.go`'s two
+(`…AChoiceWrittenBesideAProbeDropsNothingAndStaysAsked` became
+`TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn`: the probe is now waited for, never run beside
+the write; `TestAChoiceWriteIsAWriteOfTheDSDState`), and from its internal file the checks' order,
+the lock order and the panic case (`…AWriteThatPanicsLeavesNothingPending` became
+`TestAWriteThatPanicsLetsGoOfItsLeaseAndItsTurn`). Main's probe words that said a choice forgets
+the probe's answers (`dsd_policy.go`, `dsd_work.go`, `internal/alsapcm/probe_cache.go`, and
+`dsd_work_test.go`'s two subtests, now a migration's part) are worded as #1434 worded them.
+
+**What did not come back.** `pendingChoice`, `pendingFor`, `changes`, `planAt`,
+`writeInterrupts`, `settleChoice`, `lockSettled`, `awaitWrite`, `settleOpen`, `reaskDSD`,
+`refusedUnder`, `dsdJudgement.interrupts`, `handedOff`, `maxChoiceRounds`, `errChoiceRound`,
+`errWouldInterrupt`, and every choice wait in the session, open, native, producer, convert and
+reporter code: nothing waits for, classifies or re-asks a pending write. Retired with them: the
+rest of #1434's internal file (`…TheWriteAsksWhatReconciliationDoes`,
+`…AWriteCountsWhatItInterruptsNotWhatTheBoxDoes`,
+`…AnOccurrenceWhoseRateTheWriteChangesWaitsAtTheEndOfItsOpen`,
+`…TheProducerHoldsAnOccurrenceAPendingWriteWouldReplan`, `…ALostReconciliationIsTriedOnceMore`),
+its `dsd_choice_round2_test.go` and `internal/alsapcm/playback_dsd_choice*_test.go`.
+
+**B853.** `admitDSD` refused every DSD entry of a session with `nativeRevoked` set as
+`dsd_dac_unread`, and `openSuccessor` a successor whose open ended after it as `native_revoked`,
+"DSD permission revoked", whatever set the flag. Four paths set it: `stopDSD` from
+`refreshDSD`'s containment of a policy reading (the word right) and from `reconcileDSD`'s
+contained panic (its only caller there; the reconciliation's ordinary revocations call `Revoke`),
+`Revoke` itself, and the qualification path's `reconcilePermission`, which sets the flag directly
+and calls `Revoke` only where a native output is active (Codex's review of the brief, finding 4).
+The reconciliation's contained panic records the session's fault (`faulted`, `ReasonFailed`),
+which `checkDSDActivation` answers as `backend_failed` with its words: the set did read, and the
+session's occurrences were never judged against it, so neither `native_revoked` nor
+`dsd_dac_unread` says what happened; that path's word is `backend_failed`. The cause is now
+recorded where the flag is set (`revokeDSDLocked`, under the session's lock); a failed reading
+replaces any earlier cause, word and detail, and nothing replaces it; otherwise the first stands.
+Both of `admitDSD`'s refusals and `openSuccessor`'s answer the record (`dsdRevokedLocked`). Red on
+main (a1b08bde's tests over bc236545's code):
+
+- the rig, `TestADSDEntryAfterAnOrdinaryRevocationIsRefusedForIt` (the queue of
+  `TestARevocationOfAPreparedSuccessorLetsThePCMPlayOn` extended past `b` with a PCM entry and
+  a DSD one): the DSD entry skipped `dsd_dac_unread`, "the effective DSD policy did not read",
+  where the revocation's reason is "an occurrence's DSD plan left the effective set, and the
+  engine hands nothing off again";
+- `TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause`: a reconciliation that panicked,
+  an ordinary revocation, and the two in either order each refused `dsd_dac_unread` (the
+  unread-only case and the pairs with an unread reading passed on main, as they should);
+- `TestARevocationDuringAnAdmissionIsItsRefusal` (admitDSD's second check): `dsd_dac_unread`,
+  want `native_revoked`;
+- `TestASuccessorWhoseOpenEndsAfterARevocationIsRefusedForIt`: `native_revoked`, "DSD
+  permission revoked", want the revocation's reason;
+- `TestAnAuthorizationReplacedAsASuccessorOpensRefusesItForItsOwnReason`: the same, want
+  "selected DSD policy is no longer eligible".
+
+Controls, each committed first, restored from memory after, `git status` clean: the two words
+swapped (red: the rig, three internal cases and PR 1's
+`TestContainmentFencesAnAdmissionWithoutWaitingForIt`); no cause recorded (red: the rig and five
+internal tests, PR 1's containment case among them); a failed reading that does not stand over an earlier cause, and the last cause
+standing whatever it is (each red in `TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause`).
+The other reads of the flag (the native open's error, the activation's fence, the producer's
+take-back) answer no entry's refusal and were left: `openSuccessor` refuses before the native
+open is reached.
+
+**The policy's half.** Ported verbatim; controls: the compare-and-set removed (red:
+`TestTheChecksThatReadTheStateRunInTheirOrder` answered `dop_confirmation_required` for
+`stale`, and `TestAStaleBaseIsRefusedAndAMatchingOneMovesTheRevision`), and the warnings left
+uncleared (red: `TestAWriteClearsItsDACsWarnings`,
+`TestAWriteOverAStateThatDidNotReadSeesTheDACsOffers`).
+
+**The configuration lease and the write.** `Backend.lease`, beside `holder`, `probing`,
+`waiters` and `terminalUnconfirmed`, taken under the backend's lock in the step that finds no
+session record, no holder and no release unconfirmed, else `playback_not_stopped` at once. A
+Start waits for it before it registers (`admitStart`, with no lock held), giving the wait up at
+its context's end or its release, holding nothing; it then meets its Release in either order
+(`session.abandon`), letting its occurrence's reservation go, so no record is left to refuse
+every later write (Codex's finding 1). `reserveProbe` refuses the slot while the lease is held
+(`ProbeChoiceWrite`, in `probeSlotSkips`); a write that finds a probe holding the slot claims the
+lease first, waits for the probe within its context, then reads the DAC. A probe begun before the
+write never settles the probe the write owes (`oweProbe` moves `asked`, which a run reads as it
+begins), a run parked between `endProbe` and `publishProbe` included. The write answers in the
+order the brief gives: `bad_request`, the turn, the writes closed by the player's stop
+(`persist_failed`), `playback_not_stopped`, no DSD policy (`state_unreadable`, before the DAC's
+reading, which is that policy's: Codex's finding 6), `dac_unavailable`, `dac_changed`, no state
+(`state_unreadable`), the fence (`persist_uncertain`), then one `Store.Update` running
+`policy.Choose`. A `policy.ChoiceRefusal` keeps its word, a stale one reading the policy again
+before it answers (Codex's finding 3); `ErrNotWritable` is `state_unreadable`, `ErrLandedNotHeld`
+`persist_uncertain`, `atomicwrite.ErrLanded` `persist_uncertain` with `landedChoice` recorded,
+which every later reading applies, so the supervisor's refresh keeps the intersection for the
+rest of the run; anything else `persist_failed`. `dsd_choice_uncertain` stays off the wire until
+PR 3 publishes it: serve's adapter sends it as `dsd_state_unreadable` (`wireDSDReason`; Codex's
+finding 5), which `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames` asks of the serialized
+GET after an `ErrLanded` write and again after `RefreshDSD`. The engine's gap is a precondition:
+between a release the engine acknowledged and the Start that follows it the backend holds no
+record, so PR 3's adapter asks the engine's owner goroutine, which checks the transport is stopped
+and grants the reservation in one step, the persistence off that goroutine, with a test that
+parks a Play between the check and its backend registration (Codex's finding 2). A crash after
+the rename and before the directory's sync may leave either choice.
+
+The lease and write cases drive an API main does not have (`ChooseDSD`), so what each pins is
+shown by the controls the brief names, each committed first, run with the tests it names, and
+restored (`git status` clean after each batch); every one went red as predicted:
+
+| Control | Red |
+|---|---|
+| the busy check dropped | `TestEachStateThePlayerIsNotStoppedInRefusesTheWrite` (PCM playing written, the state written, the revision moved), `TestAStartBetweenItsRegistrationAndItsHoldRefusesTheWrite`, `TestEveryRefusalChangesNothing`, `TestTheWritesChecksAreAnsweredInTheirOrder` |
+| the holder alone checked | `TestAStartBetweenItsRegistrationAndItsHoldRefusesTheWrite`, `TestEveryRefusalChangesNothing`, `TestTheWritesChecksAreAnsweredInTheirOrder` |
+| a Start skips the lease | `TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn` (registered without waiting), `TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed`, `TestAStartGivingUpItsWaitForTheLeaseLeavesNoRecord`; the rig's `TestAStartDuringAWritePlaysByTheChoiceItWrote` |
+| the lease let go before the publish | `TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed` (the probe asked the DAC, a Start answered without waiting) |
+| `reserveProbe` ignores the lease | `TestAProbeAskedDuringAWriteIsRefusedAndStaysOwed` |
+| an abandoned Start returns with no rendezvous | `TestAStartGivingUpItsWaitForTheLeaseLeavesNoRecord` (its reservation held, a record left, the next write `playback_not_stopped`) |
+| the fence removed | `TestTheBackendsOwnFenceRefusesEveryLaterWrite`, `TestTheWritesChecksAreAnsweredInTheirOrder` |
+| the epoch read after the turn | `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed` (revision 2, want 1) |
+| `settled` keyed on the generation | `TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn`, `TestAProbeEndingAsAWriteTakesTheLeaseLeavesTheWritesProbeOwed` |
+| the uncertain word's mapping removed | `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames`, after the write and after the refresh |
+| a reading that does not hold the set to the intersection | `TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay`, `TestARefreshAfterALandedWriteKeepsTheIntersection` |
+| a stale answer that reads nothing again | `TestARevisionMovedBeforeTheStoresWriteIsStale`, `TestAStaleAnswerNeverCarriesARevisionAnotherWriteHasPassed` |
+| no DSD policy answered after the DAC's reading | `TestTheWritesChecksAreAnsweredInTheirOrder` |
+
+The first run of "a Start skips the lease" in the playback package went red only at go test's
+ten-minute deadline: `TestAWriteWaitsForAProbeUnderWayAndOwesItsOwn` waited in a select with no
+watchdog for the Start's wait for the lease, which the control skipped, while the write and the
+probe stayed parked. The select now fails as the Start registers without waiting, and on the
+watchdog, and every other wait of the choice's tests is bounded (20f22bea, ae4716f6); rerun, the
+control went red in under a second, three tests naming it.
+
+**Qualification version 49.** The guarded files changed (`playback/native.go`'s `Revoke`
+records its cause; `internal/alsapcm`'s probe cache words and tests); no byte a DAC is given
+changes. The runbook names 49 in its five current places and says what it covers;
+`ops/History-b470-native.md` records it beside 48.
+
+The runs, at 72e4673e, in one build-slot session on legion0 (Linux, Go 1.27.3, the Makefile's
+tags, `TMPDIR` on disk):
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean; the pinned gofmt lists none of the branch's Go files (and lists a misformatted probe, so it ran) |
+| `make vet`; `GOOS=windows make vet`; `GOOS=linux GOARCH=386 make vet` | exit 0 each |
+| `make docs-check` | exit 0 (the rules patch's budgets measured on a patched copy: CLAUDE.md 83.5%, worst load 77.8%) |
+| `go run ./scripts/qualification-version -base 3a6b924e -head HEAD` | qualification version OK |
+| `-race -count=50 -v`, the branch's 31 new or changed playback tests | 4,500 PASS, 0 FAIL, 0 SKIP; 10.0 s |
+| the same, alsapcm's 5 (the rig's busy states, the Start during a write, B853's rig case, the probe cache's two) | 550 PASS, 0 FAIL, 0 SKIP; 27.0 s |
+| the same, policy's 16 | 1,750 PASS, 0 FAIL, 0 SKIP; 2.6 s |
+| the same, `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames` and `TestQualificationRunbookVersion` | 50 and 300 PASS, 0 FAIL, 0 SKIP |
+| `go test -race ./internal/player/... ./internal/alsapcm/` | 16 packages ok; 87.2 s |
+| `go test ./internal/api/...` (the vocabulary guards) | ok; 38.1 s |
+| `go test ./cmd/bridge/` | ok; 536.4 s |
+
+The rules patch (output.md's new section and its B853 bullet, player.md's silent-probe entry
+with "Samples reach the DAC" moved to its History to make room, the eight build-ci-tests
+entries, CLAUDE.md's rows, and their long forms) was checked on a copy of the tree: it applies
+to the branch (`git apply --check`), `verify_moves.py --base HEAD` passes on the move alone and,
+on the whole patch, misses only the silent-probe entry's two edited copies, each with its
+successor; `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and passed
+without it.
+
+## 2026-11-12 — B728 B9 PR 2 round 2: B853's cause at every boundary, and the choice's tests fail instead of hanging
+
+Base: 4c63bfab (`orch/b9p2`: round 1 and its rules commit), PR #1453. Each item was checked against
+the code before it was fixed.
+
+**Item 1: the cause before the policy's refusal, at the admission and both opens.** At 4c63bfab
+`admitDSD` returned `selectFor`'s error before its second check of the cause (dsd_policy.go
+625-627); `openSuccessor` ran `readmitDSDLocked` before its check (session.go 975-981), so a
+readmission under a replaced set refused first; and `start` had no check, `readmitDSDLocked`
+returning at once while the set is unchanged (session.go 556, dsd_policy.go 664). Red, the new
+cases over that code:
+
+- `TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal` (at `Seams.Admitting`, a refresh
+  that removes the DAC's native DSD and whose reconciliation panics): refused `native_not_offered`,
+  "the DAC offers no native DSD format at this rate", for `backend_failed`;
+- `TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt` (at `Seams.Opened`, the
+  successor holding its old admission): the same;
+- `TestARevocationAsTheFirstOccurrenceOpensIsItsStartsRefusal`: the set unchanged, the Start
+  answered "the device could not be opened: DSD permission revoked", reported one native plan and
+  started a DSD monitor; the set replaced as it opened, refused `native_not_offered`; each for
+  `native_revoked` with the revocation's reason.
+
+The fix: `admitDSD` asks the cause after the set is read and before anything the policy answers,
+the refresh's refusal included (the same words where the refresh's own containment stopped the
+session); and each open's end asks it first (`refuseRevokedLocked`), with the condition
+`admitDSD`'s first check refuses by (admitted as DSD, a plan or a conversion, and nothing refused
+yet), whatever the set. How the brief's "a DoP fallback or an unrelated format refusal must behave as
+it does today when only native transport is revoked" was read: the check keys on `nativeRevoked`,
+the session-wide stop, which a tuple made unavailable on the harness's path (`next.unavailable`,
+where a DoP plan may stand in) does not set, and a refusal the open made (the budget, DSD512, an
+empty decode, a transport) stands. Controls, predicted before the runs: the policy's return first
+again at the admission, the readmission first again at a successor's open and at the first
+occurrence's, and the first occurrence's check removed: each red, its own case alone, eleven of
+the twelve B853 cases green (the third control the replaced-set subcase alone, the fourth both).
+
+**Item 2: the harness's path (`cfg.DSD` nil, an Authorization).** Traced through the three sites
+the brief names, and a fourth found on the way, each red over the code before its fix:
+
+- the selectors (`selectNative`, `selectTransition`) answered a revoked permission as no approval
+  (`dsd_not_in_this_release`, "native DSD here needs an owner-approved plan, and this backend holds
+  none") for an entry after an ordinary revocation: `openNativeContent` (guarded) now asks the
+  cause first on that path (`occ.stoppedCause`);
+- the producer's gapless check, a revocation coming while it read the record (through the
+  Authorization's `Healthy`), rebuilt the dropped successor's refusal from its error, "DSD
+  permission revoked": the cause recorded before its own revocation now stands;
+- the authorization's reconciliation dropped a successor an earlier revocation had dropped, again,
+  "selected DSD policy is no longer eligible", and dropped before it recorded: it records first,
+  leaves what is dropped and drops for the cause recorded; and later entries answered no approval
+  (the selectors' fix);
+- a panic in that reconciliation reached its caller (the session's monitor runs it on a goroutine
+  `spawn` recovers nothing on; `RefreshAuthorization` on its caller's) and recorded nothing: it is
+  contained as a policy reconciliation's is, `stopDSD` recording `backend_failed` and the fault,
+  the session's lock taken through `lockHold`; the case makes it panic at a seam only a test sets
+  (`Seams.ReconcilingPermission`), the only callback inside it being `Revoke` with an active native
+  output, which no test here can build outside the native-integration overlay;
+- `Revoke` (guarded) dropped a prepared successor for its own reason whatever stood: after a failed
+  reading it gave `native_revoked` for `dsd_dac_unread`, after a reconciliation that panicked the
+  same for `backend_failed`; it drops for the cause recorded, its own where nothing stood.
+
+With nothing recorded each answers as it did (the nothing-recorded subcases, green before and after:
+a session with no permission keeps no approval; a gapless check that fails with no earlier cause
+keeps its error; a reconciliation with no earlier cause drops for its own word). Controls: the
+harness's check removed, the producer's earlier-cause branch removed, the containment removed and
+`Revoke`'s drop back to its own reason: each red as predicted, but for one line, the containment
+case's later entry under the first, which stayed green: the containment revokes no permission, so
+the selector admits that entry and `refuseRevokedLocked` refuses it at its open's end, a second
+layer. Left, named for the backlog: a revocation after the first occurrence's open has ended and
+before its native open still makes the Start fail at `openNativeOutput` ("DSD permission revoked",
+native.go 207 at 8faf8930), a device's failure, not the recorded cause.
+
+**Item 3: three tests that would wait instead of failing.** `TestAStartDuringAWritePlaysByTheChoiceItWrote`
+registered its gate's release before the rig, so the rig's stop, which waits for the parked write,
+ran first; `TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne` parked its write
+inside a Once only the body released; `TestAStartIsAdmittedAfterAWriteThatDidNotLand` made a
+synchronous Start and a synchronous write that a leaked lease or turn would hold to the package's
+timeout. The release is registered after the rig; the write parks outside its mark (`heldOnce`),
+its gate let go on cleanup apart from what it holds and the writes joined within a bound
+(`joinWithin`, 10 s); and before each synchronous call the case asserts that no write holds the
+lease or the turn (`playback.ChoiceHeldForTest`). Proofs, temporary mutations restored from memory:
+a failure injected while the write is parked ended the first case in 0.06 s, and in 60.10 s, the
+rig's watchdog, with round 1's order; a failure injected before the gate's release ended the second
+in 0.00 s, and with the writer kept blocked past its release the join said so after 10.01 s; round
+1's lease release removed failed the third at once (0.00 s) "before the Start: ... the configuration
+lease (true) or the writes' turn (false)", and the turn's release removed, the same naming the turn.
+
+Version 49 covers round 2's guarded changes; its records say so.
+
+The runs, at c1eb858a, on legion0 (Linux, Go 1.27.3, the Makefile's tags, `TMPDIR` on disk), the
+gate in one build-slot session and CI's two native-integration invocations in a second:
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean; the pinned gofmt lists none of the round's twelve Go files |
+| `go vet` with the tags: linux/amd64, windows/amd64, linux/386 | exit 0 each |
+| `make docs-check` | exit 0 |
+| `go run ./scripts/qualification-version -base 3a6b924e -head HEAD` | qualification version OK |
+| `-race -count=50 -v`, the round's ten new or edited playback tests and six whose code it changed (round 1's four B853 cases, `TestGaplessNativeRechecksPermission`, `TestRevokeKeepsPCMWithPreparedDSD`) | each 50 times; 2,000 PASS with their subtests, 0 FAIL, 0 SKIP; 15.5 s |
+| the same, alsapcm's 3 (the Start during a write, B853's rig case, the states that refuse a write) | 450 PASS, 0 FAIL, 0 SKIP; 24.4 s |
+| the same, `TestQualificationRunbookVersion` | 300 PASS, 0 FAIL, 0 SKIP |
+| `go test -race -timeout 120m ./internal/player/...` | 15 packages ok; 44.7 s |
+| `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.3 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,560.6 s |
+| CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
+
+The rules patch (output.md's B853 line and its long form, and one build-ci-tests entry) was
+checked on a copy of the tree: it applies to the branch, the budgets hold (CLAUDE.md 83.5%, worst
+load 78.3%), `verify_moves.py --base HEAD` misses only the B853 line's two edited copies, each with
+its successor, and `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and
+passed without it.
+
+## 2026-11-12 — B728 B9 PR 2 round 3: a cause recorded during selection still wins, and the round-2 tests leave nothing running
+
+Base: fe8068c9 (`orch/b9p2`: round 2 and its rules commit), PR #1453. Each item was checked
+against the code before it was fixed, and each fix's case was red first (82fe1f40, two inert
+seams with it: `Seams.Selecting` and `Seams.MonitorEnded`).
+
+**Item 1: a revocation between the cause's ask and the harness's selector.** `openNativeContent`
+asked `o.stoppedCause()` and let go of the session's lock before `selectNative`, `selectTransition`
+or the session's cached refusal (`o.dsdRefusal`, an approval that did not read at its start)
+answered. A revocation in that gap (an ordinary `Revoke`, or the authorization replaced: its record
+gone, `RefreshAuthorization` and `reconcilePermission`) records its cause and revokes the
+permission; the selector answered no approval, `dsd_not_in_this_release`, and the cached path its
+own refusal, `dsd_approval_unavailable`; `refuseRevokedLocked` passes over an entry refused already.
+Red, a writer parked in the gap (`Seams.Selecting`), each of the three paths and each writer: no
+approval where `native_revoked` "the test's revocation" or "selected DSD policy is no longer
+eligible" was wanted, and the cached refusal on its path. The fix: a selector's refusal and the
+cached one are set in the step that asks the cause again, under the session's lock
+(`refuseAfterSelection`). Every writer records its cause before it revokes the permission: `Revoke`
+and `reconcilePermission` in one hold of the session's lock, the containment of a panic in
+`reconcilePermission` in `stopDSD`'s hold and then the revocation in a hold of its own, a session's
+start that finds a cause recorded in its own hold (round 4's correction: this said one step under
+that lock for every writer), so a selector that found the permission revoked finds the cause there,
+and no window remains after the re-ask: a refusal set before a later revocation was made before it.
+With nothing recorded each path answers as it did (admitted; the cached refusal). Production's
+admission asks the cause under the lock it decides in (`admitDSD`) and is unchanged.
+
+**Item 2: the prepared-entry test's monitors.** Each prepared successor's open
+(`TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst`) started the session's DSD monitor,
+which ends with the session's `down`, never its context; the rig cancelled the context alone, so
+each subcase left one refreshing the policy every 100 ms for the life of the process. The rig's
+cleanup now closes `down` once, under the session's lock (a release of a session that never
+started closes it first, which a case pins), joins the monitor by its end (`Seams.MonitorEnded`,
+deferred first in its goroutine) and then every goroutine of the backend's (`Wait`), each within
+10 s; the prepared-entry case asserts that it started the monitor. Red before the close: each
+subcase failed at its cleanup after 20.00 s, "the session's DSD monitor did not end within 10s of
+the session's end" and "1 goroutines still run". The rig's cases add their seams to the rig's
+rather than replace them.
+
+**Item 3: an earlier revocation in the gapless check's own words.** The producer's gapless check
+answered its check's error wherever the cause recorded read as its own revocation's words
+(`gaplessRevoked`), so an ordinary revocation given those words during the check lost to the
+check's error. Red: "DSD permission revoked" where the earlier revocation's "gapless DSD
+authorization changed" was wanted. The fix: `revokeDSDLocked` answers the count of the cause it
+recorded (`revokedSeq`), 0 where an earlier cause stood; `Revoke` delegates to `revoke`, which
+passes it on; the producer keeps the check's error only where its own revocation recorded the
+cause and it still stands, decided in the step that records it, never by words or by a reading
+before the call. Round 2's case (nothing recorded before the check failed: the check's error)
+is unchanged and green.
+
+**Item 4: the contained reconciliation's authorization.** The containment of a panic in
+`reconcilePermission` recorded `backend_failed` with the fault's words and the fault (`stopDSD`)
+and left the session's permission live: both selectors admitted under it after the containment,
+which round 2's case could not see, the fault stopping the producer. Red: "the authorization ...
+is live", both selectors answering nil. The fix: once the cause is recorded, the containment
+revokes the permission the reconciliation was replacing, as a failed reading of it does. It holds
+nothing: the hold's deferred release lets go of the session's lock before the recover runs (a
+panic before the hold took nothing), which the case checks (`TryLock`); the cause recorded is
+round 2's, `backend_failed` with "player backend: the DSD authorization's reconciliation
+panicked; the bridge's log has why".
+
+Controls, predicted before the runs, each restored from memory: the selectors' re-ask dropped
+turned the four selector cases red alone; the cached refusal's re-ask, its two cases; the rig's
+close of `down` removed, the prepared-entry case's three subcases, 20.00 s each; the close's guard
+removed, a panic "close of closed channel" in the guard's case; the producer deciding by the
+cause's words again, the identical-words case alone, round 2's control green; the containment's
+revocation removed, the containment case alone. Not run: the containment revoking before it
+records, which no seam parks between; the order keeps the invariant item 1's re-ask rests on.
+
+Version 49 covers round 3's guarded changes (`openNativeContent`, `Revoke`); its records say so.
+
+The runs, at 8b6abad5, in one build-slot session on legion0 (Linux, Go 1.27.3, the Makefile's
+tags, `TMPDIR` on disk):
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean |
+| `go vet` with the tags: linux/amd64, windows/amd64, linux/386 | exit 0 each |
+| `make docs-check` | exit 0 |
+| `go run ./scripts/qualification-version -base 3a6b924e -head HEAD` | qualification version OK |
+| `-race -count=50 -v`, the round's three new playback tests, the seven it edited or whose rig it changed, and seven beside them whose code it changed | each 50 times; 2,350 PASS with their subtests, 0 FAIL, 0 SKIP; 27.8 s |
+| the same, alsapcm's B853 rig case (`Revoke` through the backend) | 50 PASS, 0 FAIL, 0 SKIP |
+| the same, `TestQualificationRunbookVersion` | 300 PASS, 0 FAIL, 0 SKIP |
+| `go test -race -timeout 120m ./internal/player/...` | 15 packages ok; 48.5 s |
+| `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.6 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,558.1 s |
+| CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
+
+The rules patch (output.md's B853 line and its long form, and one build-ci-tests entry) was
+checked on a copy of the tree: it applies to the branch, the budgets hold (CLAUDE.md 83.5%, worst
+load 78.7%), `verify_moves.py --base HEAD` misses only the B853 line's two edited copies, each with
+its successor, and `TestEveryCitedTestNameExists` caught a ghost citation planted in the copy and
+passed without it.
+
+## 2026-11-12 — B728 B9 PR 2 round 4: a case that would hang on a leaked lock fails at once, and the records say the writers' order
+
+Base: f3cc1eab (`orch/b9p2`: round 3, its rules commit and main merged in), PR #1453. Tests and
+`ops/` markdown only.
+
+**Item 1: the containment case, and the sweep.**
+`TestAPanicInTheAuthorizationsReconciliationIsContainedAndRecorded` took the session's lock
+unconditionally once the contained reconciliation returned and asserted it free with `TryLock` only
+after: with the recovery handler's final `s.mu.Unlock()` removed from `reconcilePermission`'s
+containment, the case waited at that `Lock` to the package's timeout (at f3cc1eab, a copy, `-timeout
+60s`: "panic: test timed out after 1m0s" at `dsd_revoked_harness_internal_test.go:418`, 61.8 s). Its
+first acquisition after the containment is now the `TryLock`, nothing else holding the lock there,
+and the record, the fault and the permission are read in that hold; under the same mutation it fails
+at once, "the session's lock is held once the contained panic's caller has gone on", and the binary
+exits in 0.05 s, its cleanups included. A hand-made session is ended as a release ends it, each wait
+bounded (`handmade_internal_test.go`): its end closed once under its lock, taken at once where free,
+at once said held where the case failed already, otherwise within 5 s (`lockWithin`: a goroutine
+that hands the lock over or lets go of it, no poll and no sleep), then the backend's goroutines
+joined within 5 s; no cleanup calls a production stop that takes the lock.
+
+The sweep, of `internal/player/playback`'s tests for a session's or the backend's lock taken
+unconditionally after a containment, a recovered panic or a stop that one removed unlock leaks,
+fixed these, each proved by its mutation alone under `-timeout 60s` (its own message, cleanups
+included, then green with the unlock back):
+
+- `stopDSD`'s final unlock: the revocation rig's cases
+  (`TestASuccessorWhoseOpenEndsAfterAPanickedReconciliationIsRefusedForIt`,
+  `TestARevocationDropsAPreparedEntryForTheCauseRecordedFirst`,
+  `TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause`) fail in 0.01 to 0.02 s, the rig's
+  cause helpers asserting the lock free as their containment returns, before a call that waits for
+  it (the open's end, the revocation, the admission); the rig parks its session's DSD monitor (a
+  tick that never comes), the barrier that makes the prepared-entry case quiescent;
+  `TestAReconciliationThatPanicsDuringAnAdmissionIsItsRefusal`, whose admission itself waits, runs
+  it on a goroutine awaited within 5 s (5.0 s); `TestPolicyReadPanicIsContainedOnItsFirstCall` and
+  `TestFirstReconciliationPanicIsContainedAndStopsItsSession` assert at once (0.01 s);
+  `TestTheMonitorTakesItsNextTickAfterAPanic`, whose live monitor's next reading takes the lock a
+  moment, checks with a bounded acquisition (5.0 s), where a failed `TryLock` proves no leak.
+- `next()`'s deferred unlock: both gapless cases (0.04 and 0.07 s).
+- `letLease`'s unlock: `TestTheWritesChecksAreAnsweredInTheirOrder` and
+  `TestAWriteThatPanicsLetsGoOfItsLeaseAndItsTurn` at once;
+  `TestAStartIsAdmittedAfterAWriteThatDidNotLand` through `ChoiceHeldForTest`, which takes the
+  backend's lock within a bound and says when it stayed held (5.0 s a subcase).
+- `hold()`'s give-up unlock: `TestAStartWaitsForTheProbeThatHoldsTheSlot`'s give-ups (0.01 s).
+
+Checked and left: lock sites before any such path (rig setups, `successorOf`, a seam before its
+containment); sites after `Revoke`, the replaced authorization's reconciliation or a judgement step,
+whose holds are lockHolds with both an explicit unlock and a deferred release, so no single removed
+unlock leaves the lock held; `dsd_final_report_round2_test.go:161`, after a stop whose teardown ends
+in a lockHold and whose bounded wait on `down` fails first on any earlier leak;
+`dsd_contain_round2_test.go:137`, after `checkContained`'s `TryLock`; the lock-order case's readers,
+awaited within its bound; the native integration overlay's sites, each after a start, a transition
+or a resume; and the test doubles' own mutexes. In `internal/alsapcm` no test can take a playback
+session's or backend's lock (playback's export helpers compile into its own tests alone); its DSD
+sink tests take the sink's own lock after a release or a writer's end in several places, outside
+this sweep and named for the backlog.
+
+**Item 2: the records' atomicity.** `ops/History-b470-native.md`'s round 3 and the B853 long form
+said every writer records its cause and revokes the permission in one step under the session's lock;
+`Revoke` and `reconcilePermission` do, the containment records in `stopDSD`'s hold and revokes in
+its own, and a start that finds a cause revokes in its own: both, and round 3's log entry, say that
+order now. `refuseAfterSelection`'s comment (`session.go`) says the same of "a revocation" and is
+code, left to a round that admits it.
+
+**Item 3: the gapless cases' sessions.** Both end their hand-made sessions with the shared end, and
+their hand-made backends get `New`'s completion bookkeeping (`handMadeBackend`: `zero` and `wzero`
+closed); without it their bounded join failed at its 5 s bound, "0 goroutines still run ... context
+deadline exceeded", where `Wait` read a nil `zero`; with it both clean up at once, no goroutine
+started. The harness rig and round 2's
+`TestAnAuthorizationReplacedAsASuccessorOpensRefusesItForItsOwnReason` end theirs so too.
+
+The runs, at b7e7a38f, in one build-slot session on legion0 (Linux, Go 1.27.3, the Makefile's
+tags, `TMPDIR` on disk):
+
+| Run | Result |
+|---|---|
+| `make fmt`, then `git status --porcelain` | exit 0, the tree clean |
+| `go vet` with the tags: linux/amd64, windows/amd64, linux/386 | exit 0 each |
+| `make docs-check` | exit 0 |
+| `go run ./scripts/qualification-version -base 4678b983 -head HEAD` (main's tip, the merge base now) | qualification version OK |
+| `-race -count=50 -v`, the round's 21 new or touched playback tests | each 50 times; 3,400 PASS with their subtests, 0 FAIL, 0 SKIP; 27.4 s |
+| `go test -race -timeout 120m ./internal/player/...` | 15 packages ok; 44.7 s |
+| `go test -race -timeout 120m ./internal/alsapcm/` | ok; 77.2 s |
+| `go test -race -timeout 120m ./cmd/bridge/` | ok; 1,642.4 s |
+| CI's native-integration invocations (`scripts/native-integration-overlay.py`, `-race`) | cmd/bridge 83 of 83, playback 79 of 79, every case the job names |
+
+## 2026-11-12 — B728 B9 PR 2 round 5: two containment assertions beside a Drop's clean-up, and the rig's admission and revocation ask the lock
+
+Base: dab9af3a (`orch/b9p2`, round 4), PR #1453. Tests only.
+
+**Item 1: the containment checks beside a PCM Drop.** `TestARevocationThatPanicsStopsTheSession` and
+`TestARetiringPositionsPanicStopsAndClosesWithoutAnotherRead` asserted the session's lock free with
+an immediate `TryLock` right after the refresh that contained their failure. Both sessions have a
+PCM output, which the containment drops on two counted goroutines (the worker and its `call`), and
+the call's deferred clean-up takes the lock to clear `containDrop` once the sink's `Drop` returned,
+after `sink.stopped` closes: a legitimate holder the `TryLock` could meet. Both take the lock within
+the bound now (`checkContainedWithin`) and join both goroutines within it (`joinBackend`), their
+real end, since `ContainCalled` alone is not it under cancellation.
+`TestTheContainmentCheckWaitsOutABriefHolderOfTheLock` is the contention case: a test goroutine
+holds the lock a moment, an immediate `TryLock` fails on it, and the bounded check waits it out; its
+teardown lets the holder go and joins it whatever an assertion did. Controls (uncommitted edits to
+ca0d3b55, restored with `git checkout --`): the case's bounded check replaced by the old immediate
+one, red at once, "containment left the session lock held" (binary 0.01 s); the holder's release
+taken away, red at the bound, "containment left the session lock held 5s", the teardown letting it
+go (binary 5.02 s).
+
+**Item 2: the rig's admission and revocation.** `r.admitted` returned as soon as `admitDSD`
+answered, so a lock the admission kept went unseen: with the early `nativeRevoked` branch's deferred
+unlock removed (dab9af3a), every subcase of
+`TestAnEntryAfterTheSessionsDSDStoppedIsRefusedForTheCause` passed its own assertions and only the
+rig's cleanup said the lock was held, 5 s a subcase, 45 s in all. It asks `heldAfter("the
+admission")` before returning now; `r.revoke` gets the string form its siblings have (`revoked`),
+fails on the case's goroutine alone, and the Admitting seam, on the admission's goroutine, says a
+failure with `t.Error`. Under the same control at 8c02a947 every subcase fails at once, "the
+session's lock is held once the admission returned" (binary 0.02 s). With the later deferred unlock
+removed instead, the earlier deferred clean-up deadlocks retaking the lock, the admission never
+answers, and the rig's watchdog fires, "the admission did not answer within 5s"
+(`TestARevocationDuringAnAdmissionIsItsRefusal`, binary 5.02 s). `refusesDSD64` takes no session
+lock.
+
+Runs at 8c02a947: `go vet` with the tags on linux/amd64, windows and linux/386, clean; `-race
+-count=50 -v` of the ten touched tests, 1,100 PASS with their subtests, 0 FAIL, 0 SKIP; `go test
+-race -timeout 120m ./internal/player/playback/`, ok (3.2 s).
+## 2026-11-13 — B664: a `bridge init` run that keeps the config prepares the data dir serve will use
+
+The rule is `cli-serve.md`'s new B664 line (the rules patch,
+`rules-b664-r1.patch`) and its long form in `ops/History-rules-cli-serve.md`
+("B664"), with B727's line, whose list of the reads that ask the record
+nothing loses init keeping the config; this is the evidence. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags, TMPDIR `~/onebit/tmp` on disk,
+umask 022.
+
+### What the run did
+
+`initCmd` decides to keep the config at `init.go` 565-575 (main 4678b983):
+`--yes` without `--force`, or a no at "Overwrite?". From there the keep path
+asked nothing of the data directory: the rewrite's `refuseDataDirAway` is
+asked `if replace` alone (583), the posture warning returns at once for a run
+that keeps (226-228), the preflight (unless `--skip-doctor`, 651-674) grades
+the install's ports and certificate and has no data-dir line (B659), and the
+keep branch (721-730) printed "keeping it" and returned `finishInit`, which
+loads the config for the admin address alone, its error ignored, makes the
+log's directory, and installs and starts the unit with `WorkingDirectory` the
+data dir `priorInstallFrom` read from the file, with no environment, or
+init's own `<dir>/data` where the file did not read or parse (466-472). A run
+that kept the config returned 0 having made no data directory: systemd then
+fails the unit at its chdir (200/CHDIR, `Restart=always` every 2 s to its
+start limit), launchd likewise; Windows' SCM service and Startup launcher set
+no working directory.
+
+Serve's own order, for comparison (`main.go` 3575-3593): the record's check
+(`checkServeDataDirRecord`, beside the file its boot read was of), then
+`prepareServeDataDir` (`fsutil.MkdirAll` at 0700, owner-preserving as root,
+then a directory required there), then the lock. The doctor's data-dir line
+(`dataDirCheck`) reads the same record (beside the file the name opens now)
+and the same walk (`fsutil.BlockingEntry`), and differs where a read run by
+anyone must: a record or a marker this user may not read is a warn where
+serve refuses; a path it cannot walk is a warn where serve's MkdirAll fails
+and serve refuses; a data directory not there below a parent this user may
+not write is ok to it and refused by serve; it makes nothing. init's first
+install makes its data dir with `os.MkdirAll` at 0700 and `os.Chmod` 0700,
+owned by whoever runs it.
+
+### Red first
+
+At e1478b23, main's code with a behaviour-neutral seam over `finishInit`'s
+host calls (`initHost`: the three installs, the detached start, the browser;
+the suite's TestMain puts one that refuses and fails the suite on any ask),
+the round's tests and the away-volume tables (25 s): 61 subtests red, each as
+predicted, the two guards green.
+
+```
+init_keep_data_dir_test.go:348: init installed the unit with the working directory …/002/disk/bridge, which was not a directory: systemd and launchd fail the unit at its chdir, before serve can make it
+init_keep_data_dir_test.go:348: init installed the unit with the working directory …/002/disk/bridge, want the data directory serve uses, …/002/env/bridge
+init_keep_data_dir_test.go:392: a run keeping a config whose data directory serve refuses exited 0, want 1
+init_keep_data_dir_test.go:490: a run keeping a config whose data directory its record refuses exited 0, want 1
+init_keep_data_dir_test.go:552: a run keeping a config that does not load exited 0, want 1
+data_dir_away_commands_test.go:250: init over a data dir whose volume is away exited 0, want 1:
+```
+
+- `TestAKeptConfigsDataDirIsMadeBeforeItsServiceIsInstalled`, 7 of 7 (case
+  1): an absolute `dataDir` kept by `--yes`, by a no at "Overwrite?" and by
+  `--yes --skip-doctor`, a relative one, none, `BRIDGE_DATA_DIR` over the
+  file's (the unit installed on the file's), and a `dataDir` set on purpose to
+  a new directory while the record names the old.
+- `TestAKeptConfigWhoseDataDirServeRefusesInstallsNoService`, 18 of 18 (case
+  2): serve's six shapes (`unusableDataDirs`), each kept three ways.
+- `TestAKeptConfigWhoseDataDirsRecordRefusesItInstallsNoService`, 18 of 18:
+  the volume away, the identity missing, another identity, a marker and a
+  record that do not read, and a record this user may not read, each kept
+  three ways; the 12 runs with the preflight graded it first too.
+- `TestAKeptConfigThatDoesNotLoadInstallsNoService`, 12 of 12: a misspelt key,
+  a fraction where a whole number goes, text that is not YAML, and a config
+  this user cannot read, each kept three ways.
+- `TestEveryCommandThatWritesTheDataDirRefusesItWhileItsVolumeIsAway`'s new
+  row, init keeping the config, moved from
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`.
+- Green before and after, the guards: `TestAKeptConfigWithAGoodDataDirIsKeptAsItIs`
+  (case 3) and `TestANewConfigsDataDirIsMadeBeforeItsServiceIsInstalled`
+  (case 4).
+
+### The fix
+
+c2de2e13: `prepareKeptDataDir` (`init_keep.go`), right after the keep
+decision, before the posture warning, the preflight, the launch choice and any
+service work: serve's load (`loadServeConfigFile`, the environment included),
+`refuseDataDirAway("init", …)`, then `prepareServeDataDir`; the unit is
+installed on that data dir. Each refusal exits 1 and ends "the config was NOT
+changed, and no service was installed or started."; a permission error says to
+run init as the user the bridge runs as. `--skip-doctor` skips the preflight
+alone. The run says it keeps the config before it says what it made or why it
+refuses. Chosen over reporting alone: serve makes a data dir that is not there,
+so a refusal of one would be a rule stronger than serve's, and a warning would
+leave the unit failing at its chdir. The 61 are green, and so are all 375
+subtests of every `TestInit*` test and the round's tests together (21 s).
+
+### Controls
+
+On c2de2e13, predicted by name before the run
+(`.tmp/_b664/controls.predictions.txt`), each a mutation of the committed tree
+restored with `git checkout --` (`.tmp/_b664/controls.py`; the tree clean after
+every one), the test binary built once a control, the round's six tests and the
+away-volume table run:
+
+- C1, the brief's control, the gate's call removed from the keep path: 56 red
+  (7, 18, 18 and 12, and the moved row); the guards green.
+- C2, the record's check dropped: the 18 record rows and the moved row red (the
+  volume away and the record that does not read had the data dir made under the
+  mount point); every other row green.
+- C3, serve's preparation replaced by a bare `os.MkdirAll(dataDir, 0700)`: the
+  18 shape rows red, refused in other words than serve's; every other row green,
+  case 1 included (the mode is 0700 either way).
+- C4, the data dir the gate prepared not handed to the unit: the
+  `BRIDGE_DATA_DIR` row alone red.
+- C5, the gate moved after the preflight: the 12 record rows that run the
+  preflight red (it graded first); the shape rows green, the preflight passing
+  over each shape before the gate refused it.
+- C6, `--skip-doctor` skipping the gate: the 22 rows run with it red, every
+  other green.
+
+### The permission half, pinned
+
+cc629f97 adds two tests for the exit policy's permission half, each written
+after the fix: `TestAKeptConfigWhoseDataDirThisUserCannotMakeInstallsNoService`
+(a data dir that is not there, below a parent this user may not write:
+refused in the preparation's words, saying to run init as the bridge's user,
+nothing made, kept each of three ways) and the guard
+`TestAKeptConfigsDataDirThisUserCannotWriteIsTaken` (a data dir that is there
+and that this user may not write is taken, as serve's preparation takes it;
+B659). Run against e1478b23's code (a `git archive` copy with the new test
+file, `.tmp/_b664/redcopy.py`): the first red in its three rows ("a run
+keeping a config whose data directory this user cannot make exited 0, want
+1", a unit installed), the guard green. The six controls run again over
+cc629f97, predicted first (the predictions file's round 2): every earlier row
+as before, the new test red under C1 and C3 (three rows each) and in its
+`--skip-doctor` row under C6, the guard green under all six.
+
+### The gates
+
+On cc629f97, in one use of the build lock (07:52 to 08:26, nothing else in
+it), TMPDIR `~/onebit/tmp`, `-p 8`: `go vet ./...` with the Makefile's tags
+clean for linux, darwin and windows (cache hits on unchanged sources; `go vet
+-printf=true ./cmd/bridge/` then ran the vet tool afresh for each of the
+three, clean). From one race-built test binary, four lanes side by side,
+`-test.count 50`: the round's eight tests, the away-volume and diagnostics
+tables, and the seven keep-path tests that were there before
+(`TestInitInteractiveSkipOnExistingConfig`,
+`TestInitRunThatKeepsTheConfigIsNotRefused`,
+`TestInitInteractiveKeepAsksForNoName`,
+`TestInitSaysNothingOfTheRunsPortsWhereTheInstallsConfigLoads`,
+`TestInitInteractiveKeepGradesTheInstallsPorts`,
+`TestInitRefusesToRewriteAConfigItDoesNotMake`,
+`TestInitInteractiveRewriteRefusesAPublicOnlyFlagWithoutPublic`): every lane
+PASS, no race reported, in 373 s. `go test -race -count=1 -timeout 120m
+./cmd/bridge/`: ok in 1,606 s, with `TestEveryCitedTestNameExists` and the
+TestMain guard on init's host. On a `git archive` copy with the rules patch's
+two files written in, `TestEveryCitedTestNameExists` ok, and failing on a
+ghost citation planted in the copy's History alone, which shows it read the
+copy; `scripts/check-doc-budgets.py` clean there (`cli-serve.md` 98,976
+bytes), and over budget with the copy's file padded by 1,500 bytes. go1.27.3's
+gofmt lists none of the round's Go files. `make test` and `make build-all` were
+not run: the brief asked for the package. Windows' and macOS' runtime cases are
+the PR's CI legs'.
+## 2026-11-13 — B650: bridge doctor bounds every wait on a library root, and names the root that did not answer
+
+The rule is `cli-serve.md`'s B650 line, with `output.md`'s line on the
+checklist's read, and its long form in `ops/History-rules-cli-serve.md` ("B650
+— the doctor's bound on a library root"); this is the evidence. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk (`~/onebit/tmp`).
+The brief was rescoped from b650-v1 (the scanner recording the root a stalled
+scan is in), whose review showed that cannot be attributed reliably and found
+this: the doctor itself waited on a root with no end.
+
+### Step 0: the doctor's steps that touch a root
+
+At 4678b983:
+
+- `checkLibraryRoots` (`internal/doctor/doctor.go` 1258-1298): `os.Stat` and
+  `os.ReadDir` of each root on the run's goroutine; its context ignored
+  (`_ context.Context`).
+- `checkWatchLimit`: Linux's `countDirs` (`inotify_linux.go` 42-72, 104-142:
+  `fsutil.WalkableRoot`, then `WalkConfigured` over every folder below each
+  root) and kqueue's `manifest.CountWatchSet` (`watchbudget_kqueue.go` 32-69,
+  `manifest/watcher_fds.go` 159, `walkWatchTree`). Both ignore their context,
+  and their cap is a count, not a time.
+- Before any check ran: `buildDoctorDepsWith` → `config.Load`
+  (`cmd/bridge/doctor.go` 329) → `Validate` → `validateVariantsDir` and
+  `validateRenderTempDir` (`internal/config/config.go` 4075-4078, 4215, 4247)
+  → `fsutil.IsUnderAny` (`internal/fsutil/symlink.go` 157-187):
+  `EvalSymlinksOrClean` (an Lstat of each component) and `caseInsensitiveFS`
+  (a Stat) of every root, where `upscale.variantsDir` or `upscale.tempDir` is
+  set. No context.
+- On a player box (the MPD gate open), the checklist's outputs body
+  (`output_checklist.go` `readOutputs` → `LocalOutputs.Response` → `build` →
+  `pathRules` → `mpd.ProveRoots` → `musicPrefix`, `internal/mpd/paths.go`
+  119-179): a Stat and an EvalSymlinks of each root and Stats of the music
+  directory's entries. The context reaches MPD's `find` alone, and the build
+  runs on the goroutine of the call that began it
+  (`internal/api/outputs.go` 649-696).
+- Nothing else in a doctor run touches a root while the doctor's own files
+  are off its mount: the data dir's, the player's, the store's and the
+  sidecars' probes read the data directory, and the backups folder's reads
+  are bounded since B653. The config file and the data directory on a dead
+  mount are backlog B884's: a data directory under a library root is one,
+  where `buildDoctorDepsRun` stats the database on the run's goroutine
+  before `doctor.Run` (`os.Stat(dbPath)`, `cmd/bridge/doctor.go` 506), and
+  the player checklist (`doctorOutputChecklist`) stats it inside its bounded
+  read and reads the token file on the run's goroutine (`tokenFile`). (Round
+  2 corrected this line, which said those probes touch no root.)
+
+The console: GET /api/doctor (`internal/admin/handlers_doctor.go` 58-79)
+calls `DoctorRun(r.Context())`, `adminDoctorRunnerFor`'s closure
+(`cmd/bridge/doctor.go` 1018-1044), on the request's goroutine, which rebuilds
+Deps (`config.Load` again) and runs `doctor.Run` there. A stat the kernel held
+kept that goroutine past the browser's disconnect (the admin server sets no
+write timeout) and wrote no response. The handler is not serialised, and the
+Settings page asks it at every render (`renderSettingsPrereqs`), so each
+render left one more goroutine on the stat. The other in-process callers are
+the CLI's: `bridge doctor` (`runDoctorReport`, twice with `--fix`), the
+launcher's doctor row (`menu.go` `actDoctor`) and its Setup's preflight
+(`actSetup` → `initCmd` → `ensureDoctorClean`); init's second port pass
+touches no root.
+
+### Red first
+
+The case tests, copied verbatim from the branch into a copy of 4678b983's tree
+(`maintree.py`: the worktree copied, each file B650 changed put back by `git
+show 4678b983:<path>`, each file it added removed), through a shim that routes
+main's own calls on the roots through the tests' stand-ins and changes nothing
+of when they run (`shim.py`: `checkLibraryRoots`' `os.Stat` and `os.ReadDir`
+through the run's, `countDirs` through the stand-in count, `IsUnderAny` in
+`Validate` through a seam, the console's runner over the given probes; every
+call still on the run's goroutine, with no bound), their own deadline
+shortened to 10 s for the run (main never returns, so any deadline shows it):
+
+```
+$ go test -C <main-tree> -count=1 -p 8 -v -run '<the cases>' ./internal/doctor/   (the --- and message lines)
+    b650_red_linux_test.go:40: inotify-watch-limit did not return within 10s: a root that does not answer held it
+--- FAIL: TestACountBelowARootThatAnswersIsNotReadAsALowOne (10.01s)
+--- PASS: TestAHealthyLibrarysWatchLineIsAsItWas (0.00s)
+    b650_red_test.go:157: Run did not return within 10s: a root that does not answer held it
+--- FAIL: TestARunNamesARootThatDoesNotAnswerWithinItsBound (10.01s)
+    b650_red_test.go:231: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestTheSecondOfTwoRootsDoesNotAnswer (10.01s)
+    b650_red_test.go:252: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestRootsThatDoNotAnswerCostOneBoundTogether (10.01s)
+    b650_red_test.go:273: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestARootWhoseListingDoesNotAnswerIsNamed (10.01s)
+    b650_red_test.go:286: library-roots did not return within 10s: a root that does not answer held it
+--- FAIL: TestALaterRunFindsTheRootStillNotAnsweringAndAsksItNoMore (10.00s)
+    b650_red_test.go:320: the overlapping runs did not return within 10s: a root that does not answer held it
+--- FAIL: TestOverlappingRunsShareOneProbeOfARoot (10.01s)
+--- PASS: TestHealthyRootsReadAsTheyAlwaysDid (0.00s)
+FAIL	github.com/acoseac/1-bit-bridge/internal/doctor	70.073s
+
+$ go test -C <main-tree> -count=1 -p 8 -v -timeout 20m -run '<the cases>' ./cmd/bridge/
+    b650_red_test.go:255: bridge doctor did not return within 10s: a root that does not answer held it
+--- FAIL: TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn (10.00s)
+    b650_red_test.go:294: bridge doctor did not return within 10s: a root that does not answer held it
+--- FAIL: TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories (10.01s)
+    b650_red_test.go:327: the console's doctor did not return within 10s: a root that does not answer held it
+--- FAIL: TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce (10.01s)
+    b650_red_test.go:368: the checklist did not return within 10s: a root that does not answer held it
+--- FAIL: TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead (10.00s)
+--- PASS: TestBridgeDoctorPrintsHealthyRootsAsBefore (0.01s)
+FAIL	github.com/acoseac/1-bit-bridge/cmd/bridge	40.082s
+```
+
+Every case fails by its own deadline, none by hanging the suite, and the three
+guards pass on main's tree: over roots that answer, library-roots, the inotify
+line and config-file print what main printed, word for word. The branch's
+first commit, b4f83ae5, turns every case green.
+
+### Controls
+
+Each an uncommitted edit to the committed tree, its prediction written down
+before the run (`control-predictions.txt`, `controls-predictions.txt`),
+restored with `git checkout --` (`git status` clean after each):
+
+- C1, the brief's: the bound removed (`waitFor`'s timer `left + 1000h`):
+  `TestARunNamesARootThatDoesNotAnswerWithinItsBound` "Run did not return
+  within 1m0s" and `TestBridgeDoctorNamesARootThatDoesNotAnswerAndGoesOn`
+  "bridge doctor did not return within 1m30s", each by its own deadline.
+- C2, one work a key (`beginOut` never joins the work out): the later run, the
+  overlapping runs and the console's second run red, "two runs began 2
+  probes", "8 overlapping runs began 8 probes", no "still".
+- C3, a run's works kept (`ProbeRun.met` not asked): "the root was probed 4
+  times, want twice".
+- C4, no limit: no warn past it, at both levels, and the fifth load answered.
+- C5, one limit for both kinds (`outOfKind` counting every work): the load
+  beside sixteen probes held back, and the console's config-file "was not
+  checked: 4 earlier loads" past the probes' limit. Its first edit (`if true`)
+  did not compile, left as no control and run again.
+- C6, a work never let go (its delete removed): "the probe that answered late
+  is still out", and the console's recovered root never probed afresh.
+- C7, a stop said as a stall (`waitFor`'s stopped return removed): both
+  stopped runs "did not answer within", a fail.
+- C8, no probes beside the load (`loadDoctorConfig`'s `BeginRoots` removed):
+  "after the load, the roots were probed 0 and 0 times".
+- C10, the fold assigning in place of adding: the healthy inotify line "2
+  directories", want 3, and the fold's table red.
+
+Each as predicted.
+
+### The gates
+
+On 8ead962b, in one hold of the build lock (08:26 to 09:04, `gate.py`), `-p 8
+-parallel 8`: under `-race -count=50`, the touched tests of internal/doctor
+(the 16 cases of `rootprobes_test.go` and `rootprobes_linux_test.go`, and the
+earlier ones over the code they changed: `TestRun_FullReportShape`, the
+library-roots, config-file, port and tls-cert "not checked" tests, the count
+through a linked root) ok in 413 s; of cmd/bridge (the 11 of
+`doctor_roots_test.go`, the checklist's 10 over the changed read, and
+`TestDoctorAndInitCarryTheContainerVerdict` over `initPreflightDeps`) ok in
+252 s; `TestLibraryRootsOfIsTheRootsLoadGives` ok. `go test -race -count=1
+-timeout 120m` of `./internal/doctor/` (15 s), `./internal/config/` (14 s) and
+`./cmd/bridge/` (1,574 s, which holds `TestEveryCitedTestNameExists`): all ok.
+`go vet ./...` with the Makefile's tags for GOOS linux, darwin and windows:
+clean. go1.27.3's gofmt lists none of the Go files the change touches. The
+macOS-only case (`rootprobes_kqueue_test.go`) is vetted here and runs on CI's
+macOS leg; `make test` and `make build-all` were not run: the brief asked for
+the packages.
+## 2026-11-13 — B567: every sweep from the root skips make test's TMPDIR
+
+Backlog B567, on `fix/b567-census-skips-test-tmp` from main 4678b983, worker
+b567 on legion0 (Linux, amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`, 16 cores, so `-p 8` and `-parallel 8`). Commits: the red tests
+ad2002f7, the fix 9dff8f6f, fsutil's table of tree walks e2d9afe0 (the
+gates below), then this record. The rule's line goes into
+`.claude/rules/build-ci-tests.md`, after B740's, through
+`rules-b567-r1.patch`, its long form under B567 in
+`ops/History-rules-build-ci-tests.md`, where the patch also corrects B740's
+long form.
+
+**What was wrong.** B740 made the build-site census skip `.tmp`, the TMPDIR
+make test and make test-fast give every package's tests when the caller sets
+none, and its record said the Go-file sweeps (the citation guard, the
+hash-cost, flac-handle and blank-keeper guards) skipped it already, as every
+name the go tool ignores. Listing every walk in the repository's tests and
+scripts that starts at the checkout root, with its rule for a directory:
+
+- Three rules read `.tmp`, each because it reads dot-directories on purpose
+  (`.github` holds a Go program and docs these guards read):
+  `skipsForCitations` (`cmd/bridge/cited_test_names_test.go`), which two
+  walks share, the citation guard's (`scanTestCitationsIn`, under
+  `TestEveryCitedTestNameExists`) and `productionCalls`
+  (`cmd/bridge/itunes_unwired_test.go`, under
+  `TestTheWireManifestIsTheProvidersAlone` and
+  `TestNoProductionPathAsksITunes`); `hashCostDirRule`
+  (`internal/adminauth/hashcost_test.go`, under
+  `TestNoProductionCodeLowersTheHashCost`); and `flacDirRule`
+  (`internal/manifest/flac_handle_discipline_test.go`, under
+  `TestNoLeakyFlacConstructors`), which the brief had not named.
+- These skip it: the census, by `makeTestTmpDir`; the blank-keeper guard's
+  rule (`moduleDirRule`, over `goToolIgnores`) and the five sweeps of
+  `cmd/bridge` that share it; the docblock-subject and server-error-log walks,
+  `internal/fsutil`'s tree-walk sweep and `internal/player/dsdconv`'s served
+  sweep, which skip every dot-directory.
+- These start at the root and walk no tree there: the embed-pattern guard
+  (`go list`, then one package directory each), the serial-DTO walk (named
+  package directories), the job-writer sweep (listed directories), the
+  qualification-constructor walk (`../../internal` and its own package), the
+  licence generator's notices (one level a directory), and the Python
+  doc-split and budget scripts (one-level globs and named folders, or a
+  staging directory outside the repository).
+
+While make test ran, every package's tests kept their temporary trees in
+`.tmp` and the go command its work directories, so the three rules met
+another package's files mid-walk: a test defined there satisfied a citation
+this tree does not back, a comment there cited a test nothing defines, a
+setter call or a leaky flac call there was reported as this module's, a file
+in mid-edit failed the walk, and a directory removed between its listing and
+its own failed it outright.
+
+**Red first.** At the red tests (ad2002f7: the cases and the walk seams, no
+skip), each package alone, TMPDIR on disk (`.tmp/_b567/gotmp`), every row in
+make test's TMPDIR red and every look-alike row green:
+
+```
+hashcost_test.go:328: offenders = [".../checkout/.tmp/…/001/cmd/tool/main.go" ".../checkout/cmd/tool/main.go"] after reading 2 files, want [".../checkout/cmd/tool/main.go"] after reading 1
+hashcost_test.go:328: offenders = [".../checkout/.tmp/…/001/half.go: could not parse: …/half.go:3:27: expected ')', found 'EOF'" ".../checkout/cmd/tool/main.go"] after reading 2 files, want [".../checkout/cmd/tool/main.go"] after reading 1
+hashcost_test.go:364: the sweep failed: open .../checkout/.tmp/go-build123/b001: no such file or directory
+flac_handle_discipline_test.go:324: found [".tmp/…/001/p/probe.go:5: flac.ParseFile — use os.Open + flac.Parse + defer f.Close()" "p/probe.go:5: flac.ParseFile — use …"] after parsing 2 non-test and 1 test files (2 importing the package), want ["p/probe.go:5: …"] after 1, 0 and 1
+flac_handle_discipline_test.go:361: the sweep failed: open .../checkout/.tmp/go-build123/b001: no such file or directory
+sweeps_tmpdir_test.go:131: the walk found ["cites …ATemporaryTreeCites in .tmp/…/001/main.go" "cites …ATemporaryTreeCites in .tmp/…/001/x_test.go" "cites …ParkedNeverRuns in prod.go" … "defines …ParkedNeverRuns" …], want ["cites …ParkedNeverRuns in prod.go" …]
+sweeps_tmpdir_test.go:130: …/.tmp/…/001/half_test.go:5:31: expected '}', found 'EOF'
+sweeps_tmpdir_test.go:131: the walk found ["calls g in prod.go" "calls leftOver in .tmp/…/001/main.go"], want ["calls g in prod.go"]
+sweeps_tmpdir_test.go:130: …/.tmp/…/001/half.go:3:12: expected ')', found 'EOF'
+sweeps_tmpdir_test.go:162: open …/.tmp/go-build123/b001: no such file or directory
+```
+
+The last line stands for the four removal cases of the citation guard's two
+walks, the `open` lines above it for the two of each other sweep: each sweep
+failed on the directory it had just listed, removed by `sweeptest.Removal` at
+that moment of the walk.
+
+In the real checkout, with a leftover tree planted at `.tmp/b567-leftover/`
+(a non-test file calling `adminauth.SetTestHashCost`,
+`manifest.BuildManifest` and `enrich.NewITunesClient`, a leaky
+`flac.ParseFile`, and a test file whose comment cites a test nothing defines;
+`.tmp/_b567/leftover.py`) and the red commit's three predicates put back
+from git, the five whole-tree guards failed, and B740's census passed:
+
+```
+cited_test_names_test.go:74: no test function of this name exists: …ALeftoverTreeCites  (cited by .tmp/b567-leftover/…/001/x_test.go)
+itunes_unwired_test.go:89: a production path calls a builder that carries enrichmentProgress whatever enrich.enabled says:
+itunes_unwired_test.go:124: a production path wires the iTunes fallback, which no text names as a service enrichment asks:
+hashcost_test.go:74: non-test files call SetTestHashCost, which would weaken password hashing in production: [../../.tmp/b567-leftover/…/001/cmd/tool/main.go]
+flac_handle_discipline_test.go:89: mewkiz/flac path-taking constructors leak the file handle (Stream.Close cannot close a *bufio.Reader), which blocks deletion on Windows:
+```
+
+At 9dff8f6f, the same tree planted: all five ok, and the census's two.
+
+**The fix.** `skipsForCitations`, `hashCostDirRule` and `flacDirRule` skip
+the root's own `.tmp` by `sweeptest.IsMakeTestTmpDir`, decided by its name
+before the walk lists it, as the census skips it by `makeTestTmpDir`. One
+definition, `sweeptest.MakeTestTmpDir`, serves the three test packages. The
+census keeps its constant: it is a program and sweeptest is imported by tests
+alone, and a test package cannot reach a program's unexported constant, so
+`TestTheSweepsSkipTheDirectoryTheCensusSkips` (beside the census) holds the
+two to one name, as B740's `TestTheCensusSkipsTheMakefilesTMPDIR` holds the
+census's to the Makefile. Only the root's is skipped: a `.tmp` below the root,
+`.tmpfoo` and `.github`'s Go program stay read (the look-alike rows). Not
+renamed: `tags_test.go`'s rows and `.dockerignore` name `.tmp`. A directory
+removed mid-walk is stood in for, never raced, by `sweeptest.Removal`, a walk
+that removes its directory as the walk reaches it, after the directory above
+it was listed and before it is listed itself, taken through a walk seam of
+each package (`sweepWalkDir`, `hashCostWalkDir`, `flacWalkDir`), which the
+sweeps call on the test's own goroutine and each case puts back in its
+cleanup; `productionCalls` gained a root (`productionCallsIn`) so a fixture
+can be walked.
+
+**Negative controls**, at 9dff8f6f, predicted before the run in
+`.tmp/_b567/controls.predictions.txt` (`.tmp/_b567/controls.py`: exact-once
+replacements, the test binaries built per control, the named tests run, the
+bytes put back from memory; `git status` clean after), every one as
+predicted, every test run beside them green:
+
+| Mutation | Red |
+|---|---|
+| C1 `skipsForCitations` without the skip | both walks' rows in the TMPDIR (4), both walks' removals (4) |
+| C2 `hashCostDirRule` without the skip | its two TMPDIR rows, its two removals |
+| C3 `flacDirRule` without the skip | its TMPDIR row, its two removals |
+| C4 `IsMakeTestTmpDir` at any depth | `TestIsMakeTestTmpDir` ("one further down"), the row below the root in all four walks |
+| C5 `IsMakeTestTmpDir` for any name beginning `.tmp` | `TestIsMakeTestTmpDir` (".tmpfoo", ".tmp.old"), the `.tmpfoo` row in all four walks |
+| C6 `MakeTestTmpDir` renamed `.scratch` | the pin alone (the cases follow the constant) |
+| C7 the hash-cost seam unwired | its two removals ("did not walk through the stand-in") |
+| C8 `Removal` that removes nothing | `TestARemovalRemovesWhatTheWalkReaches`, the walk that reads it |
+
+**The gates**, through the build lock, nothing else of this worker's in it
+(`.tmp/_b567/gates.py`, under `guard.py`). `make test` was given `P=8` and
+`TEST_PKGS='-count=1 -parallel 8 ./...'`, so its recipe ran `go test -tags …
+-p 8 -race -timeout 30m -count=1 -parallel 8 ./...`, uncached, and TMPDIR was
+unset, so the Makefile's fallback was in force (the recipe line reads
+`TMPDIR="…/b567/.tmp"`), every package's tests and the go command's work
+directories in the checkout's `.tmp` while the sweeps walked the checkout.
+
+At 9dff8f6f: `go vet ./...` for linux, darwin and windows, each with the
+Makefile's tags and without them, clean; the 25 new and touched tests under
+`go test -race -count=50 -p 5 -parallel 8`, ok; `make build-all P=8` ok. The
+first make test failed one package: `internal/fsutil`'s
+`TestEveryWalkOfALibraryRootStartsFromWalkableRoot`, which reads every
+production Go file for a tree walk, found `sweeptest.go`'s `(*Removal).WalkDir`
+in neither of its tables (sweeptest is imported by tests alone, but its file
+is no test file). Every other package was ok. The second run, already under
+way, was stopped and what it left in `.tmp` removed; e2d9afe0 lists the
+stand-in in `otherTreeWalks`.
+
+At e2d9afe0: the six vets clean again (answered mostly from the build
+cache, which keeps clean results alone); the 26 tests (the 25 and fsutil's
+sweep) under `-race -count=50`, ok, no race reported (`cmd/bridge` 644 s,
+`internal/manifest` 259 s, `internal/adminauth` 95 s, `internal/fsutil`
+87 s, `scripts/third-party-licenses` 38 s, `internal/sweeptest` 1 s); `make
+build-all P=8` ok (`check-build-tags: OK`). make test with the checkout's
+`.tmp`:
+
+- run 1 (10:04 to 10:34): 89 packages ok, none failed (`cmd/bridge` 1708 s,
+  `internal/manifest` 1689 s);
+- run 2 (10:34 to 11:05): 88 ok, and `cmd/bridge` failed
+  `TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, two subtests,
+  "the analysis pool never settled", within a second each, at 1781 s of the
+  binary's 1800 while another worker's `bridge.test` ran outside the lock.
+  That wait gives up at the binary's deadline less 30 s (`serveGiveUpTime`),
+  so this is the package meeting its 30-minute cap, not the assertion; alone
+  under `-race -count=3` the test passed 3 of 3, a second a subtest;
+- run 3 (13:12 to 13:42): 89 ok, none failed (`cmd/bridge` 1717 s);
+- run 4 (14:13 to 14:43), the third whole run: 89 ok, none failed
+  (`cmd/bridge` 1711 s, `internal/manifest` 1695 s).
+
+At P=8 on this host `cmd/bridge` runs within about 90 s of its cap; the two
+runs that met it ran 1781 s and 1791 s.
+
+With TMPDIR outside the checkout (`~/onebit/jobs/b567/ext-tmp`, the recipe
+line naming it) and a leftover tree in the checkout's `.tmp`
+(`.tmp/b567-leftover/`: the five guards' plants above and a file in
+mid-edit): the first run (13:42 to 14:13) had 88 packages ok, and
+`cmd/bridge` met its cap as run 2 had, at 1791 s:
+`TestMixedCaseConcurrentLookupsEnqueueOnce` and
+`TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, every case "the
+analysis pool never settled" within a second; the guards that read the
+checkout, the five the leftover turned red at the red commit among them,
+passed. Run again (15:10 to 15:40): 89 ok, none failed (`cmd/bridge`
+1733 s), the leftover unread.
+
+The rules patch applies at this record's commit; `make docs-check`'s
+scripts are clean on a copy with it applied (`build-ci-tests.md` 37,355
+bytes), and `TestEveryCitedTestNameExists` passes there, and fails on a
+citation planted in that copy's History file, so it read the copy.
+
+## 2026-11-13 — B828: a tsnet state file that holds nothing refuses the start in the bridge's words
+
+Worker b828, legion0, branch `fix/b828-empty-tsnet-state` from main 4678b983. Commits a2a3d3fe (the tests, red
+first), ce3cf633 (the refusal and the tile), bda8e234 (the refusal's tests report every assertion), and the one that
+carries this record, the README's sentence and the release note. The rules line and its long form ship as
+`rules-b828-r1.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`).
+
+### What was true
+
+Read in the module cache, tailscale.com v1.104.2: `tsnet.Server.Start` (tsnet/tsnet.go, 556 to 559) runs `doInit`
+(709 to 714) and `start` (805), which starts its logger (875), its network monitor (879), its userspace engine (887)
+and netstack (907) and then opens its store, `store.New(tsLogf, <Dir>/tailscaled.state)` (956 to 963). `store.New`
+(ipn/store/stores.go, 59 to 82) calls `maybeMigrateLocalStateFile` (78 to 80) before `NewFileStore`, and that function
+(259 to 273) reads the file and unmarshals it into a `map[string]any` to tell a TPM-sealed file from a plain one: an
+empty file fails there, `unexpected end of JSON input`, wrapped `failed to unmarshal %q: %w` (272) and `failed to
+migrate existing TPM-sealed state file to plaintext format: %w` (79). `NewFileStore`'s "Treat an empty file as a
+missing file" (166 to 171, Tailscale's issue 895) is reached only by a direct call, as the tests' fixtures make one;
+B749's comment in `readNodeState` ("Upstream's store takes an empty file for none") had read it as the start's answer.
+
+A throwaway program at main (`.tmp/_b828/probe`, not committed) showed it. `store.New` over an empty file, over a line
+feed and over ` \t\r\n` answered that error; over `{}` it opened. The bridge's own `Start` over an empty file logged
+"tsnet: no registered node in the state dir and no AuthKey — interactive auth required", then failed `tsnet: server
+start: tsnet: failed to migrate existing TPM-sealed state file to plaintext format: failed to unmarshal "<state
+dir>/tailscaled.state": unexpected end of JSON input`, which serve prints as `tsnet: bring node up: <that> (LAN
+listener still active)`; the state dir held `tailscaled.state` alone before and `tailscaled.log.conf`,
+`tailscaled.log1.txt` and `tailscaled.log2.txt` beside it after, the logger's files, written outside a test binary.
+Over a line feed it logged the library-name line ("the node's state does not parse as Tailscale's state file, so
+this start cannot tell which name the node has …") first, then failed alike. Upstream's writer syncs the file before
+its rename (atomicfile/atomicfile.go, line 45), so an empty file comes from outside it: a truncation by hand, a copy,
+a sync tool, a filesystem's repair.
+
+`readNodeState`'s one caller is `Server.nodeName`, whose one caller is `startUnlocked`, whose one caller is
+`Server.Start`, which serve (`bringTsnetUp`, from `tsnetFront.run`), `bridge tsnet auth` and `bridge tsnet status`
+call. A node not registered was named `tsnet.DefaultHostname` unless `tailscale.hostname` was set and, with no auth
+key, logged the interactive-auth line; a state that does not read was named after the library with one line, and no
+line under `tailscale.hostname`, whose return came first; in both the upstream start ran. The console's tile showed
+`LastStartError` for a `LogsRequiredError` alone, and otherwise `tsnet status: tsnet: Status called before Start`.
+`bridge tsnet logout` reads no state: it removes the state's folder.
+
+### The choice, and as built
+
+The brief's review bound option (a) as a refusal of the start in the bridge's words, not a warning (a state that does
+not read changes the name alone and leaves upstream's start to fail), independent of the hostname, and ruled option
+(b) out: a new registration is a new device, whose MagicDNS name and certificate can change, against B749's rules that
+the node keeps its identity and that the reading changes nothing. `readNodeState` answers a file whose bytes are all
+JSON's white space (space, tab, carriage return, line feed: what Go's decoder skips), none at all included, with
+`*tsnet.EmptyStateError` (`WhiteSpace` set where it holds any); `nodeName` returns it before it asks
+`tailscale.hostname`; `startUnlocked` returns it before it builds the upstream server, so neither the hook before the
+upstream start nor the upstream start runs, whatever the hostname or the auth key; `Start` keeps it as the last start
+error. Its words name the file, and its folder by its role, and no path, and say that Tailscale does not start from
+it, that a copy of the file keeps the node, that moving the file aside and restarting the bridge gives a new device,
+which authenticates as on a first run, takes a new tailnet address and can take a new MagicDNS name, which paired apps
+hold, and that the bridge moves and replaces nothing. Serve prints them on its tailnet line, `bridge tsnet auth` and
+`status` print them and exit 1, and `tsnetAdminStatus` reads them from `LastStartError` beside `LogsRequiredError`.
+
+### The other states
+
+A missing file and `{}` are a new node, before and after (`TestAStateFileThatIsNotThereStillStartsANewNode`, green at
+main and since). White space alone was a state that does not parse: the library's name, its line, then upstream's
+failure; it is refused with the empty file now. Any other byte, a vertical tab, a form feed, a no-break space, a
+byte-order mark or NUL bytes among them, is a state that does not parse, as before
+(`TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`). What stays open of the reading is backlog B829 and the follow-ups
+this job's report names.
+
+### Red first
+
+At a2a3d3fe, the tests on main's code, `go test -count=1 -run '…' ./internal/tsnet/` and `./cmd/bridge/` with the
+release tags and TMPDIR `~/onebit/tmp`: every row of `TestAStateFileThatHoldsNothingRefusesTheStart` red, the first
+row's lines "the refusal does not say "move the file aside": "tsnet: server start: tsnet: failed to migrate existing
+TPM-sealed state file to plaintext format: failed to unmarshal \"…/tailscale/tailscaled.state\": unexpected end of
+JSON input"", "the start built 1 upstream node(s) over a state file that holds nothing, want none", "the start
+reached the hook before the upstream start" and "the start changed the state dir" (`tailscaled.log.conf` after);
+every row of `TestTheCommandsRefuseAStateFileThatHoldsNothingInTheBridgesWords` red ("bridge tsnet auth reached its
+node's upstream start", its words "tsnet: before start: the test stopped the node before its upstream start"); both
+rows of `TestServeRefusesAStateFileThatHoldsNothingInTheBridgesWords` red ("serve reached its node's upstream start;
+its line: "tsnet: bring node up: tsnet: before start: the test stopped the node before its upstream start (LAN
+listener still active)"", and the tile's "tsnet status: tsnet: Status called before Start"); and
+`TestAStateFileThatIsNotThereStillStartsANewNode` and `TestTheNodeNameIsTheRegisteredOneOrTheDefault` green. The node
+internal/tsnet stands in for does what upstream's start did in the probe (`upstreamOverState`: the logger's file, then
+upstream's words), since a test binary's own upstream start skips the logger; the cmd/bridge tests stop every start
+that reaches the hook before the upstream start (`stopTsnetStarts`), so nothing reaches the network. At ce3cf633
+every test is green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b828/controls.predictions.txt`, not committed), at bda8e234, an uncommitted edit
+of the clean tree put back with `git checkout --` and found equal to HEAD, internal/tsnet's five tests and cmd/bridge's
+four (the two new ones, `TestTheNodesNameOnEveryStart` and `TestTheTileSaysWhatATailnetThatRequiresLogsNeeds`) run
+from test binaries built for it, each subtest's verdict read. The run with no mutation was green (60 verdicts). Each
+was red where predicted and nowhere else:
+
+| | mutation | red |
+|---|---|---|
+| C1 | the fix removed: an empty file no state, white space a state that does not parse, as main | the five refusal rows (upstream's words, the node built and started, the hook, the logger's file in the state dir), the reader's three rows that hold nothing, the five commands rows, serve's two |
+| C2 | `nodeName` takes the refusal for a state that does not read | the five refusal rows, the five commands rows, serve's two; the reader's table green |
+| C3 | the refusal asked only without `tailscale.hostname` | the two refusal rows with a hostname, the three commands rows with one, serve's row with one |
+| C4 | the tile without the refusal | serve's two rows, on the tile alone |
+| C5 | the brief's (b): the reader moves the file aside and answers no state | the five refusal rows (the node up, built, the hook, the state dir's comparison), the reader's three rows, the commands and serve rows |
+| C6 | the refusal wrapped, `tsnet: %w` | the five refusal rows, the five commands rows and serve's two, on the exact words alone |
+| C7 | the line drawn at `bytes.TrimSpace` | the reader's vertical tab, form feed and no-break space rows |
+| C9 | the upstream node built though never started | the five refusal rows, on the count of nodes alone |
+
+### The gates so far
+
+At bda8e234, outside the build lock (single packages): go1.27.3's gofmt lists none of the changed Go files; `go vet`
+of internal/tsnet and cmd/bridge with the release tags clean; `go test -race -count=50 ./internal/tsnet/` ok in 24.5 s,
+and `-race -count=1 -timeout 120m` once ok (119 verdicts, none skipped); cmd/bridge's ten touched tests (the two new
+ones, `TestTheNodesNameOnEveryStart`, the three tile tests and the four `TestTailscaleAdminSource…` tests) under
+`-race -count=50 -p 8 -parallel 8` ok in 120 s (500 runs, 1,400 subtests, none failed or skipped, no race reported).
+
+### The gates at the record's commit
+
+At 095a5d0f, in one use of the build lock (06:11 to 06:38), TMPDIR `~/onebit/tmp`: `go vet ./...` with the release
+tags clean for linux/amd64, darwin/amd64 and windows/amd64, and of internal/tsnet and cmd/bridge for linux/386;
+`check-build-tags` OK and the census's tests ok (21 s); `go test -race -count=1 -p 8 -parallel 8 -timeout 120m
+./cmd/bridge/` ok in 1,586 s, which holds `TestEveryCitedTestNameExists` and the drain audit. The rules patch applies
+to HEAD (`git apply --check`); on a git-archive copy of HEAD with it applied, the copy's `check-doc-budgets.py` is
+clean (`cli-serve.md` 98,615 bytes), `verify_moves.py --base HEAD --edit '*The name.* An explicit'` reports MISSING
+the B749 bullet's two copies alone, each replaced by its successor with the one clause the patch edits (the tool
+cannot pair a line edited with its verbatim twin), and `TestEveryCitedTestNameExists` is green there and red with a
+ghost citation planted in the patched History. `make test` and `make build-all` were not run: the brief asked for the
+packages. Windows and macOS are CI's to run.
+
+## 2026-11-13 — B828 round 2: white space past the read's bound refuses the start too
+
+Worker b828, legion0, branch `fix/b828-empty-tsnet-state` at `orch/b828` 88b06153 (round 1 and its rules), against
+the finding Codex (Medium) and Claude (Low) agreed on, and the brief's review of the fix. Commits 381776bd (the tests,
+red first), ca79df9f (the fix) and the one that carries this record. The rules ship as `rules-b828-r2.patch`.
+
+### The finding
+
+`readNodeState` reads `maxStateBytes` (16 MiB) and one byte more, and its size guard ran before round 1's white-space
+check, so a `tailscaled.state` of 16 MiB and one byte of JSON white space was "larger than the 16777216 bytes it is read
+to", a state that does not read: `nodeName` took the library's name and said so, `startUnlocked` built the upstream
+node, and upstream's `store.New` refused the file in its TPM words after its logger had written into the state dir; the
+console's tile fell back to "Status called before Start". It held, at 88b06153.
+
+### As built
+
+The white-space check comes first, of the same bounded read (`io.LimitReader` at `maxStateBytes + 1`, its errors and
+its sanitised paths as they were; a chunked read would lift the cap, which the brief's review ruled out): where every
+byte read is JSON white space, the file holds nothing, `*EmptyStateError` with `Oversized` set where the read passed
+`maxStateBytes`, and nothing more is read. The words for that file say it holds no state in its first 16 MiB, which is
+as far as the bridge reads it, and that the bridge does not start the node from it; they leave out round 1's "Tailscale
+does not start from it", since of such a file the bridge knows only what it read. The words for an empty file and for
+white space alone are round 1's, byte for byte. The edge, in the comment and the History: a file with JSON past its
+first 16 MiB of white space, which Tailscale might start from, is refused with it, where it reached upstream before; a
+state file is a few KiB, so that file is broken anyway. Anything else in what was read keeps a larger file a state that
+does not read, in the same words as before.
+
+### Red first
+
+At 381776bd, the tests on 88b06153's code, `go test -count=1 -v -run '^(…)$' ./internal/tsnet/` with the release tags
+and TMPDIR `~/onebit/tmp`, the four named `TestOnlyJSONWhiteSpaceIsAStateThatHoldsNothing`,
+`TestAStateFileThatHoldsNothingRefusesTheStart`, `TestAStateFileThatIsNotThereStillStartsANewNode` and
+`TestTheStateReaderWritesNothing`: the one red row,
+"white space past the bound" (16,777,217 bytes cycling through space, tab, carriage return and line feed), with
+"readNodeState = {registered:false hostname:}, the node's state is larger than the 16777216 bytes it is read to: a
+state that holds nothing false, want true", then "the upstream node's Start ran over a state file that holds nothing",
+"the start built 1 upstream node(s) over a state file that holds nothing, want none", "the start reached the hook
+before the upstream start" and "the start changed the state dir" (`tailscaled.log.conf` after, the state file's 16,777,217
+bytes and SHA-256 unchanged), and Start's words upstream's. Green there: the row at the bound (16,777,216 bytes of white
+space), the row past it with an `x` in its first 16 MiB ("is larger than …", as before) and round 1's rows. Every row of
+the reader's table that holds nothing now drives a start too (`startRefused`, factored out of
+`TestAStateFileThatHoldsNothingRefusesTheStart` with its assertions), which the state dir's comparison reads as a length
+and a SHA-256 past 64 bytes.
+
+### Negative controls
+
+Predicted before any ran (`.tmp/_b828/controls2.predictions.txt`, not committed), at ca79df9f, each an uncommitted edit
+put back with `git checkout --`, internal/tsnet's five tests run from a test binary built for it: no mutation, 43
+verdicts green; the white-space check asked only of a read within the bound, as at 88b06153 (the brief's control), red
+on "white space past the bound" alone, on the reader, the upstream start, the hook, the state dir and the words;
+`Oversized` set at the bound, red on "white space to the bound" alone; the words without `Oversized`, red on "white
+space past the bound" alone, on its words.
+
+### The runs
+
+At ca79df9f, outside the build lock (one package each): go1.27.3's gofmt lists neither changed file; `go test -race
+-count=50 ./internal/tsnet/` ok in 134.7 s and `-race -count=1 -timeout 120m` once ok (122 verdicts, none skipped, no
+race); cmd/bridge's two B828 tests, which compare the refusal's words, under `-race -count=50` ok in 132.6 s (100 runs,
+350 subtests); `go vet -printf=true` of internal/tsnet and cmd/bridge with the release tags clean for linux, darwin and
+windows (amd64). The rest of the tree is round 1's, vetted then.
 ## 2026-11-13 — B834: two engine tests wait for the step they read, and two siblings for a timer's message
 
 Backlog B834 on `fix/b834-engine-test-barriers`, from 4678b983, by worker
@@ -96502,3 +97687,4093 @@ an edit accounts for one copy and the base held two. With the twin put
 back it passes, and the twin in the patch is the new line byte for byte.
 `make test` and `make build-all` were not run: the brief asked for the
 packages.
+## 2026-11-14 — B650 round 2: bridge doctor's gathers share one read of the box, and the root tests read their waits on the runner's clock
+
+The rules are `output.md`'s B650 line (the checklist's read) and the long
+form in `ops/History-rules-cli-serve.md` ("B650 — the doctor's bound on a
+library root"); this is round 2's evidence, from the review of round 1.
+Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk
+(`~/onebit/tmp`). Commits 7df9a009 (item 1), 9db4a0e3 (item 3), 91474ddf
+(item 1's case drains its last run through `drainLoopOnCleanup`, which
+`TestEveryBackgroundGoroutineDrainsOnCleanup` asked for in cmd/bridge's full
+run) and 1f4cbefe (two of item 3's cases count their probes once every probe
+has ended, which the run beside 16 busy processes asked for); item 2 is the
+correction of round 1's Step 0 above.
+
+### Item 1, Step 0: the long-lived paths that call readOutputs more than once
+
+At 336a61aa `readOutputs` (`cmd/bridge/output_checklist.go` 120-154) began a
+read of its own at every call (131-134). Its callers:
+
+- Serve, and each serve session the launcher runs in its process: the
+  console's checklist (`internal/admin/handlers_output_checklist.go` 41) and
+  doctor (`handlers_doctor.go` 70, `handlers_logs.go` 349) call it with the
+  request's context over the serving process's builder (`cmd/bridge/main.go`
+  6381-6382), whose one flight every read joins (`internal/api/outputs.go`
+  657-671), each joiner leaving with its own context (663-667), which
+  net/http cancels as the handler returns. At most the flight stays held:
+  no read is left per call.
+- `bridge doctor`: one gather a run, two with `--fix` (`doctor.go` 59-85),
+  and the process ends. `bridge init`'s preflight gathers none: only
+  `buildDoctorDepsRun` sets the checklist (`doctor.go` 407), and the
+  console's runner replaces it (1123).
+- The launcher (`menu.go`), which runs for as long as its menu does: its
+  doctor row (`actDoctor`, 384-385) is offered only while
+  `packaging.IsInitialized` finds no platform config (`menu.go` 130-137,
+  `internal/packaging/state.go` 91-98), so its lookup of that path loads
+  none and gathers nothing. Where `DefaultConfigDir` fails (no HOME:
+  `os.UserHomeDir`, `internal/packaging/packaging.go` 487-491),
+  `IsInitialized` gives `""`, `resolveConfigPath("")` grades
+  `./bridge.yaml` (`configpath.go` 50-52), and the row gathers at every use,
+  each over a one-shot builder of its own (`output_checklist.go` 307): on an
+  MPD box whose root does not answer, each use stranded one read's goroutine
+  until the process ended. A config made between the menu's look and the
+  row's run gives one gather, after which the row is gone.
+
+One long-lived path strands reads, so item 1 is a fix, not a Low.
+
+### Item 1, the fix
+
+`bridge doctor`'s gathers read the box through a table the process keeps
+(`cliOutputsReads`, `outputsReads`): at most one read in flight for a key,
+the config file's name and its settings as yaml.v3 encodes them
+(`outputsReadKey`; encoding/json leaves MPD's password out, which two
+configs can differ by), which every gather over that key waits on, each for
+its own bound (`outputsReadBound`) and on its own context. The read runs on
+`context.WithoutCancel` of the context of the gather that began it, so no
+gather's end ends it or answers another's wait with its cancellation, and it
+leaves the table under the table's lock as it answers, so a gather after
+that reads the config it loaded then. Serve's source keeps a read of its own
+per call, on its request's context. `bridge doctor --fix`'s two gathers now
+wait on one read, each for its own bound, so its two waits (B884's) are as
+they were.
+
+`defer lo.Close()` while a read another gather waits on is inside that
+builder's `Response`: `Close` (`internal/api/outputs.go` 1313-1327) takes the
+builder's lock, which no holder keeps across I/O, closes the session without
+taking its turn (`serialSession.Close`, 201), and leaves the flight alone;
+the build keeps the session it took (`build`, 794), whose next command fails
+and dials once more (`again`, 797-805; `session`, 723-765), and the idle
+close the flight's end arms (`armIdle`, 698-706; `idleClose`, 708-721) closes
+that one within a minute. So the read's body reaches every gather still
+waiting on it, and `Close` waits for none of it.
+`TestDoctorRunsInOneProcessShareOneReadOfTheBox`'s last run is answered by
+the read the first run's builder began and closed, under `-race`.
+
+### Red first
+
+The three tests, as 91474ddf has them, in a copy of the worktree with
+`output_checklist.go` put back as 336a61aa has it and a names-only shim
+(`redtree2.py`: the table's type, its hook and count, the process's table,
+the source's two fields, none of which that `readOutputs` reads),
+predictions written first (`r2-red-predictions.txt`):
+
+```
+$ go test -C <red-tree> -race -count=1 -p 8 -parallel 8 -v -run '<the four>' ./cmd/bridge/
+--- PASS: TestTheChecklistSaysABoxThatDoesNotAnswerWasNotRead (0.30s)
+    doctor_roots_test.go:749: 3 doctor runs in one process began 3 reads of the box, want one
+--- FAIL: TestDoctorRunsInOneProcessShareOneReadOfTheBox (0.98s)
+    doctor_roots_test.go:841: the first config's runs began 2 reads, want one while it is out
+    doctor_roots_test.go:853: after the read answered, the first config's runs began 3 reads, want a second
+--- FAIL: TestADoctorRunTakesOnlyTheReadOfItsOwnConfig (0.65s)
+    doctor_roots_test.go:931: the second gather began a read of its own while the first one's was out
+--- FAIL: TestAWaitOnASharedReadEndsAloneWithItsContext (0.00s)
+```
+
+The first red run, on the tests' first draft, also raced: a case that failed
+left a reader running past the cleanup that puts the bound back. Each case
+joins its readers in a cleanup that runs before that one, and the run above
+is race-free. 7df9a009 turns the three green.
+
+### Item 1's controls
+
+On 7df9a009, each an uncommitted edit of `output_checklist.go`, restored with
+`git checkout --` (`git status` clean after each), predictions in
+`r2-controls-predictions.txt`:
+
+- R2-C1, a read per call back (the table bypassed): all three red, as at
+  336a61aa.
+- R2-C2, the key the file's name alone: the edited config's gather waited on
+  the held read, "the player line = ... did not answer within 300ms", its
+  music line not its own read's, "began 0 reads, want its own one".
+- R2-C3, the read on its first gather's context: "the read's context ended
+  with the first gather's: context canceled", and the second gather answered
+  that cancellation, not the body.
+- R2-C4, a read never leaving the table: the test's drain "the read was
+  still out once its root answered", and the cleanup's "still out 30s after
+  the box answered".
+
+Each as predicted.
+
+### Item 2
+
+Round 1's Step 0 said nothing else in a doctor run touches a root; a data
+directory under a library root says otherwise, and the line now names the
+residual and its backlog entry, B884. The review read
+`doctorOutputChecklist`'s stat of the database as made on the run's
+goroutine: it is inside the build (`Tracks`, `output_checklist.go` 392 at
+9db4a0e3), so inside the read the bound covers, where a dead mount reads as
+a box that did not answer; what that gather reads on the run's goroutine is
+the token file (`tokenFile`, 528-529, `auth.OpenStore`). The corrected line
+names both, and `buildDoctorDepsRun`'s `os.Stat(dbPath)` (`doctor.go` 506),
+which runs before `doctor.Run`.
+
+### Item 3: the timing asserts
+
+At 336a61aa: `rootprobes_test.go` 173 (a whole run under the bound and
+15 s), 259 (two roots under 1.75 bounds), 301 (a second run under 300 ms),
+351 (a stopped run under 750 ms), and `doctor_roots_test.go` 448 (a whole
+console run under 2 s after its stop at 150 ms); and
+`TestTheLoadsHaveALimitOfTheirOwn` (591-614) waited on its loads with no
+deadline.
+
+- 173, 259, 301 and 351: a seam. `RootProbes` reads its time through two
+  fields, `now` and `timer` (`time.Now` and `time.NewTimer`'s in
+  production), and the cases run on a clock that moves only when the case
+  moves it (`clockOf`, `rootprobes_test.go`), whose timers say what they
+  wait for as they are set: 173 and 259 read one wait of the bound, move the
+  clock past it, and require the run back with no other wait set (259's two
+  roots: one bound, not two); 301's second run sets no wait at all; 351's
+  run comes back on its stop with the clock never moved, and its next run,
+  the clock past the bound, says the root still has not answered. Each fails
+  at once on a wait it should not set, and by its 60 s deadline on a run that
+  does not return.
+- 448: a lower bound and a deadlock guard. The root's bound is ten minutes;
+  the run must come back after its stop (a channel the stop closes before it
+  cancels) and within `doctorWithin`'s 90 s.
+- `TestTheLoadsHaveALimitOfTheirOwn`: its loads run under `within`'s 60 s.
+
+Beside 16 busy processes the first loaded run of the five failed 5 of the
+100 runs of two of them, "began 0 probes, want one"
+(`TestALaterRunFindsTheRootStillNotAnsweringAndAsksItNoMore` 3,
+`TestARunStoppedByItsCallerSaysSoAndNotThatTheRootIsStuck` 2): the test
+clock moves at once, so a run set its wait and was answered before its
+probe's goroutine had made the stat the stand-in counts. Since 1f4cbefe both
+read the count once the roots answer and the probes drain (`probesBegun`):
+a probe that has ended has made its one stat.
+
+Controls on 9db4a0e3, the same way (`r2-controls3-predictions.txt`):
+
+- R2-C5, the roots' probes begun only as each is waited for: "once one bound
+  passed, the run set a wait of 2s" at once.
+- R2-C6, the bound counted from the run's start, not the work's: "the second
+  run set a wait of 300ms" and "the next run set a wait of 1.5s", at once.
+- R2-C7, the run's context ignored: "the stopped run did not return within
+  1m0s" and "the console's doctor did not return within 1m30s", each by its
+  deadline.
+- R2-C8, the bound's timer never firing: "Run did not return within 1m0s of
+  its bound passing", and "the loads did not return within 1m0s", where until
+  9db4a0e3 that case would have hung to the binary's timeout.
+- R2-C9, no wait at all: "the run came back before its request went away",
+  its line saying the root did not answer.
+
+Each as predicted.
+
+### The gates
+
+Every run under `-race`, `-p 8 -parallel 8`, the packages with `-timeout
+120m`; "in the slot" is a hold of the build lock, where no other worker's
+build runs:
+
+- Item 3's five internal/doctor cases, `-count=50`: ok on 9db4a0e3 (63 s)
+  and in the slot on 1f4cbefe (63 s). Beside 16 busy processes, the host's
+  core count, in the slot: on 91474ddf red, 5 of the 100 runs of two cases
+  (above), and on 1f4cbefe ok (65 s).
+- cmd/bridge's five (item 3's console case, item 1's three, round 1's
+  checklist case), `-count=50`: ok on 9db4a0e3 (107 s) and 91474ddf
+  (108 s), and beside 16 busy processes in the slot on 91474ddf (114 s).
+  1f4cbefe changes no code cmd/bridge's tests build.
+- `./internal/doctor/` once: ok on 9db4a0e3 (11 s) and in the slot on
+  1f4cbefe (11 s).
+- `./cmd/bridge/` once: on 9db4a0e3 red on
+  `TestEveryBackgroundGoroutineDrainsOnCleanup` alone (1,686 s), which
+  91474ddf answers. Three more runs, on 91474ddf outside the slot (2,645 s)
+  and in it (1,603 s) and on 1f4cbefe outside it (3,703 s, beside another
+  worker's gate), were each red on one of backup's timing tests alone, every
+  other test ok: `TestTheTickerAndTheDoctorNameAPruneGivenUp` twice ("the
+  prune answered <nil>, want it given up": the prune finds the backups
+  folder still held by the previous verification's worker, B849's class,
+  which B869's 3a976ffc fixes and this branch does not carry), and
+  `TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` once
+  ("a stopped verification was reported", B895's). Alone, `-count=10`, the
+  second is ok on 1f4cbefe, and the first fails 1 of 10 in the slot there and
+  1 of 40 on a copy of main's own tree, 2bebca26, which carries none of
+  B650, with the same words. In the slot on 1f4cbefe, with those two skipped
+  (`-skip`), `./cmd/bridge/` is ok (1,626 s).
+- `go vet ./...` with the Makefile's tags for GOOS linux, darwin and
+  windows: clean on 91474ddf and in the slot on 1f4cbefe. go1.27.3's gofmt
+  lists none of the Go files round 2 touches.
+
+## 2026-11-14 — B650 round 3: bridge doctor's gathers share one MPD inspection, and two doctor tests take their waits off the clock
+
+The rules are `output.md`'s B650 lines (the checklist's read, and since this
+round the shared inspection) and the long form in
+`ops/History-rules-cli-serve.md` ("B650 — the doctor's bound on a library
+root"); this is round 3's evidence, from the review of round 2. Linux amd64
+(legion0), Go 1.27.3, the Makefile's tags, TMPDIR on disk (`~/onebit/tmp`).
+Commits adccca08 and 83f716a9 (item 1), 23dc1e5c and 8a6dfca2 (item 2).
+Round 2's correction of round 1's Step 0 line and round 2's record above
+stand as they are; the History's line naming the records gave round 2
+round 1's date, and says now that rounds 2 and 3 are of 2026-11-14.
+
+### Item 1: MPD inspections across reconstructed gathers
+
+At 0b1a26f0 each gather's outputs builder is its own
+(`cmd/bridge/output_checklist.go` 413), and the checklist asks its gate
+(`Active`, 439) before the shared read (94, 98). Under `output.mpd: auto`
+the gate probes MPD (`internal/api/outputs.go` 437); under `on` each build
+does (789). Every probe inspects through `inspectBounded` (578-614): on a
+context detached from its caller (541), on a goroutine of its own, abandoned
+past its deadline and the grace (610), and the guard that keeps a second from
+beginning while one runs is the builder's own (`inspecting`, 278, 580-584,
+596). An `mpd.conf` on a mount that does not answer holds `mpd.Inspect` in
+`conf.ReadHost` (`internal/mpd/inspect.go` 154) with no end, so every use of
+the launcher's doctor row began another inspection and stranded its
+goroutine.
+
+The launcher's doctor row loads neither its probe runner nor its config's
+load afresh at each use: the runner is the process's (`cliRootProbes`,
+`cmd/bridge/doctor.go` 265, each use beginning a run of it alone, 273), and
+the load is a work of it keyed by the file's path, its bytes and the
+`BRIDGE_` variables (`doctor.Bounded` with `doctorConfigKey`, 630, 647),
+which a later use joins while it is out. What each use still reads with no
+bound is the config file itself (`resolveConfigPath`'s stat, 299; 307;
+`os.ReadFile`, 618): the config file on a dead mount, B884's.
+
+The fix: `api.MPDInspections`, a table the builders given it share
+(`LocalOutputsConfig.Inspections`; bridge doctor's builders are given the
+process's, `cliMPDInspections`). One inspection is in flight for what it reads,
+its `mpd.Options` (the root, the configuration file, the endpoint, the home
+and XDG directories it expands, the password) hashed (`inspectionKey`), on a
+goroutine and a context of its own that keeps the first caller's values, which
+the builder's clock ends at `outputProbeLimit`; it is held from when it begins
+until `Inspect` returns or panics (its key let go in that goroutine's
+deferral, the panic logged). A probe of any builder given the table waits on
+the one in flight until it answers, its deadline and `outputProbeGrace` pass
+(a timer of the builder's clock closes `given`), or the probe's own context
+ends; a report that came past the deadline is late, which the probe takes as
+expired; none, or a panic, is no verdict. A probe that comes once the
+deadline and the grace have passed answers at once with none, as serve's own
+guard answers a probe while its inspection still runs. Serve's builder is
+given no table and keeps its guard and its detached wait, which
+`TestCancelledProbeIsNotCached` pins: there a caller whose context has ended
+still has the probe's verdict.
+
+### Red first
+
+The five internal/api cases and the cmd/bridge case in a copy of the worktree
+with `internal/api/outputs.go` and `cmd/bridge/output_checklist.go` put back as
+0b1a26f0 has them, through a names-only shim (`redtree3.py`: the table's type
+with its hook and count, the config's field, the process's table, none of
+which that code reads), the api cases' deadline shortened to 10 s in the copy,
+predictions written first (`r3-red-predictions.txt`):
+
+```
+$ go test -C <red-tree> -race -count=1 -p 8 -parallel 8 -v -run '<the five>' ./internal/api/
+    outputs_inspections_test.go:197: three gathers began 3 inspections while one was held, want one
+--- FAIL: TestBuildersSharingATableBeginOneInspection (2.55s)
+    outputs_inspections_test.go:238: a gather's wait did not come within 10s
+--- FAIL: TestAProbeWaitingOnASharedInspectionStopsWithItsOwnContext (10.01s)
+    outputs_inspections_test.go:304: the held configuration was inspected 2 times, want once
+--- FAIL: TestAnEditedConfigurationBeginsAnInspectionOfItsOwn (0.85s)
+--- PASS: TestASharedInspectionThatPanicsLetsItsKeyGo (0.00s)
+    outputs_inspections_test.go:363: three builds began 3 inspections while one was held, want one
+--- FAIL: TestTheBuildsProbeSharesTheTableToo (2.55s)
+
+$ go test -C <red-tree> -race -count=1 -p 8 -parallel 8 -v -run '^TestDoctorRunsInOneProcessShareOneMPDInspection$' ./cmd/bridge/
+    doctor_roots_test.go:1031: 3 doctor runs in one process began 3 MPD inspections while one was held, want one
+    doctor_roots_test.go:1031: 3 doctor runs in one process began 3 MPD inspections while one was held, want one
+    --- FAIL: TestDoctorRunsInOneProcessShareOneMPDInspection/auto (2.62s)
+    --- FAIL: TestDoctorRunsInOneProcessShareOneMPDInspection/on (2.62s)
+```
+
+Each as predicted; the panic's case is green there too, since there the
+guard is each builder's own, which a panic let go already: the case guards
+the shared slot's cleanup. adccca08 turns the rest green. The cases count the inspections begun through the `Inspect` seam,
+require exactly one begun while it is held and each gather back meanwhile,
+and a second begun once it has returned, which reads the box.
+
+### Item 1's controls
+
+On adccca08, each an uncommitted edit of `internal/api/outputs.go`, restored
+with `git checkout --` (`git status` clean after each), predictions in
+`r3-controls-predictions.txt`:
+
+- R3-C1, each builder's own guard back (the table never used): the four api
+  cases and cmd/bridge's red as at 0b1a26f0, the panic's case green as
+  there.
+- R3-C2, the slot let go as the waits give up rather than as `Inspect`
+  returns: cmd/bridge's case "began 3 MPD inspections" in both modes, as
+  predicted; the api case went red by its 60 s deadline, not by its count as
+  predicted: with the key let go the next gather began a second inspection
+  and waited on that one, whose deadline the case's clock never reached.
+- R3-C3, the inspection on its first caller's context: "the inspection's
+  context ended with the gathers that stopped waiting: context canceled".
+- R3-C4, a probe that does not stop with its own context: "the first gather,
+  its context ended did not come within 1m0s".
+- R3-C5, a key that ignores what the inspection reads: "a gather over the
+  edited configuration did not return within 1m0s", waiting on the held
+  configuration's inspection.
+
+### Item 2: two waits off the clock
+
+`TestADoctorRunTakesOnlyTheReadOfItsOwnConfig` set the read's bound to
+300 ms for every run, the healthy edited and recovered ones included, which
+had to answer within it; `TestACancelledConsoleDoctorRunSaysItWasStopped`
+cancelled its run 150 ms after it began, which a loaded host could reach
+before the healthy root's probe had ended, both roots then not checked.
+bridge doctor's waits on a read set their timer through the read table
+(`outputsReads.timer`, time.NewTimer's where none), and the first case gives
+the waits on the held read up through it (`readTimers`) once each has set it
+and the read it waits on is held at the box or joined (8a6dfca2), every
+other wait keeping bridge doctor's bound under the case's 90 s deadline,
+`boxNotRead()` reading the bound the case leaves. The second cancels once
+the run waits on the root that does not answer
+(`RootProbes.SetOnRootWaitForTest`, a test's hook told the root, the work's
+key kept on the work for it) and the healthy root's probe has made its stat
+and its listing (`rootStall.probed`).
+
+The old bounds, first under load: the two cases as 0b1a26f0 has them,
+`-count=50` beside 16 busy processes in the slot, were ok (43 s), the host's
+scheduling never once making the healthy steps late enough. So they were run
+where a healthy step is slower than the bound, as a loaded host makes it:
+copies whose stand-ins stat a root they do not hold 300 ms late and bring a
+read over a config naming no held root to the box 400 ms late (`slow.py`, the
+worktree untouched), predictions in `r3-slow-predictions.txt`:
+
+```
+the cases as 0b1a26f0 has them:
+    doctor_roots_test.go:467: the stopped run's library-roots = {... Summary:2 root(s) not checked ...}, want a warn ...
+--- FAIL: TestACancelledConsoleDoctorRunSaysItWasStopped (0.31s)
+    doctor_roots_test.go:842: over the edited config, the player line = "The bridge could not read this box's player and cards (it did not answer within 300ms: ...)", want its own read (...)
+--- FAIL: TestADoctorRunTakesOnlyTheReadOfItsOwnConfig (0.94s)
+the cases as 8a6dfca2 has them, the same steps slowed:
+--- PASS: TestACancelledConsoleDoctorRunSaysItWasStopped (0.31s)
+--- PASS: TestADoctorRunTakesOnlyTheReadOfItsOwnConfig (0.44s)
+```
+
+The new cases' first loaded run found a race of their own: beside 16 busy
+processes, 2 of 50 runs of the own-config case failed, "the first config's
+runs began 0 reads, want one while it is out", the case having fired the
+first stalled wait's timer as soon as the wait set it, while the read that
+wait began was still on its way to the box. 8a6dfca2 fires a wait's timer
+only once the read it waits on is held at the box (the box's `began`) or the
+gather has joined one (`joined`). Its control, R3-C9, in copies with the held
+read 200 ms late to the box: with the wait for the hold dropped, "the first
+config's runs began 0 reads, want one while it is out"; with it, ok.
+
+Controls on 23dc1e5c, the same way (`r3-controls5-predictions.txt`):
+
+- R3-C6, the root-wait hook never told: "the run did not wait on <NAS>
+  within 1m30s".
+- R3-C7, the read table's timer ignored: "the run over the held root set no
+  wait within 1m30s".
+- R3-C8, the run's stop not heeded in `waitFor`: "the stopped run did not
+  come back within 1m30s".
+
+Each as predicted.
+
+### Items 3 and 4
+
+Round 2's correction of round 1's Step 0 line (above) and its record are in
+the log, as round 2's patch wrote them; the History named round 2's record
+with round 1's date. The Lows:
+
+- `outputsReadKey` hashes the config file's name and `yaml.Marshal` of the
+  config `Load` made, whose `dataDir` (`yaml:"dataDir"`, written whatever its
+  value) is the derived one: `Load` gives an unset one `./data`
+  (`applyDefaults`, `internal/config/config.go` 3187, 3260), applies
+  `BRIDGE_DATA_DIR` over it (`applyEnvOverrides`, 3188) and makes it absolute
+  against the config file's directory (`resolvePaths`, 3193, 3299), so two
+  configurations whose data directories differ, however each was derived,
+  never share a key.
+- `lo.Close()` while the build is dialling MPD closes nothing of that dial:
+  `Close` (`internal/api/outputs.go` 1313-1327 at 0b1a26f0) takes the
+  session the builder holds, none yet, and the dial, on the build's context,
+  stores the session it opens after (`session`, 723-765), which lives until
+  the idle close the flight's end arms, a minute after the build ends
+  (`armIdle`, 698-706; `idleClose`, 708-721). The comment beside the deferral
+  in `doctorOutputChecklist` says so.
+- The History's claim that the checklist stats the database inside its
+  bounded read is true: the stat is in the build's `Tracks`
+  (`output_checklist.go` 392 at 0b1a26f0), run inside the read the wait's
+  bound covers; the token file is read on the run's goroutine (`tokenFile`).
+
+### The gates
+
+Every run under `-race`, the `-count=50` runs and the packages' with
+`-p 8 -parallel 8`, the packages with `-timeout 120m`, each time the one go
+test reports; "in the slot" is a hold of the build lock, where no other
+worker's build runs, and "loaded" is beside 16 busy processes, the host's
+core count, in the slot:
+
+- internal/api's five shared-inspection cases and thirteen of the probe's
+  beside them (`TestAnInspectionThatNeverReturnsIsNoVerdict`; the
+  cancellation cases, `TestACallerThatStopsWaitingGetsTheGatesLastAnswer`
+  and `TestCancelledProbeIsNotCached`; the verdict-order cases,
+  `TestAnOlderCacheVerdictNeverOverwritesANewerOne` and
+  `TestAWaiterNeverRecordsAnOlderVerdict`; and the probe's cache, flight and
+  route cases), `-count=50`: ok on 23dc1e5c (314 s), and the five loaded
+  there (2 s). internal/api's code at 83f716a9 is 23dc1e5c's, its one change
+  a test's doc comment.
+- internal/doctor's five clock cases, `-count=50`: ok on 23dc1e5c (63 s),
+  and loaded there (64 s); the package is the same at 83f716a9.
+- cmd/bridge's six (item 1's case, item 2's two, round 2's two, round 1's
+  checklist case), `-count=50`: ok on 23dc1e5c (162 s) and in the slot on
+  83f716a9 (161 s), and loaded on 23dc1e5c (170 s) and on 83f716a9 (171 s).
+  Item 2's two alone, loaded: red on 23dc1e5c, 2 of the own-config case's
+  50 runs (above), and ok on 83f716a9 (5 s).
+- `./internal/doctor/` once: ok on 23dc1e5c (11 s) and in the slot on
+  83f716a9 (11 s). `./internal/api/` once: ok on 23dc1e5c (154 s) and in the
+  slot on 83f716a9 (154 s).
+- `./cmd/bridge/` once: on 8a6dfca2 red on
+  `TestNoDocblockNamesAnotherDeclaration` alone (1,641 s), whose sweep of
+  every package's doc comments found `withinInspection`'s opening with a
+  name nothing declares; 83f716a9 answers it, and the sweep and its
+  neighbours are then ok (23 s). On 83f716a9, outside the slot, another
+  worker holding it as the run began: ok (1,763 s).
+- `go vet ./...` with the Makefile's tags for GOOS linux, darwin and
+  windows: clean in the slot on 23dc1e5c and on 83f716a9. go1.27.3's gofmt
+  lists none of the Go files round 3 touches.
+## 2026-11-13 — B886, B887, B890: the CI timing flakes wait on seams, never on time
+
+Worker b886, legion0 (Ubuntu 26.04, Linux 7.0.0-38-generic, x86-64, 16
+CPUs), branch `fix/b886-timing-flakes` from main 2bebca26. Commits: 0c2de7a4
+(the two seams), e788a843 (B886), bd301b02 and 2b5124a2 (B890), 3d6be0e8
+(B887), then this record. Every run: Go 1.27.3, the Makefile's tags, TMPDIR
+`~/onebit/tmp/b886`. The reds ran at copies of main, each mutation made
+exactly once and keeping main's line numbers (`.tmp/_b886/redcopy.py`); the
+controls are uncommitted edits to the committed tree, predicted in writing
+first (`.tmp/_b886/controls.predictions.txt`), restored with `git checkout
+--`, `git status` empty after each.
+
+### Step 0
+
+- B887: `<-s.Done()` (sink_dsd_engine_test.go:171 at main) waits for the
+  revocation the round that wrote the test meant: "cancelling an in-flight
+  activation still revokes it so the abandoned caller cannot authorize sound
+  later" (`ops/History-rules-player.md`, the native engine hand-off's review
+  round 2, #1356). `Done` closes only once the sink's writer ends, which
+  nothing but a release begins here, and of the Resume's wait (`await`) only
+  the context's arm begins one (`abandoned`, `revokeFound`). Its reply arm
+  answers the held refusal of a paused sink's reopen (sink_dsd_writer.go:108,
+  :119, :122), and the sink stays paused and alive. So each arm asserts its
+  own outcome.
+- B890, the console: run 43428379048's log could not be read here (`gh` is
+  refused by this sandbox, and no copy of it, or of #1462's, is on legion0).
+  The code's reading: the case bounded only the write and the read-back,
+  300 ms from their admission (hold.go:465-467), and its stall is the
+  manifest's sync after the rename (verify_record.go:357); a case that never
+  reached it had its write given up in its staging, which fsyncs (:565)
+  before the rename asks the give-up (:576), and the write renamed nothing.
+- B890, the ticker: yes. `SetOnManifestReadForTest`'s hook runs in
+  `readRecord` (finish.go:220-226), whose first call in the ticker's
+  verification is the worker's `stepReadRecord`, "its read of the snapshot's
+  record" (finish.go:527-531); the boot pass lists the folder through
+  `ReadStatus` (`readManifest`), which the hook does not see.
+
+### The seams (0c2de7a4)
+
+`SetStepGateForTest(root, snapshot, steps...)` (internal/backup/seams.go),
+a sibling of `SetStepBoundForTest`, holds named steps of the holds on one
+resolved backups folder, of one snapshot or ("") of any: such a step is
+given up when the test fires its gate (`StepGate.Fire`; `gateOf`, looked up
+as `runStep` registers the step, its case beside the timer's), and by
+nothing else, its bound and its caller's stop both ignored. Its restore fires
+every gate, and a test fires them all (`FireAll`) before it joins its
+callers. `SetCheckGraceForTest(fn)` is run by `runCheck` once a check's
+context has ended, given the snapshot, and answers the channel whose close
+ends that check's grace in the timer's place (nil keeps the timer). Both are
+nil in production; `SetStepBoundForTest`'s five other callers keep their
+durations.
+
+### B886 (e788a843)
+
+`TestARecheckThatDidNotEndLeavesTheVetoItMade/past_its_deadline` slept
+400 ms at the database's open behind a 150 ms deadline, on the check's
+thread, which runs at the lowest priority (`PRIO_DARWIN_BG` on macOS), and
+`runCheck` gives a check whose context has ended a second more. The check is
+now parked before it reads anything (`parkCheck`) until its deadline has
+passed and its grace has begun (`checkGraceOf`), then let go, and answers
+INCOMPLETE (deadline) within a grace the test ends at its end; the record's
+read, the veto, the write, its INCOMPLETE and the read-back are held at
+their gates, never fired. The verification runs under `joinBackupCallers`,
+whose release lets the park, the grace and the gates go first; an answer
+before the grace began fails at once (`awaitParkedPastItsDeadline`). In all
+three cases the prune follows the worker's end, its unlock held from the
+answer until the test waits (`unlockHold`, backlog B849), and asserts
+`!Skipped`, saying `SkippedFor`: B869's item 2 loses this site.
+
+### B890, the console (bd301b02)
+
+`TestTheConsoleReportsCancellationAndEveryWriteHandoff`'s two worker modes
+hold the write and the read-back at their gates: the write is fired once it
+has stalled (`entered`), and in "published then worker answer" the read-back
+once its hook says it has begun. "given-up write" moves too: held at an
+unfired gate its write would wait in its stage hook until the test's end.
+The two waits for the console's jobs, a bare `Wait`, are bounded
+(`awaitBackupJobs`, a minute).
+
+### B890, the ticker (2b5124a2)
+
+At the stop `runStep` resets the hung read's timer to `StopWriteBound`
+(hold.go:496-500 at main) and the caller arms its expiry for the same
+(finish.go:351-355); the ticker silences the expiry's cancellation and
+reports a step given up (cmd/bridge/backup.go:811-818). `answerOnceExpired`
+holds, on the worker, the answer of the ticker's verification (`filepath.Dir(dir)
+== root`, resolved) until the caller's expiry hook has run, at most 10 s,
+its overrun said on the test's goroutine, and let go at the test's end; the
+answer hook runs before `done <- outcome` (finish.go:338-341), so nothing
+waits on the worker. The bound check on the ticker's return stays.
+
+### B887 (3d6be0e8)
+
+`nativeSink` takes `lifeSinkOn`'s hooks, and a one-shot `armPick` set just
+before the Resume forces its wait: `armReply`, `armContext`, and `armAny`,
+the select's own pick, which asserts whichever outcome it took (the sink's
+`revoked`, read under its lock). Through the context the sink is revoked and
+its writer ends with no release from the test; through the reply it is
+paused and released, its writer alive, until the test's
+`BeginRelease(Immediate)`. Every wait is under the package's watchdog, and a
+cleanup registered after the sink's cancels, lets the Locate go and joins
+the Resume before the sink is released.
+
+### Reds and controls
+
+At main:
+
+- B886, `parkCheck` for the sleep and the join for the cleanup at :235:
+  verify_round5_test.go:238 "the recheck was given up (… its check did not
+  end within its bound (context deadline exceeded))", 3 of 3 under `-race`.
+- B890, the console, the write parked at its staging until the test's end:
+  handlers_backups_round8_test.go:103 "verification never reached its
+  stall", 3 of 3, each after its 30 s.
+- B890, the ticker, main with the step gate added: the read given up at its
+  gate once it hung, the ticker's report awaited on stderr, then the stop:
+  backup_round2_test.go:476 "a stopped verification was reported: … was
+  given up … its read of the snapshot's record did not end within its
+  bound", 3 of 3.
+- B887, only an `armPick` set to `armReply`: `go test -race -run
+  '^TestNativeResumeCancelsLocate$' -count=1 -timeout 2m ./internal/alsapcm`,
+  `panic: test timed out after 2m0s`, the test at sink_dsd_engine_test.go:171.
+
+Controls at 3d6be0e8 (`-count=3`, no `-race`, `.tmp/_b886/controls.py`):
+
+- C1, the grace fired at once and the check parked until the answer:
+  verify_round5_test.go:288 "the recheck was given up", 3 of 3.
+- C1b, the wait for the worker's end removed, its unlock still held: every
+  case at :306, "the prune once the recheck's worker had ended was skipped
+  (another verification or prune of these snapshots holds their lock)", 3 of
+  3.
+- C2, `armReply` with its release removed, `-watchdog 5s`:
+  sink_dsd_engine_test.go:227 "waited 5s for the sink's end", 3 of 3.
+- C3, the write parked at its staging, its gate fired, the read-back's hook
+  seen, then the staging let go: the rename refused,
+  handlers_backups_round8_test.go:117 "verification never reached its
+  stall", 3 of 3 (30.3 s each).
+- C4, the answer's wait removed, under the ticker's red forcing:
+  backup_round2_test.go:488, 3 of 3.
+- C4b, the read's gate fired just after the stop, the worker's give-up first
+  as on CI, the wait removed: :488 "(context canceled)", 3 of 3; C4g, the
+  same with the wait kept: green 3 of 3 (2.4 s each).
+
+### Runs
+
+- `-race -count=50`, four single-package lanes at once outside the build slot,
+  GOMAXPROCS 4 each (17:41 to 17:50): backup 483.9 s (200 PASS lines, 50
+  runs of the test and its three cases), admin 509.8 s (250), cmd/bridge
+  347.9 s (150), alsapcm 3.6 s (200); no FAIL, SKIP or race.
+- In slot1, taken at 18:32:11 by a guard that waited behind two other
+  workers' gates: `go vet` with the tags over `./...` for linux, darwin and
+  windows, exit 0 each; `go test -race -count=1 -p 8 -parallel 8 -timeout
+  120m` of the four packages, ok: backup 777.9 s, alsapcm 85.9 s, admin
+  1099.6 s, cmd/bridge 1633.9 s.
+- Loaded, in the same slot session, 18:59:45 to 19:11:29, legion0 (Linux
+  7.0.0-38-generic): 16 busy loops (`python3 -c "while True: pass"`, as many
+  as `getconf _NPROCESSORS_ONLN` says), killed by their captured PIDs after,
+  beside the four tests at `-race -count=20`, GOMAXPROCS 16, four lanes at
+  once: backup 701.6 s (80 PASS lines), admin 361.7 s (100), cmd/bridge
+  187.1 s (60), alsapcm 4.9 s (80); no FAIL, SKIP or race. The ticker's bound
+  check, its return within `StopWriteBound` and a second of the stop, held in
+  every run.
+- The rules patch (`rules-b886-r1.patch`): `make docs-check`'s steps over a
+  patched copy of the tracked tree pass (worst load 76.3%), and cmd/bridge's
+  `TestEveryCitedTestNameExists` there failed on a ghost citation planted in
+  the patched History, naming it, and passed without it. go1.27.3's gofmt
+  lists none of the changed files.
+
+### Left
+
+- A cancelled Resume revokes the sink or keeps it paused, at random (the
+  select of its wait); `Drop` or `Close` ends either, so nothing leaks. Which
+  it should do is the product's choice.
+- At a stop, the ticker reports a verification whose step hangs given up, or
+  says nothing, by which of the two `StopWriteBound` timers the stop arms
+  comes first; production keeps that race. Whether a stop should ever report
+  a step given up is the product's choice.
+- "stopped by its caller" (verify_round5_test.go:241) and the console's
+  "cancelled check" (handlers_backups_round8_test.go:73): the stop arms the
+  caller's 2 s expiry (finish.go:351-355), and a worker slower than that,
+  its check on the lowest-priority thread, answers after it, an unknown
+  write. The same class; neither failed in these runs.
+- `SetStepBoundForTest`'s callers `TestAWriteGivenUpLandsNothingOnceItResumes`
+  (verify_round5_test.go:83), `TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp`
+  (verify_round6_test.go:138) and `TestEveryStepUnderTheLockIsBoundedAndMarked`
+  (verify_hold_test.go:229) bound a write 300 ms from its admission and wait
+  for a park it reaches only past fsyncs (the veto's, the staging's): B890's
+  class, candidates for the gate.
+- internal/admin's other bare waits for the console's jobs
+  (`WaitForBackupJobs`: handlers_backups_verify_test.go, round6, round7,
+  admin_test.go).
+
+The backlog file is not on legion0: these are named for the orchestrator to
+file.
+
+## 2026-11-13 — B886 round 2: two waits left on time, the ticker test left to B895, the version
+
+Worker b886, legion0, branch `fix/b886-timing-flakes` from round 1's 75defae8
+(its rules, r1). Commits: 67c32992 (the ticker test back to main's), c63ba178
+(the Locate awaited), 3555aa81 (the recheck's park by path), 71859211
+(qualificationVersion 50), then this record. Same toolchain, tags and
+TMPDIR as round 1; controls predicted in writing first
+(`.tmp/_b886/controls-r2.predictions.txt`), restored with `git checkout --`,
+`git status` empty after each. The brief's review moved the B871 carry (its
+item 4) out of this round: `parkAnEarlierWorker` and the helpers the carry
+leans on exist only on B871's unmerged branch.
+
+### The ticker test, back to main's (67c32992)
+
+Round 1's `answerOnceExpired` held the worker's answer until its caller had
+expired, so `TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound`
+passed whichever of the two `StopWriteBound` timers a stop arms came first in
+production: it forced the silent order, and hid the race that is its subject,
+which B895 fixes on its own branch. The file is main's again, byte for byte;
+`answerOnceExpired` went with it, and the rule round 1 wrote for it goes
+with the r2 rules patch. `SetVerifyHandoffForTest` predates round 1 and
+stays (`verify_bound_test.go` and the console's round 8 test use it); so does
+the step gate (the recheck's and the console's tests), its any-snapshot key
+("" for the snapshot) now used by no committed test. The test is left out of
+the `-count=50` runs, where main's flake (B872p2: about 4 in 100 under
+`-race`) is expected until B895.
+
+### The Locate awaited (c63ba178)
+
+Through its context a cancelled Resume answers from `abandoned` with no wait
+for its writer (`found` false: nothing waits on the release it began), so the
+reopen's Locate it cancelled ends whenever the writer next runs, after the
+answer as often as not. The test gave it one second from the answer and
+called a later end "resume context did not cancel locator", in `armContext`
+and in `armAny` when the select took the context. It now awaits the end
+under the package's watchdog (`-watchdog`, fake_test.go:788: a minute),
+which fails naming what it waited for.
+
+### The recheck's park, by its snapshot's path (3555aa81)
+
+`parkCheck`'s hook (`SetOnLowPriorityForTest`) takes no path and parks the
+first check it sees, so in "past its deadline" a stray check of another
+snapshot would take the park and leave the recheck's own check unparked.
+`SetOnCheckEntryForTest` (internal/backup/seams.go, nil in production) runs on
+every check's thread once its priority is lowered, before it reads anything,
+given the snapshot's resolved path (runCheck, finish.go); `parkCheckOf` parks
+the first check of one snapshot there and lets every other go by. The case
+parks its own snapshot's check with it and first verifies a snapshot of
+another store, in a backups folder of its own, as another process would
+(`aCheckOfAnotherSnapshotGoesBy`): that check must answer with its verdict
+recorded and the park untouched. It returns once that verification's worker
+has ended (`SetOnVerifyEndForTest`), never at its answer: at the answer
+alone, the first run under `-race` reported `holdUnlockOf`'s install of
+`SetOnLockReleaseForTest` against the worker's late read of it as it let its
+lock go (backlog B849). The end is reordered as the review asked: the check
+let go, its answer awaited, then its grace ended; the callers' release still
+ends it for a case that fails earlier.
+
+### qualificationVersion (71859211)
+
+The branch changes `internal/alsapcm/sink_dsd_engine_test.go` and
+`sink_dsd_test.go`, under the guarded prefix `internal/alsapcm/`
+(`guardedPrefixes`), so the version moves from main's 49 to 50, with the
+runbook's five current references (`TestQualificationRunbookVersion`). At
+71859211's parent, `go run ./scripts/qualification-version -base 2bebca26
+-head HEAD` (CI's step) answered "guarded code changed without
+qualificationVersion increase (49 -> 49)", exit 1; at 71859211, "qualification
+version OK: 2bebca26..HEAD".
+
+### Reds and controls
+
+- The Locate: at round 1's head (a copy, `redcopy.py`), the test's Locate made
+  to end 1.5 s after the cancel: sink_dsd_engine_test.go:203 "resume context
+  did not cancel locator", `armContext` 3 of 3 and `armAny` 3 of 3 (the select
+  took the context each time), `armReply` green. Controls at 71859211:
+  R2C1a, the timer back with the same late end: :205, the same 3 of 3;
+  R2C1g, the fix with the late end: green 3 of 3, every arm; R2C1b, the
+  timer back with no forcing, `-race -count=50` beside 16 busy loops:
+  green 200 of 200 (7.6 s): beside the busy loops alone the writer always ran within the
+  second, so the forced late end (R2C1a) is the control that shows the defect.
+- The park: R2C3, the global park back (`parkCheck(t, "")`): "past its
+  deadline" fails at once at verify_round5_test.go:235, "the park of this
+  snapshot's check took a check of another snapshot", 3 of 3; R2C3b, the
+  grace ended before the check is let go: :295, "the recheck was given up",
+  3 of 3.
+
+### Runs
+
+- `-race -count=50`, three single-package lanes at once outside the slot,
+  GOMAXPROCS 4 (21:01 to 21:10): internal/backup 538.2 s (200 PASS lines),
+  internal/alsapcm 3.8 s (200), internal/player/qualification whole, the
+  version gate's own tests among it, 136.3 s (11,950); no FAIL, SKIP or race.
+  The reverted ticker test is not among them: it is main's, and its flake is
+  B895's.
+- In slot1, taken at once at 21:10:42: `go vet` with the tags over `./...`
+  for linux, darwin and windows, exit 0 each; `go test -race -count=1 -p 8
+  -parallel 8 -timeout 120m`, all ok: internal/backup 808.3 s,
+  internal/alsapcm 86.5 s, internal/admin 1121.0 s, cmd/bridge 1680.3 s (the
+  reverted ticker test passing in it), internal/player/qualification 4.3 s.
+- Loaded, in the same session, 21:39:19 to 22:10:57, legion0 (Linux
+  7.0.0-38-generic): 16 busy loops (`getconf _NPROCESSORS_ONLN`), killed by
+  their captured PIDs after, beside the same three lanes at `-race
+  -count=50`, GOMAXPROCS 16, and R2C1b's lane: internal/backup 1896.0 s
+  (200), internal/alsapcm 8.7 s (200), internal/player/qualification 384.3 s
+  (11,950), R2C1b 7.6 s (200); no FAIL, SKIP or race.
+- CI's version step at 71859211: "qualification version OK:
+  2bebca26..HEAD". The rules patch (`rules-b886-r2.patch`): `make
+  docs-check`'s steps over a patched copy pass, and cmd/bridge's
+  `TestEveryCitedTestNameExists` there failed on a ghost citation planted in
+  the patched History, naming it, and passed without it. go1.27.3's gofmt
+  lists none of the changed files.
+
+### Left
+
+- The B871 carry (`unlockHold.release` waiting for the end hook,
+  `parkAnEarlierWorker` waiting only for a worker that started, a
+  completeness pin for unjoined verification calls), once B871 merges.
+- `parkCheck`'s other users (B872's cases) still park the first check they
+  see; `parkCheckOf` is there for them.
+- Round 1's follow-ups stand.
+## 2026-11-14 — B899: the stuck marker is waited for until it decodes, not until it exists
+
+Worker b899t, legion0, branch `fix/b899-await-marker-decodes` from main
+fe5e331d. Commits: cbd6544d (the helper, its three callers and its cases),
+then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`, 8 of the
+host's 16 cores; controls are uncommitted edits to the committed tree, each
+predicted in writing first (`.tmp/_b899t/controls.predictions.txt`), the
+edited files' bytes put back from memory once their binary was built.
+
+### The hazard
+
+Main's gate run 43527630159 (fe5e331d, `test (macos-latest)`) failed
+`TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore` with "the
+marker does not read: unexpected end of JSON input". The marker's writer
+creates it (`os.OpenFile` with `O_CREATE|O_EXCL`, `internal/backup/stuck.go`
+238) and writes it only after (243), and the tests' `awaitMarker`
+(`verify_stuck_test.go` 32-43 at fe5e331d) waited only until the file was
+there; `readStuckMarker` (`restore_mark_test.go` 21-28) then decoded it, so a
+read between the create and the write met an empty file. Production is not
+affected: a marker that does not parse reads as none (`stuckMarker`,
+`stuck.go` 362-372), so another process's admission goes on waiting for the
+folder's lock and asks the marker again a second later (`verify_lock.go`
+212-230, `markerPoll`), answering `ErrBackupsBusy` only past its wait, never a
+hold that is not there. The change is to tests alone; `internal/backup` is
+outside the qualification gate's `guardedPrefixes` and `GuardedPaths`
+(`internal/player/qualification/version_gate.go` 20-36), so nothing is bumped.
+
+### The port
+
+The helper is B871's round 5's (PR #1457). The brief names its source as
+6191017c, which this clone does not hold (`git cat-file -t 6191017c`: not a
+valid object). The local `fix/b871-restore-lows` at 53170036 (round 5's test
+commit is c37d4c95) matches every line the brief cites of it: `awaitMarker`'s
+count of reads (`verify_stuck_test.go` 46), `waitWithin`
+(`restore_mark_test.go` 39), `parkCheck` on `SetOnDatabaseOpenForTest`
+(`verify_stuck_test.go` 80: the branch began before B872 part 1 merged, so its
+diff from fe5e331d reverts that fix inside the same hunk) and
+`StuckCheckOf(root, backup.ProbeByDoctor)` (`restore_mark_test.go` 326,
+which does not build at fe5e331d). So it was taken from there by function,
+never by hunk: `awaitMarker` with its imports (`encoding/json`, `fmt`),
+`waitReserve` and `waitWithin` verbatim, and the three call sites
+(`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`,
+`TestAGivenUpRestoreThatHoldsTheLockMarksTheFolderUntilItLetsGo`,
+`TestARestoreRefusedForAnotherRestoreNamesItselfAndThatRestore`, whose
+`readStuckMarker` after the wait goes, the helper answering the marker), their
+comments citing B899 where round 5's cite B871's rounds 2 and 5. `parkCheck`,
+`awaitParkedAndGivenUp`, `awaitEvent`, `awaitReader` and the rest stay as main
+has them. A grep at fe5e331d found no other caller of `awaitMarker` in
+`internal/backup`'s tests.
+
+### Where main's helper differs from round 5's
+
+- Its bound holds. Round 5 computed its number of reads once,
+  `max(int(waitWithin(t, 30*time.Second)/every), 1)`, so the reads' own time,
+  a hook's and a host that runs it late added up past 30 s. Main's
+  `awaitMarkerWithin` takes an absolute deadline from `waitWithin`, asks it
+  after every read, and cuts each pause to what is left of it;
+  `awaitMarker(t, root, what, want)` is `awaitMarkerWithin(t, root, what, want,
+  30*time.Second, t.Fatalf)`, and only the case that exhausts the budget
+  injects a limit and a `fatalf` of its own.
+- The hook is one call: `onMarkerRead(data, err)` after each `os.ReadFile`
+  returns and before the decode, on the helper's goroutine. `onMarkerRead` is
+  a package-level func in the test file, nil but in the helper's own cases,
+  set by `setOnMarkerRead`, which registers the cleanup that puts the
+  previous one back as it sets it; those cases are not parallel and start no
+  goroutine. No production hook is touched. #1457's round 6 takes main's
+  version.
+
+### The cases and the red
+
+- `TestTheMarkerWaitReadsAnEmptyMarkerUntilItDecodes`: the marker planted
+  empty, as the writer's `O_EXCL` create leaves it, and written whole inside
+  the hook once the helper has read it empty: the helper answers the written
+  hold, having read the empty file at least once and the marker at least
+  twice.
+- `TestTheMarkerWaitReadsAnotherHoldsMarkerUntilItsOwnReplacesIt`: snapshot
+  A's verification's marker, which a wait for A's restore refuses, replaced
+  inside the hook by A's restore's once read.
+- `TestTheMarkerWaitFailsAtItsDeadlineNamingWhatItsLastReadMet`: a 200 ms
+  limit and an injected `fatalf` that records, over no marker, a marker cut
+  short, another hold's marker, and a first read that answers once the whole
+  limit has passed (the hook sleeps the limit): each fails once, never before
+  its limit, with the helper's message naming its reads and what the last
+  met, and the slow read is its last.
+
+Red first, before the port, with a temporary adapter of the new signature
+that ran main's existence wait and then `readStuckMarker`: the empty-marker
+case failed 20 runs of 20, each at once, `verify_stuck_test.go:709: the marker
+does not read: unexpected end of JSON input`, which is `readStuckMarker`'s
+`t.Fatalf` (`restore_mark_test.go` 25) on its decode (24), reported at the
+case's call since the adapter, `awaitMarker` and `readStuckMarker` are
+helpers. The other two were red as well: the other hold's case answered the
+earlier hold's marker, its hook never called; in the exhausting case the
+no-marker row waited main's 30 s and failed through the test's own `t`, the
+cut and slow rows failed at the decode, and the other hold's row answered B's
+verification with no failure recorded. Then the port, and all three green.
+
+### Controls (`.tmp/_b899t/controls.py`; 10 of 10 as predicted)
+
+- C0, the committed tree: the three cases green.
+- C1, round 5's count of reads in place of the deadline: the exhausting case
+  red, its slow row reading 20 times ("its first read answered past the
+  limit, so it was its last") and its other rows failing at 194 to 196 ms,
+  "before its limit of 200ms"; the other two cases green.
+- C2, the hook's call taken out: the empty-marker case red after its 30 s (in
+  2922 reads, "the last met 0 bytes that do not decode"), the other hold's
+  case too (2919 reads, "the last met another hold's marker"), and every row
+  of the exhausting case (the hook's count, 0, against the message's 21).
+- C3, `want` not asked: the other hold's case red (A's verification answered
+  after one read) and that row of the exhausting case (B's verification
+  answered, no failure recorded); the empty-marker case green.
+- C4, the deadline asked one limit late: the slow row red (21 reads); the
+  other rows green, failing at 400 ms.
+- C5, the deadline at half the limit: the first three rows red, failing at 100
+  to 101 ms; the slow row green.
+- C6, the pause not cut to what is left of the deadline: green throughout, as
+  predicted. That cut shortens one pause by 10 ms at most, and no case pins
+  it.
+- C7, the message without what the last read met: every row of the
+  exhausting case red.
+- C8 to C10, each call site's `want` turned to refuse the marker its own hold
+  writes: each test red after the 30 s wait, naming the marker it met
+  (`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds`: 2915 reads, "the
+  last met another hold's marker", the check's, `Restore:false`; the given-up
+  restore's: 2916 reads, `Restore:true`; A's restore's: 2907 reads,
+  `Restore:true`): each wait asserts the hold its marker names, which in
+  `restore_words_unix_test.go` main's check after the wait asserted.
+
+`git status` was empty after the batch.
+
+### Runs
+
+At cbd6544d, the twelve tests of the four touched files, the three new among
+them, from one `-race` test binary in four lanes at once, GOMAXPROCS 2 each,
+`-test.count 50` (`.tmp/_b899t/lanes.py`):
+
+- quiet, outside the build slot (load 2 to 4, another worker's run in the
+  slot): every test 50 of 50, no data race; the lanes took 370, 453, 559 and
+  851 s;
+- beside 16 python busy loops, in the slot (load about 17): every test 50 of
+  50, no data race; the lanes took 769, 1003, 1276 and 3073 s.
+
+In the same slot session (`.tmp/_b899t/slot_session.py`): `go vet ./...` with
+the tags as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and windows/amd64,
+clean. The windows leg does not compile `restore_source_unix_test.go` or
+`restore_words_unix_test.go` (`//go:build unix`; `go list` names them ignored
+there), so their coverage is the linux and darwin legs' and every run here.
+Then `go test -race -count=1 -timeout 120m ./internal/backup/`: ok (735.3 s).
+go1.27.3's gofmt lists none of the four files, and cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass over the tree with this record. The rule is
+`rules-b899t.patch`, uncommitted: one bullet in `build-ci-tests.md`, after
+B872's bullet on a check given up (wait for the marker until it decodes as the
+hold awaited, bounded by a deadline asked after every read); `git apply
+--check` takes it, and the budgets check is clean with it (the worst load from
+76.1% to 76.3%).
+
+## 2026-11-14 — B901: a recheck stopped at SQLite's open answers within a grace the test holds
+
+Worker b901, legion0 (Ubuntu 26.04, Linux 7.0.0-38-generic, x86-64, 16
+CPUs), branch `fix/b901-recheck-grace` from main 92288694, #1469's squash
+(B886; its PR head 43053318 is not in this clone, and main holds its seam,
+`SetCheckGraceForTest`, internal/backup/seams.go 476-498). Commits: 99b4232e
+(the three tests), then this record. Every run: Go 1.27.3
+(`GOTOOLCHAIN=go1.27.3`), the tags `ts_omit_webclient,ts_omit_debugeventbus`,
+TMPDIR `~/onebit/tmp`, the tests at half the host's 16 CPUs (one binary at
+GOMAXPROCS 8, or four lanes at 2; the three vet legs at go's own parallelism,
+6 to 8 s each); the controls are uncommitted edits to the committed tree,
+predicted in writing first
+(`.tmp/_b901/controls.predictions.txt`), each edited file's bytes put back
+from memory once its binary was built.
+
+### The hazard
+
+On #1470's macOS CI (run 43569478849, attempt 1: main fe5e331d with B618,
+without B886) `TestAnIncompleteNoBarrierRecheckLeavesItsRecordTrusted`
+expected `ErrRecheckNotRecorded` and got "a step of the verification did not
+end and was given up, …: its check did not end within its bound (context
+canceled)" (the brief's transcription: `gh` is refused here, so the run's log
+was not read). The test cancels at SQLite's open
+(`SetOnDatabaseOpenForTest(cancel)`, verify_round12_test.go 19 at main), a hook
+that runs on the check's own thread as `checkSQLite` begins (verify_db.go
+161-164). Once the check's context has ended, `runCheck` (finish.go 777-808)
+waits half of `StopWriteBound` for that thread (790-792), the lowest-priority
+one (`runLowPriority`, 831-848: nice 19 and the idle I/O class on Linux,
+`PRIO_DARWIN_BG` on macOS), and gives the check up past it (803-804), which the
+worker answers as `ErrCheckGivenUp` naming "its check" (575-577, 393-408).
+Production is as designed: a check that does not end within its bound is given
+up.
+
+### Premises at HEAD
+
+- The grace: `runCheck` asks `checkGraceForTest` once the check's context has
+  ended, given its `dir`, and a channel it answers takes the timer's place
+  (finish.go 793-799); `checkGraceOf` (verify_stuck_test.go 193-205) answers
+  one for its snapshot alone and closes `begun` as that grace begins.
+- The path: `verifyHeld` resolves the snapshot (finish.go 433,
+  `resolveSnapshotIn`: verify_paths.go 40-47, through `resolveDir`, 20-26, and
+  `resolveLinks = fsutil.ResolveLinks`, 31) and hands `runCheck` that path
+  (573). The case's `dir` is `verifiedSnapshot`'s answer, `resolvedTestDir(t,
+  res.Dir)` (backup_test.go 1344), `fsutil.ResolveLinks` (verify_test.go
+  1187-1194): the path the check sees, which C3 below holds it to.
+- The caller's own bound: at the stop `verifyAndThen` arms `expire =
+  time.After(StopWriteBound)` (finish.go 351-355) and past it abandons the
+  worker (360-366) with `verifyExpiryError` (373-380), "the verification was
+  left to end on its own 2s after its stop, holding the snapshots' lock until
+  it does: context canceled". No seam holds it, and the budget (test files
+  only) keeps it: it is the residual.
+- The version gate: `internal/backup` is in neither `guardedPrefixes`
+  (internal/player/qualification/version_gate.go 36) nor `GuardedPaths`
+  (20-28), so nothing is bumped.
+
+### The fix (99b4232e)
+
+`TestAnIncompleteNoBarrierRecheckLeavesItsRecordTrusted` holds its check's
+grace past the stop with `checkGraceOf(t, dir)`, passed right after
+`VerifySnapshot` returns and in cleanup. The open's hook cancels, then holds
+the check's thread until the grace has begun, or until a channel the test's
+end closes, so in every run the check answers inside the grace, and the case
+then asserts that the grace began. Its cleanups run `pass`, the hook's
+release, `awaitClean`, then the seams: registered the other way round, the
+grace's seam first and `t.Cleanup(pass)` last. Its comment names the residual
+in the words of its error.
+
+### The siblings
+
+Every `SetOnDatabaseOpenForTest` in `./internal/backup` and every in-check hook
+that cancels, paces or delays (`SetOnLowPriorityForTest`,
+`SetOnCheckEntryForTest`, `SetBeforeFilesCheckForTest`,
+`SetFilesCheckIncompleteForTest`, `SetVerifyReadRateForTest`, and
+`SetVerifyDeadlineForTest`'s callers), lines at main:
+
+- The same race, fixed in 99b4232e:
+  - `TestARecheckThatDidNotEndLeavesTheVetoItMade/stopped_by_its_caller`
+    (verify_round5_test.go 243-253): one byte a second, the stop 50 ms after
+    the check's thread begins (a `time.AfterFunc` in the low-priority hook),
+    and an answer required (294-299: a check given up fails it). It now holds
+    its grace past the stop with `checkGraceOf`, ended after the answer
+    (`endGrace`) and by the callers' release.
+  - `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries/a_retry_past_its_deadline`
+    (verify_hold_test.go 436-438): a 150 ms deadline and a 400 ms sleep at the
+    open, its answer's error dropped (474) and only what it found asked (479),
+    which a check given up answers INCOMPLETE too (`incompleteOf`, finish.go
+    578-582). It takes #1469's arrangement: `parkCheckOf`, the park and the
+    grace's beginning awaited (`awaitParkedPastItsDeadline`), the check let go,
+    its answer awaited and only then its grace ended, the record's read, the
+    veto, the write, its INCOMPLETE and the read-back held at their gates, and
+    the park, the grace and the gates let go by the callers' release before
+    the callers are joined and the seams put back. It keeps its error, refuses
+    `ErrCheckGivenUp`, and requires `context.DeadlineExceeded` and both
+    verdicts INCOMPLETE (deadline). It verifies no snapshot of another store
+    first (`aCheckOfAnotherSnapshotGoesBy`), which proves the park's scope, as
+    #1469's case does already.
+- An answer either way, no change:
+  - `TestACancelledVerificationWritesIncomplete` (verify_test.go 637-665):
+    paced, stopped 50 ms after the check's thread begins, it asks
+    `errors.Is(err, context.Canceled)` and a record INCOMPLETE (cancelled). A
+    check given up answers both: `ErrCheckGivenUp` wraps the stop (finish.go
+    399-403), and the hold given up writes the same INCOMPLETE (578-582,
+    625-630). The timer's grace cannot turn it red; its one red is the
+    caller's expiry, and a held grace would leave the check all of that
+    expiry where the timer leaves it half, so it keeps the timer.
+  - `TestAStopWithABlockedSyncReturnsWithinItsBound/the_check` (715-793): it
+    asks only that `Finish` returns within `StopWriteBound` and a second of
+    the stop, whichever step answers.
+- A check given up expected, no change, each check parked before it reads
+  anything behind a 300 ms deadline:
+  `TestAVerificationPastItsDeadlineReturnsWithItsCallerStillWaiting`'s two
+  cases (verify_bound_test.go 128-140, 172-175),
+  `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` (verify_stuck_test.go
+  404-408), `TestAVerificationWaitingItsTurnHearsOfACheckGivenUp` (622-623,
+  649), `givenUpCheckOf` (restore_source_test.go 200-213), "a retry given up"
+  (verify_hold_test.go 439-449), `TestARecheckGivenUpLeavesTheVetoItMade`
+  (526-530), `TestAGivenUpVerificationReadsItsRecordBack` (770-773), and
+  `TestAnOwnershipIsLetGoBeforeTheLock`'s "a capture's, refused at once"
+  (verify_round5_test.go 730-732).
+- Unrelated: the open recorded (`requireNoOpen`, verify_test.go 388-402) and
+  the stray file made at the open (`TestABundleThatChangesWhileItIsCheckedFails`,
+  702-706), the brief's two; the panics at the open
+  (`TestAPanicInAVerificationLetsGoOfWhatItHolds`, verify_stuck_test.go
+  718-719; "a retry that panics", verify_hold_test.go 450-456; "on a panic of
+  its check", verify_round5_test.go 254-260), where no stop or deadline comes
+  and the recovered panic answers the check at once (`onPanic`, finish.go
+  784); the observers (`checksRun`, verify_veto_test.go 64-69;
+  `TestTheVerificationRunsOnAThreadOfItsOwn`, verify_test.go 948-965); and
+  `TestTheReadsArePaced` (925-944), paced with no stop or deadline. #1469's
+  "past its deadline" (verify_round5_test.go 233-242) is the arrangement
+  itself.
+- Outside the census (not `./internal/backup`), for the record: cmd/bridge's
+  `TestTheTickerReportsAPanickedCheckAtShutdown` (backup_round10_test.go 30)
+  panics at the open, its stop coming after the check
+  (`SetAfterCheckForTest`); internal/admin's "cancelled check"
+  (handlers_backups_round8_test.go 73-74, 122-125) takes either answer, since
+  `reportBackupVerification` (handlers_backups.go 303-332) logs a check given
+  up and one stopped alike, `recordRead=true` and no "not recorded".
+
+### Red and controls (`.tmp/_b901/controls.py`; 9 of 9 as predicted)
+
+Each `-test.count 3`, no `-race`, GOMAXPROCS 8; "main" is a copy of the tree
+with the three test files at 92288694 (the production code is the same at
+both).
+
+- C0, the committed tree: the three tests green, 33 PASS lines.
+- C1, item 2's red, at main: the open's hook cancels, then holds the check's
+  thread `3*StopWriteBound/4` (1.5 s), released early by a channel a cleanup
+  closes: 3 of 3 at verify_round12_test.go:24, "expected a recheck
+  interrupted at SQLite's open: {… Write:none Recorded:false …}, a step of the
+  verification did not end and was given up, and holds the snapshots until it
+  does: its check did not end within its bound (context canceled)", each run
+  2.0 to 2.1 s. Corrected in round 2: the hold was elapsed time, and `runCheck`
+  arms its grace's timer only when its worker takes the stop, so a worker more
+  than 500 ms late lets the check answer first and this control stays green
+  without the fix (round 2's L1: green 10 of 10 with the worker 900 ms late);
+  three red runs did not make it a reproduction. Round 2's C1 replaces it.
+- C2, item 2's green, at 99b4232e: the same hook in place of the wait for the
+  grace: green 3 of 3, 2.0 to 2.1 s a run, the case's assertion that the grace
+  began passing. Corrected in round 2: it kept the caller's own expiry, which a
+  worker late enough fails it at (round 2's L2: red 10 of 10 at "left to end on
+  its own" with the worker 2,500 ms late). Round 2's C2 replaces it.
+- C3, the path: `checkGraceOf` given the snapshot through a link to its
+  backups folder, as macOS's `/var` is for `/private/var`: 3 of 3 at
+  verify_round12_test.go:63, "the check's grace never began, and the recheck
+  answered a step of the verification did not end and was given up, …: its
+  check did not end within its bound (context canceled)".
+- R1, at main, "stopped by its caller" with its check's thread held 1.5 s
+  before its files check, after the stop (`SetBeforeFilesCheckForTest`, its
+  own snapshot alone): 3 of 3 at verify_round5_test.go:295, "the recheck was
+  given up (… (context canceled)): the test did not reach the case". R2, the
+  same hold at 99b4232e: green 3 of 3. Corrected in round 2: the same timed
+  hold as C1's, with its flaw; round 2's R1 and R2 replace them.
+- S1, at main, "a retry past its deadline" with its check's thread held 2 s
+  as it begins (`SetOnLowPriorityForTest`) in place of the open's sleep, the
+  error main drops logged: green 3 of 3, each run logging "a step of the
+  verification did not end and was given up, …: its check did not end within
+  its bound (context deadline exceeded)": main's case passed a retry given up.
+  Corrected in round 2: a timed hold too, which a worker late enough would
+  outlast; round 2's S1 replaces it.
+- S2, the negative control, at 99b4232e: the grace ended before the parked
+  check is let go: 3 of 3 at verify_hold_test.go:518, "the retry answered a
+  step of the verification did not end and was given up, …: its check did not
+  end within its bound (context deadline exceeded), want its check's answer
+  past its deadline, never its check given up".
+- S3, at 99b4232e: the check let go 1.5 s after its grace began, past the
+  timer's half of `StopWriteBound`: green 3 of 3.
+
+`git status` was empty before and after the batch.
+
+### Runs
+
+The nine cases of the three tests (the round-12 test, and each subtest of the
+other two a lane of its own), from one `-race` test binary built at 99b4232e,
+`-test.count 50`, four lanes at once at GOMAXPROCS 2 (`.tmp/_b901/lanes.py`):
+
+- quiet, outside the build slot (another worker's run in it, load 3.4 to 7.1),
+  12:20 to 12:27: every case 50 of 50, no FAIL, SKIP or data race; the lanes
+  took 81 to 243 s, 420 s in all;
+- loaded, in slot1, beside 16 python busy loops (load 17.7 to 21.0 as the
+  lanes ended), 13:06 to 13:45: every case 50 of 50, no FAIL, SKIP or data
+  race; the lanes took 443 to 1,252 s (the round-12 test 443 s, "stopped by
+  its caller" 814 s, "a retry past its deadline" 1,029 s), 2,321 s in all.
+  The loops were killed by their captured PIDs after, and none was left.
+
+In the same slot session (slot1, taken by a guard at 12:53:42 once another
+worker's gate let it go, `.tmp/_b901/guard.py` and `session.py`): `go vet
+./...` with the tags as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and
+windows/amd64, clean (5.7, 7.8 and 7.7 s); then `go test -race -count=1
+-timeout 120m ./internal/backup/` at GOMAXPROCS 8: ok (761.9 s). go1.27.3's
+gofmt lists none of the three files. The rule is `rules-b901.patch`,
+uncommitted (`~/onebit/jobs/b901/`): one bullet in `build-ci-tests.md`, after
+B886's on a check that must answer past its deadline, and its long form in
+`ops/History-rules-build-ci-tests.md`. `git apply --check` takes it at HEAD;
+over a copy of HEAD with it applied and this record appended, the budgets
+check is clean (worst load 76.6%), `scripts/doc-split/verify_moves.py --base
+HEAD` passes (the two new blocks, nothing moved or lost), and cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass, the first failing on a ghost citation planted in
+the patched History, which it names.
+
+### Left
+
+- The residual, the caller's own expiry: a check's answer and the worker's
+  steps after it slower than `StopWriteBound` from the stop end the round-12
+  case at "the verification was left to end on its own 2s after its stop,
+  holding the snapshots' lock until it does: context canceled", and "stopped
+  by its caller" at "the recheck found , want INCOMPLETE" (a zero `Found`, its
+  write unknown; B886's record names that case's class). No test seam holds
+  it, and a seam is a production change.
+- `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` and
+  `TestARecheckGivenUpLeavesTheVetoItMade` read what their prune kept without
+  asserting `!Skipped` (backlog B851's rule); both prune after `awaitClean`,
+  so it does not flake, but a prune that met the lock would pass them.
+
+The backlog file is not on legion0: these are named for the orchestrator to
+file.
+
+## 2026-11-14 — B901 round 2: the red control waits on the give-up, never on elapsed time
+
+Worker b901, legion0, branch `fix/b901-recheck-grace` from round 1's 3e13cfb6.
+Commits: 38095b0e (the round-12 test on a caller of its own, its read-back at
+its gate), ceef35df (a check whose grace never began let go before the drain),
+then this record. Same toolchain, tags, TMPDIR and core budget as round 1; the
+controls predicted in writing first (`.tmp/_b901/controls-r2.predictions.txt`),
+every edited file's bytes put back from memory once its binary was built, and
+`git status` empty before and after each batch.
+
+### The finding
+
+Round 1's C1 held the check 1.5 s after the stop and took the red that
+followed for the inner give-up. `runCheck` arms its grace's timer only when its
+worker takes the stop (finish.go 788-792), so with that worker more than
+500 ms late the check, let go at 1.5 s, answers before the timer fires, and
+with both ready its select may take the check: the control can stay green
+without the fix. C2, the same hold with the fix, kept the caller's own expiry,
+which a worker late enough fails it at. Three runs each proved neither. Round
+1's C1, C2, R1, R2 and S1 bullets above are corrected in place.
+
+### Premises at HEAD
+
+- `verifyAndThen` arms its expiry when the stop reaches it (finish.go 343,
+  351-355) and abandons the worker past it (360-366) before the expiry's
+  callback runs (`onVerifyExpired`, 363): a callback parked there cannot keep
+  the abandonment off, so the expiry itself has to be gated.
+- The no-barrier path reads the record back before it answers (finish.go 607),
+  and once the stop has come `runStep` bounds that step by `StopWriteBound`
+  (hold.go 517-521) and gives the hold up past it (522-524).
+- The round-12 test called `VerifySnapshot` on its own goroutine
+  (verify_round12_test.go 56 at 3e13cfb6) and ended its grace after it (57),
+  so nothing could let go of a recheck held there.
+- The cleanup order is `build-ci-tests.md`'s (216): what stalls let go, the
+  callers joined, the holds drained, then the seams put back.
+
+### The test (38095b0e, ceef35df)
+
+The recheck runs on a caller of the test's (`joinBackupCallers`), its answer
+awaited under a watchdog (two minutes, capped by the binary's deadline,
+`awaitRecheckAnswer`) that says whether the check's grace had begun; its
+read-back is held at its gate (`SetStepGateForTest`, "its read of the record
+after it"); the open's hook still holds the check until its grace has begun;
+the grace ends after the answer; the hook is let go before the drain; a check
+given up is said as that before the answer is judged; and the callers' release
+lets the hook, the grace and the gate go and cancels, then the caller is joined
+and the holds drained, and the seams go back last. ceef35df: 38095b0e drained
+before it let the hook go, so a grace that never began left `awaitClean` to
+wait out its 30 s and fail as a hold never let go, ahead of the assertion that
+names the cause. No production code changes: the caller's expiry stays the
+residual, now the only one, the read-back's own bound being held at its gate.
+
+### Controls (`.tmp/_b901/controls_r2.py`; 6 of 6 as predicted)
+
+C1w, C1f, C2, R1 and R2 run in an instrumented build whose `verifyAndThen`
+takes its expiry from a control's gate (finish.go's two `expire =
+time.After(StopWriteBound)` read `expiryForControl(dir)`, from a temporary
+`zz_b901_expiry_control.go`, nil keeping the timer); each control gives its own
+snapshot a gate only its end closes, installed before the verification begins.
+Each control `-test.count 20`, no `-race`, GOMAXPROCS 8:
+
+- C1w, C1 without the fix: the grace not held (`checkGraceOf` replaced by a
+  channel that never closes), the open's hook let go only once the worker
+  answers (`SetVerifyHandoffForTest`'s answer hook, run once `verifyHeld` has
+  returned: with the check parked, only its give-up lets the worker answer),
+  the read-back at its gate, and the answer required to be the check's
+  give-up: red 20 of 20, every one at verify_round12_test.go:75,
+  "C1-CHECK-GIVEN-UP: a step of the verification did not end and was given up,
+  and holds the snapshots until it does: its check did not end within its
+  bound (context canceled)"; no read-back give-up, outer expiry or watchdog.
+- C1f, the same edits with the fix (the grace held, so the hook goes once the
+  grace begins): green 20 of 20.
+- C2, the committed test (the hook let go once the grace is installed, the
+  grace open through the answer) with the gate and an assertion that no hold
+  of the folder stood given up when the answer came (`StuckCheckHere`): green
+  20 of 20.
+- R1, "stopped by its caller" without its fix: no grace held, its check held
+  before its files check (`SetBeforeFilesCheckForTest`) until the worker
+  answers, the verdict's write, its INCOMPLETE and the read-back at their
+  gates, the expiry gated: red 20 of 20 at verify_round5_test.go:305, "the
+  recheck was given up (… its check did not end within its bound (context
+  canceled)): the test did not reach the case". R2, the same with the fix (the
+  hold let go once the grace begins): green 20 of 20.
+- S1, main's "a retry past its deadline" (verify_hold_test.go at 92288694),
+  its check held at its start until the worker answers, its INCOMPLETE and its
+  read-back at their gates, the error main drops logged (a deadline, no stop,
+  so no expiry arms; not instrumented): green 20 of 20, each logging "… its
+  check did not end within its bound (context deadline exceeded)": main's case
+  passed a retry given up.
+
+### The finding's failure modes, forced (`.tmp/_b901/controls_r2_late.py`; 5 of 5 as predicted)
+
+The same instrumentation also delays `runCheck`'s worker between taking the
+check's context end and arming its timer or taking the test's grace, by
+`B901_LATE_WORKER_MS` (a sleep before finish.go's `t :=
+time.NewTimer(StopWriteBound / 2)`), as a host that runs that worker late
+does. Each `-test.count 10`:
+
+- L1, round 1's C1 (main's test, the 1.5 s hold), the worker 900 ms late:
+  green 10 of 10. That control does not go red without the fix.
+- L2, round 1's C2 (round 1's fixed test, the same hold), the worker 2,500 ms
+  late: red 10 of 10 at "the verification was left to end on its own 2s after
+  its stop, holding the snapshots' lock until it does: context canceled", the
+  caller's expiry, not the grace.
+- L3 and L4, round 2's C1w, the worker 900 and 2,500 ms late: red 10 of 10
+  each, every one the check's give-up.
+- L5, round 2's C2, the worker 2,500 ms late: green 10 of 10.
+
+### Runs
+
+- The round-12 test, `-race`, `-test.count 50`, from one race binary built at
+  ceef35df, GOMAXPROCS 8 (`.tmp/_b901/lanes_r2.py`): quiet, outside the build
+  slot (load 2.4 to 2.6), 14:49 to 14:50: 50 of 50, no FAIL, SKIP or data race,
+  74 s; loaded, in slot1 beside 16 python busy loops (load 17.5 as it ended),
+  15:10 to 15:18: 50 of 50, no FAIL, SKIP or data race, 479 s. The loops were
+  killed by their captured PIDs after, and none was left.
+- In the same slot session (slot1, taken by a guard at 14:58:27 once two other
+  workers let it go, `.tmp/_b901/guard_r2.py` and `session_r2.py`): `go vet
+  ./...` with the tags as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and
+  windows/amd64, exit 0 each (0.9 s each); then `go test -race -count=1
+  -timeout 120m ./internal/backup/` at GOMAXPROCS 8: ok (743.7 s). go1.27.3's
+  gofmt lists none of the changed files.
+- The rule is `rules-b901-r2.patch` (`~/onebit/jobs/b901/`), uncommitted. It
+  applies after round 1's `rules-b901.patch` and rewrites that bullet and its
+  long form in place: the test's new shape, round 2's controls in the place of
+  round 1's timed ones, and that a red control waits for the give-up it shows.
+  Over a git-archive copy of HEAD with round 1's patch and then round 2's
+  applied, and this record, the budgets check is clean (worst load 76.7%),
+  `scripts/doc-split/verify_moves.py --base HEAD` passes (the two new blocks,
+  nothing moved or lost), and cmd/bridge's `TestEveryCitedTestNameExists`,
+  `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass, the
+  first failing on a ghost citation planted in the patched History, which it
+  names.
+
+### Left
+
+- The residual stands: no committed seam holds the caller's own expiry, and
+  the gate above is the instrumented build's alone. A host slower than
+  `StopWriteBound` from the stop to the answer still fails the round-12 test
+  there, in that expiry's words.
+- Round 1's follow-ups stand.
+## 2026-11-14 — B895-TEST: the stopped tickers' tests hold the hung step at its gate
+
+Worker b895t, legion0, branch `fix/b895-ticker-tests-one-order` from main
+92288694, #1469's squash (B886; its PR head 43053318 is not in this clone, and
+the squash holds `SetStepGateForTest`, `internal/backup/seams.go` 435).
+Commits: 246ca2dc (the two tests), then this record. Every run: Go 1.27.3, the
+tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`;
+controls are uncommitted edits to the committed tree, each predicted in
+writing first (`.tmp/_b895t/controls.predictions.txt`), the edited files'
+bytes put back from memory once their binary was built. No production change.
+
+### The hazard
+
+#1460's macOS CI (run 43470491773) failed
+`TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` with "a
+stopped verification was reported". A stop arms two bounds of
+`StopWriteBound` (2 s, `internal/backup/finish.go` 19) at once:
+
+- the step's own: `runStep` resets its timer on the stop (`hold.go` 517-521)
+  and past it gives the step up (522-524); the worker answers
+  `ErrCheckGivenUp` joined to the cancellation by a second `%w` (`finish.go`
+  403), which `ctxerr.WithoutCancellation` keeps whole (`ctxerr.go` 87-100),
+  and the ticker reports it (`cmd/bridge/backup.go` 811-818);
+- the caller's: `verifyAndThen` arms its expiry on the same stop (`finish.go`
+  351-355) and past it abandons the hold and answers
+  `verifyExpiryError(ctx.Err())` (360-366, 373-380), one `%w` around the
+  cancellation, which `WithoutCancellation` takes out (`ctxerr.go` 82-86,
+  106-107).
+
+Which fires first is the scheduler's choice, and only the second is silent.
+
+### The outer expiry's path is silent at HEAD
+
+With the caller's expiry first, `res` carries `WriteUnknown` and nothing
+found (`finish.go` 361-366); no prune ran, so `PruneSkipped` is `!abandoned`,
+false (`finish.go` 945-953); `reportTickerVerdict` returns at `backup.go`
+800-803 (the failure nil, `Found.DatabaseState` empty); and the prune's lines
+need a live context or a deletion (`backup.go` 649-654). Every green run below
+shows it: stderr empty, stdout the snapshot's line alone. No production
+defect there.
+
+### The change (246ca2dc)
+
+- `TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound`'s
+  manifest-read case holds "its read of the snapshot's record" at its gate,
+  and `TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound` holds
+  "its verdict's write", each with `backup.SetStepGateForTest(root, "", step)`
+  set before the ticker starts. `gateOf` matches the hold's root and, for the
+  snapshot "", any snapshot under it (`seams.go` 465-474), and the ticker makes
+  its snapshot during its pass. `root` is `backupInstall`'s, under the data dir
+  it resolves (`backup_verify_test.go` 26-34), which is the root
+  `resolveSnapshotIn` gives the hold (`verify_paths.go` 40-58), so the seam
+  matches from `package main` as it is (C2 below). A gated step's `runStep`
+  drops the stop and the bound (`hold.go` 486-490), so it ends by its answer
+  or its gate, and nothing in the test fires the gate: only the caller's
+  expiry ends the ticker's wait.
+- The lock-open case keeps its seam and has no gate: `verifyHeld` takes the
+  lock (`finish.go` 442) before its first step (527), so only its caller's
+  expiry ends that wait already.
+- The cleanups are registered so that, last-registered first, they run in
+  this order whatever the body found: the hang's own seam let go (never the
+  gate) and the cancel; `drainLoopOnCleanup`'s join of the ticker;
+  `awaitHoldsLetGo` (the mark dropped, every hold let go, every snapshot's
+  ownership free); then the seams, the gate's restore among them, which fires
+  every gate as it puts the seam back, so only once no step waits at one.
+  Main's version ran the release, the cancel, a `waitClosed` that fails
+  fatally at 10 s and `awaitVerificationsEnd` in one cleanup, and the round-2
+  test released and joined again at its body's end. The seam's doc asks a
+  test to fire its gates before it joins (`seams.go` 432-434); here the hung
+  step answers once its own seam lets go, so no join waits on a gate.
+- Each case asserts what it did (the ticker back within `StopWriteBound` and a
+  second of the stop; stderr empty, else "a stopped verification was
+  reported"), and now that stdout is exactly `backup (startup): wrote <the
+  one snapshot>` (`requireOnlyTheSnapshotsLine`).
+
+### Controls (`.tmp/_b895t/controls.py`; 6 of 6 as predicted, C5's run time aside)
+
+SUP is the uncommitted suppression of the caller's expiry: `verifyAndThen`'s
+stop arm no longer arms `expire` (`finish.go` 351-355; the watchdog, an hour
+away, stays). Each case alone, `-test.count 3`.
+
+- C0, the committed tree: the three cases green, 3 of 3 each.
+- C1, the red (SUP, then the cancel, and only then the gate fired, so the
+  cancellation comes before the give-up and the step is given up as by its
+  own bound): the manifest's read red 3 of 3, `backup_round2_test.go:497: a
+  stopped verification was reported: backup (startup): the verification of
+  <dir> was given up, and its step still holds the snapshots until it ends;
+  it wrote nothing; its record was not read back: a step of the verification
+  did not end and was given up, and holds the snapshots until it does: its
+  read of the snapshot's record did not end within its bound (context
+  canceled)`; the verdict's sync red 3 of 3 with CI's line,
+  `backup_verify_test.go:453: a stopped verification was reported: ... its
+  write did not finish, and its record reads database INCOMPLETE: unsynced,
+  files INCOMPLETE: unsynced: ... its verdict's write did not end within its
+  bound (context canceled)`. Nothing else failed (the ticker back at once,
+  stdout the snapshot's line). The committed lines are 494 and 452; the
+  control's inserted statements moved them by three and one. With the gate
+  held (C0) both are green.
+- C2, SUP alone, the gate held: both cases red 3 of 3 at :491 and :449, "the
+  ticker did not return while ...", after 12.4 s each, nothing reported: the
+  gated step outlived its own stop bound.
+- C3, SUP with main's two test files (no gate): red 3 of 3 at main's
+  `backup_round2_test.go:476` and `backup_verify_test.go:441`, "a stopped
+  verification was reported ... given up ... (context canceled)", about 2 s
+  after each stop: production's own step bound, the residual below, forced.
+- C4, SUP with the gate scoped to the snapshot "x": red 3 of 3 at :494 and
+  :452, as C3: the empty snapshot is what reaches the snapshot the ticker
+  makes.
+- C5, a race build with `t.Fatal` right after the cancel in both cases: red 3
+  of 3 with that line alone, no drain timeout, no hold left, no data race.
+  Predicted 2 to 3 s a run, measured 1.3 to 1.4 s: once its hang is let go
+  the worker answers before the caller's expiry.
+
+`git status` was empty after each.
+
+### Runs
+
+At 246ca2dc, from one `-race` test binary of it (`.tmp/_b895t/lanes.py`), one
+lane per case (the manifest's read, the lock's open, the verdict's sync), the
+three at once, GOMAXPROCS 2 each, `-test.count 50`:
+
+- quiet, outside the build slot (load about 3, another worker's session in
+  the slot): every case 50 of 50, no FAIL, SKIP or data race; the lanes took
+  178, 179 and 183 s;
+- beside 16 python busy loops, in the slot (load about 17.6): every case 50 of
+  50, no FAIL, SKIP or data race; the lanes took 248, 245 and 501 s (the
+  verdict's sync runs the check first, on its lowest-priority thread).
+
+In slot1, taken at 13:45:31 by a guard that waited 46 minutes behind another
+worker's session (`.tmp/_b895t/guard.py`, `session.py`): `go vet` with the
+tags over `./...` as linux/amd64, darwin/arm64 (`CGO_ENABLED=0`) and
+windows/amd64, exit 0 each with nothing printed; `go test -race -count=1
+-timeout 120m ./cmd/bridge/` at GOMAXPROCS 8, ok in 1604.2 s, no FAIL and no
+data race; then the loaded lanes. go1.27.3's gofmt lists neither test file,
+and cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` and
+`TestEveryBackgroundGoroutineDrainsOnCleanup` pass over the tree with this
+record. The rule is `rules-b895t.patch`, uncommitted: one bullet in
+`build-ci-tests.md`, after B886's gate bullet (a test that stops a
+verification while a step hangs forces one order of the two bounds, and for
+the caller's expiry holds the step at its gate, fired only after its joins);
+`git apply --check` takes it, and the budgets check is clean with it (the
+worst load from 76.4% to 76.7%).
+
+### The residual
+
+The step-first order stays in production: where `runStep`'s bound, reset at
+the stop (`hold.go` 517-524), fires before the caller's expiry, a give-up the
+stop alone caused is reported (C3 forces it). That is B895's production fix
+(branch `fix/b895-ticker-stop-report`, unmerged), which also rewrites these
+two tests as a table firing both bounds (f8fc6011, 2fa9b9cf): its merge meets
+this change in the same two files.
+
+### The version gate
+
+`cmd/bridge/backup_round2_test.go`, `cmd/bridge/backup_verify_test.go` and
+`ops/engineering-log.md` are under neither `guardedPrefixes` nor
+`GuardedPaths` (`internal/player/qualification/version_gate.go` 20-36), and
+`internal/backup` is untouched: `go run ./scripts/qualification-version -base
+92288694 -head HEAD` says "qualification version OK: 92288694..HEAD". Nothing
+is bumped.
+
+### Left
+
+- B895's production branch and this change edit the same two tests; its
+  merge keeps one shape of them.
+
+The backlog file is not on legion0: this is named for the orchestrator to
+file.
+## 2026-11-14 — B650FIX: bridge doctor --fix's second report is a run of its own, and the churn case waits for its loads on a clock of its own
+
+The rule is `cli-serve.md`'s B650FIX line, after B650's, and its long form in
+`ops/History-rules-cli-serve.md` ("B650FIX — bridge doctor --fix's second
+report is a run of its own"), both in `rules-b650fix.patch`, uncommitted,
+which also moves out the long form of the line on the player's hotplug watcher
+(`move_entry.py --line 111`: `cli-serve.md` was 14 bytes under its budget).
+Worker b650fix, legion0 (Linux 7.0.0-38, x86-64, 16 CPUs), branch
+`fix/b650fix-doctor-second-run` from main 0ddfda75 (#1461, B650). Commits:
+097abaae (item 1's cases, red), 69af4900 (item 1's line), 6afd5bbb (item 2),
+663725f5 (two comments' wording), then this record. Every run: Go 1.27.3, the
+tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`, 8 of
+the 16 cores. Controls are uncommitted edits to the committed tree, each
+predicted in writing first (`.tmp/_b650fix/controls1.predictions.txt`,
+`controls2.predictions.txt`), the edited files' bytes put back from memory,
+`git status` clean after each.
+
+### Item 1: the second report after --fix
+
+At 0ddfda75, `runDoctorReport` (`cmd/bridge/doctor.go` 59-108) runs
+`doctor.Run(ctx, d)` (66), `runFixes` (82) and `doctor.Run(ctx, d)` again (84)
+on the same `d`, whose `RootProbes` is the one run `buildDoctorDepsWith` began
+(273, `cliRootProbes.BeginRun()`). A run keeps every work it has met
+(`ProbeRun.met`, `internal/doctor/rootprobes.go` 169) and hands it back
+(`begin`, 219-221), so the second report graded the first one's root probes
+and watch counts. Every caller builds `d` through `buildDoctorDepsWith`
+(`doctorCmd`, 52; the launcher's row, `menu.go` 385), and only `doctorCmd`
+passes `--fix`. No other production path runs the checks twice on one Deps:
+`bridge init`'s second pass over its preflight's Deps (`init.go` 860-870)
+runs `doctor.RunPortChecks`, which touches no root.
+
+What `runFixes` does (168-207): of the checks that are not ok, `config-dir`
+alone has a remediation (175): where `d.ConfigDir` is set (176),
+`os.MkdirAll(d.ConfigDir, 0o700)` (186) and `os.Chmod(d.ConfigDir, 0o700)`
+(197); every other check is passed over (202-204). config-dir is not ok where
+its check's own `os.MkdirAll` (`internal/doctor/doctor.go` 616) or its write
+(621-624) fails, so the remediation's MkdirAll makes nothing the check had not
+made, and its Chmod is what changes a directory.
+
+What a run caches, each a `rootWork` under a `workKey{kind, name}`
+(`rootprobes.go` 188-204):
+
+- `workRoot`, named by the root as configured (`beginRoot`, 381-384):
+  `probeRoot` (398-411), its stat and, of a directory, its listing
+  (`rootAnswer`, 389-394). Begun beside the config's load (`loadDoctorConfig`'s
+  `BeginRoots`, `cmd/bridge/doctor.go` 623), at `Run`'s start
+  (`internal/doctor/doctor.go` 484) and by `checkLibraryRoots` (1293).
+- `workCount`, named by the count's cap and the root (`beginCount`, 429-435,
+  the key at 431): the platform's `countRootWatches` (Linux's `countDirs`,
+  `inotify_linux.go` 116-119; kqueue's `manifest.CountWatchSet`,
+  `watchbudget_kqueue.go` 112-115). Begun by `beginWatchCounts` at `Run`'s
+  start (485) and by `tallyWatches` (455-483) in `checkWatchLimit`, only with
+  `libraryWatch.enabled` and roots configured.
+- `workOther`, named by its caller's key (`Bounded`, 361-369): cmd/bridge's
+  load of the config, keyed by `doctorConfigKey` (`cmd/bridge/doctor.go`
+  647-659: the path, and a digest of the file's bytes and every `BRIDGE_`
+  variable). Begun once, as the Deps are built (630), before either report;
+  `Run` begins none.
+
+What the remediation can change: the roots come from a config this user read
+in the config directory, so that directory grants this user search
+permission already (where it does not, the config is not readable by this
+user, config-dir is not checked, `checkConfigDir`,
+`internal/doctor/doctor.go` 589-610, and nothing is remediated), and the
+Chmod adds read and write permission alone, which changes no stat and no walk
+below the directory. What it can change is a listing of the directory
+itself: what the probe of a root that is the directory finds (its listing
+needs read permission there: the enter-only 0100 directory set to 0700), what
+that root's count finds (its walk cannot open its root, an error,
+`inotify_linux.go` 160-163), and what the count of a root above it finds (its
+walk passes over a folder it cannot list, 165-166, and counts what is below it
+once it can). It changes nothing of the config's load: neither the file's
+bytes nor the environment, which are its key.
+
+The fix, 69af4900: the second `doctor.Run` gets a new run of the same runner,
+`d.RootProbes = cliRootProbes.BeginRun()` (`cmd/bridge/doctor.go` 90 at
+663725f5), `cliRootProbes` kept. In `rootprobes.go` at 0ddfda75: `BeginRun`
+(173-175) gives an empty `met` and a `began` of its own; a work that has ended
+has left the runner's `out`, its worker deleting its key under the runner's
+lock (276-278) before it closes `done` (280), so `beginOut` (231-244) finds
+none and begins it afresh (240-242), and the root is asked again; a work still
+out is in `out` and `beginOut` returns it (234-236): joined, never begun
+twice. Its bound counts from its own `began` (240):
+`left := w.began.Add(p.bound).Sub(p.now())` (320). The first report's wait on
+it ended only once that bound had passed (its timer fired at `left`, or `left`
+was already not positive), so in the second report `left` is not positive, no
+hook is told (321-323), no timer set (324), and the wait ends at once, not
+answered (336-338), with `still` set (337: the work began before the new run),
+the line saying "still has not answered, <d> after the doctor first asked it"
+(`unansweredRoot`, 515). A work the first report began and did not wait for (a
+count `tallyWatches` stopped short of, 469-471 and 477-479), still out within
+its bound, is joined and waited for until the rest of that bound, as any run
+joins it.
+
+Its limit: the config is loaded once, in `buildDoctorDepsRun`
+(`loadDoctorConfig`, 355), and what the load gave is copied into `d`
+(`d.ConfigFile.LoadErr`, 363; the roots, 368 and 400; the ports and the rest
+of that branch), so the second `Run` grades the same load, and a load that
+timed out in the first report and finished afterwards is still reported as
+unfinished. That state is retained outside this fix, and the Deps being built
+once predates B650 (before it, the load ran there unbounded).
+
+The cases, 097abaae, each through `bridge doctor --json --fix` (`doctorCmd`),
+red at that commit, whose code is 0ddfda75's (the roots' temporary paths
+shortened to `<tmp>`):
+
+```
+--- FAIL: TestBridgeDoctorFixReadsTheRootsAgainForItsSecondReport (0.01s)
+    doctor_roots_test.go:1271: bridge doctor --fix printed library-roots {Name:library-roots Status:fail Summary:1 problem(s) Hint:fix or remove, after checking that a volume it is on is mounted: <tmp>/NAS (open <tmp>/NAS: permission denied)}, want both roots reachable: its second run lists <tmp>/NAS again
+    doctor_roots_test.go:1274: <tmp>/NAS was listed 1 times, want twice, once by each run of the checks
+--- FAIL: TestBridgeDoctorFixReportsTheRootItsRemediationLetItList (0.01s)
+    doctor_roots_test.go:1332: bridge doctor --fix printed library-roots {Name:library-roots Status:fail Summary:1 problem(s) Hint:fix or remove, after checking that a volume it is on is mounted: <tmp>/cfg (open <tmp>/cfg: permission denied)}, want the root reachable once --fix set it to 0700
+    doctor_roots_test.go:1337: the root's listings answered [open <tmp>/cfg: permission denied], want this user refused, then, once --fix set it to 0700, its entries
+--- FAIL: TestBridgeDoctorFixJoinsTheProbeOfARootStillOut (0.32s)
+    doctor_roots_test.go:1358: bridge doctor --fix printed library-roots {Name:library-roots Status:fail Summary:1 problem(s) Hint:library root <tmp>/NAS did not answer within 300ms: its mount may be stalled; ...}, want a fail saying "library root <tmp>/NAS still has not answered"
+    doctor_roots_test.go:1368: bridge doctor --fix began 1 probes of the root that answers, want two: its second run reads it again
+```
+
+The remediation case's directory mode (0700) and its config-dir line (ok)
+passed there: the remediation ran, and only the probe was the first report's.
+The cache case shows the root asked again, and no more: no remediation acts
+there (config-dir is ok). The remediation case shows the remediation's effect
+read: the first listing a real EACCES, the second, after the Chmod, the
+directory's entries. The join case counts the probes begun once the held root
+has answered and every work has ended (`DrainForTest`), since `beginOut`
+starts each worker on a goroutine of its own (242) and the stand-in counts at
+its stat's entry. 69af4900 turns all three green.
+
+Controls on 69af4900 (`controls1.py`), each as predicted:
+
+- C1, the shared run back (the line removed): all three red, as at 097abaae.
+- C2, a new runner as production makes one
+  (`doctor.NewRootProbes().BeginRun()`): the cache case red at its count only
+  (the root listed once by the stand-in, the new runner listing it with
+  `os.ReadDir`), the remediation case at its listings only, and the join case
+  at its words (`library-roots` ok, "2 root(s) reachable": the new runner asked
+  the held root's directory afresh) and at the root that answers' count (1).
+- C3, a new runner with the stand-in's calls, bound, limits, clock and hook and
+  none of its works (a control-only clone in `internal/doctor`): the cache and
+  remediation cases green, both asking again, and the join case red at its
+  words ("did not answer within 300ms") and at the begin count: "bridge doctor
+  --fix began 2 probes of the root that did not answer, want one".
+
+### Item 2: the churn case's config load
+
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn`
+(`cmd/bridge/doctor_roots_test.go` 556-605 at 0ddfda75) gave the console
+runner's works a real 100 ms bound (576), and the config's load runs under the
+same bound (`loadDoctorConfig` → `doctor.Bounded`, `cmd/bridge/doctor.go` 630;
+`waitFor`, `rootprobes.go` 315-344), so its `config-file` ok past the probes'
+limit (591-593) needed `config.Load` within 100 ms of real time. The code
+differs from the brief in one count: that assertion is one run's, the
+seventeenth, past the limit. Runs 1 to 16 and the eighteenth assert
+library-roots alone, which names the root from the load's unfinished roots
+whatever the load did (`d.LibraryRoots = unfinished`, `cmd/bridge/doctor.go`
+368), so a slow load there passes.
+
+The options, weighed:
+
+- A bound of its own for the load: the loads and the probes share
+  `RootProbes.bound` (`rootprobes.go` 72), read by `waitFor` at 320, 329 and
+  338 and in the `Wait` its words come from, so a second bound is a choice by
+  kind inside production's wait, and the load's wait would still be on real
+  time, only wider.
+- The runner's clock: `RootProbes.now` and `timer` (84-89; `time.Now` and
+  `realTimer` in production, 113-114) are all that `BeginRun` (174),
+  `beginOut` (240) and `waitFor` (320, 324, 329, 338) read of time, and
+  internal/doctor's tests set them inside their package (`clockOf`,
+  `rootprobes_test.go` 136-140), which cmd/bridge cannot. Chosen:
+  `RootProbes.SetClockForTest(now, timer)` (`rootprobes.go` 104-112 at
+  663725f5), which sets those two fields and nothing else, on the instance,
+  and which production never calls.
+
+The case's clock, `rootWaitClock` (`doctor_roots_test.go` 579-610 at
+663725f5), moves only at a run's wait on a root. `waitFor` tells the runner's
+hook the root it is about to wait on (`SetOnRootWaitForTest`, 321-323) on the
+run's goroutine just before it sets that wait's timer (324); the hook marks the
+next timer, which fires at once, the clock moving on by the bound, and every
+other timer never fires. A run waits on its load inside `buildDoctorDepsRun`
+(`loadDoctorConfig`, 630), before `doctor.Run` (1124) reaches any wait on a
+root (`checkLibraryRoots`, `internal/doctor/doctor.go` 1300), so while the load
+is waited for the clock stands still, and that wait ends only on `w.done`
+(326): by the load's answer, however long the host takes. A hook moved after
+the timer would leave a root's wait unfired, and the case would fail by its
+90 s deadline, not pass. What the case proves is unchanged: sixteen probes held
+to the limit across the churn, the warn past it in its exact words,
+config-file ok there, no probe of the new root, and the re-added root's probe
+still out (its bound long past on the clock: "still has not answered") and
+probed once.
+
+Its time does not grow: under the race detector, in the package runs below,
+0.13 s at 663725f5 against 1.73 s on main's tree, whose sixteen runs each
+waited 100 ms of real time on a root.
+
+The control on 6afd5bbb (`controls2.py`): the load of a config naming the
+case's last root (`NAS-16`, its seventeenth run's) held at a gate, a channel,
+before `config.Load`, the gate closed once a held load's wait has ended
+without its answer (`Bounded` returned, `wait.Answered()` false), never by a
+timer; a control-only file carries the gate, the case as 69af4900 has it
+(`ctlOldChurnCase`) and two harness cases:
+
+- G1, that case alone: red at config-file alone, "past the probes' limit,
+  config-file = {Name:config-file Status:fail Summary:<tmp>/bridge.yaml: its
+  load did not finish within 100ms ...}, want the load, which touches no root,
+  made", every other assertion green (1.81 s).
+- G2, the new case run on a goroutine and, once its seventeenth load was held
+  at the gate, the old one beside it: the old case red at config-file as in
+  G1, and the new case green, its load held 1.79 s of real time at the gate
+  until the old case's 100 ms wait had ended without the answer, and its
+  config-file ok.
+
+### The gates
+
+"In the slot" is a hold of the build lock (guarded, got at 14:21 behind
+b895t's session), where no other worker's build runs; "loaded" is beside 16
+busy processes, the host's core count, in the slot.
+
+- Item 1's three cases and the churn case, with
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway` (the one other
+  case that runs `doctor --fix`), `-race -count=50`, GOMAXPROCS 8: 250 of 250
+  on 6afd5bbb outside the slot (27 s), and 250 of 250 loaded on 663725f5 (43 s;
+  slowest runs 0.34 s, the join case, and 0.39 s, the churn case); no race
+  reported.
+- `go vet ./...` with the tags as linux/amd64, darwin/arm64 (CGO_ENABLED=0)
+  and windows/amd64, in the slot on 663725f5: clean.
+- `./cmd/bridge/` once, `-race -count=1 -p 8 -parallel 8 -timeout 120m`,
+  GOMAXPROCS 8, in the slot, at 663725f5 and, started 300 s later beside it,
+  on main's tree (a copy of the worktree with the three files B650FIX changes
+  put back as 0ddfda75 has them; its 3,453 tracked files compared with
+  0ddfda75's, none differing): both ok, go test's elapsed 1,631.8 s at
+  663725f5 and 1,628.6 s on main (wall 1,635 s and 1,656 s, the second
+  compiling its copy), 1,541 and 1,538 top-level cases passed, 9 skipped in
+  each, none failed. The 1,547 cases both ran took 1,630.0 s and 1,627.2 s
+  between them; the churn case 0.13 s against 1.73 s, and the three new cases
+  0.35 s.
+- Without the race detector: the cmd/bridge cases whose names hold Doctor,
+  Diagnostics or VolumeIsAway, ok on 69af4900 (28 s) and on 6afd5bbb (34 s);
+  `./internal/doctor/` once, ok on 6afd5bbb (9 s).
+- The rules patch, on a copy of HEAD's tree with it applied (git's directory
+  the worktree's): `make docs-check`'s four steps (the budgets ok,
+  `cli-serve.md` 98,921 bytes from 99,986, the worst load 77.1 % from 77.4 %,
+  `config-lifecycle.md` at 99.9 % now the closest to its budget),
+  `verify_moves.py --base HEAD` PASS (one block moved, 1,764 bytes), and
+  `TestEveryCitedTestNameExists` over the copy, red with a ghost citation
+  planted in its History and green without. `git apply --check` takes it on
+  the worktree, and applied to a fresh copy of HEAD's two files it gives the
+  copy's bytes.
+- go1.27.3's gofmt lists none of the Go files B650FIX touches.
+
+## 2026-11-14 — B650FIX round 2: the churn case counts its probes after a drain, and the record says only what can happen
+
+The rule and its long form are `rules-b650fix-r2.patch`'s, uncommitted and
+cumulative: round 1's patch with this round's changes to the History section,
+to be applied alone. Worker b650fix, legion0, from round 1's head 2f84cb14.
+Commits: ebafbf91 (the churn case), 09409933 (the comment at the second
+report), then this record, which also corrects round 1's paragraph on what
+the remediation can change (item 2). Every run as round 1's: Go 1.27.3, the
+tags, TMPDIR `~/onebit/tmp`, 8 of the 16 cores; controls are uncommitted
+edits to the committed tree, predicted in writing first
+(`.tmp/_b650fix/r2_controls.predictions.txt`), the bytes put back from memory,
+`git status` clean after the builds.
+
+### Item 1: the counts after a drain
+
+`TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn` read
+`s.statsOf(last)` (`cmd/bridge/doctor_roots_test.go` 663 at 2f84cb14) and
+`s.statsOf(roots[0])` (671) as soon as a run had returned. The stand-in
+counts a probe as it enters its stat (`rootStall.stat`, 78-81), on the
+probe's own goroutine, which `beginOut` starts and does not wait for
+(`go p.work`, `internal/doctor/rootprobes.go` 252); on round 1's
+`rootWaitClock` (`doctor_roots_test.go` 600-610) a run's wait on a root ends
+at once, so the run can return before that goroutine has counted. A count
+could then read 0 of a probe begun (a false failure), or miss one begun past
+the limit (a defect passed). ebafbf91 keeps the report assertions while the
+roots are held, then lets them go (674), requires the drain (675:
+`DrainForTest`, a fatal failure if a work is still out after 30 s), and only
+then reads both counts (678, 681), as round 1's join case does.
+
+The controls (`r2_controls.py`), each built once with exact-once edits, its
+gate a channel (the stall's release, which only `letGo` closes), run against
+the case as 2f84cb14 has it (old) and as ebafbf91 has it (new):
+
+- A, a false failure for `roots[0]`: the stand-in holds NAS-00's probe, begun
+  in the first run, between its begin and its stat. Old: red, "a root removed
+  and added again was probed 0 times, want once", the probe let go by the
+  cleanup, whose drain succeeded. New: green, its drain succeeding and the
+  probe counted once.
+- B, a missed extra probe for `last`: `beginOut` admits the first root work
+  the limit refuses (the seventeenth run's probe of NAS-16) under a key no run
+  asks for, so the drain waits for it while `beginOut` still answers nil and
+  the report keeps "was not checked: 16 earlier probes …"; the stand-in holds
+  that probe before its stat. Old: green, its count read at once missing the
+  probe. New: red, "past the limit, 1 probes of a new root began, want none",
+  its report assertions green and its drain succeeding.
+
+Each as predicted. The case's time does not grow: without the race detector,
+the old and new cases alternated twenty rounds each, median 0.100 s and
+0.090 s.
+
+### Item 2: the record says only what can happen
+
+Round 1's paragraph above ("What the remediation can change") said that the
+Chmod changes what is found below a config directory without search
+permission, and two sentences later that such a directory leaves the config
+unreadable, so nothing is remediated. A remediated directory grants search
+permission already, and adding read and write permission changes no stat and
+no walk below it. The paragraph now keeps the reachable cases alone: a root
+at the config directory (its probe's listing, its count's walk) and a root
+above it (its count's walk, which lists the directory). The History's
+paragraph is corrected alike in the patch.
+
+### Item 3: two notes
+
+The probes' limit and `--fix`. The second report begins a new probe of every
+root whose probe has ended, and `beginOut` refuses a new work while sixteen
+works on the roots are out (`rootprobes.go` 247-249; `outOfKind`, 258-266,
+counts the probes and the watch counts together), so a root the first report
+probed can be one the second cannot. That needs: the watch counts begun,
+which is Linux or a kqueue platform with its limit read (`beginWatchCounts`
+begins none where it cannot read it, `inotify_linux.go` 104-107,
+`watchbudget_kqueue.go` 99-102, and none at all elsewhere, Windows included,
+`inotify_other.go` 18-19) and `libraryWatch.enabled`; eight library roots on
+mounts that do not answer, each with its probe and an admitted count that
+stays blocked, which the local root's own probe, begun beside the config's
+load and answered at once, leaves room for; and a local root listed last, so
+that its count is the one the limit holds back in the first report. The
+second report then begins no probe of the local root and says it "was not
+checked: 16 earlier probes of the library roots have not answered yet, and
+the doctor begins no more until one does", where a plain `bridge doctor`
+reads it ok. The exit code does not change: library-roots fails already, for
+the eight.
+
+The coupling. `runDoctorReport` takes the second report's run from
+`cliRootProbes` (`cmd/bridge/doctor.go` 95 at 09409933), not from the runner
+behind `d.RootProbes`, which a `ProbeRun` does not expose. Every caller
+builds `d` through `buildDoctorDepsWith` (285, `cliRootProbes.BeginRun()`;
+`doctorCmd`, 52; the launcher's row, `menu.go` 385), so the two are one
+runner today; Deps carrying a run of another runner would have their second
+report run on the CLI's works. 09409933's comment at that line says so.
+
+### The gates
+
+- The touched cases, `-race -count=50`, GOMAXPROCS 8, outside the slot on
+  09409933: the churn case 50 of 50 (median 0.13 s, max 0.14 s), the three
+  `--fix` cases 50 of 50 each (medians 0.01, 0.01 and 0.32 s), and
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway` 50 of 50; no
+  race reported (27 s).
+- In the slot (got at 15:24, its guard's first try), on 09409933: `go vet
+  ./...` with the tags as linux/amd64, darwin/arm64 (CGO_ENABLED=0) and
+  windows/amd64, clean; then `go test -race -count=1 -p 8 -parallel 8 -timeout
+  120m ./cmd/bridge/ ./internal/doctor/`, GOMAXPROCS 8: both ok,
+  `./cmd/bridge/` in 1,578.3 s (1,541 top-level cases passed, 9 skipped) and
+  `./internal/doctor/` in 10.9 s (198 passed, 3 skipped), none failed.
+- The rules patch: `git apply --check` takes it on the worktree; applied to a
+  disposable copy of HEAD's tree (git's directory the worktree's) it gives the
+  bytes built from round 1's patch and this round's changes, and there `make
+  docs-check` passes (the budgets ok: `cli-serve.md` 98,921 bytes, the worst
+  load 77.1 %, `config-lifecycle.md` at 99.9 % the closest),
+  `verify_moves.py --base HEAD` passes (one block moved, 1,764 bytes), and
+  `TestEveryCitedTestNameExists` fails on a ghost citation planted in the
+  copy's History and passes without it.
+- go1.27.3's gofmt lists none of the Go files round 2 touches.
+## 2026-11-14 — B903: a fault during a Write under way freezes what the sink played
+
+Worker b903, legion0, branch `fix/b903-xrun-fault-test`. Its base is main at
+0ddfda75: the brief's `BASE` is `origin/main` after a fetch, and this clone
+has no `origin` remote and `git fetch` needs an approval a headless session
+cannot give, so it is the local `main`, which `orch/b903` names too, at the
+brief's floor. Commits: dd6d642e (the four tests, red), c5f0321f (the
+reporter), 8400ce75 (the tests' rig checks what each session left, as
+`rig.stop` does), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR `~/onebit/tmp`, 8 of the
+host's 16 cores. Controls are uncommitted edits to the committed tree, each
+predicted in writing first (`.tmp/_b903/controls.predictions.txt`), the
+edited file's bytes put back from memory once its binary was built. Round 1
+left no commits; its control patch (made at 92288694, a `Wrote` seam in
+`producer.go` and tests in `internal/alsapcm`) was a reference only: both
+are outside this round's budget, `internal/alsapcm` being guarded.
+
+### The hazard
+
+All four failures of `TestPlaybackFaultsOnAnXrunAndNeverRecovers` on
+`test (macos-latest)` (runs 42282368171 and 42290588523 on 11-06,
+43462407127 on 11-13 and 43587635348 on main on 11-14, as the brief lists
+them; `gh` is refused here) read `Occurrence:1 Frames:28672 … Entry:4097`:
+one track whose fault came at seven chunks of `chunkFrames` (4096,
+`open.go` 58) against 30080 to 31200 written. At 0ddfda75 the producer hands
+the sink a chunk in a Write and counts it only once the Write has returned,
+under the session's lock (`producer.go` 420-426: `inWrite` set, the lock let
+go, `out.sink.Write`, the lock taken, `inWrite` cleared, `o.written += n`;
+the native writes alike, `native.go` 357-363). The sink takes and publishes
+the frames inside the Write (`internal/alsapcm/sink.go` 634-646, `ring.sub +=
+n`), and its writer may hand them to the kernel, and the DAC play them,
+before that count. The reporter capped the occurrence heard at the count
+(`reporter.go` 141, `min(max(p.Played-heard.start, 0), heard.written)`) and
+froze the fault there (183-190). So a fault in the window between a later
+Write's publish and its count froze the position up to a Write short of what
+played: at an xrun the sink counts every frame it wrote played (`Sink.xrun`,
+`sink_writer.go` 360-371, `Played = ring.wr`), 30080 to 31200 there, and the
+cap said 28672.
+
+### Why Played bounds it, in production
+
+- PCM: `s.pos.Played = min(max(s.pos.Played, played), s.ring.wr)`
+  (`internal/alsapcm/sink_writer.go` 349, `establish`), and every other write
+  of it sets it to `ring.wr` (366 at an xrun, 595 at a pause's release, 804
+  at a drain's end); `ring.wr` never passes `ring.sub`, the writer writing
+  only what was submitted (`sink_ring.go` 10-12, `pending` 32), and
+  `Position` reports the two as Written and Submitted (`sink.go` 797-806).
+- Native DSD: `s.played = max(s.played, min(played*int64(s.word),
+  s.submitted))` (`sink_dsd_writer.go` 387, `measureNative`), `submitted`
+  growing inside `WriteDSD` as it takes bits (`sink_dsd.go` 892) and
+  `Position` reporting it (1157-1161).
+
+A sink never counts played more than it took, the frames of a Write under way
+that it took already counted. And for the occurrence the producer writes,
+every frame its sink took past the occurrence's start is the occurrence's:
+the producer writes in play order and no other occurrence before that Write
+returns. `s.writing` and `inWrite` move on the producer's goroutine alone
+(`producer.go` 139, 207, 297, 320, 369, 420, 424, 615, 638; `native.go` 357,
+361, 386; `convert.go` 301, in `serveLocked`, which only the producer runs;
+Start's at `session.go` 595, before the producer exists), and a converted
+occurrence's join window counts as its own (`convert.go` 262).
+
+### The fix (c5f0321f)
+
+`reporter.go` 137-162 (line numbers from here on are c5f0321f's): for the
+occurrence heard while its Write is under way (`s.inWrite && s.writing ==
+heard`) the frames played are `max(Played - start, 0)` with no cap, so its
+position, and the fault frozen from it (`f.Frames = s.posFrames`, 203), is
+`from + max(Played - start, 0)`; every other occurrence keeps `min(…,
+written)`. Two other caps stay as they were. The native crossing position
+(131) is followed, in the same step, by the heard position, which for the
+occurrence written is the exact one, and the engine takes the later
+(`engine/events.go` 167-175). The observation's threshold (190) is a lower
+bound that delays `streaming_observed` by less than a Write and never claims
+it early. The crossing test (115), the submission gate (91), the producer,
+the sinks and `native.go` are unchanged.
+
+### The same quantity at the bookkeeping
+
+A report step holds the session's lock from its first read of the session to
+its last (`reporter.go` 53 to 247), and the producer's count is one hold of
+it (`producer.go` 423-427), so a step sees the Write under way or counted,
+never half of it. At the count `n` is every frame the Write took
+(`sink.go` 587-595: Write returns the frames it took, each counted once
+published, 638-646), so `start + written` is then all the sink took of the
+occurrence, which Played does not pass: `min(Played - start, written)` is
+`Played - start`, the frame the step before reported for the same Played.
+The position neither steps back nor moves at the count, and Played only rises
+(349's `max`). Under the old cap the count was a jump, which a test that only
+asks "never back" accepts:
+`TestNativeIntegrationThePositionIsOneQuantityAcrossAWritesBookkeeping` holds
+playback with 9600 frames played, 8192 counted and 12192 taken; before the
+fix the position read 8192, then 9600 once the Write was counted; with it,
+9600 both times.
+
+### A panic inside a later Write
+
+A panic in `out.sink.Write` (`producer.go` 422) unwinds past 423-426, so
+`inWrite` stays set and `s.writing` stays the occurrence: on the way out
+`producerExit` (105-114) sets `producerDone` and serves the cuts, and
+`recoverFault` (`session.go` 347-352) records the session's fault,
+`backend_failed` (`faulted`, 333-343); neither touches them. The producer is
+gone, so nothing more is submitted, and the frames the sink holds past the
+occurrence's start are those its Writes took, the panicked one's taken part
+among them (published before the panic). Played is at most them (the clamps
+above), so `Played - start` is exactly the occurrence's content the kernel
+established played, and the fault names it; the cap named the count before
+that Write while the sink's writer went on playing what it took.
+`TestNativeIntegrationAPanicInALaterWriteFreezesWhatTheSinkPlayed` reads the
+session after the fault, the Write still under way, and the fault at 9600
+(8192 before the fix).
+
+### Not this round: a fault inside an occurrence's first Write
+
+The crossing test still refuses an occurrence with nothing counted
+(`reporter.go` 115, `o.written == 0`), so during an occurrence's first Write
+the occurrence heard is its predecessor, if any, and a fault there names the
+predecessor at its own end, or the first occurrence (204-205), a panic in
+that Write included. That, and the gapless attribution, are backlog B903G's.
+`TestNativeIntegrationAPredecessorsPositionStopsAtItsOwnEnd` holds a gapless
+successor's first Write with the DAC 1408 frames into it: the predecessor is
+heard at its own 8192 frames, and stays capped.
+
+### The tests and the injection route
+
+`Config.OpenSink` returns `*alsapcm.Sink` (`backend.go` 46) and cannot hand
+the session a wrapper, but `output.sink` is the `streamSink` interface
+(`session.go` 133, `native.go` 112-123). The tests' `heldWrite` wraps it as
+the sink opens, in `Config.Notify`'s `NoteOpened` (`session.go` 747), on the
+goroutine that opened it, before the session makes it current or starts the
+producer and the reporter (Start spawns them after, 612-624). It delegates
+everything to the real Sink over the fake kernel; its one held Write is the
+first a predicate names, the sink taking the first `take` of its frames
+before the hold, and it returns, or panics, only once released. The
+producer's bookkeeping is the real one: `writeAll` calls the wrapper's Write.
+The fake kernel is `internal/alsapcm`'s `export_test.go`, which a playback
+test reaches only through the native-integration overlay
+(`scripts/native-integration-overlay.py`), so the tests are in
+`internal/player/playback/native_integration_test.go`, the file the overlay
+builds, named `TestNativeIntegration…` so that CI's native-qualification job
+runs them (`.github/workflows/gate.yml` 651-659, `-run '^TestNativeIntegration'`,
+ubuntu only); `make test` and the other CI legs do not build that file. It
+and `reporter.go` are outside the qualification gate's `GuardedPaths` and
+`guardedPrefixes` (`internal/player/qualification/version_gate.go` 20-36), so
+nothing is bumped. `internal/alsapcm/playback_fault_test.go`, guarded, stays
+as it is: its `[30000, Total]` window keeps passing (below), and C1 is the
+exact pin. The rig's `stop`, registered with `t.Cleanup`, lets every hold go
+first, then releases the session, joins the backend (the teardown joins the
+producer before it closes anything, `session.go` 1672) and checks what the
+session left, as `rig.stop` does: no overlap, every goroutine joined, every
+content closed, every open of the node closed once. The reporter is ticked by
+hand, a second send the barrier.
+
+- C1, `TestNativeIntegrationAFaultInALaterWriteFreezesWhatTheSinkPlayed`:
+  the fake DAC free and an xrun at 30000 frames written, as the alsapcm test
+  has it; held is the first Write after one counted whose frames take the
+  sink past 30000, the eighth, taken whole and held before it returns. The
+  fault is an xrun in occurrence 1 at the frames the kernel was given
+  (31200), the last position before it the same, none after it.
+- `TestNativeIntegrationThePositionIsOneQuantityAcrossAWritesBookkeeping`:
+  the third Write held with 4000 of its 4096 frames taken, the DAC played
+  200 ms (9600 frames, at 50 ms periods) and then given no time, the sink's
+  next STATUS parked so nothing it counts played can move. The position is
+  9600, red before the fix (8192). Then the producer counts the Write and
+  holds at its next step, no Write under way (`Seams.ProducerStep`), and the
+  position is still 9600, green before the fix too, the cap now covering
+  what played. Each assertion's comment says which it is.
+- `TestNativeIntegrationAPredecessorsPositionStopsAtItsOwnEnd` and
+  `TestNativeIntegrationAPanicInALaterWriteFreezesWhatTheSinkPlayed`: above.
+
+### Red, green, red again; the controls
+
+At dd6d642e, the tests over 0ddfda75's production code (`-race`): C1 red
+(`fault {Reason:xrun … Frames:28672 …}; want an xrun in occurrence 1 at the
+31200 frames the kernel was given`), the bookkeeping case red before the
+count (8192 against 9600) and green after it, the panic case red (8192
+against 9600), the predecessor case green, every other overlay test green,
+no data race. At c5f0321f the four green. The controls
+(`.tmp/_b903/controls.py`) at 8400ce75, 5 of 5 as predicted:
+
+- K0, the committed tree: the four green.
+- K1, the fix reverted: C1, the bookkeeping case (its before-count assertion
+  alone) and the panic case red, with the messages above; the predecessor
+  green. Red again.
+- K2, the heard position's cap removed for every occurrence: the predecessor
+  red (its position 9600, past its own 8192 frames), the other three green.
+- K3, the cap removed whenever a Write is under way, `s.writing == heard` not
+  asked: the predecessor red the same way, the others green. The occurrence
+  asked is load-bearing.
+- K4, the cap removed for the occurrence the producer writes, `inWrite` not
+  asked: the four green, as predicted: outside a Write, Played never passes
+  what the producer counted of the occurrence it writes, so the `inWrite`
+  conjunct changes no value; it keeps the change to the window it is for.
+
+`git status` was empty after each batch.
+
+### Runs
+
+At 8400ce75 (`.tmp/_b903/r50.py`, `.tmp/_b903/slot.py`):
+
+- `-race -count=50`, each test alone from one prebuilt binary, GOMAXPROCS 8,
+  outside the build slot: the four new tests 50 of 50 each, no data race;
+  `TestPlaybackFaultsOnAnXrunAndNeverRecovers` (`./internal/alsapcm`) 50 of
+  50 with 0ddfda75's `reporter.go` (its bytes from `git show`, put back once
+  the binary was built; the two binaries' hashes differ) and 50 of 50 at the
+  fix, no data race, no skip.
+- The same test from the same two binaries, 300 runs each at GOMAXPROCS 1
+  beside 8 busy loops, all pinned to CPUs 0-7, in the slot: 300 of 300 at the
+  base and at the fix. The window CI's macOS runner met (the producer
+  descheduled between a Write's publish and its count while the writer
+  reaches the xrun and the reporter its step) did not open on this host;
+  the sightings and the held Write are the evidence, and C1 the pin.
+- `go test -race -count=1 -timeout 120m -p 2 ./internal/player/...`
+  (GOMAXPROCS 4), in the slot: every package ok, in 91 s (dsdconv 43 s,
+  openhome 38 s, engine 24 s, library 20 s, playback 2.5 s).
+- `go vet` with the tags as linux, darwin and windows: `./...` clean, and
+  `./internal/player/playback` with the overlay, which `./...` does not
+  build, clean, each run again on an empty build cache to rule out a cached
+  answer.
+- `./internal/alsapcm` under `-race` once, at the fix's content (8400ce75
+  changes a playback test file alone): ok, 80 s; `./internal/player/playback`
+  under `-race` once, and every `TestNativeIntegration…` test with the
+  overlay under `-race`: ok.
+- go1.27.3's gofmt lists neither touched file. Over a copy of the tree with
+  this record and the rules patch laid in, cmd/bridge's
+  `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`
+  and `TestNoBlankKeepers` pass, and a ghost citation planted in that copy's
+  log turns the first red, the only name it reports; `check-doc-budgets.py`
+  (`player.md` from 98,265 to 98,534 bytes of 100,000) and
+  `scripts/doc-split/verify_moves.py --base HEAD` are clean there.
+
+The rule is `rules-b903-r2.patch`, uncommitted: one line in `player.md`
+after the fault bullet, its long form in `ops/History-rules-player.md` at the
+end of "Player backend (B470 PR 4b2)"; `git apply --check` takes it. For a
+re-run on a Mac: from the branch, the overlay made again after every checkout
+(`python3 scripts/native-integration-overlay.py "$TMPDIR/b903.json"`, then
+`go test -tags ts_omit_webclient,ts_omit_debugeventbus -overlay
+"$TMPDIR/b903.json" -race -run '^TestNativeIntegrationAFaultInALaterWriteFreezesWhatTheSinkPlayed$'
+./internal/player/playback`), red with 0ddfda75's `reporter.go` checked out
+over the head's, green ×50 at the head.
+
+### Left
+
+- B903G: a fault inside an occurrence's first Write (above).
+- No deterministic native test: the native write is `o.out.native.WriteDSD`
+  on the concrete `*alsapcm.DSDSink` (`native.go` 359), which no wrapper
+  reaches, and holding it needs a seam in `native.go`, which is guarded. The
+  change covers that path by the same reasoning, the native clamp above.
+- After a panic inside a native `WriteDSD` that took bits (a defect in the
+  sink's own code: no seam reaches it), the final native report's accepted
+  prefix stays the producer's count (`native.go` 559-567), so the engine
+  drops a retiring position past it (`engine/native.go` 217) while the
+  fault keeps the sink's Played. No test reaches it; noted for B903G.
+- The rule on the backend's tests (`History-rules-player.md`, "The
+  backend's tests run…") says `internal/alsapcm` is "the one place that can
+  reach the fake kernel"; the native-integration overlay reaches it too, as
+  `native_integration_test.go` did before this round. Not corrected here,
+  beside this round's rule.
+
+## 2026-11-14 — B650FU: B650's Lows: a stopped run's look before its stop, the healthy waits' bound, the loopback probe off the gather's context, and the config-file hint
+
+The rule is `output.md`'s B650 line on the checklist's read (the loopback
+probe its body carries, and the case that pins it), in `rules-b650fu.patch`,
+uncommitted. Worker b650fu, legion0 (Linux 7.0.0-38, x86-64, 16 CPUs), branch
+`fix/b650fu-doctor-lows` from main 9acee209, which carries B650 (0ddfda75,
+#1461) and B650FIX (#1475). Commits: 4bb99deb (item 1), bc8f8a6a (item 2),
+26bdd0a5 (item 4), 279e7868 (item 5's hint), d1dfc1d3 (item 3), then this
+record. Every run: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`,
+TMPDIR `~/onebit/tmp`, 8 of the 16 cores. The controls are uncommitted edits to
+the committed tree at d1dfc1d3, predicted in writing first
+(`.tmp/_b650fu/controls.predictions.txt`), every edited file's bytes put back
+from memory and checked by its hash, `git status` clean after the batch; their
+test binaries are built without the race detector, each case run alone, and
+each came out as predicted. Line numbers are 9acee209's unless a commit is
+named.
+
+### Item 1: the stopped console run's check that it came back no sooner
+
+`TestACancelledConsoleDoctorRunSaysItWasStopped`
+(`cmd/bridge/doctor_roots_test.go` 480-542) made a channel and closed it
+(515-516) just before `cancel()` (517), then asked it without blocking
+(524-528), so its "came back before its request went away" branch could not be
+taken. 4bb99deb looks at the runner's channel without blocking just before the
+cancel (523-527 at d1dfc1d3), fails on a report there, and drops the dead
+check. The look catches a report published already, and that alone: the runner
+publishes on a goroutine of its own (`go func() { reports <- runner(ctx) }()`,
+504), and the hook says only that the run is about to wait
+(`internal/doctor/rootprobes.go` 331-332), so a run that came back on its own
+just after the look passes it. The order the case needs is in what it asserts
+already, and no seam was added: `waitFor` answers `stopped` from its context's
+arm alone (338-342; 341 is the one `outcome: stopped` in production), which
+`unansweredRoot` words "was not checked: the doctor's run was stopped before
+it answered" (528-529), the hint the case requires, so the run's wait on the
+root that does not answer ended by the case's cancel, and the run came back
+after it.
+
+- C1-new, HEAD's case with the root let go and the report's publication waited
+  for (`len(reports) == 1`) right after its `probed` check: red at the look,
+  "the run came back before its request went away", and nothing after it.
+- C1-old, main's case with the same edit: red only at its library-roots line,
+  "{Name:library-roots Status:ok Summary:2 root(s) reachable Hint:}, want a
+  warn ...", never in the old check's words.
+
+### Item 2: the own-config case's healthy waits
+
+`TestADoctorRunTakesOnlyTheReadOfItsOwnConfig` set its read table's timer to
+`readTimers` (968) for every wait, and a `readTimers` timer passed only when the
+case fired it (926-930), so the waits of its two healthy runs (the edited
+config's, and the one after the read answered) had no bound but `doctorWithin`'s
+90 s, while three texts said every wait but the held read's kept bridge
+doctor's bound: the case's comment (943-950), `ops/History-rules-cli-serve.md`
+(5594-5597 at 9acee209), and round 3's record above ("every other wait keeping
+bridge doctor's bound under the case's 90 s deadline").
+
+Chosen: real timers, not the three texts corrected. bc8f8a6a's
+`readTimers.timer` (936-944 at d1dfc1d3) hands out `time.NewTimer` for the
+bound the wait asks (`outputsReadBound`, 20 s) to every wait but the next one
+set once `capture` is armed, which it takes with `CompareAndSwap(true, false)`,
+as `rootWaitClock.timer` takes its flag (602), and `givenUp` arms it just
+before the run whose wait it gives up begins (1005 at d1dfc1d3), when no other
+run waits on a read. Why: the three texts say what the case was meant to be,
+and the change makes them true in the test alone; a healthy read cannot outlast
+a 20 s timer while it can answer, since its build ends within the builder's own
+limit (`outputBuildLimit`, 15 s: `internal/api/outputs.go` 35, 822); and a
+healthy run that waits on the held read by mistake now fails at bridge
+doctor's bound, in its Player line's words, not at the hang guard. The
+History's sentence and round 3's record stay as written: true of the case
+since bc8f8a6a, and not at 0ddfda75 (#1461's squash) or 9acee209.
+
+The controls key the shared read on the file's name alone (round 2's R2-C2
+shape: `outputsReadKey`, `cmd/bridge/output_checklist.go` 255-262), so the
+edited config's run waits on the held read:
+
+- C2-new, HEAD's case: red in 20.05 s, "over the edited config, the player line
+  = \"The bridge could not read this box's player and cards (it did not answer
+  within 20s: ...)\"", its music line "MPD was not asked about Songs, and the
+  bridge's loopback HTTP route is not serving", and "the edited config's run
+  began 0 reads, want its own one".
+- C2-old, main's case: red in 90.12 s, by the hang guard alone: "the checklist
+  did not return within 1m30s: a root that does not answer held it".
+
+### Item 3: the hooks written without the lock
+
+`MPDInspections.waiting` (`internal/api/outputs.go` 651-653) is read by every
+probe without the table's mu (`inspectShared`, 747-749) and written by one
+test before its builders probe (`outputs_inspections_test.go` 230);
+`RootProbes.onRootWait` is read alike (`rootprobes.go` 331-332) and said to be
+set before any run (`SetOnRootWaitForTest`, 99-102). No test sets either during
+runs, so `-race` is clean, and locking would want a case that sets one during
+runs, which no test needs. Chosen: the precondition written on `waiting`,
+worded as `SetOnRootWaitForTest` words it (d1dfc1d3, `outputs.go` 651-655):
+comments only, no behaviour changed, `rootprobes.go` untouched. A third hook
+of the shape is outside this budget: `outputsReads.timer`
+(`output_checklist.go` 187-190), read without the table's mu in `waitTimer`
+(195-201) and set by `TestADoctorRunTakesOnlyTheReadOfItsOwnConfig` before any
+gather, whose comment does not say when it may be set.
+
+### Item 4: the loopback probe's context
+
+`doctorOutputChecklist`'s route answer asked `probeLoopbackRoute(ctx, …)` on
+the gather's own context (`output_checklist.go` 399-401), once a gather
+(`loopbackAnswer`, 480-495). The body of the read every gather over a config
+waits on carries the route's base URL (`mpdInfo.LoopbackBaseURL =
+o.loopback()`, `internal/api/outputs.go` 1003-1004), which the build asks after
+its path rules (995) have read the indexed tracks (`o.tracks`, 1070), of the
+route answer of the gather whose builder it is: the one that began the read.
+Where that gather's context ends while the read is held before its build asks
+the route, the gather gives its wait up (`readOutputs`, 147, 155-157) and asks
+its route itself (`unreadInput`, 292-293) on the ended context: the request
+fails at once, and the answer kept for the body names no route. A gather that
+joined the read asks a route answer of its own there, which no body carries.
+Every production gather runs on Background
+(`runDoctorReport`, `cmd/bridge/doctor.go` 65; the console's runner replaces
+the checklist with the serving source's, 1135), so no bridge reached it.
+26bdd0a5 asks `probeLoopbackRoute(context.WithoutCancel(ctx), …)` (400), the
+probe's own 2 s limit kept (`loopbackProbeLimit`, 498, 520).
+
+`TestTheLoopbackProbeOutlivesTheGatherThatBeganTheRead`
+(`doctor_roots_test.go` 1161-1262 at d1dfc1d3): a loopback route that serves
+(`startProbedRoute`) named by the player config's `loopbackPort`, which the
+fixture writes 0, a value that skips the probe (`output_checklist_test.go`
+508); MPD's music directory an empty folder, so the root's rule is `unproven`
+and the Music line rests on the route (`internal/outputcheck/outputcheck.go`
+255-286); the first gather on a cancellable context, held at the box's read of
+the indexed tracks (`boxStall`), before the build asks the route, its context
+ended and its answer awaited; a second gather on Background, heard joining the
+read (`joined`) before the root is let go, a read of its own (`began`) failing
+the case at once; then the second gather's player line the body's (`boxRead`),
+its music line a warn on the body's rule ("Music is not in MPD's music
+directory") ending "; it plays through the bridge's loopback HTTP route", and
+one read of the box. It does not ask for the absence of "loopback route is not
+serving": main's words are ", and the bridge's loopback HTTP route is not
+serving" (`outputcheck.go` 283), which such a check would pass.
+
+Red first, and its controls:
+
+- C4-red, main's line put back: red at the music line, "{Name:music
+  Status:fail Summary:Music is not in MPD's music directory, and the bridge's
+  loopback HTTP route is not serving Hint:Start the bridge, so MPD can fetch
+  those tracks over its loopback HTTP route.}", its player line and its read
+  count green.
+- C4-body, the build asks no route (1004 dropped): red at the music line in the
+  same words, so the line rests on the body's base URL, not on the waiting
+  gather's own probe.
+- C4-join, a read per gather (`outputsReads.begin` past its table): red at "the
+  second gather began a read of its own while the first one's was out".
+- C4-timeout, every wait on a read bounded at 1 ns: red at the player line
+  ("... it did not answer within 1ns ...") and at the music line, a warn from
+  the gather's own probe over its own unchecked root ("MPD was not asked about
+  Music; it plays through the bridge's loopback HTTP route"), which the case
+  tells from the body's.
+
+### Item 5: two notes (one hint text; the rest record only)
+
+The stale probe. A gather that gives its wait up at its bound asks the route
+then (`unreadInput`, 292-293) and keeps that answer (`loopbackAnswer`'s once),
+and the read it began asks the same answer when its build reaches the route
+(`outputs.go` 1003-1004), whenever that is: every gather still waiting on that
+read when it finishes takes that answer in the body, however many gathers
+joined it meanwhile, and it clears only for the gathers begun after the read
+has answered, which leaves the table as it answers (`output_checklist.go` 233),
+so that the next gather begins a read of its own (217). The body's base URL
+decides the Music line ahead of the gather's own probe (`outputcheck.go`
+266-286): a stale non-empty one hides the joiner's fresh `not_serving`, or
+error, behind a warn saying the root's tracks play (266-270), and a stale empty
+one fails a route that serves now (282-284). It is in the doctor's report
+alone: nothing is written, and the console's doctor reads the serving
+process's route (`TestServeChecklistReadsTheLiveRootsAndTheRoute`), never a
+probe. 26bdd0a5 leaves it as it was: the probe is no longer cancelled with its
+gather, and is still made at its gather's give-up.
+
+The hint. A load that did not finish within the bound failed config-file with
+a hint that put it down to root validation alone
+(`internal/doctor/configfile.go` 197-200). The bound covers `config.Load` whole
+(`cmd/bridge/doctor.go` 642-643): its read of the file (`readConfigFile`,
+`internal/config/config.go` 3032-3041) and its validation, whose containment
+check resolves each root where either directory is set (`rootContainment`,
+`fsutil.IsUnderAny`, 4226). The lookup's stat (`cmd/bridge/configpath.go` 47)
+and the doctor's first read of the file (`doctor.go` 630) are not bounded, so
+a config on a mount that never answers holds the run before any hint, while
+one on a mount slow on every access can pass both and then miss the bound in
+the load's own read, with no root involved. 279e7868's hint (198-201): "root
+validation, or the load's slow read of the file, holds it: loading it checks
+upscale.variantsDir and upscale.tempDir against each library root, which a root
+whose mount does not answer holds (library-roots names such a root), and reads
+the file, which a mount slow to answer holds; bridge serve, and every command
+that loads this config, waits for it too (...)". It claims no bound on the
+whole run, keeps "upscale.variantsDir and upscale.tempDir" and says no
+"refuses" (`doctor_roots_test.go` 354, `rootprobes_test.go` 689, which still
+require both), and both cases require its new words. The History's account of
+the hint (`ops/History-rules-cli-serve.md`, "The config's load") says it too,
+in the same commit.
+
+- C5, main's hint put back: red in both,
+  `TestALoadThatDidNotFinishFailsTheConfigLine` ("config-file =
+  {...Hint:loading it checks ...}") and
+  `TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories`
+  ("config-file's hint does not say what holds the load: ...").
+
+### The gates
+
+In the slot (a hold of the build lock, where no other worker's build runs; got
+at once at 22:52, 22:56 and 23:24, the host idle), on d1dfc1d3; "loaded" is
+beside 16 busy processes, the host's core count, in the slot:
+
+- The controls above, one batch of 3.5 min; its unedited baseline green.
+- `go vet ./...` with the tags as GOOS linux, darwin and windows: clean (3 s,
+  8 s and 8 s).
+- `-race -count=50`, each case a run of its own from race binaries built at
+  d1dfc1d3, four lanes at GOMAXPROCS 2: the touched cases,
+  `TestACancelledConsoleDoctorRunSaysItWasStopped`,
+  `TestADoctorRunTakesOnlyTheReadOfItsOwnConfig`,
+  `TestTheLoopbackProbeOutlivesTheGatherThatBeganTheRead`,
+  `TestBridgeDoctorBoundsTheLoadOfAConfigThatSetsItsSidecarDirectories` and
+  internal/doctor's `TestALoadThatDidNotFinishFailsTheConfigLine`, 50 of 50
+  each, and three cases on the code they cover,
+  `TestAWaitOnASharedReadEndsAloneWithItsContext`,
+  `TestDoctorRunsInOneProcessShareOneReadOfTheBox` and
+  `TestBridgeDoctorSaysTheLoopbackRouteIsNotServing`, 50 of 50 each; no race
+  reported (54 s). Loaded, cmd/bridge's four touched cases 50 of 50 each, their
+  slowest runs 0.02, 0.08, 0.07 and 0.33 s (17 s).
+- `go test -race -count=1 -p 3 -parallel 8 -timeout 120m ./cmd/bridge/
+  ./internal/api/ ./internal/doctor/`, GOMAXPROCS 8: ok, 1,579.8 s, 150.1 s
+  and 11.0 s.
+- go1.27.3's gofmt lists none of the Go files B650FU touches.
+- The rules patch, on a copy of d1dfc1d3's tree with this record appended and
+  the patch applied there (`git apply` with `GIT_CEILING_DIRECTORIES` set; git's
+  directory the worktree's): the applied `output.md` is the bytes the patch was
+  built from; `make docs-check`'s four steps pass (the budgets ok, `output.md`
+  78,141 bytes from 77,779, the worst load 77.3 %, `config-lifecycle.md` at
+  99.9 % still the closest); `verify_moves.py` passes over d1dfc1d3 with the one
+  line edited, and over 9acee209 with that line and the History's "The config's
+  load" paragraph edited, nothing moved and no citation broken; and
+  `TestEveryCitedTestNameExists` passes over the copy, and fails on a ghost
+  citation planted in the copy's `output.md`.
+## 2026-11-15 — B904: the stalled-storage stop test waits for the stall before it stops serve
+
+Branch `fix/b904-serve-stop-stall-test`, from main at 9acee209. Commits:
+fdc91a18 (the fix: three test files under `cmd/bridge`), then this record.
+Every run: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`,
+darwin/arm64, GOMAXPROCS=6 of 12 cores. The fix was first built and proved
+as an uncommitted prototype on 9acee209, with its controls as an overlay
+that is not part of the fix; fdc91a18 is that prototype's diff, applied
+unchanged.
+
+### The hazard
+
+`TestServeStopWithThePlayersStorageStalled` failed on `test (macos-latest)`
+(run 43647029825, attempt 1, 11-14) with "the abandonment logged [], want
+once" and "a second serve lock with the player stalled: <nil>, want it
+held" (`serve_player_unix_test.go` 60 and 66 at 9acee209). The test relies
+on the supervisor being parked in the `engineConfig` seam, past the
+start's last stop checks (`serve_player.go` 439 and 445), when serve's stop
+cancels the player (377). Nothing ordered the stop after that hold. When
+the cancel lands first, the start returns at 446-447 and logs nothing,
+`supervise` settles at once (876-878), `stop` returns before its bound
+with no warning (381-382), and runServe lets the last share of the lock
+go: CI's pair. Repeated runs failed for other reasons: each pass waited out
+the 12.6 s stop bound, a boot failure left its supervisor parked, and
+iteration n's player could still run while n+1 set the global medium seam
+(`atomicwrite.mediumOf`). That was a test seam, not production.
+
+### The fix
+
+- `launchServe` takes optional hooks that run once the drain is
+  registered and before `waitForListening`, the call that can fail. A
+  cleanup registered there exists whatever the boot does, and runs before
+  the drain.
+- `playerStall` holds the start at the `engineConfig` seam. `await` waits
+  until the stall is entered: it fails at once if the start ends first,
+  and at `serveGiveUp` with serve's stacks. `end`, the one cleanup,
+  cancels serve, cancels the player (`p.cancel()`, not `p.stop()`, which
+  would wait out the bound), lets the stall go and joins `settled` until
+  `serveDrainGiveUp`. All of that happens before the directories and the
+  medium seam go.
+- The test waits for the stall before its health check and its stop, and
+  bounds its stop at 1.9 s (surface, discovery and warm at 100 ms each; the
+  engine never runs and OpenHome is off here) instead of 12.6 s.
+
+A premise of the brief was wrong. Letting the stall go does not reach
+`EnsurePlayerUUID` (`serve_player.go` 449, before the seam at 501). It
+reaches `engine.New`, whose `atomicwrite.ProbeDurable` reads the medium
+seam. So the player is joined before `persistentMedium`'s restore.
+
+### Proofs
+
+Each control fails on the unfixed test and passes with the fix:
+
+- **A boot failure** (the handed listener refused after the start is
+  held): unfixed, 10/10 leave the parked supervisor (1, 2 … 10
+  accumulate). Fixed, 10/10 settled, with 0 supervisors left.
+- **Health failing**, two ways: unfixed, the cleanup waits until
+  `serveGiveUp`. Fixed, 10/10 for each report only the injected failure,
+  in under 1 s.
+- **CI's red, deterministic:** a migration hold released only by the stop
+  or by the test's own wait, with no timer. Unfixed, 10/10 fail with
+  exactly CI's two messages, in two builds. Fixed, 10/10 pass.
+- **Health after the stall:** 20/20 fixed, 0/10 unfixed.
+- **The stall wait's bound:** a start that ends early fails in 0.83-0.86
+  s. A hang gives up at `serveGiveUp`, and the cleanup then joins.
+- **×200,** `-race -count=200 -timeout 30m`:
+  - quiet: 200/200, 0 races, 0 panics, 2.76-2.92 s each;
+  - beside 16 busy loops: 200/200, 0 races, 0 panics, 2.94-3.49 s each,
+    627 s in all; the load average reached 58.
+- **`./cmd/bridge` once,** `-race -timeout 120m`: 1548 of 1548 tests ran,
+  1544 pass, 4 skip (root-only and case-insensitive-volume), 0 fail, 0
+  races.
+- **`go vet`** with the tags (linux amd64 and arm64, darwin, windows):
+  clean.
+- **The files:** `git diff --name-only 9acee209..HEAD` names the three
+  test files and this log.
+
+## 2026-11-15 — B872U: the updater's tick seam takes its hold before it hands an arming over
+
+Branch `diag/b872u-updater-wake`, from main at bf622968. Commits:
+e7fea4b2 (the red: two seam tests and what they need), cb3b2268 (the
+fix), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, 16 CPUs,
+`-race`. The stressor and the runs were pinned to CPUs 0-7. The
+diagnostic edit (a record of the armings and holds, parks, a goroutine
+dump on `waitArmed`'s give-up) was never committed.
+
+### The hazard
+
+`TestAWakeAndAnOldTickReadyTogetherAskNothing` (check_switch_test.go
+535-571 at bf622968) waited out its minute, failing with "the poll loop
+never asked for its next wait", twice:
+
+- on Windows' CI at main 3a6b924e, at :544 (60.00 s; `internal/updater`
+  is the same at bf622968);
+- on a Linux `test -race (rest)` leg of PR #1470 (60.06 s; that log is
+  not on this host).
+
+The tick seam hands the test each arming's wait (`s.asked <- w`, :194),
+then takes the hold the test set (`s.hold.Swap(nil)`, :195), then waits
+on it (:196). The test sets a hold once it has been handed a wait, for
+the next arming. While the loop's goroutine was between :194 and :195,
+one of two things could happen:
+
+- **The arming already handed took that hold (:544).** Arming 1 waited
+  at :196 for the release at :550, which comes after the test's wait at
+  :544.
+- **The next hold replaced one its arming had not taken yet (:551).**
+  `inspect`'s hold (:549) replaced `release`'s, and arming 2 took
+  `inspect`'s. That hold is released at :558, after the wait at :551.
+
+The poll loop is not the cause:
+
+- Production's `after` is `time.After` (updater.go 469): there is no
+  hold and no hand-off.
+- With an old tick and a wake ready together, its select (529-540) takes
+  either, and each leads to the next arming. The old tick is refused at
+  593, and `finishDeferredRestart` waits only on the install marker's
+  bounded lock, only where a committed swap's restart is pending, and
+  never past its context.
+- "Check now" (1171-1182) never touches the loop's wait or wake.
+
+### Proofs
+
+- **Forced:** the diagnostic edit parks the loop between the hand-off
+  and the take.
+  - Parked at arming 1 until the test had set its hold: red at :544
+    after 60.05 s.
+  - Parked at arming 2 until the second hold, with arming 1 left to take
+    its hold first: red at :551 after 60.01 s.
+  - Both dumps show the loop `[chan receive]` at :196 in the seam's
+    `after`, called from `Run` at updater.go:528, and the test in
+    `waitArmed`'s give-up, called from :544 or :551. The record names
+    the arming that took each hold.
+- **Natural, at main:** the same build with no park.
+  - 4,400 runs of ×200 to ×1,000, unloaded and beside 8 busy loops, at
+    GOMAXPROCS 8, 2 and 1: 0 red.
+  - The long loaded batch (8 busy loops, each configuration capped at
+    480 s): 70 red in 108,634 runs, 50 at :544 and 20 at :551.
+
+    | configuration | red | runs |
+    |---|---|---|
+    | one lane, GOMAXPROCS 8 | 7 | 15,168 |
+    | one lane, GOMAXPROCS 2 | 7 | 21,077 |
+    | four lanes, GOMAXPROCS 2 | 28 | 23,037 |
+    | four lanes, GOMAXPROCS 8 | 28 | 29,352 |
+    | one lane, GOMAXPROCS 1 | 0 | 20,000 |
+
+    At GOMAXPROCS 1 the woken test goroutine waits for the P, which the
+    loop's goroutine does not give up between the hand-off and the
+    take, so no run went red.
+  - Every red's dump carries one of the two forced signatures. Between
+    its hand-off and its take, the loop's goroutine was held 24 µs to
+    3.7 ms: a median of 41 µs over the 50 at :544, and of 34 µs over the
+    20 at :551.
+- **Red first, e7fea4b2.** The seam keeps its order and gains three
+  things: a hook just after the hand-off (`tickSeam.handed`,
+  `parkAfterHanding`), arming numbers, and holds that record the arming
+  that took them. The lines below are e7fea4b2's.
+  - `TestAHoldSetOnceAnArmingIsHandedHoldsTheNextArming` parks the loop
+    just after it hands arming 1 over and sets a hold there. It fails at
+    :647: the hold was taken by arming 1, want arming 2.
+  - `TestAHoldSetBeforeAnArmingIsThatArmingsAlone` does the same with a
+    hold set before the loop runs. It fails at :679 (the first hold was
+    taken by no arming) and :682 (the second was taken by arming 1).
+  - Both are red 20 of 20, in 0.00 s each. Every hold is released before
+    the loop goes on, so a red ends at once.
+- **The fix, cb3b2268.** An arming takes its hold, then hands over its
+  wait carrying that hold (`armedWait.held`), then waits on it.
+  - `TestAWakeAndAnOldTickReadyTogetherAskNothing` keeps its property:
+    the old tick and the wake are ready together while the loop is held
+    before its select, and the current wait's tick asks once. It now
+    also asserts that each held arming took the hold set for it.
+  - The two seam tests pass 20/20. Everything
+    `-run 'Update|Tick|Wake|CheckNow|Hold'` selects passes: 47 tests and
+    39 subtests.
+  - The test alone: 1,200 of 1,200 (×200 in six configurations), and
+    the long loaded batch, the same five configurations: 0 red in
+    160,000.
+  - `./internal/updater` once: 262 of 262, 0 races, 36.2 s.
+- **Controls.** Each mutation was made in memory and the bytes put
+  back, with the predictions written before each run. The lines are
+  cb3b2268's.
+  - **C1, the schedule protection removed** (updater.go 593 reduced to
+    `!u.checksEnabled()`):
+    - `TestAWakeAndAnOldTickReadyTogetherAskNothing` was red in 51 of
+      100 runs at :627 (one request when the select took the old tick)
+      and green in 49;
+    - `TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn`
+      and
+      `TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain`
+      were red 100/100.
+  - **C2, the take moved to between the hand-off and the hook:** the
+    held assertion was red 20/20 at :614, at once. The seam tests stayed
+    green, against the prediction: their park sits after that take.
+  - **C3, the red commit's order** (hand-off, hook, take): all three
+    were red 20/20, at once.
+- **Guarded files:** `internal/updater` is not a guarded path
+  (`internal/player/qualification/version_gate.go`).
+
+The rule is a bullet after build-ci-tests.md's tickSeam bullet, in this
+branch's rules patch.
+## 2026-11-13 — B618: on Windows, bridge logs reads the file the installed bridge writes
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` from main 2bebca26. Commits 779bdfc3 (the seams, the
+two Windows logs' paths, the install check and every case, red where the selection changes), 56347aff (the
+selection, for `bridge logs` and the console), and the one that carries this record. The rules line and its long
+form ship as `rules-b618-r1.patch` (`cli-serve.md`, which gains `internal/packaging/logpath*.go` and
+`internal/packaging/scm_*.go` among its paths, and `ops/History-rules-cli-serve.md`).
+
+### What was true (Step 0, at 2bebca26)
+
+Where each Windows install's bridge writes its log:
+
+- The service. `bridge init --service` (`init.go` 1307 to 1318) registers it through `InstallWindowsService`
+  (`internal/packaging/service_windows.go` 26 to 120) as `com.acoseac.1-bit-bridge`, display name `1-bit-bridge`,
+  `bridge.exe serve --config <cfg>` run as LocalSystem, and prepares `%PROGRAMDATA%\1-bit-bridge` (73 to 82). The
+  service's `main` calls `redirectServiceIO` first (`main.go` 2698 to 2699), which opens
+  `%PROGRAMDATA%\1-bit-bridge\bridge.log`, `C:\ProgramData` where `PROGRAMDATA` is empty
+  (`cmd/bridge/service_io_windows.go` 29 to 56), `O_CREATE|O_APPEND|O_WRONLY`, 0644, and points the std handles at
+  it. LocalSystem's `%LOCALAPPDATA%` is under `C:\Windows\System32\config\systemprofile`.
+- The Startup-folder install. `bridge init` without `--service` (`InstallStartup`, `init.go` 1336 to 1337; the
+  menu's `packaging.Install`, which tries the service manager first, `menu.go` 465 to 485) writes
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\com.acoseac.1-bit-bridge.cmd` (`windows_startup.go` 19
+  to 52), whose line runs `start "1-bit-bridge" /min "<bridge.exe>" serve --config "<cfg>" 1>>"<LogPath>" 2>&1`
+  (`startup.cmd.tmpl` 6), LogPath DefaultLogPath (`init.go` 1284 to 1298): `%LOCALAPPDATA%\1-bit-bridge\bridge.log`,
+  the home's `AppData\Local` where `LOCALAPPDATA` is empty (`packaging.go` 517 to 525). Init's start of it
+  (`spawnNowOrWarn`, `init.go` 1356 to 1357 and 1386 to 1399) runs the same line through `cmd /c`
+  (`spawn_windows.go` 30 to 49).
+- A foreground `bridge serve`, the menu's "Start now" (`menu.go` 141 and 407) and init's run in its terminal
+  (`init.go` 1269) included: `logging.Init(os.Stderr)` and serve's output go to the terminal (`main.go` 2725 to
+  2733), and no file is made.
+
+`bridge logs` opened DefaultLogPath alone (`logs.go` 35), so on a service install it said "does not exist (yet)"
+and "run `bridge start` (or `bridge serve` in the foreground)" to an operator whose service was running, or
+printed a file an earlier install left.
+
+Telling the kind without elevation: `packaging.InstalledKind` (`state.go` 77 to 79, `state_windows.go` 23 to 48),
+which `bridge start`, `stop` and `restart` ask (`lifecycle.go` 75 and 82 to 96) and the menu shows, connects with
+`mgr.Connect` (x/sys v0.49.0 `svc/mgr/mgr.go` 43, `SC_MANAGER_ALL_ACCESS`) and opens with `OpenService` (195,
+`SERVICE_ALL_ACCESS`). A standard user's connect answers access denied, which falls through to the Startup-folder
+probe (`state_windows.go` 35), and any failure of the open reads as no service (32 to 34). `bridge status`
+(`status.go` 39 to 68) reads the invoking user's config and asks its admin port: it says nothing of the service. A
+query without elevation is allowed: by Microsoft's "Service Security and Access Rights" a local authenticated user
+holds `SC_MANAGER_CONNECT` (with `ENUMERATE_SERVICE`, `QUERY_LOCK_STATUS` and read control) of the manager, and
+`SERVICE_QUERY_STATUS` (with `QUERY_CONFIG`, `ENUMERATE_DEPENDENTS`, `INTERROGATE`, `USER_DEFINED_CONTROL` and
+read control) of a service `CreateService` registers with the default security, as `InstallWindowsService` does.
+legion0 has no Windows, so that is the documentation's word, which the tests' stand-in models; the query asks the
+local manager and nothing of the network.
+
+The other readers of DefaultLogPath on Windows:
+
+- `adminLogPath` (`logs.go` 226 to 232), into `admin.Deps.LogPath` (`main.go` 6345): the console's log status,
+  export and the support bundle's tail (`internal/admin/handlers_logs.go` 61 to 89, 178 to 206 and 366 to 391).
+  Inside the service it was LocalSystem's DefaultLogPath, while the service writes `%PROGRAMDATA%`'s: the same
+  mismatch, fixed here (the brief's review).
+- `adminLogPath` into `doctor.Deps.LogPath` (`doctor.go` 269), for `log-file-size` (`internal/doctor/logsize.go`
+  44 to 84). The console's doctor builds it in the serving process (`adminDoctorRunnerFor`, `doctor.go` 1021 to
+  1023), so it shares the console's path and is fixed with it. `bridge doctor` run from a shell is no service and
+  grades the user's log, which on a service install is not the log: left, and named in the report.
+- `init.go` 1284 and `menu.go` 465: the launcher's and init's start's redirect target, right for them. But
+  `bridge init --service` prints `Logs:` with it (`init.go` 1361) after installing the service, which never
+  writes it: left, and named in the report.
+
+### The choice, as built
+
+`packaging.CheckWindowsInstall` connects with `SC_MANAGER_CONNECT` alone and opens the service with
+`SERVICE_QUERY_STATUS` alone: a service it opens is registered, running or not; `ERROR_SERVICE_DOES_NOT_EXIST` is
+not registered; any other failure (the connect refused or out of reach, the service's security refusing the open)
+cannot tell, and keeps its error. It finds the Startup-folder launcher by its path. Its calls are a struct of the
+service manager's three calls (`serviceManager`), Windows's own in `scm_windows.go`, so a stand-in carries every
+case on any host. It is not `InstalledKind`, whose callers are other commands', left as they were.
+
+`chooseWindowsLog` decides from the registration and the directories alone: the service's log while the service
+is registered, the user's otherwise, the service's first where the check cannot tell. Choosing the service's needs
+nothing of the user's path: a home that cannot be read leaves only the other unnamed. `openWindowsLog` reads it;
+where the other is there too it says so in one line on stderr; where the check cannot tell it reads the service's
+log where that is there and the user's otherwise, each said in one line with the check's error, so the user's is
+never chosen in silence; where it finds no log it names the path it looked at, or both, and what writes it:
+Services (the service shows there as `1-bit-bridge`) or `sc.exe query com.acoseac.1-bit-bridge` for the service,
+the sign-in launcher, `com.acoseac.1-bit-bridge.cmd` in the Startup folder, for its log, and, with nothing
+installed, that a bridge run in the foreground logs to its terminal; never `bridge serve`, `bridge start` or
+`bridge status` (the brief's review). The paths are `packaging.WindowsLogDirs`'s: `C:\ProgramData`
+where `PROGRAMDATA` is empty, as the service took it, and the home's `AppData\Local` where `LOCALAPPDATA` is, as
+DefaultLogPath took it, the home asked only then. `redirectServiceIO` and `InstallWindowsService` take the
+service's folder and file from it and the service's open from `packaging.OpenServiceLog`, and DefaultLogPath's
+Windows answer is its `UserLog` (home first, as before, so its errors are as they were). Off Windows, `bridge logs`
+reads DefaultLogPath in its words of before, byte for byte.
+
+The console's path, `consoleLogPath`, takes `chooseWindowsLog` with whether its process runs as the service
+(`isWindowsService`) for the check: the service's log inside the service, the user's otherwise, DefaultLogPath off
+Windows, `""` where the path cannot be made, as before. The comments that said the console, the doctor and
+`bridge logs` read one file (`adminLogPath`'s, `admin.Deps.LogPath`'s and the `LogPath:` line's in `doctor.go`)
+say where they part, and `doctor.Deps.LogPath`'s and the log handlers' name the service's own log.
+
+### Red first
+
+At 779bdfc3 (the cases over main's selection, DefaultLogPath alone), `go test -count=1 -v -run '…' ./cmd/bridge/`
+with the release tags and TMPDIR `~/onebit/tmp`, predictions written first (`.tmp/_b618/red.predictions.txt`, not
+committed), every top-level verdict as predicted:
+
+- red: `TestBridgeLogsReadsTheServicesLogWhileTheServiceIsRegistered` (its 3 rows; the first "bridge logs printed
+  "a line of a bridge its sign-in launcher started\n" want "the service's first line\nthe service's last line\n""
+  and the stderr line missing), `TestBridgeLogsSaysWhichLogItReadsWhereTheServiceIsNotRegistered` (2 rows, the
+  line missing), `TestBridgeLogsSaysWhereTheServicesLogWillBe` (2: main's words name the user's path),
+  `TestBridgeLogsSaysWhatWritesTheUserLog` (2: "bridge logs offered a command as the way to make the file"),
+  `TestBridgeLogsReadsTheServicesLogWhereTheCheckCannotTell` (5), `TestBridgeLogsChoosesTheServicesLogWithoutTheHome`
+  (its registered row: "logs: resolve path"), `TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt`,
+  `TestTheConsolesLogIsTheFileItsProcessWrites` ("inside the service the console's log is "…/AppData/Local/1-bit-
+  bridge/bridge.log", want the service's") and `TestTheWindowsLogChoiceInWindowsPaths` (the console's half of its
+  4 registered rows);
+- green, the guards: `TestBridgeLogsReadsTheUserLogOfAStartupFolderInstall`, `TestBridgeLogsOffWindowsIsAsItWas`,
+  `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`, and the existing
+  `TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`.
+
+internal/packaging's new tests are of new code and green there. At 56347aff every test is green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b618/controls.predictions.txt`, not committed), at 56347aff, an uncommitted
+edit of the clean tree restored with `git checkout --` and its bytes compared with HEAD's, the touched tests run
+from test binaries built for it (`.tmp/_b618/controls.py`). The run with no mutation was green (63 verdicts). Each
+was red where predicted and nowhere else, and `git status` was clean after:
+
+| | mutation | red |
+|---|---|---|
+| C1 | the brief's: `openLog`'s Windows call site back to the old selection (`openDefaultLog`, DefaultLogPath alone) | the service, not-registered, no-file, cannot-tell, held-log and registered-without-home rows (22 verdicts); the Startup-folder, off-Windows and entry-point guards and the console green |
+| C2 | `consoleLogPath`'s Windows branch removed (`adminLogPath` as at main) | `TestTheConsolesLogIsTheFileItsProcessWrites`, the 4 registered rows' console half |
+| C3 | the check connects with `SC_MANAGER_ALL_ACCESS` (`InstalledKind`'s) | the standard user and administrator rows, three of the cannot-tell table's, the stopped service, every both-artifacts row |
+| C3b | the service opened with `SERVICE_ALL_ACCESS` | both access rows, the stopped service, the three both-artifacts rows with a service |
+| C4 | every open failure read as not registered (`InstalledKind`'s shape) | the two rows whose failure is not a missing service |
+| C5 | a check that cannot tell read as not registered (the user's log in silence) | every cannot-tell row |
+| C6 | the line naming both logs dropped where the service is registered | the two rows with both logs |
+| C9 | the choice needs the user's path | the registered row without a home, the two no-home path rows, the console's |
+| C9b | `UserLog` asks the home first | the two path rows with `LOCALAPPDATA` set |
+| C10 | no `C:\ProgramData` where `PROGRAMDATA` is empty | the path rows with no `PROGRAMDATA` (both packages) |
+| C11 | the home's fallback without `AppData\Local` | the path rows with no `LOCALAPPDATA` (both packages) |
+
+### The gates
+
+At 56347aff, TMPDIR `~/onebit/tmp` and the release tags on every command. In one use of the build lock (19:16:04
+to 19:16:19): `go vet ./...` clean for linux/amd64, darwin/amd64 and windows/amd64, and of cmd/bridge,
+internal/packaging, internal/admin and internal/doctor for linux/386 (cached results of this session's own vets of
+the same sources). go1.27.3's gofmt lists none of the changed Go files. Outside the lock, one package per
+`go test`, `-p 8 -parallel 8`: `-race -count=50` of internal/packaging's 9 touched tests ok (450 runs, 900 subtest
+passes, none failed or skipped) and of cmd/bridge's 13 (the 12 new and
+`TestTheDiagnosticsStayAvailableWhileTheDataDirsVolumeIsAway`; 650 runs, 1,650 subtest passes); `go test -race
+-count=1 -timeout 120m` of internal/packaging ok (1.4 s) and of cmd/bridge ok (2,456 s, under a load near 26 from
+the host's other workers), which holds `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers`; no race reported anywhere. The rules patch applies to HEAD (`git apply --check`); on a copy
+of the tracked tree with it applied, outside any checkout, the copy's `make docs-check` steps are clean
+(`cli-serve.md` 99,859 bytes), and `TestEveryCitedTestNameExists` passes there and fails with a ghost citation
+planted in the patched History. `make test` and `make build-all` were not run: the brief asked for the packages.
+Windows and macOS are CI's to run.
+
+### What only windows-latest shows
+
+internal/packaging's `TestTheStandInsRightsAreWindowsOwn` (the stand-in's access values against x/sys/windows's),
+`TestTheServiceManagerAnswersTheInstallCheck` (the real manager: `EventLog` registered, a made-up name not) and
+`TestTheWindowsLogsAreTheHostsOwn` (DefaultLogPath equal to `UserLog`, and the service's log under `PROGRAMDATA`
+or `C:\ProgramData`) build only there. `TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt` reads the log
+while a handle holds it with the service's own open, whose subject is Windows's sharing modes (Go opens with
+`FILE_SHARE_READ|FILE_SHARE_WRITE` both ways, go1.27.3 `syscall/syscall_windows.go` 395); on legion0 nothing
+refuses it. `TestTheWindowsLogChoiceInWindowsPaths` and `TestTheWindowsLogsAreMadeFromTheirDirectories` run with
+Windows's own `filepath.Join` there beside the tests' joiner, and `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`
+runs `bridge logs` over the real install check there. A standard user's rights are shown by neither host: CI's
+runner is elevated.
+
+## 2026-11-14 — B618 round 2: bridge doctor from a shell grades the log bridge logs reads
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` from round 1's head 14d95141 (its rules included).
+Commits 9fd10270 (the seams and every case, red first), be77499d (the choice), and the one that carries this record.
+The rules line and its long form ship as `rules-b618-r2.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`).
+
+### What was true (at 14d95141)
+
+`buildDoctorDepsWith` set `LogPath: adminLogPath()` (`cmd/bridge/doctor.go` 267 to 272) for both doctors, and
+`adminLogPath` is `consoleLogPath` on the host (`logs.go` 450 to 484), which asks whether the process runs as the
+Windows service. Bridge doctor run from a shell, and the launcher menu's doctor through `buildDoctorDepsFor`, never
+does, so on a service install their `log-file-size` line graded the user's log under `%LOCALAPPDATA%` while `bridge
+logs` and the console inside the service read the service's under `%PROGRAMDATA%`; round 1 had said so in comments
+(`doctor.go` 267 to 271, `consoleLogPath`'s) and in its History text, and left it. `checkLogSize`
+(`internal/doctor/logsize.go` 43 to 84) reads an empty `LogPath` as ok "no log file configured (logs go to the
+terminal)", and `consoleLogPath` answers `""` where a path cannot be made, so a home that could not be read was that
+ok, in both doctors. The console's doctor builds its report in the serving process (`adminDoctorRunnerFor`, 1021 to
+1023) through the same builder, so a change of the builder alone would have reached it too (the brief's review,
+the review). `printReport` prints a hint under a warn or a fail alone (`doctor.go` 897), and `--json` and
+the console copy the summary and the hint (`jsonReportEnvelope`, `adminDoctorRunnerFor`).
+
+### The choice, as built
+
+`buildDoctorDepsWith` takes `doctorLogs`, its seam on every host: a `logsHost` (the platform, the directories, the
+install check) and whether the console's doctor asks. `buildDoctorDepsFor` (bridge doctor and the menu's) passes the
+shell's, `doctorLogs{host: hostLogs()}`; `adminDoctorRunnerFor` the console's, `console: true`. The shell's line
+grades the log `bridge logs` reads (`shellDoctorLog`): off Windows DefaultLogPath; on Windows the service's log while
+the install check finds the service registered, the user's otherwise (`chooseWindowsLog`), and where the check cannot
+tell, the service's where it is there and the user's where only that is, each with a note, and neither, said, where
+neither is there. A stat that fails otherwise than for a file not there leaves the service's log chosen, for the line
+to say why it cannot be graded, as `bridge logs` says why it cannot open it. The console's doctor grades its own
+process's log (`consoleLog`, `consoleLogPath`'s with its error) and asks no install check, so a console of a bridge
+run another way beside a registered service grades the file it writes (the review's regression case).
+
+How the choice reaches the report (the review): `doctor.Deps` gains `LogNote` and
+`LogUnresolved` beside `LogPath`. `checkLogSize` puts the note after its summary whatever the line found, so the
+table, which prints no hint under an ok, `--json` and the console all carry it; where `LogUnresolved` is set, a log
+that could not be named (a path that cannot be made, or neither Windows log there where the check cannot tell), the
+line is a warn, "not checked: " and why, its note the hint, asked before the empty path that reads as the terminal's
+ok. That holds in the console's doctor and off Windows too: a home that cannot be read is a warn there now, not the
+terminal's ok. The words are `bridge logs`' own: "cannot tell whether the bridge's Windows service is installed
+(<the check's error>), so this is its log, the one `bridge logs` reads", "…, and its log, <path>, is not there, so
+this is the one `bridge logs` reads", and for neither "not checked: neither <the service's log> nor <the user's>
+exists", hinted "…; the service writes the first once it starts, and a bridge its sign-in launcher starts the
+second". Round 1's comments on the divergence go (`doctor.go`'s `LogPath:` line, `consoleLogPath`'s, which is
+`consoleLog`'s now, and `doctor.Deps.LogPath`'s).
+
+### Item 2: two tests
+
+`TestAStoppedServiceIsRegistered` (internal/packaging) could not fail: the install check asks no service's state,
+so the stand-in's "stopped" changed nothing it read. It moved to cmd/bridge under its name, which round 1's History
+cites: the service registered, its log made older than the user's (`os.Chtimes`), `bridge logs` must read the
+service's and bridge doctor grade it, so a choice by modification time, or by whether the service seems to run, goes
+red (controls D5 and D5b). The stand-in keeps registered names alone (`registered map[string]bool`), and
+`TestTheInstallCheckAsksOnlyWhatAStandardUserHolds` says its calls hold no status query.
+`TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint` asked the real service manager on Windows: `hostLogs` takes its
+check from `logsInstallCheck` now (`inContainerFunc`'s precedent), which the test sets to "not registered" and
+counts, asked once on Windows and never elsewhere, as `TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint` does
+for the doctor's entry point (`doctorCmd --json`), its check "registered".
+
+### Red first
+
+At 9fd10270 (the seams; both doctors still graded `consoleLogPath`'s file and `checkLogSize` read neither new field),
+`go test -count=1 -v -run '…'` of internal/doctor and cmd/bridge with the release tags and TMPDIR `~/onebit/tmp`,
+predictions written first (`.tmp/_b618/r2_red.predictions.txt`, not committed), every verdict as predicted:
+
+- red: `TestBridgeDoctorFromAShellGradesTheServicesLogWhileItIsRegistered` (both rows: "the log-file-size line is ok
+  "48 B (…/Users/me/AppData/Local/1-bit-bridge/bridge.log)" … want ok "49 B (…/ProgramData/1-bit-bridge/bridge.log)""),
+  `TestBridgeDoctorFromAShellSaysWhereTheCheckCannotTell` (5 rows), `TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade`
+  (5 rows, each the terminal's ok), `TestTheDoctorsLogNoteSurvivesItsRendering` (3 rows),
+  `TestAStoppedServiceIsRegistered` (its doctor half alone), and internal/doctor's
+  `TestALogNoteIsCarriedWhateverTheLineFinds` (4 rows) and `TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK` (2);
+- green, the guards: `TestBridgeDoctorFromAShellGradesTheUserLogOfAStartupFolderInstall`,
+  `TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` (both rows, the check never asked),
+  `TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint` and `TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint`
+  (off Windows), and every round-1 test.
+
+At be77499d every test is green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b618/r2_controls.predictions.txt`, not committed), at be77499d, an uncommitted
+edit of the clean tree restored with `git checkout --` and its bytes compared with HEAD's, cmd/bridge's and
+internal/doctor's touched tests run from test binaries built for it (`.tmp/_b618/r2_controls.py`). The run with no
+mutation was green (96 verdicts); `git status` was clean after.
+
+| | mutation | red verdicts, parent tests counted |
+|---|---|---|
+| D1 | the brief's: the shell's choice back to the old `adminLogPath()` | 20: both Service rows, the Startup-folder guard (`adminLogPath` reads the real host), the 5 cannot-tell rows, the 4 shell cannot-be-made rows, the 3 rendering rows, the stopped service; the console's rows and the entry point green |
+| D1b | the shell's choice back to `consoleLogPath` over the test's host (round 1's selection through the seam) | 19: as D1 but the Startup-folder guard green |
+| D2 | the console's doctor takes the shell's choice on Windows | 5: the console's two rows and its cannot-be-made row |
+| D3 | the note no longer put after the summary | 12: internal/doctor's 4 note rows, the 4 cannot-tell rows that grade a file, the rendering's noted row |
+| D4 | an unresolved log read as the terminal's ok | 14: internal/doctor's 2 rows, the cannot-tell neither row, the 5 cannot-be-made rows, the rendering's 2 |
+| D5 | bridge doctor's registered case grades the newer log by modification time | 4: the stopped service, both Service rows |
+| D5b | bridge logs' registered case reads the newer log | 6: the stopped service and `TestBridgeLogsReadsTheServicesLogWhileTheServiceIsRegistered`'s two rows with both logs, as predicted, and one more the prediction missed: `TestBridgeLogsSaysWhereTheServicesLogWillBe`'s row with a user's log there, since the newer of a missing service log and a user's log is the user's ("bridge logs exited 0, want 1") |
+| D6 | where the check cannot tell, the service's log only where the user's is not there | 2: the cannot-tell row with both logs |
+
+Not run: the entry points' seam bypassed (`hostLogs` asking `packaging.CheckWindowsInstall`): off Windows neither
+entry point asks a check, so only windows-latest can see it, where both entry-point tests count the check's calls.
+
+### The gates
+
+At be77499d, TMPDIR `~/onebit/tmp` and the release tags on every command. In one use of the build lock (02:28:22
+to 02:28:27): `go vet ./...` clean for linux/amd64, darwin/amd64 and windows/amd64, and of cmd/bridge,
+internal/packaging, internal/admin and internal/doctor for linux/386. go1.27.3's gofmt lists none of the changed Go
+files. Outside the lock, one package per `go test`, `-p 8 -parallel 8`: `-race -count=50` of internal/packaging's 7
+touched tests (350 runs, 900 subtest passes), internal/doctor's 8 (400 runs, 550 subtest passes) and cmd/bridge's 14
+(the 8 new, the bridge logs entry point, `TestTheConsolesLogIsTheFileItsProcessWrites`,
+`TestTheWindowsLogChoiceInWindowsPaths`, `TestBothDoctorsCarryTheBackupLines` and
+`TestABackupsFolderGrantingNoLockGrowsByOneSnapshotAndTheDoctorSaysWhy`, whose calls of the builder changed, and
+`TestPrintedHintsSpeakToTheOperator`; 700 runs, 1,400 subtest passes), none failed or skipped; `go test -race
+-count=1 -timeout 120m` of internal/packaging ok (1.4 s), internal/doctor ok (7.1 s) and cmd/bridge ok (1,653 s),
+which holds `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers`; no
+race reported anywhere. The rules patch applies to HEAD (`git apply --check`); on a copy of the tracked tree with it
+applied, outside any checkout, the copy's `make docs-check` steps are clean (`cli-serve.md` 99,976 bytes), and
+`TestEveryCitedTestNameExists` passes there and fails with a ghost citation planted in the patched History. `make
+test` and `make build-all` were not run: the brief asked for the packages. Windows and macOS are CI's to run.
+
+### What only windows-latest shows
+
+Round 1's Windows-only cases still stand. Of round 2's, `TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint`
+grades the service's log under the `PROGRAMDATA` given and asks `logsInstallCheck` once only there, and
+`TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint` asks it once only there; every other round-2 case models
+Windows through `logsHost` and runs on every host. A standard user's rights stay Microsoft's documentation, which
+neither host shows.
+
+## 2026-11-14 — B618 round 3: the log line's warn is the Windows shell's alone
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` from round 2's head b8d777c5 (its rules included).
+Commits 18289911 (the seam and every case, red first), 0be3563a (the fix), and the one that carries this record.
+The rules line and its long form ship as `rules-b618-r3.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`).
+
+### What was true (at b8d777c5)
+
+Round 2 made a log whose path cannot be made a warn wherever a doctor grades one: `doctorLogs.choose`'s console
+branch (`cmd/bridge/logs.go` 514 to 523) and `shellDoctorLog`'s branch off Windows (533 to 540) answered
+`doctorLog{unresolved: …}`, which `checkLogSize` reads as a warn. So `env -u HOME bridge doctor` on Linux and macOS,
+and the console's doctor of a Windows bridge run outside the service whose home cannot be read, said "[warn]
+log-file-size not checked: the log's path cannot be made (…)", where round 1 said "[ok] no log file configured (logs
+go to the terminal)", as `adminLogPath`'s empty path still makes the console's export say. The brief had put the
+warn in bridge doctor from a shell on Windows alone. `adminDoctorRunnerFor` (`doctor.go` 1028 to 1030) built
+`hostLogs()` itself, so no test could run the console's doctor over a host of its own:
+`TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` set the console flag itself through
+`buildDoctorDepsWith` and stayed green with the flag dropped from the runner. `requireLogLine`
+(`doctor_logs_test.go` 35 to 44) refused the terminal's ok whatever the case wanted, so no case could ask for it.
+`logsInstallCheck`'s doc said production never changes it, which nothing held.
+
+### As built
+
+Item 1. The console's branch grades `consoleLogPath`'s file, "" where its path cannot be made (the terminal's ok);
+round 2's `consoleLog`, whose error nobody reads now, folds back into it, round 1's body. `shellDoctorLog` off
+Windows answers no file where DefaultLogPath fails. The Windows branches keep `LogUnresolved`: a user's log with no
+path where the service is not registered, and the two cases where the check cannot tell. The docs of `doctorLog`,
+`doctorLogs`, `shellDoctorLog`, `adminLogPath` and `doctor.Deps`' `LogPath` and `LogUnresolved` say so.
+`TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade` (`doctor_logs_test.go` 184): its console row and its two
+off-Windows rows (the shell's line and the console's) want the ok, its two Windows rows the warn.
+`TestTheDoctorsLogNoteSurvivesItsRendering` (247) keeps its three Windows rows and adds "a path that cannot be made
+off Windows on darwin" and "on linux" (bridge doctor's table, "[ok] log-file-size … no log file configured (logs go
+to the terminal)" with no hint under it, and its --json) and "a path that cannot be made in the console's doctor"
+(the report `adminDoctorRunnerFor` hands the console, on Windows outside the service and on Linux). `requireLogLine`
+(57) refuses the terminal's ok only where the summary it wants is another.
+
+Item 2. `adminDoctorRunnerFor` (`doctor.go` 1031) takes `logs logsHost` from its caller and sets `console: true`
+itself; `adminDoctorRunner` (1020) and serve's wiring (`main.go` 6381) pass `hostLogs()`, serve once as it wires the
+console, as it hands it `doctorDAC`: `hostLogs` reads PROGRAMDATA and LOCALAPPDATA as it builds the host, and a
+serving process's environment does not change. `consolesLogLine` (`doctor_logs_test.go` 32) runs
+`adminDoctorRunnerFor` over the serving process's DAC host and the test's logs host and takes its report's line, and
+`TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService` (218) runs through it: beside a registered service,
+the user's log outside the service and the service's inside, the install check asked no time. A guard, green at
+18289911; its red is control E1.
+
+Item 3. `logsInstallCheck` stays. `TestNoProductionCodeReassignsTheLogsInstallCheck` (`logs_test.go` 427) parses every
+non-test Go file of cmd/bridge the go tool builds, whatever its platform: one declaration, of
+`packaging.CheckWindowsInstall`, and no assignment or address taken anywhere else; the variable's doc cites it.
+
+The brief's binding review dropped its fifth item, and nothing was built for it.
+
+### Red first
+
+At 18289911 (the seam and every case; the console's branch and the branch off Windows still answered
+`LogUnresolved`, as at b8d777c5), `go test -count=1 -v -run '…'` of cmd/bridge with the release tags and TMPDIR
+`~/onebit/tmp`, predictions written first (`.tmp/_b618/r3_red.predictions.txt`, not committed), 70 verdicts, every
+one as predicted:
+
+- red: `TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade`'s console row ("the log-file-size line is warn "not checked:
+  the log's path cannot be made (%USERPROFILE% is not defined)" (hint ""), want ok "no log file configured (logs go
+  to the terminal)" (hint "")") and both off-Windows rows (each twice, the shell's line and the console's: "warn "not
+  checked: the log's path cannot be made ($HOME is not defined)""), and `TestTheDoctorsLogNoteSurvivesItsRendering`'s
+  four new rows (the table's "[warn] log-file-size       not checked: …", --json's warn, the console's report's
+  warn);
+- green: the other rows of both tests, the console's guard (both rows, the check never asked), the pin, and every
+  other touched test.
+
+At 0be3563a all 70 are green.
+
+### Negative controls
+
+Each predicted before any ran (`.tmp/_b618/r3_controls.predictions.txt`, not committed), at 0be3563a, an uncommitted
+edit of the clean tree restored with `git checkout --` and its bytes compared with HEAD's, cmd/bridge's test binary
+built for it and the 70 touched verdicts run (`.tmp/_b618/r3_controls.py`). Every control was red where predicted
+and nowhere else; `git status` was clean after.
+
+| | mutation | red verdicts, parent tests counted |
+|---|---|---|
+| E0 | none | 0 |
+| E1 | the brief's: `console: true` dropped from `adminDoctorRunnerFor` | 8: the console's guard's two rows (outside the service "49 B (…/ProgramData/…)" for the user's "48 B", and the install check asked once in each), the console row of the cannot-be-made test ("no log file yet", the service's log) and the rendering's console row on Windows; the off-Windows console rows green, the shell's choice there being the terminal's ok too |
+| E2 | the console's doctor warns again where its path cannot be made | 8: the console row and both off-Windows rows (their console halves), the rendering's two console rows |
+| E3 | bridge doctor off Windows warns again | 6: both off-Windows rows (their shell halves), the rendering's two off-Windows rows |
+| E4 | the Windows shell names no file for a user's log with no path | 4: the "service not registered" row and the rendering's Windows row |
+| E6 | an `init` in logs.go assigns `logsInstallCheck` | 1: the pin ("logs.go:585:15 assigns it") |
+| E6b | a package variable takes its address | 1: the pin ("takes its address") |
+| E6c | its declaration wraps `packaging.CheckWindowsInstall` | 1: the pin ("declares logsInstallCheck as something other than packaging.CheckWindowsInstall") |
+
+### The gates
+
+At 0be3563a, TMPDIR `~/onebit/tmp` and the release tags on every command. In one use of the build lock (06:25:45 to
+06:26:12, the slot taken after 505 s): `go vet ./...` clean for linux/amd64, darwin/amd64 and windows/amd64, and of
+cmd/bridge and internal/doctor for linux/386; `GOOS=windows go test -c ./cmd/bridge/` built, with the release tags
+and without. go1.27.3's gofmt lists none of the changed Go files. Outside the lock, one package per `go test`, `-p 8
+-parallel 8`: `-race -count=50` of cmd/bridge's 13 touched tests (650 runs, 1,450 subtest passes, 43 s), none failed
+or skipped; `go test -race -count=1` of internal/doctor ok (9 s) and of cmd/bridge with `-timeout 120m` ok
+(1,714 s), which holds `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers`; no race reported. The rules patch applies to HEAD (`git apply --check`); on a copy of the
+tracked tree with it applied, outside any checkout, the copy's `make docs-check` steps are clean (`cli-serve.md`
+99,996 bytes), and `TestEveryCitedTestNameExists` passes there and fails with a ghost citation planted in the
+patched History. `make test` and `make build-all` were not run: the brief asked for the packages. Windows and macOS
+are CI's to run.
+
+### What only windows-latest shows
+
+Nothing new. Round 3's cases model Windows through `logsHost` and run on every host, and the pin reads every
+platform's files on every host.
+
+### Left open
+
+The warn off Windows and in the console's doctor is not built: the brief makes it a separate backlog item if it is
+wanted, and this round filed none.
+
+## 2026-11-15 — B618: main merged in at bfa11227, the log's choice through B650's runs of the doctor
+
+Worker b618, legion0, branch `fix/b618-windows-logs-path` (PR #1470) from round 3's head ee9e7470, whose last merge
+was of main fe5e331d. Main moved since by B899, B886, B650, B903, B650FIX, B904, B895, B901 and B650FU. Commits
+532272ef (the merge, parents ee9e7470 and bfa11227) and the one that carries this record (main's B650 tests' calls).
+The rules ship as `rules-b618-merge.patch` (`cli-serve.md`, `ops/History-rules-cli-serve.md`). Neither side's
+behaviour changes, and nothing new is built.
+
+### How the merge was made
+
+`git merge` needs an approval a headless session on legion0 cannot get, so the merge was assembled by hand: the base
+from `git merge-base` (fe5e331d); `git merge-tree --write-tree bfa11227 ee9e7470` (tree 872aa111, three files in
+conflict); the 46 paths main changed with no conflict checked out of that tree, which holds main's blob where main
+alone changed a path and git's own clean three-way merge where both did (`cmd/bridge/backup_round2_test.go`,
+`cmd/bridge/backup_verify_test.go`, `internal/doctor/doctor.go`, `ops/History-rules-cli-serve.md`); `cli-serve.md`
+main's blob; `doctor.go` and this log resolved from `git merge-file -p --diff3` by a script that checks each block's
+three parts before it replaces the block (`.tmp/_b618/m/resolve.py`, not committed); `MERGE_HEAD` written, then
+`git commit`. Before the commit the index was proven (`.tmp/_b618/m/mkmerge.py check`): HEAD was ee9e7470; every path
+the index changed against HEAD was one main changed; each path main alone changed held main's blob, each path both
+changed git's clean merge or its resolution, and each path the branch alone changed HEAD's.
+
+### The conflicts, and what each side meant
+
+| File | Main | This branch | Resolution |
+|---|---|---|---|
+| `cmd/bridge/doctor.go` (3 blocks) | B650: `buildDoctorDepsWith(cfgPath, absentIsPreSetup, dacHost)` a run of `cliRootProbes` through `buildDoctorDepsRun(ctx, …, dacHost, run *doctor.ProbeRun)`, which holds the body; `adminDoctorRunnerFor(…, dacHost)` a call of `adminDoctorRunnerWith(…, dacHost, probes *doctor.RootProbes)`, whose runs call `buildDoctorDepsRun(ctx, …, probes.BeginRun())` | B618: `buildDoctorDepsWith` takes `logs doctorLogs` and chooses the log file first (`lf := logs.choose()`); `adminDoctorRunnerFor` takes `logs logsHost` and builds `doctorLogs{host: logs, console: true}` | `logs` through both pairs: `buildDoctorDepsWith(…, dacHost, logs)` calls `buildDoctorDepsRun(ctx, …, dacHost, logs, run)`, whose first statement is the branch's `lf := logs.choose()`; `adminDoctorRunnerFor(…, dacHost, logs)` calls `adminDoctorRunnerWith(…, dacHost, logs, probes)`, whose runs pass `doctorLogs{host: logs, console: true}` to `buildDoctorDepsRun`. Each side's docs stay: the branch's of `buildDoctorDepsWith`, closed by main's sentence, and of `adminDoctorRunnerFor`; main's of `cliRootProbes`, `buildDoctorDepsRun` and `adminDoctorRunnerWith` |
+| `.claude/rules/cli-serve.md` (1) | B650's and B650FIX's bullets after the `player-dac` bullet | B618's bullet there, and two `paths:` globs | main's file in the merge commit; the three bullets, main's two and then the branch's, unchanged, and the globs, in the rules patch |
+| `ops/engineering-log.md` (1) | its entries from B650 round 2 to B904, appended | B618's three, appended | main's, whole, then the branch's |
+
+`lf := logs.choose()` stays ahead of the `doctor.Deps` literal, which now carries main's run, as it was ahead of the
+literal in the branch's `buildDoctorDepsWith`: it stats the log files and touches no library root, so it is no work
+of the run's. `adminDoctorRunner` keeps passing `hostLogs()`. The docs that say `adminDoctorRunnerFor` sets the
+console's flag (its own, and `doctorLogs`' in `logs.go`) hold as written: the runner it returns, `adminDoctorRunnerWith`'s,
+sets it. The four files both sides changed without a conflict were read for meaning: in `internal/doctor/doctor.go`
+B650's `RootProbes`, `Run`'s start of every root's probe and `checkLibraryRoots` sit beside B618's `LogPath`,
+`LogNote` and `LogUnresolved`, no hunk near another; in each backup test main's changes sit beside the branch's one
+line, its call of `buildDoctorDepsWith` with the shell's `doctorLogs`; the History file is taken up below.
+
+### The call sites
+
+Changed in the commit that carries this record, in `cmd/bridge/doctor_roots_test.go`, main's B650 tests of the
+console's runner: each is now `adminDoctorRunnerWith(path, nil, nil, servingDACHost(hostTrees, nil), hostLogs(),
+<its probes>)`, the probes it stands in for roots with kept:
+
+- 428, `TestTheConsolesDoctorAsksARootThatDoesNotAnswerOnce`: `stallProbes(t, s, doctorRootsBound)`;
+- 457, `TestOverlappingConsoleDoctorRunsShareOneProbeAndOneLoad`: `stallProbes(t, s, doctorRootsBound)`;
+- 508, `TestACancelledConsoleDoctorRunSaysItWasStopped`: `probes`;
+- 557, `TestTheConsolesDoctorReadsARecoveredRootAsHealthy`: `p`;
+- 654, `TestTheConsolesDoctorHoldsItsProbesToALimitAcrossConfigChurn`: `probes`.
+
+`hostLogs()` is the logs host production's `adminDoctorRunner` passes, and with the console's flag the line grades
+`consoleLogPath(hostLogs())`, which is `adminLogPath()`, the path main's `buildDoctorDepsRun` set: each case's Deps
+are what they were on main. None of the five reads the log line.
+
+Changed in the merge commit, its conflicts: `doctor.go` 288 (`buildDoctorDepsWith`'s call of `buildDoctorDepsRun`),
+296 (`buildDoctorDepsRun`'s parameters), 1129 (`adminDoctorRunnerFor`'s call of `adminDoctorRunnerWith`), 1140
+(`adminDoctorRunnerWith`'s parameters) and 1142 (its runs' call of `buildDoctorDepsRun`).
+
+Unchanged, compiling as they stand: production's `doctor.go` 267 (`buildDoctorDepsFor`, `doctorLogs{host:
+hostLogs()}`) and 1118 (`adminDoctorRunner`, `hostLogs()`), and serve's `main.go` 6381 (`adminDoctorRunnerFor(…,
+doctorDAC, hostLogs())`), whose parameters are the branch's; B618's tests, each with the logs host it stands in
+with: `doctor_logs_test.go` 25 and 257 (`buildDoctorDepsWith("", false, doctorDACHost(), logs)` and `doctorLogs{host:
+host}`) and 35 (`adminDoctorRunnerFor("", nil, nil, servingDACHost(hostTrees, nil), host)`); `doctor_player_dac_test.go`
+586 and 615 (`adminDoctorRunnerFor(…, hostLogs())`); `backup_round2_test.go` 408 and `backup_verify_test.go` 467
+(`buildDoctorDepsWith(cfgPath, false, doctorDACHost(), doctorLogs{host: hostLogs()})`, the branch's lines, merged
+cleanly); and `doctor_roots_test.go` 827 (`buildDoctorDepsFor(path, true)`, whose parameters neither side changed).
+No test calls `buildDoctorDepsRun`.
+
+### The rules
+
+`rules-b618-merge.patch` (13,391 bytes) applies to the merge commit (`git apply --check`). In `cli-serve.md` it puts
+back B618's two globs (`internal/packaging/logpath*.go`, `internal/packaging/scm_*.go`) and B618's bullet after
+main's B650FIX bullet, both byte for byte the branch's, and makes one move. Main's file is 98,921 bytes, and with the
+globs and the bullet 100,152, over the 100,000 a rules file may hold. `scripts/doc-split/move_entry.py --largest`,
+on a copy of the tree at the merge commit, lists seven entries that can move:
+
+- L75 (4,795 B): refused, its Don't (729 characters) over a pointer's 600 bytes.
+- L61, L62, L60 and L59 (1,828, 1,703, 1,143 and 1,044 B): their pointers with their titles are 1,525, 1,013, 955
+  and 869 bytes, so each moves only with a `--text` line that drops its title, and each title is its rule.
+- L121 (1,602 B, serve's OpenHome surface): its default pointer is its title alone, and the sentences that state
+  its rules in other words (the opt-in on and the player off is `openhomeOff`, one Warn and nothing started; a
+  surface that cannot start leaves the player running without it; `stopOpenHome` comes first, after only the
+  cancel of the library index's build; `hostLAN` is the one name for the host's interfaces) make it 730 bytes,
+  refused, and those still leave out its start's UDN and its stop's bounds.
+- L112 (985 B, the loopback track route and the console's checklist): its default pointer leaves out three rules
+  not worded "Don't" or "Never": the gate is asked once at boot and `OnActive` covers an MPD that appears later;
+  every request asks the gate's answer as it stands and none dials MPD; `adminDoctorRunner` takes
+  `checklistDoctorChecks` over the serving source, never bridge doctor's one-shot builder.
+
+L112 moved (`move_entry.py --line 112 --text …`), its pointer built from exact pieces of the entry (578 bytes): its
+title and the parenthesis after it, those three rules and "Rules in `output.md`." The long form alone keeps its
+mechanism and its tests: the route's `Enabled` is `apiSrv.LocalOutputsActiveNow`, what the checklist's source
+reads, the boot test's seams and the two tests that pin it. `cli-serve.md` is then 99,745 bytes. The entry lands
+verbatim at the end of its section of `ops/History-rules-cli-serve.md`, after main's hotplug entry, that section's
+last (476,856 bytes).
+
+### Proofs
+
+- `git show --remerge-diff --diff-algorithm=histogram --stat 532272ef`: `.claude/rules/cli-serve.md` 6 lines (out:
+  the globs, the branch's bullet and the markers), `cmd/bridge/doctor.go` 45 (conflicts 1 and 2),
+  `ops/engineering-log.md` 810 (the branch's 404 lines moved after main's 2,402, and the markers). Git's default
+  diff algorithm shows the same log as 4,942 lines, main's block taken out and put back.
+- `.tmp/_b618/m/union_check.py`, for this log and for `ops/History-rules-cli-serve.md`, against fe5e331d and both
+  parents: each side's additions are pure insertions; every block either side added is in the merged file whole and
+  in order (the log: main's 159-line B650 entry at line 95,031 and its 2,402 lines from 96,533, the branch's 404
+  from 98,935; the History file: main's 2 lines at 2,285 and its 326 at 5,368, the branch's 175 at 5,808); the
+  merged file is byte for byte the base with every block put in at its base position, main's first; and with the
+  other side's blocks taken out it is, line for line, each parent. By count: the log 96,373 lines + 2,561 + 404 =
+  99,338, the History file 5,479 + 328 + 175 = 5,982.
+- Compile, on this commit's code (the tree before this record was appended), in the build lock: `go build ./...`
+  and `go vet ./...` with `-tags ts_omit_webclient,ts_omit_debugeventbus` for linux, darwin and windows (amd64),
+  and `go vet ./...` for linux/386 and linux/arm, all clean. At the merge commit `go build ./...` is clean for the
+  three and `go vet ./cmd/bridge/` stops at `doctor_roots_test.go:428`, the first call this commit changes.
+- go1.27.3's gofmt lists none of the Go files the merge or this commit touches.
+
+The test runs on this commit come after it, so they are not in this record: a record cannot carry the results of
+runs made on the commit that holds it.
+## 2026-11-14 — B882L: the DSD migration's lines name a DAC by its USB IDs and a cleaned product string, and the redacted export keeps a dac attribute's IDs alone
+
+Worker b882l, legion0, branch `fix/b882l-dac-labels` from main 0ddfda75.
+Commits: ac06c649 (`usbid.Serial.HeldIn`), 0d85231a (`dacLabel` takes the
+unit `boundOf` read), fc5da5c2 (`redactLogLine`'s `dac` rule), 13e53e42 (the
+bundle's header and the Diagnostics page's text for the redacted export),
+4cd09537 (the `HeldIn` pin's table names its field `serial`), then this
+record. Every run: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`,
+TMPDIR `~/onebit/tmp`, 8 of the host's 16 cores. Each red first ran main's
+code through `go test -overlay` (main's file, under the new signature where
+one changed), the tree as committed; each control is an uncommitted edit to
+the committed tree, its bytes put back from memory, `git status` empty after
+every batch (`.tmp/_b882l/control_run.py`, which also names the cases that
+must stay green).
+
+### At main
+
+`dacLabel` (`cmd/bridge/serve_player_dsd.go` 463-471 at 0ddfda75) named a
+DAC by its key: the USB IDs, then the key's product string, which is the
+unit's sysfs `product` (`dsdstate.KeyOf`, `record.go` 51-57), at the four
+lines that name the bound DAC (309, 320, 330, 435). A unit can put its serial
+or its port in its product string; `playerDACText`
+(`serve_player_output_dac.go` 142-151) takes both out of the console's DACs
+and GET /v1/outputs' dac element. `redactLogLine` (`internal/admin/logexport.go`
+260-279) replaces absolute paths and IPs.
+
+### `usbid.Serial.HeldIn` (ac06c649)
+
+`HeldIn(text)` compares the serial's letters and digits, in order, each
+folded to the least rune of its `unicode.SimpleFold` orbit (K, k and the
+Kelvin sign alike; S, s and the long s), with the text's letters and digits,
+whatever stands between them in either. An absent serial is held in nothing;
+one with no letter or digit in every text, the empty one included, which its
+doc says fails closed. It is in `serial.go`, never `port.go`, which
+`version_gate.go`'s `GuardedPaths` lists. The tests
+(`serial_held_test.go`): the serial as it is, in another case, its K and S as
+the Kelvin sign and the long s, with spaces, dots, slashes, underscores,
+dashes, a tab and a no-break space between, and inside a longer word, held;
+another serial, a part of it, its groups in another order, one letter
+changed, `[redacted]` and every text for an absent serial, not held; five
+serials with no letter or digit (dashes, symbols, an en and an em dash,
+bytes that are not UTF-8, a control byte between dots), held in every text;
+and a pin of Redact, Label, String, MarshalJSON and LogValue on seven
+serials, with main's answers written out.
+
+Red first, main's `serial.go` and a names-only shim: with `HeldIn` false, the
+held cases (13 texts) and the no-letter cases (20) failed, the rest passed;
+with it true, the not-held cases failed (11 texts, and 5 for an absent
+serial). The pin passed against main's methods. Controls, 9 of 9 red as
+predicted: no fold (the texts in another case); `unicode.ToUpper` in place of the
+orbit (the Kelvin sign's two texts) and `unicode.ToLower` (the long s's);
+marks kept (the spaced and marked texts, and the no-letter case); an absent
+serial held; no fail-closed answer; and, for the pin, Redact replacing the
+lower-case copy too, MarshalJSON of an absent serial `"[none]"`, LogValue the
+Label. After 4cd09537 the pin's three controls were red again.
+
+### `dacLabel` (0d85231a)
+
+`boundOf` returns the unit its card's identity read as (`*card.USB`) beside
+the bound DAC, and `ask`, `migrate` and `say` hand it to `dacLabel`; the
+start's step, serve's (`serve_player.go`) and `bridge output play`'s
+(`output_play.go`), names no DAC and passes none. `dacLabel(k, unit)` is the
+IDs, then the key's product string through `playerDACText(p, *unit)`; the
+IDs alone where `unit.Serial.HeldIn` still finds the serial in what is left,
+or with no unit. `say` hands a warning's DAC the unit only where its key is
+the bound DAC's; `Migrate` writes a warning for the bound DAC alone, so that
+case is pinned on `say` (`TestAWarningOfAnotherModelIsNamedByItsUSBIDs`).
+Two cases drop the product string by design, as `dacLabel`'s comment says: a
+serial whose letters and digits stand inside `[redacted]` once folded (ACT),
+which the cleaned text then holds, and a serial with no letter or digit.
+
+`TestTheMigrationsLinesNameTheBoundDACByItsCleanedProductString` runs eleven
+cases, each three ways: the Pi 5's GO bar laid out by `sysfstest` with the
+case's serial and product string, the player's DSD state opened in a data
+directory of its own, the start's step made, the binding resolved on one
+reading of the box (`binding.Settled`) and the part asked through `ask`,
+whose `boundOf` reads the tree; the part saved (the warning's line and the
+Info line, 320 and 330 at main), its write landed and its barrier failed
+(`atomicwrite.SetSyncDirForTest`: the landed line and the warning's, 309 and
+320) and its write refused before it landed (`atomicwrite.SetMediumForTest`:
+`ask`'s own line, 435). The journal is slog's text handler and its JSON
+handler at Info, as `logging.Init` installs them, through
+`slog.NewMultiHandler` beside a `loggingtest` recorder at every level
+(`loggingtest.SetDefault`); each line naming the DAC is read back from both,
+its message and its `dac` value, and no string a handler could write holds
+the case's serial or port in the spelling the case put in the product
+string. The cases: the serial in another case, with spaces between its
+groups and with other marks between its letters and digits (the IDs alone);
+the port as sysfs gives it (`platform-xhci-hcd.0/usb2-1:1.0`) and as a
+binding names it, the serial once as the unit has it, the serial and the
+port together, a product string without the serial, and a unit with no
+serial (the product string cleaned); and the two by design (the IDs alone).
+
+Red first, `dacLabel`'s body as main's under the new signature, with main's
+`serial.go`: 30 of the 33 subtests failed, each line naming the DAC by the
+product string as the unit wrote it, the three of "a product string without
+the serial stays" passed (main's label is the same), and the other model's
+test failed. Controls, 11 of 11 red exactly where predicted, every case
+predicted green passing: main's `dacLabel` back (30 subtests and the other
+model's test); `HeldIn` always false (the three other spellings and the two
+by-design cases, 15); `HeldIn` as `s.Present()` (the five kept cases with a
+serial, 15, and the other model's test); `ask` passing nil (the six kept
+cases, 18); each line handed nil alone, the landed line (6), the warning's
+(12, and the other model's test), the Info line (6) and `ask`'s (6);
+`migrate` handing `say` nil (12); `boundOf` returning a zero unit (30); and
+a warning of any model given the unit (the other model's test alone).
+
+### The redaction (fc5da5c2, 13e53e42)
+
+`redactLogLine`'s first rule, `dacTextRe` then `dacJSONRe`, takes a quoted
+`dac` value as slog's text handler writes it (the key at the line's start or
+after white space) and as its JSON handler does (after the line's start,
+white space, `{` or `,`), with any spacing around the key and the `=` or the
+`:`, when the value begins with `vvvv:pppp` and then a space or its end, and
+keeps `dac="vvvv:pppp"`; it reads the value to its own closing quote,
+`(?:[^"\\]|\\.)*`, since both handlers escape a quote and a backslash and a
+product string may hold either (`dacprofile`'s `checkProduct`), and it runs
+before `quotedPathRe`, which reads a quoted path to the next quote whatever
+escapes it. An unquoted `dac=vvvv:pppp`, a value that does not begin with
+the IDs, and a `dac` inside another value's escaped text are left as they
+are. The bundle's header, redacted, and the Diagnostics page's hint say the
+redacted export drops a DAC's product string from the player's lines that
+name a DAC, keeping its USB IDs.
+
+The fixture's lines are written by the two handlers themselves, with
+product strings holding a quote, a trailing backslash, an escaped quote,
+`Model "/srv/Music" TAIL` and a serial, plus each handler's line with the
+IDs alone; the expected redaction of each is the handler's own line with the
+IDs alone (the text handler's value quoted). Red first, at main's
+`logexport.go`: the redacted export and the bundle failed on all ten
+product-string lines and matched the two with the IDs alone; the hand-written
+cases (spacing, escapes, a path beside, values left alone) failed where a
+product string was to go; the unredacted pin and the fixture's premise
+passed. Red first for the text, the header and the hint as fc5da5c2 had
+them, through the overlay: the text's test failed with both, and with each
+alone on its own assertion (the hint through the embed). Controls, 6 of 6 red as
+predicted: the rule removed (its three tests); the rule after `quotedPathRe`
+(the quoted path's lines alone, text and JSON, in both downloads, and the
+two hand-written quoted-path cases); the value read to the next quote (the
+three product strings holding a quote, each in both handlers' lines); a
+backslash not taken as its own escape (`(?:\\"|[^"])*`: the JSON line of the
+trailing backslash, whose match ran on to the next attribute's quote, and the
+hand-written `a\\` case; the text line, with no quote after it, still
+matched); the header's lines out; the hint's sentence out. The unredacted
+export, its default and `redact=false`, and the bundle with `redact=false`
+give every line as written.
+
+### Runs
+
+In the build slot at 13e53e42 (`.tmp/_b882l/slot_session.py`): `go vet ./...`
+with the tags as linux/amd64, linux/arm64, darwin/arm64 and windows/amd64
+(`CGO_ENABLED=0` for the three cross targets), clean (4.6, 9.3, 7.6 and 7.6
+s); then `go test -race -count=1 -timeout 120m -p 3 ./cmd/bridge/
+./internal/admin/ ./internal/usbid/`: ok, 1612.0 s, 1081.7 s and 1.0 s, the
+tree clean after. At 4cd09537, `go test -race ./internal/usbid/`: ok.
+
+At 4cd09537, the touched tests 50 times each under `-race`, one test binary
+a package, four lanes at once at GOMAXPROCS 2 (`.tmp/_b882l/lanes.py`):
+cmd/bridge's two new tests (63 s), `TestARefusedRecordLeavesAWarning` (295
+s), the four other serve tests that read a DAC's label off the migration's
+lines (`TestAPendingDACPartIsAskedAgainOnceItsDescriptorsRead`,
+`TestADACPartsRefusedWriteIsAskedAgainInThisRun`,
+`TestADACPartsLandedWriteIsNotMadeAgainInThisRun` and
+`TestAProbeTheMigrationForcesOnTheTickRuns`; 272 s), internal/admin's six
+new tests and the nine log export tests beside them (520 s), and
+internal/usbid's fourteen (1 s): every test 50 of 50, no data race.
+
+go1.27.3's gofmt lists none of the changed Go files. `git diff --name-only
+0ddfda75..HEAD` names eleven paths (`cmd/bridge/output_play.go`,
+`serve_player.go`, `serve_player_dsd.go` and its new test,
+`internal/admin/handlers_logs.go`, `logexport.go` and its two new tests,
+`templates/diagnostics.html`, `internal/usbid/serial.go` and its new test),
+none under `version_gate.go`'s `guardedPrefixes` or in its `GuardedPaths`, so
+`qualificationVersion` stays 50. cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` and
+`TestNoTestSetsTheDefaultLoggerByHand` pass over the tree with this record.
+
+The rules are `rules-b882l.patch`, uncommitted: a line in `player.md`'s B728
+section, its long form in `ops/History-rules-player.md`'s, for the
+migration's lines and `HeldIn`, and an entry in `admin-console.md` for the
+redaction. `git apply --check` takes it, and on a `git archive` copy of the
+tree with it the budgets check is clean (the worst load from 77.4% to 77.5%,
+`player.md` at 98,849 bytes), as are its self-test and those of `rules-for.py`
+and `move_entry.py`.
+
+## 2026-11-15 — B898 PR 2: the harvest state's open and bridge restore's look before its prompt wait out a read Windows refuses for a moment
+
+**The hazard.** Two production reads met Windows' refusal of an open once and
+gave up. `atlasharvest.OpenStateStore` read `atlas-harvest.json` with a bare
+`os.ReadFile`: a scanner's handle on it, or another writer's rename in
+flight, refused the open with ERROR_SHARING_VIOLATION (32) or
+ERROR_ACCESS_DENIED (5), and serve said "atlas harvest: open state: …
+(feature disabled)" and ran the whole session without the harvest; the
+revoke while the harvest is off (`ClearStoredCredential`) opens the file the
+same way and answered 500. bridge restore's look at the snapshot before its
+prompt (`backup.CheckRestoreSource`, its worker's `checkSource`) read
+`manifest.json` through `readManifest`, a bare read too: beside a serving
+bridge whose verification renames that manifest, it answered "is not a
+recognized snapshot directory", exit 2, for a moment's hold.
+
+**The change.** Both read through `atomicwrite.ReadWithRetryCtx`: five
+attempts with 750 ms of scheduled waits between them, 32 and 5 alone asked
+again (on Windows; nothing is elsewhere), cancellable between attempts. The
+waits bound the schedule, never the call: an attempt that blocks waits as
+long as the filesystem does.
+
+- `OpenStateStore(path)` and `ClearStoredCredential(path)` keep their
+  signatures, the read on `context.Background()` through a seam
+  (`readStateFile`, `os.ReadFile` in production). An absent file answers at
+  once. A refusal past the schedule is the open's error still, and turns the
+  harvest off for the session.
+- `checkSource` reads on the context `CheckRestoreSource` is given, handed to
+  its worker, through a seam (`readSourceManifest`), and decodes what it read
+  itself; `readManifest` is unchanged. A refusal past the schedule is
+  `backup.ErrSnapshotBusy`, wrapping the read's error spelled as given
+  (`spelledAsGiven`), which bridge restore says in its own words, exit 1:
+  `restore: "<snapshot>" was busy (its manifest was being written, or held by
+  another program, most likely a virus scanner): run this again in a moment`,
+  the error's own words not printed, as the not-a-snapshot line prints none.
+  A stop in the waits is told apart before the not-a-snapshot branch: "the
+  restore was stopped while it read the snapshot …, before its prompt:
+  <the context's error>; nothing was restored", neither refusal, exit 1, no
+  prompt. Any other read error, and a manifest that does not decode, is
+  `ErrNotASnapshot` at its first read, as before.
+- The look's worker runs the source worker's end hook (`sourceWorkerEnded`,
+  which `holdSource`'s worker runs too), so a test joins it before it puts a
+  seam back: `lookAt` waits for that end, bounded at 30 s, before its cleanup
+  puts back the read seam, the typed read's predicate
+  (`atomicwrite.SetReadRetryableForTest`) and the hook, and leaves them as
+  they are, failing, where the worker never ends, since it may read them
+  still. No new test calls `t.Parallel`. bridge restore reaches the look
+  through a seam of its own (`checkRestoreSource`), read on the command's
+  goroutine alone, which only a test sets.
+
+**Red first**, each prediction written before its run
+(`.tmp/_b898pr2/predictions-red.md`), at ca4473ff through `go test -overlay`:
+main's three files with a baseline instrumentation that routes each read
+through its seam, keeping main's one attempt and main's classification, has
+the look's worker run the end hook (it observes and changes nothing), and
+declares `ErrSnapshotBusy` and `checkRestoreSource` as names alone. Every
+red carries the injected refusal's words and one read. The harvest's
+"refused once" and "refused at every read" failed after one read with the
+refusal itself (not `ErrReadBusy`), "not there" passed; the look's "refused
+once" and "refused at every read" answered `ErrNotASnapshot` after one read,
+"stopped as it waits" `ErrNotASnapshot` wrapping the refusal, not the
+context's error, and "not there" and "not a manifest" passed; bridge restore's
+"busy" exited 1 through main's generic line without the busy sentence, and
+"stopped" passed. All as predicted, run again identically once the tests
+moved into the files they now sit in.
+
+**Controls**, each an uncommitted mutation of e414c34a, its bytes put back from
+memory and the file checked against HEAD after each, predicted before the
+runs (`.tmp/_b898pr2/controls-predictions.md`): 7 of 7 red exactly where
+predicted, every other row green. The harvest's read made once ("refused
+once" and "refused at every read"); the look's read made once ("refused
+once", "refused at every read" and "stopped as it waits", each
+`ErrNotASnapshot` after one read); the busy refusal returned as
+`ErrNotASnapshot` ("refused at every read" alone); the look's context dropped,
+its worker handed `context.Background()` ("stopped as it waits" alone: five
+reads, `ErrSnapshotBusy`, not the context's error); and three more: the stop's
+case removed from the switch ("stopped as it waits" alone: `ErrNotASnapshot`
+beside `context.Canceled`), the look's worker running no end hook (the join
+failing at its 30 s bound, the seams left), and bridge restore's busy case
+removed ("busy" alone, exit 1 through the generic line). The Windows cases
+(`TestTheStateFileIsReadPastAHoldThatSharesNothing`,
+`TestTheLookBeforeThePromptReadsPastAHoldThatSharesNothing`: a handle that
+shares nothing, its refusal heard by the real `os.ReadFile` before it is let
+go, five reads held throughout) compile here and run on the PR's Windows leg.
+
+**Runs** in the build slot at e414c34a, one session (`.tmp/_b898pr2/gate.sh`):
+`go vet` with the tags as linux/amd64, windows/amd64 and darwin/arm64
+(`CGO_ENABLED=0` for the two cross targets) and `GOOS=linux GOARCH=386 make
+vet`, each clean; `make build-all`, ok; `make test TEST_PKGS='-count=1
+-timeout 45m ./...'` (the later `-timeout` over the Makefile's 30 m, since
+cmd/bridge under `-race` runs near 30 min on this host): 89 packages ok, 14
+with no test files, cmd/bridge 1,775.4 s, internal/manifest 1,728.9 s,
+internal/admin 1,162.4 s, internal/backup 789.1 s, internal/atlasharvest
+11.9 s. Then the touched tests `-race -count=50`, three lanes at once:
+internal/atlasharvest's five that open the state (the new test,
+`TestClearStoredCredential`, `TestARevokeLeavesNoStoredBaseBehind`,
+`TestOpeningAStoreThatCannotDropItsBaseFails`,
+`TestTheStoreHoldsABaseInItsCanonicalForm`), 250 of 250 in 52.8 s;
+internal/backup's new test and `TestARestoreWhoseSourceDoesNotAnswerIsRefusedWithinItsBound`
+(the end hook's other worker), 100 of 100 in 1,300.0 s; cmd/bridge's new test
+and the six bridge restore tests that pass through the look
+(`TestBridgeRestoreRefusesBeforeItsPromptWhileAHoldGivenUpHoldsTheSnapshot`,
+`TestBridgeRestoreSaysWhyTheSnapshotsFolderRefusedIt`,
+`TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked`,
+`TestBridgeRestoreAnswersAStalledSnapshotWithinItsBoundBeforeItsPrompt`,
+`TestBridgeRestoreAsksTheMarkerAgainstTheLockBeforeItsPrompt`,
+`TestBridgeRestoreNamesTheSnapshotAsItWasTypedBesideARestoreThatHoldsIt`),
+350 of 350 in 1,384.0 s; no data race. `GOOS=windows go test -c` of the three
+packages compiles. go1.27.3's own gofmt lists none of the nine changed Go
+files. The Windows cases run on the PR's Windows leg.
+
+**Rules.** The rules land in 0fdc4af5, one commit with their long form: a line beside `enrichment.md`'s harvest
+bullets, and in `cli-serve.md` the B826 line with its long form in
+`ops/History-rules-cli-serve.md` (the look's busy manifest and its stop, and a
+paragraph on them), and `make docs-check`'s four steps pass at that commit: the worst load 82.0% before and 82.1% after,
+`cli-serve.md` 98,886 bytes before and 99,314 after, `enrichment.md` 45,011
+and 45,703.
+
+What stays open is follow-up F3.
+## 2026-11-15 — B898 PR 3: the harvest test reads past Windows' refusal of its open of the state file
+
+Branch `test/b898-harvest-read` from main 3f4843e1,
+test files only. Commits: 2b20bcf1 (the helper reads through a core that
+takes its read function, main's single read kept, and the hold cases: red),
+fd8c4648 (one state file for the three cases, still red), 84cf147b (the read
+through `atomicwrite.ReadWithRetryCtx`, and a busy read inside `eventually`
+answers not yet), 79ba8921 (the Windows hold's own open waits out a scanner,
+and the cases take a scanner's extra refusals), then this record. Every run:
+Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR
+`~/onebit/tmp`.
+
+### The red on main's gate (Step 0)
+
+Main bf622968's gate.yml run 43695739923, attempt 1, job `test (windows-latest)`;
+attempt 2 of the run failed on the rollback red instead, not on this test:
+
+```
+--- FAIL: TestTheHarvestRunsWithEnrichmentOff (1.60s)
+    serve_enrichment_switch_test.go:654: open C:\Users\RUNNER~1\AppData\Local\Temp\…\001\data\atlas-harvest.json: The process cannot access the file because it is being used by another process.
+```
+
+(The temporary directory's name, the test's name and digits, is elided.)
+`:654`, at bf622968 and at 3f4843e1 alike, is the call of
+`harvestPendingCovers` inside `eventually`'s condition, which reads the state
+file every 5 ms once Atlas has been asked for the premium cover; the helper
+calls `t.Helper()`, so its `t.Fatal` is reported at its caller's line. Its
+open was `os.ReadFile`, which on Windows shares reading and writing and not
+deletion (go1.27.3 `src/syscall/syscall_windows.go:395`). The job's lines
+just before the failure are serve's upgrade of that cover and its settle:
+`atlas premium cover upgraded … mbid=77777777-7777-4777-8777-777777777777`
+and `atlasharvest.covers_upgraded … count=1`. No "timed out waiting for"
+line, so the production boot read (B898's PR 2) is not this red.
+
+### What writes the state file in this test
+
+At 3f4843e1 serve writes `atlas-harvest.json` twice at the harvest's first
+tick, the submit's stamp (`internal/atlasharvest/client.go:319`; a submit is
+due every 6 h, `client.go:258-263`, and the test shortens only the poll,
+`cmd/bridge/main.go:4872-4873`) and the booklet check's (`client.go:371`;
+the fake Atlas answers the check 404, stamped once, `booklets.go:145-147`,
+`:92-94`), and once more when the premium cover settles after the switch
+(`SettlePendingCovers`, `client.go:442`, whose persist renames a staged file
+over the state file, `state.go:354`). The ticks between write nothing: an
+empty results page adds no cover (`state.go:289-291`) and its cursor of 0 is
+no advance (`client.go:648-653`), and a paused cover leg returns before it
+settles (`client.go:423-424`, `:439-441`). So the direct call (`:641`), after
+eight polls, reads beside no write of the bridge's, and the poll at `:654`
+reads in the window of the settle's write. The log does not say whether the
+open met that rename or a scanner's hold of the file the rename put in place,
+and nothing here claims more than that window.
+
+### The change
+
+`harvestPendingCovers` reads through `readPendingCovers`, which takes its
+read function (`os.ReadFile`, or a test's hold) and reads through
+`atomicwrite.ReadWithRetryCtx` on the test's context: Windows' sharing
+violation and access denied are asked again, five attempts over 750 ms, and
+any other host reads once. The direct call fails the test on any error left
+after that. `eventually`'s condition reads through `pendingCoversNow`, still
+only once the cover was asked: a read still busy past the bound
+(`atomicwrite.ErrReadBusy`) answers not yet and the next poll asks again,
+within `eventually`'s 10 s, and any other error fails the test, checked
+before the map's length.
+
+`readPastAHold` runs the read past a hold on a state file holding one
+pending cover, written once through `atlasharvest.OpenStateStore`: let go by
+the read at a refusal it heard, the covers come back; held throughout, the
+read is busy with the hold's refusal; in `eventually`'s form a poll whose
+read is refused throughout answers not yet, and a later one, whose read lets
+the hold go, the covers. `…HarvestHelperReadsPastAHoldOnTheStateFile`
+(Windows) holds the file with a handle that shares nothing, its own open
+through the same retry so that a scanner's hold of the fixture just written
+is waited out, checks before anything else that `os.ReadFile` beside it
+answers `ERROR_SHARING_VIOLATION`, and lets it go from the read or the
+cleanup, never by time. `TestTheHarvestHelperReadsPastAStandInHold` runs the
+same cases on every host, its hold a read answering a stand-in for that
+refusal until it is let go, which `atomicwrite.SetReadRetryableForTest` makes
+the retry ask again on (a process-global seam, so the test does not call
+`t.Parallel`). The hold shows the read waits out a refusal; it does not show
+who held the file in the gate's run. The two test files add 150 lines and
+remove 3 (3f4843e1..79ba8921).
+
+### Red first, and the controls
+
+At 2b20bcf1 and again at fd8c4648, main's single read, the stand-in's three
+cases failed on this host by their own assertions: the let-go case with the
+refusal returned after one refusal, the held case with an error that is not
+busy, and eventually's form with the test failed at its first poll;
+`TestTheHarvestRunsWithEnrichmentOff` passed. The Windows case did not run
+at the tests-only commits (this host cannot run it), so no red of it was
+seen; its runs are the PR's, on windows-latest.
+
+Controls on 79ba8921, each an uncommitted mutation of the test file, its test
+binary built and its bytes put back from memory before the run, each
+predicted in a file first, `git status` empty after: 3 of 3 red as predicted,
+every case predicted green passing.
+- The helper's read without its retry: the stand-in's three cases.
+- A busy read inside `eventually` taken as a fatal: eventually's form alone
+  (`file was busy: open …`).
+- A busy read inside `eventually` taken as settled, the nil map as no pending
+  cover: eventually's form alone (one poll answered, no covers).
+
+### Runs
+
+On 79ba8921, outside the slot: `go vet ./cmd/bridge/` with the tags for
+linux/amd64 and for windows/amd64, clean; `go test -c` of `./cmd/bridge` for
+windows/amd64 with the tags builds. go1.27.3's gofmt lists neither changed
+file (a misformatted probe beside them was listed). In the build slot, the
+host otherwise idle: `go test -race -count=50 -run
+'TestTheHarvestRunsWithEnrichmentOff' ./cmd/bridge/`, 50 of 50, no data race,
+1.48 to 1.57 s a run (the package 77.2 s); the stand-in's test the same way,
+50 of 50, no data race, 1.58 to 1.59 s a run (80.5 s); then `make test`
+(`go test -race -p 4 -timeout 30m ./...` with the tags), ok, 89 packages,
+cmd/bridge in 1,694.2 s, 2,169.1 s in all, the tree clean after. No path
+under `version_gate.go`'s `guardedPrefixes` or in its `GuardedPaths` changed.
+cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this record. The windows-latest leg, where the Windows case
+runs, is the PR's.
+
+### Round 2: the stand-in's retry keeps the platform's
+
+`atomicwrite.SetReadRetryableForTest` replaced the read predicate
+(`readRetryable = fn`), so `TestTheHarvestHelperReadsPastAStandInHold` asked
+again on `errBusyForTest` alone. By the code, its real reads of the state file
+on Windows (`os.ReadFile`, once the stand-in hold is let go) were then no
+longer asked again on the sharing violation and access denied, and a
+scanner's hold of the file would fail the case there. No such failure was
+seen: it is the hazard this round closes. B898's observed red is still main's
+`TestTheHarvestRunsWithEnrichmentOff`, above. Commits: 68ef1c97 (the tests,
+red first), 64600c84 (the seam), then this update.
+
+The seam now installs `fn(err) || prev(err)`, prev the predicate in place
+before it (the platform's, or an earlier call's), and its restore puts prev
+back (`internal/atomicwrite/read.go`). Production never calls it. Every
+caller adds a stand-in for Windows' refusal (cmd/bridge's bind and stand-in
+tests, internal/config's turn-read tests) and none relies on the platform's
+predicate being dropped, so no replacing form is kept. `retryStandIn`
+installs the stand-in's predicate for both stand-in tests.
+
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` installs a predicate
+standing in for the platform's (`errPlatformForTest`), then the stand-in's,
+and wants a read refused once with each asked again and the covers back:
+synthetic coverage of the composition on every host, since the predicate of
+Linux and macOS takes no error. `TestTheStandInRetryKeepsWindowsOwnRetry`
+(Windows) wants a read refused once with `ERROR_SHARING_VIOLATION`, then once
+with `ERROR_ACCESS_DENIED`, asked again with the stand-in's retry in place:
+the platform's own predicate kept, which only windows-latest can show, and
+which has not run yet.
+
+Red first at 68ef1c97, main's seam: the every-host case failed for
+`errPlatformForTest` alone, answered after one read; the stand-in's test and
+the harvest test passed. Controls on 64600c84, each predicted in a file
+first, read.go's bytes put back from memory, `git status` empty after:
+- The seam replacing again: the every-host case red for `errPlatformForTest`
+  alone, as predicted; the stand-in's test and the harvest test green.
+- The seam keeping only the predicate before it: the stand-in's test red in
+  all three cases, as predicted, and the every-host case red for both its
+  errors where `errBusyForTest` alone was predicted (the case installs its
+  stand-in for the platform through the same seam, which the control drops
+  too); the harvest test green.
+
+Runs on 64600c84: `go vet` with the tags of `./internal/atomicwrite/`,
+`./cmd/bridge/` and `./internal/config/` for linux/amd64, linux/386 and
+windows/amd64, clean; the windows/amd64 test binaries of cmd/bridge and
+internal/atomicwrite build; go1.27.3's gofmt lists none of the changed files;
+internal/atomicwrite's tests, internal/config's three turn-read tests and
+cmd/bridge's two bind tests pass. In the build slot, the host otherwise idle,
+the three harvest tests 50 times under -race in one go test: 50 of 50 each,
+no data race (`TestTheHarvestRunsWithEnrichmentOff` 1.49 to 1.67 s a run,
+the stand-in's test 1.57 to 1.59 s, the composition case 0.11 to 0.13 s;
+the package 163.1 s). cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this update.
+
+### Round 3: the composition cases take a later platform refusal
+
+`readsPastOneRefusal` wanted exactly two calls, while its calls after the
+injected refusal are real reads of a freshly written state file: on Windows a
+scanner can refuse one of them too, and the composed predicate's third call
+returning the covers would have failed both composition cases. Never seen;
+the hazard is the code's. Commits: b4121464 (the cases, red first),
+ac6d2109 (the assertion), then this update.
+
+The helper now takes the platform's predicate and a second refusal (`then`),
+injected on the second call where it is not nil, and wants the covers with no
+error, at least two calls, every call after the first answering the covers or
+an error the platform's predicate takes, and at most atomicwrite's five
+attempts (`readAttempts`). Each composition case runs it once without a
+second refusal and once with one: `errPlatformForTest` in
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore`, whose predicate is
+installed before `retryStandIn`, and `ERROR_SHARING_VIOLATION` in
+`TestTheStandInRetryKeepsWindowsOwnRetry`, which runs on Windows alone and
+has not run yet.
+
+Red first at b4121464, the exact count kept: the portable case's pass with a
+second refusal failed for both its refusals, the covers read after three
+calls; its pass without one passed. Controls on ac6d2109, predicted in a file
+first, the bytes put back, `git status` empty after:
+- The exact count back: the pass with a second refusal red for both
+  refusals, as predicted.
+- The seam replacing again: red where predicted (`errPlatformForTest` in
+  both passes) and wider: in the pass with a second refusal `errBusyForTest`
+  failed too, since that pass's second refusal is `errPlatformForTest`, which
+  the replacing seam no longer asks again on.
+
+Runs on ac6d2109: `go vet ./cmd/bridge/` with the tags for linux/amd64,
+linux/386 and windows/amd64, clean; its windows/amd64 test binary builds;
+go1.27.3's gofmt lists neither changed file. In the build slot, the host
+otherwise idle, one go test of the harvest tests and both composition cases
+50 times under -race: `TestTheHarvestRunsWithEnrichmentOff`, the stand-in's
+test and the portable composition case 50 of 50 each (1.49 to 1.90 s, 1.58 to
+1.59 s and 0.43 to 0.44 s a run), no data race, the package 178.7 s; the
+Windows case, named in the selection, does not build on this host, and its
+run is windows-latest's. cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this update.
+
+### Round 4: the portable composition case builds off Windows only
+
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` ran on Windows too, and
+its assertion takes only `errPlatformForTest` as a refusal after the first:
+a real sharing violation on one of its later reads there, which the composed
+predicate asks again on as it should, would fail the case with the code
+right. The case and `errPlatformForTest` now live in
+`cmd/bridge/serve_enrichment_switch_other_test.go`, under `//go:build
+!windows` (82e25753); the helpers the Windows file uses (`readPastAHold`,
+`retryStandIn`, `readsPastOneRefusal`) stay in the untagged file. Windows'
+own codes are `TestTheStandInRetryKeepsWindowsOwnRetry`'s, which windows-latest
+has not run yet; this host only builds it.
+
+On 82e25753: `go list` names the untagged file and the Windows one for
+windows/amd64, the untagged file and the new one for linux/amd64; `go vet
+./cmd/bridge/` with the tags for linux/amd64, linux/386 and windows/amd64,
+clean; the linux/amd64 and windows/amd64 test binaries build; go1.27.3's
+gofmt lists none of the three files. The two controls are red as in round 3
+(the exact count back: the pass with a second refusal; the seam replacing
+again: `errPlatformForTest` in both passes and `errBusyForTest` in the
+second). Outside the build slot, the slot being in use,
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` and the stand-in hold's
+test 50 times each under -race at GOMAXPROCS 4: 50 of 50, no data race (0.43
+to 0.45 s and 1.57 to 1.59 s a run). cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass over the tree with this update.
+
+## 2026-11-15 — B898 PR 3, round 5: the real-hold case leaves the PR, and what the tests still prove
+
+Branch `test/b898-harvest-read`; this round, test files and this log only (the branch also carries round 2's test seam in `internal/atomicwrite/read.go`). Commits:
+58927057 (the case removed, `readPastAHold` folded into its one remaining
+caller, and round 1's entry citing the removed case with its `Test` prefix
+elided and naming no worker or host), then this entry.
+
+Two reds, kept apart:
+- Main bf622968's gate (run 43695739923, attempt 1, windows-latest):
+  `TestTheHarvestRunsWithEnrichmentOff` failed with a sharing-violation
+  failure of the helper's single read during the settle-write window; the
+  holder and the precise cause were not established. This PR's fix, the
+  helper's read through `atomicwrite.ReadWithRetryCtx`, is unchanged.
+- The PR's head 918185a0 (run 43733404123, windows-latest):
+  `…HarvestHelperReadsPastAHoldOnTheStateFile` failed in all three subtests
+  at its own premise check (`serve_enrichment_switch_windows_test.go:52` at
+  that head): a read beside the handle that shares nothing answered nil, so
+  the case held nothing there. A test premise that did not hold on the
+  runner, not a defect found in the retry.
+
+Why the case was removed: its premise failed in every subtest of that run,
+and why a handle opened sharing nothing did not refuse the read there is not
+known. That diagnosis is filed as B898FU2. Every other leg of the run was
+green.
+
+What still proves what:
+- The production predicate's classification of `ERROR_SHARING_VIOLATION`
+  and `ERROR_ACCESS_DENIED` is pinned on Windows by
+  `TestReadRetryWindowsErrors` (`internal/atomicwrite/read_windows_test.go`,
+  on main).
+- `TestTheHarvestHelperReadsPastAStandInHold`, on every host, shows that the
+  helper reads through the retry: the covers past a stand-in refusal its read
+  lets go, the read busy past the bound, and not yet inside `eventually`.
+- `TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` (off Windows,
+  synthetic) and `TestTheStandInRetryKeepsWindowsOwnRetry` (Windows, the
+  codes injected) show that the stand-in's retry adds to the platform's
+  predicate.
+
+The residual: no remaining test deliberately holds the harvest state file
+with a conflicting Windows handle; the harvest helper's behaviour under that
+actual hold remains unverified.
+
+Runs on 58927057: `go vet ./cmd/bridge/` with the tags and `CGO_ENABLED=0`
+for linux/amd64 and windows/amd64, clean; `GOOS=linux GOARCH=386 make vet`,
+clean; `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go test -tags
+ts_omit_webclient,ts_omit_debugeventbus -c -o /dev/null ./cmd/bridge/`
+builds; go1.27.3's gofmt lists none of the three harvest test files. In the
+build slot, the harvest tests 50 times under -race:
+`TestTheHarvestRunsWithEnrichmentOff`, `TestTheHarvestHelperReadsPastAStandInHold`
+and `TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` 50 of 50 each, no
+data race (1.50 to 1.71 s, 1.57 to 1.59 s and 0.43 to 0.45 s a run; the
+package 180.8 s).
+`TestTheStandInRetryKeepsWindowsOwnRetry`, named in that selection, builds
+only on Windows, where CI on the PR is the check. cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass over the tree with this entry.
+## 2026-11-15 — B869A: the prune given up waits for the snapshot's verification to end
+
+Branch `fix/b869a-prune-given-up`, from main at ca4473ff. Test-only.
+Commits: 52f0533d (B869's 3a976ffc from the parked
+`fix/b869-prune-waits`, applied as `git cherry-pick -x` would, its diff
+unchanged), 172d511f (its cleanup with the unlock still held, and a drain
+past its bound), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`.
+
+### The hazard
+
+`TestTheTickerAndTheDoctorNameAPruneGivenUp` (cmd/bridge) failed main's
+CI in two runs in a row, "the prune answered <nil>, want it given up"
+(backup_round5_test.go:183 at ca4473ff): at 47e44f7f on `test -race`
+(bridge 2/4), and at ca4473ff on `test (macos-latest)`. Neither run's log
+is on this host, so their run ids are not recorded here.
+
+It pruned right after `verifiedInstallSnapshot`, which returns on
+`backup.SnapshotAndVerify`'s answer. The verification answers before its
+worker lets go of the backups folder's lock (`verifyAndThen`), and a prune
+that meets that lock answers `Skipped` with no error, so it is never given
+up. B851's record named this site, and backlog B869 took it as its item 1.
+
+### The fix (52f0533d, from 3a976ffc)
+
+The test takes its snapshot through `endedInstallSnapshot`
+(backup_round3_test.go:139). cmd/bridge's `unlockHold` is installed before
+the snapshot and armed in `SnapshotOptions.OnKept`. It holds the worker's
+unlock from the answer (`requireHeld`) until the test lets it go and hears
+the worker's end (`letGoAndAwaitEnd`), where it asks the folder's lock.
+
+The order this relies on, on this base: `SnapshotAndVerify` calls `OnKept`
+(finish.go:901-903) before `FinishCapture` (907), whose `verifyAndThen`
+reads the end hook as it begins (finish.go:280), and a worker runs the hook
+that stood then (seams.go:339-342). The prune's failure now prints its
+`PruneResult`.
+
+### What 172d511f adds
+
+- **A held unlock goes as the test's body ends.** With the end's wait
+  removed (C1 below), the test failed a second time 30 s after its skipped
+  prune, at its own cleanup (backup_round5_test.go:175, `awaitHoldsLetGo`'s
+  `backuptest.AwaitIdle`): "backup workers did not release their holds".
+  That cleanup runs before `holdUnlockOf`'s, and only `holdUnlockOf`'s let
+  the parked worker go. `holdUnlockOf` now also lets it go at the end of
+  the test's context (`context.AfterFunc(t.Context(), u.letGo)`, :212),
+  which comes before any cleanup.
+- **A drain past its bound ends the run.** 3a976ffc's drain reported its
+  30 s bound with `t.Error`, and the cleanups after it then ran beside the
+  worker: the lock-release seam put back, which that worker reads with no
+  lock (verify_lock.go:199), and the fixture's folders removed. A drain
+  past its bound must keep those from running, which a `t.Fatal` in it
+  would not do. On Go 1.27.3 neither a `t.Fatal` nor a panic in a cleanup stops
+  the cleanups after it: `runCleanup` runs the ones left from a deferred
+  call (testing.go:1795-1804), on a Goexit and on a panic alike, and a
+  two-cleanup scratch test showed both. So past its bound the drain ends
+  the run (`endTheRun`, :233). It raises a panic on a goroutine of its
+  own, as the binary's own `-timeout` does (testing.go:2947-2961), with
+  every goroutine printed, and the cleanup waits until it lands. The
+  seam's restore and the fixture's removal never run.
+
+### Reds, greens and controls
+
+Each variant was built with `go test -c -race -overlay` from edits made in
+memory over the committed bytes (`git show`), so no tracked file was
+written. `git status` was empty before and after every build and run. Each
+run was a process of its own with a TMPDIR of its own, and the predictions
+were written to a file before each round. "The delay" is B851's: in
+internal/backup/verify_lock.go's release closure, after the release hook
+and before the unlock (lines 199-202):
+
+```go
+				if onLockRelease != nil {
+					onLockRelease(dir)
+				}
+				time.Sleep(time.Second)
+				_ = fsutil.Unlock(f)
+```
+
+| Run | Build | Result |
+|---|---|---|
+| R1 | main's two test files (ca4473ff), the delay | red 3 of 3 at backup_round5_test.go:183, "the prune answered <nil>, want it given up"; 2.4 s each, no race |
+| G1 | 52f0533d, the delay | green 3 of 3, 3.7 s each |
+| C1 | 52f0533d, the delay, the whole `unlock.letGoAndAwaitEnd(t)` call removed (`requireHeld` and the cleanup kept) | red 3 of 3 at :190, "the prune answered {Deleted:0 Reaped:0 ReapErr:<nil> Skipped:true SkippedFor:another verification or prune of these snapshots holds their lock}, <nil>; want it given up", and again at :175, "backup workers did not release their holds"; 32.4 s each, no race |
+| C2 | 52f0533d, no delay, the hold's hook parked for good (`<-u.out` replaced by a receive from a channel nothing closes) | :165, "the verification's worker never let go of what it held", then the drain's "the snapshot's verification never ended" (backup_round3_test.go:215); the binary ran on to its exit 1, the test's temp folder removed with the worker still parked; 61.5 s |
+| G2 | 172d511f, the delay | green 3 of 3, 3.8 s each |
+| C1b | 172d511f, as C1 | red 3 of 3 at :190, C1's first failure alone; 2.4 to 2.6 s each, no race |
+| C2b | 172d511f, as C2 | the binary ended at the drain's bound, exit 2, after 61.5 s: "panic: TestTheTickerAndTheDoctorNameAPruneGivenUp: the snapshot's verification did not end within 30 s of its unlock's let-go", every goroutine printed, the worker's unlock parked in the hold's hook (made by `(*hold).release`); no cleanup after the drain ran, and the test's temp folder was still on disk |
+
+The parked branch's record ran C1 without `requireHeld` too, and quoted
+its first failure alone.
+
+### The other callers of `verifiedInstallSnapshot`
+
+A read-only census; none of them changed. Lines are 172d511f's.
+
+| Caller | What follows the snapshot | Needs the end's wait |
+|---|---|---|
+| backup_round3_test.go:432 and :434, `TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord` | a second snapshot, whose verification waits for this process's slot; then `bridge backup --verify` in a process of its own, which waits for the folder's lock (`VerifyCmdLockWait`); its prune (:524) runs once that process has exited | no; but that prune asserts its error alone and then reads what it kept, so a skip would pass it blind (B851's assertion) |
+| backup_round4_test.go:100, `TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded` | `bridge backup --verify` in this process, which waits its turn for the slot and the lock; no prune | no |
+| backup_round6_test.go:102, `TestBridgeBackupVerifySaysTheWriteAndTheReadBackApart` (its two recheck cases) | the same; no prune | no |
+| backup_round12_test.go:66, :93 and :181 | `awaitHoldsLetGo(t, root)` first: the holds drained (a worker drops its hold after its unlock and its slot) and every snapshot's ownership taken | no |
+| backup_round13_test.go:19 | `awaitHoldsLetGo(t, root)` first | no |
+
+No rules change. build-ci-tests.md's B849 and B851 bullet already says
+that a step that needs the folder's lock free waits for the worker's end
+through `unlockHold`, and asserts that a prune ran.
+
+### Runs
+
+At f4c1e106: 172d511f's code, and the record's first part. TMPDIR was
+`$HOME/onebit/tmp`.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=50 -timeout 30m -v -run 'TestTheTickerAndTheDoctorNameAPruneGivenUp' ./cmd/bridge/`, inside the build slot | 50 of 50, no race; ok in 87.2 s (89.3 s with its build) |
+| the same, outside the slot at nice 19, while another worker held the slot | 50 of 50, no race; ok in 88.6 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, inside the slot and outside it |
+| gofmt (`go run cmd/gofmt -l`) on the two test files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f4c1e106 and with this table |
+| `make docs-check` | exit 0, at f4c1e106 and with this table |
+
+## 2026-11-15 — B869A round 2: the hold's seam goes back as the snapshot's worker ends, and the drains wait for every hold
+
+Branch `fix/b869a-prune-given-up`, round 1 at 6f205fd2. Test-only.
+Commits: 34a9977a (the fix and three tests), then this record and the
+round-1 record's wording. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`. Every
+control was built through `go test -c -overlay` from edits made in memory,
+so no tracked file was written; `git status` was empty before and after
+each build and run, and the predictions were written to a file before each
+round.
+
+### What it changes, and why
+
+1. **A prune's worker could outlive its drain beside the seams' restores.**
+   In `TestTheTickerAndTheDoctorNameAPruneGivenUp` the hold's drain waited
+   for the snapshot's end alone, heard before the prune began. A prune
+   whose worker outlived the test's own drain (`awaitHoldsLetGo`, whose
+   `t.Fatal` lets the later cleanups run) then had the lock-release seam
+   and `onPrune` put back beside it: F1a below shows both races at round 1.
+   - The seam now goes back once the snapshot's worker has ended and no
+     hold is left (`letGoAndAwaitEnd`: `awaitNoHolds`, then `putSeamBack`,
+     a `sync.Once` the cleanup shares), so a holder after the snapshot never
+     reads the hold's hook
+     (`TestAnEndedInstallSnapshotPutsTheLockReleaseSeamBack`).
+   - `awaitHoldsLetGo` and `awaitVerificationsEnd` still had to end the run
+     past their bounds: the cleanups after them put back seams a holder
+     still running reads with no lock, `onPrune` among them (read on the
+     prune's step goroutine, backup.go:1190), which F1c shows racing with
+     the lock-release seam already back. They now end the run there
+     (`endTheRun`), for every one of their 41 calls in the backup test
+     files.
+2. **A snapshot refused before its worker began ended the run and hid its
+   failure.** The debt was set by `arm`, from `OnKept`, before any worker
+   existed. A verification refused before its worker began
+   (`verifyAndThen`'s refusals at its folder's mark and its slot,
+   finish.go:288-306) left the drain waiting 30 s for an end no worker
+   would bring; then it ended the run, the test's own failure unprinted.
+   - Neither the hook's entry nor `t.Failed()` shows that no work is live.
+     A worker answers before its unlock and can stay parked there, in its
+     ownership's let-go (hold.go:322-328). The worker that writes an
+     abandoned verification's INCOMPLETE (`abandonPending`, finish.go:697-735)
+     takes and lets go of the lock and runs no end hook.
+   - The debt is now the backup package's own count of holds
+     (`backup.ActiveHoldsForTest`). A verification's hold is counted from
+     `newHold` (finish.go:292, hold.go:108), before its slot and its worker,
+     until `drop` (hold.go:397): its worker's last step but the end hook,
+     after its unlock (finish.go:329-331). A release past its bound keeps
+     the count until the unlock ends (hold.go:342-349, 384-386). A refusal
+     drops it at once (finish.go:300, 304). `abandonPending`'s worker keeps
+     a hold of its own (finish.go:700-704), as a prune's, a claim's and a
+     restore's do (backup.go:1086-1089, owner.go:251-254,
+     restore_source.go:198-200 and 257-258).
+   - The hold's cleanup waits until none is left (`awaitNoHolds`), and an
+     end heard once the test's body has ended asks nothing of the folder's
+     lock (`over`). `verifyAndThen` has no seam at its worker's start, and
+     none was added: the count already begins before the worker does.
+3. **The round-1 record's wording.** It now states each requirement as the
+   change's own reason.
+4. **`arm`'s restore of the end hook runs before the hold's drain.** That is
+   harmless. A worker reads the end hook once, as its verification begins
+   (finish.go:280), through an atomic pointer (seams.go:330, 352-353), so a
+   restore after that changes nothing it calls, and the hook touches the
+   hold's own state alone. `arm`'s docblock says so, and the registration
+   stays where B849's second round put it.
+
+### Reds, greens and controls
+
+A is `TestAHoldArmedForAVerificationRefusedBeforeItsWorkerLeavesTheTestsFailure`,
+B `TestAHoldsCleanupWaitsForAWorkerParkedBeforeItsUnlock` and C
+`TestAnEndedInstallSnapshotPutsTheLockReleaseSeamBack`. A and B run their
+case as a process of their own and read its output: its exit code, its
+failures, and a line printed by a cleanup registered before the hold, so
+after the hold's own cleanups. F1 lets the fixed test's prune stall go from
+the loop's drain instead of from the test's own cleanup, so that cleanup's
+`awaitHoldsLetGo` outlives its bound with the prune's worker parked.
+
+| Run | Build | Result |
+|---|---|---|
+| C at round 1 | 6f205fd2's helpers, the new tests | red 3 of 3 at backup_unlock_hold_test.go:97, "the prune's release ran the seam that stood before the hold 0 times, want once" |
+| A at round 1 | the same | red: its case, refused at the slot once `OnKept` had armed the hold, ended by `endTheRun`'s panic, exit 2, "the snapshot's verification did not end within 30 s of its unlock's let-go", its own failure unprinted; 34.4 s |
+| B at round 1 | the same | green, 2.7 s: round 1's drain waited for the armed worker |
+| A, B, C and the fixed test | 34a9977a | green 3 of 3 each; A 4.1 to 4.3 s, B 2.5 to 2.7 s, C 1.4 to 1.7 s |
+| C-ctl | 34a9977a, `awaitNoHolds` and `putSeamBack` taken out of `letGoAndAwaitEnd` | C red 3 of 3, "0 times, want once" |
+| B-ctl | 34a9977a, the drain returning at once where the hook was never entered and the test had failed | B red: the case's last cleanup found "holds 1", its worker still parked before its unlock |
+| F1a | 6f205fd2, F1 | `awaitHoldsLetGo` failed at its bound, "a hold given up was never let go", and the cleanups after it raced the prune's worker twice: `SetOnPruneForTest`'s restore (seams.go:115) against `pruneHeld`'s read (backup.go:1190), and `SetOnLockReleaseForTest`'s restore (seams.go:240) against the release's read (verify_lock.go:199); exit 1, 31.9 s |
+| F1b | 34a9977a, F1 | the run ended at `awaitHoldsLetGo`'s bound, exit 2, "a hold given up was never let go"; no race; 32.0 s |
+| F1c | F1b, `awaitHoldsLetGo`'s `endTheRun` put back to `t.Fatal` | one race, `onPrune`'s (seams.go:115 against backup.go:1190), none on the lock-release seam; exit 1, 32.0 s |
+| R1 | round 1's red at main, the delay | red 3 of 3 at backup_round5_test.go:183, "the prune answered <nil>, want it given up" |
+| G | 34a9977a, the delay | green 3 of 3, 3.8 s |
+| C1 | 34a9977a, the delay, the whole `unlock.letGoAndAwaitEnd(t)` call taken out | red 3 of 3 at :190 with the skipped-prune assertion alone, 2.4 to 2.6 s, no race |
+| C2 | 34a9977a, the hold's hook parked for good | the run ended at the hold's drain, exit 2, "a backup holder kept its hold after the snapshot's unlock was let go: 1 still held 30 s on"; 61.5 s |
+
+### Runs
+
+At cab61276: 34a9977a's code, and this record but its runs. TMPDIR was
+`$HOME/onebit/tmp`.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=50 -timeout 30m -v -run '^TestTheTickerAndTheDoctorNameAPruneGivenUp$' ./cmd/bridge/`, inside the build slot | 50 of 50, no race; ok in 88.8 s |
+| the same, outside the slot at nice 19, while another worker held the slot | 50 of 50, no race; ok in 89.9 s |
+| the three new tests, `-race -count=10`, inside the slot | 30 of 30, 10 each, no race; ok in 83.3 s |
+| every test of cmd/bridge's backup test files (`backup_*_test.go`, `restore_source_test.go`: 65, the 41 calls of the two drains among them), `-race -count=1`, inside the slot and outside it at nice 19 | 65 of 65 each, no race; ok in 170.4 s and 169.1 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, inside the slot and outside it |
+| gofmt (`go run cmd/gofmt -l`) on the five test files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at cab61276 and with this table |
+| `make docs-check` | exit 0, at cab61276 and with this table |
+
+## 2026-11-15 — B869A round 3: the hold's cleanup waits for its end hook's ask and for a refused verification's let-go
+
+Branch `fix/b869a-prune-given-up`, round 2 at 13415a6e. Commits: 38c29935
+(one counter and its accessor in internal/backup; the rest test code, and
+the tests), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`. Every red
+and control was built through `go test -c -overlay` from edits made in
+memory, so no tracked file was written; `git status` was empty after each,
+and the predictions were written to a file before each round. Line numbers
+are 38c29935's.
+
+The tests: I is internal/backup's
+`TestARefusedVerificationsLetGoIsCountedUntilItEnds`; in cmd/bridge, W1a is
+`TestAnEndHooksAskUnderWayHoldsTheHoldsCleanup`, W1b
+`TestAnEndHookThatComesAfterTheTestsEndAsksNothing`, W1c
+`TestAnEndHooksAskThatNeverEndsEndsTheRun`, W2e
+`TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` and W2f
+`TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun`. W1c and W2f run
+their case as a process of their own, with a one-second drain bound
+(`holdDrainBound`, 30 s elsewhere), and require the run ended there, saying
+so, with no line from a cleanup registered before the hold.
+
+### The two windows
+
+1. **The end hook's ask ran beside the cleanup.**
+   - A worker runs its end hook once it has dropped its hold: the hook's
+     defer is registered first (finish.go:317) and runs after `h.drop()`
+     (finish.go:329). So `ActiveHoldsForTest` read 0 while the hook could be
+     inside its ask of the folder's lock (`backupsLockHeld`), and `over` was
+     read with no ordering against `letGo`.
+   - The hook now announces its ask (an atomic count, `asks`) before it reads
+     `over`, and asks through `probe`, which a test can stand in for. The
+     hold's cleanup waits for `asks` to read 0 once `letGo` has stored `over`,
+     bounded, and ends the run past the bound (`awaitAsks`). Go's atomics
+     are sequentially consistent, so either the hook's load of `over` comes
+     after the cleanup's store and it asks nothing, or its count comes before
+     the cleanup's read and the cleanup waits for it.
+   - The count is atomic, not a `sync.WaitGroup`: the hook can come after
+     the cleanup has begun to wait, and a WaitGroup's `Add` from zero beside
+     its `Wait` breaks that type's rules. `letGo` stays non-blocking, since
+     it also runs on the test context's `AfterFunc` goroutine; the wait is in
+     the cleanup.
+2. **A refused verification's let-go outlived the drain.**
+   - A verification refused at its folder's mark, before any hold
+     (finish.go:288-291), or at the slot, once its hold is dropped
+     (finish.go:297-302), hands its capture's ownership release to
+     `letGoWithin`. That waits StopWriteBound and leaves the release running
+     (finish.go:752-769), counted by no hold.
+   - `letGoWithin` now counts it, from before its goroutine starts until
+     `end` returns (`activeReleases`, hold.go:106; finish.go:756, 760),
+     exposed as `backup.ActiveReleasesForTest` (seams.go:387). It still
+     answers at its bound.
+   - `awaitNoHolds`, which `awaitHoldsLetGo` and `awaitVerificationsEnd` go
+     through, waits for both counts. The count is a separate accessor, not
+     folded into `ActiveHoldsForTest`, so internal/backup's own drains are
+     unchanged.
+   - The helper that makes a refused snapshot disarms the hold once the
+     refusal is answered. Without that, a blocker in the same folder had its
+     own unlock held by it (the first red run's "1 holds were left").
+
+### The two Lows of round 2
+
+1. `parkedBeforeItsUnlock` let its park go a second after the body's end even
+   where nothing had parked. It now does so through `letParkedGo`, which
+   sleeps only where the park was entered.
+2. `letGoAndAwaitEnd` calls `awaitNoHolds` once its end is heard. Nothing to
+   change: the worker's `h.drop()` runs before its end hook on its own
+   goroutine (finish.go:317-331), so its hold is gone by then, and the wait
+   covers other holders alone, as intended.
+
+### Reds, greens and controls
+
+| Run | Build | Result |
+|---|---|---|
+| reds | 13415a6e's helpers and a names-only shim: a `probe` the hook calls, `ActiveReleasesForTest` answering 0 | I red in both cases, "0 let-goes are counted, want 1" (release_count_internal_test.go:86); W1a red, the ask still running at the cleanup before the fixture's removal (backup_unlock_hold_test.go:254); W1b green (round 2 read `over` before asking); W1c red, its case exiting 0 with the later cleanup's line printed; W2e red in both cases and W2f red, at the let-go count |
+| greens | 38c29935 | I, W1a, W1b, W1c, W2e, W2f, round 2's three and the fixed test green |
+| W1-ctl | `awaitAsks` taken out of the hold's cleanup | W1a red at :254; W1c red, exit 0, the line printed |
+| W1b-ctl | the hook asking whatever `over` says | W1b red, "asked the folder's lock 1 times, want none" |
+| W2-ctl | `awaitNoHolds` waiting for holds alone | W2e red in both cases at the release-completion assertion (:473, "another verification owes this snapshot its check"); W2f red, exit 0, the line printed |
+| I-ctl | `letGoWithin` counting nothing | I red in both cases, "0 let-goes are counted, want 1" |
+| round 2's | 38c29935 | C-ctl red 3 of 3 (:99); B-ctl red, "holds 1"; F1b ended the run at `awaitHoldsLetGo`'s bound, exit 2, no race, 31.8 s |
+| round 1's | 38c29935, R1 at main | G green 3 of 3; C1 red 3 of 3 at backup_round5_test.go:190 on the skipped-prune assertion alone; C2 ended the run at the hold's drain, exit 2, "1 holds and 0 refused verifications' let-goes still running 30s on", 61.5 s; R1 red 3 of 3 at :183 |
+
+No test shows the announce-before-check order itself, since no seam parks
+the hook between its count and its load; the argument for it is the
+sequential consistency above.
+
+### Runs
+
+At 597ef073: 38c29935's code, and this record but its runs. TMPDIR was
+`$HOME/onebit/tmp`.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=50 -timeout 30m -v -run '^TestTheTickerAndTheDoctorNameAPruneGivenUp$' ./cmd/bridge/`, inside the build slot | 50 of 50, no race; ok in 88.0 s |
+| the same, outside the slot at nice 19, before the slot came free | 50 of 50, no race; ok in 88.8 s |
+| the new cmd/bridge tests, round 2's three and this round's five, `-race -count=10`, inside the slot and outside it | 80 of 80 each, no race; ok in 336.2 s and 350.7 s |
+| I, `-race -count=10`, inside the slot and outside it | 10 of 10 each, no race; ok in 41.1 s and 41.2 s |
+| every test of cmd/bridge's backup test files (70), `-race -count=1`, inside the slot and outside it | 70 of 70 each, no race; ok in 191.9 s and 214.5 s |
+| internal/backup's whole suite, `-race -count=1 -timeout 60m`, inside the slot | 291 of 291, no race; ok in 748.1 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, inside the slot and outside it |
+| gofmt (`go run cmd/gofmt -l`) on the six files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at 597ef073 and with this table |
+| `make docs-check` | exit 0, at 597ef073 and with this table |
+
+## 2026-11-16 — B869A round 4: the blocking check is drained before its seams go back, and a refused let-go is parked after its unlock
+
+Branch `fix/b869a-prune-given-up`, round 3 at fe9eda97. Commits: 3290ebda
+(the fix and its tests), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`; every
+control was built through `go test -c -overlay` from edits made in memory,
+with `git status` empty after each, and the predictions were written to a
+file first. Lines are 3290ebda's.
+
+B869A's production changes are two, and each leaves production as it was:
+round 3's count of letGoWithin's let-goes (`activeReleases`: finish.go,
+hold.go; `ActiveReleasesForTest`, seams.go), and this round's hook after an
+ownership's release (`SetAfterOwnerReleaseForTest`, seams.go:252-269, run
+at owner.go:85-90), nil unless a test sets it.
+
+### Two answers first
+
+1. **`endTheRun` ends the run before any later cleanup runs.** It sets the
+   traceback to all, raises a panic on a goroutine of its own and blocks in
+   `select {}` (backup_round3_test.go:274-280). The panic is unrecovered, so
+   the runtime ends the process. The cleanup that called it never returns,
+   and testing's runCleanup runs the next cleanup only once the one before
+   it has returned (testing.go:1810-1822) or unwound (1797-1804). So no seam
+   is put back and no fixture removed after an expired bound. The runs that
+   end there leave their fixture on disk and print no later cleanup's line
+   (round 1's C2b, round 3's W1c and W2f).
+2. **Zero counts cover the seams this failure path puts back, but for the
+   check's caller.**
+   - A verification's hold is counted from `newHold` (finish.go:292,
+     hold.go:112) until `drop`'s decrement (hold.go:401). `drop` runs after
+     `h.release`, whose `waitTracked` (hold.go:321 and 332) waits for every
+     goroutine the hold tracks. Among them is the check's: `verifyHeld`
+     tracks it whatever the check answered (finish.go:574), and its
+     `finished` closes once `runLowPriority`'s goroutine has ended
+     (finish.go:836-837), after its read of `onLowPriority` (845-846). So a
+     zero count orders that read before the seam's restore.
+   - The worker's read of the verify deadline (finish.go:460) comes before
+     its drop too.
+   - The caller's does not: `verifyAndThen` reads the verify deadline for
+     its watchdog (finish.go:344) after it has started the worker (312), so
+     the worker can drop its hold first. The caller is now joined.
+   - After its drop the worker reads `aroundVerifyEnd` (finish.go:323) and
+     calls the end hook it read as it began (280, 320). Both are atomic
+     pointers, and this path puts neither back; `onVerifyAnswer` (338) comes
+     before the drop. So the count and the caller's join cover every plain
+     seam the path puts back, and the worker's own end is not waited for.
+
+### What changes
+
+1. **The blocking check is drained before its seams go back.**
+   `checkGivenUpIn` let its check go in a cleanup that ran just before
+   `onLowPriority` and the verify deadline were put back, with no wait. Its
+   caller is now tracked (`callerDone`). A cleanup registered after the two
+   seams, so run before them, does four things, each bounded by
+   `holdDrainBound` and ending the run past it: it lets the hold go
+   (disarmed, so the check's own unlock of a folder the hold is on is not
+   held), lets the check go, joins the caller, and waits until no hold is
+   left. It drains the check alone: a refused verification's let-go is
+   still the hold's own cleanup's to wait for. A cleanup registered before
+   the two seams, so run right after they are put back, fails the test
+   where they went back beside the check or its caller.
+2. **The refused let-go is parked after its unlock.** `refusedLetGo`
+   parked the let-go in `SetOnOwnerReleaseForTest`, which runs before the
+   unlock, and the test's completion check took the ownership. That check
+   passes once the let-go is past its unlock, however long it then runs.
+   The let-go now parks in the new hook after the release, and the cleanup
+   after the hold's requires a signal set as the let-go goes on past its
+   park, with a bounded wait for it otherwise.
+
+The order of the two installs' removal was not changed: `t.TempDir`
+registers one cleanup for the test's whole temporary tree on its first
+call, before the hold.
+
+### Reds, greens and controls
+
+| Run | Build | Result |
+|---|---|---|
+| greens | 3290ebda | `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree`, `TestARefusedVerificationsLetGoIsCountedUntilItEnds`, `TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained` (2.7 s), `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` (both cases, 12.7 s), `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` (6.9 s) and the other hold tests and the fixed test green, no race |
+| C4a, item 1 | the check's drain replaced by round 3's bare let-go | `TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained` red: its case failed again after the restores, "1 holds were left when the blocking check's seams were put back" (backup_unlock_hold_test.go:390), beside a DATA RACE, `SetOnLowPriorityForTest`'s restore (seams.go:147) against `runLowPriority`'s read (finish.go:845) |
+| C4b, item 2's old check | round 3's ownership check, the park after the unlock kept, `holdUnlockOf`'s release wait off | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` GREEN in both cases: the ownership was free with the let-go still parked |
+| C4c, item 2's new check | `holdUnlockOf`'s release wait off, the count kept | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` red in both cases at the completion check (:460, "the refused verification's let-go was still parked past its ownership's release when the cleanup after the hold's ran"); `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` red, its case ending at that check's bound rather than the hold's drain's |
+| C4d, a premature completion | `activeReleases.Add(-1)` moved before `end()` | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` red in both cases at `refusedLetGo`'s count check ("0 let-goes are counted, want 1", reported at its call, :517), then at the completion check (:460); `TestARefusedVerificationsLetGoIsCountedUntilItEnds` red in both cases at its count check (release_count_internal_test.go:86) |
+| C4e | the hook after the release run before the unlock | `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree` red, "another verification owes this snapshot its check, want it free there" (:122) |
+
+### The gate
+
+The first gate, at f3d7f7d9 (3290ebda's code), ran inside the build slot
+from 00:12 to 00:41 in three lanes at once. The second, at ac60b148, ran
+inside the slot from 00:44.
+
+| Check | Result |
+|---|---|
+| internal/backup's whole suite, `-race -count=1 -timeout 60m` (f3d7f7d9; internal/backup has not changed since) | 292 of 292, no race; ok in 836.1 s |
+| `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree` and `TestARefusedVerificationsLetGoIsCountedUntilItEnds`, `-race -count=50` (f3d7f7d9) | 50 of 50 each, no race; ok in 201.4 s |
+| cmd/bridge's whole suite, `-race -count=1 -timeout 60m`, at f3d7f7d9 | 1,582 passed, 9 skipped, one failed: `TestEveryBackgroundGoroutineDrainsOnCleanup`, since `checkGivenUpIn` launched a goroutine that closes `callerDone` and registered neither drain helper the sweep asks for; no race |
+| the fix, ac60b148 | `checkGivenUpIn` registers `drainLoopOnCleanup` for its caller, run right after the bounded drain, which has joined the caller by then or ended the run; the sweep and the four tests pass, and C4a run again on it gave the same red, the same race |
+| cmd/bridge's whole suite, `-race -count=1 -timeout 60m`, at ac60b148 | 1,583 passed, 9 skipped, none failed, no race; ok in 1,647.9 s |
+| `TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained`, `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup`, `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` and `TestTheTickerAndTheDoctorNameAPruneGivenUp`, `-race -count=50`, at f3d7f7d9 and at ac60b148 | 50 of 50 each at f3d7f7d9, no race, ok in 1,268.6 s; 50 of 50 each at ac60b148, no race, ok in 1,215.2 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, at f3d7f7d9 and at ac60b148 |
+| gofmt (`go run cmd/gofmt -l`) on the changed files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f3d7f7d9 and with this table |
+| `make docs-check` | exit 0, at f3d7f7d9 and with this table |

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -254,4 +255,35 @@ func TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked(t *testing.T) {
 		t.Errorf("the refused restore completed B's player seal: %v", err)
 	}
 	requireInstallUntouched(t, cfgB, dataB, before)
+}
+
+// TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy: bridge restore whose look
+// before its prompt found the snapshot's manifest busy past the read's retries
+// (backup.ErrSnapshotBusy) says so and to run it again in a moment, exit 1,
+// never that the path holds no snapshot, and asks nothing; one whose look its
+// stop ended says the stop, exit 1, asking nothing (backlog B898). The look's
+// own answers are internal/backup's TestTheLookBeforeThePromptReadsABusyManifestAgain.
+func TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy(t *testing.T) {
+	snap := filepath.Join(t.TempDir(), "20261115T000000Z")
+	for _, tc := range []struct {
+		name   string
+		answer error
+		want   string
+	}{
+		{"busy", fmt.Errorf("%w: file was busy", backup.ErrSnapshotBusy), fmt.Sprintf("restore: %q was busy (its manifest was being "+
+			"written, or held by another program, most likely a virus scanner): run this again in a moment\n", snap)},
+		{"stopped", fmt.Errorf("the look was stopped: %w", context.Canceled), context.Canceled.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := checkRestoreSource
+			checkRestoreSource = func(context.Context, string, time.Duration) error { return tc.answer }
+			t.Cleanup(func() { checkRestoreSource = prev })
+			var stdout, stderr strings.Builder
+			code := restoreCmd(context.Background(), []string{snap}, strings.NewReader("yes\n"), &stdout, &stderr)
+			if code != 1 || !strings.Contains(stderr.String(), tc.want) || strings.Contains(stderr.String(), "not a recognized snapshot") ||
+				strings.Contains(stderr.String(), "Type 'yes'") || stdout.Len() != 0 {
+				t.Errorf("bridge restore whose look answered %v = %d\nstdout:\n%s\nstderr:\n%s", tc.answer, code, stdout.String(), stderr.String())
+			}
+		})
+	}
 }

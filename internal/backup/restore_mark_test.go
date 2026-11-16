@@ -27,6 +27,25 @@ func readStuckMarker(t *testing.T, root string) backup.StuckCheck {
 	return s
 }
 
+// waitReserve is what a capped wait leaves of the test binary's deadline for
+// the cleanups that run after it (waitWithin).
+const waitReserve = 10 * time.Second
+
+// waitWithin is how long a test's wait for an event may take: limit, the
+// wait's own maximum, capped by the test binary's deadline less waitReserve,
+// so that a missed event fails its case while the cleanups after it still have
+// time to run, never at the package's deadline; with no deadline (-timeout 0)
+// the maximum alone applies (backlog B871).
+func waitWithin(t *testing.T, limit time.Duration) time.Duration {
+	t.Helper()
+	if deadline, ok := t.Deadline(); ok {
+		if left := time.Until(deadline) - waitReserve; left < limit {
+			return max(left, 0)
+		}
+	}
+	return limit
+}
+
 // awaitEvent waits for event on events, failing the test past a deadline.
 func awaitEvent(t *testing.T, events <-chan string, want ...string) string {
 	t.Helper()

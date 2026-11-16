@@ -171,7 +171,14 @@ func TestAStartWaitsForTheProbeThatHoldsTheSlot(t *testing.T) {
 	// the next probe once the one it waited for ends.
 	gaveUp := func(t *testing.T, st start) {
 		t.Helper()
-		st.b.mu.Lock()
+		// The first acquisition after the Start's hold gave its wait up, its
+		// answer received, which nothing else can hold here (no goroutine
+		// runs): asserted free at once, so a lock the give-up kept fails the
+		// case, where a Lock waited to the package's timeout (backlog B853,
+		// round 4).
+		if !st.b.mu.TryLock() {
+			t.Fatal("the backend's lock is held once the Start that gave its wait up returned")
+		}
 		holder, waiters := st.b.holder, st.b.waiters
 		st.b.mu.Unlock()
 		if holder != nil {
