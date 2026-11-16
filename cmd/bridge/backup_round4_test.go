@@ -46,7 +46,10 @@ func flipBundleByte(t *testing.T, dir, name string) {
 // awaitHoldsLetGo waits until no hold given up in this process holds the
 // backups folder at root, asked by that spelling (backup.StuckCheckHere,
 // whose mark drops once all its hold held is let go), and until no snapshot
-// there is owned, failing the test past a deadline.
+// there is owned, ending the run past a deadline (endTheRun): a test's
+// cleanup that calls it runs before the cleanups that put back the seams the
+// holder still running reads with no lock and remove its folders, and a
+// t.Fatal would let those run (backlog B869).
 func awaitHoldsLetGo(t *testing.T, root string) {
 	t.Helper()
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
@@ -54,7 +57,7 @@ func awaitHoldsLetGo(t *testing.T, root string) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("a hold given up was never let go")
+			endTheRun(t, "a hold given up was never let go")
 		}
 	}
 	awaitVerificationsEnd(t, root)

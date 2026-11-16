@@ -747,14 +747,17 @@ func abandonPending(dir, backupsRoot string, ctx context.Context, onEnd func(), 
 // goroutine of its own, and waits for it StopWriteBound at most: the end of
 // a verification refused before it held anything, which a filesystem that
 // does not answer must not hold up; past it, end is left to end on its own,
-// holding nothing else. A nil end does nothing.
+// holding nothing else, and counted until it does (activeReleases). A nil
+// end does nothing.
 func letGoWithin(end func()) {
 	if end == nil {
 		return
 	}
+	activeReleases.Add(1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer activeReleases.Add(-1)
 		end()
 	}()
 	t := time.NewTimer(StopWriteBound)

@@ -28,17 +28,19 @@ func ReadWithRetryCtx(ctx context.Context, read func() error) error {
 
 // readRetryable is what ReadWithRetryCtx asks again on: the platform's
 // retryableReadError (Windows' ERROR_SHARING_VIOLATION and
-// ERROR_ACCESS_DENIED, nothing elsewhere). SetReadRetryableForTest replaces it.
+// ERROR_ACCESS_DENIED, nothing elsewhere). SetReadRetryableForTest adds to it.
 var readRetryable = retryableReadError
 
 // SetReadRetryableForTest makes ReadWithRetryCtx ask again on the errors fn
-// answers true for, and returns what puts the platform's answer back: for a
+// answers true for as well as on those it asked again on before (the
+// platform's, and an earlier call's), and returns what puts that back: for a
 // test, on every platform, of a reader that must ask again where Windows
-// refuses a read for a moment. Process-global, like SetSyncDirForTest: a test
-// that sets it does not call t.Parallel, and puts it back once every reader it
+// refuses a read for a moment, whose real reads still wait out Windows' own
+// refusals (backlog B898). Process-global, like SetSyncDirForTest: a test that
+// sets it does not call t.Parallel, and puts it back once every reader it
 // started has returned.
 func SetReadRetryableForTest(fn func(error) bool) (restore func()) {
 	prev := readRetryable
-	readRetryable = fn
+	readRetryable = func(err error) bool { return fn(err) || prev(err) }
 	return func() { readRetryable = prev }
 }
