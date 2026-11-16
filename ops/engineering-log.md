@@ -100439,10 +100439,12 @@ restored one from a process that had read the old one. The migration ladder's
 lock lasts through the open alone. Three more defects of the full restore: a
 snapshot at this version's ladder top recorded nothing in an armed install
 marker, so the crash rollback could put the previous binary back over a store
-it does not read (codex-1, confirmed by the round's premise run); the epoch's
+it does not read (a finding of the design review, confirmed by the round's
+premise run); the epoch's
 TRUNCATE checkpoint's answer was ignored and the WAL removed whatever it said;
 and `bridge restore` looked at its snapshot before anything else, so a resume
-that needs no snapshot (PR 2b's) could not run without one (codex-4).
+that needs no snapshot (PR 2b's) could not run without one (another finding
+of the design review).
 
 ### The lifetime lock and its failure policy
 
@@ -100458,7 +100460,7 @@ caller). One descriptor a process, because on a Linux NFS mount flock is
 carried out as a POSIX record lock, which closing any descriptor of the file
 releases (`internal/fsutil/lock.go:23-31`).
 
-The policy (design-r2 §6.3, codex-2): only the filesystem's definitive answer
+The policy (design-r2 §6.3, and the design review's finding on ENOLCK): only the filesystem's definitive answer
 that it keeps no locks (`fsutil.DefinitelyKeepsNoLocks`: EOPNOTSUPP, ENOTSUP,
 `errors.ErrUnsupported`; ERROR_NOT_SUPPORTED, ERROR_INVALID_FUNCTION) lets an
 opener go on without the lock, said once a process at Warn; a restore refuses
@@ -100490,10 +100492,11 @@ transaction keeps its own until it ends (the brief's review, finding 1).
 
 `manifest.RestoreJournalPath` (`<db>-restore.json`): any entry there refuses,
 with `ErrRestoreIncomplete` and nothing made, every opener (asked under the
-shared hold, before the link check and `Precreate`, carbon-2), the live
+shared hold, before the link check and `Precreate`, the design review's
+order), the live
 snapshot (before its first write, the brief's review, finding 3), the full
 restore (right after `holdSource`, before the player seal's completion),
-`bridge restore` (before any snapshot is looked at, codex-4), and serve's
+`bridge restore` (before any snapshot is looked at), and serve's
 crash and early rollbacks (before any marker write or rename).
 
 ### The full restore's store-change record and its WAL
@@ -100508,19 +100511,19 @@ snapshot reader (`openSnapshotReader`, the one-file VFS with `immutable=1`),
 so the lifetime lock never makes a file in a snapshot. `ResetBackupEpoch`
 reads its checkpoint's row and answers `ErrEpochCheckpointBusy` unless busy is
 0 and every frame was checkpointed; the restore then keeps the `-wal` and
-`-shm` and says so (the brief's review, its third finding).
+`-shm` and says so (the brief's review, finding 5).
 
 ### The rename that never replaces, measured on this host
 
 `fsutil.RenameNoReplace` (renameat2 with `RENAME_NOREPLACE` on Linux,
 renamex_np with `RENAME_EXCL` on macOS, `MoveFileEx` with no flags on Windows,
 `ErrNoReplaceUnsupported` elsewhere) answers an occupied destination with
-EEXIST, which `syscall.Errno` reads as `fs.ErrExist`, on legion0's ext4 (the
-worktree) and on tmpfs (`/dev/shm`), Linux 7.0: both take the flag. A creator
+EEXIST, which `syscall.Errno` reads as `fs.ErrExist`, on ext4 (the
+worktree's filesystem) and on tmpfs (`/dev/shm`), Linux 7.0: both take the flag. A creator
 racing the call for 1,000 rounds lost nothing on either (landed against
 refused: 204/796, 177/823 and 190/810 on ext4, 255/745, 232/768 and 259/741
-on tmpfs, 494/506 and 491/509 under `-race`). The fallback codex-5 rejected,
-an `Lstat` then `os.Rename`, put in the call's place, replaced the creator's
+on tmpfs, 494/506 and 491/509 under `-race`). The fallback the design
+review rejected, an `Lstat` then `os.Rename`, put in the call's place, replaced the creator's
 entry in 459, 511 and 478 of 1,000 rounds on ext4 and 376, 360 and 395 on
 tmpfs. The Windows rows (a source held without delete sharing, retried on
 `atomicwrite.RenameWithRetry`'s schedule) and the macOS rows are CI's legs to
@@ -100540,7 +100543,7 @@ nothing in the snapshot, so its red is its control's. Among the reds:
 `TestAnOpenStoreKeepsARestoreOut` (an exclusive hold beside another process's
 open store answered nil), `TestAnOpenOverAnUnfinishedRestoreRefusesAndMakesNothing`
 (the open went on over a journal), `TestARestoreOverAnArmedInstallKeepsEveryRollbackOff`
-(the marker recorded nothing, the premise of codex-1),
+(the marker recorded nothing, the armed-install finding's premise),
 `TestTheFullRestoreKeepsAWALWhoseEpochDidNotCheckpoint` (the WAL removed),
 `TestRestoreFindsAnUnfinishedRestoreBeforeItsSnapshot` (exit 2, the snapshot
 looked at first) and `TestTheRollbacksRefuseWhileADatabaseRestoreIsUnfinished`
@@ -100570,7 +100573,8 @@ which it turns red ("bridge.db was made").
 ### Rules
 
 `rules-b653p2a.patch` (the worktree's `.tmp/_b653p2a/`, and the job folder),
-uncommitted, since this host's sessions may not write `.claude/`: in
+applied and committed as `24203d7b` (a session on this host cannot write
+`.claude/`, so the rules travel as a patch): in
 `scanner.md`, the lifetime lock's line and the rename's, their long forms in
 `ops/History-rules-scanner.md`, the B613 bullet's clause that a restore of
 either kind records the store change, and the globs of the files this PR adds;
@@ -100592,3 +100596,114 @@ tests 20 times, the cross builds, `make test` and `make build-all` in the
 build slot) are in the PR's report, since a record cannot hold the runs of
 the commit that carries it.
 
+### Round 2: the review's findings
+
+Each finding was checked against the code first; numbers are the round's
+brief's.
+
+1. **A capture could open the live database with no hold.** `holdLiveStore`
+   answered success, holding nothing, where the database's directory was not
+   there, and the capture went on: a restore that made the directory and its
+   database meanwhile, holding the store exclusively, had them copied by
+   `VACUUM INTO`. It now makes the directory as the store's own open does
+   (`fsutil.MkdirAll`, 0755) and takes the shared hold, with no way through
+   without it, and `captureInto` refuses an empty data dir before it, so a
+   refused capture makes nothing. `PendingMigrations` keeps its own
+   absent-directory answer: it opens nothing there, and the doctor, which may
+   run as a user who cannot make the directory, makes nothing but the lock
+   file, in a directory that is there. The red holds the other process's
+   exclusive hold, with the directory and the database made, in the window
+   after the capture began and before its hold
+   (`backup.SetBeforeLiveStoreHoldForTest`, joined onto the base's own
+   absent-directory branch for the red run): at the base the capture
+   published a snapshot of the restore's database.
+2. **Two spellings of one lock file were two holds.** `filepath.EvalSymlinks`
+   keeps each component as written, so on a volume that folds case two
+   spellings of the data directory, or of the database, keyed apart, and a
+   shared hold through the second met this process's own exclusive lock:
+   an opener under `bridge restore`'s hold refused itself. Each entry now keeps
+   its lock file's identity, and where the key finds no entry the registry
+   matches the file at the lock's path (`os.Lstat`, so a link matches nothing)
+   by `os.SameFile` under its mutex, before another descriptor is opened; a
+   match is counted on and released by its own key. This host's ext4 does not
+   fold case, so the red is a hard link to the lock file from another
+   directory, the same pair of spellings on any volume: at the base the second
+   hold answered `ErrStoreRestoring`. The case-fold rows skip where the volume
+   is case-sensitive and run on macOS's APFS; a Windows 8.3 short name is a
+   preservation row (`EvalSymlinks` names each component as the directory
+   lists it).
+3. **A restore run by the version an armed install replaces recorded
+   nothing.** `DisarmBeforeMigrating` rightly skips both records for that
+   version's own migrations, and a rollback runs as it; but a restore may put a
+   newer store in place, over which a rollback of the install would put that
+   version back. `updater.AdmitStoreRestore` (asked before the player seal's
+   completion, writing nothing) and `updater.DisarmBeforeRestoring` (the
+   record) refuse it, `ErrRestoreByPreviousVersion`, under the marker's lock
+   and without it (held past the wait, ENOLCK, an I/O error, and a filesystem
+   that keeps none); `DisarmBeforeMigrating` still admits that version's
+   opens. The record asks again under the lock, for an install armed between
+   the two asks. The backup red is a destination whose player seal is
+   incomplete: at the base the restore completed it and restored.
+4. **The library restore asked the journal after its snapshot's admission.**
+   `holdRestoredStore` asks it under the exclusive hold, so every caller of
+   `RestoreWithOptions` finds an unfinished restore before `holdSource`; the
+   red goes through the library entry point, where `bridge restore`'s own
+   earlier check does not hide it: at the base a missing snapshot answered
+   `ErrSnapshotGone`, and a present one had its source admission run twice
+   and its backups folder changed.
+5. **A hold let go before its connections close: refuted.** In Go 1.27.3's
+   `database/sql`, `DB.Close` closes every idle connection before it returns
+   (`sql.go:931`), each through `finalClose`, which decrements `numOpen`
+   (`sql.go:682`, 705); `execDC` returns its connection in a deferred
+   `release` before the call returns (`sql.go:1701-1703`), and `Row.Scan`
+   closes its rows in a defer (`sql.go:3535`, 3553), whose `close` releases the
+   connection under the rows' lock (`sql.go:3491`, 3517), so a context's own
+   close of the rows has finished by then. The one release made after a call
+   returns is a transaction's rollback once its context ends (`Tx.awaitDone`,
+   `sql.go:2214`, started for every transaction at `sql.go:1930`), and none of
+   the three paths begins one on a context that can end: `PendingMigrations`
+   runs one `QueryRow`, `vacuumInto` one `ExecContext` and no transaction, and
+   `OpenStoreAdmitted`'s `migrate` runs on `context.Background()`
+   (`store.go:3027`), its FTS probe's `Conn` closed by a defer. No production
+   code sets `SetConnMaxLifetime` or `SetConnMaxIdleTime`, so the pool's
+   cleaner (`sql.go:1100`), which closes idle connections on a goroutine of its
+   own, never runs. Only a `Store` shared across goroutines can hold a
+   transaction open past `Close`, which `letGoOfTheHold` covers.
+6. **Windows: a directory or a directory link at `<db>-open.lock` opened as
+   access denied.** `CreateFile` opens no directory without
+   `FILE_FLAG_BACKUP_SEMANTICS`, and `ERROR_ACCESS_DENIED` read as a lock file
+   this user may not write. The open takes it beside
+   `FILE_FLAG_OPEN_REPARSE_POINT`, as the backup's `VACUUM INTO` opens did in
+   B653 PR 1's round 14, so the attribute check refuses both as no file. The
+   test (a directory, and a junction made by `mklink /J`) runs on CI's
+   windows-latest leg alone; here it is vetted and built.
+7. **The prompt test.** Its premise was false at the base (the prompt's
+   `Type 'yes'` is on stderr, where it looked), so it has no red there. It now
+   also requires no `Restore from` line on stdout and the restore's source
+   worker never run. That hook runs on `RestoreWithOptions`' own admission
+   alone, never on `bridge restore`'s look before its prompt
+   (`CheckRestoreSource`), so a directory that is no snapshot shows the order:
+   beside an open store it is refused for the lock, exit 1, where a hold moved
+   after the look, still before the prompt, answers exit 2.
+8. **Rules that said more than the code:** the B826 bullet now says what
+   comes before the source's lock (the store's lock, its file, and the data
+   dir where missing), and the lifetime lock's lines say the database-only
+   restore is PR 2b's.
+9. **Finding tags in added text** are gone: each finding is named by what it
+   found.
+10. **This record** says the rules are committed, and uses the brief's review's
+    numbers alone.
+
+Negative controls, each a mutation laid over the tree through
+`go test -overlay`, its test run alone (`.tmp/_b653p2a/controls2.py`,
+predictions written first): the capture without its hold; the data dir's check
+moved back after the capture's hold (the first form of that control deleted
+the check, which made the capture write `backups` in the package's directory
+with an empty data dir; it was removed, and the control rerun as the move); no
+lookup by identity; the lookup through `Stat`, which follows a link; a match
+released by the caller's key; no refusal under the marker's lock, and none
+without it; the admission writing what the record writes; the refusal for
+every disarm, ordinary opens included; the restore's admission removed, the
+record alone left to refuse after the seal's completion; no journal under the
+restore's hold; and the store's hold moved after the snapshot's look: every one
+red.

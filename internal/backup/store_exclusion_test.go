@@ -292,8 +292,8 @@ func TestTheFullRestoreRefusesWhileADatabaseRestoreIsUnfinished(t *testing.T) {
 	requireSealStillOwed(t, dir)
 }
 
-// TestEveryRestoreTakesTheStoresLockItself (PR 2a's brief review, its
-// first finding): RestoreWithOptions, called by any caller and not bridge
+// TestEveryRestoreTakesTheStoresLockItself (PR 2a's brief review, on the
+// library's own restore): RestoreWithOptions, called by any caller and not bridge
 // restore alone, takes the store's lifetime lock exclusively before it
 // touches anything: beside a store another process has open it is refused
 // (manifest.ErrStoreHeld), nothing restored, the data directory as it was.
