@@ -50,6 +50,9 @@ type Config struct {
 	OpenNative func(ctx context.Context, cfg alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
 	// Probe runs the silent probe (Backend.Probe); nil is alsapcm.Probe.
 	Probe func(ep alsapcm.Endpoint, cfg alsapcm.ProbeConfig) (alsapcm.ProbeReport, error)
+	// OpenTone opens the bound unit's node for the console's test tone
+	// (Backend.Tone, B601); nil is alsapcm.Open.
+	OpenTone func(ep alsapcm.Endpoint, cfg alsapcm.Config) (*alsapcm.Device, error)
 	// Tick is what a session measures its sink's position on: a channel that
 	// ticks and the function that stops it. Nil ticks every MeasureEvery.
 	Tick func() (<-chan time.Time, func())
@@ -207,6 +210,15 @@ type Seams struct {
 	// counts the monitors its cleanup ended (B853 round 3). It must not block
 	// or call the backend.
 	MonitorEnded func(s engine.SessionID)
+	// The console's test tone's steps (Backend.Tone, B601), each on the
+	// goroutine that reaches it, which it may hold there: ToneEntering before
+	// the tone is counted, ToneCounted once it is and before it asks for the
+	// device slot, ToneAdmitted once it holds the slot and before its run
+	// starts, and ToneClosed once its node's close has answered (closedOK: a
+	// close confirmed) and before the slot is given back. None may call the
+	// backend.
+	ToneEntering, ToneCounted, ToneAdmitted func()
+	ToneClosed                              func(closedOK bool)
 }
 
 // reconcilingPermission is the ReconcilingPermission seam.
@@ -487,9 +499,25 @@ type Backend struct {
 	// does (Probe): a Start waits for it, at most ProbeWait, and no other
 	// probe starts beside it.
 	probing *probeHold
-	// waiters counts the Starts that found a probe holding the slot and
-	// have not taken it yet: a probe is refused while one waits.
+	// toning is the console's test tone that holds the device slot (Tone,
+	// B601), nil while none does: a Start ends it and waits for it, at most
+	// ToneYield; a probe is refused and stays owed; a choice's write and
+	// another tone are refused.
+	toning *toneHold
+	// waiters counts the Starts that found a probe or a tone holding the slot
+	// and have not taken it yet: a probe and a tone are refused while one
+	// waits.
 	waiters int
+	// The tone's gate, the supervisor's (ToneOutput): open, or shut with the
+	// word a tone is refused and ended with (it starts output_unknown);
+	// tonesClosed, shut for good by serve's stop (CloseTones); toneLast, the
+	// last tone's result; toneFenced, a fence a tone's cleanup set
+	// (terminalUnconfirmed beside it), which ToneStatus says.
+	toneOpen    bool
+	toneShut    ToneOutcome
+	tonesClosed bool
+	toneLast    ToneResult
+	toneFenced  bool
 	// lease is the configuration lease a choice's write holds (takeLease, B728
 	// B9 PR 2), nil while none does: taken in the step that finds no session's
 	// record, nothing holding the device and no release unconfirmed, it keeps
@@ -517,13 +545,15 @@ type Backend struct {
 	// (spawnWrite), for which a share of the data directory's lock is kept
 	// (DSDWrites, B762); and whether the writes are closed to any asked from
 	// now on (CloseDSDWrites, B762 round 2). One lock, so a count of both is
-	// one reading (Running).
+	// one reading (Running). tclosed is the console's tones closed to any asked
+	// from now on (CloseTones, B601): no tone is counted once it is set.
 	gmu     sync.Mutex
 	live    int
 	zero    chan struct{} // closed while live is 0
 	writes  int
 	wzero   chan struct{} // closed while writes is 0
 	wclosed bool
+	tclosed bool
 	// wrefused says, once, that a write came once the writes were closed.
 	wrefused sync.Once
 }
@@ -547,6 +577,9 @@ func New(cfg Config) (*Backend, error) {
 	if cfg.Probe == nil {
 		cfg.Probe = alsapcm.Probe
 	}
+	if cfg.OpenTone == nil {
+		cfg.OpenTone = alsapcm.Open
+	}
 	if cfg.Tick == nil {
 		cfg.Tick = func() (<-chan time.Time, func()) {
 			t := time.NewTicker(MeasureEvery)
@@ -566,7 +599,7 @@ func New(cfg Config) (*Backend, error) {
 		reason = string(ReasonDSD)
 	}
 	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero, wzero: zero,
-		choiceTurn: make(chan struct{}, 1)}
+		choiceTurn: make(chan struct{}, 1), toneShut: ToneOutputUnknown}
 	if cfg.DSD != nil {
 		// Its read side the state's warnings of the bridge's already, a state
 		// that did not read among them, before the first refresh reads the box.
@@ -586,8 +619,10 @@ type Stats struct {
 	// returned: each session's producer, reporter and openers, a release's
 	// teardown, a call waiting on its sink for its caller, the writes of the
 	// player's DSD state (a choice's, made on its caller's goroutine, counted
-	// as one: dsdWrite), and the silent probe's and the refresh's that the
-	// supervisor asks for (RequestProbeDSD, RequestRefreshDSD). A device the
+	// as one: dsdWrite), the silent probe's and the refresh's that the
+	// supervisor asks for (RequestProbeDSD, RequestRefreshDSD), and the
+	// console's test tone's, counted from before it asks for the device slot
+	// to after its node's close has answered (Tone, B601). A device the
 	// kernel holds in a call that never returns keeps the sink's writer in
 	// it, and with it the teardown that closes that sink and any call that
 	// waits on it: those are abandoned, never joined, and stay counted
@@ -856,7 +891,11 @@ var errReleased = errors.New("player backend: the session's release came first: 
 // takes the slot, under the lock the probe's answers are decided under
 // (takeProbe): a probe whose answers are decided after it keeps nothing of
 // what it asked (B762), and one whose answers were decided before, or beside
-// a Start that gave its wait up, keeps them (rounds 2 and 3).
+// a Start that gave its wait up, keeps them (rounds 2 and 3). The console's
+// test tone in the slot (Tone, B601) is preempted: ended, on the record found
+// under the lock, and waited for as a probe is, at most ToneYield, its node
+// closed before the slot is taken; past it the device is busy, the tone's
+// close still held in the kernel.
 func (b *Backend) hold(ctx context.Context, s *session) error {
 	var expired chan struct{}
 	stop := func() bool { return false }
@@ -875,8 +914,8 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 			b.mu.Unlock()
 			return engine.ErrReleaseUnconfirmed
 		}
-		p := b.probing
-		if p == nil {
+		p, tn := b.probing, b.toning
+		if p == nil && tn == nil {
 			if waiting {
 				b.waiters--
 				waiting = false
@@ -892,6 +931,13 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 			b.mu.Unlock()
 			return nil
 		}
+		held, bound, by := (<-chan struct{})(nil), ProbeWait, "the silent probe"
+		if p != nil {
+			held = p.done
+		} else {
+			tn.end(TonePreempted)
+			held, bound, by = tn.done, ToneYield, "the console's test tone"
+		}
 		if !waiting {
 			b.waiters++
 			waiting = true
@@ -899,14 +945,14 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 		b.mu.Unlock()
 		if expired == nil {
 			ch := make(chan struct{})
-			stop = b.cfg.AfterFunc(ProbeWait, func() { close(ch) })
+			stop = b.cfg.AfterFunc(bound, func() { close(ch) })
 			expired = ch
 		}
 		select {
-		case <-p.done:
+		case <-held:
 			b.startWoke()
 		case <-expired:
-			return fmt.Errorf("player backend: the device is busy: the silent probe has held it for %v: %w", ProbeWait, engine.ErrDeviceBusy)
+			return fmt.Errorf("player backend: the device is busy: %s has held it for %v: %w", by, bound, engine.ErrDeviceBusy)
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.ctx.Done():

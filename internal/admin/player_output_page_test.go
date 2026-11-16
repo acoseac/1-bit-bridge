@@ -153,8 +153,9 @@ func TestThePlayerPageOffersTheRestartAsSettingsDoes(t *testing.T) {
 
 // TestThePlayerPageOffersNoDSDControl pins the owner's decision for this
 // release: the page says plainly that DSD on this player comes later, offers
-// no control for it and no command to copy, and its script writes nothing but
-// the switch, the OpenHome switch (B612) and the DAC.
+// no control for it and no command to copy, and its script posts nothing but
+// the switch, the OpenHome switch (B612), the DAC and the test tone (B601),
+// whose request writes nothing and which no second route stops.
 func TestThePlayerPageOffersNoDSDControl(t *testing.T) {
 	srv, _, _ := newPlayerTestServer(t)
 	page := renderOutputPage(t, srv)
@@ -175,8 +176,8 @@ func TestThePlayerPageOffersNoDSDControl(t *testing.T) {
 		got = append(got, w[1])
 	}
 	sort.Strings(got)
-	if strings.Join(got, " ") != "/api/output/player/dac /api/output/player/enabled /api/output/player/openhome" {
-		t.Errorf("the page's script writes %v, want the DAC, the switch and the OpenHome switch alone", got)
+	if strings.Join(got, " ") != "/api/output/player/dac /api/output/player/enabled /api/output/player/openhome /api/output/player/tone" {
+		t.Errorf("the page's script posts %v, want the DAC, the switch, the OpenHome switch and the test tone alone", got)
 	}
 }
 
@@ -493,13 +494,14 @@ func TestThePlayerPageOffersTheOpenHomeSwitchBelowThePlayersOwn(t *testing.T) {
 // playerPageHarnessRun drives the shipped renderPlayerOutput over the cases
 // and prints what each left of the switch panel, the OpenHome switch and the
 // status line. The functions it calls that these cases do not look at are
-// stubs (the transports' table, the pending list), and every other one is
-// extracted from app.js as shipped; the panel, the OpenHome box and its note
-// start hidden, as the template ships them.
+// stubs (the transports' table, the pending list, the test tone's line), and
+// every other one is extracted from app.js as shipped; the panel, the
+// OpenHome box and its note start hidden, as the template ships them.
 const playerPageHarnessRun = `
 let playerOutputLatest = null;
 function renderPlayerOutputTransports() {}
 function renderPlayerOutputPending() {}
+function renderPlayerOutputTone() {}
 const input = JSON.parse(await (await import("node:fs/promises")).readFile(process.argv[2], "utf8"));
 const out = [];
 for (const c of input.cases) {

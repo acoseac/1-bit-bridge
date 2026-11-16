@@ -5166,6 +5166,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// full teardown below runs before upstream resolution is stopped.
 	defer func() {
 		if !discoveryStopped && player != nil {
+			player.closeTones()
 			player.refuseOpenHome(context.Background())
 			player.stop()
 		}
@@ -5187,6 +5188,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		SSDP:     ssdpSubsystem,
 		Hosts:    playerHosts,
 	})
+	// The console's test tones end as serve's stop begins (B601): a tone that
+	// plays ends with serve_stopping, answering its request while the console
+	// still serves, and none is counted from then on, before the servers drain
+	// and well before the player's own teardown, which closes them again.
+	stopTones := context.AfterFunc(ctx, player.closeTones)
+	defer stopTones()
 
 	// GET /v1/outputs lists the player as its element of kind bridge, and
 	// /v1/health advertises bridgeOutput while the plan lists it (B470 PR
@@ -5283,6 +5290,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		stopCtx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
 		if player != nil {
+			// The console's test tones close first, before the OpenHome
+			// surface is refused (B601): serve closed them as its stop
+			// began, on a goroutine of its own, which nothing orders
+			// against this.
+			player.closeTones()
 			player.refuseOpenHome(stopCtx)
 		}
 		if dlnaOwner != nil && dlnaOwner.server != nil {
