@@ -898,6 +898,31 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 	return nil
 }
 
+// mintRestoredEpoch mints the backup epoch of the database a restore put at
+// target: a restored library is a new backup generation. Minting after the
+// copy, then dropping the WAL the mint left, keeps the epoch in the main
+// file. Only where the mint's checkpoint completed (backlog B653 PR 2a): a
+// checkpoint that did not leaves the epoch, and any migration step the open
+// ran, in the WAL, which is kept for the next open to replay, and said; any
+// other error keeps it too.
+func mintRestoredEpoch(target string, opts RestoreOptions) error {
+	switch err := manifest.ResetBackupEpoch(target); {
+	case errors.Is(err, manifest.ErrEpochCheckpointBusy):
+		warnRestore(opts, fmt.Sprintf("restore: wrote %s, but its new backup epoch is still in its WAL (%s): "+
+			"the next open replays it, so leave %s and %s beside it", ManifestDBFileName, filepath.Base(target)+"-wal",
+			filepath.Base(target)+"-wal", filepath.Base(target)+"-shm"))
+		return nil
+	case err != nil:
+		return fmt.Errorf("mint backup epoch: %w", err)
+	}
+	for _, sidecar := range []string{target + "-wal", target + "-shm"} {
+		if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove epoch sidecar %s: %w", sidecar, err)
+		}
+	}
+	return nil
+}
+
 // restoreMigrationHeld refuses, before the restore's first write, a snapshot
 // whose store this version would migrate where a command may not migrate it
 // (backlog B660's second round): the restored database is opened at once to
