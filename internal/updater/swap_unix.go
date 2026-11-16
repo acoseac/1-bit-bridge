@@ -70,32 +70,47 @@ var linkFunc = os.Link
 // filesystem mutation and aborts the swap on error; see State.SwapStarted.
 // The window it closes is a Windows one — this path reaches its first
 // mutation in microseconds — but the hook fires on both platforms so the
-// marker's meaning is identical everywhere.
+// marker's meaning is identical everywhere. The staging, the mode and the
+// capabilities come before it (backlog B898), as Windows' staging and probes
+// do: a step that fails there moved nothing and armed nothing.
 func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) error {
 	bak := dst + backupExt
-	if err := armSwap(markSwapStarted); err != nil {
-		return err
-	}
 	// Stage BEFORE anything is vacated. On this path it changes nothing
 	// about the window — the hardlink keeps dst resolving through its own
 	// dentry for the whole operation, so dst was never absent here even
 	// when placeNewBinary fell back to a cross-volume copy. It matters
 	// for the FALLBACK below, which had no such protection, and doing it
 	// once for both keeps a single definition of "the new bytes are on
-	// dst's volume, durable, with the right mode".
-	staged, err := stageIntoDir(newBinary, dst, installedMode(dst))
-	if err != nil {
-		return err
+	// dst's volume, durable, with the right mode". The settings check's
+	// copy is beside dst already and is taken as it is, its mode set again
+	// from dst's, as the staging sets it.
+	mode := installedMode(dst)
+	checked := checkedBeside(newBinary, dst)
+	staged := newBinary
+	if !checked {
+		s, err := stageIntoDir(newBinary, dst, mode)
+		if err != nil {
+			return err
+		}
+		staged = s
 	}
-	// The operator's setcap on the binary, where this process may set it
-	// (backlog B660's second round).
-	carryCapabilities(dst, staged)
 	committed := false
 	defer func() {
 		if !committed {
 			_ = os.Remove(staged)
 		}
 	}()
+	if checked {
+		if err := os.Chmod(staged, mode); err != nil {
+			return fmt.Errorf("chmod staged binary: %w", err)
+		}
+	}
+	// The operator's setcap on the binary, where this process may set it
+	// (backlog B660's second round).
+	carryCapabilities(dst, staged)
+	if err := armSwap(markSwapStarted); err != nil {
+		return err
+	}
 
 	// Try the link first, and clear a stale bak only when EEXIST says
 	// that is the obstacle (R5). Removing bak unconditionally gave up the
@@ -187,18 +202,12 @@ func isCrossDeviceErr(err error) bool { return errors.Is(err, syscall.EXDEV) }
 // A failure of the second rename restores bak, so the operator is never
 // left without an executable by a swap that merely failed. The hazard
 // this reordering removes is the one no in-process restore can cover: a
-// power loss while dst is absent.
+// power loss while dst is absent. Each failure is a *SwapError saying what
+// it left (backlog B898): the put-back's own refusal BinaryMissing, naming
+// the rename that puts the binary back.
 func commitViaRename(dst, staged, bak string) error {
-	if err := renameFunc(dst, bak); err != nil {
-		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
-	}
-	// Plain os.Rename: same directory, so never cross-device.
-	if err := os.Rename(staged, dst); err != nil {
-		if rerr := os.Rename(bak, dst); rerr != nil {
-			return fmt.Errorf("install %s -> %s failed (%v); rollback also failed (%v); manual recovery needed",
-				staged, dst, err, rerr)
-		}
-		return fmt.Errorf("install %s -> %s: %w (rolled back)", staged, dst, err)
+	if err := liveMoves().commit(dst, staged, bak); err != nil {
+		return err
 	}
 	fsyncDir(filepath.Dir(dst))
 	return nil

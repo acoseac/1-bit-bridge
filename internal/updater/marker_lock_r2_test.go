@@ -150,7 +150,8 @@ func TestAStopWhileTheRestampWaitsRequestsNoRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		restarts := &atomic.Int32{}
-		return New(Options{AutoInstallOpts: &InstallOptions{DataDir: dir}, AutoInstallRestart: func() { restarts.Add(1) }}), dir, restarts
+		return New(Options{AutoInstallOpts: &InstallOptions{DataDir: dir, BinaryPath: runningBinary(t)},
+			AutoInstallRestart: func() { restarts.Add(1) }}), dir, restarts
 	}
 	t.Run("stopped while it waits", func(t *testing.T) {
 		u, dir, restarts := setUp(t)

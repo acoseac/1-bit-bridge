@@ -112,8 +112,8 @@ func TestAFailedRemovalOfTheBackupLeavesTheInstallForTheNextStart(t *testing.T) 
 
 	var stderr bytes.Buffer
 	refused := errors.New("the file is being used by another process")
-	if err := bootHousekeepingWith(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil,
-		func(string, string) error { return refused }); err != nil {
+	if err := bootHousekeepingWith(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion,
+		bootSeams{remove: func(string, string) error { return refused }, probeBound: testBackupProbeTimeout}); err != nil {
 		t.Fatalf("the housekeeping = %v; stderr=%s", err, stderr.String())
 	}
 	if st, err := updater.LoadState(r.dataDir); err != nil || st.Status != "installed" || st.DataDirOpenedBy != version.ServerVersion {
@@ -128,7 +128,7 @@ func TestAFailedRemovalOfTheBackupLeavesTheInstallForTheNextStart(t *testing.T) 
 	files.requireUnchanged(t)
 
 	stderr.Reset()
-	if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil); err != nil {
+	if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil, testBackupProbeTimeout); err != nil {
 		t.Fatalf("the next start's housekeeping = %v; stderr=%s", err, stderr.String())
 	}
 	if _, err := os.Lstat(r.bak); !os.IsNotExist(err) {
@@ -178,7 +178,7 @@ func TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied(t *testing.T) 
 			}
 
 			var stderr bytes.Buffer
-			if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, nil); err != nil {
+			if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, nil, testBackupProbeTimeout); err != nil {
 				t.Fatalf("the previous version's housekeeping = %v; stderr=%s", err, stderr.String())
 			}
 			st, err := updater.LoadState(r.dataDir)

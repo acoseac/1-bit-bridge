@@ -222,7 +222,7 @@ func TestACrashAfterTheFirstBootKeepsTheBackup(t *testing.T) {
 	r.saveMarker(t, r.dataDir)
 	for boot := 1; boot <= 2; boot++ {
 		var stderr bytes.Buffer
-		if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil); err != nil {
+		if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil, testBackupProbeTimeout); err != nil {
 			t.Fatalf("the housekeeping of start %d = %v; stderr=%s", boot, err, stderr.String())
 		}
 		if st := markerOf(t, r.dataDir); st.Status != "installing" || !st.InstalledAt.IsZero() {
@@ -328,7 +328,7 @@ func TestThreeFailedStartsRollBackAnInstallThatMigratedNothing(t *testing.T) {
 		t.Fatalf("the backup's version's admission = %v", err)
 	}
 	var housekeeping bytes.Buffer
-	if err := bootHousekeeping(t.Context(), &housekeeping, r.dataDir, r.bin, previousVersion, nil); err != nil {
+	if err := bootHousekeeping(t.Context(), &housekeeping, r.dataDir, r.bin, previousVersion, nil, testBackupProbeTimeout); err != nil {
 		t.Fatalf("the backup's version's housekeeping = %v; stderr=%s", err, housekeeping.String())
 	}
 	st := markerOf(t, r.dataDir)

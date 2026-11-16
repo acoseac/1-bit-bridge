@@ -33,7 +33,7 @@ func TestMapUpdaterError(t *testing.T) {
 			// The adapter must classify both the bare sentinel and a
 			// wrapped instance (Install returns errors with context).
 			for _, err := range []error{tc.err, fmt.Errorf("install: %w", tc.err)} {
-				got := mapUpdaterError(err)
+				got := mapUpdaterError(err, updaterInstall)
 				if !errors.Is(got, tc.want) {
 					t.Errorf("mapUpdaterError(%v) does not unwrap to %v", err, tc.want)
 				}
@@ -41,11 +41,11 @@ func TestMapUpdaterError(t *testing.T) {
 		})
 	}
 
-	if got := mapUpdaterError(nil); got != nil {
+	if got := mapUpdaterError(nil, updaterInstall); got != nil {
 		t.Errorf("mapUpdaterError(nil) = %v, want nil", got)
 	}
 	boom := errors.New("boom")
-	if got := mapUpdaterError(boom); !errors.Is(got, boom) {
+	if got := mapUpdaterError(boom, updaterInstall); !errors.Is(got, boom) {
 		t.Errorf("mapUpdaterError(unknown) = %v, want passthrough of %v", got, boom)
 	}
 }

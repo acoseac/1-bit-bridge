@@ -115,8 +115,10 @@ func recordRestoredStore(h *updater.RestoreHold) error {
 
 // SetOnSourceWorkerEndForTest installs the hook a restore's source worker
 // runs last, given the snapshot as the restore was given it, once it has
-// handed its hold over or let go of what it took, and returns the restore.
-// Its callback must return, and ignore every snapshot but its test's.
+// handed its hold over or let go of what it took, and bridge restore's look
+// before its prompt (CheckRestoreSource) once its look has answered, and
+// returns the restore. Its callback must return, and ignore every snapshot
+// but its test's.
 // Exported from a production file (it was export_test.go's until B653 PR 2a)
 // so cmd/bridge's tests can show that bridge restore finds an unfinished
 // restore before any snapshot is looked at; production code never calls it.

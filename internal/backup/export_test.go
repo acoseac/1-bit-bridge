@@ -252,3 +252,13 @@ func SetOnSourceStepForTest(fn func(dir, step string)) (restore func()) {
 	prev := onSourceStep.Swap(p)
 	return func() { onSourceStep.Store(prev) }
 }
+
+// SetReadSourceManifestForTest replaces the read of the manifest that bridge
+// restore's look before its prompt makes (os.ReadFile), and returns the
+// restore, which runs once the look's worker has ended
+// (SetOnSourceWorkerEndForTest): the worker reads the seam.
+func SetReadSourceManifestForTest(fn func(path string) ([]byte, error)) (restore func()) {
+	prev := readSourceManifest
+	readSourceManifest = fn
+	return func() { readSourceManifest = prev }
+}

@@ -125,6 +125,11 @@ func ParseLease(s string) (Lease, error) {
 	return l, nil
 }
 
+// ConfigLease is what ReserveConfiguration hands its caller, and only its
+// caller: no snapshot holds it (Snapshot.ConfigurationReserved says whether a
+// reservation is held), so no reader can let a reservation go.
+type ConfigLease struct{ b [16]byte }
+
 // Hold is what EnterMaintenance answers: the lease, the hold's expiry, and
 // whether the release it asked for was confirmed (false: entered, release
 // unconfirmed).
@@ -290,6 +295,7 @@ type Snapshot struct {
 	shuffle     bool
 	output      OutputState
 	maint       *MaintenanceInfo
+	configured  bool // a configuration reservation held
 	unconfirmed *ReleaseInfo
 	devReleased bool
 	resumed     ResumeResult
@@ -421,6 +427,12 @@ func (s *Snapshot) Maintenance() (MaintenanceInfo, bool) {
 	}
 	return *s.maint, true
 }
+
+// ConfigurationReserved reports a configuration reservation held
+// (Engine.ReserveConfiguration): while one is, whatever would start a session
+// is refused ReasonConfiguring. The lease is its holder's alone, in no
+// snapshot.
+func (s *Snapshot) ConfigurationReserved() bool { return s.configured }
 
 // ReleaseUnconfirmed is the release past its deadline, when there is one:
 // until its acknowledgement nothing opens the device.

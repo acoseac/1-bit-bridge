@@ -31,6 +31,11 @@ import (
 // shorten it; production code MUST NOT mutate it.
 var configCheckTimeout = 30 * time.Second
 
+// ConfigCheckBound is the longest a settings check runs: its bound and the
+// wait for its pipes once a run past it is killed, for cmd/bridge's pin of
+// what the crash rollback holds the install marker's lock for (backlog B898).
+func ConfigCheckBound() time.Duration { return configCheckTimeout + waitDelay }
+
 // VersionProbeTimeout is ProbeVersion's bound, which the early rollback asks
 // its backup within in production. A release binary's `version` answered in
 // 8 ms on legion0 with its pages dropped from the cache, reading 0.5 MB of

@@ -188,7 +188,7 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 		noRollback(stderr, st, fmt.Sprintf("there is no backup to put back, a regular file at %s", backup))
 		return 0, false
 	}
-	got, err := updater.ProbeVersionWithin(ctx, backup, backupProbeBound(opts))
+	got, err := backupVersion(ctx, backup, opts)
 	if err != nil {
 		noRollback(stderr, st, fmt.Sprintf("the backup at %s did not say its version: %v", backup, err))
 		return 0, false
@@ -228,6 +228,14 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 		restore = updater.RollbackBinary
 	}
 	if err := restore(binaryPath, ".bak"); err != nil {
+		// No binary at its path (backlog B898): the record stays, true of
+		// whichever rename puts one back, and the start refuses its
+		// settings as before.
+		if missing := binaryMissing(err); missing != "" {
+			noRollback(stderr, st, fmt.Sprintf("could not put the backup back, and the bridge's program file is not at its path: %v; "+
+				"the rollback's record is kept: %s", err, missing))
+			return 0, false
+		}
 		// The install marker back as it was, so that a start that gets past
 		// these settings goes on with the install as it would have, on
 		// probation until it is confirmed (backlog B660).
@@ -242,6 +250,21 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 		"auto-installer; the settings file is unchanged, so fix it before installing %s again; exiting for the service manager to start %s\n",
 		version.ServerVersion, st.PreviousVersion, binaryPath, version.ServerVersion, version.ServerVersion, st.PreviousVersion)
 	return supervision.RestartExitCode, true
+}
+
+// binaryMissing is what a start's line says to do where a rollback's restore
+// left no binary at its path (updater.ErrBinaryMissing; backlog B898): the
+// one rename that puts it back, then a start, which finishes the rollback the
+// record describes; "" where the binary is there.
+func binaryMissing(err error) string {
+	if !errors.Is(err, updater.ErrBinaryMissing) {
+		return ""
+	}
+	var swapErr *updater.SwapError
+	if errors.As(err, &swapErr) && swapErr.Recover != "" {
+		return swapErr.Recover + ", then start the bridge, which finishes the rollback"
+	}
+	return "put the bridge's binary back at its path, then start the bridge"
 }
 
 // noRollback reports why the early rollback leaves the install st describes,
@@ -267,6 +290,16 @@ func backupProbeBound(opts serveOpts) time.Duration {
 		return opts.backupProbeTimeout
 	}
 	return updater.VersionProbeTimeout
+}
+
+// backupVersion asks the backup at path its version within backupProbeBound,
+// through opts.probeVersion (updater.ProbeVersionWithin where unset).
+func backupVersion(ctx context.Context, path string, opts serveOpts) (string, error) {
+	probe := opts.probeVersion
+	if probe == nil {
+		probe = updater.ProbeVersionWithin
+	}
+	return probe(ctx, path, backupProbeBound(opts))
 }
 
 // disarmEarlyRollback is the boot's admission: it records, before serve's

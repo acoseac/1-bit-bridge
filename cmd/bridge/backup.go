@@ -385,6 +385,10 @@ func describeVerdictLed(w io.Writer, prefix string, v backup.Verification) {
 // and puts it back in t.Cleanup; nothing else sets it.
 var restoreRandom io.Reader
 
+// checkRestoreSource is bridge restore's look before its prompt,
+// backup.CheckRestoreSource; only a test replaces it.
+var checkRestoreSource = backup.CheckRestoreSource
+
 // restoreCmd is `bridge restore [--config X] [--yes] <snapshot-dir>`
 // — copies files from `<snapshot-dir>` back into the live data dir.
 //
@@ -504,13 +508,18 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	// up in this process, asked first of no filesystem, then on a worker the
 	// folder it resolves into, another process's marker there counted only
 	// while that folder's lock is held, and the manifest; a folder that does
-	// not answer is refused within the bound, before any prompt. The restore
-	// asks again, under the folder's lock, once confirmed. It follows the
-	// config, the data dir's lock and the store's (backlog B653 PR 2a).
-	switch err := backup.CheckRestoreSource(ctx, snapshotDir, verifyCmdLockWait); {
+	// not answer is refused within the bound, before any prompt, and a
+	// manifest Windows keeps busy past its read's retries is refused as busy,
+	// exit 1, never as no snapshot (backlog B898). The restore asks again,
+	// under the folder's lock, once confirmed. It follows the config, the
+	// data dir's lock and the store's (backlog B653 PR 2a).
+	switch err := checkRestoreSource(ctx, snapshotDir, verifyCmdLockWait); {
 	case errors.Is(err, backup.ErrNotASnapshot):
 		fmt.Fprintf(stderr, "restore: %q is not a recognized snapshot directory (no readable manifest.json with a supported schema)\n", snapshotDir)
 		return 2
+	case errors.Is(err, backup.ErrSnapshotBusy):
+		fmt.Fprintf(stderr, "restore: %q was busy (its manifest was being written, or held by another program, most likely a virus scanner): run this again in a moment\n", snapshotDir)
+		return 1
 	case err != nil:
 		if !sayRestoreRefusal(stderr, err) {
 			fmt.Fprintf(stderr, "restore: %v\n", err)

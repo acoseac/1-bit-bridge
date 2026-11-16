@@ -26,8 +26,11 @@ import (
 // records it in the marker (State.RollbackRefused) where it holds the install
 // marker's lock, and serve goes on starting, since this start may be the one
 // that works. That start counts itself at its admission, so every later start
-// that does not end cleanly asks again. acted says whether it put the backup
-// back, and code is then serve's exit.
+// that does not end cleanly asks again. acted says whether the start ends
+// here, and code is then serve's exit: it put the backup back (75), or its
+// put-back left no binary at its path (1, backlog B898), the rollback's record
+// kept and the admission not reached; a start that refused its settings then
+// refuses them as before (acted false).
 //
 // It runs right after serve took the data dir's lock, and only where it did
 // (the backup is put back by the data dir's owner alone), before the boot's
@@ -38,8 +41,9 @@ import (
 // early rollback leaves the install and the count asks for this one, under the
 // data dir's lock it takes there (recoverCrashedRefusedInstall; backlog B760).
 // then is what the start does where this leaves the install, which each line
-// that says so ends with (crashRollbackGoesOn, crashRollbackRefusedStart). It
-// follows the
+// that says so ends with (crashRollbackGoesOn, crashRollbackRefusedStart; a
+// start that goes on ends instead where no binary is left,
+// crashRollbackEndsTheStart). It follows the
 // early rollback (recoverRefusedInstall) step for step: the install marker's
 // lock, held from its read through the rename (never without the exclusion),
 // the marker read again under it, the backup a regular file whose `version`
@@ -134,7 +138,7 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		refuse(fmt.Sprintf("there is no backup to put back, a regular file at %s", backup), "there is no backup beside the binary to put back")
 		return 0, false
 	}
-	got, err := updater.ProbeVersionWithin(ctx, backup, backupProbeBound(opts))
+	got, err := backupVersion(ctx, backup, opts)
 	if err != nil {
 		refuse(fmt.Sprintf("the backup at %s did not say its version: %v", backup, err), "the backup did not say its version")
 		return 0, false
@@ -144,7 +148,11 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 			fmt.Sprintf("the backup is %s, where the install replaced %s", got, st.PreviousVersion))
 		return 0, false
 	}
-	check := updater.CheckConfig(ctx, backup, configPath)
+	checkConfig := opts.checkConfig
+	if checkConfig == nil {
+		checkConfig = updater.CheckConfig
+	}
+	check := checkConfig(ctx, backup, configPath)
 	switch check.Verdict {
 	case updater.ConfigValid:
 	case updater.ConfigCheckUnsupported:
@@ -181,6 +189,20 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		restore = updater.RollbackBinary
 	}
 	if err := restore(binaryPath, ".bak"); err != nil {
+		// No binary at its path (backlog B898): the record stays, its hold,
+		// its veto and its count with it, and the start ends here, before the
+		// admission, which would count it, lift the veto of its version and
+		// let its store migrate past what the backup reads. A start that
+		// refused its settings refuses them as before.
+		if missing := binaryMissing(err); missing != "" {
+			code, ends, next := 0, false, then
+			if then == crashRollbackGoesOn {
+				code, ends, next = 1, true, crashRollbackEndsTheStart
+			}
+			crashRollbackLine(stderr, st, fmt.Sprintf("could not put the backup back, and the bridge's program file is not at its path: %v; "+
+				"the rollback's record is kept: %s", err, missing), next)
+			return code, ends
+		}
 		// The install marker back as it was, with why: the binary in place is
 		// still this version's.
 		st.RollbackRefused = "the backup could not be put back over the binary"
@@ -217,6 +239,9 @@ func rollbackWaitsForTheRestore(dataDir string) string {
 const (
 	crashRollbackGoesOn       = "this start goes on, and counts itself"
 	crashRollbackRefusedStart = "this start refuses its settings, as it did before, and is not counted"
+	// crashRollbackEndsTheStart is a start whose settings loaded, where the
+	// rollback left no binary at its path (backlog B898).
+	crashRollbackEndsTheStart = "this start ends here, before it writes anything, and is not counted"
 )
 
 // crashRollbackLine says why the crash rollback leaves the install st

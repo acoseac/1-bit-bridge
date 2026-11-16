@@ -2,14 +2,18 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 )
 
 // A restore's source (backlog B826). A restore reads the snapshot it restores
@@ -108,9 +112,19 @@ var ErrSnapshotGone = errors.New("the snapshot is no longer there")
 // take reads as a snapshot here, and the restore refuses it in its own words.
 var ErrNotASnapshot = errors.New("not a recognized snapshot directory (no readable manifest.json with a supported schema)")
 
+// ErrSnapshotBusy is bridge restore's refusal, before its prompt, of a snapshot
+// whose manifest Windows kept refusing past the read's retries
+// (atomicwrite.ErrReadBusy): a moment's hold, never ErrNotASnapshot.
+var ErrSnapshotBusy = errors.New("the snapshot's manifest was busy")
+
+// readSourceManifest is checkSource's read of the manifest, os.ReadFile; only
+// a test replaces it (SetReadSourceManifestForTest).
+var readSourceManifest = os.ReadFile
+
 // onSourceWorkerEnd, nil in production, runs last on a restore's source
 // worker, given the snapshot as the restore was given it, once the worker has
-// handed its hold over, or let go of what it took and dropped its hold's mark
+// handed its hold over, or let go of what it took and dropped its hold's mark,
+// and on CheckRestoreSource's once its look has answered
 // (SetOnSourceWorkerEndForTest).
 var onSourceWorkerEnd atomic.Pointer[func(string)]
 
@@ -125,6 +139,13 @@ var onSourceStep atomic.Pointer[func(dir, step string)]
 func sourceStep(snapshotDir, step string) {
 	if hook := onSourceStep.Load(); hook != nil {
 		(*hook)(snapshotDir, step)
+	}
+}
+
+// sourceWorkerEnded runs onSourceWorkerEnd's hook, if any.
+func sourceWorkerEnded(snapshotDir string) {
+	if hook := onSourceWorkerEnd.Load(); hook != nil {
+		(*hook)(snapshotDir)
 	}
 }
 
@@ -232,11 +253,7 @@ func holdSource(ctx context.Context, snapshotDir string, wait time.Duration) (*s
 	out := make(chan *sourceHold)
 	gone := make(chan struct{})
 	go func() {
-		defer func() {
-			if hook := onSourceWorkerEnd.Load(); hook != nil {
-				(*hook)(snapshotDir)
-			}
-		}()
+		defer sourceWorkerEnded(snapshotDir)
 		s := takeSource(h, snapshotDir, wait)
 		if s.err != nil {
 			// Nothing to hand over: what the hold holds is let go here,
@@ -377,8 +394,11 @@ func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 // this process's mark, then another process's marker there, counted only
 // while another open holds the folder's lock, since a marker beside a lock
 // nobody holds is one a process that ended left, which the restore removes
-// once it holds the lock), and its manifest read. It answers
-// ErrCheckStillRunning, ErrNotASnapshot, sourceExpiryError's refusal, or nil.
+// once it holds the lock), and its manifest read, made again on ctx while
+// Windows refuses it for a moment (atomicwrite.ReadWithRetryCtx, backlog
+// B898). It answers ErrCheckStillRunning, ErrNotASnapshot, ErrSnapshotBusy
+// for a refusal past the read's retries, a stop wrapping ctx's error where ctx
+// ends them, sourceExpiryError's refusal, or nil.
 // It writes nothing, and holds nothing past its return: the lock it tries to
 // ask whether another holds it, it lets go at once, and a worker given up
 // holds nothing.
@@ -387,7 +407,7 @@ func CheckRestoreSource(ctx context.Context, snapshotDir string, wait time.Durat
 		return err
 	}
 	out := make(chan error, 1)
-	go func() { out <- checkSource(snapshotDir) }()
+	go func() { defer sourceWorkerEnded(snapshotDir); out <- checkSource(ctx, snapshotDir) }()
 	err, answered := awaitSourceWorker(ctx, wait, out)
 	if !answered {
 		return sourceExpiryError(snapshotDir, ctx.Err())
@@ -396,7 +416,7 @@ func CheckRestoreSource(ctx context.Context, snapshotDir string, wait time.Durat
 }
 
 // checkSource is CheckRestoreSource's look, on its worker.
-func checkSource(snapshotDir string) error {
+func checkSource(ctx context.Context, snapshotDir string) error {
 	snap, root, err := resolveSnapshotIn(snapshotDir, "")
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrNotASnapshot, err)
@@ -404,7 +424,21 @@ func checkSource(snapshotDir string) error {
 	if check, held := StuckCheckOf(root); held {
 		return heldRefusal(snapshotDir, stillRunning(check))
 	}
-	m, err := readManifest(filepath.Join(snap, ManifestFile))
+	var data []byte
+	err = atomicwrite.ReadWithRetryCtx(ctx, func() (err error) {
+		data, err = readSourceManifest(filepath.Join(snap, ManifestFile))
+		return err
+	})
+	var m Manifest
+	switch {
+	case errors.Is(err, atomicwrite.ErrReadBusy):
+		return fmt.Errorf("%w: %w", ErrSnapshotBusy, spelledAsGiven(err, snap, snapshotDir))
+	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
+		return fmt.Errorf("the restore was stopped while it read the snapshot %s, before its prompt: %w; nothing was restored",
+			snapshotDir, err)
+	case err == nil:
+		err = json.Unmarshal(data, &m)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrNotASnapshot, spelledAsGiven(err, snap, snapshotDir))
 	}

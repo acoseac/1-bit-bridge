@@ -61,6 +61,10 @@ func (e *Engine) seek(c *command) {
 			e.answer(c, reply{err: why})
 			return
 		}
+		if why := e.configRefusal(name); why != nil {
+			e.answer(c, reply{err: why})
+			return
+		}
 	}
 	at, err := e.seekPoint(c)
 	if err != nil {
