@@ -100574,7 +100574,7 @@ which it turns red ("bridge.db was made").
 
 `rules-b653p2a.patch` (the worktree's `.tmp/_b653p2a/`, and the job folder),
 applied and committed as `24203d7b` (a session on this host cannot write
-`.claude/`, so the rules travel as a patch): in
+the rules directory, so the rules travel as a patch): in
 `scanner.md`, the lifetime lock's line and the rename's, their long forms in
 `ops/History-rules-scanner.md`, the B613 bullet's clause that a restore of
 either kind records the store change, and the globs of the files this PR adds;
