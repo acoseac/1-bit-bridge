@@ -102462,3 +102462,72 @@ inside the slot from 00:44.
 | gofmt (`go run cmd/gofmt -l`) on the changed files | nothing listed |
 | `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f3d7f7d9 and with this table |
 | `make docs-check` | exit 0, at f3d7f7d9 and with this table |
+
+## 2026-11-16 — B601's round 5: a refused Play's words, and the tone before it
+
+Branch `feat/b601-pcm-tone`. e772fa5d merges main 30ae88f6 (B911 and B912, the
+two load-sensitive tests this branch's CI failed, with B898 PR 1 and B728 B9
+PR 3a): four documents conflicted where both sides wrote, CLAUDE.md's three
+player rows taking each side's words, and `ops/History-rules-cli-serve.md`,
+`ops/History-rules-output.md` and this log both sides' entries, this
+branch's first. e81bb2c1 is the page's test ahead of its fix, b5b26217 the
+fix, then this record; the rules' change is the round's patch, which goes in
+as a commit after this record.
+
+A tone that ends `stop_unconfirmed` holds the device slot until its node's
+close answers, so a newer Play is refused meanwhile (409 `tone_playing`, or
+`player_sounding` where the engine plays), its words on the tone's line. The
+next status still read the earlier tone `stop_unconfirmed`, and
+`renderPlayerOutputTone` painted its warning over the refusal and set
+`busyShown`, so the idle status once the DAC closed said how the earlier
+tone had ended, on the line where the operator's Play had been refused. The
+page now marks the line as a refusal's (`playerTone.refusalShown`) where the
+bridge answered the Play 409, and while the mark stands a status neither
+repaints the line nor sets `busyShown`; a status that reads the tone idle, a
+later tone `playing` (another page's included) or `release_unconfirmed`
+(whose restart warning replaces the refusal) takes the mark back, and the
+status speaks as before from that reading on. `stopping` holds the mark as
+`stop_unconfirmed` does: either is a tone still letting go of the DAC. Only
+a refusal sets it: a Play that ran keeps the warning it answered for the next
+status (`busyShown`, round 4), and a failure the bridge did not answer 409,
+where the tone may have run, sets nothing. Play's start, the page's wiring, a
+Stop's confirmation, and the page's hiding and its showing again from the
+cache take it back. The fix is 18 lines of `app.js` (15 added, 3 removed).
+
+`TestTheToneBeforeARefusedPlayDoesNotPaintOverIt` runs four cases under
+node, each after a tone that answered `stop_unconfirmed` and a newer Play
+refused 409 `tone_playing`: `stop_unconfirmed` then idle, the refusal
+standing through both with `busyShown` false, then a later `playing` and
+idle, each painted; `stop_unconfirmed` then `release_unconfirmed`, painted;
+`stop_unconfirmed` then `playing`, painted; and the page hidden and shown
+again from the cache while the status reads `stop_unconfirmed`, painted. Its
+structural half (the guard, its setting in the 409 branch, the four paths
+that take it back) fails at e81bb2c1 and passes at b5b26217; the test host
+has no node, so the node half of every page case skipped there. Three
+controls, each an edit of b5b26217's `app.js`, the case run, then the
+committed bytes written back: A, the guard's two lines taken out; B, the line
+that takes the mark back taken out, so the mark holds every status once set;
+C, `"release_unconfirmed"` taken out of the statuses that end it. Each failed
+by the structural half; under node, A fails the first case's
+`stop_unconfirmed` step, B its later `playing` and idle and the second step
+of the next two cases, C the second case's `release_unconfirmed` step.
+
+The merge left `.claude/rules/admin-console.md` at 100,377 bytes, over its
+100,000: main's 741 bytes beside this branch's 5,473. The round's patch moves
+the B177 entry's long form, verbatim, into a new
+`ops/History-rules-admin-console.md` (`scripts/doc-split/move_entry.py
+--line 329`, which leaves its pointer in place), which
+`scripts/doc-split/verify_moves.py --base b5b26217` passes with the move
+alone and again with the test tone's bullet named as edited, and adds the
+round's clause and case to that bullet: 96,998 bytes. On a copy with the
+patch applied, `make docs-check`'s four commands and cmd/bridge's
+`TestEveryCitedTestNameExists` pass.
+
+At b5b26217, in the build slot: `go test ./internal/admin/` passed in 258 s,
+none of its 51 node halves running (the seven tone page cases' structural
+halves passed); `go test -race -count=1 -timeout 45m ./internal/admin/
+./internal/api/ ./internal/backup/` passed (admin 1,221 s, api 157 s, backup
+754 s); and `go vet ./...` with the tags for linux/amd64, darwin/arm64 and
+windows/amd64 (`CGO_ENABLED=0` for the two) exited 0 each. go1.27.3's gofmt
+lists none of the changed Go files, and the names check over the branch's
+commit messages and added lines since main finds nothing in this round's.
