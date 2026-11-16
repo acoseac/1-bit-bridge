@@ -101145,3 +101145,84 @@ inside the slot from 00:44.
 | gofmt (`go run cmd/gofmt -l`) on the changed files | nothing listed |
 | `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f3d7f7d9 and with this table |
 | `make docs-check` | exit 0, at f3d7f7d9 and with this table |
+
+## 2026-11-16 — B653 PR 2a round 3: the restore holds the install marker's lock through the database's replacement
+
+Main (`adadd7b3`, B869A) was merged first, as one merge commit (`81ff6ff5`):
+every file main alone changed is main's blob, and this log, the one file both
+sides changed, keeps both appended entries in date order.
+
+**Round 2's Windows leg.** Four of this PR's tests failed there, each reading
+a lock file another handle held: `treeState` (internal/backup) and
+`dirState` (internal/manifest) hashed every regular file,
+`bridge.db-open.lock` and `update-state.lock` among them, and Windows refuses
+a read of a byte range another handle has locked. No production path reads
+either lock file. Both helpers now compare a lock file by its size, mode and
+modification time. `TestARestoreLeavesItsSnapshotAsItWas` wanted its
+snapshot's record VERIFIED after a check again, which where no directory can
+be synced records nothing (`ErrRecheckNotRecorded`): it takes that answer
+there, and runs both here, the second through `SetSyncsParentDirForTest`.
+Only the windows-latest leg proves these four.
+
+**An install armed during the restore.** The admission and the record each
+took the install marker's lock and let it go, so `bridge update`, which takes
+neither `server.lock` nor the store's lock, could arm an install with this
+version as its previous one between them, and the record refused after the
+player seal's completion had written, or between the record and the
+database's copy, which then replaced the store with nothing recorded. A
+record that could not take the lock also went on where it had nothing to
+write, an absent marker among them, while the lock's holder could still arm.
+`updater.HoldMarkerForRestore` now takes the lock and refuses where it is not
+held (another holder past the wait, ENOLCK, a failure, a filesystem that keeps
+none), whatever the marker holds, and makes the admission under it;
+`RestoreHold.Record` records under the same hold (`disarmHeld`, never
+`LockState` again); `Release` is idempotent. `RestoreWithOptions` takes the
+hold before its turn of the config file's lock, the order `checksoff.go`
+(its lines 30 to 38) documents, the marker's lock before the config's,
+defers its release, records once the config's and the snapshot's checks have
+passed, and lets the lock go right after the database's copy, before
+`manifest.ResetBackupEpoch` (`backup.go`'s lines 619-622, 714, 870 at
+`48cf9354`).
+
+The contract after that release: the epoch's open asks the marker only where
+a migration step is pending (`store.go:3032`, `if current <
+migrations[len(migrations)-1].version`), and where one is, this version's
+own steps need no record when it is the install's previous version
+(`armsStoreRecord`, `disarm.go:433`): an install armed in that window finds
+this version's store in place, and what it records from then on is its own.
+`TestAnInstallArmedOnceTheDatabaseIsInPlaceIsLeftToItsOwnRecords` is the
+case at the ladder's top: the install arms at once, the marker after the
+restore records nothing of the restore's.
+
+**The seal.** It is completed only after the record, wherever the restore has
+a player target, whether or not it replaces the database or restores an
+identity; its failure refuses only a restore of an identity, as before. The
+admission and the record are one lock window, so no install can be armed
+between them.
+
+**The Lows.** On Windows `os.SameFile` reads a path's file ID through a
+handle opened with no access asked and closed at once (Go 1.27.3's
+`os/types_windows.go:321`, in `loadFileId`), which holds no lock and lets none
+go: the lookup's comment says so. A hold whose lock file's identity cannot be
+read is refused (`ErrStoreLockUnavailable`), so a live entry's identity is
+never nil. The Windows helper takes a short name only where it was written
+whole (`int(n) >= len(buf)` refuses), and `RestoreWithOptions`' doc says what a
+refusal before the first write leaves: the database's directory and the
+store's lock file where it made them, and the install marker's lock file.
+
+**Reds and controls.** Over `d43a0b15`'s production code, a copy with a
+names-only shim of the hold over round 2's two asks and the copy seams joined
+onto its own lines (`.tmp/_b653p2a/red3.py`, predictions written first):
+`TestAnInstallArmedBeforeTheDatabaseIsReplacedWaitsForTheReplacement` (the
+install armed before the replacement), `TestAnInstallArmedBetweenTheRestoresChecksWaitsForThem`
+(refused by the previous version after the seal was written),
+`TestARecordThatFailsLeavesThePlayerSealOwed` (the seal written),
+`TestARestoreByTheVersionAnInstallReplacesIsRefusedWithoutTheLock` (an absent
+marker admitted without the lock) and
+`TestARestoreHoldsTheMarkersLockUntilItLetsItGo` (another taker took it) all
+failed as predicted; the contract case passed there, as predicted. Seven
+controls by overlay (`.tmp/_b653p2a/controls3.py`), all red: the lock let go
+right after the record; the seal completed first again; no release after the
+copy; a lock that cannot be taken gone on unheld; a filesystem that keeps none
+admitted; the record taking the lock again; and an identity that cannot be
+read kept as none.

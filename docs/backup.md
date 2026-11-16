@@ -243,7 +243,10 @@ from being rolled back: the previous version may not read the database the
 restore put in place. For the same reason, while an update is on probation,
 the version it replaced (a `bridge` you kept, or the update's backup) refuses
 to restore the database, with nothing restored: restore with the updated
-bridge, or once the update is confirmed or rolled back.
+bridge, or once the update is confirmed or rolled back. While restore replaces
+the database, an update waits for it to finish (`bridge update` says to try
+again if the restore takes longer than its wait), and a restore that an update
+being installed keeps waiting is refused the same way, with nothing restored.
 
 Before it asks you to confirm, restore looks at the snapshot. It refuses at
 once, with nothing restored, while a check, a prune or a restore of those
