@@ -8388,8 +8388,9 @@ const PLAYER_TONE_STATES = {
 // Stop's confirmation running, and the count that lets a later Play or Stop
 // end an earlier one; and whether the tone's line holds what the next status
 // must say again (renderPlayerOutputTone): a tone that was not idle, or a stop
-// not confirmed.
-const playerTone = { controller: null, confirming: false, stopSeq: 0, busyShown: false };
+// not confirmed; and whether it holds a refused Play's words, which a status
+// still reading the tone before it leaves as they are.
+const playerTone = { controller: null, confirming: false, stopSeq: 0, busyShown: false, refusalShown: false };
 
 // playerToneFormatText words what the kernel committed for a tone, as it
 // plays or played, "" before an open did.
@@ -8435,10 +8436,14 @@ function showPlayerToneLine(kind, text) {
 // and no Stop's confirmation running: a tone that is not idle (another
 // page's, or one still letting go of the DAC), then, once it is idle again,
 // how it ended, and on a line still empty how the last tone ended; an idle
-// tone otherwise leaves the line as the page last set it.
+// tone otherwise leaves the line as the page last set it. A refused Play's
+// words stand while the status still reads the tone before it: only a tone
+// read idle, playing or release_unconfirmed ends that (refusalShown).
 function renderPlayerOutputTone(run) {
   const tone = run.tone;
   if (!tone || playerTone.controller || playerTone.confirming) return;
+  if (["idle", "playing", "release_unconfirmed"].includes(tone.state)) playerTone.refusalShown = false;
+  if (playerTone.refusalShown) return;
   const line = document.getElementById("player-output-tone-msg");
   const busy = tone.state !== "idle";
   if (busy || playerTone.busyShown || (line && !line.textContent)) {
@@ -8476,6 +8481,7 @@ function wirePlayerOutputTone() {
   playerTone.controller = null;
   playerTone.confirming = false;
   playerTone.busyShown = false;
+  playerTone.refusalShown = false;
   play.addEventListener("click", async () => {
     const st = playerOutputLatest;
     if (!st || !st.available || playerTone.controller) return;
@@ -8486,6 +8492,7 @@ function wirePlayerOutputTone() {
     // What the line said of an earlier tone is no longer the status's to say
     // again: this tone's own words win.
     playerTone.busyShown = false;
+    playerTone.refusalShown = false;
     // A status read before the tone starts, or while it plays, would paint
     // over what the page says of it once it answers: the tone's start, and
     // its result below, end every read still out (playerOutputSeq).
@@ -8512,6 +8519,8 @@ function wirePlayerOutputTone() {
         showPlayerToneLine("err", err.status === 409
           ? `The tone did not play: ${PLAYER_TONE_WORDS[err.code] || err.message}`
           : `The tone did not play: ${err.message}`);
+        // A refusal stands while the status still reads the tone before it.
+        playerTone.refusalShown = err.status === 409;
       }
     } finally {
       if (playerTone.controller === controller) playerTone.controller = null;
@@ -8543,6 +8552,7 @@ function hidePlayerTone() {
   playerTone.stopSeq++;
   playerTone.confirming = false;
   playerTone.busyShown = true;
+  playerTone.refusalShown = false;
 }
 
 // showPlayerToneAgain is a page the back/forward cache shows again (pageshow,
@@ -8558,6 +8568,7 @@ function showPlayerToneAgain(play, stop) {
   playerTone.stopSeq++;
   playerTone.confirming = false;
   playerTone.busyShown = true;
+  playerTone.refusalShown = false;
   showPlayerToneLine("ok", "");
   setDisabled(stop, true);
   setDisabled(play, false);
@@ -8581,6 +8592,7 @@ function showPlayerToneAgain(play, stop) {
 async function confirmPlayerToneStop(scope) {
   const seq = ++playerTone.stopSeq;
   playerTone.confirming = true;
+  playerTone.refusalShown = false;
   const deadline = Date.now() + 3000;
   const current = () => seq === playerTone.stopSeq && !scope.aborted;
   showPlayerToneLine("ok", "Stopping the tone…");
