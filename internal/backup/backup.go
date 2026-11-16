@@ -532,13 +532,16 @@ func Restore(snapshotDir string, dst Targets) error {
 // marker's lock and makes its admission under it (holdRestoreMarker), holding
 // that lock through its record and the database's copy, and letting it go
 // right after the copy, before the epoch's open (backlog B653 PR 2a's third
-// round). It completes a player seal the destination left incomplete only
-// once every refusal before its first write has passed, the config's checks
-// and the marker's record included, wherever it has a player target. It reads
-// the snapshot where it resolves, in the folder whose lock it holds. The data
-// directory's lock, its caller's, comes first, the store's lifetime lock
-// next, the snapshot's folder's after it, then the install marker's, and
-// bridge.yaml's last.
+// round). It mints the restored database's backup epoch once it has let
+// bridge.yaml's lock go, under the store's hold, on every return after the
+// copy, a late refusal's included (its fourth round: mintRestoredEpoch, its
+// error joined to the restore's). It completes a player seal the destination
+// left incomplete only once every refusal before its first write has passed,
+// the config's checks and the marker's record included, wherever it has a
+// player target. It reads the snapshot where it resolves, in the folder whose
+// lock it holds. The data directory's lock, its caller's, comes first, the
+// store's lifetime lock next, the snapshot's folder's after it, then the
+// install marker's, and bridge.yaml's last.
 //
 // A restore that writes bridge.yaml, or whose caller read the config to work
 // out the targets (RestoreOptions.ConfigAsRead), takes the config file's lock
@@ -621,6 +624,22 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 		}
 		defer marker.Release()
 	}
+	// The restored database's backup epoch is minted on every return once the
+	// database is replaced (dbReplaced), after bridge.yaml's lock is let go
+	// (deferred before its unlock, it runs after it) and before the store's
+	// hold is: the epoch's open takes the install marker's lock again where a
+	// step is pending, and a writer that takes that lock and then bridge.yaml's
+	// would wait on the restore while the restore waited on it (backlog B653
+	// PR 2a's fourth round). Its error is joined to the restore's.
+	var dbReplaced string
+	defer func() {
+		if dbReplaced == "" {
+			return
+		}
+		if mintErr := mintRestoredEpoch(dbReplaced, opts); mintErr != nil {
+			err = errors.Join(err, mintErr)
+		}
+	}()
 	var configTurn *config.FileLock
 	if dst.BridgeYAML != "" && (slices.Contains(m.Files, "bridge.yaml") || opts.ConfigAsRead != nil) {
 		l, err := config.LockFile(dst.BridgeYAML)
@@ -860,38 +879,18 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 			return fmt.Errorf("restore %s: %w", name, err)
 		}
 		if name == ManifestDBFileName {
-			// The database is replaced: the install marker's lock goes now,
-			// before the epoch's open, which takes it again where a step is
-			// pending (disarmBeforeMigrating). An install armed from here on
-			// finds this version's store in place, and the open records as
-			// every migrating open does: nothing at the ladder's top, nothing
-			// for this version's own steps where it is the install's previous
-			// version (backlog B653 PR 2a's third round).
+			// The database is replaced: its epoch is owed (dbReplaced), and the
+			// install marker's lock goes now, before the epoch's open, which
+			// takes it again where a step is pending (disarmBeforeMigrating).
+			// An install armed from here on finds this version's store in
+			// place, and the open records as every migrating open does:
+			// nothing at the ladder's top, nothing for this version's own
+			// steps where it is the install's previous version (backlog B653
+			// PR 2a's third round).
+			dbReplaced = target
 			marker.Release()
 			if opts.afterDatabaseCopy != nil {
 				opts.afterDatabaseCopy()
-			}
-			// A restored library is a new backup generation. Minting
-			// after the copy, then dropping the WAL the mint left,
-			// keeps the epoch in the main file. Only where the mint's
-			// checkpoint completed (backlog B653 PR 2a): a checkpoint that
-			// did not leaves the epoch, and any migration step the open
-			// ran, in the WAL, which is kept for the next open to replay,
-			// and said; any other error keeps it too.
-			switch err := manifest.ResetBackupEpoch(target); {
-			case errors.Is(err, manifest.ErrEpochCheckpointBusy):
-				warnRestore(opts, fmt.Sprintf("restore: wrote %s, but its new backup epoch is still in its WAL (%s): "+
-					"the next open replays it, so leave %s and %s beside it", name, filepath.Base(target)+"-wal",
-					filepath.Base(target)+"-wal", filepath.Base(target)+"-shm"))
-				restored = append(restored, name)
-				continue
-			case err != nil:
-				return fmt.Errorf("mint backup epoch: %w", err)
-			}
-			for _, sidecar := range []string{target + "-wal", target + "-shm"} {
-				if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf("remove epoch sidecar %s: %w", sidecar, err)
-				}
 			}
 		}
 		restored = append(restored, name)
