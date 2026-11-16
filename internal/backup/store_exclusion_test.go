@@ -28,12 +28,15 @@ import (
 )
 
 // backupLockHelperEnv names the database whose lifetime lock the helper
-// process holds exclusively, as a restore in another process would, and
+// process holds exclusively, as a restore in another process would;
 // backupLockHelperOpenEnv makes it open the store instead, as a command that
-// has the database open does.
+// has the database open does; and backupLockHelperMakeEnv makes it, holding
+// the lock, make the database's directory and the database in it first, as a
+// restore into a data dir not there yet does.
 const (
 	backupLockHelperEnv     = "BRIDGE_BACKUP_STORE_LOCK_HELPER"
 	backupLockHelperOpenEnv = "BRIDGE_BACKUP_STORE_LOCK_OPEN"
+	backupLockHelperMakeEnv = "BRIDGE_BACKUP_STORE_LOCK_MAKE"
 )
 
 // TestBackupStoreLockHelperProcess is the second process the store
@@ -56,10 +59,30 @@ func TestBackupStoreLockHelperProcess(t *testing.T) {
 		_ = s.Close()
 		os.Exit(0)
 	}
+	making := os.Getenv(backupLockHelperMakeEnv) != ""
+	if making {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			fmt.Printf("refused %v\n", err)
+			os.Exit(0)
+		}
+	}
 	h, err := manifest.HoldStoreExclusive(path)
 	if err != nil {
 		fmt.Printf("refused %v\n", err)
 		os.Exit(0)
+	}
+	if making {
+		// The restore's database, put in place under its own hold, which
+		// this process's open counts on.
+		s, err := manifest.OpenStore(path)
+		if err != nil {
+			fmt.Printf("refused %v\n", err)
+			os.Exit(0)
+		}
+		if err := s.Close(); err != nil {
+			fmt.Printf("refused %v\n", err)
+			os.Exit(0)
+		}
 	}
 	fmt.Println("ready")
 	_, _ = io.Copy(io.Discard, os.Stdin)
@@ -296,7 +319,7 @@ func armedInstall(failedStarts int) updater.State {
 		SwapStarted: true, AttemptedAt: time.Now().UTC(), FailedStarts: failedStarts}
 }
 
-// TestARestoreOverAnArmedInstallKeepsEveryRollbackOff (T35, codex-1): a full
+// TestARestoreOverAnArmedInstallKeepsEveryRollbackOff (T35): a full
 // restore of a snapshot at this version's ladder top, made in another data
 // directory, over an armed install that recorded nothing: the restore records
 // that this version changed the store and opened the data dir, so the crash
@@ -372,7 +395,7 @@ func TestARestoreOverAnArmedInstallKeepsEveryRollbackOff(t *testing.T) {
 	// A restore stopped once its record is made and before its first write
 	// to the restored files leaves the record, durable (SaveState's barrier),
 	// and nothing else: the record step is made here as the restore makes it
-	// (updater.DisarmBeforeMigrating, recordRestoredStore's call), standing in
+	// (updater.DisarmBeforeRestoring, recordRestoredStore's call), standing in
 	// for a kill right after it. The rerun records nothing more, completes,
 	// and every rollback still refuses.
 	t.Run("a rerun after a restore stopped once its record was made", func(t *testing.T) {
@@ -383,7 +406,7 @@ func TestARestoreOverAnArmedInstallKeepsEveryRollbackOff(t *testing.T) {
 			t.Fatal(err)
 		}
 		before, _ := os.ReadFile(live)
-		if _, err := updater.DisarmBeforeMigrating(dst, version.ServerVersion); err != nil {
+		if _, err := updater.DisarmBeforeRestoring(dst, version.ServerVersion); err != nil {
 			t.Fatal(err)
 		}
 		st, err := updater.LoadState(dst)
