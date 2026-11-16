@@ -363,22 +363,57 @@ func askThatNeverEnds(t *testing.T) {
 // checkGivenUpIn gives up a check of a snapshot of the install at dataDir,
 // whose backups folder is root, parked on its thread past a deadline of
 // 300 ms: a hold that marks that folder and holds this process's slot until
-// letGo lets the check go. Its seams are put back by the cleanups it
-// registers, which let the check go first.
-func checkGivenUpIn(t *testing.T, dataDir, root string) (letGo func()) {
+// letGo lets the check go. The seams the check reads are put back only once
+// it is drained: a cleanup registered after them, so run before them, lets
+// u go (disarmed, so the check's own unlock of a folder u holds is not
+// held), lets the check go, joins its caller, which reads the verify
+// deadline once it has started the worker, and waits until no hold is left,
+// each bounded by holdDrainBound and ending the run past it (endTheRun). It
+// drains the check alone: a refused verification's let-go is left to u's own
+// cleanup (holdUnlockOf). A cleanup registered before the seams, so run right
+// after they are put back, fails the test where they were put back beside the
+// check or its caller.
+func checkGivenUpIn(t *testing.T, u *unlockHold, dataDir, root string) (letGo func()) {
 	t.Helper()
 	snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	callerDone := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-callerDone:
+		default:
+			t.Error("the blocking check's caller was still running when the seams it reads were put back")
+		}
+		if n := backup.ActiveHoldsForTest(); n != 0 {
+			t.Errorf("%d holds were left when the blocking check's seams were put back", n)
+		}
+	})
 	t.Cleanup(backup.SetVerifyDeadlineForTest(300 * time.Millisecond))
 	out := make(chan struct{})
 	var once sync.Once
 	letGo = func() { once.Do(func() { close(out) }) }
 	t.Cleanup(backup.SetOnLowPriorityForTest(func() { <-out }))
-	t.Cleanup(letGo)
+	t.Cleanup(func() {
+		if u != nil {
+			u.letGo()
+		}
+		letGo()
+		select {
+		case <-callerDone:
+		case <-time.After(holdDrainBound):
+			endTheRun(t, fmt.Sprintf("the blocking check's caller did not return within %v of the check's let-go", holdDrainBound))
+		}
+		for deadline := time.Now().Add(holdDrainBound); backup.ActiveHoldsForTest() != 0; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				endTheRun(t, fmt.Sprintf("the blocking check's hold was still held %v after its let-go", holdDrainBound))
+			}
+		}
+	})
 	given := make(chan error, 1)
 	go func() {
+		defer close(callerDone)
 		_, err := backup.VerifySnapshot(context.Background(), snap, backup.VerifyOptions{BackupsRoot: root})
 		given <- err
 	}()
@@ -397,28 +432,44 @@ func checkGivenUpIn(t *testing.T, dataDir, root string) (letGo func()) {
 // root, whose verification is refused before its worker begins, at the
 // folder's mark or at the slot, a check given up there or in another folder
 // blocking it, with its capture's ownership let go on a goroutine of its own
-// (letGoWithin) and parked in that let-go, until out closes, in the
-// ownership seam, which comes before its unlock. Once the refusal is
-// answered the blocker is let go and every hold is dropped, so only that
-// let-go is left (backup.ActiveReleasesForTest). It answers the snapshot.
-// The ownership seam is put back by a cleanup registered here, before the
-// hold's, so after the hold's cleanups.
+// (letGoWithin) and that let-go parked, until out closes, once the ownership
+// is let go, after its unlock and close (SetAfterOwnerReleaseForTest). Once
+// the refusal is answered the blocker is let go and every hold is dropped, so
+// only that let-go is left (backup.ActiveReleasesForTest). It answers the
+// snapshot. A cleanup registered after the ownership seam and before the
+// hold, so run once the hold's cleanups have run and before that seam is put
+// back, requires that the let-go went on past its park, a signal of its own
+// set there (the ownership is free from before the park), and otherwise
+// waits for it, bounded, so the cleanups after it run beside nothing.
 func refusedLetGo(t *testing.T, refusal, dataDir, root string, out chan struct{}, parked *atomic.Bool) (u *unlockHold, kept string) {
 	t.Helper()
 	var dir atomic.Pointer[string]
+	var wentOn atomic.Bool
 	entered := make(chan struct{})
-	t.Cleanup(backup.SetOnOwnerReleaseForTest(func(key string) {
+	t.Cleanup(backup.SetAfterOwnerReleaseForTest(func(key string) {
 		if d := dir.Load(); d != nil && filepath.Base(key) == filepath.Base(*d) && parked.CompareAndSwap(false, true) {
 			close(entered)
 			<-out
+			wentOn.Store(true)
 		}
 	}))
+	t.Cleanup(func() {
+		if !parked.Load() || wentOn.Load() {
+			return
+		}
+		t.Error("the refused verification's let-go was still parked past its ownership's release when the cleanup after the hold's ran")
+		for deadline := time.Now().Add(holdDrainBound); !wentOn.Load(); time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				endTheRun(t, "the refused verification's let-go never went on past its park")
+			}
+		}
+	})
 	u = holdUnlockOf(t, root)
 	blockerData, blockerRoot := dataDir, root
 	if refusal == "at the slot" {
 		_, blockerData, blockerRoot = backupInstall(t)
 	}
-	letBlockerGo := checkGivenUpIn(t, blockerData, blockerRoot)
+	letBlockerGo := checkGivenUpIn(t, u, blockerData, blockerRoot)
 	res := backup.SnapshotAndVerify(context.Background(), backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)},
 		backup.SnapshotOptions{OnKept: func(d string) {
 			dir.Store(&d)
@@ -452,43 +503,48 @@ func refusedLetGo(t *testing.T, refusal, dataDir, root string, out chan struct{}
 // up holds, leaves its capture's ownership to a let-go its caller answers
 // without once StopWriteBound has passed (letGoWithin). The hold's cleanup
 // waits for that let-go too (backup.ActiveReleasesForTest), so the cleanup
-// after it finds the ownership let go, the snapshot's owner lock free
-// (backlog B869). The blocker is let go and every hold dropped before the
-// test's body ends, so only that let-go is left to wait for; it is parked
-// until a second after the body ends.
+// after it finds the let-go gone on past its park, which comes once the
+// ownership is let go (refusedLetGo; backlog B869). The blocker is let go and
+// every hold dropped before the test's body ends, so only that let-go is left
+// to wait for; it is parked until a second after the body ends.
 func TestARefusedVerificationsLetGoHoldsTheHoldsCleanup(t *testing.T) {
 	for _, refusal := range []string{"at its folder's mark", "at the slot"} {
 		t.Run(refusal, func(t *testing.T) {
 			_, dataDir, root := backupInstall(t)
-			var kept string
-			t.Cleanup(func() {
-				if kept == "" {
-					return
-				}
-				release, err := backup.TakeOwnerForTest(kept)
-				if err == nil {
-					release()
-					return
-				}
-				t.Errorf("the refused verification's let-go of its ownership was still running when the cleanup before the fixture's removal ran: %v", err)
-				// Waited for here, bounded, so the cleanups after this one run
-				// beside nothing.
-				for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-					if release, err := backup.TakeOwnerForTest(kept); err == nil {
-						release()
-						return
-					}
-					if time.Now().After(deadline) {
-						endTheRun(t, "the refused verification's let-go of its ownership never ended")
-					}
-				}
-			})
 			out := make(chan struct{})
 			var parked atomic.Bool
 			letParkedGo(t, &parked, out)
-			_, kept = refusedLetGo(t, refusal, dataDir, root, out, &parked)
+			refusedLetGo(t, refusal, dataDir, root, out, &parked)
 		})
 	}
+}
+
+// TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained: a test that fails with
+// its blocking check given up and parked (checkGivenUpIn), before it drains
+// that check itself, has the check let go, its caller joined and its hold
+// dropped before the seams the check reads are put back: the cleanup right
+// after those restores finds no hold left and the caller ended, and the test
+// fails with its own failure alone, with no race and no panic (backlog B869).
+// The case runs as a process of its own (failsWithItsBlockerParked).
+func TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained(t *testing.T) {
+	if os.Getenv(holdCaseEnv) == "blocker" {
+		failsWithItsBlockerParked(t)
+		return
+	}
+	out, code := runHoldCase(t, "blocker", "^TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained$")
+	requireTheCasesOwnFailure(t, out, code, "the test fails here, its blocking check parked", holdCaseMark+": holds 0")
+}
+
+// failsWithItsBlockerParked is that case, its blocking check in the folder
+// its hold is on.
+func failsWithItsBlockerParked(t *testing.T) {
+	_, dataDir, root := backupInstall(t)
+	t.Cleanup(func() {
+		fmt.Fprintf(os.Stderr, "%s: holds %d\n", holdCaseMark, backup.ActiveHoldsForTest())
+	})
+	u := holdUnlockOf(t, root)
+	checkGivenUpIn(t, u, dataDir, root)
+	t.Fatal("the test fails here, its blocking check parked")
 }
 
 // TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun: the let-go of a

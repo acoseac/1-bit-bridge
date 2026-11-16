@@ -249,6 +249,25 @@ func SetOnOwnerReleaseForTest(fn func(dir string)) (restore func()) {
 	return func() { onOwnerRelease = prev }
 }
 
+// afterOwnerRelease, nil in production, runs once an owner lock has been let
+// go (SetAfterOwnerReleaseForTest).
+var afterOwnerRelease atomic.Pointer[func(string)]
+
+// SetAfterOwnerReleaseForTest installs the hook a snapshot's owner lock runs
+// once it has been let go, after its unlock and close and the removal of this
+// process's record of it, given the snapshot's resolved path, and returns the
+// restore: a test parks a let-go there with the ownership already free
+// (SetOnOwnerReleaseForTest's hook runs before the unlock). Its callback must
+// return, and ignore every dir but its test's.
+func SetAfterOwnerReleaseForTest(fn func(dir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := afterOwnerRelease.Swap(p)
+	return func() { afterOwnerRelease.Store(prev) }
+}
+
 // SetOnClaimAnswerForTest sets the function a claim runs once its claim has
 // answered, before its caller is handed the answer, and returns the restore.
 func SetOnClaimAnswerForTest(fn func()) (restore func()) {

@@ -94,3 +94,32 @@ func TestARefusedVerificationsLetGoIsCountedUntilItEnds(t *testing.T) {
 		})
 	}
 }
+
+// TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree: the hook after an
+// ownership's release (SetAfterOwnerReleaseForTest), where a test parks a
+// let-go to show it outlives the release itself, runs once the owner lock is
+// unlocked and closed and this process's record of it removed: the ownership
+// can be taken again from inside it (backlog B869). The hook before the
+// release (SetOnOwnerReleaseForTest) runs while it is still held.
+func TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "snap")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	o, err := takeOwner(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	taken := errors.New("the hook never ran")
+	var again *owner
+	t.Cleanup(SetAfterOwnerReleaseForTest(func(string) {
+		// Once: letting the second ownership go runs the hook again.
+		once.Do(func() { again, taken = takeOwner(dir) })
+	}))
+	o.release()
+	if taken != nil {
+		t.Fatalf("taking the ownership again from the hook after its release: %v, want it free there", taken)
+	}
+	again.release()
+}
