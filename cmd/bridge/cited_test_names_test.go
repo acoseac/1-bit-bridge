@@ -692,7 +692,7 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 	t.Helper()
 	cited, defined = map[string][]string{}, map[string]bool{}
 	mdCitations := map[string]bool{}
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := sweepWalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -733,6 +733,12 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 	// shared mutable state between them is a seam nobody asked for.
 	return cited, defined, len(mdCitations)
 }
+
+// sweepWalkDir is how the walks that skip by skipsForCitations
+// (scanTestCitationsIn, productionCallsIn) walk a tree: filepath.WalkDir,
+// which a test replaces with a sweeptest.Removal to stand in for another
+// process removing a directory while the walk is under way.
+var sweepWalkDir = filepath.WalkDir
 
 // skipsForCitations reports whether the walk leaves a directory below the
 // root unread: the repository's metadata, and build output or vendored code,
@@ -775,6 +781,14 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 // holding a `.git` entry (sweeptest.IsOtherCheckout). A checkout git is
 // still writing has no go.mod yet, since cmd/ comes before go.mod in index
 // order, and while it had none its tests satisfied this tree's citations.
+//
+// Nor does it read make test's TMPDIR, the root's own `.tmp`
+// (sweeptest.IsMakeTestTmpDir), where every package's tests keep their
+// temporary files while the suite runs: a test there satisfied a citation
+// this tree does not back, a comment there was collected as this tree's, a
+// file there in mid-edit failed the guard, and so did a directory there
+// removed between its listing and its own (B567). Only that one: a `.tmp`
+// further down is the tree's, as `.github` is.
 func skipsForCitations(root, path, name string) bool {
 	if path == root {
 		return false
@@ -783,6 +797,9 @@ func skipsForCitations(root, path, name string) bool {
 		return true
 	}
 	if strings.HasPrefix(name, "_") {
+		return true
+	}
+	if sweeptest.IsMakeTestTmpDir(root, path) {
 		return true
 	}
 	if sweeptest.IsOtherCheckout(root, path) {

@@ -708,3 +708,74 @@ waiting in it by `meeting`; settle's other exits, the lock again after a
 change, and the lock's wait are staged on a sink no goroutine owns, the
 context's Done never ready where the case says the wait took another arm
 (`verdictWaitContext`).
+
+## A DAC's DSD choice written while the player is stopped, and the revocation's word (B853) — 2026-11-12
+
+B728 B9 PR 2 (the owner, 2026-11-10: "Stop playback to change DSD"). The
+player's backend writes a DAC's choice (`playback.Backend.ChooseDSD`) only
+under its configuration lease, which it takes under the backend's lock in the
+step that finds no session record, nothing holding the device and no release
+unconfirmed. While the lease is held a Start waits before it registers and
+`reserveProbe` refuses the device slot (`ProbeChoiceWrite`, one of
+`probeSlotSkips`, so the probe stays owed); a probe that held the slot as the
+lease was claimed is waited for. The write reads the DAC, writes the state,
+publishes and reads its answer's epoch under the lease, so a Start admitted
+after it plays by the set it published. No native or DoP byte changes, and no
+native sink, activation or release changes its rules: nothing of #1434's
+write beside what plays (its pending set, the waits for it in the open, the
+producer, an activation or a resume) came back.
+
+The guarded files changed for B853. `Revoke` (`playback/native.go`) records
+its cause where it stops the session's DSD (`revokeDSDLocked`:
+`native_revoked` with the revocation's reason), as `stopDSD` does for a failed
+reading of the policy (`dsd_dac_unread` with `errDSDUnread`'s words, which
+stands whatever came first) and for a contained reconciliation panic
+(`backend_failed` with the session's fault), and the qualification path's
+`reconcilePermission` does (`native_revoked`, the selected policy no longer
+eligible). Both refusals in `admitDSD`, and `openSuccessor`'s, answer that
+record, where `admitDSD`'s answered `dsd_dac_unread` and `openSuccessor`'s
+`native_revoked`, whatever the cause. `internal/alsapcm`'s probe cache says a
+choice forgets none of a probe's answers (`Forget` is the migration's part
+alone), and its tests gain the rig's revocation-word and lease cases.
+Qualification version 49 invalidates earlier harness evidence; LegacyVersion
+remains 35. Test and negative-control evidence is in `ops/engineering-log.md`.
+
+### Round 2: the cause first at every boundary
+
+A refusal of the policy's no longer answers in the recorded cause's place:
+`admitDSD` asks the cause before `selectFor`'s answer (a reconciliation that
+panicked while it read the set refused the entry `native_not_offered`), and
+each open's end asks it before the readmission (`refuseRevokedLocked`, with
+the condition `admitDSD`'s first check refuses by), the set unchanged
+included, where a session's first occurrence was not asked at all. On the
+harness's path `openNativeContent` (guarded) asks it before the selectors,
+which answered a revoked permission as no approval; the producer's gapless
+check keeps the cause a revocation during the check dropped the successor
+for; the authorization's reconciliation records first, leaves what is dropped
+already and drops for the cause recorded, and contains its panic as a policy
+reconciliation's is (`stopDSD`, `backend_failed`); and `Revoke` (guarded)
+drops a prepared successor for the cause recorded, its own where nothing
+stood. Qualification version 49 covers both rounds.
+
+### Round 3: the cause asked again at the selection, the gapless check's own revocation, the contained reconciliation's authorization
+
+On the harness's path `openNativeContent` (guarded) asked the cause recorded
+and let go of the session's lock before a selector, or the session's cached
+refusal, answered: a revocation or a replaced authorization in that gap
+recorded its cause and revoked the permission, which the selector answered as
+no approval, and `refuseRevokedLocked` passes over an entry refused already. A
+selector's refusal and the cached one are now set in the step that asks the
+cause again (`refuseAfterSelection`), and every writer records its cause
+before it revokes the permission: `Revoke` and `reconcilePermission` in one
+hold of the session's lock, the containment of a panic in
+`reconcilePermission` in `stopDSD`'s hold and then, in a hold of its own, the
+revocation; that order, the cause first, is what the selectors rely on (round
+4: this said one step under the session's lock for every writer). `Revoke`
+(guarded) delegates to `revoke`, which answers the count of the cause it
+recorded (`revokeDSDLocked`, `revokedSeq`), 0 where an earlier cause stood:
+the producer's gapless check keeps its check's error only where its own
+revocation is the cause recorded, told by that and never by the cause's words,
+which an earlier revocation may share. The authorization's contained
+reconciliation revokes the authorization it was replacing once its cause is
+recorded, as a failed reading of it does. No byte a DAC is given changes.
+Qualification version 49 covers the three rounds.

@@ -16,9 +16,15 @@ import (
 // name, or a bare name) and the file's slash path below the root.
 func productionCalls(t *testing.T, match func(call *ast.CallExpr, rel string)) {
 	t.Helper()
-	root := repoRootForCitations(t)
+	productionCallsIn(t, repoRootForCitations(t), match)
+}
+
+// productionCallsIn is productionCalls over the tree at root, which a test
+// gives a fixture of its own.
+func productionCallsIn(t *testing.T, root string, match func(call *ast.CallExpr, rel string)) {
+	t.Helper()
 	fset := token.NewFileSet()
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := sweepWalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

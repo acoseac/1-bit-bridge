@@ -1370,7 +1370,7 @@ to nothing is still not there. The record is in `ops/engineering-log.md`,
 
 ## A candidate's settings check, and the early rollback of an install whose version refuses the settings (backlog B613, 2026-11-02)
 
-- **A candidate is checked against this bridge's settings before its swap, and an install whose version refuses them at its first start is rolled back before serve writes anything** (2026-11-02, backlog B613, five rounds): 0.2.2 refuses a fraction or a leading zero in a whole-number setting (B528, B533), 0.2.1's updater swapped without asking, and the new serve exited 2 at the load, before the boot rollback, under `Restart=always`. Install stages the verified candidate beside the binary and runs `<candidate> serve --validate-config --config <the settings the bridge loaded>` (`updater.CheckConfig`: 30 s, stdin empty, 64 KiB of each output): 0 swaps; 78 refuses, one `config refused: ` line a reason, naming the line and no path (`config.RefusedError.Reasons`), and the version is recorded as rejected with its reason and a digest of the settings (the file's bytes and every BRIDGE_ variable, on Windows whatever its name's case, `updater.ConfigDigest`), which holds it from the auto-installer while the digest is unchanged, a newer version and a manual install checking again; a 2 carrying the flag package's refusal of the flag is a candidate that predates the check, held from the auto-installer for every setting and installed by hand with a warning; for anything else (a timeout, a cancellation, a candidate that will not start, another code), nothing is swapped, installed or recorded. The check is serve's own load (`checkServeConfig`: the boot read, Load, `serveConfigRefusal`), which writes, opens and binds nothing, and never a root's reach (`CheckLibraryRootsAccessible` is the host's, and the user's who runs it). Serve, refusing its settings (a `config.RefusedError`, or `serveConfigRefusal`, every one of them before the data dir's lock), reads the data dir from the dataDir key, the default, BRIDGE_DATA_DIR and the settings' directory alone (`config.DataDirOf`), and puts the backup back only for a recent `installing` marker of this version over another, or its own record of one (`State.RollbackStarted`), swapped, under which no other version has opened the data dir, with the data dir's lock its own and the backup a regular file whose `version` names the marker's PreviousVersion (`updater.EarlyRollback`, `updater.ProbeVersion`, a version check and not a proof of the bytes), or, where that leaves an install whose count asks for the crash rollback, by that rollback whole (backlog B760); it records the hold durably before the rename, in the form the restored binary's boot keeps, Status "" beside the install it undoes (`updater.RollbackRecord`; 0.2.1's and 0.2.2's boot clears an install marker it cannot finish), so a start of this version that finds it with the backup not back finishes the rollback; a hold it cannot record leaves the install as it is, and a rename that fails puts the install marker back; then it exits 75 (`supervision.RestartExitCode`), which systemd, launchd and the SCM's recovery all restart; otherwise it refuses as before, saying why when the marker is this version's. Before its first write, serve records in an armed marker that it opened the data dir (`State.DataDirOpenedBy`, `updater.AdmitBoot`; a marker it cannot read is removed) and refuses to start when it cannot, and every store open with a migration step pending does the same before the step, whichever command opens the store (`updater.DisarmBeforeMigrating`, `manifest.OpenStore` refusing); BootInstallFailed leaves the backup where a version other than the backup's opened the data dir, and every clear at boot keeps a hold, and a veto of a rolled-back version's store migrations, recorded beside the install (`updater.ClearInstall`); and a directory barrier that fails is the marker's write's error (`SaveState`, `ClearStateDurably`), but where the filesystem cannot fsync a directory (the next bullet). **Don't swap a candidate whose check did not answer 0, take a failed or stopped check for a refusal or a 2 for "predates" without the flag package's words, record a refusal against no digest or a predates hold against one, change the flag, the codes or the prefix (every later release answers this updater), let the check write, open a store, bind or ask a root's reach, name a path in a reason, find the marker's data dir by anything but Load's rules for that key, restore without the lock, the marker's proof and the backup's version, or before the hold is recorded durably, restore after another version opened the data dir (but the crash rollback, which asks instead that no migration of the store began: the B660 bullet below), migrate the store before recording that this version opened it and that it began a migration (`State.StoreMigratedBy`, B660), drop a recorded hold or veto at boot, ignore the marker's directory barrier, write the settings, or exit 0 after a restore.** `TestAnInstallWhoseCandidateRefusesTheSettingsSwapsNothing`, `TestAnAutomaticInstallHoldsARefusedVersionBackUntilTheSettingsChange`, `TestAnAutomaticInstallHoldsBackACandidateThatPredatesTheCheck`, `TestACheckThatFailsSwapsNothingAndRecordsNothing`, `TestCheckConfigReadsTheCandidatesAnswerByItsExitCode`, `TestTheSettingsCheckRefusesWhatServeRefuses`, `TestTheUpdaterReadsWhatThisBridgesSettingsCheckSays`, `TestDataDirOfIsTheDataDirLoadGives`, `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, `TestServeLeavesAnInstallItCannotProveAsItIs`, `TestServeDisarmsTheEarlyRollbackBeforeItsFirstStoreAccess`, `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir`, `TestEveryInstallTheBridgeStartsNamesItsSettings`, `TestTheHoldIsRecordedBeforeTheBackupIsPutBack`, `TestServeLeavesTheBackupWhereItCannotRecordTheHold`, `TestAStartFinishesARollbackStoppedBeforeItsRename`, `TestACommandThatMigratesTheStoreDisarmsTheEarlyRollback`, `TestAStoreOpenThatMigratesRecordsItInAnArmedInstallMarker`, `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall`, `TestSaveStateReportsADirectoryBarrierThatFails` and `TestTheSettingsDigestReadsTheBridgeVariablesAsThePlatformNamesThem` pin it.
+- **A candidate is checked against this bridge's settings before its swap, and an install whose version refuses them at its first start is rolled back before serve writes anything** (2026-11-02, backlog B613, five rounds): 0.2.2 refuses a fraction or a leading zero in a whole-number setting (B528, B533), 0.2.1's updater swapped without asking, and the new serve exited 2 at the load, before the boot rollback, under `Restart=always`. Install stages the verified candidate beside the binary and runs `<candidate> serve --validate-config --config <the settings the bridge loaded>` (`updater.CheckConfig`: 30 s, stdin empty, 64 KiB of each output): 0 swaps; 78 refuses, one `config refused: ` line a reason, naming the line and no path (`config.RefusedError.Reasons`), and the version is recorded as rejected with its reason and a digest of the settings (the file's bytes and every BRIDGE_ variable, on Windows whatever its name's case, `updater.ConfigDigest`), which holds it from the auto-installer while the digest is unchanged, a newer version and a manual install checking again; a 2 carrying the flag package's refusal of the flag is a candidate that predates the check, held from the auto-installer for every setting and installed by hand with a warning; for anything else (a timeout, a cancellation, a candidate that will not start, another code), nothing is swapped, installed or recorded. The check is serve's own load (`checkServeConfig`: the boot read, Load, `serveConfigRefusal`), which writes, opens and binds nothing, and never a root's reach (`CheckLibraryRootsAccessible` is the host's, and the user's who runs it). Serve, refusing its settings (a `config.RefusedError`, or `serveConfigRefusal`, every one of them before the data dir's lock), reads the data dir from the dataDir key, the default, BRIDGE_DATA_DIR and the settings' directory alone (`config.DataDirOf`), and puts the backup back only for a recent `installing` marker of this version over another, or its own record of one (`State.RollbackStarted`), swapped, under which no other version has opened the data dir, with the data dir's lock its own and the backup a regular file whose `version` names the marker's PreviousVersion (`updater.EarlyRollback`, `updater.ProbeVersion`, a version check and not a proof of the bytes), or, where that leaves an install whose count asks for the crash rollback, by that rollback whole (backlog B760); it records the hold durably before the rename, in the form the restored binary's boot keeps, Status "" beside the install it undoes (`updater.RollbackRecord`; 0.2.1's and 0.2.2's boot clears an install marker it cannot finish), so a start of this version that finds it with the backup not back finishes the rollback; a hold it cannot record leaves the install as it is, and a rename that fails puts the install marker back, but where it left no binary at its path, which keeps the record (backlog B898); then it exits 75 (`supervision.RestartExitCode`), which systemd, launchd and the SCM's recovery all restart; otherwise it refuses as before, saying why when the marker is this version's. Before its first write, serve records in an armed marker that it opened the data dir (`State.DataDirOpenedBy`, `updater.AdmitBoot`; a marker it cannot read is removed) and refuses to start when it cannot, and every store open with a migration step pending does the same before the step, whichever command opens the store (`updater.DisarmBeforeMigrating`, `manifest.OpenStore` refusing); BootInstallFailed leaves the backup where a version other than the backup's opened the data dir, or where the backup does not say the install's `PreviousVersion` (backlog B898), and every clear at boot keeps a hold, and a veto of a rolled-back version's store migrations, recorded beside the install (`updater.ClearInstall`); and a directory barrier that fails is the marker's write's error (`SaveState`, `ClearStateDurably`), but where the filesystem cannot fsync a directory (the next bullet). **Don't swap a candidate whose check did not answer 0, take a failed or stopped check for a refusal or a 2 for "predates" without the flag package's words, record a refusal against no digest or a predates hold against one, change the flag, the codes or the prefix (every later release answers this updater), let the check write, open a store, bind or ask a root's reach, name a path in a reason, find the marker's data dir by anything but Load's rules for that key, restore without the lock, the marker's proof and the backup's version, or before the hold is recorded durably, restore after another version opened the data dir (but the crash rollback, which asks instead that no migration of the store began: the B660 bullet below), migrate the store before recording that this version opened it and that it began a migration (`State.StoreMigratedBy`, B660), drop a recorded hold or veto at boot, ignore the marker's directory barrier, write the settings, or exit 0 after a restore.** `TestAnInstallWhoseCandidateRefusesTheSettingsSwapsNothing`, `TestAnAutomaticInstallHoldsARefusedVersionBackUntilTheSettingsChange`, `TestAnAutomaticInstallHoldsBackACandidateThatPredatesTheCheck`, `TestACheckThatFailsSwapsNothingAndRecordsNothing`, `TestCheckConfigReadsTheCandidatesAnswerByItsExitCode`, `TestTheSettingsCheckRefusesWhatServeRefuses`, `TestTheUpdaterReadsWhatThisBridgesSettingsCheckSays`, `TestDataDirOfIsTheDataDirLoadGives`, `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, `TestServeLeavesAnInstallItCannotProveAsItIs`, `TestServeDisarmsTheEarlyRollbackBeforeItsFirstStoreAccess`, `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir`, `TestEveryInstallTheBridgeStartsNamesItsSettings`, `TestTheHoldIsRecordedBeforeTheBackupIsPutBack`, `TestServeLeavesTheBackupWhereItCannotRecordTheHold`, `TestAStartFinishesARollbackStoppedBeforeItsRename`, `TestACommandThatMigratesTheStoreDisarmsTheEarlyRollback`, `TestAStoreOpenThatMigratesRecordsItInAnArmedInstallMarker`, `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall`, `TestSaveStateReportsADirectoryBarrierThatFails` and `TestTheSettingsDigestReadsTheBridgeVariablesAsThePlatformNamesThem` pin it.
 
 *The defect.* 0.2.2 refuses at load a whole-number setting written as a
 fraction (`21600.5`) or with a leading zero (`060`), which only a hand edit
@@ -2401,7 +2401,7 @@ is in `ops/engineering-log.md`, 2026-11-03, B705.
 
 ## The console's Roll back offered only where the rollback would run (backlog B707, 2026-11-04)
 
-- **The console's Updates panel offers Roll back only where the operator's rollback would run, from one read of the install marker per status: `CanRollback` is `.bak` present and no refusal from `updater.RollbackRefusalOn`, which `Rollback` asks itself of its own read (`RollbackRefusal`'s, or a fixed sentence for a marker that cannot be read), for `Status` and for an install's answer alike; where `.bak` is there and the rollback would refuse, Roll back stays hidden and a Rollback row beside Held update says why (`RollbackRefusal`, JSON `rollbackRefusal`), in the rollback's words and naming no path, at the first paint and in `renderUpdateTile`; with no `.bak` nothing is said, and the API keeps its 409** (2026-11-04, backlog B707). **Don't offer Roll back from `.bak` alone, decide it by any check but `RollbackRefusalOn`, read the marker twice for one status, take a marker that cannot be read for none, show a reason where there is no backup, or put an error's text or a path in it.** `TestTheUpdatesPanelOffersRollBackOnlyWhereTheRollbackWouldRun`, `TestTheConsoleOffersRollBackOnlyWhereTheRollbackWouldRun`, `TestTheRollbacksRefusalOnItsReadOfTheMarkerIsTheConsoles`, `TestTheSettingsPageSaysWhyRollBackIsNotOffered`, `TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency`, `TestTheUpdatesPanelScriptShowsWhyRollBackIsNotOffered` and `TestTheUpdatesPanelShowsRollBackOrWhyNot` (under node) pin it. → History-rules-config-lifecycle.md
+- **The console's Updates panel offers Roll back only where the operator's rollback would run, from one read of the install marker per status: `CanRollback` is `.bak` present and no refusal from `updater.RollbackRefusalAt` (the recovery latch's, backlog B898, then `RollbackRefusalOn`), which `Rollback` asks itself of its own read (`RollbackRefusal`'s, or a fixed sentence for a marker that cannot be read), for `Status` and for an install's answer alike; where `.bak` is there and the rollback would refuse, Roll back stays hidden and a Rollback row beside Held update says why (`RollbackRefusal`, JSON `rollbackRefusal`), in the rollback's words and naming no path, at the first paint and in `renderUpdateTile`; with no `.bak` nothing is said, and the API keeps its 409** (2026-11-04, backlog B707). **Don't offer Roll back from `.bak` alone, decide it by any check but `RollbackRefusalAt`, read the marker twice for one status, take a marker that cannot be read for none, show a reason where there is no backup, or put an error's text or a path in it.** `TestTheUpdatesPanelOffersRollBackOnlyWhereTheRollbackWouldRun`, `TestTheConsoleOffersRollBackOnlyWhereTheRollbackWouldRun`, `TestTheRollbacksRefusalOnItsReadOfTheMarkerIsTheConsoles`, `TestTheSettingsPageSaysWhyRollBackIsNotOffered`, `TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency`, `TestTheUpdatesPanelScriptShowsWhyRollBackIsNotOffered` and `TestTheUpdatesPanelShowsRollBackOrWhyNot` (under node) and `TestTheUpdatesPanelHidesRollBackWhileTheBinaryIsMissing` pin it. → History-rules-config-lifecycle.md
 
 *The defect* (B705's "Left", read from the code; this section's tests
 reproduce it). Since B692 an operator's rollback refuses, 409
@@ -2490,7 +2490,7 @@ record is in `ops/engineering-log.md`, 2026-11-04, B707.
 
 ## An install counted healthy only once it has answered and stayed up (backlog B660, 2026-11-06)
 
-- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly make the next start try to roll it back, before it writes anything, which a migration of the store begun, or a backup that cannot be shown to run here, prevents** (2026-11-06, backlog B660; its rounds 2 and 3, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, or dial an IPv6 wildcard on IPv4's loopback alone, don't count a stop (take its count back as the stop arrives once the start has answered as ready and once the teardown has run before that, so a start killed before it is ready stays counted; ask whether an end is a stop of the caller's context and the restart request once the teardown has run, never of serve's own context or of the stop's notice; ask for the marker's lock again within one budget for the teardown and the take-back, inside the shortest stop wait of systemd, launchd and the SCM, a take-back begun once a teardown past the budget has run two seconds still, below the SCM's wait; and join it before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or an end of the tailnet listener serve did not begin, don't read a start as running from the data dir's lock, a command's too, from a marker read before the install marker's lock, or from an exclusive try, which another probe's hold refuses (a start runs only where the marker's token names a lock that start holds exclusively, which every probe tries shared, its token cleared at every return), don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
+- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly make the next start try to roll it back, before it writes anything, which a migration of the store begun, a restore of the store (recorded as a migration is, `State.StoreMigratedBy`, and refused to the version the install replaces, which that record would not cover: `updater.ErrRestoreByPreviousVersion`; the install marker's lock held from the restore's admission through the database's replacement, so no install is armed unrecorded meanwhile), or a backup that cannot be shown to run here, prevents, and neither the crash rollback nor the early rollback acts while an unfinished restore of the database's journal stands (B653 PR 2a)** (2026-11-06, backlog B660; its rounds 2 and 3, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, or dial an IPv6 wildcard on IPv4's loopback alone, don't count a stop (take its count back as the stop arrives once the start has answered as ready and once the teardown has run before that, so a start killed before it is ready stays counted; ask whether an end is a stop of the caller's context and the restart request once the teardown has run, never of serve's own context or of the stop's notice; ask for the marker's lock again within one budget for the teardown and the take-back, inside the shortest stop wait of systemd, launchd and the SCM, a take-back begun once a teardown past the budget has run two seconds still, below the SCM's wait; and join it before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or an end of the tailnet listener serve did not begin, don't read a start as running from the data dir's lock, a command's too, from a marker read before the install marker's lock, or from an exclusive try, which another probe's hold refuses (a start runs only where the marker's token names a lock that start holds exclusively, which every probe tries shared, its token cleared at every return), don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
 
 *The defect* (the self-healing study of 2026-11-02, read from the code;
 B613's "Not here" above; B198's scenario). `DecideBootAction` answered
@@ -3611,6 +3611,185 @@ Round 5's: internal/updater's
 reds and controls are in `ops/engineering-log.md`, 2026-11-10, B761 PR 1
 round 5.
 
+## The updater waits out a held binary where it is in place (backlog B898 PR 1, 2026-11-15)
+
+- **The updater's renames of the binary, and the probes before them, wait out another process's hold only while the binary is in place and nothing is armed, each step tried by its operation's deadline, and a binary a failed put-back left missing refuses every install, rollback and deferred restart until it is back** (2026-11-15, backlog B898 PR 1): a hold is Windows' sharing or lock violation (`inUse`), never Access is denied; each step is retried alone on `forwardWaits` (eight attempts over 4.75 s of waits) by the operation's forward deadline, a monotonic time set as the operation begins (`deadline`, read on the moves' clock, `time.Now` through `renameNow` in production), so that the time each step takes, waiting or not, is the next one's; a wait is admitted only while some of the deadline remains, shortened to what remains, and the attempt after an admitted wait is made however long the wait took, so the schedule's last attempt comes at the deadline, past it by no more than its wait overran; once the deadline is seen to have passed no step is begun and no wait admitted, a step not tried answering `ErrDeadlinePassed` (`NothingMoved`, or `BinaryMissing` on the rollback's missing-binary path, never `InUse`) and a swap whose probes ended past it arming nothing; the swap's vacate and either place have one attempt, the place after a vacate that landed is made whatever the time, and a refused place is put back on `recoveryWaits` (seven attempts over 3.15 s) by a deadline set as the put-back begins, its first attempt made whatever that deadline says, a put-back that lands late being a put-back; a step under way is never cut short (a rename takes no context), so each bound counts the waits as they were asked of the clock, never a step's own time; each failure is a `*SwapError` saying what it left (`NothingMoved`, `PutBack`, `BinaryMissing` and its `Recover`); the latch asks the disk under the install marker's lock (`binaryLatch`, `ErrBinaryMissing`; the Updates panel through `RollbackRefusalAt`); a rollback whose put-back left no binary keeps its record, the boot's keeps its marker where a hold or its deadline left the binary where it was, an install answers a marker it could not put back (`MarkerNotRestoredError`), and `RollbackBinary` stops no service. **Don't wait with the binary vacated but for the put-back, wait once a swap is armed, retry a swap or a rollback whole, take Access is denied for a hold, draw the put-back's waits from the forward deadline, begin a step or admit a wait once its deadline has passed, make an admitted wait longer than what remains of its deadline or skip the attempt after it, leave the put-back's first attempt to its deadline, read a step its deadline left untried as one that landed or as a hold, arm a swap whose probes ended past its deadline, leave the place after a landed vacate untried or take a put-back that landed late for a failure, put a marker back as read where the put-back left no binary, install, roll back or restart while the binary is not on disk, wrap the latch's refusal in another, or stop a service in a rollback.** `TestEachHeldRenameIsWaitedForWhereTheBinaryIsInPlace`, `TestEachSwapOutcomeSaysWhatItLeft`, `TestEveryStepIsTriedByItsOperationsDeadline`, `TestEveryAttemptIsMadeOnAClockTheStepsMove`, `TestThePutBacksFirstAttemptIsMadeHoweverLateItComes`, `TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried`, `TestNothingWaitsWithNoBinaryButThePutBack`, `TestNoWaitFollowsTheSwapsArming`, `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed`, `TestAMissingBinaryRefusesEveryInstallAndRollback`, `TestARollbackThatLeavesNoBinaryKeepsItsRecord`, `TestAnInstallWhoseMarkerCannotBePutBackSaysSo`, `TestADeferredRestartIsNotRequestedWhileTheBinaryIsMissing`, `TestTheRollbackStopsNoService`, `TestEveryProtectedOperationFitsInsideTheMarkersLockWait`, cmd/bridge's `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse` and `TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt`, and Windows' `held_windows_test.go`, pin it.
+
+*The hazard.* Windows' `os.Rename` is `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`,
+which opens its source for delete access: another handle on the source that
+shares no deletion refuses it with `ERROR_SHARING_VIOLATION` (32), and a lock
+on a range of it with `ERROR_LOCK_VIOLATION` (33); a destination that is the
+mapped running image, or one this user may not replace, answers
+`ERROR_ACCESS_DENIED` (5). A real-time scanner or the search indexer opens an
+executable just written or just run, and the early and crash rollbacks run the
+backup for its version (`ProbeVersionWithin`) just before they rename it.
+Until B898 every one of the updater's renames of the binary had one attempt,
+so a scanner's hold on the backup refused the rollback's place, and a start
+whose early rollback would have put the backup back (exit 75) refused its
+settings instead (exit 2). The install's put-back after a refused place had
+one attempt too, and a refusal there left no binary on disk.
+
+*Which errors wait.* 32 and 33 alone (`held_windows.go`'s `inUse`), each a
+holder that ends when its handle closes. 5 never: a rename onto the mapped
+image is refused for as long as the process runs, and 5 is also a
+permission. Go's `syscall.EACCES` on Windows is an errno Go invents
+(`APPLICATION_ERROR + 1`), not 5, so a test that injects it shows nothing
+about the predicate; `TestOnlyWindowsSharingAndLockViolationsAreAFileInUse`
+asks Windows' own numbers. Off Windows nothing is a hold (`held_other.go`),
+and nothing waits.
+
+*Where waiting is allowed.* Only while the binary is in place and nothing is
+armed. The swap (`swapByVacate`, Windows' after its SCM stop, and on every
+host in the tests) stages a candidate only where it is not beside the binary
+already, then probes the candidate, the binary and a backup already there
+(`movable`: an open for deletion sharing everything, closed at once, which
+answers 32 exactly where another handle shares no deletion; a backup that is
+not there passes), each on `forwardWaits` (0, 50, 100, 200, 400, 800, 1,600
+and 1,600 ms: eight attempts over 4.75 s of waits) by one forward deadline;
+then it arms (`armSwap`), and the vacate and the place have one attempt each,
+so a vacate refused once armed moved nothing and the install puts its marker
+back as it read it, which disarms. The Unix swap stages and carries its
+capabilities before it arms too. The rollback probes the binary and the
+backup and vacates by one forward deadline, nothing being armed there and the
+caller's record safe to wait under; its place has one attempt. A refused place
+is put back on a schedule kept for it (`recoveryWaits`, seven attempts over
+3.15 s), the only wait with no binary at its path, which can only shorten the
+time it is missing against giving up there. A rollback over a missing binary
+(the backup's rename onto an empty path) waits by the forward deadline.
+
+*The deadlines.* Round 1 drew each wait from a budget of the schedule's
+waits, which the time a step took never touched, so a probe or a staging that
+took seconds left the steps after it their whole schedule. Since round 2 each
+is a time on a monotonic clock (`deadline`; `moves.now`, `time.Now` in
+production, whose monotonic reading `time.Time`'s comparisons use): the
+forward one set as the operation begins and shared by its staging, its probes
+and the rollback's vacate, the recovery one set as the put-back begins. Round
+2 made a wait only where it ended at or before its deadline, which a host's
+clock never allows the last one: every call takes time and every sleep
+overruns, so the last wait always ended past the deadline, and the forward
+schedule lost its eighth attempt and the put-back its seventh, the 1.6 s that
+keeps a binary from being left missing. Since round 3 a wait is admitted only
+while some of its deadline remains, shortened to what remains, and the attempt
+after an admitted wait is made however long the wait took: the last attempt
+comes at the deadline, past it by no more than its wait overran, and on a
+clock nothing but the waits moves the schedules are exact, eight attempts, the
+last at 4.75 s, and seven, the last at 3.15 s
+(`TestEveryAttemptIsMadeOnAClockTheStepsMove` keeps every count on a clock
+each call and each sleep moves on by a millisecond, the last wait the
+remainder); a step after the forward deadline was spent whole on its
+predecessors' waits is still tried at that instant
+(`TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed`). Once the deadline
+is seen to have passed, no further step is begun and no wait admitted: a step
+whose deadline passed before its first attempt is not tried and answers
+`ErrDeadlinePassed`, a `*SwapError` that is `NothingMoved` (or
+`BinaryMissing` on the rollback's missing-binary path, which it leaves as it
+found it), never `InUse`, since no hold was seen, and a swap whose last probe
+landed past the deadline arms nothing, a probe whose hold clears on its last
+attempt included. Two transitions are completed whatever the time, because
+stopping in them is what leaves no binary: the place after a vacate that
+landed (`moves.once`, which asks no deadline), and the put-back, whose
+deadline is set as it begins and whose first attempt is made whatever that
+deadline says by then (round 2 asked it first, so a stall of more than 3.15 s
+between the two reads left the binary missing with a put-back possible), a
+rename of it that lands late being the put-back's success. A step under way is
+never cut short: a rename takes no context, and a staging's copy across
+volumes is ordinary I/O, so a deadline bounds the work begun, not the time a
+begun step takes. An `inUseError` counts its waits as they were asked of the
+clock, the last one shortened to what remained, never the time the clock read.
+The boot's rollback keeps its vetoed marker for `ErrDeadlinePassed` as for a
+hold, for the next start to ask again; the early and crash rollbacks, and the
+console's, put the marker back as read after any failure that left the binary
+in place, as before.
+
+*What each failure says.* A `*SwapError`: `NothingMoved`, `PutBack` (the
+binary put back), or `BinaryMissing` with `Recover`, the one rename that puts
+the binary back; it matches `ErrBinaryInUse` where a hold ended it with the
+binary in place, `ErrBinaryMissing` where none is at its path, and
+`ErrDeadlinePassed` where its deadline left a step untried. A
+`*MarkerNotRestoredError` is a swap's failure whose marker could not be put
+back after it, matching `ErrMarkerNotRestored` beside the swap's own
+sentinels; until B898 Install logged that and answered the swap's error
+alone. Their precedence: a binary not on disk, then a marker not put back,
+then a hold.
+
+*The latch.* A binary not at its path refuses every install (before its
+download, and again under the install marker's lock), every operator's
+rollback (under the lock, before the marker is read, so a marker that cannot
+be read never turns it into a refusal of the rollback), and the
+auto-installer's deferred restart, which would end the one bridge running
+with nothing to start again, in whatever process asks, for any target and
+however old the marker: `binaryLatch` asks the disk (`os.Lstat`), never a flag
+in memory or in the marker. The Updates panel asks the same latch first
+(`RollbackRefusalAt`).
+
+*What a failed put-back leaves.* A rollback whose put-back left no binary
+keeps the record it wrote before its restore (the operator's
+`OperatorRollbackRecord`, the early rollback's `RollbackRecord`, the crash
+rollback's `CrashRollbackRecord`, the boot's vetoed marker), never the marker
+as it was read: that record is true of whichever rename puts a binary back.
+An install's failed swap puts its marker back as read, as before.
+
+*The starts.* The crash rollback's missing binary ends its start before the
+admission (exit 1, nothing written but the record, the start not counted);
+the boot rollback's ends the start after its housekeeping
+(`maybeRollbackOnBoot` returns it; exit 1, before the updater and every
+listener); the early rollback's start refuses its settings as before. Each
+line names the rename. The boot rollback asks the backup its version before
+it renames it, and leaves a backup that does not say the install's
+`PreviousVersion` (a marker left armed over a swap that moved nothing, beside
+an older backup); it keeps its vetoed marker after a restore refused for a
+hold, or one its deadline left untried, for the next start to ask again, and
+clears the install as before after any other failure.
+
+*The console and `bridge update`.* The three classes are the console's 500
+`recovery-required`, 500 `marker-not-restored` and 409 `binary-in-use`, in
+that precedence before every other class, in fixed words that name no path,
+each error logged whole at Error (`admin-console.md`'s B898 bullet).
+`bridge update` prints the error whole, then the rename that puts the binary
+back, or the latch's line, or that the marker could not be put back.
+
+*The lock's wait.* What each protected operation holds the install marker's
+lock for at its worst (the forward deadline spent whole, the place refused,
+the put-back landing at its last attempt), built from the constants and
+recorded from the run: the operator's rollback 9.4 s (two marker writes'
+retries at 750 ms each and 7.9 s of waits), an install 10.15 s as the service
+and 25.15 s in the foreground with the SCM's stop, the early and the boot
+rollbacks 19.4 s each (with the backup's 10 s version), every one inside the
+30 s every other taker waits (`TestEveryProtectedOperationFitsInsideTheMarkersLockWait`,
+cmd/bridge's `TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait`); the
+crash rollback's row is backlog B898's F1. These count the waits at their
+lengths in the schedule and the bounds each step is given: what a step under
+way takes on its filesystem (an open, a rename, a copy across volumes) adds to
+them, and no step is begun once its deadline has passed.
+
+*No service stop in a rollback.* Every rollback runs in a serve, the process
+that maps the binary, and a rename of the mapped image needs no stop. A serve
+that holds its data dir's lock is the only serve on that data dir, so a
+service such a stop could reach is another install's; a serve that runs
+without the lock (where the filesystem gives none) may stand beside a service
+on the same data dir, which then runs its image until it restarts, as after
+an operator's rollback made from a shell. `TestTheRollbackStopsNoService`
+reads `swap_windows.go`'s calls on every host; cmd/bridge's
+`TestAServeWithoutItsDataDirsLockRollsBackAtItsBoot` runs the unlocked
+start's boot rollback.
+
+*The tests.* On every host through the seams (`renameFunc`, `probeMovable`,
+`renameInUse`, `renameWait`, `renameNow`, and the observer
+`SetRenameObserverForTest`, which hears each refused attempt), on a clock that
+only the waits move, and a step a case says takes time (`heldRig`'s `took`,
+`over` for a wait the host overran, and `step` and `sleep` for a clock every
+call and every sleep moves); cmd/bridge's through
+`updater.ReplaceRunningBinaryForTest`, Windows' put-back on any host, on the
+test's clock (`RestoreSeams.Now`); on Windows, real holds
+(`held_windows_test.go`: a handle the test opens with share mode 0, let go from
+the observer after a refusal it heard, or, where the case holds the file
+throughout, once the operation has returned and before any file is read), the
+waits on a clock they move, each sleep overrunning by a millisecond
+(`realHolds`). The reds at main and at round
+1's and round 2's heads, and the negative controls, are in `ops/engineering-log.md`,
+2026-11-15, B898 PR 1 and its rounds 2 and 3. What stays open is backlog B898's F1,
+F2, F3, F4, F7, F8 and F9.
+
 ## Config, settings and process lifecycle
 
 - **An install of a target already staged on disk is REFUSED, and the refusal
@@ -3880,3 +4059,88 @@ round 5.
   `TestKeepOwnerAsRoot` and `TestCLIRunAsRootKeepsTheInstallOwner`, which CI
   skips and dido's container runs. With the six writers reverted, the
   end-to-end test names exactly those six files.
+
+- **…and a reload before the staging is not enough: every `tokens.json` write
+  re-reads the file just before its rename** (#1043), adminauth's #1039 rule
+  (under Auth, pairing, TLS) on the bearer-token store. All seven writers (the
+  debounced Validate and RecordClientVersion writes, the shutdown flush, and
+  Mint, Revoke, Rotate, SetExpiry) reloaded, then staged (a temp file, a write,
+  an fsync: a median of 0.6 to 0.7 ms on ext4, 2.3 to 3.8 ms on APFS) and
+  renamed with no further check. A `bridge pair` or
+  `bridge token revoke|rotate|expire` committing inside the staging was renamed
+  over: the paired device's token vanished (401 from then on) or the revoked one
+  came back, on disk and in the running bridge. Measured with two processes and
+  no test seams, against a writer every 20 ms: 24 of 200 mints lost and 30 of
+  200 revokes undone on APFS (16 and 11 on ext4), and 1 and 2 after the fix (2
+  and 1). `commitLocked` builds from the last read, stages, compares the file's
+  BYTES with what that read or this process's last write saw (`Store.raw`), and
+  on a change reloads (whose per-token merge keeps unwritten LastUsedAt and
+  client-version bumps), rebuilds and restages, up to three attempts. A re-read
+  or reload that fails ends the write with nothing written. **Bytes, not
+  mtime+size**: a write is rare enough to afford the read, and a same-size
+  sibling write in the same mtime tick passes a stat. A write adopts its list
+  only once its rename lands, and a Rotate or SetExpiry of a token revoked
+  meanwhile answers ErrNotFound rather than writing it back. **What a write
+  records as its file is the STAGED file's stat**, after its Close and before
+  the rename: RenameWithRetry fsyncs the directory after renaming (0.5 ms ext4,
+  2.8 ms APFS), and a stat of the path after that took a sibling's commit in the
+  fsync for this process's own, so Validate refused a device paired there until
+  the next write. What remains is the rename itself (a median of 50 µs on ext4
+  and 170 µs on APFS from the re-read to the rename's return; 2 of 1,600 mints
+  lost against a 10 Hz writer) and, on Windows, its retries. A kernel lock would
+  close it, as for adminauth.json, and is not taken.
+- **A Windows rollback moves the running exe aside before it renames
+  `.bak` into place** (2026-10-09, backlog B202). `RollbackBinary` on
+  Windows was one `os.Rename` of the backup onto `dst`. Both callers
+  run in this process (`Updater.Rollback`, `maybeRollbackOnBoot`), and
+  `stopServiceIfRunning` returns without stopping when this process is
+  the service, so that rename replaces the mapped image. Windows
+  answers "Access is denied". `swapBinary` already vacates a running
+  exe first (a rename of the image succeeds; a rename onto it does
+  not). The rollback does the same, then renames `.bak` onto the
+  vacated path, and renames the aside file back onto `dst` if that
+  rename fails. The aside file is the image this process still maps.
+  Windows will not delete it. `swapBinary` leaves its leftover on disk
+  as `.bak`, which is the rollback target. The rollback leftover is
+  the build being replaced, so it is not named `.bak`: `canRollback`
+  would stay true and the next rollback would restore the broken
+  build. A best-effort remove drops an earlier leftover when nothing
+  maps it; a refusal leaves `bridge.exe.rollback-<n>` beside the
+  binary, and the next vacate uses a new name so it never replaces
+  that leftover. A missing `dst` stays one rename of the backup onto
+  that path. Unix `RollbackBinary` is still one rename over the live
+  path. (`TestRollbackBinaryReplacesARunningExe`,
+  `TestRollbackReplaceVacatesARunningPathBeforeRenamingBak`,
+  `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`.)
+
+*Since backlog B898 (2026-11-15).* **A Windows rollback moves the running exe aside before it renames `.bak` into place** (2026-10-09, backlog B202), **and since backlog B898 waits out another process's hold on either file before it moves anything, puts the aside back on a schedule of its own, and stops no service manager's service.** The probes of `dst` and `.bak` and the vacate are tried by the operation's forward deadline; the place, adjacent to the vacate, has one attempt, made whenever the vacate lands; a refused place puts the aside back on `recoveryWaits` by a deadline set as the put-back begins, and a put-back refused past it is `BinaryMissing`, naming the aside's rename. A missing `dst` is still one rename of the backup onto it, after the backup's probe, both by the forward deadline. The SCM stop `RollbackBinary` made is gone (the B898 section, above).
+
+- **A swap PRESERVES the mode `dst` already has; it does not impose one.** The
+  rename path inherited the extractor's `O_CREATE 0o755`, which IS umask-masked,
+  while the copy path chmod'd an unmasked `0o755` — under a comment asserting the
+  two matched. Measured under `UMask=0027`, which this repo's own deployment
+  runbook prescribes: the same-volume path installed **0750** and the
+  cross-volume path **0600**. The service user still execs it, so the bridge
+  runs and nothing looks wrong; every other account on the host gets `EACCES` on
+  a binary that worked yesterday, with no log line. The divergence is invisible
+  at umask 0, so the test sets one.
+
+- **The new bytes are STAGED beside `dst` before anything is vacated, so the
+  no-file window is two adjacent renames and never encloses a copy.** Both
+  fallback shapes vacated `dst` first and then called `placeNewBinary`, which
+  falls back to a ~30 MiB cross-volume copy plus an fsync on EXDEV /
+  `ERROR_NOT_SAME_DEVICE` — so the gap both files described as "the tiny no-file
+  window between the two renames" was the duration of a full transfer. **The
+  POSIX hardlink path was never affected** (dst keeps resolving through its own
+  dentry for the whole copy); the two that were are `swapBinaryViaRename` and
+  **Windows, where the hardlink trick cannot apply at all and this is the ONLY
+  path** — on the very host `placeNewBinaryWindows`' docblock names ("bridge.exe
+  on D: and the data dir under %LOCALAPPDATA% on C:"), every update spent seconds
+  with no `bridge.exe` on disk. The in-process restore cannot cover a power loss
+  there. Staging tries the cheap same-volume move FIRST, so an ordinary install
+  still pays a rename rather than a copy. `swap_test.go` exercised each fallback
+  alone and never composed them, which is why nothing saw it — the pin now walks
+  all four combinations and asserts the ORDER (copy before vacate), because
+  "dst is never absent" is false by construction for the two-rename commit.
+
+*Since backlog B898 (2026-11-15).* **The new bytes are STAGED beside `dst` before anything is vacated, so the no-file window is two adjacent renames and never encloses a copy; since backlog B898 the staging comes before the swap is armed, and the settings check's copy, beside `dst` already (`checkedBeside`: its directory and its `.bridge-check-` name), is taken as it is and given `dst`'s mode.** **Don't stage a candidate twice, or arm the swap before its staging.** Every production install stages its verified candidate beside the binary for its settings check (`stageForCheck`), so the swap's own staging made a second copy after `armSwap`, and a hold on it (a scanner reading the copy the check had just run) failed a swap already armed. The swap now takes that copy as its staged file, and stages only a candidate that is elsewhere (an install with no settings path, the tests), before it arms, on the swap's forward deadline, so that the time a staging takes, a copy across volumes among it, is the probes' after it; on Unix the copy's mode is set from `dst`'s as the staging set it (`TestASwapOfTheCheckedCandidateGivesItTheBinarysMode`, under the runbook's umask), and the cross-device copy is shown to run (`TestSwapBinaryFallsBackToCopyOnCrossDeviceRename`: the staging's rename refused, the file at `dst` another than the source).

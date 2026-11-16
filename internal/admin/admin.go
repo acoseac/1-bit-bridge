@@ -176,10 +176,13 @@ type Deps struct {
 	// with backup wiring.
 	BackupSources backup.Sources
 
-	// LogPath is where this install's log file lives — the same
-	// `packaging.DefaultLogPath()` the service units point
-	// StandardOutput/StandardError at, and the same one `bridge logs`
-	// reads. Injected rather than resolved here so internal/admin needs
+	// LogPath is where this bridge's log file lives — cmd/bridge's
+	// adminLogPath: the `packaging.DefaultLogPath()` the service units
+	// point StandardOutput/StandardError at and the Windows sign-in
+	// launcher redirects to, or, inside the Windows service, the service's
+	// own log under %PROGRAMDATA% (backlog B618). `bridge logs` reads the
+	// same file wherever the console runs inside the installed bridge.
+	// Injected rather than resolved here so internal/admin needs
 	// no dependency on internal/packaging, matching how BackupSources
 	// carries the other state-file paths.
 	//
@@ -492,8 +495,9 @@ type Deps struct {
 	// PlayerOutput is the bridge's own player as the console's Player page
 	// asks it (B601, handlers_player_output.go): cmd/bridge implements it
 	// over serve's player, its boot plan and the box's DAC readings, so this
-	// package imports no player package. Nil leaves the page saying that no
-	// player is wired here, and every route of it refusing.
+	// package imports no player package; its test tone plays through the
+	// running player's backend. Nil leaves the page saying that no player is
+	// wired here, and every route of it refusing.
 	PlayerOutput PlayerOutput
 
 	// AnalysisSweep returns the serve-side auto-analysis sweeper's
@@ -1420,6 +1424,20 @@ var (
 	// read (its round 4), so nothing was saved, failing closed. A 409,
 	// `update-checks-off-unchecked`, in words of each case's own.
 	ErrUpdateChecksOffUnchecked = errors.New("whether an off saved now would keep a crash rollback from putting the backup back could not be told")
+	// ErrUpdateBinaryInUse: another program held a file of the install or the
+	// rollback past its wait, and the bridge's binary is where it was, so
+	// nothing was done (backlog B898). A 409, `binary-in-use`: trying again
+	// is the remedy.
+	ErrUpdateBinaryInUse = errors.New("a file of the update was in use by another program")
+	// ErrUpdateBinaryMissing: the bridge's binary is not on disk, left so by
+	// a put-back that failed, or found so by the recovery latch, which
+	// refuses every install and rollback until it is back. A 500,
+	// `recovery-required`: the bridge log names the rename that puts it back.
+	ErrUpdateBinaryMissing = errors.New("the bridge's program file is not on disk")
+	// ErrUpdateMarkerNotRestored: an install or a rollback that failed could
+	// not put the install marker back as it read it. A 500,
+	// `marker-not-restored`, never `binary-in-use`, whatever ended it.
+	ErrUpdateMarkerNotRestored = errors.New("the install marker could not be put back")
 )
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from
@@ -1991,12 +2009,15 @@ func (s *Server) Handler() http.Handler {
 	// through the live holder, and each route refuses, before anything is
 	// read or written, where the player cannot run: a public bridge, a host
 	// that is not Linux, a player block that does not read, a setting the
-	// control plane owns.
+	// control plane owns. The test tone (B601) writes nothing: it plays
+	// through the running player's DAC until its request ends, and no route
+	// stops it.
 	mux.HandleFunc("GET /api/output/player", s.apiPlayerOutputStatus)
 	mux.HandleFunc("GET /api/output/player/dacs", s.apiPlayerOutputDACs)
 	mux.HandleFunc("POST /api/output/player/enabled", s.apiPlayerOutputEnabled)
 	mux.HandleFunc("POST /api/output/player/openhome", s.apiPlayerOutputOpenHome)
 	mux.HandleFunc("POST /api/output/player/dac", s.apiPlayerOutputDAC)
+	mux.HandleFunc("POST /api/output/player/tone", s.apiPlayerOutputTone)
 	// Log export. All GET: reads, not mutations, so csrfGuard passes them
 	// through as it does every other read on this listener. The exports are
 	// downloads rather than JSON a cross-origin page could read back.

@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"runtime"
 	"strconv"
@@ -16,14 +15,18 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"github.com/acoseac/1-bit-bridge/internal/player/testtone"
+	"github.com/acoseac/1-bit-bridge/internal/tonebounds"
 )
 
 // The test tone: a 1 kHz sine, never louder than pcmTestLoudest dBFS,
-// because the hardware gate is run on headphones.
+// because the hardware gate is run on headphones. The tone is
+// internal/player/testtone's and its bounds internal/tonebounds', which the
+// console's tone (B601) shares.
 const (
-	pcmTestToneHz   = 1000
-	pcmTestLoudest  = -30.0
-	pcmTestQuietest = -90.0
+	pcmTestToneHz   = tonebounds.ToneHz
+	pcmTestLoudest  = tonebounds.Loudest
+	pcmTestQuietest = tonebounds.Quietest
 )
 
 // pcmTestDevice is what the harness drives: an *alsapcm.Device, or a
@@ -269,7 +272,7 @@ func pcmTestRunFrom(device, rate, bits int, alsaFormat string, seconds int, leve
 	if seconds < 1 || seconds > 600 {
 		return bad("--seconds is 1 to 600, not %d", seconds)
 	}
-	if math.IsNaN(level) || level > pcmTestLoudest || level < pcmTestQuietest {
+	if tonebounds.Check(level) != nil {
 		return bad("--level is %g to %g dBFS, not %g: the tone is never louder than %g dBFS", pcmTestQuietest, pcmTestLoudest, level, pcmTestLoudest)
 	}
 	return pcmTestRun{rate: rate, bits: bits, format: f, seconds: seconds, level: level}, 0
@@ -294,9 +297,9 @@ func pcmTestPacks(f format.ALSAFormat, bits int) bool {
 // pcmTestCarries says what each format carries, for a refusal.
 const pcmTestCarries = "S16_LE takes 16, S24_3LE and S24_LE take 16 or 24, S32_LE takes 16, 24 or 32"
 
-// pcmTestTone is the test tone packed for one run: the frames a 1 kHz sine
-// at the run's rate takes to come back to its first sample exactly, so the
-// tone repeats them without a seam.
+// pcmTestTone is the test tone packed for one run (testtone.Tone): the
+// frames a 1 kHz sine at the run's rate takes to come back to its first sample
+// exactly, so the tone repeats them without a seam.
 type pcmTestTone struct {
 	packed    []byte
 	frames    int
@@ -304,31 +307,15 @@ type pcmTestTone struct {
 	fullScale int64
 }
 
-// buildPCMTestTone builds the tone for a rate, valid bits, format and
-// level: a sine whose peak is the level's fraction of full scale, rounded
-// down, on both channels, packed by the format package's packer.
+// buildPCMTestTone builds the tone for a rate, valid bits, format and level
+// (testtone.Build): a sine whose peak is the level's fraction of full scale,
+// rounded down, on both channels, packed by the format package's packer.
 func buildPCMTestTone(rate, bits int, f format.ALSAFormat, level float64) (pcmTestTone, error) {
-	frames := rate / gcd(rate, pcmTestToneHz)
-	full := int64(1)<<(bits-1) - 1
-	amp := int64(math.Floor(float64(full) * math.Pow(10, level/20)))
-	samples := make([]int32, 2*frames)
-	for n := range frames {
-		v := int32(math.Round(float64(amp) * math.Sin(2*math.Pi*pcmTestToneHz*float64(n)/float64(rate))))
-		samples[2*n], samples[2*n+1] = v, v
-	}
-	packed := make([]byte, format.PackedBytes(len(samples), f))
-	if _, err := format.Pack(packed, samples, bits, f); err != nil {
+	t, err := testtone.Build(rate, bits, f, level)
+	if err != nil {
 		return pcmTestTone{}, err
 	}
-	return pcmTestTone{packed: packed, frames: frames, amplitude: amp, fullScale: full}, nil
-}
-
-// gcd is the greatest common divisor of two positive integers.
-func gcd(a, b int) int {
-	for b != 0 {
-		a, b = b, a%b
-	}
-	return a
+	return pcmTestTone{packed: t.Packed, frames: t.Frames, amplitude: t.Amplitude, fullScale: t.FullScale}, nil
 }
 
 // play is one active run: open, check against the kernel's own file, play

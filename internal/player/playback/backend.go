@@ -15,6 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
@@ -49,6 +50,9 @@ type Config struct {
 	OpenNative func(ctx context.Context, cfg alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
 	// Probe runs the silent probe (Backend.Probe); nil is alsapcm.Probe.
 	Probe func(ep alsapcm.Endpoint, cfg alsapcm.ProbeConfig) (alsapcm.ProbeReport, error)
+	// OpenTone opens the bound unit's node for the console's test tone
+	// (Backend.Tone, B601); nil is alsapcm.Open.
+	OpenTone func(ep alsapcm.Endpoint, cfg alsapcm.Config) (*alsapcm.Device, error)
 	// Tick is what a session measures its sink's position on: a channel that
 	// ticks and the function that stops it. Nil ticks every MeasureEvery.
 	Tick func() (<-chan time.Time, func())
@@ -170,6 +174,86 @@ type Seams struct {
 	// through a Start, which finds the answers recorded (B762 round 3). It may
 	// block, and must not call the backend.
 	ProbeDecided func()
+	// Holding runs in session s's Start once its record is registered, before
+	// it takes the device slot (hold): a test holds a Start there, between its
+	// registration and its hold, where nothing holds the device (B728 B9 PR
+	// 2). It may block, and must not call the backend.
+	Holding func(s engine.SessionID)
+	// Leased runs in session s's Start that finds a choice's write holding the
+	// configuration lease (admitStart), before it waits for it, holding
+	// nothing and registering nothing (B728 B9 PR 2). It may block.
+	Leased func(s engine.SessionID)
+	// ChoiceLeased runs in a choice's write (ChooseDSD) once it holds the
+	// configuration lease, before it waits for a probe that held the device
+	// slot and reads the DAC (B728 B9 PR 2). It may block.
+	ChoiceLeased func()
+	// ChoiceWritten runs in a choice's write once the state's write has
+	// returned, err its answer, before anything is published. It may block.
+	ChoiceWritten func(err error)
+	// ChoiceQueued runs in a choice's write that finds another write's turn
+	// under way, before it waits for it. It must not block.
+	ChoiceQueued func()
+	// ReconcilingPermission runs as session s's authorization is reconciled
+	// (reconcilePermission, the harness's path), before it reads anything: a
+	// test makes the reconciliation panic there (B853 round 2). It must not
+	// call the backend.
+	ReconcilingPermission func(s engine.SessionID)
+	// Selecting runs on occurrence o's opener on the harness's path (an
+	// Authorization, no effective policy: openNativeContent) once the cause
+	// its session recorded has been asked and none found, before a selector or
+	// the session's cached refusal answers, with no lock held: a test revokes
+	// there, in the window the cause is asked again after (B853 round 3). It
+	// may call the backend.
+	Selecting func(o engine.OccurrenceID)
+	// MonitorEnded runs on session s's DSD monitor's goroutine
+	// (startDSDMonitor) as it returns, after everything else it does: a test
+	// counts the monitors its cleanup ended (B853 round 3). It must not block
+	// or call the backend.
+	MonitorEnded func(s engine.SessionID)
+	// The console's test tone's steps (Backend.Tone, B601), each on the
+	// goroutine that reaches it, which it may hold there: ToneEntering before
+	// the tone is counted, ToneCounted once it is and before it asks for the
+	// device slot, ToneAdmitted once it holds the slot and before its run
+	// starts, and ToneClosed once its node's close has answered (closedOK: a
+	// close confirmed) and before the slot is given back. None may call the
+	// backend.
+	ToneEntering, ToneCounted, ToneAdmitted func()
+	ToneClosed                              func(closedOK bool)
+}
+
+// reconcilingPermission is the ReconcilingPermission seam.
+func (b *Backend) reconcilingPermission(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.ReconcilingPermission != nil {
+		sm.ReconcilingPermission(s)
+	}
+}
+
+// selecting is the Selecting seam.
+func (b *Backend) selecting(o engine.OccurrenceID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Selecting != nil {
+		sm.Selecting(o)
+	}
+}
+
+// monitorEnded is the MonitorEnded seam.
+func (b *Backend) monitorEnded(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.MonitorEnded != nil {
+		sm.MonitorEnded(s)
+	}
+}
+
+// holding is the Holding seam.
+func (b *Backend) holding(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Holding != nil {
+		sm.Holding(s)
+	}
+}
+
+// leased is the Leased seam.
+func (b *Backend) leased(s engine.SessionID) {
+	if sm := b.cfg.Seams; sm != nil && sm.Leased != nil {
+		sm.Leased(s)
+	}
 }
 
 // releasingSeam is the Releasing seam.
@@ -380,6 +464,12 @@ type Backend struct {
 	dsdJudged    *dsdSet
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
+	// choiceTurn is the writes' turn: one choice write at a time (ChooseDSD,
+	// B728 B9); landedChoice is the state a choice's write left in the state's
+	// file, landed and not known to be durable, which every reading holds the
+	// set to until the next start (setOver), nil while there is none.
+	choiceTurn   chan struct{}
+	landedChoice atomic.Pointer[dsdstate.State]
 
 	policyMu   sync.Mutex
 	policy     PlayerPolicy
@@ -409,9 +499,31 @@ type Backend struct {
 	// does (Probe): a Start waits for it, at most ProbeWait, and no other
 	// probe starts beside it.
 	probing *probeHold
-	// waiters counts the Starts that found a probe holding the slot and
-	// have not taken it yet: a probe is refused while one waits.
-	waiters             int
+	// toning is the console's test tone that holds the device slot (Tone,
+	// B601), nil while none does: a Start ends it and waits for it, at most
+	// ToneYield; a probe is refused and stays owed; a choice's write and
+	// another tone are refused.
+	toning *toneHold
+	// waiters counts the Starts that found a probe or a tone holding the slot
+	// and have not taken it yet: a probe and a tone are refused while one
+	// waits.
+	waiters int
+	// The tone's gate, the supervisor's (ToneOutput): open, or shut with the
+	// word a tone is refused and ended with (it starts output_unknown);
+	// tonesClosed, shut for good by serve's stop (CloseTones); toneLast, the
+	// last tone's result; toneFenced, a fence a tone's cleanup set
+	// (terminalUnconfirmed beside it), which ToneStatus says.
+	toneOpen    bool
+	toneShut    ToneOutcome
+	tonesClosed bool
+	toneLast    ToneResult
+	toneFenced  bool
+	// lease is the configuration lease a choice's write holds (takeLease, B728
+	// B9 PR 2), nil while none does: taken in the step that finds no session's
+	// record, nothing holding the device and no release unconfirmed, it keeps
+	// every Start from registering (admitStart) and every probe from taking
+	// the slot (reserveProbe) until it is let go.
+	lease               *configLease
 	took                map[packKey]format.ALSAFormat
 	overlaps            int
 	terminalUnconfirmed bool
@@ -433,13 +545,15 @@ type Backend struct {
 	// (spawnWrite), for which a share of the data directory's lock is kept
 	// (DSDWrites, B762); and whether the writes are closed to any asked from
 	// now on (CloseDSDWrites, B762 round 2). One lock, so a count of both is
-	// one reading (Running).
+	// one reading (Running). tclosed is the console's tones closed to any asked
+	// from now on (CloseTones, B601): no tone is counted once it is set.
 	gmu     sync.Mutex
 	live    int
 	zero    chan struct{} // closed while live is 0
 	writes  int
 	wzero   chan struct{} // closed while writes is 0
 	wclosed bool
+	tclosed bool
 	// wrefused says, once, that a write came once the writes were closed.
 	wrefused sync.Once
 }
@@ -463,6 +577,9 @@ func New(cfg Config) (*Backend, error) {
 	if cfg.Probe == nil {
 		cfg.Probe = alsapcm.Probe
 	}
+	if cfg.OpenTone == nil {
+		cfg.OpenTone = alsapcm.Open
+	}
 	if cfg.Tick == nil {
 		cfg.Tick = func() (<-chan time.Time, func()) {
 			t := time.NewTicker(MeasureEvery)
@@ -481,7 +598,8 @@ func New(cfg Config) (*Backend, error) {
 	if cfg.Authorization == nil {
 		reason = string(ReasonDSD)
 	}
-	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero, wzero: zero}
+	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero, wzero: zero,
+		choiceTurn: make(chan struct{}, 1), toneShut: ToneOutputUnknown}
 	if cfg.DSD != nil {
 		// Its read side the state's warnings of the bridge's already, a state
 		// that did not read among them, before the first refresh reads the box.
@@ -500,8 +618,11 @@ type Stats struct {
 	// Goroutines is the goroutines the backend started that have not
 	// returned: each session's producer, reporter and openers, a release's
 	// teardown, a call waiting on its sink for its caller, the writes of the
-	// player's DSD state, and the silent probe's and the refresh's that the
-	// supervisor asks for (RequestProbeDSD, RequestRefreshDSD). A device the
+	// player's DSD state (a choice's, made on its caller's goroutine, counted
+	// as one: dsdWrite), the silent probe's and the refresh's that the
+	// supervisor asks for (RequestProbeDSD, RequestRefreshDSD), and the
+	// console's test tone's, counted from before it asks for the device slot
+	// to after its node's close has answered (Tone, B601). A device the
 	// kernel holds in a call that never returns keeps the sink's writer in
 	// it, and with it the teardown that closes that sink and any call that
 	// waits on it: those are abandoned, never joined, and stay counted
@@ -590,9 +711,30 @@ func (b *Backend) spawnWrite(what string, f func()) bool {
 	return true
 }
 
+// dsdWrite runs f, a write of the player's DSD state made on its caller's
+// goroutine (a choice's, ChooseDSD, B728 B9), counted as a write spawnWrite
+// starts is (DSDWrites, Running, Wait) until it returns, a panic's way out
+// included, so serve's player's stop keeps its share of the data directory's
+// lock until it ends and says so as it says a write left running. It reports
+// whether f ran: once the writes are closed (CloseDSDWrites) it runs nothing,
+// said once as spawnWrite says it.
+func (b *Backend) dsdWrite(what string, f func()) bool {
+	b.gmu.Lock()
+	if b.wclosed {
+		b.gmu.Unlock()
+		b.wrefused.Do(func() { b.dsdLog().Warn(dsdWriteRefused, "what", what) })
+		return false
+	}
+	b.startLocked(true)
+	b.gmu.Unlock()
+	b.counted(true, f)
+	return true
+}
+
 // Running is how many of the goroutines the backend started have not
 // returned, and how many of those are writes of the player's DSD state or may
-// start one (spawnWrite), from one reading: serve's player's stop says what
+// start one (spawnWrite), a choice's write on its caller's goroutine counted
+// among both (dsdWrite), from one reading: serve's player's stop says what
 // each kind left past its bound (B762 round 2).
 func (b *Backend) Running() (goroutines, writes int) {
 	b.gmu.Lock()
@@ -653,16 +795,70 @@ func (b *Backend) notify(n Note) {
 
 // session is id's record, made by whichever of its calls comes first: the
 // engine runs each call on a goroutine of its own, so a Release may reach
-// the backend before its Start.
+// the backend before its Start. A Release registers one whatever a choice's
+// write holds, and never waits: its record holds nothing; a Start registers
+// its own through admitStart.
 func (b *Backend) session(id engine.SessionID) *session {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.sessionLocked(id)
+}
+
+// sessionLocked is session under b.mu.
+func (b *Backend) sessionLocked(id engine.SessionID) *session {
 	s := b.sessions[id]
 	if s == nil {
 		s = newSession(b, id)
 		b.sessions[id] = s
 	}
 	return s
+}
+
+// admitStart registers req's session for its Start, in the step that finds
+// no choice's write holding the configuration lease (takeLease, B728 B9 PR 2),
+// under the lock the lease is taken under, so no write is taken beside a Start
+// between its registration and its hold of the device. A Start that comes
+// while a write holds the lease waits for it to be let go, holding nothing and
+// never under b.mu, and asks again: it then plays under the set that write
+// published. It gives the wait up at its release (StartRequest.Released) or
+// its context's end, each read before and after the wait, and answers why,
+// having registered nothing: its caller then makes the record its Release
+// meets (session.abandon).
+func (b *Backend) admitStart(ctx context.Context, req engine.StartRequest) (*session, error) {
+	for {
+		b.mu.Lock()
+		l := b.lease
+		if l == nil {
+			s := b.sessionLocked(req.Session)
+			b.mu.Unlock()
+			return s, nil
+		}
+		b.mu.Unlock()
+		if err := startGivenUp(ctx, req.Released); err != nil {
+			return nil, err
+		}
+		b.leased(req.Session)
+		select {
+		case <-l.free:
+		case <-ctx.Done():
+		case <-req.Released:
+		}
+		if err := startGivenUp(ctx, req.Released); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// startGivenUp is why a Start waiting for the configuration lease gives its
+// wait up: its release taken (errReleased) or its context ended; nil while
+// neither.
+func startGivenUp(ctx context.Context, released <-chan struct{}) error {
+	select {
+	case <-released:
+		return errReleased
+	default:
+	}
+	return ctx.Err()
 }
 
 // known is id's record, nil when the backend has none: a call for a session
@@ -695,7 +891,11 @@ var errReleased = errors.New("player backend: the session's release came first: 
 // takes the slot, under the lock the probe's answers are decided under
 // (takeProbe): a probe whose answers are decided after it keeps nothing of
 // what it asked (B762), and one whose answers were decided before, or beside
-// a Start that gave its wait up, keeps them (rounds 2 and 3).
+// a Start that gave its wait up, keeps them (rounds 2 and 3). The console's
+// test tone in the slot (Tone, B601) is preempted: ended, on the record found
+// under the lock, and waited for as a probe is, at most ToneYield, its node
+// closed before the slot is taken; past it the device is busy, the tone's
+// close still held in the kernel.
 func (b *Backend) hold(ctx context.Context, s *session) error {
 	var expired chan struct{}
 	stop := func() bool { return false }
@@ -714,8 +914,8 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 			b.mu.Unlock()
 			return engine.ErrReleaseUnconfirmed
 		}
-		p := b.probing
-		if p == nil {
+		p, tn := b.probing, b.toning
+		if p == nil && tn == nil {
 			if waiting {
 				b.waiters--
 				waiting = false
@@ -731,6 +931,13 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 			b.mu.Unlock()
 			return nil
 		}
+		held, bound, by := (<-chan struct{})(nil), ProbeWait, "the silent probe"
+		if p != nil {
+			held = p.done
+		} else {
+			tn.end(TonePreempted)
+			held, bound, by = tn.done, ToneYield, "the console's test tone"
+		}
 		if !waiting {
 			b.waiters++
 			waiting = true
@@ -738,14 +945,14 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 		b.mu.Unlock()
 		if expired == nil {
 			ch := make(chan struct{})
-			stop = b.cfg.AfterFunc(ProbeWait, func() { close(ch) })
+			stop = b.cfg.AfterFunc(bound, func() { close(ch) })
 			expired = ch
 		}
 		select {
-		case <-p.done:
+		case <-held:
 			b.startWoke()
 		case <-expired:
-			return fmt.Errorf("player backend: the device is busy: the silent probe has held it for %v: %w", ProbeWait, engine.ErrDeviceBusy)
+			return fmt.Errorf("player backend: the device is busy: %s has held it for %v: %w", by, bound, engine.ErrDeviceBusy)
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.ctx.Done():
@@ -771,9 +978,14 @@ func (b *Backend) letGo(s *session, started bool) {
 // Start begins a session: the first occurrence's content opened and its
 // first chunk decoded (refused before the device is touched when it cannot
 // play), the bound unit located and its device opened, checked and given the
-// first frames. It answers once those frames are in the sink.
+// first frames. It answers once those frames are in the sink. A choice's
+// write that holds the configuration lease is waited for first (admitStart);
+// a Start that gives that wait up acquires nothing (session.abandon).
 func (b *Backend) Start(ctx context.Context, req engine.StartRequest) error {
-	s := b.session(req.Session)
+	s, err := b.admitStart(ctx, req)
+	if err != nil {
+		return b.session(req.Session).abandon(req, err)
+	}
 	return s.start(ctx, req)
 }
 

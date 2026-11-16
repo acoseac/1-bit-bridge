@@ -115,12 +115,12 @@ func (e installRefusal) Unwrap() error { return updater.ErrConfigRefused }
 // and shows the updater's sentence once, not after its own words again.
 func TestAnInstallTheSettingsRefuseIsTheConsolesOwnAnswer(t *testing.T) {
 	sentence := "9.9.9 refuses this bridge's settings, so it was not installed: line 409: a whole number is written with a leading zero"
-	mapped := mapUpdaterError(installRefusal(sentence))
+	mapped := mapUpdaterError(installRefusal(sentence), updaterInstall)
 	if !errors.Is(mapped, admin.ErrUpdateConfigRefused) || mapped.Error() != sentence {
 		t.Errorf("mapped = %q (is %v), want %q as admin.ErrUpdateConfigRefused", mapped, errors.Is(mapped, admin.ErrUpdateConfigRefused), sentence)
 	}
 	failed := fmt.Errorf("%w: 9.9.9: it exited with status 3", updater.ErrConfigCheckFailed)
-	mapped = mapUpdaterError(failed)
+	mapped = mapUpdaterError(failed, updaterInstall)
 	if !errors.Is(mapped, admin.ErrUpdateConfigCheckFailed) || strings.Count(mapped.Error(), updater.ErrConfigCheckFailed.Error()) != 1 {
 		t.Errorf("mapped = %q, want admin.ErrUpdateConfigCheckFailed saying it once", mapped)
 	}

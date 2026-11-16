@@ -403,3 +403,35 @@ func TestOpenRefusesAReadBackThatIsNotWhatWasAsked(t *testing.T) {
 		})
 	}
 }
+
+// TestARefusedOpenWhoseCloseFailsSaysItsReleaseIsUnconfirmed pins what a
+// refused open answers once its own close of the node has answered (B601):
+// an error from that close is carried beside the refusal with
+// ErrReleaseUnconfirmed, its Reason still the refusal's, so a caller that
+// tries another format by the Reason goes on as before, and the console's
+// test tone, which asks for ErrReleaseUnconfirmed, stops there; a close that
+// answers nil adds nothing.
+func TestARefusedOpenWhoseCloseFailsSaysItsReleaseIsUnconfirmed(t *testing.T) {
+	closeFailed := errors.New("the close failed")
+	for _, fails := range []bool{false, true} {
+		name := "its close answers nil"
+		if fails {
+			name = "its close answers an error"
+		}
+		t.Run(name, func(t *testing.T) {
+			k := newFake(t)
+			if fails {
+				k.inspect(func(k *fakeKernel) { k.closeErr = closeFailed })
+			}
+			_, err := openFake(k, Config{RateHz: 48000, Format: format.S24LE})
+			wantReason(t, err, ReasonNotSupported)
+			if got := errors.Is(err, ErrReleaseUnconfirmed); got != fails {
+				t.Errorf("errors.Is(%v, ErrReleaseUnconfirmed) is %v; want %v", err, got, fails)
+			}
+			if got := errors.Is(err, closeFailed); got != fails {
+				t.Errorf("errors.Is(%v, the close's error) is %v; want %v", err, got, fails)
+			}
+			k.checkClosedOnce(t)
+		})
+	}
+}

@@ -46,12 +46,19 @@ type session struct {
 	// nil, never closed, for a request without one.
 	released <-chan struct{}
 
-	mu              sync.Mutex
-	started         bool
-	releasing       bool
-	nativeRelease   *engine.ReleaseRequest
-	finalReport     bool
+	mu            sync.Mutex
+	started       bool
+	releasing     bool
+	nativeRelease *engine.ReleaseRequest
+	finalReport   bool
+	// nativeRevoked is the session's DSD stopped, and revokedFor why: the word
+	// and the detail every DSD entry of the session is refused with from then
+	// on (backlog B853). revokedSeq counts the causes recorded, each write of
+	// revokedFor, so a revocation tells whether the cause it recorded stands
+	// (round 3). All three are set by revokeDSDLocked alone.
 	nativeRevoked   bool
+	revokedFor      engine.Unplayable
+	revokedSeq      uint64
 	nativeEscalated bool
 	releaseErr      error
 	lateAck         bool // Release answered its context's error: the teardown acknowledges
@@ -342,6 +349,80 @@ func (s *session) faulted(where string) error {
 	return err
 }
 
+// revokeDSDLocked stops the session's DSD (nativeRevoked) and records why,
+// the word and the detail every DSD entry of the session is refused with from
+// then on (dsdRevokedLocked; backlog B853): the policy's reading that failed
+// (ReasonDACUnread), a reconciliation's contained panic (ReasonFailed, the
+// fault it records), an ordinary revocation (native_revoked, for its reason)
+// or, on the harness's path, an authorization replaced (native_revoked). The
+// first cause stands, but for the reading's failure, which stands once it
+// comes, whatever came first, its detail with it, so no entry is refused with
+// one cause's word and another's detail. Until B853 every cause refused an
+// entry at its admission as a policy that did not read: the set did read
+// after an ordinary revocation. It answers the count of the cause where it
+// recorded why (revokedSeq), 0 where an earlier cause stood: who stopped the
+// session's DSD is told by that, never by the cause's words, which two
+// revocations may share (round 3). s.mu is held.
+func (s *session) revokeDSDLocked(why engine.Unplayable) uint64 {
+	s.nativeRevoked = true
+	if s.revokedFor.Reason == "" || why.Reason == ReasonDACUnread {
+		s.revokedFor = why
+		s.revokedSeq++
+		return s.revokedSeq
+	}
+	return 0
+}
+
+// dsdRevokedLocked is the refusal of a DSD entry of a session whose DSD was
+// stopped, for the cause recorded (revokeDSDLocked), a copy of its own.
+// s.mu is held.
+func (s *session) dsdRevokedLocked() *engine.Unplayable {
+	u := s.revokedFor
+	return &u
+}
+
+// stoppedCause is the refusal o's session gives a DSD entry once its DSD was
+// stopped, for the cause recorded (dsdRevokedLocked), or nil while it was not
+// or for an occurrence of no session. It takes the session's lock, which its
+// caller does not hold.
+func (o *occ) stoppedCause() *engine.Unplayable {
+	s := o.owner
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.nativeRevoked {
+		return nil
+	}
+	return s.dsdRevokedLocked()
+}
+
+// refuseAfterSelection refuses o, whose open is under way on the harness's
+// path, with u, a selector's refusal or the session's cached one, unless its
+// session's DSD was stopped: then for the cause recorded (dsdRevokedLocked,
+// backlog B853), asked again in the step that sets the refusal, under the
+// session's lock. A revocation records its cause before it revokes the
+// permission, in one step under that lock, so a selector that found the
+// permission revoked, and answered no approval, finds the cause here (round 3:
+// a revocation after the cause's first ask was refused as no approval, which
+// refuseRevokedLocked passes over). The caller does not hold the session's
+// lock.
+func (o *occ) refuseAfterSelection(u *engine.Unplayable) {
+	s := o.owner
+	if s == nil {
+		o.refused = u
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nativeRevoked {
+		o.refused = s.dsdRevokedLocked()
+		return
+	}
+	o.refused = u
+}
+
 // recoverFault is deferred last by the producer: a panic on it is recovered,
 // logged once, and is the session's fault (faulted).
 func (s *session) recoverFault(where string) {
@@ -485,6 +566,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	first.leading = true
 	s.mu.Unlock()
 	defer close(s.startDone)
+	s.b.holding(s.id)
 	if err := s.b.hold(ctx, s); err != nil {
 		return err
 	}
@@ -520,8 +602,12 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	// it under that set and a reconciliation after it judges it (B728 B7, round
 	// 2). Once its done is closed, reconciliation repoints its set and a
 	// revocation refuses it, under this lock, so what decides the DSD monitor
-	// and the open's refusal is read in that step too (round 3).
+	// and the open's refusal is read in that step too (round 3). A revocation
+	// that came while it opened, which passed over it, refuses it first, for
+	// the cause recorded, the set unchanged or not (B853 round 2): until then
+	// the Start reported its plan and failed at the native open.
 	s.mu.Lock()
+	s.refuseRevokedLocked(first)
 	s.readmitDSDLocked(first)
 	s.makeConverterLocked(first)
 	close(first.done)
@@ -630,6 +716,36 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	case <-cctx.Done():
 		return cctx.Err()
 	}
+}
+
+// abandon is a Start that gave its wait for the configuration lease up
+// (admitStart), for why: its release taken, or its context ended. It
+// acquires nothing, and leaves its session's record as a Start whose release
+// came first leaves it (start): its occurrence's reservation let go, its
+// Start done, and the record let go here when its Release came first, or by
+// the teardown of the Release still to come, which a Start this record shows
+// as started makes run. So an abandoned Start meets its Release in either
+// order and leaves no record behind, which would refuse every later choice's
+// write as playback_not_stopped (B728 B9 PR 2).
+func (s *session) abandon(req engine.StartRequest, why error) error {
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return fmt.Errorf("player backend: session %d started twice", s.id)
+	}
+	s.started = true
+	s.ev, s.opts, s.released = req.Events, req.Options, req.Released
+	came := s.releasing
+	s.mu.Unlock()
+	req.First.Reservation.ReleaseBackend()
+	close(s.startDone)
+	switch {
+	case came:
+		s.b.letGo(s, true)
+	case s.releaseTaken():
+		s.b.fenced("start")
+	}
+	return why
 }
 
 // releaseTaken reports whether the engine has taken the session's release
@@ -907,15 +1023,17 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 		wake(s.wakeP)
 		wake(s.wakeR)
 	}()
-	// Admitted under a set a refresh has replaced since, which no
-	// reconciliation reaches while the open is under way: admitted again under
-	// the set published now, before its Prepared is reported (B728 B7), and
-	// its converter made for the plan it is admitted under (B11).
+	// Admitted before the session's DSD stopped: refused for the cause
+	// recorded, as its admission would refuse it now (B853), before its
+	// readmission, so a set a refresh published meanwhile never refuses it in
+	// the cause's place (round 2). Admitted under a set a refresh has replaced
+	// since, which no reconciliation reaches while the open is under way:
+	// admitted again under the set published now, before its Prepared is
+	// reported (B728 B7), and its converter made for the plan it is admitted
+	// under (B11).
+	s.refuseRevokedLocked(o)
 	s.readmitDSDLocked(o)
 	s.makeConverterLocked(o)
-	if s.nativeRevoked && (o.plan != nil || o.converts()) && o.refused == nil {
-		o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "DSD permission revoked"}
-	}
 	monitor = o.admitted != nil && o.refused == nil && !o.dropped
 	if o.dropped {
 		// Dropped while it opened: nothing of it plays or is reported, and

@@ -165,6 +165,13 @@ type InstallOptions struct {
 //     for an install the switch's off transition stopped before its
 //     decision or that found the switch off at it (backlog B761): nothing
 //     armed or swapped.
+//   - ErrBinaryMissing while the binary is not at opts.BinaryPath (the
+//     recovery latch, backlog B898): nothing written or swapped.
+//   - A swap that failed is a *SwapError, wrapped: ErrBinaryInUse where
+//     another process's hold ended it with the binary in place,
+//     ErrBinaryMissing where it left none (the marker put back as read
+//     all the same); and a *MarkerNotRestoredError where the marker could
+//     not be put back after it.
 //   - Any download / verify / swap / state-save error returned verbatim
 //     with a wrapped context prefix.
 //
@@ -306,6 +313,12 @@ func (u *Updater) install(ctx context.Context, a *admission, opts InstallOptions
 	if !opts.Force && opts.Sessions != nil && opts.Sessions.Inflight() > 0 {
 		return status, fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
+	}
+	// The recovery latch (backlog B898), read here without the install
+	// marker's lock to spare a download it would refuse, and asked again under
+	// the lock, where it binds.
+	if err := binaryLatch(opts.BinaryPath); err != nil {
+		return status, fmt.Errorf("%w; nothing was installed", err)
 	}
 
 	// Permission preflight FIRST, before any network I/O: if we can't
@@ -481,6 +494,12 @@ func (u *Updater) install(ctx context.Context, a *admission, opts InstallOptions
 		return status, err
 	}
 	defer lock.Release()
+	// The recovery latch, under the lock (backlog B898): a binary a failed
+	// put-back left missing, in any process, refuses every install, of any
+	// release, however old the marker, until it is renamed back.
+	if err := binaryLatch(opts.BinaryPath); err != nil {
+		return status, fmt.Errorf("%w; nothing was installed", err)
+	}
 	prior, priorErr := LoadState(opts.DataDir)
 	if opts.holdBeforeDecision != nil {
 		opts.holdBeforeDecision()
@@ -528,11 +547,17 @@ func (u *Updater) install(ctx context.Context, a *admission, opts InstallOptions
 		// Swap failed — the marker back as this install read it under the
 		// lock, so the next boot doesn't roll back something that didn't
 		// actually change, and a hold or a veto it carried stays (backlog
-		// B692; none where there was no marker to read, as before).
+		// B692; none where there was no marker to read, as before). Where
+		// the swap left no binary too (backlog B898), what it read is true
+		// once the backup is renamed back, and keeps what it held and vetoed.
+		// A marker that cannot be put back is the install's answer: the next
+		// start reads an armed marker over a swap that may have moved
+		// nothing, and the boot rollback asks the backup's version first.
+		swapErr := fmt.Errorf("swap: %w", err)
 		if perr := putMarkerBack(opts.DataDir, prior, priorErr); perr != nil {
-			logger.Warn("could not put the install marker back after a swap that failed", "err", perr)
+			return status, &MarkerNotRestoredError{Swap: swapErr, Marker: markerIOError{perr}}
 		}
-		return status, fmt.Errorf("swap: %w", err)
+		return status, swapErr
 	}
 
 	// Record the STATE, not the intent: a swap landed and nothing has
@@ -632,14 +657,19 @@ var (
 // version put back, and clears the under-way mark only once the rename
 // has landed (round 2): a rollback the process's end stops between the
 // two leaves a record the version that runs next finishes. A rename
-// that fails puts the marker back as it was read. A lock it cannot hold
-// refuses with ErrMarkerLockUnavailable, and a stop in its wait returns
-// ctx's error, nothing read, written or renamed either way.
+// that fails puts the marker back as it was read, but one that left no
+// binary at its path, which keeps the record (backlog B898). A lock it
+// cannot hold refuses with ErrMarkerLockUnavailable, and a stop in its
+// wait returns ctx's error, nothing read, written or renamed either way.
+// Under the lock and before anything else it asks the recovery latch
+// (binaryLatch).
 //
 // Errors: ErrInstallInFlight when an Install (or another Rollback)
 // is already running on this Updater, ErrActiveSessions when Force
 // is false and Sessions.Inflight() is nonzero, ErrMarkerLockUnavailable,
-// and ErrRollbackRefused.
+// ErrBinaryMissing (the latch's, or a *SwapError's that left no binary),
+// a *SwapError matching ErrBinaryInUse, a *MarkerNotRestoredError, and
+// ErrRollbackRefused.
 func (u *Updater) Rollback(ctx context.Context, opts InstallOptions) error {
 	// Phase B-Windows (PR #48) implements the rollback rename
 	// alongside darwin/linux — no platform guard needed here. The
@@ -662,6 +692,13 @@ func (u *Updater) Rollback(ctx context.Context, opts InstallOptions) error {
 		return err
 	}
 	defer lock.Release()
+	// The recovery latch first, before the marker is read (backlog B898): a
+	// binary that is not there refuses as ErrBinaryMissing, whatever the
+	// marker says or whether it can be read, and nothing is written. The
+	// Updates panel asks the same latch (RollbackRefusalAt).
+	if err := binaryLatch(opts.BinaryPath); err != nil {
+		return fmt.Errorf("%w; nothing was rolled back", err)
+	}
 	// Read the marker BEFORE the swap undoes it — TargetVersion is the
 	// release being rejected in both reachable rollback windows (marker
 	// "installing", still running the old binary; and marker
@@ -694,10 +731,18 @@ func (u *Updater) Rollback(ctx context.Context, opts InstallOptions) error {
 		restore = RollbackBinary
 	}
 	if err := restore(opts.BinaryPath, ".bak"); err != nil {
+		// No binary at its path (backlog B898): the record stays as it was
+		// written, its hold and its veto with it. The marker as read is true
+		// only once the aside is renamed back, and the record is true of
+		// whichever rename puts a binary back: that version's start
+		// finishes the rollback, or the backup's ends it as one done.
+		if errors.Is(err, ErrBinaryMissing) {
+			return err
+		}
 		// The binary in place is still the one rolled back from: the
 		// marker back as it was read.
 		if perr := putMarkerBack(opts.DataDir, st, nil); perr != nil {
-			return fmt.Errorf("%w; nor could the install marker be put back as it was (%w)", err, markerIOError{perr})
+			return &MarkerNotRestoredError{Swap: err, Marker: markerIOError{perr}}
 		}
 		return err
 	}

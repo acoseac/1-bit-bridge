@@ -263,7 +263,13 @@ func bootServe(t *testing.T, args ...string) servedBridge {
 // with t.TempDir before this call is removed after the drain, since
 // cleanups run last-registered-first. TestEveryBackgroundGoroutineDrainsOnCleanup
 // audits this function as it audits a test that launches serve itself.
-func launchServe(t *testing.T, start func(ctx context.Context, stdout, stderr io.Writer) int) servedBridge {
+//
+// Each of beforeBanner runs once the drain is registered and before the wait
+// for the banner, which can fail the test, with serve's cancel and the channel
+// closed once serve has returned: a cleanup it registers runs whatever the
+// boot did, ahead of the drain and of the removal of directories made before
+// this call.
+func launchServe(t *testing.T, start func(ctx context.Context, stdout, stderr io.Writer) int, beforeBanner ...func(stop context.CancelFunc, exited <-chan struct{})) servedBridge {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	stdout, stderr := &safeBuffer{}, &safeBuffer{}
@@ -274,6 +280,9 @@ func launchServe(t *testing.T, start func(ctx context.Context, stdout, stderr io
 		exitCode <- start(ctx, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, exitCode, stderr)
+	for _, f := range beforeBanner {
+		f(cancel, exited)
+	}
 	addr, _ := waitForListening(t, stdout, exited, exitCode, stderr)
 	return servedBridge{addr: addr, stdout: stdout, stderr: stderr, done: exitCode, stop: cancel}
 }

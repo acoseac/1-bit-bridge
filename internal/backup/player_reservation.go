@@ -45,10 +45,14 @@ type RestoreOptions struct {
 	// before it writes the snapshot's bridge.yaml, in its turn of the file's
 	// lock; sourceHeld once it holds the lock of the folder that holds its
 	// snapshot and has read the manifest there, before it touches the
-	// destination. They are the windows a test lands another writer in
-	// (WithBeforeWritesForTest, WithBeforeConfigForTest,
-	// WithSourceHeldForTest). Nil in production.
-	beforeWrites, beforeConfig, sourceHeld func()
+	// destination; beforeDatabaseCopy just before it removes the live
+	// database's sidecars and copies the snapshot's database over it, and
+	// afterDatabaseCopy once that copy is in place and the install marker's
+	// lock let go, before the epoch's open. They are the windows a test lands
+	// another writer in (WithBeforeWritesForTest, WithBeforeConfigForTest,
+	// WithSourceHeldForTest, WithBeforeDatabaseCopyForTest,
+	// WithAfterDatabaseCopyForTest). Nil in production.
+	beforeWrites, beforeConfig, sourceHeld, beforeDatabaseCopy, afterDatabaseCopy func()
 }
 
 // restoreMargin is the minimum jump and the amount of running room left

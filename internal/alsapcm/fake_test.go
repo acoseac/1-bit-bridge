@@ -127,6 +127,11 @@ type fakeKernel struct {
 	// the kernel's exclusive open refuses a second open of a device with one
 	// substream.
 	exclusive bool
+	// closeErr and closePanic make the next close of the node answer an error,
+	// or panic, once it has closed the node (failNextClose, panicAtNextClose):
+	// a close whose answer says nothing the caller can trust.
+	closeErr   error
+	closePanic any
 	// refineErrs fails the nth HW_REFINE (from 1) with its error.
 	refineErrs map[int]error
 	// others are the card's other substreams open at each read of its open
@@ -189,6 +194,7 @@ type fakeKernel struct {
 	// opens the ones that opened.
 	opened     []string
 	openAt     []int // len(played) at each open: where each open's bytes begin
+	openRefine []int // len(refines) at each open: where each open's refines begin
 	opens      int
 	refines    []hwParams // each HW_REFINE as it was asked, before the kernel narrowed it
 	isOpen     bool
@@ -324,6 +330,7 @@ func (k *fakeKernel) open(path string) (int, error) {
 	k.isOpen = true
 	k.opens++
 	k.openAt = append(k.openAt, len(k.played))
+	k.openRefine = append(k.openRefine, len(k.refines))
 	return k.fd, nil
 }
 
@@ -371,6 +378,14 @@ func (k *fakeKernel) close(fd int) error {
 	}
 	k.isOpen = false
 	k.closes++
+	if v := k.closePanic; v != nil {
+		k.closePanic = nil
+		panic(v)
+	}
+	if err := k.closeErr; err != nil {
+		k.closeErr = nil
+		return err
+	}
 	return nil
 }
 

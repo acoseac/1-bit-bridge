@@ -83,6 +83,11 @@ func TestMain(m *testing.M) {
 	stopOpens := alsapcm.GuardNodeOpens(recordNodeOpen)
 	stopControls := alsactl.GuardNodeOpens(recordNodeOpen)
 	stopReads := alsa.WatchHostReads(recordHostRead)
+	// No test installs a unit with the host's service manager, starts a
+	// bridge detached or opens a browser: one that runs init's launch path
+	// stands in for its host (standInForInitHost), and one that reaches it
+	// otherwise is refused and recorded.
+	initHost = refusingInitHost()
 	code := m.Run()
 	stopControls()
 	stopReads()
@@ -90,6 +95,10 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(treesDir)
 	if opened := nodeOpens(); len(opened) > 0 {
 		fmt.Fprintf(os.Stderr, "the suite opened PCM nodes, or asked the doctor's probe of them, which no test may: %q\n", opened)
+		code = 1
+	}
+	if asked := initHostAsked(); len(asked) > 0 {
+		fmt.Fprintf(os.Stderr, "the suite asked init's host to %q, which no test may: stand in for it (standInForInitHost)\n", asked)
 		code = 1
 	}
 	if read := hostReads(); len(read) > 0 {

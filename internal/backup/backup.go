@@ -258,6 +258,29 @@ func CaptureSnapshot(ctx context.Context, src Sources) (*Capture, error) {
 // captureInto is the capture itself, its owner lock put in *own as soon as
 // the directory is made.
 func captureInto(ctx context.Context, src Sources, own **owner) (snapDir string, retErr error) {
+	// A capture with no data dir is refused before it makes anything, the
+	// database's directory and its lock file included.
+	if src.DataDir == "" {
+		return "", errors.New("backup: DataDir is required")
+	}
+	// The live database is opened as a store open opens it (VACUUM INTO's
+	// source), so the capture holds the store's lifetime lock shared from
+	// before it writes anything, the player seal's completion, the backups
+	// folder and the snapshot's directory included, until its source has
+	// closed, and asks the restore's journal under it (backlog B653 PR 2a;
+	// its brief's review): a restore's hold refuses the capture
+	// (manifest.ErrStoreRestoring), and so does an unfinished restore
+	// (manifest.ErrRestoreIncomplete), so no snapshot without its database
+	// is published. The database's directory is made first where it is not
+	// there, never left unheld (holdLiveStore). Serve's ticker counts on
+	// serve's own hold.
+	if src.ManifestDB != "" {
+		release, err := holdLiveStore(src.ManifestDB)
+		if err != nil {
+			return "", err
+		}
+		defer release()
+	}
 	if src.PlayerUUID != "" {
 		if err := completeCapturedPlayerSeal(filepath.Dir(src.PlayerUUID)); err != nil {
 			// Local repair is not part of a snapshot. The captured UUID/floor
@@ -270,9 +293,6 @@ func captureInto(ctx context.Context, src Sources, own **owner) (snapDir string,
 				logging.Component("backup").Warn("player seal completion failed", "reason", err.Error())
 			}
 		}
-	}
-	if src.DataDir == "" {
-		return "", errors.New("backup: DataDir is required")
 	}
 	backupsRoot := filepath.Join(src.DataDir, BackupsDirName)
 	if err := fsutil.MkdirAll(backupsRoot, 0o700); err != nil {
@@ -490,20 +510,38 @@ func Restore(snapshotDir string, dst Targets) error {
 // RestoreWithOptions restores with an optional warning sink and random source.
 // Like Restore, its caller must hold the data directory's exclusive lock.
 //
-// First, before it touches the destination, it takes the lock of the folder
-// that holds the snapshot, the one every verification, claim and prune of
-// that folder takes (holdSource, backlog B826), and holds it until it
-// returns: so no prune removes the snapshot under it, and a snapshot that a
-// verification given up still holds, here or in another process, is refused
-// (ErrCheckStillRunning), as is one whose folder another holder keeps past
-// the restore's wait (ErrBackupsBusy, RestoreOptions.LockWait) and one in a
-// folder where no lock can be had (ErrBackupsUnlocked), nothing restored.
-// Under that lock it reads the snapshot's manifest, a snapshot that is no
-// longer there refused (ErrSnapshotGone), and only then completes a player
-// seal the destination left incomplete. It reads the snapshot where it
-// resolves, in the folder whose lock it holds. The data directory's lock, its
-// caller's, comes first, the snapshot's folder's next, and bridge.yaml's
-// last.
+// First it takes the store's lifetime lock exclusively (holdRestoredStore,
+// backlog B653 PR 2a), the database's directory made where it is not there
+// and the lock's file in it, the only things it makes before the source's
+// lock, and under that hold asks the restore's journal: an unfinished
+// restore of the database refuses it (manifest.ErrRestoreIncomplete) before
+// it looks at its snapshot. A restore refused at any step before its first
+// write leaves the destination as it was but for those two, where it made
+// them, and the install marker's lock file, where it took that lock and
+// found none. Then, before it touches anything else of the
+// destination, it takes the lock of the folder that holds the snapshot, the
+// one every verification, claim and prune of that folder takes (holdSource,
+// backlog B826), and holds it until it returns: so no prune removes the
+// snapshot under it, and a snapshot that a verification given up still
+// holds, here or in another process, is refused (ErrCheckStillRunning), as is
+// one whose folder another holder keeps past the restore's wait
+// (ErrBackupsBusy, RestoreOptions.LockWait) and one in a folder where no lock
+// can be had (ErrBackupsUnlocked), nothing restored. Under that lock it reads
+// the snapshot's manifest, a snapshot that is no longer there refused
+// (ErrSnapshotGone), and, where it replaces the database, takes the install
+// marker's lock and makes its admission under it (holdRestoreMarker), holding
+// that lock through its record and the database's copy, and letting it go
+// right after the copy, before the epoch's open (backlog B653 PR 2a's third
+// round). It mints the restored database's backup epoch once it has let
+// bridge.yaml's lock go, under the store's hold, on every return after the
+// copy, a late refusal's included (its fourth round: mintRestoredEpoch, its
+// error joined to the restore's). It completes a player seal the destination
+// left incomplete only once every refusal before its first write has passed,
+// the config's checks and the marker's record included, wherever it has a
+// player target. It reads the snapshot where it resolves, in the folder whose
+// lock it holds. The data directory's lock, its caller's, comes first, the
+// store's lifetime lock next, the snapshot's folder's after it, then the
+// install marker's, and bridge.yaml's last.
 //
 // A restore that writes bridge.yaml, or whose caller read the config to work
 // out the targets (RestoreOptions.ConfigAsRead), takes the config file's lock
@@ -539,6 +577,19 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 	if wait == 0 {
 		wait = VerifyCmdLockWait
 	}
+	// The store's lifetime lock, exclusively, before anything else (backlog
+	// B653 PR 2a; its brief's review): bridge restore holds it from before
+	// its prompt, and is counted on here; any other caller takes it here. A
+	// command that has the database open refuses the restore, nothing
+	// restored (manifest.ErrStoreHeld), and so does storage that grants no
+	// lock, and, asked under the hold before the snapshot is looked at, an
+	// unfinished restore of the database (its journal, B653 PR 2b's): the
+	// full restore never writes over a database restore that did not finish.
+	storeHold, err := holdRestoredStore(dst.ManifestDB)
+	if err != nil {
+		return err
+	}
+	defer storeHold.Release()
 	src, err := holdSource(ctx, snapshotDir, wait)
 	if err != nil {
 		return err
@@ -553,10 +604,42 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 	if opts.sourceHeld != nil {
 		opts.sourceHeld()
 	}
-	var completionErr error
-	if dst.PlayerUUID != "" {
-		completionErr = completePlayerSeal(filepath.Dir(dst.PlayerUUID))
+	// The install marker is asked before anything of the destination but the
+	// store's lifetime lock is made: a snapshot this version would migrate
+	// while the install is held (restoreMigrationHeld), and, where the restore
+	// replaces the database, the restore's hold of the marker's lock and its
+	// admission under it (holdRestoreMarker: a lock that cannot be held, a
+	// veto, a hold, this version the one an armed install replaces), taken
+	// before the config file's lock and held until the database is replaced,
+	// so no install is armed between the admission, the record and the
+	// replacement (backlog B653 PR 2a's third round). Let go at the latest as
+	// the restore returns.
+	if err := restoreMigrationHeld(snap, dst.ManifestDB, m.Files); err != nil {
+		return err
 	}
+	var marker *updater.RestoreHold
+	if restoreReplacesDatabase(snap, dst.ManifestDB, m.Files) {
+		if marker, err = holdRestoreMarker(dst.ManifestDB); err != nil {
+			return err
+		}
+		defer marker.Release()
+	}
+	// The restored database's backup epoch is minted on every return once the
+	// database is replaced (dbReplaced), after bridge.yaml's lock is let go
+	// (deferred before its unlock, it runs after it) and before the store's
+	// hold is: the epoch's open takes the install marker's lock again where a
+	// step is pending, and a writer that takes that lock and then bridge.yaml's
+	// would wait on the restore while the restore waited on it (backlog B653
+	// PR 2a's fourth round). Its error is joined to the restore's.
+	var dbReplaced string
+	defer func() {
+		if dbReplaced == "" {
+			return
+		}
+		if mintErr := mintRestoredEpoch(dbReplaced, opts); mintErr != nil {
+			err = errors.Join(err, mintErr)
+		}
+	}()
 	var configTurn *config.FileLock
 	if dst.BridgeYAML != "" && (slices.Contains(m.Files, "bridge.yaml") || opts.ConfigAsRead != nil) {
 		l, err := config.LockFile(dst.BridgeYAML)
@@ -641,8 +724,26 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 	if (playerUUIDRead || dsdStateRead) && !atomicwrite.HasDirectoryBarrier() {
 		return playerFilesNeedABarrier(m, playerUUIDRead, dsdStateRead)
 	}
-	if err := restoreMigrationHeld(snap, dst.ManifestDB, m.Files); err != nil {
-		return err
+	// The store change recorded in an armed install, whatever the snapshot's
+	// version, under the hold its admission took, once every check of the
+	// config and the snapshot has passed and before the restore's first write,
+	// wherever the restore replaces the database (backlog B653 PR 2a: a
+	// ladder-top snapshot records nothing at the epoch's open).
+	if marker != nil {
+		if err := recordRestoredStore(marker); err != nil {
+			return err
+		}
+	}
+	// The player seal the destination left incomplete is completed only now,
+	// once every refusal before the first write has passed, the record
+	// included: completed wherever the restore has a player target, whether
+	// or not it replaces the database or restores an identity, and its
+	// failure refuses only a restore of an identity, below (backlog B653 PR
+	// 2a's third round: completed before the record, a refusal of the record
+	// left it written).
+	var completionErr error
+	if dst.PlayerUUID != "" {
+		completionErr = completePlayerSeal(filepath.Dir(dst.PlayerUUID))
 	}
 	// restored names what has been written, for a refusal at bridge.yaml's
 	// own write to say.
@@ -765,6 +866,9 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 			// WAL in place while copyFile overwrites the DB, reproducing
 			// the exact corruption this block prevents (Gemini + CodeRabbit
 			// on PR #476).
+			if opts.beforeDatabaseCopy != nil {
+				opts.beforeDatabaseCopy()
+			}
 			for _, sidecar := range []string{target + "-wal", target + "-shm"} {
 				if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return fmt.Errorf("remove stale sidecar %s: %w", sidecar, err)
@@ -775,19 +879,46 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 			return fmt.Errorf("restore %s: %w", name, err)
 		}
 		if name == ManifestDBFileName {
-			// A restored library is a new backup generation. Minting
-			// after the copy, then dropping the WAL the mint left,
-			// keeps the epoch in the main file.
-			if err := manifest.ResetBackupEpoch(target); err != nil {
-				return fmt.Errorf("mint backup epoch: %w", err)
-			}
-			for _, sidecar := range []string{target + "-wal", target + "-shm"} {
-				if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf("remove epoch sidecar %s: %w", sidecar, err)
-				}
+			// The database is replaced: its epoch is owed (dbReplaced), and the
+			// install marker's lock goes now, before the epoch's open, which
+			// takes it again where a step is pending (disarmBeforeMigrating).
+			// An install armed from here on finds this version's store in
+			// place, and the open records as every migrating open does:
+			// nothing at the ladder's top, nothing for this version's own
+			// steps where it is the install's previous version (backlog B653
+			// PR 2a's third round).
+			dbReplaced = target
+			marker.Release()
+			if opts.afterDatabaseCopy != nil {
+				opts.afterDatabaseCopy()
 			}
 		}
 		restored = append(restored, name)
+	}
+	return nil
+}
+
+// mintRestoredEpoch mints the backup epoch of the database a restore put at
+// target: a restored library is a new backup generation. Minting after the
+// copy, then dropping the WAL the mint left, keeps the epoch in the main
+// file. Only where the mint's checkpoint completed (backlog B653 PR 2a): a
+// checkpoint that did not leaves the epoch, and any migration step the open
+// ran, in the WAL, which is kept for the next open to replay, and said; any
+// other error keeps it too.
+func mintRestoredEpoch(target string, opts RestoreOptions) error {
+	switch err := manifest.ResetBackupEpoch(target); {
+	case errors.Is(err, manifest.ErrEpochCheckpointBusy):
+		warnRestore(opts, fmt.Sprintf("restore: wrote %s, but its new backup epoch is still in its WAL (%s): "+
+			"the next open replays it, so leave %s and %s beside it", ManifestDBFileName, filepath.Base(target)+"-wal",
+			filepath.Base(target)+"-wal", filepath.Base(target)+"-shm"))
+		return nil
+	case err != nil:
+		return fmt.Errorf("mint backup epoch: %w", err)
+	}
+	for _, sidecar := range []string{target + "-wal", target + "-shm"} {
+		if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove epoch sidecar %s: %w", sidecar, err)
+		}
 	}
 	return nil
 }
@@ -800,13 +931,23 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) (e
 // confirmation after a start that did not end cleanly, that open refuses
 // (updater.MigrationHeld), which past the database's copy would leave the
 // restore half done. A snapshot whose store cannot be read is left to the
-// copy, as before.
+// copy, as before. The snapshot's user_version is read through the snapshot
+// reader (snapshotUserVersion), never manifest.PendingMigrations, the live
+// database's reader, whose hold of the store's lifetime lock would make its
+// lock file in the snapshot (backlog B653 PR 2a). The record every restore
+// of the database makes after it (recordRestoredStore) refuses under the
+// same hold whatever the snapshot's version; this refusal's words name the
+// migration.
 func restoreMigrationHeld(snapshotDir, dbTarget string, files []string) error {
 	if dbTarget == "" || !slices.Contains(files, ManifestDBFileName) {
 		return nil
 	}
-	pending, err := manifest.PendingMigrations(filepath.Join(snapshotDir, ManifestDBFileName))
-	if err != nil || pending == 0 {
+	current, err := snapshotUserVersion(filepath.Join(snapshotDir, ManifestDBFileName))
+	if err != nil {
+		return nil
+	}
+	pending := manifest.PendingFrom(current)
+	if pending == 0 {
 		return nil
 	}
 	dataDir := filepath.Dir(dbTarget)

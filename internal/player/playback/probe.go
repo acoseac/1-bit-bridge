@@ -40,6 +40,12 @@ const (
 	ProbeReleaseUnconfirmed ProbeSkip = "release_unconfirmed"
 	// ProbeRunning: another probe holds the slot.
 	ProbeRunning ProbeSkip = "probe_running"
+	// ProbeChoiceWrite: a choice's write holds the configuration lease
+	// (ChooseDSD, B728 B9 PR 2): the probe it owes runs once it is let go.
+	ProbeChoiceWrite ProbeSkip = "choice_write"
+	// ProbeToneHolds: the console's test tone holds the device slot (Tone,
+	// B601): the probe stays owed and runs once the tone has given it back.
+	ProbeToneHolds ProbeSkip = "tone_holds"
 )
 
 // ProbeSkipped is a probe the backend did not run, and why: nothing was
@@ -172,18 +178,26 @@ func (b *Backend) Probe(ctx context.Context, req ProbeRequest) (alsapcm.ProbeRep
 // device otherwise (it plays, or is opening it); and a Start that found a
 // probe holding the slot and has not taken it yet (hold's waiters), which
 // is about to hold the device, so it takes the slot as the probe ends and no
-// second probe slips in first (round 2). The session's state is read
-// without its lock (its life, its fence, pausedFlag): a session takes the
-// backend's lock under its own, never the reverse.
+// second probe slips in first (round 2). It refuses too while a choice's
+// write holds the configuration lease (takeLease, B728 B9 PR 2), which owes
+// the probe it would make, and while the console's test tone holds the slot
+// (Tone, B601): each a refusal by the slot (probeSlotSkips), so the probe
+// stays owed. The session's state is read without its lock (its life, its
+// fence, pausedFlag): a session takes the backend's lock under its own, never
+// the reverse.
 func (b *Backend) reserveProbe() (*probeHold, ProbeSkip) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	h := b.holder
 	switch {
+	case b.lease != nil:
+		return nil, ProbeChoiceWrite
 	case b.terminalUnconfirmed:
 		return nil, ProbeReleaseUnconfirmed
 	case b.probing != nil:
 		return nil, ProbeRunning
+	case b.toning != nil:
+		return nil, ProbeToneHolds
 	case b.waiters > 0:
 		return nil, ProbeSessionHolds
 	case h != nil && (h.ctx.Err() != nil || h.releaseTaken()):

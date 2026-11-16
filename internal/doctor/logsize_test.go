@@ -99,6 +99,66 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
+// TestALogNoteIsCarriedWhateverTheLineFinds (backlog B618): where the caller
+// says how the log was chosen, on Windows where the install check could not
+// tell whether the bridge's service is installed, the line's summary carries
+// it whatever the line found, so the table, which prints a hint under a warn
+// or a fail alone, shows it on an ok too.
+func TestALogNoteIsCarriedWhateverTheLineFinds(t *testing.T) {
+	const note = "cannot tell whether the bridge's Windows service is installed (the test's reason), so this is its log"
+	for _, tc := range []struct {
+		name string
+		path string
+		want Status
+	}{
+		{"a log below the threshold", writeSized(t, 1024), OK},
+		{"a log past the threshold", writeSized(t, logSizeWarnBytes+1), Warn},
+		{"no log file yet", filepath.Join(t.TempDir(), "nope.log"), OK},
+		{"a directory", t.TempDir(), Warn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkLogSize(context.Background(), Deps{LogPath: tc.path, LogNote: note})
+			if got.Status != tc.want || !strings.HasSuffix(got.Summary, "; "+note) {
+				t.Errorf("got %s %q, want %s with the note after its summary", got.Status, got.Summary, tc.want)
+			}
+			bare := checkLogSize(context.Background(), Deps{LogPath: tc.path})
+			if got.Summary != bare.Summary+"; "+note || got.Hint != bare.Hint {
+				t.Errorf("with the note the line is %q (hint %q), without it %q (hint %q): the note changed more than the summary's end",
+					got.Summary, got.Hint, bare.Summary, bare.Hint)
+			}
+		})
+	}
+}
+
+// TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK (backlog B618): a log whose
+// path could not be made, or that the install check could not place, is a
+// warn saying why, its note the hint, never the ok "no log file configured
+// (logs go to the terminal)" that an empty path alone reads as.
+func TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK(t *testing.T) {
+	terminal := checkLogSize(context.Background(), Deps{}).Summary
+	for _, tc := range []struct{ name, unresolved, note string }{
+		{"a path that cannot be made", "the log's path cannot be made (the test's home is not set)", ""},
+		{"neither log there", `neither C:\a\bridge.log nor C:\b\bridge.log exists`,
+			"cannot tell whether the bridge's Windows service is installed (the test's reason)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkLogSize(context.Background(), Deps{LogUnresolved: tc.unresolved, LogNote: tc.note})
+			if got.Status != Warn || got.Summary != "not checked: "+tc.unresolved || got.Hint != tc.note {
+				t.Errorf("got %s %q (hint %q), want warn %q, its note the hint", got.Status, got.Summary, got.Hint,
+					"not checked: "+tc.unresolved)
+			}
+			if got.Summary == terminal {
+				t.Errorf("a log that could not be named reads as a bridge that logs to its terminal: %q", got.Summary)
+			}
+		})
+	}
+	// A managed bridge's log is still the host's, asked first.
+	if got := checkLogSize(context.Background(), Deps{Managed: true, LogUnresolved: "x"}); got.Status != OK ||
+		!strings.Contains(got.Summary, "skipped") {
+		t.Errorf("a managed bridge's line is %s %q, want the host's skip", got.Status, got.Summary)
+	}
+}
+
 // TestCheckLogSizeWarnsOnDirectory: os.Stat succeeds on a directory and
 // reports a small size, so without an explicit IsDir test the check reports OK
 // for a path that can never hold a log — telling the operator logging is fine

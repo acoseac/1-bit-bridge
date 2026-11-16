@@ -30,8 +30,9 @@ func gateBackend(t *testing.T, afterFunc func(time.Duration, func()) func() bool
 // release before the call came), it is paused (a pause holds the slot
 // whether or not its release has let the device go), or it holds the device
 // otherwise (it plays, or it is opening the device); and so does a Start
-// that waited for a probe and has not taken the slot yet (round 2). A free
-// slot is taken, and the probe's end gives it back and says so.
+// that waited for a probe and has not taken the slot yet (round 2), and the
+// console's test tone holding the slot (B601). A free slot is taken, and the
+// probe's end gives it back and says so.
 func TestTheProbesGateReadsTheDeviceSlot(t *testing.T) {
 	taken := make(chan struct{})
 	close(taken)
@@ -60,6 +61,7 @@ func TestTheProbesGateReadsTheDeviceSlot(t *testing.T) {
 		{"a release never confirmed", func(b *Backend) { b.terminalUnconfirmed = true }, ProbeReleaseUnconfirmed},
 		{"a probe under way", func(b *Backend) { b.probing = &probeHold{done: make(chan struct{})} }, ProbeRunning},
 		{"a Start that waited for a probe and has not taken the slot yet", func(b *Backend) { b.waiters = 1 }, ProbeSessionHolds},
+		{"a tone holds the slot", func(b *Backend) { b.toning = &toneHold{done: make(chan struct{})} }, ProbeToneHolds},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := gateBackend(t, nil)
@@ -171,7 +173,14 @@ func TestAStartWaitsForTheProbeThatHoldsTheSlot(t *testing.T) {
 	// the next probe once the one it waited for ends.
 	gaveUp := func(t *testing.T, st start) {
 		t.Helper()
-		st.b.mu.Lock()
+		// The first acquisition after the Start's hold gave its wait up, its
+		// answer received, which nothing else can hold here (no goroutine
+		// runs): asserted free at once, so a lock the give-up kept fails the
+		// case, where a Lock waited to the package's timeout (backlog B853,
+		// round 4).
+		if !st.b.mu.TryLock() {
+			t.Fatal("the backend's lock is held once the Start that gave its wait up returned")
+		}
 		holder, waiters := st.b.holder, st.b.waiters
 		st.b.mu.Unlock()
 		if holder != nil {

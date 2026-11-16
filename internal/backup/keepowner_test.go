@@ -10,6 +10,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 )
 
@@ -39,6 +40,10 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	wantSnapshot := []string{
+		// The store's lifetime lock beside the live database, which the
+		// capture holds shared before it writes anything (backlog B653 PR
+		// 2a): left root's, the service could not open its store again.
+		manifest.StoreOpenLockPath(src.ManifestDB),
 		filepath.Join(dataDir, backup.BackupsDirName),
 		snap,
 		// The capture's owner lock (backlog B653's second round): left
@@ -128,6 +133,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 		t.Fatalf("Snapshot: %v", err)
 	}
 	wantSnapshot := []string{
+		manifest.StoreOpenLockPath(src.ManifestDB),
 		filepath.Join(dataDir, backup.BackupsDirName),
 		snap,
 		filepath.Join(snap, backup.OwnerLockName),

@@ -110,7 +110,9 @@ var tsnetBeforeStart tsnet.StartHook
 // The node's name is tailscale.hostname, else what the state dir says at the
 // start: a registered node keeps its name, a new one is
 // tsnet.DefaultHostname, and a state that cannot be read keeps the library
-// name earlier versions gave every node (backlog B749).
+// name earlier versions gave every node (backlog B749). A state file that
+// holds nothing refuses the start, whatever tailscale.hostname says, in the
+// bridge's words (tsnet.EmptyStateError, backlog B828).
 //
 // Logger writes to stderr at debug level — production routes this
 // through the bridge's existing slog setup (cfg.LogLevel) once the
@@ -281,9 +283,10 @@ func (s tailscaleAdminSource) RefreshNow(ctx context.Context) admin.TailscaleSta
 // tsnetStatusSource is what the admin tile reads from the embedded node:
 // a tsnetNode, narrowed to its reads. LastStartError and LogsRequired are
 // how a tailnet that requires the logs this node does not upload reaches
-// the tile, after a start it refused and while the node runs; Uploads is
-// the upload policy's status, which the tile shows whatever the tailnet
-// says.
+// the tile, after a start it refused and while the node runs, and
+// LastStartError how the bridge's own refusal of a state file that holds
+// nothing does; Uploads is the upload policy's status, which the tile shows
+// whatever the tailnet says.
 type tsnetStatusSource interface {
 	Status(context.Context) (*ipnstate.Status, error)
 	CertDomains() []string
@@ -302,7 +305,10 @@ type tsnetStatusSource interface {
 // upload, is said in the bridge's words (tsnet.LogsRequiredError) in
 // LastError: after a start it refused, when there is no node to ask for a
 // status, and while the node runs, from its status's health, beside the
-// backend state (Stopped) the status reports.
+// backend state (Stopped) the status reports. A start the bridge refused
+// over a state file that holds nothing (tsnet.EmptyStateError, whose words
+// name no path) is said there too, in place of the "called before Start"
+// a status of no node answers.
 //
 // What holds the node's diagnostic-log uploads off where the config allows
 // them (tsnet.Uploads.HeldOff: the launch environment, this process
@@ -322,8 +328,13 @@ func tsnetAdminStatus(ctx context.Context, s tsnetStatusSource) admin.TailscaleS
 			"is true: " + held
 	}
 	var refused *tsnet.LogsRequiredError
-	if errors.As(s.LastStartError(), &refused) {
+	var empty *tsnet.EmptyStateError
+	switch last := s.LastStartError(); {
+	case errors.As(last, &refused):
 		out.LastError = refused.Error()
+		return out
+	case errors.As(last, &empty):
+		out.LastError = empty.Error()
 		return out
 	}
 	st, err := s.Status(ctx)

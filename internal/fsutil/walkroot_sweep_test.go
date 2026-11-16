@@ -45,6 +45,7 @@ var otherTreeWalks = map[string]string{
 	"internal/fsutil/walkroot.go WalkConfigured":              "the path WalkableRoot returned; a separator path whose chain names a directory is read there and reported under that path",
 	"internal/fsutil/walkroot.go walkResolvedChain":           "the directory a separator path's link chain names, reported under the configured path",
 	"internal/doctor/cgroup.go findCgroups":                   "the cgroup2 mount",
+	"internal/sweeptest/sweeptest.go (*Removal).WalkDir":      "the tree a sweep's test gives it, removing one directory as the walk reaches it (tests alone import sweeptest)",
 	"internal/trash/restore.go (*Manager).pruneEmptyStamp":    "one stamp directory of a root's trash, below the root",
 	"internal/trash/restore.go (*Manager).Sweep":              "one stamp directory of a root's trash, below the root",
 	"internal/trash/trash.go (*Manager).List":                 "one stamp directory of a root's trash, below the root",

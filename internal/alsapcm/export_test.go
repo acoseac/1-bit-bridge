@@ -44,6 +44,30 @@ func Watchdog() time.Duration { return *watchdog }
 // Ordered is the bound an ordered wait uses: the watchdog itself (ordered).
 func Ordered() time.Duration { return ordered() }
 
+// Open opens the fake node as Open opens a real one, on the fake's clock: what
+// the player's backend takes as its Config.OpenTone (B601), the console's test
+// tone's own open.
+func (tk *FakeKernel) Open(ep Endpoint, cfg Config) (*Device, error) {
+	return open(tk.k, tk.k.now, ep, cfg)
+}
+
+// FailNextClose makes the next close of the node answer err once it has
+// closed the node, and PanicAtNextClose makes it panic with v there: a close
+// whose answer leaves it unknown what the caller holds (B601).
+func (tk *FakeKernel) FailNextClose(err error) {
+	tk.k.inspect(func(k *fakeKernel) { k.closeErr = err })
+}
+
+func (tk *FakeKernel) PanicAtNextClose(v any) {
+	tk.k.inspect(func(k *fakeKernel) { k.closePanic = v })
+}
+
+// Rates sets the rates the DAC takes, in place of the eight the iFi GO bar
+// lists.
+func (tk *FakeKernel) Rates(hz ...uint32) {
+	tk.k.inspect(func(k *fakeKernel) { k.hw.rates = append([]uint32(nil), hz...) })
+}
+
 // OpenSink opens a sink on the fake node, on the fake's clock: what the
 // player's backend takes as its Config.OpenSink.
 func (tk *FakeKernel) OpenSink(ctx context.Context, cfg SinkConfig) (*Sink, error) {
@@ -135,6 +159,29 @@ type KernelView struct {
 	Refines, HWParams                int
 	// Card is the card the node says it is.
 	Card int
+	// Asked is what each open of the node asked first, in order: the format
+	// and the rate of its first HW_REFINE, the exact request an open makes;
+	// none for an open that refined nothing.
+	Asked []Ask
+}
+
+// Ask is one open's request: a format at a rate.
+type Ask struct {
+	Format format.ALSAFormat
+	RateHz int
+}
+
+// formatOf is the format a code names among those this backend packs, PCM's
+// and native DSD's, "" for none of them.
+func formatOf(code uint32) format.ALSAFormat {
+	for _, table := range []map[format.ALSAFormat]sampleFormat{sampleFormats, nativeFormats} {
+		for name, sf := range table {
+			if sf.code == code {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // view is the fake as a KernelView; k.mu is held.
@@ -152,6 +199,19 @@ func (k *fakeKernel) view() KernelView {
 				}
 			}
 		}
+	}
+	for i, at := range k.openRefine {
+		end := len(k.refines)
+		if i+1 < len(k.openRefine) {
+			end = k.openRefine[i+1]
+		}
+		if at >= end {
+			continue
+		}
+		r := k.refines[at]
+		f, _ := r.maskOf(hwParamFormat).single()
+		rate, _ := r.intervalOf(hwParamRate).exact()
+		v.Asked = append(v.Asked, Ask{Format: formatOf(f), RateHz: int(rate)})
 	}
 	for _, c := range k.calls {
 		switch c {

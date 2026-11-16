@@ -38,6 +38,51 @@
 // that comes while it holds the slot waits for it, at most ProbeWait, and its
 // answers, which a Start came beside, are dropped and the probe owed.
 //
+// # A DAC's DSD choice, written while the player is stopped (B728 B9)
+//
+// ChooseDSD writes the bound DAC's choice in the player's DSD state, one
+// write at a time, only while the player is stopped ("Stop playback to change
+// DSD"): it takes the configuration lease, the backend's one admission point
+// beside it, in the step under the backend's lock that finds no session's
+// record, nothing holding the device and no release left unconfirmed, and
+// refuses playback_not_stopped otherwise. While it holds the lease a Start
+// waits before it registers (and then plays under the set the write
+// published), a probe is refused and stays owed, and a probe that held the
+// slot as the lease was taken is waited for. The policy's checks run inside the
+// state's one write (policy.Choose), then the set is published, a probe owed,
+// and the write answered from the epoch it published. A write that landed and
+// is not known to be durable holds every later set to what both states play
+// alike until the next start, and fences every later write. The lease cannot
+// see the engine between an acknowledged Release and the Start that follows
+// it: its caller holds the engine's own configuration reservation (B9 PR 3).
+//
+// # The console's test tone (B601)
+//
+// Tone plays a quiet 1 kHz sine (internal/player/testtone's, by
+// internal/tonebounds' bounds: -30 dBFS or quieter, 1 to 30 seconds) through
+// the bound DAC while the player is stopped, PCM alone: the device slot's third
+// holder beside a session and the silent probe. It is counted among the
+// backend's goroutines first, under gmu, which serve's stop
+// closes (CloseTones), so Wait joins every tone it did not refuse; then it
+// takes the slot in one step under the backend's lock that refuses by word,
+// never waiting: the supervisor's gate shut (ToneOutput: output_unknown until
+// an available report, then withheld, output_unavailable, output_changed,
+// snapshot_stale, serve_stopping), a release never confirmed, a probe, a
+// choice's write, a Start waiting, a session's record or the device's holder,
+// another tone. A Start preempts it (hold) and waits for its node's close at
+// most ToneYield; a probe is refused and stays owed (ProbeToneHolds, one of
+// probeSlotSkips); a choice's write is refused (playback_not_stopped). Its run
+// locates the unit, opens the first of eight (rate, format) pairs the kernel
+// commits exactly (48 kHz then 44.1 kHz, each S24_3LE, S24_LE and S32_LE at 24
+// valid bits, then S16_LE at 16), checks the node after open, writes whole
+// repeats for its length and drains; it writes nothing to the DSD state or the
+// packing memory and publishes no observation. Each end is a cause on its
+// context, set on the record found under the lock, the first standing; the
+// slot is given back only once the node's close has answered, and a close that
+// answered an error, a cleanup that panicked, or an open whose own cleanup is
+// not confirmed (alsapcm.ErrReleaseUnconfirmed, or a panic) fences the device
+// as a release never confirmed fences it, until serve restarts.
+//
 // # DSD converted to PCM (B728 B11)
 //
 // A rate the effective set converts opens through the PCM output path: the
@@ -127,13 +172,21 @@
 // session still holds the device (ErrOverlap, Stats.Overlaps): under the
 // engine's contract it never happens, so a defect shows as a refusal a test
 // sees, never as the kernel's busy refusal of the bridge's own second open.
+// A Start that comes while a choice's write holds the configuration lease
+// waits for it before it registers; given up at its release or its context's
+// end, it acquires nothing and leaves the record its Release meets, in either
+// order (session.abandon).
 //
 // The silent probe (Probe, B728 B4) shares that device slot: it takes it in
 // the step that finds no session holding it (none plays, opens, is paused or
-// is being released, and no release was left unconfirmed), holds it from
+// is being released, no release was left unconfirmed, no choice's write
+// holds the configuration lease, B728 B9, and no console's test tone holds
+// it, B601), holds it from
 // the binding's location to its node's close, and a Start that comes
 // meanwhile waits for it, at most ProbeWait, holding nothing, then answers
 // the device busy. A probe never waits: one the slot refuses opens nothing.
+// The console's test tone holds the slot the same way, and a Start ends it
+// before it waits for it (Tone, above).
 //
 // Release is confirmed or it is not: Release ends the session's life, so
 // its sinks drop their streams and close their devices; a teardown joins

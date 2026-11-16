@@ -1,13 +1,16 @@
 // The console's Player page (B601): the bridge's own player (B470) as the
 // operator sees it, beside the web player that plays in the browser. It shows
 // the player's status, turns it on or off, lets the 1-bit app cast to it or
-// not (its OpenHome surface, output.player.openhome, B612), and chooses its
-// DAC; it offers no DSD control and no test tone (both later work, B602).
+// not (its OpenHome surface, output.player.openhome, B612), chooses its DAC,
+// and plays a quiet test tone through that DAC while the player is stopped
+// (POST /api/output/player/tone); it offers no DSD control (B602).
 //
 // The page asks the serving process alone. cmd/bridge implements PlayerOutput
-// over serve's player (its boot plan, its engine, GET /v1/outputs' own view of
-// it) and the box's DAC readings, so this package imports no player package
-// and the console and /v1/outputs say one thing.
+// over serve's player (its boot plan, its engine and backend, GET /v1/outputs'
+// own view of it) and the box's DAC readings, so this package imports no
+// player package and the console and /v1/outputs say one thing. The tone's
+// bounds are internal/tonebounds', outside internal/player, which the player's
+// backend refuses a tone by too.
 //
 // The three writes change output.player, which serve decides its player from
 // once, at boot: each goes through the live holder (CfgHolder.UpdateChecked),
@@ -35,10 +38,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strings"
+	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/tonebounds"
 )
 
 // The managed-setting names of the page's three writes, as
@@ -62,8 +69,9 @@ const (
 )
 
 // PlayerOutput is the bridge's own player as the Player page asks it.
-// cmd/bridge implements it over serve's player; every method reads, and none
-// writes the config, which this package does.
+// cmd/bridge implements it over serve's player. None of its methods writes the
+// config, which this package does, and every one but Tone only reads: Tone
+// plays the console's test tone through the running player's DAC.
 type PlayerOutput interface {
 	// Platform is the host the player runs on: "linux" is the one that runs
 	// it.
@@ -98,6 +106,66 @@ type PlayerOutput interface {
 	// after withholds the running player's output where before did not: the
 	// player turned off, or another DAC than the one it started with.
 	Withholds(before, after *config.Config) bool
+	// Tone plays the console's test tone through the running player's DAC
+	// and answers once it has ended (B601): refused by its word, nothing
+	// opened, unless the player that runs is stopped with its output
+	// available and nothing withheld on live (the config the route loaded
+	// once) and its backend's device slot is free; ended by its length, ctx
+	// (the request's), a play the player starts, the output going, or serve's
+	// stop. It writes nothing, and never makes the player sound (Sounding).
+	Tone(ctx context.Context, live *config.Config, req PlayerToneRequest) PlayerToneResult
+}
+
+// PlayerToneRequest is the test tone the page asks for: its peak in dBFS, a
+// number from -90 to -30 (tonebounds.Check), and its length in whole seconds,
+// 1 to 30 (tonebounds.CheckSeconds).
+type PlayerToneRequest struct {
+	LevelDBFS float64
+	Seconds   int
+}
+
+// PlayerToneResult is a tone's answer, POST /api/output/player/tone's body
+// for one that took the DAC's slot (Admitted): the word it ended with, a
+// refused open's cause, what the kernel committed for it ("" and 0 before an
+// open did) and the frames it wrote. One refused before it took the slot is
+// answered 409 with its word as the code.
+type PlayerToneResult struct {
+	// Outcome is the word the tone ended or was refused with.
+	Outcome string `json:"outcome"`
+	// LastError is a refused open's cause, device_busy (another process holds
+	// the DAC) or permission_denied (this process may not open its node), ""
+	// otherwise: the tone's own, never the engine's (PlayerRunning.LastError).
+	LastError string `json:"lastError"`
+	Format    string `json:"format"`
+	RateHz    int    `json:"rateHz"`
+	ValidBits int    `json:"validBits"`
+	Frames    int64  `json:"frames"`
+	// Admitted is a tone that took the device slot.
+	Admitted bool `json:"-"`
+}
+
+// PlayerTone is the console's test tone now (PlayerRunning.Tone).
+type PlayerTone struct {
+	// State is idle, playing, stopping (ended, its node's close not answered
+	// yet), stop_unconfirmed (that close not answered past its wait: the DAC
+	// is still held) or release_unconfirmed (a tone's close did not answer
+	// cleanly: nothing opens the DAC until the bridge restarts).
+	State string `json:"state"`
+	// LevelDBFS and Seconds are the tone in the slot's request, 0 while none
+	// is.
+	LevelDBFS float64 `json:"levelDBFS"`
+	Seconds   int     `json:"seconds"`
+	// Format, RateHz and ValidBits are what the kernel committed for the tone
+	// in the slot, or for the last tone while none is ("" and 0 before an
+	// open did).
+	Format    string `json:"format"`
+	RateHz    int    `json:"rateHz"`
+	ValidBits int    `json:"validBits"`
+	// Outcome is the last tone's end and LastError its refused open's cause
+	// (device_busy, permission_denied), "" before one ended; both are cleared
+	// when the next tone takes the slot.
+	Outcome   string `json:"outcome"`
+	LastError string `json:"lastError"`
 }
 
 // Chosen's refusals, which the DAC route answers with their own codes.
@@ -191,6 +259,11 @@ type PlayerRunning struct {
 	// Signal is what the DAC receives, the backend's observation, nil while
 	// nothing is open.
 	Signal *PlayerSignal `json:"signal"`
+	// Tone is the console's test tone (B601): nil for a player serve did not
+	// start, one not running yet, and one whose backend plays none; idle
+	// while no tone plays. Its lastError is the tone's own: LastError above
+	// stays the engine's last play attempt alone.
+	Tone *PlayerTone `json:"tone"`
 }
 
 // PlayerBinding is a binding as the page shows it: the serial as its label
@@ -472,23 +545,130 @@ func (s *Server) apiPlayerOutputDACs(w http.ResponseWriter, r *http.Request) {
 // a second value, which must be the end of the body (io.EOF): Decoder.More
 // answers false for a closing brace or bracket, so it let `{...}}` through
 // (B612).
-func decodePlayerBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes))
+//
+// A body its reader could not read whole is no fault of its JSON, and the
+// decoder hands the reader's error back as it is: a client that stops sending
+// until the read times out, or resets the connection, gives a *net.OpError
+// whose words name both ends of the socket, which the response carried until
+// B601's round 2. The reader's own failure (bodyReader) decides it, in either
+// decode, and is answered in fixed words and logged by route and class alone
+// (writePlayerBodyUnread). A fault of the JSON inside the object (a syntax
+// error, a value of another type, a key it does not take, a body cut short),
+// or of its size inside it or after it (*http.MaxBytesError), keeps the
+// decoder's words, which name nothing but the body; trailing JSON or content
+// after the object (a second value, a stray character) is "one JSON object,
+// and nothing after it", and a reader's failure, inside the object or after
+// it, playerBodyUnread. route is the write's name in that log line, one of
+// the playerRoute constants.
+func decodePlayerBody(w http.ResponseWriter, r *http.Request, route string, v any) bool {
+	body := &bodyReader{r: r.Body}
+	dec := json.NewDecoder(http.MaxBytesReader(w, body, adminMaxBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		msg := err.Error()
-		if errors.Is(err, io.EOF) {
-			msg = "a JSON body is required"
+		switch {
+		case body.err != nil:
+			writePlayerBodyUnread(w, route, body.err)
+		case errors.Is(err, io.EOF):
+			writeError(w, http.StatusBadRequest, errCodeBadJSON, "a JSON body is required")
+		default:
+			writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
 		}
-		writeError(w, http.StatusBadRequest, errCodeBadJSON, msg)
 		return false
 	}
 	var after json.RawMessage
 	if err := dec.Decode(&after); !errors.Is(err, io.EOF) {
-		writeError(w, http.StatusBadRequest, errCodeBadJSON, "one JSON object, and nothing after it")
+		var tooLarge *http.MaxBytesError
+		switch {
+		case body.err != nil:
+			writePlayerBodyUnread(w, route, body.err)
+		case errors.As(err, &tooLarge):
+			writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, errCodeBadJSON, "one JSON object, and nothing after it")
+		}
 		return false
 	}
 	return true
+}
+
+// The words and the log line for a write whose body could not be read.
+const (
+	playerBodyUnread     = "the request's body could not be read"
+	playerBodyUnreadLine = "admin: a player write's body could not be read"
+)
+
+// The player writes' names, which a body-read failure's log line gives as its
+// route: one constant a route, never the request's own path.
+const (
+	playerRouteEnabled  = "player_enabled"
+	playerRouteOpenHome = "player_openhome"
+	playerRouteDAC      = "player_dac"
+	playerRouteTone     = "player_tone"
+)
+
+// The classes of a body-read failure, the one word of the reader's error the
+// log line carries (bodyReadClass).
+const (
+	bodyReadTimeout = "timeout"
+	bodyReadReset   = "reset"
+	bodyReadClosed  = "closed"
+	bodyReadEOF     = "eof"
+	bodyReadOther   = "other"
+)
+
+// bodyReader is a request body that keeps the first error its reader answered
+// other than the body's end, under the bound decodePlayerBody puts over it, so
+// that *http.MaxBytesError, which the bound makes, is never one.
+type bodyReader struct {
+	r   io.ReadCloser
+	err error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && b.err == nil {
+		b.err = err
+	}
+	return n, err
+}
+
+func (b *bodyReader) Close() error { return b.r.Close() }
+
+// writePlayerBodyUnread answers a write whose body's reader failed with err:
+// 400 bad_json in fixed words, the status and the code any refused body has,
+// and a line at Info, the client's doing (it stopped sending, or reset the
+// connection), that names the write by its route constant and err by its
+// class alone (bodyReadClass). Nothing of the request or of err's words
+// reaches the line: an error's text can hold both ends of its socket, and a
+// scrub of addresses out of it missed shapes of address three times (B601's
+// rounds 2 to 4).
+func writePlayerBodyUnread(w http.ResponseWriter, route string, err error) {
+	logger.Info(playerBodyUnreadLine, "route", route, "class", bodyReadClass(err))
+	writeError(w, http.StatusBadRequest, errCodeBadJSON, playerBodyUnread)
+}
+
+// bodyReadClass is what a log line says of err, the error a request body's
+// reader answered: one word of a fixed list, decided by err's type through its
+// chain (errors.Is, errors.As), never by its text. timeout: a net.Error whose
+// Timeout is true, context.DeadlineExceeded or os.ErrDeadlineExceeded; reset:
+// syscall.ECONNRESET; closed: net.ErrClosed, io.ErrClosedPipe, os.ErrClosed or
+// syscall.EPIPE; eof: io.ErrUnexpectedEOF (a plain io.EOF is the body's end,
+// which bodyReader records as no failure); anything else other, an error whose
+// words say "reset" or "timeout" among them. Windows reports a reset as its own
+// WSAECONNRESET, not syscall.ECONNRESET, so a reset there is other.
+func bodyReadClass(err error) string {
+	var ne net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return bodyReadTimeout
+	case errors.Is(err, syscall.ECONNRESET):
+		return bodyReadReset
+	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe), errors.Is(err, os.ErrClosed), errors.Is(err, syscall.EPIPE):
+		return bodyReadClosed
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return bodyReadEOF
+	}
+	return bodyReadOther
 }
 
 // playerEnabledRequest is POST /api/output/player/enabled's body.
@@ -508,7 +688,7 @@ type playerEnabledRequest struct {
 // holds already writes nothing.
 func (s *Server) apiPlayerOutputEnabled(w http.ResponseWriter, r *http.Request) {
 	var req playerEnabledRequest
-	if !decodePlayerBody(w, r, &req) {
+	if !decodePlayerBody(w, r, playerRouteEnabled, &req) {
 		return
 	}
 	if req.Enabled == nil {
@@ -598,7 +778,7 @@ type playerOpenHomeRequest struct {
 // clash this route refuses cannot come the other way.
 func (s *Server) apiPlayerOutputOpenHome(w http.ResponseWriter, r *http.Request) {
 	var req playerOpenHomeRequest
-	if !decodePlayerBody(w, r, &req) {
+	if !decodePlayerBody(w, r, playerRouteOpenHome, &req) {
 		return
 	}
 	if req.OpenHome == nil {
@@ -667,7 +847,7 @@ type playerDACRequest struct {
 // one it started with. A binding the config holds already writes nothing.
 func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 	var req playerDACRequest
-	if !decodePlayerBody(w, r, &req) {
+	if !decodePlayerBody(w, r, playerRouteDAC, &req) {
 		return
 	}
 	switch req.Binding {
@@ -737,6 +917,58 @@ func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 // errPlayerUnchanged ends a DAC choice's turn with nothing saved: the config
 // names the chosen binding already.
 var errPlayerUnchanged = errors.New("the config names that DAC already")
+
+// playerToneRequest is POST /api/output/player/tone's body: the level in dBFS
+// and the length in whole seconds, both required. Each is a pointer, so a
+// field left out is told from 0, and a length that is no whole number does
+// not decode.
+type playerToneRequest struct {
+	Level   *float64 `json:"level"`
+	Seconds *int     `json:"seconds"`
+}
+
+// apiPlayerOutputTone handles POST /api/output/player/tone: the console's
+// test tone through the running player's DAC (B601), answered once it has
+// ended. In this order: the body, one JSON object (decodePlayerBody); its
+// fields, the level a number from -90 to -30 dBFS and the length 1 to 30
+// whole seconds, by the bounds the player's backend refuses a tone by
+// (internal/tonebounds), 400 otherwise; the page's refusals (playerRefusal)
+// on the config it loads once, which the provider judges the withholding on
+// too; then the provider's Tone on the request's context, which the page's
+// Stop, a navigation or a closed tab ends. A tone refused before it took the
+// DAC's device slot is 409 with its word as the code, nothing opened; one that
+// took it is 200 with its result alone, never the player's status. It writes
+// nothing and takes neither the console's lock nor bridge.yaml's: no route
+// stops a tone, and the page's Stop is the end of this request.
+func (s *Server) apiPlayerOutputTone(w http.ResponseWriter, r *http.Request) {
+	var req playerToneRequest
+	if !decodePlayerBody(w, r, playerRouteTone, &req) {
+		return
+	}
+	if req.Level == nil || tonebounds.Check(*req.Level) != nil {
+		writeError(w, http.StatusBadRequest, errCodeBadJSON, "level is required: a number of dBFS from -90 to -30")
+		return
+	}
+	if req.Seconds == nil || tonebounds.CheckSeconds(*req.Seconds) != nil {
+		writeError(w, http.StatusBadRequest, errCodeBadJSON, "seconds is required: a whole number from 1 to 30")
+		return
+	}
+	cfg := s.deps.CfgHolder.Load()
+	if why := s.playerRefusal(cfg, ""); why != nil {
+		writeError(w, why.status, why.code, why.msg)
+		return
+	}
+	res := s.deps.PlayerOutput.Tone(r.Context(), cfg, PlayerToneRequest{LevelDBFS: *req.Level, Seconds: *req.Seconds})
+	if !res.Admitted {
+		code := res.Outcome
+		if code == "" {
+			code = "failed"
+		}
+		writeError(w, http.StatusConflict, code, "the test tone did not play ("+code+")")
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
 
 // playerWouldInterrupt is the code of a write refused because it would stop
 // what the player plays or holds paused now and came without the operator's

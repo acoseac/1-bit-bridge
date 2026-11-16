@@ -318,7 +318,9 @@ does a shared reference ID without a product string. The live altsets still deci
   `defaultMode`, with no cap: `auto` on a fresh install, or `off` where an explicit `dsdMode: off`
   (or `dop` with `allowDoP` false) was migrated (§3.6) or the state did not read (below). No other
   `defaultMode` decodes. `choice.revision` is 1 for the first choice and one more for each choice
-  written since, the migration's included; `setBy` is `app`, `console` or `migration`.
+  written since, the migration's included; what playback observes (the evidence, first use's
+  `observedAt`) never moves it, so it never makes a choice's write stale (B9). `setBy` is `app`,
+  `console` or `migration`.
 - **The DoP confirmation** is `null` or `{bcdDevice, confirmedAt, setBy}`: the firmware it was
   given under, so it lapses on another (§1.2).
 - **One listener answer per tuple.** `listener` is a list of its own, one entry for each transport,
@@ -331,8 +333,9 @@ does a shared reference ID without a product string. The live altsets still deci
   `firstUseAcknowledged` made it (§7.2). One with `bitRates` covers those rates alone, ascending: a
   migrated record made it, and lists the rates the record approved (§3.6). A list present and empty
   does not decode, since it would read as every rate, so a migration writes no entry for a transport
-  its record approved no rate of. A later acknowledgement of the transport, or a write that chooses
-  the mode again, replaces the entry with one covering every rate.
+  its record approved no rate of. A later write that carries `firstUseAcknowledged` for the
+  transport replaces the entry with one covering every rate; a write that chooses the mode again
+  needs it while the entry covers some rates alone (§7.2, B9).
 - **Warnings** record what the app must be able to explain: a migration that could not carry a
   record over, an explicit opt-out migrated, and a damaged state set aside. Each has a code and, for
   `migration_record_refused`, its reason word (§7.1), and an owner: `dac`, the key of the DAC the
@@ -677,11 +680,12 @@ hotplug or an identity change. Each occurrence is:
 - **revoked,** if its plan left the set and it is heard, or a frame of it is the kernel's. It stops
   at once, as today.
 
-A choice write (§7.2) needs the user's `interrupt` if it would revoke the occurrence heard, or
-re-plan one whose frames are already in a sink. Without `interrupt` it changes nothing. So a write
-that changes only an unused rate cap revokes nothing, and asks nothing. A safety change revokes
-without asking: the gain leaving 0 dB, the identity changing, the DAC leaving, or the state
-becoming unreadable.
+A choice write (§7.2) is made only while the player is stopped (the owner, 2026-11-10: "Stop
+playback to change DSD"), so it revokes and re-plans nothing: the next start plays by the set it
+published. (This section's first answer, a write that needed the user's `interrupt` to revoke the
+occurrence heard or re-plan one whose frames are in a sink, was built in #1434 and withdrawn.) A
+safety change revokes without asking: the gain leaving 0 dB, the identity changing, the DAC
+leaving, or the state becoming unreadable.
 
 **B5's predicate** (`policy.Reconcile`) reads each occurrence's inputs apart, never a tuple's
 membership and a flag: its plan, its own frames submitted to its sink, written to the kernel and
@@ -697,8 +701,8 @@ heard, a frame of it is the kernel's or its output retires, or while its frames 
 opened another identity, so an identity change that leaves the same tuple available still
 revokes, a released pause's included, whose reopen would write its taken-back frames to the unit
 that took the port; re-planned otherwise. Every revocation, and a re-plan of an occurrence with
-frames in a sink, interrupts what is heard: a user's write needs its `interrupt` for either, and a
-safety change acts without asking.
+frames in a sink, interrupts what is heard: a safety change acts without asking, and a user's
+write, made only while the player is stopped (B9), meets nothing to interrupt.
 
 **Kept, unchanged:**
 
@@ -1055,13 +1059,18 @@ fresh, no engine session holds the device, and no release is pending. The probe 
 - at the player's start, once the output is available;
 - when the bound unit's enumeration changes (the hotplug generation);
 - after a bcdDevice change;
-- after a choice write (§7.2).
+- after a choice write (§7.2), which makes the probe due and lapses none of its answers (B9): they
+  are the kernel's and the descriptors', which a choice does not change. The write is made only
+  while the player is stopped; a probe under way as it comes is waited for, the write holding the
+  configuration lease, so no Start and no other probe begins meanwhile, and a probe begun before
+  the write never settles the one it owes. The probe runs at the supervisor's next tick once the
+  device slot is free, never inside the write's request.
 
 It never runs on a timer, and never while a session holds the device or a pause still holds it.
 Since B4 the backend's device slot decides it (`playback.Backend.Probe`): a session holds the slot
 from its Start until its release is done, so a paused session holds it whether or not its pause's
-release has let the device go, and a probe asked meanwhile (a choice written while paused) is not
-run.
+release has let the device go, and a probe asked meanwhile (one a hotplug change makes due while
+paused) is not run.
 
 **What it does:**
 
@@ -1079,9 +1088,10 @@ run.
 - It closes the node. HW_FREE is not needed, since nothing was set.
 - Each candidate's answer (accepted, or refused with EINVAL) is kept in the probe's cache, in
   memory (`alsapcm.ProbeCache`, B4), under the model's identity, the bcdDevice, the kernel release
-  and the unit's enumeration, a change of any of which lapses it, as a choice written for the DAC
-  does. B3's durable evidence holds neither refusals nor conversion candidates; B7 records there an
-  accepted native format or DoP carrier as the tuple's `driverAcceptedAt`, with the kernel release.
+  and the unit's enumeration, a change of any of which lapses it, as the migration's part for the
+  DAC does; a choice written for it does not (above). B3's durable evidence holds neither refusals
+  nor conversion candidates; B7 records there an accepted native format or DoP carrier as the
+  tuple's `driverAcceptedAt`, with the kernel release.
 
 **A busy node.** EBUSY, usually MPD holding the DAC, is recorded as not probed, and nothing waits.
 The holder is left alone (`internal/alsapcm/device.go:302-303`; the busy bullet in
@@ -1322,41 +1332,79 @@ All four routes are `rateWrite`, bearer-token (`s.authed`) and bounded, in the p
 neither gate holds, as `GET` does. It answers 404 `output_not_found` for an id that is not this
 bridge's player, which covers every id while the player's own gate is shut.
 
-**`PUT /v1/outputs/{id}/dsd`: the choice.**
+**`PUT /v1/outputs/{id}/dsd`: the choice.** It is made only while the player is stopped (the
+owner, 2026-11-10: "Stop playback to change DSD"); the bridge neither stops nor resumes playback
+for it.
 
-Body: `{"dacKey", "baseRevision", "mode", "maxBitRate", "confirmDoP", "firstUseAcknowledged",
-"interrupt"}`. `mode` is `auto`, `native`, `dop`, `convert` or `off`. `maxBitRate` is 0 (no cap),
-2822400, 5644800 or 11289600.
+Body: `{"dacKey", "baseRevision", "mode", "maxBitRate", "confirmDoP", "firstUseAcknowledged"}`.
+`mode` is `auto`, `native`, `dop`, `convert` or `off`. `maxBitRate` is 0 (no cap), 2822400, 5644800
+or 11289600.
 
 Checks, in order:
 
 1. The body parses (400 `bad_request`).
-2. A bound DAC is available now (409 `dac_unavailable`).
-3. `dacKey` is that DAC's key (409 `dac_changed`).
-4. `baseRevision` is the stored revision (409 `stale`, carrying the current `dsdDAC`).
-5. The mode is offered at some rate (409 `mode_not_offered`).
-6. DoP on a DAC whose profile has no DoP claim carries `confirmDoP` (409
+2. The player is stopped (409 `playback_not_stopped`, nothing changed): the engine's transport is
+   stopped with no transition under way, which the engine's owner checks and, in the same step,
+   grants the write its configuration reservation (PR 3); and the backend holds no session record
+   (starting, playing, paused with the device open or released, releasing, a retiring tail),
+   nothing holds the device and no release is unconfirmed (`playback.Backend.ChooseDSD`'s
+   configuration lease, B9 PR 2). A silent probe under way is waited for, the lease claimed.
+3. A bound DAC is available now (409 `dac_unavailable`).
+4. `dacKey` is that DAC's key (409 `dac_changed`).
+5. The player's DSD state opened (409 `state_unreadable`).
+6. No earlier write of the state replaced its file without its sync (500 `persist_uncertain`).
+7. `baseRevision` is the stored revision (409 `stale`, carrying the current `dsdDAC`).
+8. The mode is offered at some rate (409 `mode_not_offered`).
+9. DoP on a DAC whose profile has no DoP claim carries `confirmDoP` (409
    `dop_confirmation_required`).
-7. Native or DoP whose first use is not acknowledged under this bcdDevice carries
-   `firstUseAcknowledged` (409 `first_use_unacknowledged`). A rejection re-arms first use (§1.2),
-   so a write that chooses a rejected transport again always carries it, and that write clears the
-   rejection.
-8. The write would leave alone what plays, or carries `interrupt` (409 `would_interrupt`, nothing
-   changed). The test is §3.5's per-occurrence predicate, computed against the set the write would
-   publish: would it revoke the occurrence heard, or re-plan one whose frames are already in a sink?
-   A write that changes only an unused rate cap, or an unused mode, therefore needs no `interrupt`.
-   This is the console's rule and its word (the console bullet in `.claude/rules/player.md`).
+10. Native or DoP whose first use is not acknowledged under this bcdDevice carries
+    `firstUseAcknowledged` (409 `first_use_unacknowledged`). A rejection re-arms first use
+    (§1.2), so a write that chooses a rejected transport again always carries it, and that write
+    clears the rejection.
+
+Writes are one at a time: a write waits its turn within its request's time (500 `persist_failed`
+past it), and none is made once the player's stop has closed the writes of its DSD state (500
+`persist_failed`, nothing written).
 
 Then the bridge:
 
-1. writes the state durably (500 `persist_failed`, nothing changed);
-2. probes the DAC if it is free;
-3. recomputes and publishes the effective set (`policyGeneration` + 1);
-4. reconciles each occurrence (§3.5): it keeps what stays in the set, re-plans successors that left
-   it, and revokes only what step 8 allowed;
-5. answers 200 with `{dsdDAC, dsdPlayback}`, read from the published epoch.
+1. writes the state durably, in the store's one write, checks 7 to 10 run inside it on the state
+   that write is made from: 500 `persist_failed` where the write failed before it replaced the
+   file, nothing changed; 500 `persist_uncertain` where it replaced the file and its sync failed,
+   the file holding the new choice, not known to be durable, and the player the old one, so for
+   the rest of the run a rate plays only where the two play it alike (refused `dsd_choice_uncertain`
+   otherwise; until PR 3 names the word, serve's adapter sends it as `dsd_state_unreadable`), and
+   every later write of the state is refused `persist_uncertain` too, changing nothing, never
+   rolled back; 409 `state_unreadable` where the state's file was refused in memory (it could not
+   be read or set aside) and is written over by nothing until it is moved;
+2. makes the silent probe due, which the supervisor runs at its next tick once the device slot is
+   free (§5), never inside the request, and drops none of its answers;
+3. recomputes and publishes the effective set, at `policyGeneration` + 1 only where what plays
+   changes: every written choice moves `choice.revision`, and one that changes the choice and
+   nothing that plays is published beside the set as it was (§7.1); nothing plays, so nothing is
+   reconciled, and the next start plays by the set published;
+4. answers 200 with `{dsdDAC, dsdPlayback}`, read from the epoch it published, inside its turn and
+   its lease.
 
 That read-back is the effective choice, exactly as `GET` returns it afterwards.
+
+What B9 built (PR 2; the route is PR 3's): the write takes the writes' turn, then the configuration
+lease, which the backend decides under its lock in the step that finds no session record, nothing
+holding the device and no release unconfirmed. While the lease is held a Start waits before it
+registers (within its own context and its release, holding nothing) and no probe takes the device
+slot, so the write and its publish come before any later open. The checks that read the state, 7
+to 10, are `policy.Choose`, run inside the store's one write (`dsdstate.Store.Update`), so no other
+writer (the migration's part, playback's evidence) slips between the check and the write; a write
+that finds the revision moved answers `stale` only once the write that moved it has published, with
+the revision the next write compares with. The backend sees no session between a release the
+engine acknowledged and the Start that follows it (a seek, Next, Previous, a skip after a refusal,
+a Play while playing), so item 2's stopped check is the engine owner's, which grants the
+reservation in the same step, the write's persistence off the owner's goroutine (PR 3, with a test
+that parks a Play between the check and its backend registration). #1434 built a write beside what
+plays (`interrupt` and `would_interrupt`, and a pending set that every open, the producer and each
+activation waited for) over 19 review rounds; the owner withdrew it. The crash points: before the
+rename, the choice as it was; after the rename and before the directory's sync, either choice;
+after the sync, the new choice, which the next start reads and publishes, answered or not.
 
 **`POST /v1/outputs/{id}/dsd/check`.** Body: `{dacKey, transport, bitRate, interrupt}`. Answers 202
 `{check}`, whose state goes `preparing`, `playing`, then `complete`, `stopped` or `failed`.
@@ -1379,7 +1427,8 @@ once when no check runs.
 that did not complete, is older than 10 minutes, was already answered, or belongs to another DAC.
 
 **Error table.** New rows: `dac_unavailable`, `dac_changed`, `mode_not_offered`,
-`dop_confirmation_required`, `first_use_unacknowledged`, `would_interrupt`, `check_running`,
+`dop_confirmation_required`, `first_use_unacknowledged`, `playback_not_stopped`,
+`state_unreadable`, `persist_uncertain` (B9's), `would_interrupt` (the check's), `check_running`,
 `check_unavailable`, `check_not_answerable`. Reused rows: `bad_request`, `stale`, `persist_failed`,
 `output_not_found`, `local_outputs_not_supported`. Guards hold PROTOCOL.md's table to what the
 handlers send (the error table bullet in `.claude/rules/wire.md`).
@@ -1423,8 +1472,9 @@ and two units of one model share one choice, as the phone's per-DAC choice does 
   that doesn't decode it plays as noise, much of it ultrasonic. Turn on DoP only if this DAC's maker
   says it supports DoP." The buttons are Turn On and Cancel.
 - **Conflicts.** Writes carry the key and the revision just read. On 409 `stale` or `dac_changed`
-  the app reads again and shows the current state. On `would_interrupt` it asks "Stop the DSD
-  that's playing?"
+  the app reads again and shows the current state. On 409 `playback_not_stopped` it says "Stop
+  playback to change DSD" (the owner, 2026-11-10): neither the app nor the bridge stops or resumes
+  playback for a write.
 - **Evidence** shows per rate, in §1.3's words.
 - **A rate a migrated acknowledgement does not cover** (`firstUse.bitRates`) asks for the first-use
   sheet again before the app sends that rate's write.
@@ -1833,13 +1883,13 @@ Each PR is about a day of worker time. Tests marked red first fail on the tree b
 | B10 | bridge | `internal/player/dsdconv` (§4.2 to §4.5), not wired, with the join-window snapshot and recompute (§4.7); the rules at `player.md:27` and `:36`, and the converter's bullet | none | `TestTheResponseMeetsItsMask` (from the coefficients, the 30 kHz and the 20 kHz plans), `TestAliasingIsADifferential` (CIFF fixtures, `internal/transcode/testdata/gen/dsd_fixtures.py`, or B725's), `TestUnityGainLevels` (a −20 dBFS `dsdtone` sine gives −20 dBFS ± 0.05), `TestOvermodulationSaturatesAndCounts`, `TestDelayLinesStartAtNumericZero`, `TestPaddingPastFramesIsNotRead`, `TestTheJoinWindowRecomputesFromTheSnapshot`, `TestAnAbuttingJoinIsZeroPadded`, `TestTheOutputIsDeterministic`, `BenchmarkConvert{DSD64,DSD128,DSD256}` | standard |
 | B11 | bridge | Conversion in the player: `native.go`'s DSD open branches for a convert plan; continuous, abutting and reopen joins (DSD64 then DSD128 on one sink included); the join window held back and recomputed on a cut; the observation and Details from the plan (§4.1, §4.7, §4.8); the next free version at its merge; the rules at CLAUDE.md:91, `jobs.md:132`, `player.md:133-135` and `output.md`, and the claims bullet | B7, B10 | `TestAnUnknownDACPlaysDSDConverted`, `TestConvertedDSDReachesTheDACPackedByTheTable`, `TestConvertedTracksJoinContinuouslyAtOneRate`, `TestDSD64ThenDSD128ConvertedShareTheSink` (no reopen), `TestDeletingOrReplacingAPreparedConvertedSuccessor` (the three moments of §4.7, against the oracle), `TestStopDuringConversionIsBounded`, `TestTheClaimsAreThePlans` (a 44.1 kHz, 16-bit DAC is said to get 16 bits, 20 kHz and TPDF), `TestAConvertedTrackIsNotLossless`, `TestNoConvertedStreamIsServed` | player, hardware (CPU and xruns on a Pi 4 and a Pi 5, §4.6; a listening pass) |
 | B8 | bridge | The read side (§7.1): `dsdDAC` with first use and its `bitRates`, `evidence`, `converted` with each plan, `refused`, `warnings` (migration failures and a damaged state), the `converted` playback token and plan; no health flag yet; PROTOCOL.md; fixtures; the `wire.md` DSD bullet | B11 | `TestTheBridgeElementCarriesTheDACChoice`, `TestDSDOutputProtocolMembers` and `TestDSDOutputProtocolTokens` (new rows), `TestAConvertedEntryCarriesItsPlan`, `TestAMigrationFailureIsPublished`, `TestADamagedStateIsPublishedWithNoDAC`, `TestNoHealthFlagBeforeItsRoute`, `TestNoDACKeyOrModelCarriesASerialOrAPort`, the fixture exporter | standard, mirror (I1) |
-| B9 | bridge | `PUT /v1/outputs/{id}/dsd` (§7.2): CAS, key binding, confirmation, acknowledgement, the per-occurrence `would_interrupt`, durable write, read-back; the `bridgeDSDChoice` flag; the `wire.md` bullet completed | B8 | `TestTheChoiceIsDurableBeforeItIsAnswered`, `TestAStaleRevisionChangesNothing`, `TestAChoiceForAnotherDACIsRefused`, `TestDoPOnAnUnknownDACNeedsConfirmation`, `TestNativeOrDoPNeedsFirstUseAcknowledged`, `TestChoosingARejectedTransportAgainClearsTheRejection`, `TestAnAcknowledgementWidensAMigratedChoiceToEveryRate`, `TestAWriteClearsItsDACsWarnings`, `TestOnlyAWriteThatInterruptsNeedsTheGoAhead`, `TestTheAnswerIsTheEffectiveChoice`, `TestTheChoiceFlagArrivesWithItsRoute`; the route classification and error-table guards | standard, mirror (I4) |
+| B9 | bridge | The choice's write, made only while the player is stopped (the owner, 2026-11-10: "Stop playback to change DSD"), in three PRs. PR 1 (#1448, merged): #1434's native lifecycle fixes. PR 2: the backend's write (`ChooseDSD`: the configuration lease and `playback_not_stopped`, CAS, key binding, confirmation, acknowledgement, durable write, read-back, a landed write's intersection), and B853's refusal word. PR 3: `PUT /v1/outputs/{id}/dsd` (§7.2), the engine owner's stopped check and reservation, `dsd_choice_uncertain` on the wire, the `bridgeDSDChoice` flag, PROTOCOL.md and the `wire.md` bullet, paired with I4's mirror | B8 | PR 2: `TestEachStateThePlayerIsNotStoppedInRefusesTheWrite`, `TestAStartDuringAWritePlaysByTheChoiceItWrote`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestTwoWritesOfOneRevisionLandOnce`, `TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay`, `TestDoPOnAnUnknownDACNeedsConfirmation`, `TestNativeOrDoPNeedsFirstUseAcknowledged`, `TestChoosingARejectedTransportAgainClearsTheRejection`, `TestAnAcknowledgementWidensAMigratedChoiceToEveryRate`, `TestAWriteClearsItsDACsWarnings`, `TestADSDEntryAfterAnOrdinaryRevocationIsRefusedForIt`; PR 3: `TestTheAnswerIsTheEffectiveChoice`, `TestTheChoiceFlagArrivesWithItsRoute`, a Play parked between the owner's check and its backend registration, the route classification and error-table guards | standard, mirror (I4) |
 | B12 | bridge | The check (§6.2, §7.2): admission by the effective policy, the chime modulated at its own rate, the `preparing` state, the answer, the `bridgeDSDCheck` flag; an OpenHome Stop ends a check; PROTOCOL.md; the next free version at its merge; the `openhome.md` rule and the check's bullet | B9, B11, B725's modulator in a production package | `TestTheCheckAdmitsOnlyWhatTheSetPlays` (red before: an offered tuple with first use unacknowledged, and unconfirmed DoP), `TestTheChimeIsModulatedAtItsOwnRate` (no repeated bits; the pads are `0x69`), `TestEveryStopEndsTheCheckWithinItsBound`, `TestTheCheckNeverAutoplays`, `TestOnlyACompleteCheckIsAnswered`, `TestANoiseAnswerRefusesTheTransportInEveryMode`, `TestTheCheckFlagArrivesWithItsRoute` | player, hardware (the owner hears the chime on a real DAC), mirror (I5) |
 | B13 | bridge | The console's Player page shows and sets the per-DAC choice and evidence, with the same first-use sheet (`cmd/bridge/serve_player_console.go:517-559`, the wording at `:532`) | B9 | the console's view and write tests for each state | standard |
 | I1 | iOS | Mirror of B8: PROTOCOL.md copied; DTOs for `dsdDAC` with first use and its `bitRates`, `evidence`, `converted` with its plan, `refused`, `warnings`, and the `converted` playback token; fixtures | B8 | decode tests: a malformed new member withholds only its own object (I1's rule); `converted` reads as its own token | full suite |
 | I2 | iOS | R12 admits converted rates; the refusal copy (§7.6) | I1 | `testAConvertedRateIsEligibleUnderAFreshGrant`, `testAConvertedEntryFromAnotherEpochAdmitsNothing`, `testNoConvertedEntryKeepsTheRateRefused`, `testARefusedRateSaysItsReason` | full suite |
 | I3 | iOS | Signal Path: the converted card composed from the plan, and the evidence line (§7.5) | I1 | copy-table pins with no forbidden word for DSD on the bridge's player; `testTheConvertedLineIsThePlans`; `testAConvertedOccurrenceIsNeverBitExact` | full suite |
-| I4 | iOS | The per-DAC mode UI (§7.4) with the first-use sheet and the large Stop (§6.1), the sheet shown again for a rate a migrated acknowledgement does not cover, and each warning's sentence; mirror of B9 | B9, I1 | view-model tests for each state (known and unknown, offered and blocked, `stale`, `dac_changed`, `would_interrupt`); `testNativeOrDoPIsNeverSentWithoutTheSheet`; `testTheStopStaysUntilObserved`; `testAnUncoveredRateAsksForTheSheet`; `testAWarningShowsItsSentence` | full suite, mirror |
+| I4 | iOS | The per-DAC mode UI (§7.4) with the first-use sheet and the large Stop (§6.1), the sheet shown again for a rate a migrated acknowledgement does not cover, and each warning's sentence; mirror of B9 | B9, I1 | view-model tests for each state (known and unknown, offered and blocked, `stale`, `dac_changed`, `playback_not_stopped`); `testNativeOrDoPIsNeverSentWithoutTheSheet`; `testTheStopStaysUntilObserved`; `testAnUncoveredRateAsksForTheSheet`; `testAWarningShowsItsSentence` | full suite, mirror |
 | I5 | iOS | The optional chime and its answer (§6.1); mirror of B12 | B12, I4 | `testAChimeIsOfferedOnlyForATupleTheBridgePlays`, `testNoAnswerForAStoppedCheck` | full suite, mirror; the owner's hardware run |
 
 ### Order and parallelism
