@@ -100838,3 +100838,22 @@ call, before the hold.
 | C4c, item 2's new check | `holdUnlockOf`'s release wait off, the count kept | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` red in both cases at the completion check (:460, "the refused verification's let-go was still parked past its ownership's release when the cleanup after the hold's ran"); `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` red, its case ending at that check's bound rather than the hold's drain's |
 | C4d, a premature completion | `activeReleases.Add(-1)` moved before `end()` | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` red in both cases at `refusedLetGo`'s count check ("0 let-goes are counted, want 1", reported at its call, :517), then at the completion check (:460); `TestARefusedVerificationsLetGoIsCountedUntilItEnds` red in both cases at its count check (release_count_internal_test.go:86) |
 | C4e | the hook after the release run before the unlock | `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree` red, "another verification owes this snapshot its check, want it free there" (:122) |
+
+### The gate
+
+The first gate, at f3d7f7d9 (3290ebda's code), ran inside the build slot
+from 00:12 to 00:41 in three lanes at once. The second, at ac60b148, ran
+inside the slot from 00:44.
+
+| Check | Result |
+|---|---|
+| internal/backup's whole suite, `-race -count=1 -timeout 60m` (f3d7f7d9; internal/backup has not changed since) | 292 of 292, no race; ok in 836.1 s |
+| `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree` and `TestARefusedVerificationsLetGoIsCountedUntilItEnds`, `-race -count=50` (f3d7f7d9) | 50 of 50 each, no race; ok in 201.4 s |
+| cmd/bridge's whole suite, `-race -count=1 -timeout 60m`, at f3d7f7d9 | 1,582 passed, 9 skipped, one failed: `TestEveryBackgroundGoroutineDrainsOnCleanup`, since `checkGivenUpIn` launched a goroutine that closes `callerDone` and registered neither drain helper the sweep asks for; no race |
+| the fix, ac60b148 | `checkGivenUpIn` registers `drainLoopOnCleanup` for its caller, run right after the bounded drain, which has joined the caller by then or ended the run; the sweep and the four tests pass, and C4a run again on it gave the same red, the same race |
+| cmd/bridge's whole suite, `-race -count=1 -timeout 60m`, at ac60b148 | 1,583 passed, 9 skipped, none failed, no race; ok in 1,647.9 s |
+| `TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained`, `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup`, `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` and `TestTheTickerAndTheDoctorNameAPruneGivenUp`, `-race -count=50`, at f3d7f7d9 and at ac60b148 | 50 of 50 each at f3d7f7d9, no race, ok in 1,268.6 s; 50 of 50 each at ac60b148, no race, ok in 1,215.2 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, at f3d7f7d9 and at ac60b148 |
+| gofmt (`go run cmd/gofmt -l`) on the changed files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f3d7f7d9 and with this table |
+| `make docs-check` | exit 0, at f3d7f7d9 and with this table |
