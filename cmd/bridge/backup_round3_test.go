@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -124,15 +126,264 @@ func runStuckCheck() int {
 // the one path every snapshot takes, and requires both its verdicts VERIFIED.
 func verifiedInstallSnapshot(t *testing.T, cfgPath string) string {
 	t.Helper()
+	return snapshotInstall(t, cfgPath, nil)
+}
+
+// endedInstallSnapshot is verifiedInstallSnapshot for a test whose next step
+// needs the backups folder at root let go, a prune that must run: it returns
+// once the snapshot's verification has ended, never on its answer, which
+// comes before its worker lets go of the folder's lock (backlog B869, B849's
+// rule). The worker's unlock is held from the answer until the test waits for
+// its end (unlockHold), whose hook is set as the bundle is kept, just before
+// its verification begins (backup.SnapshotOptions.OnKept), and the
+// lock-release seam is put back as it stood before the test's next step.
+func endedInstallSnapshot(t *testing.T, cfgPath, root string) string {
+	t.Helper()
+	unlock := holdUnlockOf(t, root)
+	dir := snapshotInstall(t, cfgPath, func(dir string) { unlock.arm(t, dir) })
+	unlock.requireHeld(t)
+	unlock.letGoAndAwaitEnd(t)
+	return dir
+}
+
+// snapshotInstall is verifiedInstallSnapshot calling onKept, when set, with
+// the bundle once it is kept, before its verification begins.
+func snapshotInstall(t *testing.T, cfgPath string, onKept func(dir string)) string {
+	t.Helper()
 	cfg, resolved, err := loadCLIConfig(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := backup.SnapshotAndVerify(t.Context(), buildBackupSources(cfg, resolved), backup.SnapshotOptions{})
+	res := backup.SnapshotAndVerify(t.Context(), buildBackupSources(cfg, resolved), backup.SnapshotOptions{OnKept: onKept})
 	if !res.Kept() || res.VerifyErr != nil || !res.Verify.Record.Passes() {
 		t.Fatalf("the snapshot: kept %v, %v, %+v", res.Kept(), res.VerifyErr, res.Verify.Record)
 	}
 	return res.Dir
+}
+
+// unlockHold is internal/backup's test support of that name, for this
+// package's snapshots (backlog B869): installed on the backups folder at root
+// before any verification there begins, it holds the next unlock of that
+// folder's lock once armed (backup.SetOnLockReleaseForTest) until the test
+// lets it go, and hears the end of the worker of the verification it is armed
+// for (backup.SetOnVerifyEndForTest), asking the folder's lock there. A
+// verification answers its caller before its worker lets go of that lock
+// (verifyAndThen), so the window between the answer and the unlock is held
+// open, and a step the test takes once the verification has answered is
+// shown to wait for the worker's end, never the answer (backlog B849).
+type unlockHold struct {
+	root  string
+	armed atomic.Bool
+	// entered closes once the unlock is held, and out lets it go.
+	entered, out      chan struct{}
+	entering, leaving sync.Once
+	// over is set as the test's body ends (letGo): an end heard after it asks
+	// nothing of the folder's lock, so it opens nothing in the folders the
+	// test's cleanups remove.
+	over  atomic.Bool
+	heard sync.Once
+	ended chan struct{}
+	// probe asks the folder's lock where the end is heard: backupsLockHeld,
+	// or a test's stand-in that parks there. asks counts the asks begun and
+	// not ended, each announced before the hook reads over (awaitAsks).
+	probe func(root string) (bool, error)
+	asks  atomic.Int32
+	// held and heldErr are what the end found of the folder's lock, written
+	// before ended closes.
+	held    bool
+	heldErr error
+	// restore puts the lock-release seam back as it stood, once (putSeamBack).
+	restore func()
+	putBack sync.Once
+}
+
+// holdUnlockOf installs an unlockHold on the backups folder at root, not
+// armed, before any verification there begins. Every holder of a backups
+// folder's lock reads SetOnLockReleaseForTest's seam, with no lock, as it lets
+// the lock go, so the seam is put back (putSeamBack) only once no holder in
+// this process keeps a hold (awaitNoHolds): a holder drops its hold once it has
+// let go of its lock, and the count's atomic orders that read before the
+// write. That is as soon as the snapshot's worker has ended
+// (letGoAndAwaitEnd), so a holder that comes after it, a prune the test runs
+// next, never reads the hold's hook; or else in the cleanup registered first
+// here. A held unlock is let go as the test's body ends (its context's end,
+// which comes before any cleanup), so no cleanup the test registers once it
+// has its snapshot waits on the worker it holds. The other cleanup, which
+// runs before the seam's restore, marks the test's end and lets a held unlock
+// go (letGo), waits for an ask of the folder's lock the end hook began before
+// that mark (awaitAsks: a worker runs its end hook once it has dropped its
+// hold, so no hold counts it), and then waits until no hold and no refused
+// verification's let-go is left (awaitNoHolds): the debt is the holders',
+// counted by the backup package from before a verification takes its slot
+// until its worker has let go of all it held, never the hook's, which a
+// worker parked before its unlock, a verification refused before its worker
+// began, and the worker that writes the INCOMPLETE of one abandoned in its
+// slot's wait (which runs no end hook) never enter. Past either bound it ends
+// the run (endTheRun) rather than let the seam's restore and the fixture's
+// removal run beside what is still running (backlog B869).
+func holdUnlockOf(t *testing.T, root string) *unlockHold {
+	t.Helper()
+	u := &unlockHold{root: root, entered: make(chan struct{}), out: make(chan struct{}), ended: make(chan struct{}), probe: backupsLockHeld}
+	u.restore = backup.SetOnLockReleaseForTest(func(dir string) {
+		if dir == u.root && u.armed.CompareAndSwap(true, false) {
+			u.entering.Do(func() { close(u.entered) })
+			<-u.out
+		}
+	})
+	t.Cleanup(u.putSeamBack)
+	context.AfterFunc(t.Context(), u.letGo)
+	t.Cleanup(func() {
+		u.letGo()
+		u.awaitAsks(t)
+		awaitNoHolds(t, "a backup holder kept its hold after the snapshot's unlock was let go")
+	})
+	return u
+}
+
+// awaitNoHolds waits until no backup holder in this process keeps a hold
+// (backup.ActiveHoldsForTest), and no verification refused before its worker
+// began still lets go of its capture's ownership (backup.ActiveReleasesForTest,
+// a let-go its caller answers without once StopWriteBound has passed). A
+// holder, a verification's worker, the one that writes an abandoned
+// verification's INCOMPLETE, a prune's, a claim's or a restore's, is counted
+// from before it takes anything until it has let go of all of it, its
+// folder's lock and its unlock's seam among them. Past holdDrainBound it ends
+// the run (endTheRun), saying what, so that no cleanup after it restores a
+// seam they read, or removes the folders they work in.
+func awaitNoHolds(t *testing.T, what string) {
+	t.Helper()
+	busy := func() bool { return backup.ActiveHoldsForTest() != 0 || backup.ActiveReleasesForTest() != 0 }
+	for deadline := time.Now().Add(holdDrainBound); busy(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			endTheRun(t, fmt.Sprintf("%s: %d holds and %d refused verifications' let-goes still running %v on",
+				what, backup.ActiveHoldsForTest(), backup.ActiveReleasesForTest(), holdDrainBound))
+		}
+	}
+}
+
+// holdDrainBound is how long awaitNoHolds and awaitAsks wait before they end
+// the run: 30 s, and less in a case process whose run is to end there.
+var holdDrainBound = 30 * time.Second
+
+// endTheRun ends the test binary, saying what and printing every goroutine,
+// for a cleanup whose later cleanups must not run: here a worker it waited for
+// still runs beside them. A t.Fatal or a panic in a cleanup does not stop
+// them, since testing's runCleanup runs the cleanups left on its way out of
+// either; so the panic is raised on a goroutine of its own, as the binary's
+// own -timeout raises its, and the cleanup waits there until it lands.
+func endTheRun(t *testing.T, what string) {
+	t.Helper()
+	msg := t.Name() + ": " + what
+	debug.SetTraceback("all")
+	go func() { panic(msg) }()
+	select {}
+}
+
+// arm holds the next unlock of the folder's lock, and sets the end hook for
+// the verification of snapshot, the dir its caller passes. A worker runs the
+// hook that stood as its verification began, so arm is called just before
+// that verification begins (backlog B849's second round). The hook's restore,
+// registered here, runs before holdUnlockOf's drain, and may run before that
+// worker calls the hook it took, harmlessly: the worker reads the seam once,
+// through its atomic pointer, as its verification begins (verifyAndThen), and
+// the hook touches this hold's own state alone, the folder's lock asked only
+// before the test's end.
+func (u *unlockHold) arm(t *testing.T, snapshot string) {
+	t.Helper()
+	t.Cleanup(backup.SetOnVerifyEndForTest(func(dir string) {
+		if dir == snapshot {
+			u.heard.Do(func() {
+				// Announced before over is read: either this reads over set and
+				// asks nothing, or the cleanup, which sets over first, finds
+				// the ask counted and waits for it (awaitAsks).
+				u.asks.Add(1)
+				if !u.over.Load() {
+					// Asked where the end happens, on the worker's goroutine.
+					u.held, u.heldErr = u.probe(u.root)
+				}
+				u.asks.Add(-1)
+				close(u.ended)
+			})
+		}
+	}))
+	u.armed.Store(true)
+}
+
+// awaitAsks waits until no ask of the folder's lock the end hook began is
+// still running, past holdDrainBound ending the run (endTheRun), the test's
+// end marked first (letGo), so that no ask begins once the count reads 0.
+func (u *unlockHold) awaitAsks(t *testing.T) {
+	t.Helper()
+	for deadline := time.Now().Add(holdDrainBound); u.asks.Load() != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			endTheRun(t, fmt.Sprintf("the end hook's ask of the backups folder's lock was still running %v after the test's end", holdDrainBound))
+		}
+	}
+}
+
+// requireHeld waits until the unlock is held: the verification has answered,
+// and its worker holds the lock still.
+func (u *unlockHold) requireHeld(t *testing.T) {
+	t.Helper()
+	select {
+	case <-u.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("no holder of the backups folder's lock came to let it go")
+	}
+}
+
+// letGoAndAwaitEnd lets the unlock go and waits for the verification's worker
+// to have let go of everything it held, the folder's lock free as its end is
+// heard; then, once no hold is left (awaitNoHolds), it puts the lock-release
+// seam back.
+func (u *unlockHold) letGoAndAwaitEnd(t *testing.T) {
+	t.Helper()
+	u.release()
+	select {
+	case <-u.ended:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the verification's worker never let go of what it held")
+	}
+	if u.heldErr != nil {
+		t.Fatalf("asking the backups folder's lock as the verification's worker ended: %v", u.heldErr)
+	}
+	if u.held {
+		t.Error("the verification's worker ended with the backups folder's lock still held")
+	}
+	awaitNoHolds(t, "a backup holder kept its hold once the snapshot's worker had ended")
+	u.putSeamBack()
+}
+
+// release lets the unlock go.
+func (u *unlockHold) release() { u.leaving.Do(func() { close(u.out) }) }
+
+// letGo marks the test's end, disarms the hold and lets a held unlock go.
+func (u *unlockHold) letGo() {
+	u.over.Store(true)
+	u.armed.Store(false)
+	u.release()
+}
+
+// putSeamBack puts the lock-release seam back as it stood, once.
+func (u *unlockHold) putSeamBack() { u.putBack.Do(u.restore) }
+
+// backupsLockHeld reports whether the lock of the backups folder at root is
+// held, asked as another process asks it: an exclusive try through an open of
+// its own, let go at once.
+func backupsLockHeld(root string) (bool, error) {
+	f, err := os.OpenFile(filepath.Join(root, backup.LockFileName), os.O_RDWR, 0)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	switch err := fsutil.TryLock(f); {
+	case err == nil:
+		return false, fsutil.Unlock(f)
+	case errors.Is(err, fsutil.ErrLocked):
+		return true, nil
+	default:
+		return false, err
+	}
 }
 
 // backupLines are the doctor's backups lines for the install at cfgPath, as

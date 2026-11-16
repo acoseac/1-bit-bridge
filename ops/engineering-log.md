@@ -99589,6 +99589,131 @@ Each control fails on the unfixed test and passes with the fix:
 - **The files:** `git diff --name-only 9acee209..HEAD` names the three
   test files and this log.
 
+## 2026-11-15 — B872U: the updater's tick seam takes its hold before it hands an arming over
+
+Branch `diag/b872u-updater-wake`, from main at bf622968. Commits:
+e7fea4b2 (the red: two seam tests and what they need), cb3b2268 (the
+fix), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, 16 CPUs,
+`-race`. The stressor and the runs were pinned to CPUs 0-7. The
+diagnostic edit (a record of the armings and holds, parks, a goroutine
+dump on `waitArmed`'s give-up) was never committed.
+
+### The hazard
+
+`TestAWakeAndAnOldTickReadyTogetherAskNothing` (check_switch_test.go
+535-571 at bf622968) waited out its minute, failing with "the poll loop
+never asked for its next wait", twice:
+
+- on Windows' CI at main 3a6b924e, at :544 (60.00 s; `internal/updater`
+  is the same at bf622968);
+- on a Linux `test -race (rest)` leg of PR #1470 (60.06 s; that log is
+  not on this host).
+
+The tick seam hands the test each arming's wait (`s.asked <- w`, :194),
+then takes the hold the test set (`s.hold.Swap(nil)`, :195), then waits
+on it (:196). The test sets a hold once it has been handed a wait, for
+the next arming. While the loop's goroutine was between :194 and :195,
+one of two things could happen:
+
+- **The arming already handed took that hold (:544).** Arming 1 waited
+  at :196 for the release at :550, which comes after the test's wait at
+  :544.
+- **The next hold replaced one its arming had not taken yet (:551).**
+  `inspect`'s hold (:549) replaced `release`'s, and arming 2 took
+  `inspect`'s. That hold is released at :558, after the wait at :551.
+
+The poll loop is not the cause:
+
+- Production's `after` is `time.After` (updater.go 469): there is no
+  hold and no hand-off.
+- With an old tick and a wake ready together, its select (529-540) takes
+  either, and each leads to the next arming. The old tick is refused at
+  593, and `finishDeferredRestart` waits only on the install marker's
+  bounded lock, only where a committed swap's restart is pending, and
+  never past its context.
+- "Check now" (1171-1182) never touches the loop's wait or wake.
+
+### Proofs
+
+- **Forced:** the diagnostic edit parks the loop between the hand-off
+  and the take.
+  - Parked at arming 1 until the test had set its hold: red at :544
+    after 60.05 s.
+  - Parked at arming 2 until the second hold, with arming 1 left to take
+    its hold first: red at :551 after 60.01 s.
+  - Both dumps show the loop `[chan receive]` at :196 in the seam's
+    `after`, called from `Run` at updater.go:528, and the test in
+    `waitArmed`'s give-up, called from :544 or :551. The record names
+    the arming that took each hold.
+- **Natural, at main:** the same build with no park.
+  - 4,400 runs of ×200 to ×1,000, unloaded and beside 8 busy loops, at
+    GOMAXPROCS 8, 2 and 1: 0 red.
+  - The long loaded batch (8 busy loops, each configuration capped at
+    480 s): 70 red in 108,634 runs, 50 at :544 and 20 at :551.
+
+    | configuration | red | runs |
+    |---|---|---|
+    | one lane, GOMAXPROCS 8 | 7 | 15,168 |
+    | one lane, GOMAXPROCS 2 | 7 | 21,077 |
+    | four lanes, GOMAXPROCS 2 | 28 | 23,037 |
+    | four lanes, GOMAXPROCS 8 | 28 | 29,352 |
+    | one lane, GOMAXPROCS 1 | 0 | 20,000 |
+
+    At GOMAXPROCS 1 the woken test goroutine waits for the P, which the
+    loop's goroutine does not give up between the hand-off and the
+    take, so no run went red.
+  - Every red's dump carries one of the two forced signatures. Between
+    its hand-off and its take, the loop's goroutine was held 24 µs to
+    3.7 ms: a median of 41 µs over the 50 at :544, and of 34 µs over the
+    20 at :551.
+- **Red first, e7fea4b2.** The seam keeps its order and gains three
+  things: a hook just after the hand-off (`tickSeam.handed`,
+  `parkAfterHanding`), arming numbers, and holds that record the arming
+  that took them. The lines below are e7fea4b2's.
+  - `TestAHoldSetOnceAnArmingIsHandedHoldsTheNextArming` parks the loop
+    just after it hands arming 1 over and sets a hold there. It fails at
+    :647: the hold was taken by arming 1, want arming 2.
+  - `TestAHoldSetBeforeAnArmingIsThatArmingsAlone` does the same with a
+    hold set before the loop runs. It fails at :679 (the first hold was
+    taken by no arming) and :682 (the second was taken by arming 1).
+  - Both are red 20 of 20, in 0.00 s each. Every hold is released before
+    the loop goes on, so a red ends at once.
+- **The fix, cb3b2268.** An arming takes its hold, then hands over its
+  wait carrying that hold (`armedWait.held`), then waits on it.
+  - `TestAWakeAndAnOldTickReadyTogetherAskNothing` keeps its property:
+    the old tick and the wake are ready together while the loop is held
+    before its select, and the current wait's tick asks once. It now
+    also asserts that each held arming took the hold set for it.
+  - The two seam tests pass 20/20. Everything
+    `-run 'Update|Tick|Wake|CheckNow|Hold'` selects passes: 47 tests and
+    39 subtests.
+  - The test alone: 1,200 of 1,200 (×200 in six configurations), and
+    the long loaded batch, the same five configurations: 0 red in
+    160,000.
+  - `./internal/updater` once: 262 of 262, 0 races, 36.2 s.
+- **Controls.** Each mutation was made in memory and the bytes put
+  back, with the predictions written before each run. The lines are
+  cb3b2268's.
+  - **C1, the schedule protection removed** (updater.go 593 reduced to
+    `!u.checksEnabled()`):
+    - `TestAWakeAndAnOldTickReadyTogetherAskNothing` was red in 51 of
+      100 runs at :627 (one request when the select took the old tick)
+      and green in 49;
+    - `TestATickArmedWhileUpdateChecksWereOffAsksNothingOnceTheyAreOn`
+      and
+      `TestATickArmedBeforeUpdateChecksWentOffAsksNothingOnceTheyAreOnAgain`
+      were red 100/100.
+  - **C2, the take moved to between the hand-off and the hook:** the
+    held assertion was red 20/20 at :614, at once. The seam tests stayed
+    green, against the prediction: their park sits after that take.
+  - **C3, the red commit's order** (hand-off, hook, take): all three
+    were red 20/20, at once.
+- **Guarded files:** `internal/updater` is not a guarded path
+  (`internal/player/qualification/version_gate.go`).
+
+The rule is a bullet after build-ci-tests.md's tickSeam bullet, in this
+branch's rules patch.
 ## 2026-11-13 — B618: on Windows, bridge logs reads the file the installed bridge writes
 
 Worker b618, legion0, branch `fix/b618-windows-logs-path` from main 2bebca26. Commits 779bdfc3 (the seams, the
@@ -100824,3 +100949,1081 @@ Round 3 against bae55650: production +60 −50 lines, tests +274 −79.
 ### What stays open
 
 Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
+## 2026-11-15 — B728 B9 PR 3a: the engine reserves the player's configuration while a choice is written
+
+Branch `feat/b728-b9-pr3a-reservation`, from main at ca4473ff (3f4843e1,
+the brief's main, and B872U, which touches `internal/updater` alone).
+Commits: 2fd8ba6f (the reservation, its tests, `CLAUDE.md`'s two rows and
+the two History files), 25986504 (the lost-grant test goes on past a wrong
+refusal, so a control shows both of its findings), then this record. The
+rules lines of `output.md` and `openhome.md` are in this branch's rules
+patch. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, TMPDIR on disk.
+
+### The hazard
+
+The player's backend writes a DAC's DSD choice only while it holds no
+session's record (B9 PR 2's configuration lease). Between a release the
+engine has acknowledged and the Start that follows it, the backend holds
+none: a seek, a Next or a Previous, a PlayID while playing, a skip past an
+entry refused at its start, a Play during a release to play. A write let in
+there would run in the middle of a transition, so the check must be the
+engine owner's, in the one step that finds the transport stopped. Nothing
+calls the reservation yet: the DSD choice's route (B9 PR 3b) will.
+
+### What was built
+
+- `Engine.ReserveConfiguration(ctx) (ConfigLease, error)` and
+  `Engine.ReleaseConfiguration(ConfigLease)`, two commands of no lane;
+  `owner.configs`, the set of leases held; `Snapshot.ConfigurationReserved`;
+  the reasons `not_stopped` and `configuring`.
+- The grant (`reserveConfiguration`, owner.go) is refused `not_stopped`
+  unless the state is Stopped, `o.sess` is nil, `o.sessions` is empty and no
+  release is unconfirmed; maintenance and the shutdown refuse it in
+  `dispatch` before it. It moves no generation (`touched`), and draws a lease
+  from the engine's randomness that is neither zero nor held already.
+- The release is dispatched before `case o.closing`, in every state; a lease
+  not held changes nothing and publishes nothing.
+- `configRefusal` (transport.go), asked right after `outputRefusal` at its
+  three sites: `transport()` before the move and `selectEntry`; `seek()`; and
+  `afterRelease`'s play.
+- `ReserveConfiguration` asks the owner on `context.WithoutCancel(ctx)` and
+  lets go a grant `ctx` outlived, answering `ReasonCancelled` wrapping
+  `ErrNotAdmitted` and the context's error. `ReasonCancelled`'s,
+  `ErrNotAdmitted`'s and `WithAdmission`'s docs and doc.go's say so.
+- OpenHome's fault table answers both reasons 501.
+- `EnterMaintenance` is not refused while a lease is held, a residual its
+  doc, doc.go and the rule name: only the harness's `bridge output play`
+  enters maintenance (`cmd/bridge/output_play.go`), and it holds none.
+
+### The brief's reviews
+
+- **First review, 1: C6 could not go red.** Confirmed: past `ReleaseTimeout`,
+  `releaseDeadline` clears `o.sess` and keeps the session in `o.sessions`,
+  so the unconfirmed-release term alone is covered by the sessions term.
+  C6 removes both; each alone (C6a, C6b) is the other's defence in depth.
+- **First review, 2: the overlay could not reach `o.configs` or the errors.go a test
+  reads.** The red runs overlaid main's owner.go with the field and its make
+  (nothing reads it) and main's errors.go with the two reasons in the file
+  itself; T8 and T9 ran in a disposable copy of the tree with main's files on
+  disk and the two reasons in its errors.go.
+- **First review, 3: T6 passed against the no-op shim.** T6 now requires the
+  reservation shown and a Play refused `configuring` before the release.
+- **First review, 4: the cancellation exception.** Documented where the rule it
+  breaks is written (above), and T4 requires WithAdmission's channel closed
+  while the method answers `ErrNotAdmitted`.
+- **Second review, 1: maintenance beside a held reservation.** The finding's second
+  option: the brief keeps it a named residual (design 5.5), so the rule,
+  doc.go and `EnterMaintenance`'s doc say a maintenance entered while one is
+  held is not refused. The shutdown keeps the leases on purpose: nothing
+  starts once it has begun, and the release, dispatched first, still clears
+  one (T7).
+- **Second review, 2: the brief's unbound `err`.** `if err := ctx.Err(); err != nil`,
+  the chain notAdmitted's (`fmt.Errorf("%w: %w", ErrNotAdmitted, err)`).
+- **Second review, 3: a release of a lease not held.** Deletes and touches only a
+  lease held; T5 requires a second release to publish no snapshot.
+- **Second review, 4: `o.starting` and `r.output`.** `o.starting` is set only in
+  `startSession`, with `o.sess` and state Playing, and cleared in
+  `releaseSession` and `onAudible`; `o.sess` is cleared only by
+  `releaseDeadline` and `acked`, after `releaseSession`. So the grant's
+  Stopped term excludes a start under way. Every rule that starts a session
+  or will has `output` set (Play, Next, Previous, PlayID and PlayIndex that
+  start, resume or carry a play; a seek that plays); `startSession`'s two
+  callers are `transport()`'s start and `afterRelease`; `do` answers closed
+  at `e.done` before and while it waits, so a release after Run returns.
+- **Second review, 5: T6 tested no path of its own.** T6 holds the owner as it
+  admits the release (the `admitted` seam): the release has not returned and
+  the lease is shown; once it returns, at once none is shown and a Play is
+  admitted. A posted release fails it at once, every time (C11).
+
+### Red first
+
+At main, each new test failed by its own assertion, never a missing name.
+The engine's seven ran through `go test -overlay` from the worktree: main's
+seven touched files, owner.go and errors.go structural as above, and a shim
+of the remaining names with main's behaviour (`ReserveConfiguration`
+answers the zero lease and nil, `ReleaseConfiguration` does nothing,
+`ConfigurationReserved` is false). The lines are this branch's
+configuration_test.go and writes_test.go.
+
+| Test | Line | Failure at main |
+|---|---|---|
+| T1 `TestAConfigurationReservationIsGrantedOnlyWhileStopped`, stopped with entries | :143 | granted, and the snapshot shows no reservation held |
+| T1, a start the backend holds; playing; paused with its session; paused with no session | :173, :180, :186, :194 | `<nil>`, want a refusal `not_stopped` |
+| T1, releasing to stop, to pause, to play; a release left unconfirmed | :204, :217, :229, :253 | `<nil>`, want `not_stopped` |
+| T1, maintenance; the shutdown | :260, :271 | `<nil>`, want `maintenance`; `<nil>`, want `closed` |
+| T2 `TestWhateverWouldStartASessionIsRefusedWhileAReservationIsHeld` | :307 | play while a reservation is held: `<nil>`, want configuring |
+| T3 `TestTheReservationIsAskedWhereverASessionWouldStart`, the seek; the release's play | :393, :418 | got `<nil>`, want `configuring` |
+| T4 `TestAReservationGrantedAsItsCallerLeavesIsLetGo` | :483 | the reservation answered `<nil>` before the owner sent its reply |
+| T5 `TestTwoReservationsHoldUntilBothAreLetGo` | :535 | two grants share one lease |
+| T6 `TestAReleasedReservationIsGoneWhenItsReleaseReturns` | :590 | granted, and the snapshot shows no reservation held |
+| T7 `TestAReservationAfterRunIsClosedAndItsReleaseReturns` | :662 | a reservation once the shutdown began: `<nil>`, want closed |
+| T8 `TestEveryEngineReasonHasItsFault` | writes_test.go:554 | `engine.ReasonNotStopped` and `engine.ReasonConfiguring` have no row |
+| T9 `TestATransportWriteWhileTheConfigurationIsReservedIsRefused` | writes_test.go:620 | Playlist#Play: 200, want a fault |
+
+The engine's run took 0.73 s and OpenHome's 0.06 s. Every failure was the
+one written down before the run.
+
+### Controls
+
+Each control was an exact-once edit of the committed files (25986504), made
+in memory, its test binaries built without `-race`, the nine tests run by
+name, and the bytes written back from memory; `git status` was clean after
+every batch. The predictions were written before the runs. Each control took
+3.2-5.1 s.
+
+| # | Mutation | Predicted | Result |
+|---|---|---|---|
+| C1 | `configRefusal` not asked in `transport()` | T2, T5, T6 and T9 red | as predicted |
+| C2 | asked after `selectEntry` | T2's next, previous, play id and play index rows; T9 at Id | T2's four rows, the play row green; T9 red one write earlier, at Next (see below) |
+| C3 | not asked in `seek()` | T3's seek | as predicted |
+| C4 | not asked in `afterRelease` | T3's release | as predicted |
+| C5 | `do` handed the caller's ctx | T4: the refusal without `ErrNotAdmitted`, the lease held | as predicted, both lines |
+| C6 | the grant without the sessions and unconfirmed terms | T1's unconfirmed release | as predicted |
+| C6a, C6b | each of those terms alone removed | all green | as predicted |
+| C7 | `visible()` for `touched()` in the grant | T1's generation | as predicted |
+| C8 | OpenHome's two rows removed | T8; T9 green | as predicted |
+| C9 | the release dispatched after `case o.closing` | T7 | as predicted |
+| C10 | a release deletes and touches whatever the lease | T5 | as predicted |
+| C11 | the release posted as a message | T6 at once; others racy, not predicted | T6 red 20 of 20 at its first select; T1, T4, T5 and T7 red too |
+| C12 | a grant ctx outlived kept | T4 | as predicted |
+| C13 | the grant without the Stopped term | T1's paused with no session | as predicted |
+| C14 | the grant without the `o.sess` term | all green | as predicted |
+
+- **C2.** The prediction placed T9's failure at Id. SeekId moved the
+  selection to the last entry before its refusal, which made the Next after
+  it a Next past the end, which no rule refuses. So T9 failed at Next.
+- **C11.** The prediction listed T1, T2, T3, T5, T7 and T9 as possibly red
+  by the race. T4 went red as well: the release inside
+  `ReserveConfiguration` is the same posted message.
+- **Defence in depth.** C6a, C6b and C14 are the terms each covered by
+  another in every state the engine reaches. The seek's and afterRelease's
+  sites are unreachable while a grant holds, which T3 reaches through a lease
+  a hook on the owner's goroutine puts in.
+
+### Runs
+
+- **gofmt.** The pinned gofmt (`go run cmd/gofmt -l`) listed none of the
+  ten changed Go files, and `make fmt` rewrote nothing.
+- **The new tests.** Under `-race`, the engine's seven took 1.75 s and
+  OpenHome's two 1.08 s. Each package alone under `-race`: the engine 25.1 s,
+  OpenHome 37.5 s. At `-race -count=50`, the engine's seven took 37.3 s and
+  OpenHome's two 3.8 s, every run a PASS. OpenHome's player skips on tmpfs,
+  so TMPDIR was on disk and the PASS lines were counted.
+- **The gate**, at 25986504, in one slot session (15:57-16:36).
+  - `make fmt`: 1 s. `make vet`: 6 s. `GOOS=linux GOARCH=arm make vet`: 8 s.
+    `GOOS=linux GOARCH=386 make vet`: 10 s.
+  - `GOOS=windows` and `GOOS=darwin` `go vet` of the two packages: 3 s each.
+  - The qualification version gate (`scripts/qualification-version`): OK
+    against 3f4843e1 and against ca4473ff.
+  - `make test`: 2,292 s, 88 packages ok. Among them: the engine 41.6 s,
+    OpenHome 40.9 s, `internal/manifest` 1,777 s, `internal/admin` 1,197 s.
+  - `make test`'s cmd/bridge: FAIL at 1,793.97 s of its 30-minute cap. The
+    failures were `TestMixedCaseConcurrentLookupsEnqueueOnce` and four cases
+    of `TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, each "the
+    analysis pool never settled", at 16:27:42-56. That is the binary's last
+    30 s, where `regenFixture.settle` waits until `serveGiveUpTime` (the
+    deadline less 30 s) and so gives up at once: the cap, not the change.
+    cmd/bridge alone, as B897's split runs it (`-race -p 1 -timeout 45m`, in
+    the slot): ok, 1,741.5 s.
+  - `make build-all`: 52 s.
+- **Docs.** `make docs-check` passed on the commit. On a copy of HEAD with
+  the rules patch applied, each file was byte-equal to what was built, and:
+  - the budgets passed;
+  - `verify_moves.py` passed against HEAD and against 3f4843e1, with the
+    edited blocks declared (openhome.md's write bullet, its History long
+    form, CLAUDE.md's two tables);
+  - cmd/bridge's `TestEveryCitedTestNameExists`,
+    `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` passed.
+    A ghost citation planted in the copy's output.md failed the first
+    ("cited by .claude/rules/output.md"), so it read the copy.
+- **After this record.** The three sweeps ran over this record before its
+  commit, on the worktree and on the patched copy, and passed.
+
+### Budgets
+
+- `output.md`: 84,132 to 86,108 bytes (the rules patch).
+- `openhome.md`: 44,178 to 44,318 bytes (the patch).
+- `CLAUDE.md`: 53,440 to 53,664 bytes, 83.8%.
+- The worst load, `output_dac_bind_test.go`: 82.4% with the patch.
+- The History files: output 88,895 to 96,775 bytes; openhome 110,909 to
+  111,316 bytes.
+
+### Addendum: the branch as it merges
+
+After this record the branch took four more commits, none of them code:
+- bf80b8d4 names this record's review findings by number, and a test
+  comment's, where it named who found them;
+- a2124345 commits the rules lines of `output.md` and `openhome.md`, so the
+  patch the record names is no longer separate;
+- b381015b corrects the `output.md` bullet and its long form: a grant that
+  outlived its caller's context, answered as a cancellation wrapping
+  `ErrNotAdmitted`; the stalled owner's delay of the release, a residual;
+  the holder's half stated as what a holder must do, none running in
+  production until B728 B9 PR 3b;
+- 8a2c3b4d turns the last reversed phrase of that long form.
+
+Run again on the tree as it merges, this addendum included: `make
+docs-check` (the budgets and both self-tests) and cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` passed. `verify_moves.py` was not run again: the later
+commits move nothing, they edit one bullet and its long form in place. The
+sizes as merged: `output.md` 86,328 bytes, `openhome.md` 44,318 bytes, the
+History files 97,039 (output) and 111,316 (openhome) bytes.
+## 2026-11-15 — B898 PR 2: the harvest state's open and bridge restore's look before its prompt wait out a read Windows refuses for a moment
+
+**The hazard.** Two production reads met Windows' refusal of an open once and
+gave up. `atlasharvest.OpenStateStore` read `atlas-harvest.json` with a bare
+`os.ReadFile`: a scanner's handle on it, or another writer's rename in
+flight, refused the open with ERROR_SHARING_VIOLATION (32) or
+ERROR_ACCESS_DENIED (5), and serve said "atlas harvest: open state: …
+(feature disabled)" and ran the whole session without the harvest; the
+revoke while the harvest is off (`ClearStoredCredential`) opens the file the
+same way and answered 500. bridge restore's look at the snapshot before its
+prompt (`backup.CheckRestoreSource`, its worker's `checkSource`) read
+`manifest.json` through `readManifest`, a bare read too: beside a serving
+bridge whose verification renames that manifest, it answered "is not a
+recognized snapshot directory", exit 2, for a moment's hold.
+
+**The change.** Both read through `atomicwrite.ReadWithRetryCtx`: five
+attempts with 750 ms of scheduled waits between them, 32 and 5 alone asked
+again (on Windows; nothing is elsewhere), cancellable between attempts. The
+waits bound the schedule, never the call: an attempt that blocks waits as
+long as the filesystem does.
+
+- `OpenStateStore(path)` and `ClearStoredCredential(path)` keep their
+  signatures, the read on `context.Background()` through a seam
+  (`readStateFile`, `os.ReadFile` in production). An absent file answers at
+  once. A refusal past the schedule is the open's error still, and turns the
+  harvest off for the session.
+- `checkSource` reads on the context `CheckRestoreSource` is given, handed to
+  its worker, through a seam (`readSourceManifest`), and decodes what it read
+  itself; `readManifest` is unchanged. A refusal past the schedule is
+  `backup.ErrSnapshotBusy`, wrapping the read's error spelled as given
+  (`spelledAsGiven`), which bridge restore says in its own words, exit 1:
+  `restore: "<snapshot>" was busy (its manifest was being written, or held by
+  another program, most likely a virus scanner): run this again in a moment`,
+  the error's own words not printed, as the not-a-snapshot line prints none.
+  A stop in the waits is told apart before the not-a-snapshot branch: "the
+  restore was stopped while it read the snapshot …, before its prompt:
+  <the context's error>; nothing was restored", neither refusal, exit 1, no
+  prompt. Any other read error, and a manifest that does not decode, is
+  `ErrNotASnapshot` at its first read, as before.
+- The look's worker runs the source worker's end hook (`sourceWorkerEnded`,
+  which `holdSource`'s worker runs too), so a test joins it before it puts a
+  seam back: `lookAt` waits for that end, bounded at 30 s, before its cleanup
+  puts back the read seam, the typed read's predicate
+  (`atomicwrite.SetReadRetryableForTest`) and the hook, and leaves them as
+  they are, failing, where the worker never ends, since it may read them
+  still. No new test calls `t.Parallel`. bridge restore reaches the look
+  through a seam of its own (`checkRestoreSource`), read on the command's
+  goroutine alone, which only a test sets.
+
+**Red first**, each prediction written before its run
+(`.tmp/_b898pr2/predictions-red.md`), at ca4473ff through `go test -overlay`:
+main's three files with a baseline instrumentation that routes each read
+through its seam, keeping main's one attempt and main's classification, has
+the look's worker run the end hook (it observes and changes nothing), and
+declares `ErrSnapshotBusy` and `checkRestoreSource` as names alone. Every
+red carries the injected refusal's words and one read. The harvest's
+"refused once" and "refused at every read" failed after one read with the
+refusal itself (not `ErrReadBusy`), "not there" passed; the look's "refused
+once" and "refused at every read" answered `ErrNotASnapshot` after one read,
+"stopped as it waits" `ErrNotASnapshot` wrapping the refusal, not the
+context's error, and "not there" and "not a manifest" passed; bridge restore's
+"busy" exited 1 through main's generic line without the busy sentence, and
+"stopped" passed. All as predicted, run again identically once the tests
+moved into the files they now sit in.
+
+**Controls**, each an uncommitted mutation of e414c34a, its bytes put back from
+memory and the file checked against HEAD after each, predicted before the
+runs (`.tmp/_b898pr2/controls-predictions.md`): 7 of 7 red exactly where
+predicted, every other row green. The harvest's read made once ("refused
+once" and "refused at every read"); the look's read made once ("refused
+once", "refused at every read" and "stopped as it waits", each
+`ErrNotASnapshot` after one read); the busy refusal returned as
+`ErrNotASnapshot` ("refused at every read" alone); the look's context dropped,
+its worker handed `context.Background()` ("stopped as it waits" alone: five
+reads, `ErrSnapshotBusy`, not the context's error); and three more: the stop's
+case removed from the switch ("stopped as it waits" alone: `ErrNotASnapshot`
+beside `context.Canceled`), the look's worker running no end hook (the join
+failing at its 30 s bound, the seams left), and bridge restore's busy case
+removed ("busy" alone, exit 1 through the generic line). The Windows cases
+(`TestTheStateFileIsReadPastAHoldThatSharesNothing`,
+`TestTheLookBeforeThePromptReadsPastAHoldThatSharesNothing`: a handle that
+shares nothing, its refusal heard by the real `os.ReadFile` before it is let
+go, five reads held throughout) compile here and run on the PR's Windows leg.
+
+**Runs** in the build slot at e414c34a, one session (`.tmp/_b898pr2/gate.sh`):
+`go vet` with the tags as linux/amd64, windows/amd64 and darwin/arm64
+(`CGO_ENABLED=0` for the two cross targets) and `GOOS=linux GOARCH=386 make
+vet`, each clean; `make build-all`, ok; `make test TEST_PKGS='-count=1
+-timeout 45m ./...'` (the later `-timeout` over the Makefile's 30 m, since
+cmd/bridge under `-race` runs near 30 min on this host): 89 packages ok, 14
+with no test files, cmd/bridge 1,775.4 s, internal/manifest 1,728.9 s,
+internal/admin 1,162.4 s, internal/backup 789.1 s, internal/atlasharvest
+11.9 s. Then the touched tests `-race -count=50`, three lanes at once:
+internal/atlasharvest's five that open the state (the new test,
+`TestClearStoredCredential`, `TestARevokeLeavesNoStoredBaseBehind`,
+`TestOpeningAStoreThatCannotDropItsBaseFails`,
+`TestTheStoreHoldsABaseInItsCanonicalForm`), 250 of 250 in 52.8 s;
+internal/backup's new test and `TestARestoreWhoseSourceDoesNotAnswerIsRefusedWithinItsBound`
+(the end hook's other worker), 100 of 100 in 1,300.0 s; cmd/bridge's new test
+and the six bridge restore tests that pass through the look
+(`TestBridgeRestoreRefusesBeforeItsPromptWhileAHoldGivenUpHoldsTheSnapshot`,
+`TestBridgeRestoreSaysWhyTheSnapshotsFolderRefusedIt`,
+`TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked`,
+`TestBridgeRestoreAnswersAStalledSnapshotWithinItsBoundBeforeItsPrompt`,
+`TestBridgeRestoreAsksTheMarkerAgainstTheLockBeforeItsPrompt`,
+`TestBridgeRestoreNamesTheSnapshotAsItWasTypedBesideARestoreThatHoldsIt`),
+350 of 350 in 1,384.0 s; no data race. `GOOS=windows go test -c` of the three
+packages compiles. go1.27.3's own gofmt lists none of the nine changed Go
+files. The Windows cases run on the PR's Windows leg.
+
+**Rules.** The rules land in 0fdc4af5, one commit with their long form: a line beside `enrichment.md`'s harvest
+bullets, and in `cli-serve.md` the B826 line with its long form in
+`ops/History-rules-cli-serve.md` (the look's busy manifest and its stop, and a
+paragraph on them), and `make docs-check`'s four steps pass at that commit: the worst load 82.0% before and 82.1% after,
+`cli-serve.md` 98,886 bytes before and 99,314 after, `enrichment.md` 45,011
+and 45,703.
+
+What stays open is follow-up F3.
+## 2026-11-15 — B898 PR 3: the harvest test reads past Windows' refusal of its open of the state file
+
+Branch `test/b898-harvest-read` from main 3f4843e1,
+test files only. Commits: 2b20bcf1 (the helper reads through a core that
+takes its read function, main's single read kept, and the hold cases: red),
+fd8c4648 (one state file for the three cases, still red), 84cf147b (the read
+through `atomicwrite.ReadWithRetryCtx`, and a busy read inside `eventually`
+answers not yet), 79ba8921 (the Windows hold's own open waits out a scanner,
+and the cases take a scanner's extra refusals), then this record. Every run:
+Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR
+`~/onebit/tmp`.
+
+### The red on main's gate (Step 0)
+
+Main bf622968's gate.yml run 43695739923, attempt 1, job `test (windows-latest)`;
+attempt 2 of the run failed on the rollback red instead, not on this test:
+
+```
+--- FAIL: TestTheHarvestRunsWithEnrichmentOff (1.60s)
+    serve_enrichment_switch_test.go:654: open C:\Users\RUNNER~1\AppData\Local\Temp\…\001\data\atlas-harvest.json: The process cannot access the file because it is being used by another process.
+```
+
+(The temporary directory's name, the test's name and digits, is elided.)
+`:654`, at bf622968 and at 3f4843e1 alike, is the call of
+`harvestPendingCovers` inside `eventually`'s condition, which reads the state
+file every 5 ms once Atlas has been asked for the premium cover; the helper
+calls `t.Helper()`, so its `t.Fatal` is reported at its caller's line. Its
+open was `os.ReadFile`, which on Windows shares reading and writing and not
+deletion (go1.27.3 `src/syscall/syscall_windows.go:395`). The job's lines
+just before the failure are serve's upgrade of that cover and its settle:
+`atlas premium cover upgraded … mbid=77777777-7777-4777-8777-777777777777`
+and `atlasharvest.covers_upgraded … count=1`. No "timed out waiting for"
+line, so the production boot read (B898's PR 2) is not this red.
+
+### What writes the state file in this test
+
+At 3f4843e1 serve writes `atlas-harvest.json` twice at the harvest's first
+tick, the submit's stamp (`internal/atlasharvest/client.go:319`; a submit is
+due every 6 h, `client.go:258-263`, and the test shortens only the poll,
+`cmd/bridge/main.go:4872-4873`) and the booklet check's (`client.go:371`;
+the fake Atlas answers the check 404, stamped once, `booklets.go:145-147`,
+`:92-94`), and once more when the premium cover settles after the switch
+(`SettlePendingCovers`, `client.go:442`, whose persist renames a staged file
+over the state file, `state.go:354`). The ticks between write nothing: an
+empty results page adds no cover (`state.go:289-291`) and its cursor of 0 is
+no advance (`client.go:648-653`), and a paused cover leg returns before it
+settles (`client.go:423-424`, `:439-441`). So the direct call (`:641`), after
+eight polls, reads beside no write of the bridge's, and the poll at `:654`
+reads in the window of the settle's write. The log does not say whether the
+open met that rename or a scanner's hold of the file the rename put in place,
+and nothing here claims more than that window.
+
+### The change
+
+`harvestPendingCovers` reads through `readPendingCovers`, which takes its
+read function (`os.ReadFile`, or a test's hold) and reads through
+`atomicwrite.ReadWithRetryCtx` on the test's context: Windows' sharing
+violation and access denied are asked again, five attempts over 750 ms, and
+any other host reads once. The direct call fails the test on any error left
+after that. `eventually`'s condition reads through `pendingCoversNow`, still
+only once the cover was asked: a read still busy past the bound
+(`atomicwrite.ErrReadBusy`) answers not yet and the next poll asks again,
+within `eventually`'s 10 s, and any other error fails the test, checked
+before the map's length.
+
+`readPastAHold` runs the read past a hold on a state file holding one
+pending cover, written once through `atlasharvest.OpenStateStore`: let go by
+the read at a refusal it heard, the covers come back; held throughout, the
+read is busy with the hold's refusal; in `eventually`'s form a poll whose
+read is refused throughout answers not yet, and a later one, whose read lets
+the hold go, the covers. `…HarvestHelperReadsPastAHoldOnTheStateFile`
+(Windows) holds the file with a handle that shares nothing, its own open
+through the same retry so that a scanner's hold of the fixture just written
+is waited out, checks before anything else that `os.ReadFile` beside it
+answers `ERROR_SHARING_VIOLATION`, and lets it go from the read or the
+cleanup, never by time. `TestTheHarvestHelperReadsPastAStandInHold` runs the
+same cases on every host, its hold a read answering a stand-in for that
+refusal until it is let go, which `atomicwrite.SetReadRetryableForTest` makes
+the retry ask again on (a process-global seam, so the test does not call
+`t.Parallel`). The hold shows the read waits out a refusal; it does not show
+who held the file in the gate's run. The two test files add 150 lines and
+remove 3 (3f4843e1..79ba8921).
+
+### Red first, and the controls
+
+At 2b20bcf1 and again at fd8c4648, main's single read, the stand-in's three
+cases failed on this host by their own assertions: the let-go case with the
+refusal returned after one refusal, the held case with an error that is not
+busy, and eventually's form with the test failed at its first poll;
+`TestTheHarvestRunsWithEnrichmentOff` passed. The Windows case did not run
+at the tests-only commits (this host cannot run it), so no red of it was
+seen; its runs are the PR's, on windows-latest.
+
+Controls on 79ba8921, each an uncommitted mutation of the test file, its test
+binary built and its bytes put back from memory before the run, each
+predicted in a file first, `git status` empty after: 3 of 3 red as predicted,
+every case predicted green passing.
+- The helper's read without its retry: the stand-in's three cases.
+- A busy read inside `eventually` taken as a fatal: eventually's form alone
+  (`file was busy: open …`).
+- A busy read inside `eventually` taken as settled, the nil map as no pending
+  cover: eventually's form alone (one poll answered, no covers).
+
+### Runs
+
+On 79ba8921, outside the slot: `go vet ./cmd/bridge/` with the tags for
+linux/amd64 and for windows/amd64, clean; `go test -c` of `./cmd/bridge` for
+windows/amd64 with the tags builds. go1.27.3's gofmt lists neither changed
+file (a misformatted probe beside them was listed). In the build slot, the
+host otherwise idle: `go test -race -count=50 -run
+'TestTheHarvestRunsWithEnrichmentOff' ./cmd/bridge/`, 50 of 50, no data race,
+1.48 to 1.57 s a run (the package 77.2 s); the stand-in's test the same way,
+50 of 50, no data race, 1.58 to 1.59 s a run (80.5 s); then `make test`
+(`go test -race -p 4 -timeout 30m ./...` with the tags), ok, 89 packages,
+cmd/bridge in 1,694.2 s, 2,169.1 s in all, the tree clean after. No path
+under `version_gate.go`'s `guardedPrefixes` or in its `GuardedPaths` changed.
+cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this record. The windows-latest leg, where the Windows case
+runs, is the PR's.
+
+### Round 2: the stand-in's retry keeps the platform's
+
+`atomicwrite.SetReadRetryableForTest` replaced the read predicate
+(`readRetryable = fn`), so `TestTheHarvestHelperReadsPastAStandInHold` asked
+again on `errBusyForTest` alone. By the code, its real reads of the state file
+on Windows (`os.ReadFile`, once the stand-in hold is let go) were then no
+longer asked again on the sharing violation and access denied, and a
+scanner's hold of the file would fail the case there. No such failure was
+seen: it is the hazard this round closes. B898's observed red is still main's
+`TestTheHarvestRunsWithEnrichmentOff`, above. Commits: 68ef1c97 (the tests,
+red first), 64600c84 (the seam), then this update.
+
+The seam now installs `fn(err) || prev(err)`, prev the predicate in place
+before it (the platform's, or an earlier call's), and its restore puts prev
+back (`internal/atomicwrite/read.go`). Production never calls it. Every
+caller adds a stand-in for Windows' refusal (cmd/bridge's bind and stand-in
+tests, internal/config's turn-read tests) and none relies on the platform's
+predicate being dropped, so no replacing form is kept. `retryStandIn`
+installs the stand-in's predicate for both stand-in tests.
+
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` installs a predicate
+standing in for the platform's (`errPlatformForTest`), then the stand-in's,
+and wants a read refused once with each asked again and the covers back:
+synthetic coverage of the composition on every host, since the predicate of
+Linux and macOS takes no error. `TestTheStandInRetryKeepsWindowsOwnRetry`
+(Windows) wants a read refused once with `ERROR_SHARING_VIOLATION`, then once
+with `ERROR_ACCESS_DENIED`, asked again with the stand-in's retry in place:
+the platform's own predicate kept, which only windows-latest can show, and
+which has not run yet.
+
+Red first at 68ef1c97, main's seam: the every-host case failed for
+`errPlatformForTest` alone, answered after one read; the stand-in's test and
+the harvest test passed. Controls on 64600c84, each predicted in a file
+first, read.go's bytes put back from memory, `git status` empty after:
+- The seam replacing again: the every-host case red for `errPlatformForTest`
+  alone, as predicted; the stand-in's test and the harvest test green.
+- The seam keeping only the predicate before it: the stand-in's test red in
+  all three cases, as predicted, and the every-host case red for both its
+  errors where `errBusyForTest` alone was predicted (the case installs its
+  stand-in for the platform through the same seam, which the control drops
+  too); the harvest test green.
+
+Runs on 64600c84: `go vet` with the tags of `./internal/atomicwrite/`,
+`./cmd/bridge/` and `./internal/config/` for linux/amd64, linux/386 and
+windows/amd64, clean; the windows/amd64 test binaries of cmd/bridge and
+internal/atomicwrite build; go1.27.3's gofmt lists none of the changed files;
+internal/atomicwrite's tests, internal/config's three turn-read tests and
+cmd/bridge's two bind tests pass. In the build slot, the host otherwise idle,
+the three harvest tests 50 times under -race in one go test: 50 of 50 each,
+no data race (`TestTheHarvestRunsWithEnrichmentOff` 1.49 to 1.67 s a run,
+the stand-in's test 1.57 to 1.59 s, the composition case 0.11 to 0.13 s;
+the package 163.1 s). cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this update.
+
+### Round 3: the composition cases take a later platform refusal
+
+`readsPastOneRefusal` wanted exactly two calls, while its calls after the
+injected refusal are real reads of a freshly written state file: on Windows a
+scanner can refuse one of them too, and the composed predicate's third call
+returning the covers would have failed both composition cases. Never seen;
+the hazard is the code's. Commits: b4121464 (the cases, red first),
+ac6d2109 (the assertion), then this update.
+
+The helper now takes the platform's predicate and a second refusal (`then`),
+injected on the second call where it is not nil, and wants the covers with no
+error, at least two calls, every call after the first answering the covers or
+an error the platform's predicate takes, and at most atomicwrite's five
+attempts (`readAttempts`). Each composition case runs it once without a
+second refusal and once with one: `errPlatformForTest` in
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore`, whose predicate is
+installed before `retryStandIn`, and `ERROR_SHARING_VIOLATION` in
+`TestTheStandInRetryKeepsWindowsOwnRetry`, which runs on Windows alone and
+has not run yet.
+
+Red first at b4121464, the exact count kept: the portable case's pass with a
+second refusal failed for both its refusals, the covers read after three
+calls; its pass without one passed. Controls on ac6d2109, predicted in a file
+first, the bytes put back, `git status` empty after:
+- The exact count back: the pass with a second refusal red for both
+  refusals, as predicted.
+- The seam replacing again: red where predicted (`errPlatformForTest` in
+  both passes) and wider: in the pass with a second refusal `errBusyForTest`
+  failed too, since that pass's second refusal is `errPlatformForTest`, which
+  the replacing seam no longer asks again on.
+
+Runs on ac6d2109: `go vet ./cmd/bridge/` with the tags for linux/amd64,
+linux/386 and windows/amd64, clean; its windows/amd64 test binary builds;
+go1.27.3's gofmt lists neither changed file. In the build slot, the host
+otherwise idle, one go test of the harvest tests and both composition cases
+50 times under -race: `TestTheHarvestRunsWithEnrichmentOff`, the stand-in's
+test and the portable composition case 50 of 50 each (1.49 to 1.90 s, 1.58 to
+1.59 s and 0.43 to 0.44 s a run), no data race, the package 178.7 s; the
+Windows case, named in the selection, does not build on this host, and its
+run is windows-latest's. cmd/bridge's `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass over
+the tree with this update.
+
+### Round 4: the portable composition case builds off Windows only
+
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` ran on Windows too, and
+its assertion takes only `errPlatformForTest` as a refusal after the first:
+a real sharing violation on one of its later reads there, which the composed
+predicate asks again on as it should, would fail the case with the code
+right. The case and `errPlatformForTest` now live in
+`cmd/bridge/serve_enrichment_switch_other_test.go`, under `//go:build
+!windows` (82e25753); the helpers the Windows file uses (`readPastAHold`,
+`retryStandIn`, `readsPastOneRefusal`) stay in the untagged file. Windows'
+own codes are `TestTheStandInRetryKeepsWindowsOwnRetry`'s, which windows-latest
+has not run yet; this host only builds it.
+
+On 82e25753: `go list` names the untagged file and the Windows one for
+windows/amd64, the untagged file and the new one for linux/amd64; `go vet
+./cmd/bridge/` with the tags for linux/amd64, linux/386 and windows/amd64,
+clean; the linux/amd64 and windows/amd64 test binaries build; go1.27.3's
+gofmt lists none of the three files. The two controls are red as in round 3
+(the exact count back: the pass with a second refusal; the seam replacing
+again: `errPlatformForTest` in both passes and `errBusyForTest` in the
+second). Outside the build slot, the slot being in use,
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` and the stand-in hold's
+test 50 times each under -race at GOMAXPROCS 4: 50 of 50, no data race (0.43
+to 0.45 s and 1.57 to 1.59 s a run). cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass over the tree with this update.
+
+## 2026-11-15 — B898 PR 3, round 5: the real-hold case leaves the PR, and what the tests still prove
+
+Branch `test/b898-harvest-read`; this round, test files and this log only (the branch also carries round 2's test seam in `internal/atomicwrite/read.go`). Commits:
+58927057 (the case removed, `readPastAHold` folded into its one remaining
+caller, and round 1's entry citing the removed case with its `Test` prefix
+elided and naming no worker or host), then this entry.
+
+Two reds, kept apart:
+- Main bf622968's gate (run 43695739923, attempt 1, windows-latest):
+  `TestTheHarvestRunsWithEnrichmentOff` failed with a sharing-violation
+  failure of the helper's single read during the settle-write window; the
+  holder and the precise cause were not established. This PR's fix, the
+  helper's read through `atomicwrite.ReadWithRetryCtx`, is unchanged.
+- The PR's head 918185a0 (run 43733404123, windows-latest):
+  `…HarvestHelperReadsPastAHoldOnTheStateFile` failed in all three subtests
+  at its own premise check (`serve_enrichment_switch_windows_test.go:52` at
+  that head): a read beside the handle that shares nothing answered nil, so
+  the case held nothing there. A test premise that did not hold on the
+  runner, not a defect found in the retry.
+
+Why the case was removed: its premise failed in every subtest of that run,
+and why a handle opened sharing nothing did not refuse the read there is not
+known. That diagnosis is filed as B898FU2. Every other leg of the run was
+green.
+
+What still proves what:
+- The production predicate's classification of `ERROR_SHARING_VIOLATION`
+  and `ERROR_ACCESS_DENIED` is pinned on Windows by
+  `TestReadRetryWindowsErrors` (`internal/atomicwrite/read_windows_test.go`,
+  on main).
+- `TestTheHarvestHelperReadsPastAStandInHold`, on every host, shows that the
+  helper reads through the retry: the covers past a stand-in refusal its read
+  lets go, the read busy past the bound, and not yet inside `eventually`.
+- `TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` (off Windows,
+  synthetic) and `TestTheStandInRetryKeepsWindowsOwnRetry` (Windows, the
+  codes injected) show that the stand-in's retry adds to the platform's
+  predicate.
+
+The residual: no remaining test deliberately holds the harvest state file
+with a conflicting Windows handle; the harvest helper's behaviour under that
+actual hold remains unverified.
+
+Runs on 58927057: `go vet ./cmd/bridge/` with the tags and `CGO_ENABLED=0`
+for linux/amd64 and windows/amd64, clean; `GOOS=linux GOARCH=386 make vet`,
+clean; `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go test -tags
+ts_omit_webclient,ts_omit_debugeventbus -c -o /dev/null ./cmd/bridge/`
+builds; go1.27.3's gofmt lists none of the three harvest test files. In the
+build slot, the harvest tests 50 times under -race:
+`TestTheHarvestRunsWithEnrichmentOff`, `TestTheHarvestHelperReadsPastAStandInHold`
+and `TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` 50 of 50 each, no
+data race (1.50 to 1.71 s, 1.57 to 1.59 s and 0.43 to 0.45 s a run; the
+package 180.8 s).
+`TestTheStandInRetryKeepsWindowsOwnRetry`, named in that selection, builds
+only on Windows, where CI on the PR is the check. cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` pass over the tree with this entry.
+## 2026-11-15 — B869A: the prune given up waits for the snapshot's verification to end
+
+Branch `fix/b869a-prune-given-up`, from main at ca4473ff. Test-only.
+Commits: 52f0533d (B869's 3a976ffc from the parked
+`fix/b869-prune-waits`, applied as `git cherry-pick -x` would, its diff
+unchanged), 172d511f (its cleanup with the unlock still held, and a drain
+past its bound), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`.
+
+### The hazard
+
+`TestTheTickerAndTheDoctorNameAPruneGivenUp` (cmd/bridge) failed main's
+CI in two runs in a row, "the prune answered <nil>, want it given up"
+(backup_round5_test.go:183 at ca4473ff): at 47e44f7f on `test -race`
+(bridge 2/4), and at ca4473ff on `test (macos-latest)`. Neither run's log
+is on this host, so their run ids are not recorded here.
+
+It pruned right after `verifiedInstallSnapshot`, which returns on
+`backup.SnapshotAndVerify`'s answer. The verification answers before its
+worker lets go of the backups folder's lock (`verifyAndThen`), and a prune
+that meets that lock answers `Skipped` with no error, so it is never given
+up. B851's record named this site, and backlog B869 took it as its item 1.
+
+### The fix (52f0533d, from 3a976ffc)
+
+The test takes its snapshot through `endedInstallSnapshot`
+(backup_round3_test.go:139). cmd/bridge's `unlockHold` is installed before
+the snapshot and armed in `SnapshotOptions.OnKept`. It holds the worker's
+unlock from the answer (`requireHeld`) until the test lets it go and hears
+the worker's end (`letGoAndAwaitEnd`), where it asks the folder's lock.
+
+The order this relies on, on this base: `SnapshotAndVerify` calls `OnKept`
+(finish.go:901-903) before `FinishCapture` (907), whose `verifyAndThen`
+reads the end hook as it begins (finish.go:280), and a worker runs the hook
+that stood then (seams.go:339-342). The prune's failure now prints its
+`PruneResult`.
+
+### What 172d511f adds
+
+- **A held unlock goes as the test's body ends.** With the end's wait
+  removed (C1 below), the test failed a second time 30 s after its skipped
+  prune, at its own cleanup (backup_round5_test.go:175, `awaitHoldsLetGo`'s
+  `backuptest.AwaitIdle`): "backup workers did not release their holds".
+  That cleanup runs before `holdUnlockOf`'s, and only `holdUnlockOf`'s let
+  the parked worker go. `holdUnlockOf` now also lets it go at the end of
+  the test's context (`context.AfterFunc(t.Context(), u.letGo)`, :212),
+  which comes before any cleanup.
+- **A drain past its bound ends the run.** 3a976ffc's drain reported its
+  30 s bound with `t.Error`, and the cleanups after it then ran beside the
+  worker: the lock-release seam put back, which that worker reads with no
+  lock (verify_lock.go:199), and the fixture's folders removed. A drain
+  past its bound must keep those from running, which a `t.Fatal` in it
+  would not do. On Go 1.27.3 neither a `t.Fatal` nor a panic in a cleanup stops
+  the cleanups after it: `runCleanup` runs the ones left from a deferred
+  call (testing.go:1795-1804), on a Goexit and on a panic alike, and a
+  two-cleanup scratch test showed both. So past its bound the drain ends
+  the run (`endTheRun`, :233). It raises a panic on a goroutine of its
+  own, as the binary's own `-timeout` does (testing.go:2947-2961), with
+  every goroutine printed, and the cleanup waits until it lands. The
+  seam's restore and the fixture's removal never run.
+
+### Reds, greens and controls
+
+Each variant was built with `go test -c -race -overlay` from edits made in
+memory over the committed bytes (`git show`), so no tracked file was
+written. `git status` was empty before and after every build and run. Each
+run was a process of its own with a TMPDIR of its own, and the predictions
+were written to a file before each round. "The delay" is B851's: in
+internal/backup/verify_lock.go's release closure, after the release hook
+and before the unlock (lines 199-202):
+
+```go
+				if onLockRelease != nil {
+					onLockRelease(dir)
+				}
+				time.Sleep(time.Second)
+				_ = fsutil.Unlock(f)
+```
+
+| Run | Build | Result |
+|---|---|---|
+| R1 | main's two test files (ca4473ff), the delay | red 3 of 3 at backup_round5_test.go:183, "the prune answered <nil>, want it given up"; 2.4 s each, no race |
+| G1 | 52f0533d, the delay | green 3 of 3, 3.7 s each |
+| C1 | 52f0533d, the delay, the whole `unlock.letGoAndAwaitEnd(t)` call removed (`requireHeld` and the cleanup kept) | red 3 of 3 at :190, "the prune answered {Deleted:0 Reaped:0 ReapErr:<nil> Skipped:true SkippedFor:another verification or prune of these snapshots holds their lock}, <nil>; want it given up", and again at :175, "backup workers did not release their holds"; 32.4 s each, no race |
+| C2 | 52f0533d, no delay, the hold's hook parked for good (`<-u.out` replaced by a receive from a channel nothing closes) | :165, "the verification's worker never let go of what it held", then the drain's "the snapshot's verification never ended" (backup_round3_test.go:215); the binary ran on to its exit 1, the test's temp folder removed with the worker still parked; 61.5 s |
+| G2 | 172d511f, the delay | green 3 of 3, 3.8 s each |
+| C1b | 172d511f, as C1 | red 3 of 3 at :190, C1's first failure alone; 2.4 to 2.6 s each, no race |
+| C2b | 172d511f, as C2 | the binary ended at the drain's bound, exit 2, after 61.5 s: "panic: TestTheTickerAndTheDoctorNameAPruneGivenUp: the snapshot's verification did not end within 30 s of its unlock's let-go", every goroutine printed, the worker's unlock parked in the hold's hook (made by `(*hold).release`); no cleanup after the drain ran, and the test's temp folder was still on disk |
+
+The parked branch's record ran C1 without `requireHeld` too, and quoted
+its first failure alone.
+
+### The other callers of `verifiedInstallSnapshot`
+
+A read-only census; none of them changed. Lines are 172d511f's.
+
+| Caller | What follows the snapshot | Needs the end's wait |
+|---|---|---|
+| backup_round3_test.go:432 and :434, `TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord` | a second snapshot, whose verification waits for this process's slot; then `bridge backup --verify` in a process of its own, which waits for the folder's lock (`VerifyCmdLockWait`); its prune (:524) runs once that process has exited | no; but that prune asserts its error alone and then reads what it kept, so a skip would pass it blind (B851's assertion) |
+| backup_round4_test.go:100, `TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded` | `bridge backup --verify` in this process, which waits its turn for the slot and the lock; no prune | no |
+| backup_round6_test.go:102, `TestBridgeBackupVerifySaysTheWriteAndTheReadBackApart` (its two recheck cases) | the same; no prune | no |
+| backup_round12_test.go:66, :93 and :181 | `awaitHoldsLetGo(t, root)` first: the holds drained (a worker drops its hold after its unlock and its slot) and every snapshot's ownership taken | no |
+| backup_round13_test.go:19 | `awaitHoldsLetGo(t, root)` first | no |
+
+No rules change. build-ci-tests.md's B849 and B851 bullet already says
+that a step that needs the folder's lock free waits for the worker's end
+through `unlockHold`, and asserts that a prune ran.
+
+### Runs
+
+At f4c1e106: 172d511f's code, and the record's first part. TMPDIR was
+`$HOME/onebit/tmp`.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=50 -timeout 30m -v -run 'TestTheTickerAndTheDoctorNameAPruneGivenUp' ./cmd/bridge/`, inside the build slot | 50 of 50, no race; ok in 87.2 s (89.3 s with its build) |
+| the same, outside the slot at nice 19, while another worker held the slot | 50 of 50, no race; ok in 88.6 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, inside the slot and outside it |
+| gofmt (`go run cmd/gofmt -l`) on the two test files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f4c1e106 and with this table |
+| `make docs-check` | exit 0, at f4c1e106 and with this table |
+
+## 2026-11-15 — B869A round 2: the hold's seam goes back as the snapshot's worker ends, and the drains wait for every hold
+
+Branch `fix/b869a-prune-given-up`, round 1 at 6f205fd2. Test-only.
+Commits: 34a9977a (the fix and three tests), then this record and the
+round-1 record's wording. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`. Every
+control was built through `go test -c -overlay` from edits made in memory,
+so no tracked file was written; `git status` was empty before and after
+each build and run, and the predictions were written to a file before each
+round.
+
+### What it changes, and why
+
+1. **A prune's worker could outlive its drain beside the seams' restores.**
+   In `TestTheTickerAndTheDoctorNameAPruneGivenUp` the hold's drain waited
+   for the snapshot's end alone, heard before the prune began. A prune
+   whose worker outlived the test's own drain (`awaitHoldsLetGo`, whose
+   `t.Fatal` lets the later cleanups run) then had the lock-release seam
+   and `onPrune` put back beside it: F1a below shows both races at round 1.
+   - The seam now goes back once the snapshot's worker has ended and no
+     hold is left (`letGoAndAwaitEnd`: `awaitNoHolds`, then `putSeamBack`,
+     a `sync.Once` the cleanup shares), so a holder after the snapshot never
+     reads the hold's hook
+     (`TestAnEndedInstallSnapshotPutsTheLockReleaseSeamBack`).
+   - `awaitHoldsLetGo` and `awaitVerificationsEnd` still had to end the run
+     past their bounds: the cleanups after them put back seams a holder
+     still running reads with no lock, `onPrune` among them (read on the
+     prune's step goroutine, backup.go:1190), which F1c shows racing with
+     the lock-release seam already back. They now end the run there
+     (`endTheRun`), for every one of their 41 calls in the backup test
+     files.
+2. **A snapshot refused before its worker began ended the run and hid its
+   failure.** The debt was set by `arm`, from `OnKept`, before any worker
+   existed. A verification refused before its worker began
+   (`verifyAndThen`'s refusals at its folder's mark and its slot,
+   finish.go:288-306) left the drain waiting 30 s for an end no worker
+   would bring; then it ended the run, the test's own failure unprinted.
+   - Neither the hook's entry nor `t.Failed()` shows that no work is live.
+     A worker answers before its unlock and can stay parked there, in its
+     ownership's let-go (hold.go:322-328). The worker that writes an
+     abandoned verification's INCOMPLETE (`abandonPending`, finish.go:697-735)
+     takes and lets go of the lock and runs no end hook.
+   - The debt is now the backup package's own count of holds
+     (`backup.ActiveHoldsForTest`). A verification's hold is counted from
+     `newHold` (finish.go:292, hold.go:108), before its slot and its worker,
+     until `drop` (hold.go:397): its worker's last step but the end hook,
+     after its unlock (finish.go:329-331). A release past its bound keeps
+     the count until the unlock ends (hold.go:342-349, 384-386). A refusal
+     drops it at once (finish.go:300, 304). `abandonPending`'s worker keeps
+     a hold of its own (finish.go:700-704), as a prune's, a claim's and a
+     restore's do (backup.go:1086-1089, owner.go:251-254,
+     restore_source.go:198-200 and 257-258).
+   - The hold's cleanup waits until none is left (`awaitNoHolds`), and an
+     end heard once the test's body has ended asks nothing of the folder's
+     lock (`over`). `verifyAndThen` has no seam at its worker's start, and
+     none was added: the count already begins before the worker does.
+3. **The round-1 record's wording.** It now states each requirement as the
+   change's own reason.
+4. **`arm`'s restore of the end hook runs before the hold's drain.** That is
+   harmless. A worker reads the end hook once, as its verification begins
+   (finish.go:280), through an atomic pointer (seams.go:330, 352-353), so a
+   restore after that changes nothing it calls, and the hook touches the
+   hold's own state alone. `arm`'s docblock says so, and the registration
+   stays where B849's second round put it.
+
+### Reds, greens and controls
+
+A is `TestAHoldArmedForAVerificationRefusedBeforeItsWorkerLeavesTheTestsFailure`,
+B `TestAHoldsCleanupWaitsForAWorkerParkedBeforeItsUnlock` and C
+`TestAnEndedInstallSnapshotPutsTheLockReleaseSeamBack`. A and B run their
+case as a process of their own and read its output: its exit code, its
+failures, and a line printed by a cleanup registered before the hold, so
+after the hold's own cleanups. F1 lets the fixed test's prune stall go from
+the loop's drain instead of from the test's own cleanup, so that cleanup's
+`awaitHoldsLetGo` outlives its bound with the prune's worker parked.
+
+| Run | Build | Result |
+|---|---|---|
+| C at round 1 | 6f205fd2's helpers, the new tests | red 3 of 3 at backup_unlock_hold_test.go:97, "the prune's release ran the seam that stood before the hold 0 times, want once" |
+| A at round 1 | the same | red: its case, refused at the slot once `OnKept` had armed the hold, ended by `endTheRun`'s panic, exit 2, "the snapshot's verification did not end within 30 s of its unlock's let-go", its own failure unprinted; 34.4 s |
+| B at round 1 | the same | green, 2.7 s: round 1's drain waited for the armed worker |
+| A, B, C and the fixed test | 34a9977a | green 3 of 3 each; A 4.1 to 4.3 s, B 2.5 to 2.7 s, C 1.4 to 1.7 s |
+| C-ctl | 34a9977a, `awaitNoHolds` and `putSeamBack` taken out of `letGoAndAwaitEnd` | C red 3 of 3, "0 times, want once" |
+| B-ctl | 34a9977a, the drain returning at once where the hook was never entered and the test had failed | B red: the case's last cleanup found "holds 1", its worker still parked before its unlock |
+| F1a | 6f205fd2, F1 | `awaitHoldsLetGo` failed at its bound, "a hold given up was never let go", and the cleanups after it raced the prune's worker twice: `SetOnPruneForTest`'s restore (seams.go:115) against `pruneHeld`'s read (backup.go:1190), and `SetOnLockReleaseForTest`'s restore (seams.go:240) against the release's read (verify_lock.go:199); exit 1, 31.9 s |
+| F1b | 34a9977a, F1 | the run ended at `awaitHoldsLetGo`'s bound, exit 2, "a hold given up was never let go"; no race; 32.0 s |
+| F1c | F1b, `awaitHoldsLetGo`'s `endTheRun` put back to `t.Fatal` | one race, `onPrune`'s (seams.go:115 against backup.go:1190), none on the lock-release seam; exit 1, 32.0 s |
+| R1 | round 1's red at main, the delay | red 3 of 3 at backup_round5_test.go:183, "the prune answered <nil>, want it given up" |
+| G | 34a9977a, the delay | green 3 of 3, 3.8 s |
+| C1 | 34a9977a, the delay, the whole `unlock.letGoAndAwaitEnd(t)` call taken out | red 3 of 3 at :190 with the skipped-prune assertion alone, 2.4 to 2.6 s, no race |
+| C2 | 34a9977a, the hold's hook parked for good | the run ended at the hold's drain, exit 2, "a backup holder kept its hold after the snapshot's unlock was let go: 1 still held 30 s on"; 61.5 s |
+
+### Runs
+
+At cab61276: 34a9977a's code, and this record but its runs. TMPDIR was
+`$HOME/onebit/tmp`.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=50 -timeout 30m -v -run '^TestTheTickerAndTheDoctorNameAPruneGivenUp$' ./cmd/bridge/`, inside the build slot | 50 of 50, no race; ok in 88.8 s |
+| the same, outside the slot at nice 19, while another worker held the slot | 50 of 50, no race; ok in 89.9 s |
+| the three new tests, `-race -count=10`, inside the slot | 30 of 30, 10 each, no race; ok in 83.3 s |
+| every test of cmd/bridge's backup test files (`backup_*_test.go`, `restore_source_test.go`: 65, the 41 calls of the two drains among them), `-race -count=1`, inside the slot and outside it at nice 19 | 65 of 65 each, no race; ok in 170.4 s and 169.1 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, inside the slot and outside it |
+| gofmt (`go run cmd/gofmt -l`) on the five test files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at cab61276 and with this table |
+| `make docs-check` | exit 0, at cab61276 and with this table |
+
+## 2026-11-15 — B869A round 3: the hold's cleanup waits for its end hook's ask and for a refused verification's let-go
+
+Branch `fix/b869a-prune-given-up`, round 2 at 13415a6e. Commits: 38c29935
+(one counter and its accessor in internal/backup; the rest test code, and
+the tests), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`. Every red
+and control was built through `go test -c -overlay` from edits made in
+memory, so no tracked file was written; `git status` was empty after each,
+and the predictions were written to a file before each round. Line numbers
+are 38c29935's.
+
+The tests: I is internal/backup's
+`TestARefusedVerificationsLetGoIsCountedUntilItEnds`; in cmd/bridge, W1a is
+`TestAnEndHooksAskUnderWayHoldsTheHoldsCleanup`, W1b
+`TestAnEndHookThatComesAfterTheTestsEndAsksNothing`, W1c
+`TestAnEndHooksAskThatNeverEndsEndsTheRun`, W2e
+`TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` and W2f
+`TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun`. W1c and W2f run
+their case as a process of their own, with a one-second drain bound
+(`holdDrainBound`, 30 s elsewhere), and require the run ended there, saying
+so, with no line from a cleanup registered before the hold.
+
+### The two windows
+
+1. **The end hook's ask ran beside the cleanup.**
+   - A worker runs its end hook once it has dropped its hold: the hook's
+     defer is registered first (finish.go:317) and runs after `h.drop()`
+     (finish.go:329). So `ActiveHoldsForTest` read 0 while the hook could be
+     inside its ask of the folder's lock (`backupsLockHeld`), and `over` was
+     read with no ordering against `letGo`.
+   - The hook now announces its ask (an atomic count, `asks`) before it reads
+     `over`, and asks through `probe`, which a test can stand in for. The
+     hold's cleanup waits for `asks` to read 0 once `letGo` has stored `over`,
+     bounded, and ends the run past the bound (`awaitAsks`). Go's atomics
+     are sequentially consistent, so either the hook's load of `over` comes
+     after the cleanup's store and it asks nothing, or its count comes before
+     the cleanup's read and the cleanup waits for it.
+   - The count is atomic, not a `sync.WaitGroup`: the hook can come after
+     the cleanup has begun to wait, and a WaitGroup's `Add` from zero beside
+     its `Wait` breaks that type's rules. `letGo` stays non-blocking, since
+     it also runs on the test context's `AfterFunc` goroutine; the wait is in
+     the cleanup.
+2. **A refused verification's let-go outlived the drain.**
+   - A verification refused at its folder's mark, before any hold
+     (finish.go:288-291), or at the slot, once its hold is dropped
+     (finish.go:297-302), hands its capture's ownership release to
+     `letGoWithin`. That waits StopWriteBound and leaves the release running
+     (finish.go:752-769), counted by no hold.
+   - `letGoWithin` now counts it, from before its goroutine starts until
+     `end` returns (`activeReleases`, hold.go:106; finish.go:756, 760),
+     exposed as `backup.ActiveReleasesForTest` (seams.go:387). It still
+     answers at its bound.
+   - `awaitNoHolds`, which `awaitHoldsLetGo` and `awaitVerificationsEnd` go
+     through, waits for both counts. The count is a separate accessor, not
+     folded into `ActiveHoldsForTest`, so internal/backup's own drains are
+     unchanged.
+   - The helper that makes a refused snapshot disarms the hold once the
+     refusal is answered. Without that, a blocker in the same folder had its
+     own unlock held by it (the first red run's "1 holds were left").
+
+### The two Lows of round 2
+
+1. `parkedBeforeItsUnlock` let its park go a second after the body's end even
+   where nothing had parked. It now does so through `letParkedGo`, which
+   sleeps only where the park was entered.
+2. `letGoAndAwaitEnd` calls `awaitNoHolds` once its end is heard. Nothing to
+   change: the worker's `h.drop()` runs before its end hook on its own
+   goroutine (finish.go:317-331), so its hold is gone by then, and the wait
+   covers other holders alone, as intended.
+
+### Reds, greens and controls
+
+| Run | Build | Result |
+|---|---|---|
+| reds | 13415a6e's helpers and a names-only shim: a `probe` the hook calls, `ActiveReleasesForTest` answering 0 | I red in both cases, "0 let-goes are counted, want 1" (release_count_internal_test.go:86); W1a red, the ask still running at the cleanup before the fixture's removal (backup_unlock_hold_test.go:254); W1b green (round 2 read `over` before asking); W1c red, its case exiting 0 with the later cleanup's line printed; W2e red in both cases and W2f red, at the let-go count |
+| greens | 38c29935 | I, W1a, W1b, W1c, W2e, W2f, round 2's three and the fixed test green |
+| W1-ctl | `awaitAsks` taken out of the hold's cleanup | W1a red at :254; W1c red, exit 0, the line printed |
+| W1b-ctl | the hook asking whatever `over` says | W1b red, "asked the folder's lock 1 times, want none" |
+| W2-ctl | `awaitNoHolds` waiting for holds alone | W2e red in both cases at the release-completion assertion (:473, "another verification owes this snapshot its check"); W2f red, exit 0, the line printed |
+| I-ctl | `letGoWithin` counting nothing | I red in both cases, "0 let-goes are counted, want 1" |
+| round 2's | 38c29935 | C-ctl red 3 of 3 (:99); B-ctl red, "holds 1"; F1b ended the run at `awaitHoldsLetGo`'s bound, exit 2, no race, 31.8 s |
+| round 1's | 38c29935, R1 at main | G green 3 of 3; C1 red 3 of 3 at backup_round5_test.go:190 on the skipped-prune assertion alone; C2 ended the run at the hold's drain, exit 2, "1 holds and 0 refused verifications' let-goes still running 30s on", 61.5 s; R1 red 3 of 3 at :183 |
+
+No test shows the announce-before-check order itself, since no seam parks
+the hook between its count and its load; the argument for it is the
+sequential consistency above.
+
+### Runs
+
+At 597ef073: 38c29935's code, and this record but its runs. TMPDIR was
+`$HOME/onebit/tmp`.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=50 -timeout 30m -v -run '^TestTheTickerAndTheDoctorNameAPruneGivenUp$' ./cmd/bridge/`, inside the build slot | 50 of 50, no race; ok in 88.0 s |
+| the same, outside the slot at nice 19, before the slot came free | 50 of 50, no race; ok in 88.8 s |
+| the new cmd/bridge tests, round 2's three and this round's five, `-race -count=10`, inside the slot and outside it | 80 of 80 each, no race; ok in 336.2 s and 350.7 s |
+| I, `-race -count=10`, inside the slot and outside it | 10 of 10 each, no race; ok in 41.1 s and 41.2 s |
+| every test of cmd/bridge's backup test files (70), `-race -count=1`, inside the slot and outside it | 70 of 70 each, no race; ok in 191.9 s and 214.5 s |
+| internal/backup's whole suite, `-race -count=1 -timeout 60m`, inside the slot | 291 of 291, no race; ok in 748.1 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, inside the slot and outside it |
+| gofmt (`go run cmd/gofmt -l`) on the six files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at 597ef073 and with this table |
+| `make docs-check` | exit 0, at 597ef073 and with this table |
+
+## 2026-11-16 — B869A round 4: the blocking check is drained before its seams go back, and a refused let-go is parked after its unlock
+
+Branch `fix/b869a-prune-given-up`, round 3 at fe9eda97. Commits: 3290ebda
+(the fix and its tests), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`; every
+control was built through `go test -c -overlay` from edits made in memory,
+with `git status` empty after each, and the predictions were written to a
+file first. Lines are 3290ebda's.
+
+B869A's production changes are two, and each leaves production as it was:
+round 3's count of letGoWithin's let-goes (`activeReleases`: finish.go,
+hold.go; `ActiveReleasesForTest`, seams.go), and this round's hook after an
+ownership's release (`SetAfterOwnerReleaseForTest`, seams.go:252-269, run
+at owner.go:85-90), nil unless a test sets it.
+
+### Two answers first
+
+1. **`endTheRun` ends the run before any later cleanup runs.** It sets the
+   traceback to all, raises a panic on a goroutine of its own and blocks in
+   `select {}` (backup_round3_test.go:274-280). The panic is unrecovered, so
+   the runtime ends the process. The cleanup that called it never returns,
+   and testing's runCleanup runs the next cleanup only once the one before
+   it has returned (testing.go:1810-1822) or unwound (1797-1804). So no seam
+   is put back and no fixture removed after an expired bound. The runs that
+   end there leave their fixture on disk and print no later cleanup's line
+   (round 1's C2b, round 3's W1c and W2f).
+2. **Zero counts cover the seams this failure path puts back, but for the
+   check's caller.**
+   - A verification's hold is counted from `newHold` (finish.go:292,
+     hold.go:112) until `drop`'s decrement (hold.go:401). `drop` runs after
+     `h.release`, whose `waitTracked` (hold.go:321 and 332) waits for every
+     goroutine the hold tracks. Among them is the check's: `verifyHeld`
+     tracks it whatever the check answered (finish.go:574), and its
+     `finished` closes once `runLowPriority`'s goroutine has ended
+     (finish.go:836-837), after its read of `onLowPriority` (845-846). So a
+     zero count orders that read before the seam's restore.
+   - The worker's read of the verify deadline (finish.go:460) comes before
+     its drop too.
+   - The caller's does not: `verifyAndThen` reads the verify deadline for
+     its watchdog (finish.go:344) after it has started the worker (312), so
+     the worker can drop its hold first. The caller is now joined.
+   - After its drop the worker reads `aroundVerifyEnd` (finish.go:323) and
+     calls the end hook it read as it began (280, 320). Both are atomic
+     pointers, and this path puts neither back; `onVerifyAnswer` (338) comes
+     before the drop. So the count and the caller's join cover every plain
+     seam the path puts back, and the worker's own end is not waited for.
+
+### What changes
+
+1. **The blocking check is drained before its seams go back.**
+   `checkGivenUpIn` let its check go in a cleanup that ran just before
+   `onLowPriority` and the verify deadline were put back, with no wait. Its
+   caller is now tracked (`callerDone`). A cleanup registered after the two
+   seams, so run before them, does four things, each bounded by
+   `holdDrainBound` and ending the run past it: it lets the hold go
+   (disarmed, so the check's own unlock of a folder the hold is on is not
+   held), lets the check go, joins the caller, and waits until no hold is
+   left. It drains the check alone: a refused verification's let-go is
+   still the hold's own cleanup's to wait for. A cleanup registered before
+   the two seams, so run right after they are put back, fails the test
+   where they went back beside the check or its caller.
+2. **The refused let-go is parked after its unlock.** `refusedLetGo`
+   parked the let-go in `SetOnOwnerReleaseForTest`, which runs before the
+   unlock, and the test's completion check took the ownership. That check
+   passes once the let-go is past its unlock, however long it then runs.
+   The let-go now parks in the new hook after the release, and the cleanup
+   after the hold's requires a signal set as the let-go goes on past its
+   park, with a bounded wait for it otherwise.
+
+The order of the two installs' removal was not changed: `t.TempDir`
+registers one cleanup for the test's whole temporary tree on its first
+call, before the hold.
+
+### Reds, greens and controls
+
+| Run | Build | Result |
+|---|---|---|
+| greens | 3290ebda | `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree`, `TestARefusedVerificationsLetGoIsCountedUntilItEnds`, `TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained` (2.7 s), `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` (both cases, 12.7 s), `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` (6.9 s) and the other hold tests and the fixed test green, no race |
+| C4a, item 1 | the check's drain replaced by round 3's bare let-go | `TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained` red: its case failed again after the restores, "1 holds were left when the blocking check's seams were put back" (backup_unlock_hold_test.go:390), beside a DATA RACE, `SetOnLowPriorityForTest`'s restore (seams.go:147) against `runLowPriority`'s read (finish.go:845) |
+| C4b, item 2's old check | round 3's ownership check, the park after the unlock kept, `holdUnlockOf`'s release wait off | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` GREEN in both cases: the ownership was free with the let-go still parked |
+| C4c, item 2's new check | `holdUnlockOf`'s release wait off, the count kept | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` red in both cases at the completion check (:460, "the refused verification's let-go was still parked past its ownership's release when the cleanup after the hold's ran"); `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` red, its case ending at that check's bound rather than the hold's drain's |
+| C4d, a premature completion | `activeReleases.Add(-1)` moved before `end()` | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` red in both cases at `refusedLetGo`'s count check ("0 let-goes are counted, want 1", reported at its call, :517), then at the completion check (:460); `TestARefusedVerificationsLetGoIsCountedUntilItEnds` red in both cases at its count check (release_count_internal_test.go:86) |
+| C4e | the hook after the release run before the unlock | `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree` red, "another verification owes this snapshot its check, want it free there" (:122) |
+
+### The gate
+
+The first gate, at f3d7f7d9 (3290ebda's code), ran inside the build slot
+from 00:12 to 00:41 in three lanes at once. The second, at ac60b148, ran
+inside the slot from 00:44.
+
+| Check | Result |
+|---|---|
+| internal/backup's whole suite, `-race -count=1 -timeout 60m` (f3d7f7d9; internal/backup has not changed since) | 292 of 292, no race; ok in 836.1 s |
+| `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree` and `TestARefusedVerificationsLetGoIsCountedUntilItEnds`, `-race -count=50` (f3d7f7d9) | 50 of 50 each, no race; ok in 201.4 s |
+| cmd/bridge's whole suite, `-race -count=1 -timeout 60m`, at f3d7f7d9 | 1,582 passed, 9 skipped, one failed: `TestEveryBackgroundGoroutineDrainsOnCleanup`, since `checkGivenUpIn` launched a goroutine that closes `callerDone` and registered neither drain helper the sweep asks for; no race |
+| the fix, ac60b148 | `checkGivenUpIn` registers `drainLoopOnCleanup` for its caller, run right after the bounded drain, which has joined the caller by then or ended the run; the sweep and the four tests pass, and C4a run again on it gave the same red, the same race |
+| cmd/bridge's whole suite, `-race -count=1 -timeout 60m`, at ac60b148 | 1,583 passed, 9 skipped, none failed, no race; ok in 1,647.9 s |
+| `TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained`, `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup`, `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` and `TestTheTickerAndTheDoctorNameAPruneGivenUp`, `-race -count=50`, at f3d7f7d9 and at ac60b148 | 50 of 50 each at f3d7f7d9, no race, ok in 1,268.6 s; 50 of 50 each at ac60b148, no race, ok in 1,215.2 s |
+| `go vet ./...` with the tags for linux/amd64, for darwin/arm64 and windows/amd64 with `CGO_ENABLED=0`, and `GOOS=linux GOARCH=386 make vet` | exit 0 each, at f3d7f7d9 and at ac60b148 |
+| gofmt (`go run cmd/gofmt -l`) on the changed files | nothing listed |
+| `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f3d7f7d9 and with this table |
+| `make docs-check` | exit 0, at f3d7f7d9 and with this table |

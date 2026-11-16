@@ -101,6 +101,10 @@ var releaseBound = StopWriteBound
 // activeHolds includes workers that have neither a slot nor an overrun mark.
 var activeHolds atomic.Int64
 
+// activeReleases counts the let-goes letGoWithin runs, from before one starts
+// until it returns, past letGoWithin's own wait too (ActiveReleasesForTest).
+var activeReleases atomic.Int64
+
 // newHold is a hold for the snapshot named, on the folder reached by the
 // spellings given (spellingKey's), its caller's context ctx; no lock is held
 // yet (held).

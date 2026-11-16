@@ -9,6 +9,7 @@
 package atlasharvest
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,10 @@ import (
 )
 
 var logger = logging.Component("atlasharvest")
+
+// readStateFile is OpenStateStore's read of the file, os.ReadFile; only a test
+// replaces it.
+var readStateFile = os.ReadFile
 
 // errNotACredentialBase is SetCredential's refusal of a base it cannot hold a
 // credential against. It names no part of the base: the value may carry user
@@ -65,6 +70,10 @@ type StateStore struct {
 }
 
 // OpenStateStore loads the state file, or starts empty when it's absent.
+// A read Windows refuses for a moment (a scanner's hold, a writer's rename in
+// flight) is made again, five attempts with 750 ms of waits between them
+// (atomicwrite.ReadWithRetryCtx, backlog B898), and a refusal past them is the
+// open's error; a read that blocks waits as long as the filesystem does.
 //
 // The Atlas base the file holds is held in the one form SetCredential
 // stores, or not at all (holdOnlyACredentialBase): a hand edit can leave any
@@ -78,7 +87,11 @@ type StateStore struct {
 // (ClearStoredCredential) report gone a credential still on disk.
 func OpenStateStore(path string) (*StateStore, error) {
 	s := &StateStore{path: path}
-	b, err := os.ReadFile(path)
+	var b []byte
+	err := atomicwrite.ReadWithRetryCtx(context.Background(), func() (err error) {
+		b, err = readStateFile(path)
+		return err
+	})
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return s, nil
