@@ -1,0 +1,79 @@
+# B653 PR 2a round 4's Windows experiment, not for main: the four tests this
+# round fixed or added, each run 20 times on windows-latest with -v, so every
+# run's own --- PASS or --- FAIL line is in the log (a package "ok" is not
+# evidence). Place it at .github/workflows/b653p2a-r4-windows.yml on an
+# experiment branch at the round's head and push that branch; or run it by
+# workflow_dispatch there.
+#
+#   internal/backup: TestAnInstallArmedBeforeTheDatabaseIsReplacedWaitsForTheReplacement
+#                    TestAnInstallArmedBetweenTheRestoresChecksWaitsForThem
+#                    TestAWriterOfTheMarkerThenTheConfigMeetsNoLockCycleBesideARestore
+#   cmd/bridge:      TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy
+#
+# The last step fails the job unless each test shows 20 PASS lines and no
+# FAIL line.
+name: b653p2a-r4-windows
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      # As gate.yml's cross-platform job: Defender scans what the tests
+      # write and holds a handle across the scan.
+      - name: Exclude the Go temp tree from Defender
+        continue-on-error: true
+        run: |
+          GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo "$TEMP")
+          echo "Go os.TempDir() = $GOTMP"
+          pwsh -Command "Add-MpPreference -ExclusionPath '$GOTMP'" || echo "could not set exclusion (non-fatal)"
+      - name: internal/backup, three tests, -v -count=20
+        continue-on-error: true
+        run: |
+          go version
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -v -count=20 -timeout 40m \
+            -run '^(TestAnInstallArmedBeforeTheDatabaseIsReplacedWaitsForTheReplacement|TestAnInstallArmedBetweenTheRestoresChecksWaitsForThem|TestAWriterOfTheMarkerThenTheConfigMeetsNoLockCycleBesideARestore)$' \
+            ./internal/backup/ > backup.log 2>&1
+          echo "exit=$?"
+      - name: cmd/bridge, the busy test, -v -count=20
+        continue-on-error: true
+        run: |
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -v -count=20 -timeout 40m \
+            -run '^TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy$' ./cmd/bridge/ > cmdbridge.log 2>&1
+          echo "exit=$?"
+      - name: Each test's PASS and FAIL lines
+        run: |
+          status=0
+          for t in TestAnInstallArmedBeforeTheDatabaseIsReplacedWaitsForTheReplacement \
+                   TestAnInstallArmedBetweenTheRestoresChecksWaitsForThem \
+                   TestAWriterOfTheMarkerThenTheConfigMeetsNoLockCycleBesideARestore \
+                   TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy; do
+            pass=$(cat backup.log cmdbridge.log | grep -c -- "^--- PASS: $t (" || true)
+            fail=$(cat backup.log cmdbridge.log | grep -c -- "^--- FAIL: $t (" || true)
+            echo "$t: PASS $pass FAIL $fail"
+            if [ "$pass" != "20" ] || [ "$fail" != "0" ]; then status=1; fi
+          done
+          grep -h -B2 -A12 -- "^--- FAIL" backup.log cmdbridge.log | head -200 || true
+          exit $status
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (fuzz.yml's pin)
+        if: always()
+        with:
+          name: b653p2a-r4-windows-logs
+          path: |
+            backup.log
+            cmdbridge.log
