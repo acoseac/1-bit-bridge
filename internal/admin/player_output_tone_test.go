@@ -705,12 +705,60 @@ func TestAStopsConfirmationKeepsTheLastToneItRead(t *testing.T) {
 	}
 }
 
+// TestAStopNotConfirmedGivesWayOnceTheDACCloses (B601's round 4): a line that
+// says a tone's stop is not confirmed (a Stop's confirmation that read
+// stop_unconfirmed, or the tone's own answer stop_unconfirmed) is left for the
+// next status to say again, so once the DAC closes an ordinary idle status
+// replaces the warning with the idle tone's words; until then the warning
+// stayed under every idle status. A newer message still wins: Play takes the
+// flag back, so an idle status after a refused Play leaves the refusal as it
+// is. Where node is installed it runs the shipped page: a confirmation that
+// read stop_unconfirmed, then an idle status; the tone's answer
+// stop_unconfirmed, then an idle status; and a confirmation that read
+// stop_unconfirmed, a new Play the bridge refused (409 player_sounding), then
+// an idle status.
+func TestAStopNotConfirmedGivesWayOnceTheDACCloses(t *testing.T) {
+	src := readConsoleJS(t, "static/app.js")
+	confirm := stripJSComments(extractJSFunctionIfPresentOrEmpty(src, "confirmPlayerToneStop"))
+	requireInOrder(t, "confirmPlayerToneStop", confirm, `if (t && state !== "playing" && state !== "stopping") {`,
+		`playerTone.busyShown = state !== "idle";`, `if (state === "idle") showPlayerToneLine("ok", "The tone stopped.");`)
+	wire := stripJSComments(extractJSFunctionIfPresentOrEmpty(src, "wirePlayerOutputTone"))
+	requireInOrder(t, "Play", wire, `play.addEventListener("click", async () => {`, "playerTone.confirming = false;",
+		"playerTone.busyShown = false;", `await API.post("/api/output/player/tone"`, `showPlayerToneLine(r.outcome === "played"`,
+		`playerTone.busyShown = r.outcome === "stop_unconfirmed";`)
+	script, assembled := tonePageScript(t, src, toneWarningRun)
+	requireCarried(t, script, assembled[len(script):], src)
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; the rest runs the shipped page")
+	}
+	raw := runScriptUnderNode(t, node, assembled, struct{}{})
+	var runs []struct {
+		Name   string `json:"name"`
+		Warned string `json:"warned"`
+		After  string `json:"after"`
+		Idle   string `json:"idle"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil || len(runs) != 3 {
+		t.Fatalf("node answered %s: %v", raw, err)
+	}
+	for _, r := range runs[:2] {
+		if !strings.Contains(r.Warned, "has not confirmed that it let go") || r.Idle == "" || r.After != r.Idle {
+			t.Errorf("%s: %+v; want the stop's warning, then the idle status's own words", r.Name, r)
+		}
+	}
+	if r := runs[2]; !strings.HasPrefix(r.Warned, "The tone did not play: ") || r.After != r.Warned {
+		t.Errorf("%s: %+v; want the newer Play's refusal kept under the idle status", r.Name, r)
+	}
+}
+
 // tonePageHarness is the tone's page as the shipped functions see it: buttons
 // and selects by id, whose click runs their listeners; a document and a window
 // whose listeners a scope's signal removes and whose events the run
 // dispatches; the page's scope (pageAbort, as dispatchPageInit keeps it); the
-// console's API, whose post answers when the run resolves it (posts[i].resolve)
-// or its signal aborts it, and whose get answers the statuses queued, the last
+// console's API, whose post answers when the run resolves or rejects it
+// (posts[i].resolve, posts[i].reject) or its signal aborts it, and whose get
+// answers the statuses queued, the last
 // one again and again, a held one when the run releases it or its signal
 // aborts it, a failed one with an error; fetch, which a navigation's run holds
 // and answers; a clock that the run's advance alone moves, firing each timer
@@ -774,7 +822,7 @@ const abortError = () => { const e = new Error("aborted"); e.name = "AbortError"
 const API = {
   post(path, body, signal) {
     return new Promise((resolve, reject) => {
-      posts.push({ path, body, signal, resolve });
+      posts.push({ path, body, signal, resolve, reject });
       if (signal) signal.addEventListener("abort", () => reject(abortError()));
     });
   },
@@ -1012,5 +1060,43 @@ async function lastRead(name, queued) {
 await lastRead("a read cut off at the three seconds after one that read playing", [status("playing"), HOLD]);
 await lastRead("a status with no tone after one that read playing", [status("playing"), noTone]);
 await lastRead("a read that never answers", [HOLD]);
+console.log(JSON.stringify(out));
+`
+
+// toneWarningRun leaves the tone's line on a stop not confirmed for each case
+// (a confirmation that read stop_unconfirmed, the tone's own answer
+// stop_unconfirmed) or on a refusal of a newer Play after one, then paints an
+// ordinary idle status as the five-second paint does, and prints what the
+// line said before the idle status, what it says after, and the shipped words
+// of that idle tone.
+const toneWarningRun = `
+const play = () => el("player-output-tone-play").click();
+const stop = () => el("player-output-tone-stop").click();
+const unconfirmed = { outcome: "stop_unconfirmed", admitted: true, format: "S24_3LE", rateHz: 48000, validBits: 24, frames: 4800 };
+const sounding = () => Object.assign(new Error("the player sounds"), { status: 409, code: "player_sounding" });
+async function warning(name, setup) {
+  freshPage();
+  statuses = [status("stop_unconfirmed")];
+  await setup();
+  const warned = el("player-output-tone-msg").textContent;
+  statuses = [status("idle")];
+  loadPlayerOutput();
+  await settle();
+  out.push({ name, warned, after: el("player-output-tone-msg").textContent, idle: playerToneStatusText(status("idle").running.tone) });
+}
+await warning("a confirmation that read stop_unconfirmed, then an idle status", async () => {
+  play(); await settle();
+  stop(); await settle();
+});
+await warning("the tone's answer stop_unconfirmed, then an idle status", async () => {
+  play(); await settle();
+  posts[0].resolve(unconfirmed); await settle();
+});
+await warning("a confirmation that read stop_unconfirmed, a newer Play refused, then an idle status", async () => {
+  play(); await settle();
+  stop(); await settle();
+  play(); await settle();
+  posts[1].reject(sounding()); await settle();
+});
 console.log(JSON.stringify(out));
 `
