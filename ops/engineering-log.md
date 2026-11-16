@@ -100807,3 +100807,50 @@ playerOutputSeq)` to `if (seq === playerOutputSeq)`): its structural check
 fails here, and the pagehide case is the one its node cases catch, the
 sequence covering the other two. The bare IPv6 case failed on all eight
 routes and positions before its fix.
+
+## 2026-11-16 — B601's round 4: a warning that gives way, and a body-read line that carries no input
+
+Branch `feat/b601-pcm-tone` from 9fe39f93. Commits: c68a3782 (the page's
+test ahead of its fix), 8bf8a7bc (the fix), a2c3a004 (the body-read class),
+6b25579b (round 3's record names its rules' commit), then this record; the
+rules' change is the round's patch, which goes in as a commit after this
+record and drops the citation of the scrub's test this round deletes.
+
+A stop not confirmed is the next status's to say again (`busyShown`), and two
+paths left it with nobody to say it: a Stop's confirmation that read
+`stop_unconfirmed` cleared the flag, and the tone's own answer
+`stop_unconfirmed` never set it, so once the DAC closed every idle status kept
+the warning. The confirmation's branch now sets it unless the tone it read is
+idle, the tone's answer sets it when it is `stop_unconfirmed`, and Play takes
+it back as it starts, so an idle status after a newer Play the bridge refused
+keeps the refusal. `TestAStopNotConfirmedGivesWayOnceTheDACCloses` runs the
+three sequences under node; its first two cases fail at c68a3782, the third
+pins the reset, and each of the three edits taken back alone fails its case.
+
+The body-read line carried the reader's error with its socket's ends left out
+and its addresses scrubbed by patterns, and each round's review found a shape
+the patterns missed: an address after a word and a colon, one with a zone, a
+full form with a port, a dotted IPv6 address with a zone, an IPv4-mapped one.
+The line now carries the write's route constant, which `decodePlayerBody`
+takes from its caller, and one class decided by the error's type through its
+chain (`bodyReadClass`: `timeout`, `reset`, `closed`, `eof` or `other`), never
+its text; a reset Windows reports is its own errno there, and reads `other`.
+Nothing else in the record comes from the request or the error: the admin
+logger (`logging.Component("admin")`) adds `component=admin` alone, the
+handler it resolves (`logging.Init`'s text or JSON handler, level alone) adds
+the time and the level, a plain `Info` hands no request context to it, and
+`writeJSON` drops a failed write's error. `TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress`
+now requires one record per request, its message the fixed line and its
+attributes exactly the component, the route and the expected class, over
+twelve errors of every shape and class on four routes in two positions;
+against the scrubbing code all 96 cases failed, and logging the error's
+words as the class fails all 96 too, those whose words say a class word
+among them. The scrub (`bodyReadFault`, `bareIPv6Run`, `scrubBareIPv6`) and
+its own test are gone; `ipv4Re` and `ipv6Re` stay for the log export.
+
+At 6b25579b: `go vet ./internal/admin/` clean; `go test -race -timeout 30m
+./internal/admin/` passed in 1,242 s (the page's node cases skip without
+node); the round's changed Go tests 50 times each under `-race` (`-timeout
+60m`) passed in 349 s; go1.27.3's gofmt lists none of the changed files; and
+`make docs-check` is clean, on the tree and on a copy with the rules' patch
+applied, where cmd/bridge's `TestEveryCitedTestNameExists` passes too.
