@@ -100754,3 +100754,87 @@ At 597ef073: 38c29935's code, and this record but its runs. TMPDIR was
 | gofmt (`go run cmd/gofmt -l`) on the six files | nothing listed |
 | `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at 597ef073 and with this table |
 | `make docs-check` | exit 0, at 597ef073 and with this table |
+
+## 2026-11-16 — B869A round 4: the blocking check is drained before its seams go back, and a refused let-go is parked after its unlock
+
+Branch `fix/b869a-prune-given-up`, round 3 at fe9eda97. Commits: 3290ebda
+(the fix and its tests), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, `-race`; every
+control was built through `go test -c -overlay` from edits made in memory,
+with `git status` empty after each, and the predictions were written to a
+file first. Lines are 3290ebda's.
+
+B869A's production changes are two, and each leaves production as it was:
+round 3's count of letGoWithin's let-goes (`activeReleases`: finish.go,
+hold.go; `ActiveReleasesForTest`, seams.go), and this round's hook after an
+ownership's release (`SetAfterOwnerReleaseForTest`, seams.go:252-269, run
+at owner.go:85-90), nil unless a test sets it.
+
+### Two answers first
+
+1. **`endTheRun` ends the run before any later cleanup runs.** It sets the
+   traceback to all, raises a panic on a goroutine of its own and blocks in
+   `select {}` (backup_round3_test.go:274-280). The panic is unrecovered, so
+   the runtime ends the process. The cleanup that called it never returns,
+   and testing's runCleanup runs the next cleanup only once the one before
+   it has returned (testing.go:1810-1822) or unwound (1797-1804). So no seam
+   is put back and no fixture removed after an expired bound. The runs that
+   end there leave their fixture on disk and print no later cleanup's line
+   (round 1's C2b, round 3's W1c and W2f).
+2. **Zero counts cover the seams this failure path puts back, but for the
+   check's caller.**
+   - A verification's hold is counted from `newHold` (finish.go:292,
+     hold.go:112) until `drop`'s decrement (hold.go:401). `drop` runs after
+     `h.release`, whose `waitTracked` (hold.go:321 and 332) waits for every
+     goroutine the hold tracks. Among them is the check's: `verifyHeld`
+     tracks it whatever the check answered (finish.go:574), and its
+     `finished` closes once `runLowPriority`'s goroutine has ended
+     (finish.go:836-837), after its read of `onLowPriority` (845-846). So a
+     zero count orders that read before the seam's restore.
+   - The worker's read of the verify deadline (finish.go:460) comes before
+     its drop too.
+   - The caller's does not: `verifyAndThen` reads the verify deadline for
+     its watchdog (finish.go:344) after it has started the worker (312), so
+     the worker can drop its hold first. The caller is now joined.
+   - After its drop the worker reads `aroundVerifyEnd` (finish.go:323) and
+     calls the end hook it read as it began (280, 320). Both are atomic
+     pointers, and this path puts neither back; `onVerifyAnswer` (338) comes
+     before the drop. So the count and the caller's join cover every plain
+     seam the path puts back, and the worker's own end is not waited for.
+
+### What changes
+
+1. **The blocking check is drained before its seams go back.**
+   `checkGivenUpIn` let its check go in a cleanup that ran just before
+   `onLowPriority` and the verify deadline were put back, with no wait. Its
+   caller is now tracked (`callerDone`). A cleanup registered after the two
+   seams, so run before them, does four things, each bounded by
+   `holdDrainBound` and ending the run past it: it lets the hold go
+   (disarmed, so the check's own unlock of a folder the hold is on is not
+   held), lets the check go, joins the caller, and waits until no hold is
+   left. It drains the check alone: a refused verification's let-go is
+   still the hold's own cleanup's to wait for. A cleanup registered before
+   the two seams, so run right after they are put back, fails the test
+   where they went back beside the check or its caller.
+2. **The refused let-go is parked after its unlock.** `refusedLetGo`
+   parked the let-go in `SetOnOwnerReleaseForTest`, which runs before the
+   unlock, and the test's completion check took the ownership. That check
+   passes once the let-go is past its unlock, however long it then runs.
+   The let-go now parks in the new hook after the release, and the cleanup
+   after the hold's requires a signal set as the let-go goes on past its
+   park, with a bounded wait for it otherwise.
+
+The order of the two installs' removal was not changed: `t.TempDir`
+registers one cleanup for the test's whole temporary tree on its first
+call, before the hold.
+
+### Reds, greens and controls
+
+| Run | Build | Result |
+|---|---|---|
+| greens | 3290ebda | `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree`, `TestARefusedVerificationsLetGoIsCountedUntilItEnds`, `TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained` (2.7 s), `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` (both cases, 12.7 s), `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` (6.9 s) and the other hold tests and the fixed test green, no race |
+| C4a, item 1 | the check's drain replaced by round 3's bare let-go | `TestABlockingChecksSeamsGoBackOnlyOnceItIsDrained` red: its case failed again after the restores, "1 holds were left when the blocking check's seams were put back" (backup_unlock_hold_test.go:390), beside a DATA RACE, `SetOnLowPriorityForTest`'s restore (seams.go:147) against `runLowPriority`'s read (finish.go:845) |
+| C4b, item 2's old check | round 3's ownership check, the park after the unlock kept, `holdUnlockOf`'s release wait off | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` GREEN in both cases: the ownership was free with the let-go still parked |
+| C4c, item 2's new check | `holdUnlockOf`'s release wait off, the count kept | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` red in both cases at the completion check (:460, "the refused verification's let-go was still parked past its ownership's release when the cleanup after the hold's ran"); `TestARefusedVerificationsLetGoThatNeverEndsEndsTheRun` red, its case ending at that check's bound rather than the hold's drain's |
+| C4d, a premature completion | `activeReleases.Add(-1)` moved before `end()` | `TestARefusedVerificationsLetGoHoldsTheHoldsCleanup` red in both cases at `refusedLetGo`'s count check ("0 let-goes are counted, want 1", reported at its call, :517), then at the completion check (:460); `TestARefusedVerificationsLetGoIsCountedUntilItEnds` red in both cases at its count check (release_count_internal_test.go:86) |
+| C4e | the hook after the release run before the unlock | `TestTheHookAfterAnOwnershipsReleaseRunsOnceItIsFree` red, "another verification owes this snapshot its check, want it free there" (:122) |
