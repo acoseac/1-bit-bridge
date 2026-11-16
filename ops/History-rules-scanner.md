@@ -3925,7 +3925,7 @@
 
 ## B653 PR 2a — the store's lifetime lock, the restore's journal and the rename that never replaces (2026-11-15)
 
-- **Every opener of the live database holds the store's lifetime lock (`<db>-open.lock`, `internal/manifest/store_open_lock.go`) shared for as long as it has the database open, one counted hold a process, and a restore of either kind holds it exclusively (`manifest.HoldStoreExclusive`): `OpenStoreAdmitted` takes it right after its `MkdirAll` and asks the restore's journal under it (`manifest.CheckRestoreJournal`), before the link check, `Precreate` and the ladder, and `Store.Close` lets it go once the last connection has closed; `PendingMigrations` and the live snapshot's capture hold it too; only the filesystem's definitive answer that it keeps no locks (`fsutil.DefinitelyKeepsNoLocks`) lets an opener go on, ENOLCK and every other failure refusing it (`ErrStoreLockUnavailable`), and a doctor probe the lock or the journal refuses says not checked** (2026-11-15, backlog B653 PR 2a). **Don't open the live database without the hold, ask the journal before the hold or after `Precreate`, go on after ENOLCK or a lock file that cannot be opened, open a second descriptor for a database this process holds, let the hold go before the last connection has closed, follow a link at the lock file, or read a snapshot's database through `PendingMigrations`.**
+- **Every opener of the live database holds the store's lifetime lock (`<db>-open.lock`, `internal/manifest/store_open_lock.go`) shared for as long as it has the database open, one counted hold a process, found by its lock file's identity whatever spelling names it, and a restore holds it exclusively (`manifest.HoldStoreExclusive`; the full restore since PR 2a, the database-only restore once PR 2b brings it): `OpenStoreAdmitted` takes it right after its `MkdirAll` and asks the restore's journal under it (`manifest.CheckRestoreJournal`), before the link check, `Precreate` and the ladder, and `Store.Close` lets it go once the last connection has closed; `PendingMigrations` and the live snapshot's capture hold it too, the capture making the database's directory first where it is not there and never going on without the hold; only the filesystem's definitive answer that it keeps no locks (`fsutil.DefinitelyKeepsNoLocks`) lets an opener go on, ENOLCK and every other failure refusing it (`ErrStoreLockUnavailable`), and a doctor probe the lock or the journal refuses says not checked** (2026-11-15, backlog B653 PR 2a). **Don't open the live database without the hold, ask the journal before the hold or after `Precreate`, go on after ENOLCK or a lock file that cannot be opened, open a second descriptor for a lock file this process holds, under any spelling, let a capture go on without the hold, let the hold go before the last connection has closed, follow a link at the lock file, or read a snapshot's database through `PendingMigrations`.**
   `bridge restore` kept a running serve out by `server.lock` and nothing else: a scan, an analyze, an
   upscale, variants, artwork, library add and remove, the manifest commands, the doctor's probes and a
   live backup's `VACUUM INTO` open the store without it, and the full restore renamed a fresh
@@ -3936,10 +3936,16 @@
   under this process's exclusive hold counts on it (the full restore's own epoch open), and an exclusive
   acquire under its shared hold refuses (`ErrStoreHeld`). The registry keys a hold by the database's
   path with its directory resolved (`filepath.EvalSymlinks`), so two spellings of one data directory,
-  macOS's /var and /private/var, meet one hold (the brief's review). The journal (`manifest.RestoreJournalPath`,
+  macOS's /var and /private/var, meet one hold (the brief's review). A key is a spelling, though: on a volume that folds case `EvalSymlinks`
+  keeps each component as written, and a hard link names the same lock file from another directory,
+  so the registry finds an entry by its lock file's identity (`os.Lstat`, so a link matches nothing,
+  and `os.SameFile`, under its mutex, before another descriptor is opened) wherever the key finds
+  none, and a match is released by its own key (the second round: the hard link is the case Linux
+  runs, the case-fold rows run where the volume folds case, and a Windows 8.3 short name stays one
+  hold). The journal (`manifest.RestoreJournalPath`,
   `<db>-restore.json`, written by PR 2b's database-only restore) is asked under the hold, so a restore,
   which needs the lock exclusively first, cannot write it between an opener's check and its
-  `Precreate`, which would make an empty store where the restore moved the database out (carbon-2).
+  `Precreate`, which would make an empty store where the restore moved the database out (the design review's order).
   The lock file is opened without following a link at its name (`fsutil.OpenLockFileNoFollow`), for
   writing and, where that open is refused for want of the right to write, for reading, which a shared
   lock takes (a doctor run by another user); a link there makes nothing, and the lock file is a store
@@ -3947,16 +3953,22 @@
   `database/sql` has closed every connection, since a transaction keeps its own past Close (finding
   1). ENOLCK refuses because Linux also answers it on a filesystem that keeps locks, beside a holder,
   when it cannot allocate a lock record (`fsutil.NoLockToGive`, the one reading the config file's lock
-  shares): an opener that went on could stand beside a restore's hold (codex-2). That changes serve:
+  shares): an opener that went on could stand beside a restore's hold (the design review's finding on ENOLCK). That changes serve:
   a data directory whose lock manager does not answer stops every store open, serve's start included,
   until it answers. The live snapshot's capture holds the lock and asks the journal before it writes
-  anything, the player seal's completion and the backups folder included (finding 3). A snapshot's
+  anything, the player seal's completion and the backups folder included (finding 3), making the
+  database's directory first where it is not there and taking the hold there too: a capture that went
+  on without it where the directory was missing copied the database a restore made there meanwhile (the
+  second round), while `PendingMigrations`, which opens nothing where the directory is not there, makes
+  none. A snapshot's
   database is read through the snapshot reader (`openSnapshotReader`), never `PendingMigrations`,
   whose hold would make the lock file in the snapshot. `TestAnOpenStoreKeepsARestoreOut`,
   `TestARestoreHoldKeepsEveryOpenerOut` (manifest and backup), `TestAnOpenOverAnUnfinishedRestoreRefusesAndMakesNothing`,
   `TestTheJournalIsAskedUnderTheOpenersHold`, `TestOneProcessHoldsTheStoreOnce`,
   `TestNoLockFailureAdmitsAnOpenerBesideARestore`, `TestALockFileThisUserMayOnlyReadStillHoldsTheStore`,
   `TestAClosedStoreHoldsItsLockUntilItsLastTransactionEnds`, `TestALockFileThatIsALinkIsNeverFollowed`,
+  `TestTwoSpellingsOfOneLockFileAreOneHold`, `TestAShortNameOfTheDataDirectoryIsTheSameHold` (Windows),
+  `TestACaptureNeverOpensADatabaseItDoesNotHold`, `TestACaptureWithNoDataDirMakesNothing`,
   `TestEveryOpenerOfTheLiveDatabaseTakesTheStoreLock` (the AST sweep of every `sql.Open`) and
   `TestTheDoctorSaysNotCheckedWhereTheStoreLockRefuses` pin it.
 - **`fsutil.RenameNoReplace` renames only while nothing is at its target, the check and the rename one system call (renameat2's `RENAME_NOREPLACE`, renamex_np's `RENAME_EXCL`, `MoveFileEx` without `MOVEFILE_REPLACE_EXISTING`), an occupied target `fs.ErrExist`, and answers `ErrNoReplaceUnsupported` where none can be made, renaming nothing** (2026-11-15, backlog B653 PR 2a; nothing in production calls it until PR 2b). **Don't give it a fallback (an `Lstat` then a rename, or a copy), or read EXDEV as unsupported.**
@@ -3964,6 +3976,6 @@
   are `ErrNoReplaceUnsupported`, which matches `errors.ErrUnsupported`; EXDEV and ERROR_NOT_SAME_DEVICE
   pass as they are; on Windows a sharing violation or a refused access is tried again on
   `atomicwrite.RenameWithRetry`'s schedule, the context asked between tries. There is no fallback
-  (codex-5): an `Lstat` then a rename lost the entry a racing creator made in 459 to 511 of 1,000
+  (the design review): an `Lstat` then a rename lost the entry a racing creator made in 459 to 511 of 1,000
   rounds on ext4 and 360 to 395 on tmpfs, where the call lost none.
   `TestARenameThatNeverReplacesLeavesAnEntryAtItsTarget` pins it.
