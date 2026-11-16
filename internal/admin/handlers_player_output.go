@@ -40,8 +40,9 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
+	"os"
 	"strings"
+	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/tonebounds"
@@ -550,22 +551,23 @@ func (s *Server) apiPlayerOutputDACs(w http.ResponseWriter, r *http.Request) {
 // until the read times out, or resets the connection, gives a *net.OpError
 // whose words name both ends of the socket, which the response carried until
 // B601's round 2. The reader's own failure (bodyReader) decides it, in either
-// decode, and is answered in fixed words and logged without an address
+// decode, and is answered in fixed words and logged by route and class alone
 // (writePlayerBodyUnread). A fault of the JSON inside the object (a syntax
 // error, a value of another type, a key it does not take, a body cut short),
 // or of its size inside it or after it (*http.MaxBytesError), keeps the
 // decoder's words, which name nothing but the body; trailing JSON or content
 // after the object (a second value, a stray character) is "one JSON object,
 // and nothing after it", and a reader's failure, inside the object or after
-// it, playerBodyUnread.
-func decodePlayerBody(w http.ResponseWriter, r *http.Request, v any) bool {
+// it, playerBodyUnread. route is the write's name in that log line, one of
+// the playerRoute constants.
+func decodePlayerBody(w http.ResponseWriter, r *http.Request, route string, v any) bool {
 	body := &bodyReader{r: r.Body}
 	dec := json.NewDecoder(http.MaxBytesReader(w, body, adminMaxBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		switch {
 		case body.err != nil:
-			writePlayerBodyUnread(w, r, body.err)
+			writePlayerBodyUnread(w, route, body.err)
 		case errors.Is(err, io.EOF):
 			writeError(w, http.StatusBadRequest, errCodeBadJSON, "a JSON body is required")
 		default:
@@ -578,7 +580,7 @@ func decodePlayerBody(w http.ResponseWriter, r *http.Request, v any) bool {
 		var tooLarge *http.MaxBytesError
 		switch {
 		case body.err != nil:
-			writePlayerBodyUnread(w, r, body.err)
+			writePlayerBodyUnread(w, route, body.err)
 		case errors.As(err, &tooLarge):
 			writeError(w, http.StatusBadRequest, errCodeBadJSON, err.Error())
 		default:
@@ -593,6 +595,25 @@ func decodePlayerBody(w http.ResponseWriter, r *http.Request, v any) bool {
 const (
 	playerBodyUnread     = "the request's body could not be read"
 	playerBodyUnreadLine = "admin: a player write's body could not be read"
+)
+
+// The player writes' names, which a body-read failure's log line gives as its
+// route: one constant a route, never the request's own path.
+const (
+	playerRouteEnabled  = "player_enabled"
+	playerRouteOpenHome = "player_openhome"
+	playerRouteDAC      = "player_dac"
+	playerRouteTone     = "player_tone"
+)
+
+// The classes of a body-read failure, the one word of the reader's error the
+// log line carries (bodyReadClass).
+const (
+	bodyReadTimeout = "timeout"
+	bodyReadReset   = "reset"
+	bodyReadClosed  = "closed"
+	bodyReadEOF     = "eof"
+	bodyReadOther   = "other"
 )
 
 // bodyReader is a request body that keeps the first error its reader answered
@@ -616,54 +637,38 @@ func (b *bodyReader) Close() error { return b.r.Close() }
 // writePlayerBodyUnread answers a write whose body's reader failed with err:
 // 400 bad_json in fixed words, the status and the code any refused body has,
 // and a line at Info, the client's doing (it stopped sending, or reset the
-// connection), that names the route and what bodyReadFault says of err.
-func writePlayerBodyUnread(w http.ResponseWriter, r *http.Request, err error) {
-	logger.Info(playerBodyUnreadLine, "path", r.URL.Path, "err", bodyReadFault(err))
+// connection), that names the write by its route constant and err by its
+// class alone (bodyReadClass). Nothing of the request or of err's words
+// reaches the line: an error's text can hold both ends of its socket, and a
+// scrub of addresses out of it missed shapes of address three times (B601's
+// rounds 2 to 4).
+func writePlayerBodyUnread(w http.ResponseWriter, route string, err error) {
+	logger.Info(playerBodyUnreadLine, "route", route, "class", bodyReadClass(err))
 	writeError(w, http.StatusBadRequest, errCodeBadJSON, playerBodyUnread)
 }
 
-// bodyReadFault is what a log line says of err, the error a request body's
-// reader answered: its words with a socket error's two ends left out (a
-// *net.OpError's "read tcp <local>-><remote>: <cause>" is "read tcp: <cause>"),
-// and every address left in them replaced, loopback's too: a dotted IPv4 one
-// and a bracketed IPv6 one, as the log export redacts them, and an IPv6 one
-// written bare (scrubBareIPv6), so the line names no client however the
-// error was made.
-func bodyReadFault(err error) string {
-	text := err.Error()
-	var op *net.OpError
-	if errors.As(err, &op) && op.Err != nil {
-		bare := *op
-		bare.Source, bare.Addr = nil, nil
-		text = strings.ReplaceAll(text, op.Error(), bare.Error())
+// bodyReadClass is what a log line says of err, the error a request body's
+// reader answered: one word of a fixed list, decided by err's type through its
+// chain (errors.Is, errors.As), never by its text. timeout: a net.Error whose
+// Timeout is true, context.DeadlineExceeded or os.ErrDeadlineExceeded; reset:
+// syscall.ECONNRESET; closed: net.ErrClosed, io.ErrClosedPipe, os.ErrClosed or
+// syscall.EPIPE; eof: io.ErrUnexpectedEOF (a plain io.EOF is the body's end,
+// which bodyReader records as no failure); anything else other, an error whose
+// words say "reset" or "timeout" among them. Windows reports a reset as its own
+// WSAECONNRESET, not syscall.ECONNRESET, so a reset there is other.
+func bodyReadClass(err error) string {
+	var ne net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return bodyReadTimeout
+	case errors.Is(err, syscall.ECONNRESET):
+		return bodyReadReset
+	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe), errors.Is(err, os.ErrClosed), errors.Is(err, syscall.EPIPE):
+		return bodyReadClosed
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return bodyReadEOF
 	}
-	text = ipv4Re.ReplaceAllString(text, "<ip>")
-	return scrubBareIPv6(ipv6Re.ReplaceAllString(text, "<ip>"))
-}
-
-// bareIPv6Run is a run of text that may be an IPv6 address written without
-// brackets (hex digits, colons and dots, two colons at least), with a zone
-// after it.
-var bareIPv6Run = regexp.MustCompile(`[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*(?:%[0-9A-Za-z._-]+)?`)
-
-// scrubBareIPv6 replaces each run of text (bareIPv6Run) that net.ParseIP takes
-// for an IPv6 address, its zone with it, and leaves any other run as it is: a
-// time of day, a hardware address. A colon or a dot that ends the run, as the
-// colon after an address before an error's own words does, stays after the
-// replacement.
-func scrubBareIPv6(text string) string {
-	return bareIPv6Run.ReplaceAllStringFunc(text, func(run string) string {
-		addr, _, zoned := strings.Cut(run, "%")
-		tail := ""
-		for !zoned && addr != "" && net.ParseIP(addr) == nil && strings.ContainsAny(addr[len(addr)-1:], ":.") {
-			tail = addr[len(addr)-1:] + tail
-			addr = addr[:len(addr)-1]
-		}
-		if !strings.Contains(addr, ":") || net.ParseIP(addr) == nil {
-			return run
-		}
-		return "<ip>" + tail
-	})
+	return bodyReadOther
 }
 
 // playerEnabledRequest is POST /api/output/player/enabled's body.
@@ -683,7 +688,7 @@ type playerEnabledRequest struct {
 // holds already writes nothing.
 func (s *Server) apiPlayerOutputEnabled(w http.ResponseWriter, r *http.Request) {
 	var req playerEnabledRequest
-	if !decodePlayerBody(w, r, &req) {
+	if !decodePlayerBody(w, r, playerRouteEnabled, &req) {
 		return
 	}
 	if req.Enabled == nil {
@@ -773,7 +778,7 @@ type playerOpenHomeRequest struct {
 // clash this route refuses cannot come the other way.
 func (s *Server) apiPlayerOutputOpenHome(w http.ResponseWriter, r *http.Request) {
 	var req playerOpenHomeRequest
-	if !decodePlayerBody(w, r, &req) {
+	if !decodePlayerBody(w, r, playerRouteOpenHome, &req) {
 		return
 	}
 	if req.OpenHome == nil {
@@ -842,7 +847,7 @@ type playerDACRequest struct {
 // one it started with. A binding the config holds already writes nothing.
 func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 	var req playerDACRequest
-	if !decodePlayerBody(w, r, &req) {
+	if !decodePlayerBody(w, r, playerRouteDAC, &req) {
 		return
 	}
 	switch req.Binding {
@@ -937,7 +942,7 @@ type playerToneRequest struct {
 // stops a tone, and the page's Stop is the end of this request.
 func (s *Server) apiPlayerOutputTone(w http.ResponseWriter, r *http.Request) {
 	var req playerToneRequest
-	if !decodePlayerBody(w, r, &req) {
+	if !decodePlayerBody(w, r, playerRouteTone, &req) {
 		return
 	}
 	if req.Level == nil || tonebounds.Check(*req.Level) != nil {

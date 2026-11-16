@@ -1,9 +1,13 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,12 +21,13 @@ import (
 )
 
 // playerBodyRoutes are the four writes whose body decodePlayerBody decodes,
-// each with an object it takes and one holding a value of another type.
-var playerBodyRoutes = []struct{ path, object, wrongType string }{
-	{"/api/output/player/enabled", `{"enabled":true}`, `{"enabled":"yes"}`},
-	{"/api/output/player/openhome", `{"openhome":true}`, `{"openhome":1}`},
-	{"/api/output/player/dac", `{"selection":"tok","binding":"serial"}`, `{"selection":1,"binding":"serial"}`},
-	{toneRoute, `{"level":-40,"seconds":10}`, `{"level":-40,"seconds":1.5}`},
+// each with the route constant its log line names, an object it takes and one
+// holding a value of another type.
+var playerBodyRoutes = []struct{ path, route, object, wrongType string }{
+	{"/api/output/player/enabled", playerRouteEnabled, `{"enabled":true}`, `{"enabled":"yes"}`},
+	{"/api/output/player/openhome", playerRouteOpenHome, `{"openhome":true}`, `{"openhome":1}`},
+	{"/api/output/player/dac", playerRouteDAC, `{"selection":"tok","binding":"serial"}`, `{"selection":1,"binding":"serial"}`},
+	{toneRoute, playerRouteTone, `{"level":-40,"seconds":10}`, `{"level":-40,"seconds":1.5}`},
 }
 
 // unreadBody is a request body whose reader gives head and then answers err
@@ -75,67 +80,78 @@ func requireNothingAsked(t *testing.T, fake *fakePlayerOutput) {
 	}
 }
 
-// TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress (B601's round 2): a
-// write whose body's reader fails, a client that stops sending until the read
-// times out or that resets the connection, is answered 400 bad_json in fixed
-// words (playerBodyUnread), and the failure is logged once at Info with its
-// route and its cause and no address, loopback's included. The response
-// carried the socket error's text until then, which names both ends of the
-// connection, and no console response names a host. For each of the four
-// routes, the read failing inside the object and after it (where the second
-// decode reads), nothing is written and the provider is asked nothing.
+// bodyReadErrors are reader failures of every shape of address the body-read
+// line's reviews named, and of every class, each with the class its type
+// makes and what of its words must reach no record: an address, a port, a
+// zone, a sentinel, or the class word its text says where its type is not
+// that class's.
+var bodyReadErrors = []struct {
+	name   string
+	err    error
+	class  string
+	hidden []string
+}{
+	{"words with an address after a colon, saying reset", errors.New("peer addr:2001:db8::9 reset"), bodyReadOther,
+		[]string{"2001:db8::9", "peer addr", "reset"}},
+	{"a zoned link-local address", errors.New("src:fe80::1%eth0"), bodyReadOther, []string{"fe80::1", "eth0"}},
+	{"a full-form address with a port", errors.New("2001:db8:0:0:0:0:0:1:443"), bodyReadOther, []string{"2001:db8:0:0:0:0:0:1", "443"}},
+	{"a dotted IPv6 address with a zone", errors.New("fe80::192.0.2.1%eth0"), bodyReadOther, []string{"fe80::192.0.2.1", "192.0.2.1", "eth0"}},
+	{"an IPv4-mapped address", errors.New("::ffff:192.0.2.1"), bodyReadOther, []string{"::ffff:192.0.2.1", "192.0.2.1"}},
+	{"a sentinel with an address and a port", errors.New("sentinel-5e6f the reader failed at 203.0.113.7:8443"), bodyReadOther,
+		[]string{"sentinel-5e6f", "203.0.113.7", "8443"}},
+	{"a socket's timeout with both ends",
+		&net.OpError{Op: "read", Net: "tcp", Source: tcpAddr("192.0.2.10", 47789), Addr: tcpAddr("198.51.100.23", 54321), Err: os.ErrDeadlineExceeded},
+		bodyReadTimeout, []string{"192.0.2.10", "198.51.100.23", "47789", "54321"}},
+	{"a socket's reset over IPv6 with both ends",
+		&net.OpError{Op: "read", Net: "tcp6", Source: tcpAddr("2001:db8::10", 47789), Addr: tcpAddr("2001:db8::23", 54321), Err: os.NewSyscallError("read", syscall.ECONNRESET)},
+		bodyReadReset, []string{"2001:db8::10", "2001:db8::23", "47789", "54321"}},
+	{"a broken pipe over loopback",
+		&net.OpError{Op: "read", Net: "tcp", Source: tcpAddr("127.0.0.1", 47789), Addr: tcpAddr("::1", 54321), Err: os.NewSyscallError("read", syscall.EPIPE)},
+		bodyReadClosed, []string{"127.0.0.1", "::1", "47789", "54321"}},
+	{"a closed connection wrapped with a sentinel", fmt.Errorf("sentinel-7f3a read on fe80::7%%eth1: %w", net.ErrClosed), bodyReadClosed,
+		[]string{"sentinel-7f3a", "fe80::7", "eth1"}},
+	{"a body cut short wrapped with a sentinel", fmt.Errorf("sentinel-1b2d from 198.51.100.8: %w", io.ErrUnexpectedEOF), bodyReadEOF,
+		[]string{"sentinel-1b2d", "198.51.100.8"}},
+	{"a context's deadline wrapped with an address", fmt.Errorf("gave up near [2001:db8::42]:9: %w", context.DeadlineExceeded), bodyReadTimeout,
+		[]string{"2001:db8::42", "gave up"}},
+}
+
+// TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress (B601's rounds 2 and 4):
+// a write whose body's reader fails, a client that stops sending until the
+// read times out or that resets the connection, is answered 400 bad_json in
+// fixed words (playerBodyUnread), and logs one record and only one: at Info,
+// its message the fixed line, and its attributes exactly the admin logger's
+// component, the write's route constant and the class its error's type makes
+// (bodyReadClass), so nothing of the request or of the error's words, which
+// can name both ends of its socket, reaches the log. Until round 4 the line
+// carried the error's words with its addresses scrubbed, and three rounds of
+// review each found a shape of address the scrub missed. For each of the four
+// routes, each error of bodyReadErrors, the read failing inside the object and
+// after it (where the second decode reads), nothing is written and the
+// provider is asked nothing.
 func TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress(t *testing.T) {
-	for _, sock := range []struct {
-		name   string
-		err    error
-		cause  string   // what the log line keeps of the error
-		hidden []string // what reaches neither the response nor the log
-	}{
-		{"a timeout over loopback",
-			&net.OpError{Op: "read", Net: "tcp", Source: tcpAddr("127.0.0.1", 47789), Addr: tcpAddr("127.0.0.1", 54321), Err: os.ErrDeadlineExceeded},
-			"read tcp: i/o timeout", []string{"127.0.0.1", "47789", "54321"}},
-		{"a reset over IPv4",
-			&net.OpError{Op: "read", Net: "tcp", Source: tcpAddr("192.0.2.10", 47789), Addr: tcpAddr("198.51.100.23", 54321), Err: os.NewSyscallError("read", syscall.ECONNRESET)},
-			"read tcp: read: " + syscall.ECONNRESET.Error(), []string{"192.0.2.10", "198.51.100.23", "47789", "54321"}},
-		{"a timeout over IPv6",
-			&net.OpError{Op: "read", Net: "tcp6", Source: tcpAddr("2001:db8::10", 47789), Addr: tcpAddr("2001:db8::23", 54321), Err: os.ErrDeadlineExceeded},
-			"read tcp6: i/o timeout", []string{"2001:db8::10", "2001:db8::23", "47789", "54321"}},
-		{"a timeout over IPv6 loopback",
-			&net.OpError{Op: "read", Net: "tcp6", Source: tcpAddr("::1", 47789), Addr: tcpAddr("::1", 54321), Err: os.ErrDeadlineExceeded},
-			"read tcp6: i/o timeout", []string{"::1", "47789", "54321"}},
-		{"an error whose own words name addresses",
-			errors.New("stream from 203.0.113.7:443 and [2001:db8::7]:443 cut short"),
-			"cut short", []string{"203.0.113.7", "2001:db8::7"}},
-		// An IPv6 address in an error's words with no brackets, beside a time
-		// of day the scrub must leave as it is (B601's round 3).
-		{"an error whose own words name IPv6 addresses bare",
-			errors.New("a reset from 2001:db8::9 and ::1, seen at 10:42:07"),
-			"seen at 10:42:07", []string{"2001:db8::9", "::1"}},
-	} {
-		for _, route := range playerBodyRoutes {
+	for _, route := range playerBodyRoutes {
+		srv, fake, cfgPath := newPlayerTestServer(t)
+		want := readFileOrNil(cfgPath)
+		for _, read := range bodyReadErrors {
 			for _, at := range []struct{ name, head string }{
 				{"inside the object", route.object[:len(route.object)-1]},
 				{"after the object", route.object},
 			} {
-				t.Run(sock.name+"/"+route.path+"/"+at.name, func(t *testing.T) {
-					srv, fake, cfgPath := newPlayerTestServer(t)
-					want := readFileOrNil(cfgPath)
+				t.Run(route.route+"/"+read.name+"/"+at.name, func(t *testing.T) {
 					logs := loggingtest.Record(t)
-					w, env := playerBodyRequest(t, srv, route.path, &unreadBody{head: at.head, err: sock.err})
+					w, env := playerBodyRequest(t, srv, route.path, &unreadBody{head: at.head, err: read.err})
 					if w.Code != http.StatusBadRequest || env.Error != errCodeBadJSON || env.Message != playerBodyUnread {
 						t.Errorf("= %d %q %q; want 400 %s %q", w.Code, env.Error, env.Message, errCodeBadJSON, playerBodyUnread)
 					}
-					for _, h := range sock.hidden {
+					requireTheBodyReadRecord(t, logs, route.route, read.class)
+					for _, h := range read.hidden {
 						if strings.Contains(w.Body.String(), h) {
-							t.Errorf("the response names %q: %s", h, w.Body)
+							t.Errorf("the response holds %q: %s", h, w.Body)
 						}
 					}
-					if carried := logs.Carrying(sock.hidden...); len(carried) != 0 {
-						t.Errorf("a log line names an address: %q", carried)
-					}
-					lines := logs.Lines(playerBodyUnreadLine)
-					if len(lines) != 1 || !strings.HasPrefix(lines[0], "INFO ") || !strings.Contains(lines[0], route.path) || !strings.Contains(lines[0], sock.cause) {
-						t.Errorf("the log holds %q; want one Info line %q naming %s and %q", logs.All(), playerBodyUnreadLine, route.path, sock.cause)
+					if carried := logs.Carrying(read.hidden...); len(carried) != 0 {
+						t.Errorf("a record holds what the error's words said: %q", carried)
 					}
 					unchangedConfig(t, srv, cfgPath, want, config.PlayerConfig{}, route.path)
 					requireNothingAsked(t, fake)
@@ -145,21 +161,67 @@ func TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress(t *testing.T) {
 	}
 }
 
-// TestTheBodyReadScrubTakesOnlyWhatParsesAsAnIPv6Address (B601's round 3):
-// scrubBareIPv6 replaces an IPv6 address written without brackets, a zone
-// with it and a colon after it kept, and leaves a run of colons that is no
-// address (a time of day, a hardware address) as it is.
-func TestTheBodyReadScrubTakesOnlyWhatParsesAsAnIPv6Address(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{"a reset from 2001:db8::9 and ::1, seen at 10:42:07", "a reset from <ip> and <ip>, seen at 10:42:07"},
-		{"read from 2001:db8::9: connection reset", "read from <ip>: connection reset"},
-		{"from fe80::1%eth0 at 10:42", "from <ip> at 10:42"},
-		{"the full form 2001:0db8:0000:0000:0000:0000:0000:0001.", "the full form <ip>."},
-		{"a hardware address 00:1a:2b:3c:4d:5e", "a hardware address 00:1a:2b:3c:4d:5e"},
-		{"read tcp6: i/o timeout", "read tcp6: i/o timeout"},
+// requireTheBodyReadRecord fails the test unless logs holds one record, at
+// Info, whose message is playerBodyUnreadLine and whose attributes are exactly
+// component=admin (the admin logger's own), route=route and class=class.
+func requireTheBodyReadRecord(t *testing.T, logs *loggingtest.Recorder, route, class string) {
+	t.Helper()
+	recs := logs.Records()
+	if len(recs) != 1 {
+		t.Fatalf("the request logged %d records: %q; want the one body-read line", len(recs), logs.All())
+	}
+	rec := recs[0]
+	got := map[string]string{}
+	rec.Attrs(func(a slog.Attr) bool {
+		got[a.Key] = a.Value.Resolve().String()
+		return true
+	})
+	wantAttrs := map[string]string{"component": "admin", "route": route, "class": class}
+	if rec.Level != slog.LevelInfo || rec.Message != playerBodyUnreadLine || rec.NumAttrs() != len(wantAttrs) || !maps.Equal(got, wantAttrs) {
+		t.Errorf("the record is %s %q %v (%d attributes); want INFO %q %v", rec.Level, rec.Message, got, rec.NumAttrs(), playerBodyUnreadLine, wantAttrs)
+	}
+}
+
+// netError is a net.Error whose Timeout answers timeout, and whose words say
+// a timeout whatever it answers.
+type netError struct{ timeout bool }
+
+func (e netError) Error() string   { return "i/o timeout at 192.0.2.99:7" }
+func (e netError) Timeout() bool   { return e.timeout }
+func (e netError) Temporary() bool { return false }
+
+// TestABodyReadFailureIsClassedByItsType (B601's round 4): bodyReadClass names
+// a reader's failure by its type through its chain, never its words: each
+// type of timeout, reset, closed and eof, bare and wrapped, is its class, and
+// words that say a class over a type that is none of them, or a net.Error that
+// did not time out, are other.
+func TestABodyReadFailureIsClassedByItsType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"a socket's timeout", &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}, bodyReadTimeout},
+		{"os's deadline", os.ErrDeadlineExceeded, bodyReadTimeout},
+		{"a context's deadline, wrapped", fmt.Errorf("gave up: %w", context.DeadlineExceeded), bodyReadTimeout},
+		{"a net.Error that timed out", netError{timeout: true}, bodyReadTimeout},
+		{"a reset", os.NewSyscallError("read", syscall.ECONNRESET), bodyReadReset},
+		{"a socket's reset", &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}, bodyReadReset},
+		{"a closed connection", net.ErrClosed, bodyReadClosed},
+		{"a closed pipe, wrapped", fmt.Errorf("read: %w", io.ErrClosedPipe), bodyReadClosed},
+		{"a closed file", os.ErrClosed, bodyReadClosed},
+		{"a socket's broken pipe", &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.EPIPE)}, bodyReadClosed},
+		{"a body cut short", io.ErrUnexpectedEOF, bodyReadEOF},
+		{"a body cut short, wrapped", fmt.Errorf("read: %w", io.ErrUnexpectedEOF), bodyReadEOF},
+		{"words that say a reset", errors.New("read tcp: connection reset by peer"), bodyReadOther},
+		{"words that say a timeout", errors.New("i/o timeout"), bodyReadOther},
+		{"words that say closed", errors.New("use of closed network connection"), bodyReadOther},
+		{"words that say a body cut short", errors.New("unexpected EOF"), bodyReadOther},
+		{"a net.Error that did not time out", netError{timeout: false}, bodyReadOther},
+		{"a permission refusal", os.ErrPermission, bodyReadOther},
 	} {
-		if got := scrubBareIPv6(tc.in); got != tc.want {
-			t.Errorf("scrubBareIPv6(%q) = %q; want %q", tc.in, got, tc.want)
+		if got := bodyReadClass(tc.err); got != tc.want {
+			t.Errorf("%s: bodyReadClass(%v) = %q; want %q", tc.name, tc.err, got, tc.want)
 		}
 	}
 }
