@@ -12,11 +12,16 @@ import (
 // openLockFileNoFollow is OpenLockFileNoFollow's open on Windows: CreateFile
 // with FILE_FLAG_OPEN_REPARSE_POINT, which opens a link (a symbolic link, a
 // junction) as itself rather than what it names, so a link to nothing makes
-// nothing; then the handle's attributes are asked, and a reparse point or a
-// directory is refused. Without FILE_FLAG_BACKUP_SEMANTICS a directory does
-// not open at all. OPEN_ALWAYS for writing creates the file; OPEN_EXISTING
-// for reading never does. Every sharing mode is granted, as Go's own opens
-// grant read and write: the lock, not the handle, is what excludes.
+// nothing, and FILE_FLAG_BACKUP_SEMANTICS, without which a directory, or a
+// link to one, does not open at all and answers ERROR_ACCESS_DENIED, which
+// would read as a lock file this user may not write rather than one that is
+// no file (B653 PR 2a's second round; the backup's VACUUM INTO opens took the
+// same pair in B653 PR 1's round 14). Then the handle's attributes are asked,
+// and a reparse point or a directory is refused, ErrLockFileNotAFile.
+// OPEN_ALWAYS for writing creates a regular file where nothing is there;
+// OPEN_EXISTING for reading never creates. Every sharing mode is granted, as
+// Go's own opens grant read and write: the lock, not the handle, is what
+// excludes.
 func openLockFileNoFollow(path string, _ os.FileMode, write bool) (*os.File, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -28,7 +33,7 @@ func openLockFileNoFollow(path string, _ os.FileMode, write bool) (*os.File, err
 	}
 	h, err := windows.CreateFile(name, access,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-		disposition, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		disposition, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}

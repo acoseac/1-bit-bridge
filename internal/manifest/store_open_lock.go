@@ -14,8 +14,9 @@ import (
 
 // storeOpenLockSuffix names the file beside the database on which every
 // opener of the live database holds a kernel lock for as long as it has the
-// database open, shared, and a restore of either kind holds it exclusively
-// (backlog B653 PR 2a, the store's lifetime lock). `bridge restore` kept a
+// database open, shared, and a restore holds it exclusively (backlog B653 PR
+// 2a, the store's lifetime lock): the full restore since PR 2a, and the
+// database-only restore once PR 2b brings it. `bridge restore` kept a
 // running serve out by server.lock, and nothing kept out the commands that
 // open the store without it (scan, analyze, upscale, variants, artwork,
 // library add and remove, the manifest commands, the doctor's probes, a live
@@ -88,16 +89,21 @@ func (e *storeLockError) Unwrap() []error {
 // shares and closing any of them releases (fsutil.TryLock's doc), so a second
 // descriptor, serve's store beside its ticker's snapshot, would drop the
 // first's hold when it closed. f is nil where the filesystem answered that it
-// keeps no locks and the openers went on without one.
+// keeps no locks and the openers went on without one. fi is the lock file as
+// it was opened, its identity, by which a hold through another spelling of
+// the same file finds this entry (storeLockEntryOf); nil where its stat
+// failed.
 type storeLockEntry struct {
 	f      *os.File
+	fi     os.FileInfo
 	shared int
 	excl   int
 }
 
 // storeLocks is the process's registry of holds, keyed by the database's
-// absolute, cleaned path (storeLockKey). Its mutex is held across a lock
-// file's open and its try, both of which wait for nothing.
+// absolute, cleaned path (storeLockKey), and found by the lock file's
+// identity whatever the key (storeLockEntryOf). Its mutex is held across a
+// lock file's lookup, its open and its try, none of which waits for anything.
 var storeLocks = struct {
 	sync.Mutex
 	byKey map[string]*storeLockEntry
@@ -105,14 +111,13 @@ var storeLocks = struct {
 
 // storeLockKey keys the registry: the database's path made absolute and
 // cleaned, its directory resolved where it is there (filepath.EvalSymlinks:
-// macOS's /var reached as /private/var, a Windows short name), so two
-// spellings of one data directory meet one hold (B653 PR 2a's brief
-// review); a directory not there yet keys as written. The bridge opens its
-// store at DefaultDBPath(dataDir) alone
-// (TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase), so serve's store and
-// its ticker's snapshot meet one key either way; two spellings through a
-// link to the database file itself, or a hard link, still hold two
-// descriptors, a residual the PR names.
+// macOS's /var reached as /private/var, a Windows short name); a directory
+// not there yet keys as written. A key is a spelling, not an identity: on a
+// volume that folds case (macOS's APFS by default) EvalSymlinks keeps each
+// component as it was written, so /data/Library and /data/library are two
+// keys for one directory, and a hard link is another name for the same lock
+// file. The entry is therefore found by the lock file's identity whenever its
+// key finds none (storeLockEntryOf).
 func storeLockKey(dbPath string) string {
 	abs, err := filepath.Abs(filepath.Clean(dbPath))
 	if err != nil {
@@ -122,6 +127,44 @@ func storeLockKey(dbPath string) string {
 		return filepath.Join(dir, filepath.Base(abs))
 	}
 	return abs
+}
+
+// storeLockEntryOf returns this process's entry for the database at dbPath
+// and the key it is kept under, with storeLocks held: the entry key names,
+// else the one whose lock file is the file at the lock's path now
+// (os.SameFile against each entry's fi), whatever spelling took it, so the
+// caller counts on it and its release finds it by that key; nil where it has
+// none. It opens nothing: a match is decided before another descriptor
+// could be opened on a file this process holds (B653 PR 2a's second round).
+// A lock file that is not a regular file matches nothing, and is the open's
+// to refuse.
+func storeLockEntryOf(key, dbPath string) (string, *storeLockEntry) {
+	if e := storeLocks.byKey[key]; e != nil {
+		return key, e
+	}
+	if len(storeLocks.byKey) == 0 {
+		return "", nil
+	}
+	fi, err := os.Lstat(StoreOpenLockPath(dbPath))
+	if err != nil || !fi.Mode().IsRegular() {
+		return "", nil
+	}
+	for k, e := range storeLocks.byKey {
+		if e.fi != nil && os.SameFile(e.fi, fi) {
+			return k, e
+		}
+	}
+	return "", nil
+}
+
+// lockFileInfo is f's identity for its entry (storeLockEntry.fi), nil where
+// it cannot be read.
+func lockFileInfo(f *os.File) os.FileInfo {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	return fi
 }
 
 // The lifetime lock's seams, the platform's calls in production: the lock
@@ -181,7 +224,8 @@ func sayNoStoreLock(name string, err error) {
 // holdStoreShared takes this process's shared hold of the lifetime lock of
 // the database at dbPath, for an opener of the live database, and returns
 // what lets it go (once, however often it is called). A hold this process has
-// already, shared or exclusive, is counted on (the full restore's own epoch
+// already, shared or exclusive, through this spelling or another of the same
+// lock file (storeLockEntryOf), is counted on (the full restore's own epoch
 // open counts on the restore's exclusive hold). Otherwise the lock file is
 // opened for writing, and for reading where that open is refused for want of
 // the right to write (fsutil.OpenRefusedForWriting: a doctor run by another
@@ -189,16 +233,16 @@ func sayNoStoreLock(name string, err error) {
 // process's exclusive hold refuses (ErrStoreRestoring); the filesystem's
 // definitive answer that it keeps no locks goes on without one, said once;
 // and every other answer refuses (ErrStoreLockUnavailable), ENOLCK included,
-// which Linux also gives beside a holder (backlog B653 PR 2a, codex-2: an
-// opener that went on there could stand beside a restore). Nothing of the
-// database is touched before it answers.
+// which Linux also gives beside a holder (backlog B653 PR 2a, the design
+// review's finding on ENOLCK: an opener that went on there could stand
+// beside a restore). Nothing of the database is touched before it answers.
 func holdStoreShared(dbPath string) (release func(), err error) {
 	key := storeLockKey(dbPath)
 	storeLocks.Lock()
 	defer storeLocks.Unlock()
-	if e := storeLocks.byKey[key]; e != nil {
+	if k, e := storeLockEntryOf(key, dbPath); e != nil {
 		e.shared++
-		return storeLockRelease(key, false), nil
+		return storeLockRelease(k, false), nil
 	}
 	dir, name := filepath.Dir(dbPath), filepath.Base(dbPath)+storeOpenLockSuffix
 	open, try, _ := storeLockSeams()
@@ -211,14 +255,15 @@ func holdStoreShared(dbPath string) (release func(), err error) {
 	}
 	switch err := try(f, false); {
 	case err == nil:
-		storeLocks.byKey[key] = &storeLockEntry{f: f, shared: 1}
+		storeLocks.byKey[key] = &storeLockEntry{f: f, fi: lockFileInfo(f), shared: 1}
 	case errors.Is(err, fsutil.ErrLocked):
 		_ = f.Close()
 		return nil, &storeLockError{kind: ErrStoreRestoring, lock: name}
 	case fsutil.DefinitelyKeepsNoLocks(err):
+		fi := lockFileInfo(f)
 		_ = f.Close()
 		sayNoStoreLock(name, err)
-		storeLocks.byKey[key] = &storeLockEntry{shared: 1}
+		storeLocks.byKey[key] = &storeLockEntry{fi: fi, shared: 1}
 	default:
 		_ = f.Close()
 		return nil, &storeLockError{kind: ErrStoreLockUnavailable, lock: name, cause: err}
@@ -261,13 +306,15 @@ func (h *StoreHold) Release() {
 }
 
 // HoldStoreExclusive takes the lifetime lock of the database at dbPath
-// exclusively, for a restore of either kind (backlog B653 PR 2a), and refuses
-// on anything but success: a holder in another process (ErrStoreHeld: a
-// command has the database open), a shared hold of this process's
-// (ErrStoreHeld too), and any failure to take it (ErrStoreLockUnavailable),
-// the filesystem's answer that it keeps no locks included, since a restore
-// there cannot show that nothing has the database open. A hold this process
-// has exclusively already is counted on (bridge restore takes it before its
+// exclusively, for a restore (backlog B653 PR 2a: the full restore, and the
+// database-only restore once PR 2b brings it), and refuses on anything but
+// success: a holder in another process (ErrStoreHeld: a command has the
+// database open), a shared hold of this process's (ErrStoreHeld too), and
+// any failure to take it (ErrStoreLockUnavailable), the filesystem's answer
+// that it keeps no locks included, since a restore there cannot show that
+// nothing has the database open. A hold this process has exclusively already,
+// through this spelling or another of the same lock file
+// (storeLockEntryOf), is counted on (bridge restore takes it before its
 // prompt, and RestoreWithOptions takes it again). It is a try, never a wait.
 // The lock file is opened for writing, as an exclusive lock on a Linux NFS
 // mount needs.
@@ -276,10 +323,10 @@ func HoldStoreExclusive(dbPath string) (*StoreHold, error) {
 	name := filepath.Base(dbPath) + storeOpenLockSuffix
 	storeLocks.Lock()
 	defer storeLocks.Unlock()
-	if e := storeLocks.byKey[key]; e != nil {
+	if k, e := storeLockEntryOf(key, dbPath); e != nil {
 		if e.excl > 0 {
 			e.excl++
-			return &StoreHold{release: storeLockRelease(key, true)}, nil
+			return &StoreHold{release: storeLockRelease(k, true)}, nil
 		}
 		return nil, &storeLockError{kind: ErrStoreHeld, lock: name}
 	}
@@ -290,7 +337,7 @@ func HoldStoreExclusive(dbPath string) (*StoreHold, error) {
 	}
 	switch err := try(f, true); {
 	case err == nil:
-		storeLocks.byKey[key] = &storeLockEntry{f: f, excl: 1}
+		storeLocks.byKey[key] = &storeLockEntry{f: f, fi: lockFileInfo(f), excl: 1}
 	case errors.Is(err, fsutil.ErrLocked):
 		_ = f.Close()
 		return nil, &storeLockError{kind: ErrStoreHeld, lock: name}
