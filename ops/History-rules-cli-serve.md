@@ -1383,7 +1383,7 @@ mentions across the four `ops/audit-*.md` files.
   `TestServesLockingAFreshDataDirAtOnceTakeItOnce`, both red on macOS 27.0.1
   before the retry).
 
-- **`bridge restore`, `bridge reset-player` and `bridge manifest clear-missing` hold the data-dir lock for the whole run; restore and reset refuse if the lock cannot be taken, and reset repeats both of restore's admin-port checks around its confirmation; each of them, and `bridge output dac bind`, prepares the data dir first as serve does and refuses one it cannot prepare, before it writes anything (`holdDataDirForMutation`, B606), clear-missing and the bind keeping the admin-port probe where only the lock cannot be taken; and restore then takes the store's lifetime lock exclusively (`manifest.HoldStoreExclusive`: it refuses while any command has the library database open, and on storage that grants no lock) and asks the restore's journal, both before it looks at its snapshot (B653 PR 2a), and `backup.RestoreWithOptions` asks that journal under its own hold, before the snapshot's lock, for every caller; where it replaces the database it holds the install marker's lock from its admission, taken before its turn of bridge.yaml's lock, through its record and the database's copy (B653 PR 2a's third round).**
+- **`bridge restore`, `bridge reset-player` and `bridge manifest clear-missing` hold the data-dir lock for the whole run; restore and reset refuse if the lock cannot be taken, and reset repeats both of restore's admin-port checks around its confirmation; each of them, and `bridge output dac bind`, prepares the data dir first as serve does and refuses one it cannot prepare, before it writes anything (`holdDataDirForMutation`, B606), clear-missing and the bind keeping the admin-port probe where only the lock cannot be taken; and restore then takes the store's lifetime lock exclusively (`manifest.HoldStoreExclusive`: it refuses while any command has the library database open, and on storage that grants no lock) and asks the restore's journal, both before it looks at its snapshot (B653 PR 2a), and `backup.RestoreWithOptions` asks that journal under its own hold, before the snapshot's lock, for every caller; where it replaces the database it holds the install marker's lock from its admission, taken before its turn of bridge.yaml's lock, through its record and the database's copy (B653 PR 2a's third round), and mints the restored database's epoch once it has let bridge.yaml's lock go (its fourth round).**
   Restore and clear-missing mutate the store from a second process,
   where `Store.mu` does not reach and `busy_timeout` is a retry rather than
   a serializer. Each takes `lockServeDataDir` (the kernel lock `bridge
@@ -2433,8 +2433,9 @@ Windows-runner check, distinct from portable race-test results.
 - **A command that takes both the data dir's lock and bridge.yaml's takes
   the data dir's first (`holdDataDirForMutation`, `lockServeDataDir`) and
   bridge.yaml's inside it: bind, restore (in `backup.RestoreWithOptions`,
-  before its first write, to its end, bridge.yaml written through the
-  turn's `SaveBytes`) and serve; library add and remove (`config.Edit`),
+  before its first write, to its last write, bridge.yaml written through
+  the turn's `SaveBytes`, its epoch minted after: B653 PR 2a's fourth
+  round) and serve; library add and remove (`config.Edit`),
   init (`saveInitConfig`) and serve's seed (`writeAutoInitConfig`) take
   bridge.yaml's alone, each deciding on what its turn found
   (`FileLock.LoadFound`, `Found`); a restore compares the config with the
