@@ -100763,3 +100763,47 @@ run green; the first try of the admin ones met go test's ten-minute default
 with no failure and was run again at sixty minutes. go1.27.3's gofmt lists
 none of the changed files, and `make docs-check` is clean (`admin-console.md`
 97,892 bytes).
+
+## 2026-11-16 — B601's round 3: a stale status read, and four Lows
+
+Branch `feat/b601-pcm-tone` from e4bcdece. Commits: aca5038e (the tests
+ahead of their fix), fa0e89ef (the fix), df474469 (the bare IPv6 scrub),
+c782e655 and 2c2c9120 (wording), then this record; the rules' change is a
+patch beside the branch.
+
+A status read that answered after the page had moved on painted over it.
+Play moved `stopSeq` and not the paints' sequence, so a Stop's
+confirmation's read, or the five-second paint's, held across a newer tone
+that played to its end wrote "A test tone is playing" over "The tone played
+to its end". Play now moves `playerOutputSeq` as it starts the tone and as
+it says the tone's result, and a confirmation's read paints only while the
+confirmation stands, the one guard for a page its pagehide left, where no
+sequence moves. A confirmation now says its stop not confirmed by the last
+tone a read answered (`if (st) tone = t`): a read that failed or was cut off
+at the three seconds keeps it, where a slow bridge's last read had been
+said unreadable after earlier reads read playing; one that answered
+replaces it, a status with no tone in words of its own. Every stop said not
+confirmed leaves its line for the next status (`busyShown`), so an ordinary
+idle status replaces the warning.
+
+`bodyReadFault` left an IPv6 address written bare in an error that is not a
+socket error's; it now replaces every run `net.ParseIP` takes for one
+(`scrubBareIPv6`), a zone with it and a colon after it kept, a time of day
+and a hardware address left as they are, and the body test hides `::1`, which
+every `[::1]` holds. `decodePlayerBody`'s claim (a fault of the JSON inside
+the object, or of its size inside it or after it, keeps the decoder's words;
+trailing JSON or content after it is "one JSON object, and nothing after
+it") is corrected in its comment, the fault test (trailing content now
+asserted word for word), round 2's record and the rules; the History file
+says the kernel's headers alone.
+
+The page's new cases run under node, which is not installed here:
+`TestNoStaleStatusReadPaintsOverANewerTone` (a confirmation's read and a
+poll's, each held across a newer tone, and a confirmation's read held past
+the page's pagehide) and `TestAStopsConfirmationKeepsTheLastToneItRead`;
+their structural parts failed at aca5038e and pass at fa0e89ef. Their
+control removes only the predicate (`if (current() && seq ===
+playerOutputSeq)` to `if (seq === playerOutputSeq)`): its structural check
+fails here, and the pagehide case is the one its node cases catch, the
+sequence covering the other two. The bare IPv6 case failed on all eight
+routes and positions before its fix.
