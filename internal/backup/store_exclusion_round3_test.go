@@ -1,7 +1,9 @@
 package backup_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +19,33 @@ import (
 
 // racedInstall is what an install raced against a restore found and did:
 // whether the live database had been replaced when it took the install
-// marker's lock (its file another than before: the restore's copy is a
-// rename into place), and its marker's write's error.
+// marker's lock (its file another than before, or its bytes: the restore's
+// copy is a rename into place), and its marker's write's error.
 type racedInstall struct {
 	replaced bool
 	err      error
+}
+
+// liveFile is the file at path, its identity and its bytes, read through one
+// open handle. On Windows an Lstat names its file by its path alone, and
+// os.SameFile reads the ID through that path when it compares, so an Lstat
+// taken before a replacement compares as the file that replaced it; a
+// handle's Stat reads the ID at once. The handle is closed before the
+// restore runs: it shares no delete (syscall.Open), so held open it would
+// refuse the rename that replaces the file. The bytes rule out an ID the old
+// file freed being given to the new one.
+func liveFile(path string) (os.FileInfo, []byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err := io.ReadAll(f)
+	return fi, data, err
 }
 
 // raceAnInstall arms an install of a later version over this one (this
@@ -32,7 +56,7 @@ type racedInstall struct {
 // armed or waits for the lock; the channel answers once, when it armed.
 func raceAnInstall(t *testing.T, dataDir, live string) (start func(), armed <-chan racedInstall) {
 	t.Helper()
-	before, err := os.Lstat(live)
+	before, beforeBytes, err := liveFile(live)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +82,8 @@ func raceAnInstall(t *testing.T, dataDir, live string) (start func(), armed <-ch
 				return
 			}
 			defer lock.Release()
-			now, err := os.Lstat(live)
-			r := racedInstall{replaced: err == nil && !os.SameFile(before, now)}
+			now, nowBytes, err := liveFile(live)
+			r := racedInstall{replaced: err == nil && (!os.SameFile(before, now) || !bytes.Equal(beforeBytes, nowBytes))}
 			r.err = updater.SaveState(dataDir, updater.State{Status: "installing", TargetVersion: "99.0.0-next",
 				PreviousVersion: version.ServerVersion, SwapStarted: true, AttemptedAt: time.Now().UTC()})
 			out <- r
