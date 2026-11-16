@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -808,6 +809,106 @@ func TestARestoreWhoseSourceDoesNotAnswerIsRefusedWithinItsBound(t *testing.T) {
 			}
 			c.requireRestored(t, snap)
 			callers.wait(t)
+		})
+	}
+}
+
+// errHeld stands in for Windows' refusal of an open another program holds, or
+// that a verification's rename refuses, which the look's read takes for one
+// on every host here.
+var errHeld = errors.New("held for a moment")
+
+// lookableSnapshot is a snapshot's folder holding its manifest alone, body
+// ("" for none), all that bridge restore's look before its prompt reads.
+func lookableSnapshot(t *testing.T, body string) string {
+	t.Helper()
+	dir := filepath.Join(resolvedTestDir(t, t.TempDir()), "20261115T000000Z")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		if err := os.WriteFile(filepath.Join(dir, backup.ManifestFile), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// lookAt is bridge restore's look at the snapshot dir (CheckRestoreSource),
+// its manifest's read replaced by read and, where retry is not nil, what that
+// read asks again on. It joins the look's worker, bounded, and puts the seams
+// back at the test's end only once joined: a worker that never ends may read
+// them still, so they are left as they are (backlog B898).
+func lookAt(t *testing.T, ctx context.Context, dir string, read func(string) ([]byte, error), retry func(error) bool) error {
+	t.Helper()
+	ended, joined := make(chan struct{}), false
+	restore := []func(){backup.SetOnSourceWorkerEndForTest(func(d string) {
+		if d == dir {
+			close(ended)
+		}
+	}), backup.SetReadSourceManifestForTest(read)}
+	if retry != nil {
+		restore = append(restore, atomicwrite.SetReadRetryableForTest(retry))
+	}
+	t.Cleanup(func() {
+		for i := len(restore) - 1; joined && i >= 0; i-- {
+			restore[i]()
+		}
+	})
+	err := backup.CheckRestoreSource(ctx, dir, time.Minute)
+	select {
+	case <-ended:
+		joined = true
+	case <-time.After(30 * time.Second):
+		t.Fatal("the look's worker never ended: its seams are left as they are")
+	}
+	return err
+}
+
+// TestTheLookBeforeThePromptReadsABusyManifestAgain: bridge restore's look at
+// the snapshot before its prompt reads a manifest Windows refuses for a moment
+// again (backlog B898): refused once, it answers at its second read; refused
+// at every read, ErrSnapshotBusy after the schedule's five, the read's error
+// kept, never ErrNotASnapshot; stopped as it waits, its worker answers the
+// stop at its first read, its context's error kept and neither refusal; and a
+// manifest not there, or not one, is no snapshot at its first read, as before.
+func TestTheLookBeforeThePromptReadsABusyManifestAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name, body     string
+		refused, reads int
+		stop           bool
+		want           error
+	}{
+		{"refused once", `{"schemaVersion":2}`, 1, 2, false, nil},
+		{"refused at every read", `{"schemaVersion":2}`, 99, 5, false, backup.ErrSnapshotBusy},
+		{"stopped as it waits", `{"schemaVersion":2}`, 99, 1, true, context.Canceled},
+		{"not there", "", 0, 1, false, backup.ErrNotASnapshot},
+		{"not a manifest", "not json", 0, 1, false, backup.ErrNotASnapshot},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := lookableSnapshot(t, tc.body)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reads := 0
+			err := lookAt(t, ctx, dir, func(p string) ([]byte, error) {
+				reads++
+				if tc.stop {
+					cancel()
+				}
+				if reads <= tc.refused {
+					return nil, &fs.PathError{Op: "open", Path: p, Err: errHeld}
+				}
+				return os.ReadFile(p)
+			}, func(err error) bool { return errors.Is(err, errHeld) })
+			if reads != tc.reads || !errors.Is(err, tc.want) {
+				t.Fatalf("the look answered %v after %d reads, want %v after %d", err, reads, tc.want, tc.reads)
+			}
+			// The busy refusal keeps the read's error and is no other; a stop is
+			// neither refusal, and its worker's, not the bound's ("did not answer").
+			busy, notOne := errors.Is(err, backup.ErrSnapshotBusy), errors.Is(err, backup.ErrNotASnapshot)
+			if busy && (notOne || !errors.Is(err, errHeld)) || tc.stop && (busy || notOne || strings.Contains(err.Error(), "did not answer")) {
+				t.Fatalf("the look answered %v", err)
+			}
 		})
 	}
 }
