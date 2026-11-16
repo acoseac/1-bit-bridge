@@ -207,7 +207,7 @@ func TestAnOpenOverAnUnfinishedRestoreRefusesAndMakesNothing(t *testing.T) {
 	})
 }
 
-// TestTheJournalIsAskedUnderTheOpenersHold (T3b, carbon-2): an opener parked
+// TestTheJournalIsAskedUnderTheOpenersHold (T3b): an opener parked
 // once its shared hold is taken and before it asks the journal keeps a
 // restore's exclusive try out, in another process; a journal that stands by
 // the time it asks refuses it, nothing made, so no restore can slip its
@@ -388,7 +388,7 @@ func TestOneProcessHoldsTheStoreOnce(t *testing.T) {
 	})
 }
 
-// TestNoLockFailureAdmitsAnOpenerBesideARestore (T5, codex-2): a lock that
+// TestNoLockFailureAdmitsAnOpenerBesideARestore (T5): a lock that
 // answers ENOLCK, a lock file whose open answers EACCES, and a lock that
 // answers an I/O error each refuse every opener with ErrStoreLockUnavailable,
 // before SQLite is reached and with nothing of the database made or changed;

@@ -422,7 +422,7 @@ var restoreRandom io.Reader
 // and the admin probe, the store's lifetime lock exclusively
 // (manifest.HoldStoreExclusive: a command that has the library database open
 // refuses the restore), the restore's journal (an unfinished database restore
-// refuses it, before any snapshot is looked at, codex-4), the snapshot's
+// refuses it, before any snapshot is looked at), the snapshot's
 // look, the prompt, and the probe again.
 func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
@@ -492,7 +492,7 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	defer storeHold.Release()
 
 	// An unfinished restore of the database is found before any snapshot is
-	// looked at (backlog B653 PR 2a, codex-4): finishing it needs no snapshot,
+	// looked at (backlog B653 PR 2a): finishing it needs no snapshot,
 	// and one that is gone must not stand in its way.
 	if err := manifest.CheckRestoreJournal(dbPath); err != nil {
 		fmt.Fprintf(stderr, "restore: %v; nothing was restored\n", err)

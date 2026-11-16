@@ -324,7 +324,7 @@ func OpenStore(path string) (*Store, error) {
 // Every open, OpenStore's too, holds the store's lifetime lock shared for as
 // long as the Store is open (holdStoreShared; backlog B653 PR 2a), taken
 // right after the directory is made and before anything of the database is
-// touched, in this order (carbon-2): the directory, the hold, the restore's
+// touched, in this order: the directory, the hold, the restore's
 // journal (CheckRestoreJournal: an unfinished restore refuses the open with
 // ErrRestoreIncomplete before Precreate could make an empty store where the
 // restore moved the database out), the link check, Precreate, the ladder.

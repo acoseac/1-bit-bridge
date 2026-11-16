@@ -49,7 +49,7 @@ var ErrNoReplaceUnsupported = fmt.Errorf("this filesystem has no rename that nev
 // here as no such rename; the restore it is made for renames a file.
 //
 // There is deliberately no fallback of any kind, neither another rename nor
-// a copy (backlog B653 PR 2a, codex-5). An Lstat that finds nothing at to,
+// a copy (backlog B653 PR 2a). An Lstat that finds nothing at to,
 // then a rename, is not a rename that never replaces: another program can
 // make the entry between the two calls, the bridge's advisory locks do not
 // bind another program, and the window between the two is real. Put in the

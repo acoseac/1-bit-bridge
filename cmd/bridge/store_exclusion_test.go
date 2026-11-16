@@ -49,7 +49,7 @@ func TestTheFullRestoreRefusesWhileADatabaseRestoreIsUnfinished(t *testing.T) {
 	}
 }
 
-// TestRestoreFindsAnUnfinishedRestoreBeforeItsSnapshot (T37, codex-4): with
+// TestRestoreFindsAnUnfinishedRestoreBeforeItsSnapshot (T37): with
 // a journal standing and the snapshot's folder gone, bridge restore exits 1
 // in the journal's words, not 2 for a snapshot it does not recognise: it
 // asks the journal before it looks at any snapshot, and its look's worker
@@ -132,8 +132,8 @@ func TestTheRollbacksRefuseWhileADatabaseRestoreIsUnfinished(t *testing.T) {
 	})
 }
 
-// TestARestoreOverAnArmedInstallKeepsEveryRollbackOff (T35, serve's half,
-// codex-1): bridge restore of a snapshot at this version's ladder top, made in
+// TestARestoreOverAnArmedInstallKeepsEveryRollbackOff (T35, serve's
+// half): bridge restore of a snapshot at this version's ladder top, made in
 // another data dir, over an armed install that recorded nothing, records the
 // store change; three starts that crash then bring the count to the crash
 // rollback's limit, and the next start refuses the rollback (a migration of
@@ -214,9 +214,17 @@ func TestTheDoctorSaysNotCheckedWhereTheStoreLockRefuses(t *testing.T) {
 // TestEveryRestoreTakesTheStoresLockBeforeItsPrompt: bridge restore beside a
 // command that has the library database open (a store open in this process
 // stands in for it; the kernel's answer across processes is internal/
-// manifest's T1) is refused before its prompt, exit 1, naming why.
+// manifest's T1) is refused before it looks at its snapshot and before its
+// prompt, exit 1, naming why: no prompt on either stream, and the source's
+// worker, which looks at the snapshot (backup.CheckRestoreSource), never run.
 func TestEveryRestoreTakesTheStoresLockBeforeItsPrompt(t *testing.T) {
 	cfgPath, dataDir, snap := seedRestorableInstall(t, closedAdminAddr(t))
+	var looked atomic.Int32
+	t.Cleanup(backup.SetOnSourceWorkerEndForTest(func(d string) {
+		if d == snap {
+			looked.Add(1)
+		}
+	}))
 	s, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +233,10 @@ func TestEveryRestoreTakesTheStoresLockBeforeItsPrompt(t *testing.T) {
 	var stdout, stderr strings.Builder
 	code := restoreCmd(context.Background(), []string{"--config", cfgPath, snap}, strings.NewReader("yes\n"), &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "a bridge command has the library database open") ||
-		strings.Contains(stderr.String(), "Type 'yes'") {
+		strings.Contains(stderr.String(), "Type 'yes'") || strings.Contains(stdout.String(), "Restore from") {
 		t.Fatalf("bridge restore beside an open store = %d, want 1 before its prompt\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if n := looked.Load(); n != 0 {
+		t.Errorf("bridge restore looked at its snapshot %d time(s) before the store's lock refused it", n)
 	}
 }
