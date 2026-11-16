@@ -515,7 +515,10 @@ func Restore(snapshotDir string, dst Targets) error {
 // and the lock's file in it, the only things it makes before the source's
 // lock, and under that hold asks the restore's journal: an unfinished
 // restore of the database refuses it (manifest.ErrRestoreIncomplete) before
-// it looks at its snapshot. Then, before it touches anything else of the
+// it looks at its snapshot. A restore refused at any step before its first
+// write leaves the destination as it was but for those two, where it made
+// them, and the install marker's lock file, where it took that lock and
+// found none. Then, before it touches anything else of the
 // destination, it takes the lock of the folder that holds the snapshot, the
 // one every verification, claim and prune of that folder takes (holdSource,
 // backlog B826), and holds it until it returns: so no prune removes the

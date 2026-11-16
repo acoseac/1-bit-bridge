@@ -91,8 +91,8 @@ func (e *storeLockError) Unwrap() []error {
 // first's hold when it closed. f is nil where the filesystem answered that it
 // keeps no locks and the openers went on without one. fi is the lock file as
 // it was opened, its identity, by which a hold through another spelling of
-// the same file finds this entry (storeLockEntryOf); nil where its stat
-// failed.
+// the same file finds this entry (storeLockEntryOf); never nil, since a hold
+// whose lock file's identity cannot be read is refused (lockFileIdentity).
 type storeLockEntry struct {
 	f      *os.File
 	fi     os.FileInfo
@@ -134,10 +134,15 @@ func storeLockKey(dbPath string) string {
 // else the one whose lock file is the file at the lock's path now
 // (os.SameFile against each entry's fi), whatever spelling took it, so the
 // caller counts on it and its release finds it by that key; nil where it has
-// none. It opens nothing: a match is decided before another descriptor
-// could be opened on a file this process holds (B653 PR 2a's second round).
-// A lock file that is not a regular file matches nothing, and is the open's
-// to refuse.
+// none. A match is decided before another descriptor that could take or let
+// go of a lock is opened on a file this process holds (B653 PR 2a's second
+// round), and the lookup itself opens none: on Unix it stats the path and
+// compares device and inode, and on Windows os.SameFile reads the path's file
+// ID through a handle of its own, opened by path with no access asked and
+// closed at once (Go 1.27.3's os.(*fileStat).loadFileId, CreateFile with
+// access 0), which holds no lock and lets none go, since a LockFileEx lock
+// belongs to the handle that took it. A lock file that is not a regular file
+// matches nothing, and is the open's to refuse.
 func storeLockEntryOf(key, dbPath string) (string, *storeLockEntry) {
 	if e := storeLocks.byKey[key]; e != nil {
 		return key, e
@@ -150,35 +155,27 @@ func storeLockEntryOf(key, dbPath string) (string, *storeLockEntry) {
 		return "", nil
 	}
 	for k, e := range storeLocks.byKey {
-		if e.fi != nil && os.SameFile(e.fi, fi) {
+		if os.SameFile(e.fi, fi) {
 			return k, e
 		}
 	}
 	return "", nil
 }
 
-// lockFileInfo is f's identity for its entry (storeLockEntry.fi), nil where
-// it cannot be read.
-func lockFileInfo(f *os.File) os.FileInfo {
-	fi, err := f.Stat()
-	if err != nil {
-		return nil
-	}
-	return fi
-}
-
 // The lifetime lock's seams, the platform's calls in production: the lock
-// file's open (write says for writing), the try (exclusive says which kind)
-// and the unlock. A test stands in for a filesystem's answers through them
-// (setStoreLockSeams). storeHoldTaken runs in OpenStoreAdmitted and
-// PendingMigrations once the shared hold is taken and before the journal is
-// asked, nil in production.
+// file's open (write says for writing), the stat of its identity, the try
+// (exclusive says which kind) and the unlock. A test stands in for a
+// filesystem's answers through them (SetStoreLockOpenForTest,
+// SetStoreLockTryForTest, or this package's own tests under storeLockSeamMu).
+// storeHoldTaken runs in OpenStoreAdmitted and PendingMigrations once the
+// shared hold is taken and before the journal is asked, nil in production.
 var (
 	storeLockSeamMu sync.Mutex
 	storeLockOpen   = func(dir, name, like string, write bool) (*os.File, error) {
 		return fsutil.OpenLockFileNoFollow(dir, name, like, 0o644, write)
 	}
-	storeLockTry = func(f *os.File, exclusive bool) error {
+	storeLockStat = (*os.File).Stat
+	storeLockTry  = func(f *os.File, exclusive bool) error {
 		if exclusive {
 			return fsutil.TryLock(f)
 		}
@@ -187,6 +184,21 @@ var (
 	storeLockUnlock = fsutil.Unlock
 	storeHoldTaken  func(dbPath string)
 )
+
+// lockFileIdentity is the identity of the lock file f opened, which its
+// registry entry keeps (storeLockEntry.fi): a hold whose identity cannot be
+// read is refused (ErrStoreLockUnavailable), so a live entry's is never nil
+// and a hold through another spelling of its file always finds it.
+func lockFileIdentity(f *os.File, name string) (os.FileInfo, error) {
+	storeLockSeamMu.Lock()
+	stat := storeLockStat
+	storeLockSeamMu.Unlock()
+	fi, err := stat(f)
+	if err != nil {
+		return nil, &storeLockError{kind: ErrStoreLockUnavailable, lock: name, cause: err}
+	}
+	return fi, nil
+}
 
 // storeLockSeams returns the seams as they stand.
 func storeLockSeams() (open func(dir, name, like string, write bool) (*os.File, error), try func(*os.File, bool) error, unlock func(*os.File) error) {
@@ -253,14 +265,18 @@ func holdStoreShared(dbPath string) (release func(), err error) {
 	if err != nil {
 		return nil, storeLockOpenRefusal(dbPath, name, err)
 	}
+	fi, err := lockFileIdentity(f, name)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	switch err := try(f, false); {
 	case err == nil:
-		storeLocks.byKey[key] = &storeLockEntry{f: f, fi: lockFileInfo(f), shared: 1}
+		storeLocks.byKey[key] = &storeLockEntry{f: f, fi: fi, shared: 1}
 	case errors.Is(err, fsutil.ErrLocked):
 		_ = f.Close()
 		return nil, &storeLockError{kind: ErrStoreRestoring, lock: name}
 	case fsutil.DefinitelyKeepsNoLocks(err):
-		fi := lockFileInfo(f)
 		_ = f.Close()
 		sayNoStoreLock(name, err)
 		storeLocks.byKey[key] = &storeLockEntry{fi: fi, shared: 1}
@@ -335,9 +351,14 @@ func HoldStoreExclusive(dbPath string) (*StoreHold, error) {
 	if err != nil {
 		return nil, storeLockOpenRefusal(dbPath, name, err)
 	}
+	fi, err := lockFileIdentity(f, name)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	switch err := try(f, true); {
 	case err == nil:
-		storeLocks.byKey[key] = &storeLockEntry{f: f, fi: lockFileInfo(f), excl: 1}
+		storeLocks.byKey[key] = &storeLockEntry{f: f, fi: fi, excl: 1}
 	case errors.Is(err, fsutil.ErrLocked):
 		_ = f.Close()
 		return nil, &storeLockError{kind: ErrStoreHeld, lock: name}

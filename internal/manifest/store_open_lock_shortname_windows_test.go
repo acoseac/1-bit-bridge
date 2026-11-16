@@ -11,7 +11,10 @@ import (
 )
 
 // shortNameOf is the 8.3 short name Windows gives path, "" where the volume
-// gives it none.
+// gives it none. GetShortPathName answers the length it wrote, without the
+// terminating NUL, where the buffer held the name, and the length the name
+// needs, with it, where the buffer was too small: an answer as long as the
+// buffer or longer is a name it did not write whole.
 func shortNameOf(t *testing.T, path string) string {
 	t.Helper()
 	p, err := windows.UTF16PtrFromString(path)
@@ -20,7 +23,7 @@ func shortNameOf(t *testing.T, path string) string {
 	}
 	buf := make([]uint16, windows.MAX_LONG_PATH)
 	n, err := windows.GetShortPathName(p, &buf[0], uint32(len(buf)))
-	if err != nil || n == 0 || int(n) > len(buf) {
+	if err != nil || n == 0 || int(n) >= len(buf) {
 		return ""
 	}
 	if s := windows.UTF16ToString(buf[:n]); s != path {

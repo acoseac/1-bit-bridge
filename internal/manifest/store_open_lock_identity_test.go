@@ -56,6 +56,43 @@ func requireOneHoldAcrossSpellings(t *testing.T, first, second string) {
 	waitForOtherProcessToHold(t, first)
 }
 
+// TestALockFileWhoseIdentityCannotBeReadHoldsNothing: a hold whose lock
+// file's identity cannot be read (its stat fails) is refused
+// (ErrStoreLockUnavailable), shared and exclusive alike, with no registry
+// entry left and the lock never taken: a live entry's identity is never
+// missing, so a hold through another spelling of its file always finds it
+// (B653 PR 2a's third round: an entry kept with none was passed over, and a
+// second descriptor met this process's own lock).
+func TestALockFileWhoseIdentityCannotBeReadHoldsNothing(t *testing.T) {
+	storeLockSeamMu.Lock()
+	prev := storeLockStat
+	storeLockStat = func(*os.File) (os.FileInfo, error) { return nil, errors.New("the stat failed") }
+	storeLockSeamMu.Unlock()
+	t.Cleanup(func() {
+		storeLockSeamMu.Lock()
+		storeLockStat = prev
+		storeLockSeamMu.Unlock()
+	})
+	path := filepath.Join(t.TempDir(), "bridge.db")
+	if release, err := holdStoreShared(path); !errors.Is(err, ErrStoreLockUnavailable) {
+		if err == nil {
+			release()
+		}
+		t.Errorf("a shared hold whose lock file's identity cannot be read = %v, want ErrStoreLockUnavailable", err)
+	}
+	if h, err := HoldStoreExclusive(path); !errors.Is(err, ErrStoreLockUnavailable) {
+		h.Release()
+		t.Errorf("an exclusive hold whose lock file's identity cannot be read = %v, want ErrStoreLockUnavailable", err)
+	}
+	storeLocks.Lock()
+	n := len(storeLocks.byKey)
+	storeLocks.Unlock()
+	if n != 0 {
+		t.Errorf("the registry keeps %d entries for holds it refused, want none", n)
+	}
+	waitForOtherProcessToHold(t, path)
+}
+
 // TestTwoSpellingsOfOneLockFileAreOneHold: the registry finds a hold by the
 // lock file's identity, never by its spelling alone (B653 PR 2a's second
 // round). On a volume that folds case (macOS's APFS by default)
