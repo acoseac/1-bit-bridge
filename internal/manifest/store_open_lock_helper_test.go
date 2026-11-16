@@ -250,7 +250,10 @@ func waitForOtherProcessToHold(t *testing.T, path string, env ...string) {
 }
 
 // dirState is every entry of dir: its kind, and a regular file's size and
-// SHA-256, so two states compare byte for byte.
+// SHA-256, so two states compare byte for byte. A lock file (a name ending
+// .lock) is compared by its size, mode and modification time alone, never
+// read: Windows refuses a read of a byte range another handle has locked,
+// and the tests take these states while a restore's hold stands.
 func dirState(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -266,6 +269,10 @@ func dirState(t *testing.T, dir string) map[string]string {
 		}
 		if !fi.Mode().IsRegular() {
 			out[e.Name()] = fi.Mode().Type().String()
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".lock") {
+			out[e.Name()] = fmt.Sprintf("lock file %d %v %d", fi.Size(), fi.Mode(), fi.ModTime().UnixNano())
 			continue
 		}
 		b, err := os.ReadFile(p)

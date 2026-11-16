@@ -22,6 +22,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -141,7 +142,10 @@ func restoreInAnotherProcess(t *testing.T, path string, env ...string) (stop fun
 }
 
 // treeState is every entry under dir, recursively: its kind, and a regular
-// file's size and SHA-256, so two states compare byte for byte.
+// file's size and SHA-256, so two states compare byte for byte. A lock file
+// (a name ending .lock) is compared by its size, mode and modification time
+// alone, never read: Windows refuses a read of a byte range another handle
+// has locked, and the tests take these states while a lock is held.
 func treeState(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -156,6 +160,10 @@ func treeState(t *testing.T, dir string) map[string]string {
 		}
 		if !fi.Mode().IsRegular() {
 			out[rel] = fi.Mode().Type().String()
+			return nil
+		}
+		if strings.HasSuffix(fi.Name(), ".lock") {
+			out[rel] = fmt.Sprintf("lock file %d %v %d", fi.Size(), fi.Mode(), fi.ModTime().UnixNano())
 			return nil
 		}
 		b, err := os.ReadFile(p)
@@ -591,7 +599,10 @@ func TestTheFullRestoreKeepsAWALWhoseEpochDidNotCheckpoint(t *testing.T) {
 // TestARestoreLeavesItsSnapshotAsItWas (T41): a full restore of a snapshot
 // whose database is one step behind the ladder reads its version through
 // the snapshot reader, so the snapshot's folder lists what it listed before
-// (no lock file, no -shm), and its verification still reads VERIFIED.
+// (no lock file, no -shm), and a check of it again still finds its database
+// VERIFIED. Where no directory can be synced (Windows), a check of a
+// snapshot whose record holds a VERIFIED verdict records nothing
+// (ErrRecheckNotRecorded), and what the check found is its answer.
 func TestARestoreLeavesItsSnapshotAsItWas(t *testing.T) {
 	src := t.TempDir()
 	old := filepath.Join(src, backup.ManifestDBFileName)
@@ -615,11 +626,27 @@ func TestARestoreLeavesItsSnapshotAsItWas(t *testing.T) {
 		t.Fatalf("the restore = %v", err)
 	}
 	requireSameTree(t, snap, before)
-	res, err := backup.VerifySnapshot(t.Context(), snap, backup.VerifyOptions{})
-	if err != nil {
-		t.Fatal(err)
+	// Checked again as this platform checks it, then as one where no
+	// directory can be synced does.
+	checkAgain := func(barrier bool) {
+		t.Helper()
+		res, err := backup.VerifySnapshot(t.Context(), snap, backup.VerifyOptions{})
+		if !barrier {
+			if !errors.Is(err, backup.ErrRecheckNotRecorded) || res.Found.DatabaseState != backup.StateVerified {
+				t.Fatalf("the snapshot's check after the restore, where no directory can be synced = %+v, %v; "+
+					"want its database found VERIFIED and nothing recorded (ErrRecheckNotRecorded)", res.Found, err)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Record.DatabaseState != backup.StateVerified {
+			t.Fatalf("the snapshot's verification after the restore = %+v, want its database VERIFIED", res.Record)
+		}
 	}
-	if res.Record.DatabaseState != backup.StateVerified {
-		t.Fatalf("the snapshot's verification after the restore = %+v, want its database VERIFIED", res.Record)
-	}
+	checkAgain(fsutil.SyncsParentDir)
+	restore := backup.SetSyncsParentDirForTest(false)
+	defer restore()
+	checkAgain(false)
 }
