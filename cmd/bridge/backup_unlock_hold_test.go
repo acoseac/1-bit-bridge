@@ -395,6 +395,9 @@ func checkGivenUpIn(t *testing.T, u *unlockHold, dataDir, root string) (letGo fu
 	var once sync.Once
 	letGo = func() { once.Do(func() { close(out) }) }
 	t.Cleanup(backup.SetOnLowPriorityForTest(func() { <-out }))
+	// The caller's drain on cleanup, which runs once the bounded drain below
+	// has joined it, or ended the run.
+	drainLoopOnCleanup(t, letGo, callerDone, "the blocking check's caller")
 	t.Cleanup(func() {
 		if u != nil {
 			u.letGo()
