@@ -361,7 +361,7 @@ func TestThePageStopsItsToneByItsRequestAlone(t *testing.T) {
 		}
 	}
 	confirm := stripJSComments(extractJSFunction(t, src, "confirmPlayerToneStop"))
-	for _, want := range []string{"Date.now() + 3000", "readPlayerOutputForTone(scope, deadline - Date.now())", "setTimeout(resolve, 250)",
+	for _, want := range []string{"Date.now() + 3000", "readPlayerOutputForTone(scope, deadline - Date.now()", "setTimeout(resolve, 250)",
 		`state !== "playing" && state !== "stopping"`, "The stop is not confirmed"} {
 		if !strings.Contains(confirm, want) {
 			t.Errorf("confirmPlayerToneStop has no %s", want)
@@ -587,17 +587,135 @@ func TestAPageTheCacheShowsAgainSaysWhatTheStatusSays(t *testing.T) {
 	}
 }
 
+// TestNoStaleStatusReadPaintsOverANewerTone (B601's round 3): a status read
+// that answers after the page has moved on paints nothing. Play ends every read
+// still out as it starts the tone and again as it says the tone's result (the
+// paint's sequence, playerOutputSeq), so neither a Stop's confirmation nor the
+// five-second paint, held across a newer tone, writes "A test tone is
+// playing" over what the page said of that tone; and a Stop's confirmation
+// paints only while it is current (readPlayerOutputForTone's predicate), so
+// one whose page was hidden, which moves no sequence, paints nothing either.
+// Where node is installed it runs the shipped page, each held read released
+// with a status still playing and before its three seconds are up, nothing
+// else read in between: a confirmation's read and a poll's, each held past a
+// newer one-second tone that played to its end, and a confirmation's read
+// held past the page's pagehide.
+func TestNoStaleStatusReadPaintsOverANewerTone(t *testing.T) {
+	src := readConsoleJS(t, "static/app.js")
+	wire := stripJSComments(extractJSFunctionIfPresentOrEmpty(src, "wirePlayerOutputTone"))
+	requireInOrder(t, "Play", wire, `play.addEventListener("click", async () => {`, "playerOutputSeq++;",
+		`await API.post("/api/output/player/tone"`, "if (!scope.aborted) {", "playerOutputSeq++;", `showPlayerToneLine(r.outcome === "played"`,
+		"if (!controller.signal.aborted && !scope.aborted) {", "playerOutputSeq++;", `showPlayerToneLine("err"`)
+	read := stripJSComments(extractJSFunctionIfPresentOrEmpty(src, "readPlayerOutputForTone"))
+	requireInOrder(t, "readPlayerOutputForTone", read, "async function readPlayerOutputForTone(scope, ms, current) {",
+		"if (current() && seq === playerOutputSeq) renderPlayerOutput(st);")
+	confirm := stripJSComments(extractJSFunctionIfPresentOrEmpty(src, "confirmPlayerToneStop"))
+	requireInOrder(t, "confirmPlayerToneStop", confirm, "readPlayerOutputForTone(scope, deadline - Date.now(), current)")
+	script, assembled := tonePageScript(t, src, toneStaleRun)
+	requireCarried(t, script, assembled[len(script):], src)
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; the rest runs the shipped page")
+	}
+	raw := runScriptUnderNode(t, node, assembled, struct{}{})
+	var runs []struct {
+		Name    string   `json:"name"`
+		Posts   []string `json:"posts"`
+		Line    string   `json:"line"`
+		Painted bool     `json:"painted"`
+		Now     int      `json:"now"`
+		Held    int      `json:"held"`
+		Played  string   `json:"playedLine"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil || len(runs) != 3 {
+		t.Fatalf("node answered %s: %v", raw, err)
+	}
+	for _, r := range runs {
+		if r.Painted || r.Now != 0 || r.Held != 0 {
+			t.Errorf("%s: %+v; want the stale read, released before its three seconds, to paint nothing", r.Name, r)
+		}
+	}
+	confirmation, poll, hidden := runs[0], runs[1], runs[2]
+	if len(confirmation.Posts) != 2 || confirmation.Played == "" || confirmation.Line != confirmation.Played {
+		t.Errorf("%s: the line says %q; want the newer tone's result, %q", confirmation.Name, confirmation.Line, confirmation.Played)
+	}
+	if len(poll.Posts) != 1 || poll.Played == "" || poll.Line != poll.Played {
+		t.Errorf("%s: the line says %q; want the newer tone's result, %q", poll.Name, poll.Line, poll.Played)
+	}
+	if hidden.Line != "Stopping the tone…" {
+		t.Errorf("%s: the line says %q; want the hidden page's line as its pagehide left it", hidden.Name, hidden.Line)
+	}
+}
+
+// extractJSFunctionIfPresentOrEmpty is a top-level function of src, or "" for
+// none, so a structural check fails by what it looks for rather than stopping
+// the test before the cases node runs.
+func extractJSFunctionIfPresentOrEmpty(src, name string) string {
+	body, _ := extractJSFunctionIfPresent(src, name)
+	return body
+}
+
+// TestAStopsConfirmationKeepsTheLastToneItRead (B601's round 3): a Stop's
+// confirmation remembers the tone of the last status it read: a read that
+// fails or is cut off at the three seconds keeps it, and a read that answers
+// replaces it, with none where no tone runs. So a read cut off after one that
+// read playing says the bridge still reads the tone as playing, where it said
+// the status could not be read; a status with no tone after one that read
+// playing says so, never that the tone still plays; and every stop said not
+// confirmed leaves its line for the next status to say again (busyShown), so
+// an ordinary idle status replaces the warning. Where node is installed it runs
+// the shipped page: playing then a read held to the deadline, playing then a
+// status with no tone, and a read that never answers, each followed by an
+// idle status.
+func TestAStopsConfirmationKeepsTheLastToneItRead(t *testing.T) {
+	src := readConsoleJS(t, "static/app.js")
+	confirm := stripJSComments(extractJSFunctionIfPresentOrEmpty(src, "confirmPlayerToneStop"))
+	requireInOrder(t, "confirmPlayerToneStop", confirm, "for (;;) {", "if (st) tone = t;", "playerTone.busyShown = true;", "The stop is not confirmed")
+	if strings.Contains(confirm, "if (t) tone = t;") {
+		t.Error("confirmPlayerToneStop keeps a tone across a status that read none")
+	}
+	script, assembled := tonePageScript(t, src, toneLastReadRun)
+	requireCarried(t, script, assembled[len(script):], src)
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; the rest runs the shipped page")
+	}
+	raw := runScriptUnderNode(t, node, assembled, struct{}{})
+	var runs []struct {
+		Name   string `json:"name"`
+		Warned string `json:"warned"`
+		After  string `json:"after"`
+		Idle   string `json:"idle"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil || len(runs) != 3 {
+		t.Fatalf("node answered %s: %v", raw, err)
+	}
+	for i, want := range []string{
+		"The stop is not confirmed: three seconds on, the bridge still reads the tone as playing.",
+		"The stop is not confirmed: the bridge's player is not running, and its status says nothing of the tone.",
+		"The stop is not confirmed: the bridge's status could not be read.",
+	} {
+		r := runs[i]
+		if r.Warned != want {
+			t.Errorf("%s: the stop's line says %q; want %q", r.Name, r.Warned, want)
+		}
+		if r.Idle == "" || r.After != r.Idle {
+			t.Errorf("%s: after an idle status the line says %q; want the status's own words, %q", r.Name, r.After, r.Idle)
+		}
+	}
+}
+
 // tonePageHarness is the tone's page as the shipped functions see it: buttons
 // and selects by id, whose click runs their listeners; a document and a window
 // whose listeners a scope's signal removes and whose events the run
 // dispatches; the page's scope (pageAbort, as dispatchPageInit keeps it); the
-// console's API, whose post never answers until its signal aborts it and
-// whose get answers the statuses queued, the last one again and again, a held
-// one when the run releases it or its signal aborts it, a failed one with an
-// error; fetch, which a navigation's run holds and answers; a clock that the
-// run's advance alone moves, firing each timer due in turn; and the Player
-// page's status painted by the shipped renderPlayerOutput, what it paints
-// beside the tone stubbed.
+// console's API, whose post answers when the run resolves it (posts[i].resolve)
+// or its signal aborts it, and whose get answers the statuses queued, the last
+// one again and again, a held one when the run releases it or its signal
+// aborts it, a failed one with an error; fetch, which a navigation's run holds
+// and answers; a clock that the run's advance alone moves, firing each timer
+// due in turn; and the Player page's status painted by the shipped
+// renderPlayerOutput, what it paints beside the tone stubbed.
 const tonePageHarness = `
 class El {
   constructor(id) {
@@ -655,8 +773,8 @@ function release(st) {
 const abortError = () => { const e = new Error("aborted"); e.name = "AbortError"; return e; };
 const API = {
   post(path, body, signal) {
-    posts.push({ path, body, signal });
     return new Promise((resolve, reject) => {
+      posts.push({ path, body, signal, resolve });
       if (signal) signal.addEventListener("abort", () => reject(abortError()));
     });
   },
@@ -828,5 +946,71 @@ await cached("hidden with a Stop's confirmation out", [HOLD, status("idle")], ()
 await cached("hidden with its tone out", [status("idle")], () => {}, hideAndShow);
 await cached("shown again where the status cannot be read", [FAIL], () => {}, hideAndShow);
 await cached("a pageshow that is not the cache's", [status("idle")], () => {}, () => dispatchWindow("pageshow", { type: "pageshow", persisted: false }));
+console.log(JSON.stringify(out));
+`
+
+// toneStaleRun holds one status read for each case, lets the page move on
+// (a newer tone that plays to its end, or the page's pagehide), then releases
+// the held read with a status still playing, before its three seconds are up
+// and with nothing else read in between, and prints what the line says,
+// whether the released status was painted, the clock, the reads still held,
+// and the words of the newer tone's result.
+const toneStaleRun = `
+const played = { outcome: "played", admitted: true, format: "S24_3LE", rateHz: 48000, validBits: 24, frames: 48000 };
+const playedLine = playerToneEndText(played.outcome, "") + playerToneFormatText(played.format, played.rateHz, played.validBits, "played");
+const play = () => el("player-output-tone-play").click();
+const stop = () => el("player-output-tone-stop").click();
+async function stale(name, setup) {
+  freshPage();
+  statuses = [HOLD];
+  await setup();
+  const old = status("playing");
+  release(old);
+  await settle();
+  out.push({ name, posts: posts.map((p) => p.path), line: el("player-output-tone-msg").textContent,
+    painted: playerOutputLatest === old, now, held: held.length, playedLine });
+}
+await stale("a Stop's confirmation read answering after a newer tone's result", async () => {
+  play(); await settle();
+  stop(); await settle();
+  play(); await settle();
+  posts[1].resolve(played); await settle();
+});
+await stale("a poll's read answering after a newer tone's result", async () => {
+  loadPlayerOutput(); await settle();
+  play(); await settle();
+  posts[0].resolve(played); await settle();
+});
+await stale("a Stop's confirmation read answering after the page was hidden", async () => {
+  play(); await settle();
+  stop(); await settle();
+  dispatchWindow("pagehide"); await settle();
+});
+console.log(JSON.stringify(out));
+`
+
+// toneLastReadRun plays a tone and stops it for each case, the confirmation's
+// reads answering the statuses queued, runs the clock past its three seconds,
+// then paints an ordinary idle status as the five-second paint does, and
+// prints what the stop's line said, what the line says after the idle status,
+// and the shipped words of that idle tone.
+const toneLastReadRun = `
+const noTone = { available: true, managed: {}, running: {} };
+async function lastRead(name, queued) {
+  freshPage();
+  statuses = queued;
+  el("player-output-tone-play").click();
+  await settle();
+  el("player-output-tone-stop").click();
+  await advance(10000);
+  const warned = el("player-output-tone-msg").textContent;
+  statuses = [status("idle")];
+  loadPlayerOutput();
+  await settle();
+  out.push({ name, warned, after: el("player-output-tone-msg").textContent, idle: playerToneStatusText(status("idle").running.tone) });
+}
+await lastRead("a read cut off at the three seconds after one that read playing", [status("playing"), HOLD]);
+await lastRead("a status with no tone after one that read playing", [status("playing"), noTone]);
+await lastRead("a read that never answers", [HOLD]);
 console.log(JSON.stringify(out));
 `
