@@ -8483,6 +8483,9 @@ function wirePlayerOutputTone() {
     playerTone.controller = controller;
     playerTone.stopSeq++;
     playerTone.confirming = false;
+    // What the line said of an earlier tone is no longer the status's to say
+    // again: this tone's own words win.
+    playerTone.busyShown = false;
     // A status read before the tone starts, or while it plays, would paint
     // over what the page says of it once it answers: the tone's start, and
     // its result below, end every read still out (playerOutputSeq).
@@ -8497,6 +8500,9 @@ function wirePlayerOutputTone() {
         playerOutputSeq++;
         showPlayerToneLine(r.outcome === "played" ? "ok" : "warn",
           playerToneEndText(r.outcome, r.lastError) + playerToneFormatText(r.format, r.rateHz, r.validBits, "played"));
+        // A stop the DAC has not confirmed is the next status's to say again,
+        // so the warning gives way once the DAC closes.
+        playerTone.busyShown = r.outcome === "stop_unconfirmed";
       }
     } catch (err) {
       // An abort is Stop's, whose confirmation says what followed, or the
@@ -8566,8 +8572,10 @@ function showPlayerToneAgain(play, stop) {
 // tone reads anything else, and past the three seconds that it was not, never
 // that it was, by the last tone a read answered: a read that failed, or was
 // cut off at the three seconds, keeps the tone read before it, and one that
-// answered replaces it, with none where no tone runs. A stop not confirmed
-// leaves its line for the next status to say again (busyShown). A later Play
+// answered replaces it, with none where no tone runs. A stop not confirmed,
+// past the three seconds or read so (a tone neither idle, playing nor
+// stopping: stop_unconfirmed), leaves its line for the next status to say
+// again (busyShown), so the warning gives way once the DAC closes. A later Play
 // or Stop ends it, and so do the page's going (scope) and its being hidden;
 // a read it made paints only while it stands (current).
 async function confirmPlayerToneStop(scope) {
@@ -8587,7 +8595,7 @@ async function confirmPlayerToneStop(scope) {
     const state = t ? t.state : "";
     if (t && state !== "playing" && state !== "stopping") {
       playerTone.confirming = false;
-      playerTone.busyShown = false;
+      playerTone.busyShown = state !== "idle";
       if (state === "idle") showPlayerToneLine("ok", "The tone stopped.");
       else showPlayerToneLine("warn", playerToneStatusText(t));
       return;
