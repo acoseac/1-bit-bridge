@@ -1,0 +1,47 @@
+# B653 PR 2a: the gate's Windows test step exactly (go test -timeout 30m ./...), twice at the merge head and twice at main (an experiment, not for main).
+name: b653p2a-ci-replica
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [ "101eead8243f83c68f8a83232cfd4afa36290da6", "30ae88f604afd3efe478bcab26cc61925fb894ca" ]
+        attempt: [ 1, 2 ]
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - name: Exclude the Go temp tree from Defender
+        continue-on-error: true
+        run: |
+          GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo "$TEMP")
+          pwsh -Command "Add-MpPreference -ExclusionPath '$GOTMP'" || echo "could not set exclusion (non-fatal)"
+      - name: test (the gate's command)
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m ./... 2>&1 | tee test.log | grep -E '^(ok|FAIL|---)' ; rc=${PIPESTATUS[0]}
+          echo "ref=${{ matrix.ref }} attempt=${{ matrix.attempt }} exit=$rc seconds=$(($(date +%s)-start))"
+          grep -E '^(ok|FAIL)\s' test.log | sort -t$'\t' -k3 -rn | head -8 || true
+          exit $rc
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: replica-${{ matrix.ref }}-${{ matrix.attempt }}
+          path: test.log
