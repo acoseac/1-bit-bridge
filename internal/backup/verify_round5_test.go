@@ -64,7 +64,7 @@ func vetoed(t *testing.T, dir string) bool {
 // round 4, both reviews of the round's brief): a verdict's write that stalls
 // inside its staging, or just before its rename, and the write of INCOMPLETE
 // for a verification stopped before it began (abandonPending), are each given
-// up within their bound, and once the stall ends the write renames nothing:
+// up while they stall, and once the stall ends the write renames nothing:
 // the record is the bytes it held before, the veto the write put in place
 // before its staging stands, and no reader reads the snapshot verified. A
 // write whose rename landed before its sync stalled (a rename in the kernel
@@ -79,8 +79,11 @@ func TestAWriteGivenUpLandsNothingOnceItResumes(t *testing.T) {
 			root := filepath.Dir(c.Dir)
 			mpath := filepath.Join(c.Dir, backup.ManifestFile)
 			before := readBytes(t, mpath)
-			// The real check keeps its bound; only the parked write expires.
-			t.Cleanup(backup.SetStepBoundForTest(c.Dir, 300*time.Millisecond, "its verdict's write", "its write of INCOMPLETE"))
+			// The real check keeps its bound; the parked write is given up at its
+			// gate once it has reached the park, never by a bound from its
+			// admission, which a slow host passes first (backlog B912).
+			gate, restoreGate := backup.SetStepGateForTest(root, filepath.Base(c.Dir), "its verdict's write", "its write of INCOMPLETE")
+			t.Cleanup(restoreGate)
 			p := newParking()
 			var stage, rename func(string) error
 			switch tc {
@@ -111,12 +114,12 @@ func TestAWriteGivenUpLandsNothingOnceItResumes(t *testing.T) {
 			// end joined before any seam is put back.
 			callerDone := make(chan struct{})
 			t.Cleanup(func() {
+				gate.FireAll()
 				p.release()
 				waitCaller(t, callerDone)
 				awaitClean(t)
 			})
 			done := make(chan backup.Result, 1)
-			started := time.Now()
 			if tc == "abandonPending's write" {
 				stopped, cancel := context.WithCancel(context.Background())
 				cancel()
@@ -131,15 +134,33 @@ func TestAWriteGivenUpLandsNothingOnceItResumes(t *testing.T) {
 					done <- backup.FinishCapture(context.Background(), c, nil, backup.VerifyOptions{})
 				}()
 			}
-			select {
-			case <-p.entered:
-			case <-time.After(30 * time.Second):
-				t.Fatal("the write never began")
-			}
-			res := requireReturnedWithin(t, done, started, 5*time.Second+2*backup.StopWriteBound+3*time.Second, "the verification whose write stalls")
 			step := "its verdict's write"
 			if tc == "abandonPending's write" {
 				step = "its write of INCOMPLETE"
+			}
+			// An answer that comes first is kept where the write is parked (a
+			// park, once entered, stays seen), and is a failure where it is not.
+			var res backup.Result
+			answered := false
+			select {
+			case <-p.entered:
+			case res = <-done:
+				select {
+				case <-p.entered:
+					answered = true
+				default:
+					t.Fatalf("the verification answered %v (found %s, write %d) before its write reached the park",
+						res.VerifyErr, res.Verify.Found.DatabaseState, res.Verify.Write)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("the write never began")
+			}
+			fired := time.Now()
+			gate.Fire(step)
+			if !answered {
+				res = requireReturnedWithin(t, done, fired, 2*backup.StopWriteBound+3*time.Second, "the verification whose write stalls")
+			}
+			if tc == "abandonPending's write" {
 				if !errors.Is(res.VerifyErr, context.Canceled) {
 					t.Errorf("the stopped verification answered %v, want its stop", res.VerifyErr)
 				}
