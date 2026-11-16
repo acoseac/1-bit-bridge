@@ -72,7 +72,7 @@ func TestServeMarkerDiagnosticsCarryNoPaths(t *testing.T) {
 		dir := t.TempDir()
 		unreadableInstallMarker(t, dir, true)
 		var stderr bytes.Buffer
-		maybeRollbackOnBoot(t.Context(), &stderr, dir, filepath.Join(t.TempDir(), "bridge"))
+		maybeRollbackOnBoot(t.Context(), &stderr, dir, filepath.Join(t.TempDir(), "bridge"), serveOpts{backupProbeTimeout: testBackupProbeTimeout})
 		requirePathlessMarkerOutput(t, dir, stderr.String(), "updater: load state:")
 	})
 	t.Run("early rollback reread", func(t *testing.T) {

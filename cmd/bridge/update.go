@@ -346,7 +346,9 @@ func rereadUpdateSwitch(path string) func() error {
 // to do: for a version that refuses the settings, each reason it gave by
 // line, and the file to fix (backlog B613); for update checks turned off, or
 // settings that no longer read, by the install's reread of the switch, what
-// it found (B761's round 2).
+// it found (B761's round 2); for a binary the swap left missing, the rename
+// that puts it back, and for a marker it could not put back, the disk to
+// check (backlog B898).
 func reportInstallFailure(stderr io.Writer, err error, cfgPath string) {
 	if errors.Is(err, updater.ErrUpdateChecksOff) {
 		fmt.Fprintf(stderr, "bridge update: %v\n", err)
@@ -361,6 +363,20 @@ func reportInstallFailure(stderr io.Writer, err error, cfgPath string) {
 		return
 	}
 	fmt.Fprintf(stderr, "Install failed: %v\n", err)
+	// Backlog B898: a binary not on disk says the rename that puts it back,
+	// and a marker not put back says to look at the disk first.
+	if errors.Is(err, updater.ErrBinaryMissing) {
+		var swapErr *updater.SwapError
+		if errors.As(err, &swapErr) && swapErr.Recover != "" {
+			fmt.Fprintf(stderr, "The bridge's program file is not on disk: %s, then start the bridge.\n", swapErr.Recover)
+		} else {
+			fmt.Fprintln(stderr, "The bridge's program file is not on disk, so nothing is installed until it is back: "+
+				"the bridge log names the rename that puts it back.")
+		}
+	}
+	if errors.Is(err, updater.ErrMarkerNotRestored) {
+		fmt.Fprintln(stderr, "The install marker could not be put back: check the data dir's disk before the bridge next starts.")
+	}
 	if errors.Is(err, updater.ErrConfigRefused) {
 		fmt.Fprintf(stderr, "The running bridge is unchanged. Fix %s, then run `bridge update` again.\n", cfgPath)
 		return

@@ -3902,9 +3902,14 @@ func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 //     or the install marker's lock cannot be held (`marker-locked`:
 //     another process holds it, or the data dir's filesystem keeps no
 //     locks; backlog B692), or update checks are off, or were turned off
-//     before the install's swap (`update-checks-off`, backlog B761)
+//     before the install's swap (`update-checks-off`, backlog B761), or
+//     another program held a file of the swap past its wait and nothing
+//     was installed (`binary-in-use`, backlog B898)
 //   - 501 on Windows (Phase B is darwin/linux; Windows is a follow-up)
 //   - 403 when the binary path isn't writable (system install needs sudo)
+//   - 500 when the bridge's program file is not on disk, left so by the
+//     swap's put-back or found so (`recovery-required`), or the install
+//     marker could not be put back (`marker-not-restored`; backlog B898)
 //   - 502 on download / verify / swap failures
 func (s *Server) apiUpdatesInstall(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Updater == nil {
@@ -3935,7 +3940,11 @@ func (s *Server) apiUpdatesInstall(w http.ResponseWriter, r *http.Request) {
 //     marker's lock cannot be held (`marker-locked`), or the version
 //     rolled back from has opened the data dir, so its store may hold
 //     what the backup's version does not read (`rollback-refused`;
-//     backlog B692)
+//     backlog B692), or another program held a file of the rollback past
+//     its wait and nothing was rolled back (`binary-in-use`, backlog B898)
+//   - 500 when the bridge's program file is not on disk
+//     (`recovery-required`) or the install marker could not be put back
+//     (`marker-not-restored`; backlog B898)
 //   - 501 on Windows
 //   - 502 on rollback I/O failure (.bak missing, etc.)
 func (s *Server) apiUpdatesRollback(w http.ResponseWriter, r *http.Request) {
@@ -3964,6 +3973,16 @@ func (s *Server) apiUpdatesRollback(w http.ResponseWriter, r *http.Request) {
 // implementation as fragile — fixed.
 func classifyUpdateError(err error) (status int, short string) {
 	switch {
+	// The three of backlog B898 first, in their precedence: a binary not on
+	// disk, then a marker not put back, then a hold that ended an install or
+	// a rollback with the binary in place. Their words are the adapter's,
+	// fixed and naming no path; it logs the error whole.
+	case errors.Is(err, ErrUpdateBinaryMissing):
+		return http.StatusInternalServerError, "recovery-required"
+	case errors.Is(err, ErrUpdateMarkerNotRestored):
+		return http.StatusInternalServerError, "marker-not-restored"
+	case errors.Is(err, ErrUpdateBinaryInUse):
+		return http.StatusConflict, "binary-in-use"
 	case errors.Is(err, ErrUpdateNoUpdate):
 		return http.StatusBadRequest, "no-update"
 	case errors.Is(err, ErrUpdateActiveSessions):

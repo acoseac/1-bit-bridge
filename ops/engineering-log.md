@@ -100420,6 +100420,535 @@ tree with it the budgets check is clean (the worst load from 77.4% to 77.5%,
 `player.md` at 98,849 bytes), as are its self-test and those of `rules-for.py`
 and `move_entry.py`.
 
+## 2026-11-15 — B898 PR 1: the updater waits out a held binary where it is in place
+
+Branch `fix/b898-updater-held-binary` from main 3f4843e1, every run on the
+Linux test host. Commits: fbe92a26 (the tests first, over main's behaviour: a
+names-only shim per package, `b898_shim.go`, and `cmd/bridge/main.go` under
+the new signatures alone, so that the commit's own run shows each red at
+main, Windows' real-hold cases on windows-latest among them), 667c4277 (the
+fix, the shims removed), 93fb303f (the lock-wait pin names its exception by
+its id alone), then this record. The rules files, their History and the
+three entries moved out of `config-lifecycle.md` are round 2's commit
+8f79e202 (the round 2 section below). Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus` where a make target sets them,
+TMPDIR on the worktree's disk.
+
+### At main
+
+Every one of the updater's renames of the binary had one attempt:
+`replaceRunningBinary` (`internal/updater/rollback_replace.go` 36-59 at
+3f4843e1) vacated, placed and put back through `renameFunc` once each, and
+Windows' swap (`swap_windows.go` 55-160) armed, staged the checked candidate
+again, vacated and placed with `os.Rename`, its put-back one attempt that
+could leave no binary on disk. `RollbackBinary` stopped the SCM service
+(284-304). Install logged a marker it could not put back after a failed swap
+and answered the swap's error alone. The boot rollback put back the
+`.bak` beside the binary without asking its version, and cleared the install
+after any failed restore. The console answered every swap failure 502 `install-failed` with
+the error's text, paths included.
+
+### What changed
+
+`internal/updater`: `held.go` (one step's attempts on a schedule and a wait
+budget, `try`; `once`; the seams `renameInUse`, `probeMovable`, `renameWait`;
+the observer `SetRenameObserverForTest`), `held_windows.go` and
+`held_other.go` (`inUse`: 32 and 33 on Windows, nothing elsewhere; `movable`,
+the probe), `swapbound.go` (`forwardWaits`, `recoveryWaits`),
+`swaperror.go` (`SwapError` and its outcomes, `MarkerNotRestoredError`,
+`ErrBinaryInUse`, `ErrBinaryMissing`, `ErrMarkerNotRestored`, `binaryLatch`),
+`swap_byvacate.go` (Windows' filesystem part, untagged), `swap_unix.go` (the
+staging, the checked copy's mode and the capabilities before `armSwap`),
+`swap_copy.go`, `rollback_replace.go`, `swap_windows.go` (`RollbackBinary`
+without the SCM stop), `install.go` (the latch, twice in Install and once in
+Rollback, a marker not put back as the answer, a rollback's record kept),
+`state.go` (`RollbackRefusalAt`, the marker-write observer), `updater.go` (the
+deferred restart's latch). `cmd/bridge`: the early, crash and boot rollbacks'
+answers to a missing binary, the boot's ask of the backup's version
+(`backupNotPrevious`), `maybeRollbackOnBoot`'s error and runServe's exit 1,
+`mapUpdaterError`'s three classes and their words (`updaterWords`), the
+Error line (`logUpdaterFailure`), the adapter's restore and
+`RollbackRefusalAt`, `bridge update`'s lines. `internal/admin`: the three
+sentinels and `classifyUpdateError`'s three classes, first.
+
+### Reds at main
+
+Each new test first ran over main's code through `go test -overlay`: the
+production files at 3f4843e1, a names-only shim per package (each name with
+main's behaviour behind it; the updater's `swapByVacate` main's Windows swap
+after its stop, its two renames through `renameFunc` so that a test's
+refusals reach it) and `cmd/bridge/main.go` under the new signatures alone,
+on Linux; each prediction written before its run. Every prediction held.
+
+- `internal/updater`, red: `TestEachHeldRenameIsWaitedForWhereTheBinaryIsInPlace`
+  (24 rows of 24; main probes nothing and waits nothing: "calls =
+  "dst>aside bak>dst", want "?dst ?dst ?bak dst>aside bak>dst""),
+  `TestEachSwapOutcomeSaysWhatItLeft` (16 of 16),
+  `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed`,
+  `TestTheBackupIsWaitedForBeforeTheBinaryIsVacated`,
+  `TestAMissingBinaryRefusesEveryInstallAndRollback`,
+  `TestARollbackThatLeavesNoBinaryKeepsItsRecord`,
+  `TestAnInstallWhoseMarkerCannotBePutBackSaysSo` (both: "err = swap: Access
+  is denied. (*fmt.wrapError)"), `TestASwapInterruptedBeforeItsArmingLeavesTheStaleBackupAlone`
+  (both), `TestAVacateRefusedOnceArmedDisarmsTheInstall`,
+  `TestADeferredRestartIsNotRequestedWhileTheBinaryIsMissing` (both) and
+  `TestEveryProtectedOperationFitsInsideTheMarkersLockWait`;
+  `TestTheRollbackStopsNoService`, which reads `swap_windows.go` from disk,
+  red on a copy of fbe92a26 ("calls: map[RollbackBinary:[stopServiceIfRunning
+  replaceRunningBinary] …]"). Green as predicted:
+  `TestNothingWaitsWithNoBinaryButThePutBack` and
+  `TestNoWaitFollowsTheSwapsArming` (main waits nothing; they guard the fix's
+  waits), `TestNoRenameFailureIsAFileInUseOffWindows`,
+  `TestSwapBinaryFallsBackToCopyOnCrossDeviceRename` and
+  `TestASwapOfTheCheckedCandidateGivesItTheBinarysMode` (main always stages),
+  and every other updater test.
+- `internal/admin`: `TestClassifyUpdateError` red on its six B898 rows (502
+  `install-failed`; the join with `marker-locked` answered that), green on
+  the other thirteen.
+- `cmd/bridge`, red: `TestTheEarlyRollbackWaitsOutABackupHeldForAMoment`
+  (both: "serve = 2, want 75"; and no line of the wait),
+  `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (both: "the start = 0
+  (served true), want 75"), `TestAStartWhoseCrashRollbackLeavesNoBinaryEndsBeforeItsAdmission`,
+  `TestAnEarlyRollbackThatLeavesNoBinaryKeepsItsRecord`,
+  `TestABootRollbackThatLeavesNoBinaryEndsTheStart`,
+  `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse` (two of three;
+  "refused otherwise" green), `TestTheBootRollbackLeavesABackupThatIsNotThePreviousVersion`,
+  `TestTheConsoleAnswersEachUpdaterOutcomeInWords`,
+  `TestTheUpdatesPanelHidesRollBackWhileTheBinaryIsMissing`,
+  `TestBridgeUpdateSaysTheRenameThatPutsTheBinaryBack`,
+  `TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait` and
+  `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall`'s new row. Green as
+  predicted: `TestAServeWithoutItsDataDirsLockRollsBackAtItsBoot` (it pins
+  the unlocked start's path) and every test changed for its signatures alone.
+  The stand-in restore holds the backup file, a probe or a rename of it alike,
+  so main meets the hold at its place, as the CI runs did.
+- Windows, not run on the Linux test host: at fbe92a26 windows-latest should show red
+  `TestOnlyWindowsSharingAndLockViolationsAreAFileInUse`,
+  `TestAnAccessDeniedRenameIsAnsweredAtOnceThroughThePredicate`,
+  `TestARollbackWaitsOutAHandleThatSharesNoDeletion`,
+  `TestARollbackHeldThroughItsWaitMovesNothing`,
+  `TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre`,
+  `TestARenameOntoTheRunningImageIsAnsweredAtOnce`,
+  `TestAnInstallWaitsForItsCheckedCandidateBeforeItArms` and
+  `TestRollbackBinaryReplacesARunningExe`'s held case, and green the swap
+  tests moved onto `swapByVacate` and `TestRollbackBinary_Windows`.
+
+### Negative controls
+
+Each an uncommitted mutation of the committed fix, applied by a runner that
+reads each file's bytes first and writes them back after the run, `git
+status` empty after every batch; each prediction written before the run;
+every mutation built. Each went red exactly where predicted, and the cases
+predicted green stayed green:
+
+- N1, one attempt per step: the stage table, the backup's window, and the
+  serve tests' "for a moment" cases ("serve = 2, want 75").
+- N2, the whole rollback retried: the stage table's call order (nine rows).
+- N3, every refusal taken for a hold: "a refusal no wait ends" in both tables.
+- N4, no probe and the place retried: "a refusal heard with no binary in
+  place: {Stage:place …}".
+- N5, the put-back drawn from the forward deadline: "the put-back made 1
+  attempts after the forward deadline was spent, want 7".
+- N6, `PutBack` where the put-back failed, the rollback's and the swap's
+  each: their rows in both tables, the record case, the latch case.
+- N7, the boot clearing its marker after a hold: two of its three cases.
+- N8, the swap armed before its probes: waits after arming on four rows, and
+  the interruption case's marker armed at the probe's wait.
+- N10, the place retried, the rollback's and the swap's each: their rows of
+  `TestNothingWaitsWithNoBinaryButThePutBack`.
+- N11, the latch removed: from Install (both asks; and the ask before the
+  download alone, which then downloads before it refuses), from Rollback
+  (the console's latch case too), from the deferred restart ("the restart
+  was requested 1 time(s) with no binary on disk"), from the panel's
+  predicate.
+- N12, a marker put back as read after a missing binary: the operator's,
+  the early and the crash rollback each.
+- N13, the binary-in-use class first, in `mapUpdaterError` and in
+  `classifyUpdateError` each.
+- N14, the crash rollback going on to its admission; the boot's missing
+  binary answered nil; runServe going on past it.
+- N15, the backup's version not asked at boot: both of its tests.
+- N16, Install's and Rollback's failed marker logged alone, each.
+- The rest: the checked candidate without the binary's mode; every candidate
+  taken as beside the binary (the cross-device copy never runs); no boot
+  rollback without the data dir's lock; Rollback's latch wrapped in a refusal
+  of the rollback (the updater's case red, the console's green, its
+  precedence answering first); the console's failure logged at Warn; a hold's
+  words the error's text.
+
+Not run on the Linux test host: N1's real-hold cases 1 and 6, N3's Windows
+half (`ERROR_ACCESS_DENIED` in Windows' predicate, which builds for Windows),
+N6's case 3 and N8's case 6, all windows-latest's.
+
+N9 was withdrawn: the code it would mutate is backlog B898's PR 3's, not this
+PR's, and the other controls keep their numbers.
+
+### The runs
+
+- The x50, 16:28 to 16:48: every test the PR adds or changes that runs on
+  the Linux test host, 51 in three packages, `-race -count=50` each alone,
+  from race test binaries built once (make test's tags), four lanes at
+  GOMAXPROCS 4, the host's load 3 to 6 (another build beside it): all passed, the longest
+  `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (381 s) and
+  `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (362 s).
+- The gate, in the build slot, 17:06 to 17:39, at 93fb303f: `go vet ./...`
+  for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64 (cgo off for
+  the cross targets) and `GOOS=linux GOARCH=386 make vet`, clean; the three
+  packages' tests built for Windows; `make test P=8` with
+  `TEST_PKGS='-count=1 -timeout 45m ./...'`, 89 packages ok in 1,929 s
+  (cmd/bridge 1,856 s, past the Makefile's 30 m, hence the 45 m; manifest
+  1,792 s; admin 1,281 s; updater 43 s); `make build-all` clean; the pinned
+  gofmt over every Go file the PR touches listed nothing; `make docs-check`
+  clean.
+- The rules patch, on a copy of 93fb303f: the three moves alone proven by
+  `verify_moves.py --base HEAD` (PASS), and the whole patch PASS once its
+  four edited blocks (the B613 and B707 lines and their History twins) are
+  put back to the base's words; the copy's `make docs-check` clean
+  (`config-lifecycle.md` at 99.7 % of its budget); cmd/bridge's
+  `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`
+  and `TestNoBlankKeepers` green over it, and a citation of a test nothing
+  declares, planted in its History file, failed the first, so it read the
+  copy. Applied with git to a fresh copy of HEAD, the patch gives the same
+  bytes.
+- Not run on the Linux test host: windows-latest (the real-hold cases, and
+  the serve tests whose Windows reds this PR answers) and the loaded
+  experiment.
+
+### The Windows tests at fbe92a26
+
+fbe92a26's Windows tests are for a CI runner only, never a host with a
+registered bridge service: at that commit `RollbackBinary` is still main's,
+which asks the service manager to stop a registered bridge service once it has
+found the backup (`swap_windows.go` 284-290 there), and
+`TestRollbackBinary_Windows` and `TestRollbackBinaryReplacesARunningExe` call
+it without the `skipIfBridgeServiceRegistered` main gave them (the swap tests
+fbe92a26 moved onto `swapByVacate` reach no service manager). From 667c4277 on
+no rollback reaches the service manager (`TestTheRollbackStopsNoService`), and
+the one test that can reach an SCM wrapper, `TestSwapWindows_Composition` in
+`internal/updater/swap_windows_test.go` (`swapBinary` whole, through
+`stopServiceIfRunning`), keeps the fail-closed guard, which runs it only where
+the service manager answers that no bridge service exists.
+
+### Size
+
+Against 3f4843e1: production +1,203 −185 lines (code +641 −94), tests +2,243
+−121 (code +1,821 −98), past the brief's 500 and 1,600.
+
+### What stays open
+
+Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
+
+## 2026-11-15 — B898 PR 1, round 2: each step tried by its operation's deadline
+
+Branch `fix/b898-updater-held-binary` from round 1's head 046cd677, every run
+on the Linux test host, Go 1.27.3, TMPDIR outside the worktree. Commits:
+a2ba28ab (the deadlines and their tests), 2f9c9f81 (the Windows hold tests),
+8f79e202 (the rules, their History twins and the moves), 64b1e977 (round 1's
+record reworded, N9, fbe92a26's Windows tests), then this record.
+
+### The findings and what changed
+
+1. The forward and recovery bounds were budgets of nominal waits: a step's
+   own time (a slow probe, a slow staging copy, a rename that takes time, a
+   wait the host overran) cost nothing, so an operation could go on with its
+   whole schedule after its time had run out. Each is now a deadline on a
+   monotonic clock (`deadline` in `held.go`): the forward one set as the swap
+   or the rollback begins, shared by its staging, its probes and the
+   rollback's vacate; the recovery one set as the put-back begins; both read
+   on the moves' clock (`moves.now`; `renameNow`, `time.Now` in production,
+   whose monotonic reading `time.Time`'s comparisons use). A wait is made only
+   where it ends at or before its deadline, and an attempt begun only at or
+   before it, so where the steps take no time the schedules are as before:
+   eight attempts, the last at 4.75 s, and seven, the last at 3.15 s, and
+   `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed` keeps its
+   expectations, the steps after the spent deadline tried at the deadline
+   itself. Once the deadline is seen to have passed, no further step, attempt
+   or wait of the operation's is begun: a step not tried answers
+   `ErrDeadlinePassed`, a `*SwapError` that is `NothingMoved` (or
+   `BinaryMissing` on the rollback's missing-binary path) and never `InUse`,
+   since no hold was seen; a wait the host overran past the deadline is
+   followed by no attempt; a swap whose last probe landed past it arms
+   nothing. Two transitions complete whatever the time: the place after a
+   vacate that landed (`once` asks no deadline), and the put-back, whose
+   deadline is set as it begins and whose late landing is its success. A
+   step under way is not cut short, so a deadline bounds what is begun, and
+   `inUseError` counts its waits at their lengths in the schedule. The boot's
+   rollback keeps its vetoed marker for `ErrDeadlinePassed` as for a hold.
+   `RestoreSeams.Now` gives a test's put-back a clock its waits move
+   (`time.Now` where nil), and the rigs' clocks move only by their waits and
+   by a step a case says takes time (`heldRig`'s `took` and `over`,
+   `heldRestore`'s `took`, Windows' `realHolds`).
+2. Two of Windows' hold tests read files they still held:
+   `TestARollbackHeldThroughItsWaitMovesNothing` read the backup through its
+   share-mode-0 handle, and `TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre`
+   the aside and the backup through theirs (the backup held at the place, the
+   aside at its first put-back attempt). `readBytes` answered a read that
+   failed with "", so each failed on a byte comparison, as if a file had
+   moved. Each now keeps its let-go and calls it once the rollback has
+   returned, before any read, as does the held-throughout case of
+   `TestAnInstallWaitsForItsCheckedCandidateBeforeItArms`, and `readBytes`
+   fails the test on a read that fails ("read <path>: <error>"). The PR's
+   other Windows tests let a hold go at its first refusal (`letGoAtRefusalOf`)
+   before they read, or hold nothing.
+3. The rules were not on the branch: 8f79e202 is the patch, committed. Its
+   moves were made by `move_entry.py` and proven by `verify_moves.py --base
+   HEAD` with its four edited blocks (the B613 and B707 lines and their
+   History twins) put back to the base's words (PASS); the B898 line is
+   condensed in `config-lifecycle.md` (99,436 bytes of its 100,000), its long
+   form in the History file's B898 section. At 8f79e202 `make docs-check` is
+   clean, and cmd/bridge's `TestEveryCitedTestNameExists`,
+   `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass; a
+   citation of a test nothing declares, planted in the History file of a copy,
+   failed the first.
+4. Round 1's record named who ran it and where; it now says the Linux test
+   host.
+5. `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse`'s "refused
+   otherwise" case passed with the restore skipped, since a cleared install
+   is what it asserted: each case now asserts every call its put-back made and
+   what each answered (exactly off Windows; on Windows, where a scanner of the
+   host's may hold a file too, its last calls), so that case needs the place
+   denied and the put-back landed. Its new "out of time" case is a slow probe
+   of the backup.
+6. `defaultStateLockWait`'s list names the boot's backup version and the
+   crash rollback (backlog B898's F1), and says how a rename's waits are
+   bounded: the schedules' waits, no attempt begun past a deadline, a step
+   under way taking what its filesystem takes.
+7. N9's withdrawal is said under round 1's controls.
+8. `TestAnInstallWaitsForItsCheckedCandidateBeforeItArms` runs each case
+   under `t.Run`; `holdShareNone` puts a file whose premise rename landed
+   back, its handle closed first, before the case fails.
+9. The statement on fbe92a26's Windows tests is under round 1's record.
+
+### Reds at round 1's head
+
+Each new or changed test ran over 046cd677's code through `go test
+-overlay`: the production files at 046cd677, a names-only shim
+(`renameNow` and `ErrDeadlinePassed` declared and unused) and 046cd677's
+`RestoreSeams` with a `Now` field declared; each prediction written before
+its run. Every prediction held.
+
+- `internal/updater`: `TestEveryStepIsTriedByItsOperationsDeadline` red on
+  nine rows of twelve (a slow probe of the binary, of the backup, and of the
+  backup on the missing-binary path; a held probe whose attempts each take a
+  second, eight attempts where five fit; a wait overrun inside the deadline
+  and one past it, eight attempts where six and seven fit; the candidate's
+  slow probe; a final probe that lands late, after which it armed; a slow
+  staging), green on the three boundaries the old code keeps too (a vacate
+  that lands late, then its place; a put-back that lands late, the
+  rollback's and the swap's); `TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried`
+  red (the swap landed); every row of the unchanged schedule table and
+  `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed` green.
+- `cmd/bridge`: `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse`'s
+  "out of time" red ("the put-back's calls: ?bin ok, ?bak ok, bin>aside ok,
+  bak>bin ok", the install cleared); its other three cases green.
+- Windows, not run on the Linux test host: at 046cd677 windows-latest should
+  show `TestARollbackHeldThroughItsWaitMovesNothing` red ("a file moved") and
+  `TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre` red ("asides … want
+  the binary aside and the backup where it was"), each from a read of a file
+  the case still held, and both green at 2f9c9f81.
+
+### Negative controls
+
+Each an uncommitted mutation of the committed round, applied by a runner that
+reads each file's bytes first and writes them back after the run, `git
+status` empty after the batch; each prediction written before the run; every
+mutation built. Nine of ten went red exactly where predicted, the cases
+predicted green staying green; R3 went red where predicted and once more:
+
+- R1, the deadline subtracting only the schedule again (round 1's budget):
+  every row of the deadline table a step's time decides, the slow copy and
+  the boot's "out of time"; the boundaries, the schedule table, the put-back
+  case and "refused otherwise" green.
+- R2, the swap armed whatever its probes' time: the final probe's row alone.
+- R3, the rollback's place tried by the forward deadline: the late vacate's
+  row (the place untried, the aside put back), and, not predicted, the
+  rollback's late put-back row, whose message gains the in-use words `try`
+  gives the place's refusal.
+- R4, a put-back that lands past its deadline taken for a failure: both late
+  put-back rows.
+- R5, a step left untried read as one that landed: the rollback's two
+  slow-probe rows (the place then renames the backup over the binary), the
+  missing-binary row (answered nil), the slow staging's row (answered by the
+  arming check, in other words) and the boot's "out of time".
+- R6, the boot clearing its marker for `ErrDeadlinePassed`: "out of time"
+  alone.
+- R7, finding 5's: the boot skipping its restore and still clearing the
+  install: all four cases, "refused otherwise" by its calls, none made.
+- R8, an attempt after a wait the host overran past the deadline: that row
+  alone.
+- R9, a wait that ends exactly at the deadline not made: every
+  held-throughout row (seven attempts) and the put-back case.
+- R10, an attempt exactly at the deadline not made: the put-back case and
+  the shared-deadline row.
+- W1, `TestARollbackHeldThroughItsWaitMovesNothing` reading the backup before
+  its hold is let go, and W2, `readBytes` ignoring a read that fails: both
+  build for Windows (vet); W1's red is windows-latest's ("read …bridge.exe.bak:
+  The process cannot access the file because it is being used by another
+  process."), and W2 turns nothing red at 2f9c9f81, where no read meets a
+  hold.
+
+### The runs
+
+- The x50, 19:12 to 19:32, at 64b1e977: every test the PR adds or changes
+  that runs on the Linux test host, 53 in three packages (round 1's 51 and
+  round 2's two), `-race -count=50` each alone, from race test binaries built
+  once (make test's tags), four lanes at GOMAXPROCS 4, another build in the
+  slot beside them: all passed, the longest
+  `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (371 s) and
+  `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (363 s).
+- The gate, in the build slot, 20:00 to 20:32, at 64b1e977: `go vet ./...`
+  for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64 (cgo off for
+  the cross targets) and `GOOS=linux GOARCH=386 make vet`, clean; the three
+  packages' tests built for Windows; `make test P=8` with
+  `TEST_PKGS='-count=1 -timeout 45m ./...'`, 89 packages ok in 1,812 s
+  (cmd/bridge 1,760 s, manifest 1,697 s, admin 1,176 s, updater 42 s);
+  `make build-all` clean; the pinned gofmt over every Go file the PR touches
+  listed nothing; `make docs-check` clean.
+- Not run on the Linux test host: windows-latest (the hold tests, and W1's
+  red).
+
+### Size
+
+Round 2 against 046cd677: production +145 −75 lines, tests +308 −70.
+
+### What stays open
+
+Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
+
+## 2026-11-15 — B898 PR 1, round 3: the deadline keeps every attempt it promises
+
+Branch `fix/b898-updater-held-binary` from round 2's head bae55650, every run
+on the Linux test host, Go 1.27.3, TMPDIR outside the worktree. Commits:
+5c32976e (the deadline's waits shortened to what remains, the put-back's
+first attempt, their tests), 635de172 (the rules, their History twins and
+the moves), then this record.
+
+### The findings and what changed
+
+1. High: on a real clock the last attempt of each schedule never happened.
+   Round 2's deadline was the schedule's total from the operation's start,
+   and a wait was made only where it ended at or before it; every call takes
+   time and every sleep overruns, so the last wait always ended past the
+   deadline: the forward schedule made seven attempts, the put-back six over
+   about 1.55 s. Now a wait is admitted only while some of its deadline
+   remains, shortened to what remains, and the attempt after an admitted
+   wait is made however long the wait took (round 2's check after the wait
+   is gone), so each schedule keeps its count, its last attempt at the
+   deadline, past it by no more than the last sleep overran. A step's
+   waits, `RenameRefusal.Wait` and `SwapError.Waited` are the waits as asked
+   of the clock, the last one shortened; on a rig whose steps take no time
+   they are the schedules', so the exact totals the serve tests assert (4.75
+   s, 3.15 s, their sum) stand. Round 2's two overrun rows change on
+   purpose: a wait the host overran inside the deadline shortens the ones
+   after it to what remains (seven attempts over 1.75 s, where round 2 made
+   six), and one that overran past the deadline is still followed by its
+   attempt (eight, where round 2 made seven).
+2. P2: the deadline could skip the first put-back. `putBack` set its
+   deadline and then asked it before its first attempt, so a stall of more
+   than 3.15 s between the two reads, after a landed vacate and a refused
+   place, left the binary missing with a put-back possible. The put-back's
+   first attempt is now made whatever its deadline says (`retry`, which
+   `try` calls once it has asked the deadline); only its later attempts are
+   bounded by it.
+3. Low: the Windows check of the boot rollback's record failed on a
+   scanner's refusal of the real put-back. `heldRestore` does wait out
+   Windows' own holds (`ReplaceRunningBinaryForTest` takes Windows' `inUse`
+   beside the test's, and calls `movable` after the test's probe), but it
+   recorded such a refusal as its error's text. On Windows the record is now
+   compared once each run of one call's answers stands as its last
+   (`answered(true)`; `TestTheHeldRestoresCollapsedRecordKeepsEachCallsLastAnswer`).
+4. Low: the three new rules bullets. `cli-serve.md` and `build-ci-tests.md`
+   are condensed files ("Each long entry here is one line … ending
+   → History-rules-<name>.md"), so their B898 bullets moved verbatim to
+   their History files (`move_entry.py`), each line a shorter title and
+   every Don't; `admin-console.md` keeps its entries whole and has no
+   History file, so its bullet stays. The B898 line and its long form say
+   the shortened wait and the put-back's first attempt.
+
+The brief's own reviews decided what changed with them: round 2's check
+after the wait went, with its row; the waits recorded are those asked; the
+clock rows assert each shortened wait and total, so that the unclamped
+control fails on a duration and not on a count; outcome rows cover a hold
+that clears on a last attempt at the final probe (nothing proceeds, nothing
+arms), at the vacate (its place follows, and the put-back where the place is
+refused) and at the put-back (`PutBack`, the binary in its place); finding
+2's test drives `putBack` on a clock that moves 4 s at every read after the
+first.
+
+### Reds at round 2's head
+
+Each new or changed test ran over bae55650's `held.go`, `swapbound.go` and
+`statelock.go` through `go test -overlay`, with no shim (every name the tests
+use is bae55650's); each prediction written before its run. Every prediction
+held.
+
+- `internal/updater`: `TestEveryAttemptIsMadeOnAClockTheStepsMove` red on
+  all eight rows (seven forward attempts, six put-back attempts, and the
+  holds that clear on a last attempt answered as holds);
+  `TestThePutBacksFirstAttemptIsMadeHoweverLateItComes` red both ways ("the
+  operation's deadline passed before this step was tried", no attempt);
+  `TestEveryStepIsTriedByItsOperationsDeadline` red on its two changed rows
+  alone; the schedule tables and
+  `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed` green.
+- `cmd/bridge`: `TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt` red both
+  ways (waits ending at 1.6 s with no 1.586 s; no 1.589 s); the collapse's
+  test and the boot rollback's green.
+- Windows, not run on the Linux test host: at bae55650 windows-latest should
+  show `TestARollbackHeldThroughItsWaitMovesNothing` red on `realHolds`'
+  clock, which now overruns every sleep (seven attempts).
+
+### Negative controls
+
+Each an uncommitted mutation of the committed round, applied by a runner that
+reads each file's bytes first and writes them back after the run, `git
+status` empty after the batch; each prediction written before the run; every
+mutation built; each went red exactly where predicted, the cases predicted
+green staying green.
+
+- Q1, the unclamped wait, an admitted wait at its whole length: every clock
+  row on its waits and words, the counts unchanged ("50 100 200 400 800 1600
+  1600" ms, want "… 1587"), the deadline table's shortened-wait row, and both
+  cmd/bridge cases on their waits; the schedule tables green.
+- Q2, the put-back's first attempt asking its deadline: both cases of the
+  first-attempt test; the clock rows green.
+- Q3, round 2's rule back, no attempt after a wait that ended past the
+  deadline: every clock row and the overrun-past row.
+- Q4, a wait admitted once the deadline has passed: the row whose attempts
+  each take a second (eight attempts, not five).
+- W3, `realHolds` without its overrun, builds for Windows; its red is
+  windows-latest's.
+
+### The runs
+
+- The x50, 21:09 to 21:28, at 635de172: every test the PR adds or changes
+  that runs on the Linux test host, 57 in three packages (round 2's 53 and
+  round 3's four), `-race -count=50` each alone, from race test binaries
+  built once (make test's tags), four lanes at GOMAXPROCS 4: all passed, the
+  longest `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (359 s) and
+  `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (350 s).
+- The gate, in the build slot, 21:28 to 22:00, at 635de172: `go vet ./...`
+  for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64 (cgo off for
+  the cross targets) and `GOOS=linux GOARCH=386 make vet`, clean; the three
+  packages' tests built for Windows; `make test P=8` with
+  `TEST_PKGS='-count=1 -timeout 45m ./...'`, 89 packages ok in 1,837 s
+  (cmd/bridge 1,771 s, manifest 1,724 s, admin 1,194 s, updater 42 s);
+  `make build-all` clean; the pinned gofmt over every Go file the PR touches
+  listed nothing; `make docs-check` clean.
+- The rules, on a copy of 5c32976e: `verify_moves.py --base HEAD` PASS with
+  round 3's edited blocks put back to the base's words (two blocks moved,
+  1,976 bytes), the copy's docs-check clean, and the three sweeps green over
+  it, a citation of a test nothing declares failing the first; applied with
+  git to a fresh copy, the patch gives the same bytes.
+- Not run on the Linux test host: windows-latest (the hold tests, and W3's
+  red).
+
+### Size
+
+Round 3 against bae55650: production +60 −50 lines, tests +274 −79.
+
+### What stays open
+
+Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
 ## 2026-11-15 — B728 B9 PR 3a: the engine reserves the player's configuration while a choice is written
 
 Branch `feat/b728-b9-pr3a-reservation`, from main at ca4473ff (3f4843e1,

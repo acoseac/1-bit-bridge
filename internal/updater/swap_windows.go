@@ -15,9 +15,9 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
 
-// scmStopWait, how long the swap and the rollback wait for the SCM to stop
-// the service, is in swapbound.go, where its bound against the install
-// marker's lock's wait is checked on every platform.
+// scmStopWait, how long the swap waits for the SCM to stop the service, is
+// in swapbound.go, where its bound against the install marker's lock's wait
+// is checked on every platform.
 
 // swapBinary atomically replaces the running bridge.exe on Windows.
 //
@@ -47,13 +47,14 @@ import (
 //
 // **markSwapStarted** (nil in tests) is invoked immediately before the
 // first rename — deliberately AFTER the SCM stop, which is where this
-// platform's marker-armed-but-nothing-mutated window lives: the stop can
+// platform's marker-armed-but-nothing-mutated window lived: the stop can
 // block for scmStopWait (15 s), and a kill in there used to leave the
 // next boot renaming a two-versions-old .bak over a healthy binary. See
-// State.SwapStarted. A non-nil error aborts before any rename; the
-// deferred svc.Start still brings the service back.
+// State.SwapStarted. And after the staging and the probes, whose waits
+// for another process's hold come before anything is armed (backlog B898;
+// swapByVacate, which makes the renames). A non-nil error aborts before
+// any rename; the deferred svc.Start still brings the service back.
 func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) error {
-	bak := dst + backupExt
 
 	// SCM coordination: try to stop the service first. If we can't
 	// reach SCM (no admin), or no service registered, or service
@@ -89,10 +90,9 @@ func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) 
 		return fmt.Errorf("stop SCM service: %w", stoppedErr)
 	}
 
-	// Rename trick. os.Rename on Windows uses MoveFileEx with
-	// MOVEFILE_REPLACE_EXISTING, so a stale .bak is silently
-	// overwritten. Wrap each step's error so the operator can tell
-	// which side of the swap failed.
+	// Rename trick (swapByVacate). os.Rename on Windows uses MoveFileEx
+	// with MOVEFILE_REPLACE_EXISTING, so a stale .bak is silently
+	// overwritten.
 	//
 	// Note on B35 (the swap_unix.go "hardlink dst→bak, then rename over
 	// dst" fix that keeps dst present throughout): it deliberately does
@@ -100,55 +100,19 @@ func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) 
 	// the way (the trick above) but refuses to REPLACE it in place —
 	// MoveFileEx over a mapped, running image fails with a sharing
 	// violation. So the running dst MUST be vacated to bak first, then the
-	// new binary placed at the now-empty dst; the tiny no-file window
-	// between the two renames is structurally unavoidable on this OS.
-	// NTFS metadata journaling ($LogFile) keeps each individual rename
-	// crash-consistent, and the boot-time rollback marker + SCM restart
-	// recover the rare crash-in-window case.
+	// new binary placed at the now-empty dst.
 	//
-	// Everything above this line is non-destructive, so the marker only
-	// becomes restorable-from here.
-	if err := armSwap(markSwapStarted); err != nil {
-		return err
-	}
-	// Stage BEFORE vacating dst. This is not a fallback here — the
-	// hardlink trick cannot apply on Windows at all (see the note above),
+	// The new bytes are beside dst before anything is vacated. This is not
+	// a fallback here — the hardlink trick cannot apply on Windows at all,
 	// so EVERY swap on this OS goes through the two-rename shape, and
-	// until now every one of them called placeNewBinaryWindows with dst
-	// already gone. That function's own docblock names the host where its
-	// cross-volume branch fires: "bridge.exe on D: and the data dir under
-	// %LOCALAPPDATA% on C: — a small-SSD media PC — EVERY update failed".
-	// On exactly that host, every update then spent the duration of a
-	// ~30 MiB copy plus a flush with no bridge.exe on disk.
+	// until the staging moved ahead of the vacate every one of them called
+	// placeNewBinaryWindows with dst already gone. That function's own
+	// docblock named the host where its cross-volume branch fires:
+	// "bridge.exe on D: and the data dir under %LOCALAPPDATA% on C: — a
+	// small-SSD media PC — EVERY update failed". On exactly that host, every
+	// update then spent the duration of a ~30 MiB copy plus a flush with no
+	// bridge.exe on disk.
 	//
-	// mode 0: NTFS has no executable bit to set.
-	staged, err := stageIntoDir(newBinary, dst, 0)
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.Remove(staged)
-		}
-	}()
-	if err := os.Rename(dst, bak); err != nil {
-		return fmt.Errorf("rename %s -> %s: %w", dst, bak, err)
-	}
-	// Same directory as dst, so never cross-volume — the window this
-	// leaves is the gap between two adjacent renames, which is what the
-	// note above has always claimed it was.
-	if err := os.Rename(staged, dst); err != nil {
-		// Restore .bak so we don't leave the operator with no
-		// executable.
-		if rerr := os.Rename(bak, dst); rerr != nil {
-			return fmt.Errorf("install %s -> %s failed (%v); rollback also failed (%v); manual recovery needed",
-				staged, dst, err, rerr)
-		}
-		return fmt.Errorf("install %s -> %s: %w (rolled back)", staged, dst, err)
-	}
-	committed = true
-
 	// No directory fsync on Windows: FlushFileBuffers rejects directory
 	// handles (ERROR_ACCESS_DENIED / ERROR_INVALID_HANDLE) regardless of
 	// the access right requested, so the old CreateFile + FlushFileBuffers
@@ -156,7 +120,7 @@ func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) 
 	// guaranteed by os.Rename (MoveFileEx) + NTFS metadata journaling
 	// ($LogFile). (Gemini r2 review; supersedes the PR #48 GENERIC_WRITE
 	// note.)
-	return nil
+	return swapByVacate(dst, newBinary, backupExt, markSwapStarted)
 }
 
 // installedMode is the permission bits a staged binary takes: none, since
@@ -276,30 +240,30 @@ func waitServiceStopped(s *mgr.Service, timeout time.Duration) error {
 	return fmt.Errorf("service did not stop within %s", timeout)
 }
 
-// RollbackBinary restores dst.bak → dst, with the same SCM-stop
-// coordination as swapBinary. The restore itself is not the Unix
-// rename: Windows refuses to replace a mapped running image, and both
-// callers run inside the process that maps dst. replaceRunningBinary
-// moves that image aside first.
+// RollbackBinary restores dst.bak → dst. The restore itself is not the
+// Unix rename: Windows refuses to replace a mapped running image, and
+// every caller runs inside the process that maps dst.
+// replaceRunningBinary moves that image aside first.
+//
+// It stops no SCM service (backlog B898; until then it made swapBinary's
+// stop, up to scmStopWait, under the install marker's lock). Its callers
+// all run in serve: the console's Roll back, the early, crash and boot
+// rollbacks. A rename of the mapped image needs no stop, the vacate
+// being a rename of it, and the stop was skipped already where serve is
+// the service. In a foreground serve that holds its data dir's lock, a
+// bridge service the stop could reach serves another data dir, another
+// install the rollback has no business stopping. A serve that could not
+// take its data dir's lock (a lock file it cannot open or lock, which it
+// starts without; a filesystem that keeps no locks refuses the install
+// marker's lock too, so no rollback runs there) may have a bridge
+// service beside it on the same data dir, which it says it cannot rule
+// out: that service runs its image until it restarts, and its next start
+// runs the binary put back.
 func RollbackBinary(dst, backupExt string) error {
 	bak := dst + backupExt
 	if _, err := os.Stat(bak); err != nil {
 		return fmt.Errorf("backup %s missing: %w", bak, err)
 	}
-
-	stoppedHandle, stoppedErr := stopServiceIfRunning()
-	if stoppedHandle != nil {
-		defer func() {
-			if err := stoppedHandle.svc.Start(); err != nil {
-				logger.Warn("post-rollback service restart failed; will start on next boot", "err", err)
-			}
-			stoppedHandle.svc.Close()
-			stoppedHandle.scm.Disconnect()
-		}()
-	} else if stoppedErr != nil && !errors.Is(stoppedErr, errSCMUnavailable) && !errors.Is(stoppedErr, errServiceNotRegistered) {
-		return fmt.Errorf("stop SCM service: %w", stoppedErr)
-	}
-
 	return replaceRunningBinary(dst, bak)
 }
 

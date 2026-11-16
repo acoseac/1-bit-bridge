@@ -81,10 +81,12 @@ func (e *ChecksOffLockError) Unwrap() error { return e.cause }
 // save is published and the updater told.
 //
 // It waits as every taker of the lock does, LockState's wait (30 s), which an
-// install's hold fits inside: its marker read, its two marker writes and its
+// install's hold fits inside: its marker read, its marker writes and its
 // swap, which first waits up to scmStopWait for the SCM to stop the bridge's
 // Windows service where it stops one (swap_windows.go's stopServiceIfRunning;
-// TestAnSCMStopFitsInsideTheMarkersLockWait holds it to half the wait). A swap
+// TestAnSCMStopFitsInsideTheMarkersLockWait holds it to half the wait), and
+// then for another process's hold on its files within its schedules (backlog
+// B898; TestEveryProtectedOperationFitsInsideTheMarkersLockWait). A swap
 // that stops nothing (a Startup-folder install's, or one run without the
 // rights to stop the service) leaves the save to take the lock once the swap
 // is done. A stop of serve ends the wait as it ends every request of the

@@ -2194,6 +2194,10 @@ type updateInfoAdapter struct {
 	// checks the candidate against it, and a version held back for
 	// refusing it is held only while it is unchanged.
 	configPath string
+	// restoreBackup is the console's rollback's restore
+	// (InstallOptions.RestoreBackup): nil, updater.RollbackBinary, but in a
+	// boot test (serveOpts.restoreBackup).
+	restoreBackup func(dst, backupExt string) error
 }
 
 func (a updateInfoAdapter) UpdateInfo() api.UpdateInfo {
@@ -2301,16 +2305,17 @@ func (a updateInfoAdapter) readMarker() markerRead {
 // rollback is what the Updates panel offers of the backup beside the binary,
 // from the marker read m: Roll back where the console's rollback would put
 // the backup back (Updater.Rollback), and where the backup is there and that
-// rollback would refuse on the marker, why, in the rollback's own words,
-// which name no path (updater.RollbackRefusalOn); with no backup, nothing,
-// and no reason. Since B692 and B705 the rollback refuses once a version
-// other than the backup's has opened the data dir, so a Roll back offered
-// from the backup alone showed, and then answered 409 (backlog B707).
+// rollback would refuse, on the binary or on the marker, why, in the
+// rollback's own words, which name no path (updater.RollbackRefusalAt: the
+// recovery latch, backlog B898, then RollbackRefusalOn); with no backup,
+// nothing, and no reason. Since B692 and B705 the rollback refuses once a
+// version other than the backup's has opened the data dir, so a Roll back
+// offered from the backup alone showed, and then answered 409 (backlog B707).
 func (a updateInfoAdapter) rollback(m markerRead) (can bool, refusal string) {
 	if !a.backupPresent() {
 		return false, ""
 	}
-	if why := updater.RollbackRefusalOn(m.st, m.err); why != "" {
+	if why := updater.RollbackRefusalAt(m.st, m.err, a.binaryPath); why != "" {
 		return false, why
 	}
 	return true, ""
@@ -2338,7 +2343,7 @@ func (a updateInfoAdapter) backupPresent() bool {
 // check they stopped, as admin.ErrUpdateChecksOff (backlog B761).
 func (a updateInfoAdapter) CheckNow(ctx context.Context) (admin.UpdateStatus, error) {
 	_, err := a.u.CheckNow(ctx)
-	return a.Status(), mapUpdaterError(err)
+	return a.Status(), mapUpdaterError(err, updaterInstall)
 }
 
 func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.UpdateStatus, error) {
@@ -2349,6 +2354,7 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		Sessions:   a.sessions,
 		ConfigPath: a.configPath,
 	})
+	logUpdaterFailure(updaterInstall, err)
 	// The marker as the install left it, read once, as Status reads it.
 	m := a.readMarker()
 	canRollback, rollbackRefusal := a.rollback(m)
@@ -2378,31 +2384,68 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		RejectedReason:   m.st.RejectedReason,
 		InstallWarning:   st.InstallWarning,
 		CheckEnabled:     st.CheckEnabled,
-	}, mapUpdaterError(err)
+	}, mapUpdaterError(err, updaterInstall)
 }
 
 func (a updateInfoAdapter) Rollback(ctx context.Context, force bool) error {
-	return mapUpdaterError(a.u.Rollback(ctx, updater.InstallOptions{
-		DataDir:    a.dataDir,
-		BinaryPath: a.binaryPath,
-		Force:      force,
-		Sessions:   a.sessions,
-	}))
+	err := a.u.Rollback(ctx, updater.InstallOptions{
+		DataDir:       a.dataDir,
+		BinaryPath:    a.binaryPath,
+		Force:         force,
+		Sessions:      a.sessions,
+		RestoreBackup: a.restoreBackup,
+	})
+	logUpdaterFailure(updaterRollback, err)
+	return mapUpdaterError(err, updaterRollback)
+}
+
+// updaterAction is what the console asked of the updater, for the words of an
+// answer that differ between an install and a rollback.
+type updaterAction bool
+
+const (
+	updaterInstall  updaterAction = false
+	updaterRollback updaterAction = true
+)
+
+// logUpdaterFailure logs an install's or a rollback's failure of backlog
+// B898's three classes whole, at Error, where the bridge's own files may be
+// named: the console's answer carries fixed words alone (mapUpdaterError).
+func logUpdaterFailure(act updaterAction, err error) {
+	if !errors.Is(err, updater.ErrBinaryMissing) && !errors.Is(err, updater.ErrMarkerNotRestored) &&
+		!errors.Is(err, updater.ErrBinaryInUse) {
+		return
+	}
+	what := "install"
+	if act == updaterRollback {
+		what = "rollback"
+	}
+	logger.Error("the console's "+what+" failed", "err", err)
 }
 
 // mapUpdaterError translates internal/updater's typed sentinel
 // errors to the admin-package equivalents so handlers_api.go's
 // classifyUpdateError can switch on errors.Is without importing
 // internal/updater. The original error message is preserved as the
-// %w child so the operator-facing detail still threads through.
+// %w child so the operator-facing detail still threads through, but
+// for backlog B898's three classes, which come first in their
+// precedence (a binary not on disk, a marker not put back, a hold
+// that ended an install or a rollback act asked for) and are answered
+// in fixed words that name no path (updaterWords).
 //
 // New sentinel pairings land here as the Phase C / future work
 // expands the install error surface.
-func mapUpdaterError(err error) error {
+func mapUpdaterError(err error, act updaterAction) error {
 	if err == nil {
 		return nil
 	}
 	switch {
+	case errors.Is(err, updater.ErrBinaryMissing):
+		return detailError{sentinel: admin.ErrUpdateBinaryMissing, msg: updaterWords(err, act)}
+	case errors.Is(err, updater.ErrMarkerNotRestored):
+		return detailError{sentinel: admin.ErrUpdateMarkerNotRestored, msg: updaterWords(err, act)}
+	case errors.Is(err, updater.ErrBinaryInUse):
+		return detailError{sentinel: admin.ErrUpdateBinaryInUse, msg: updaterWords(err, act)}
 	case errors.Is(err, updater.ErrNoUpdate):
 		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateNoUpdate, err.Error())
 	case errors.Is(err, updater.ErrActiveSessions):
@@ -2435,6 +2478,46 @@ func mapUpdaterError(err error) error {
 	default:
 		return err
 	}
+}
+
+// updaterWords is what the console says of err, one of backlog B898's three
+// classes, for an install or a rollback (act), in that precedence: a binary
+// not on disk (the latch's refusal, or what a failed put-back left), a marker
+// not put back, and a hold that ended it with the binary in place, which says
+// how long it was waited for where it was. No path, no error's text: the log
+// has the error whole (logUpdaterFailure).
+func updaterWords(err error, act updaterAction) string {
+	did, done, of := "installed", "nothing is installed or rolled back", "update"
+	if act == updaterRollback {
+		did, of = "rolled back", "rollback"
+	}
+	var swapErr *updater.SwapError
+	isSwap := errors.As(err, &swapErr)
+	switch {
+	case errors.Is(err, updater.ErrBinaryMissing) && isSwap && swapErr.Outcome == updater.BinaryMissing:
+		return fmt.Sprintf("The bridge's program file is not on disk: the %s moved it aside and could not put it back. "+
+			"The bridge goes on running until it stops, but cannot start again until the file is back, and %s until then. "+
+			"The bridge log names the one rename that puts it back.", of, done)
+	case errors.Is(err, updater.ErrBinaryMissing):
+		return "The bridge's program file is not on disk, so " + done + " until it is back: the bridge log names the rename " +
+			"that puts it back."
+	case errors.Is(err, updater.ErrMarkerNotRestored):
+		return fmt.Sprintf("Nothing was %s and the bridge's program file is as it was, but the install marker could not be "+
+			"put back as it was read: the bridge log says why. Check the data dir's disk; the next start leaves the backup "+
+			"as it is.", did)
+	}
+	held := fmt.Sprintf("Windows reported a file of the %s in use by another program, most likely a virus scanner", of)
+	if isSwap && swapErr.Waited > 0 {
+		held += fmt.Sprintf(", for %s seconds", strconv.FormatFloat(swapErr.Waited.Seconds(), 'f', -1, 64))
+	}
+	if isSwap && swapErr.Outcome == updater.PutBack {
+		held += ", so the running version was put back and nothing was " + did
+		if act == updaterInstall {
+			held += "; the backup of the version before it was replaced in the attempt"
+		}
+		return held + "."
+	}
+	return held + ", so nothing was " + did + ": try again in a minute."
 }
 
 // detailError is an admin sentinel with a message of its own: the console
@@ -2511,24 +2594,44 @@ const backupShutdownWait = 45 * time.Second
 // to give, a filesystem that keeps none, a failure, serve's stop), leaves the
 // marker and both binaries as they are, said on one line: the boot after it
 // asks again.
-func maybeRollbackOnBoot(ctx context.Context, stderr io.Writer, dataDir, binaryPath string) {
-	_ = bootHousekeeping(ctx, stderr, dataDir, binaryPath, version.ServerVersion, nil)
+//
+// A restore that left no binary at its path returns its error, which
+// matches updater.ErrBinaryMissing, the vetoed marker kept, and serve ends
+// the start (backlog B898). opts gives the restore and the backup's
+// version's ask and bound (serveOpts.restoreBackup, probeVersion,
+// backupProbeBound), production's where unset.
+func maybeRollbackOnBoot(ctx context.Context, stderr io.Writer, dataDir, binaryPath string, opts serveOpts) error {
+	return bootHousekeepingWith(ctx, stderr, dataDir, binaryPath, version.ServerVersion,
+		bootSeams{restore: opts.restoreBackup, probeVersion: opts.probeVersion, probeBound: backupProbeBound(opts)})
 }
 
 // bootHousekeeping is maybeRollbackOnBoot as the boot of version current,
-// which puts the backup back through restore (nil is updater.RollbackBinary):
-// a test runs it as the version a rollback put back, or holds it in its
-// restore. It returns why it left the marker as it is, where it did for a
-// reason of its own: the install marker's lock it could not hold, or an
-// interrupted rollback's record it would not confirm.
-func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, restore func(dst, suffix string) error) error {
-	return bootHousekeepingWith(ctx, stderr, dataDir, binaryPath, current, restore, nil)
+// which puts the backup back through restore (nil is updater.RollbackBinary)
+// once the backup has said its version within probeBound: a test runs it as
+// the version a rollback put back, or holds it in its restore. It returns
+// why it left the marker as it is, where it did for a reason of its own: the
+// install marker's lock it could not hold, an interrupted rollback's record
+// it would not confirm, a stop, or a restore that left no binary.
+func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string,
+	restore func(dst, suffix string) error, probeBound time.Duration) error {
+	return bootHousekeepingWith(ctx, stderr, dataDir, binaryPath, current, bootSeams{restore: restore, probeBound: probeBound})
 }
 
-// bootHousekeepingWith is bootHousekeeping removing the backup after a
-// confirmed install through remove (nil is updater.RemoveBackup): a test runs
-// it with a removal that fails, as one can on Windows.
-func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, restore, remove func(dst, suffix string) error) error {
+// bootSeams are what the boot's housekeeping calls that a test stands in for,
+// production's where unset: restore puts the backup back
+// (updater.RollbackBinary), remove takes it away after a confirmed install
+// (updater.RemoveBackup), and probeVersion asks the backup its version
+// (updater.ProbeVersionWithin) within probeBound.
+type bootSeams struct {
+	restore, remove func(dst, suffix string) error
+	probeVersion    func(ctx context.Context, binary string, within time.Duration) (string, error)
+	probeBound      time.Duration
+}
+
+// bootHousekeepingWith is bootHousekeeping through seams: a test removes the
+// backup through a removal that fails, as one can on Windows.
+func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, seams bootSeams) error {
+	restore, remove := seams.restore, seams.remove
 	if restore == nil {
 		restore = updater.RollbackBinary
 	}
@@ -2609,6 +2712,25 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 			}
 			return nil
 		}
+		// The backup first (backlog B898): a regular file whose version names
+		// the install's PreviousVersion, as the early and crash rollbacks ask
+		// it. A marker left armed over a swap that moved nothing, its disarm
+		// not written, has an older backup beside the binary that runs, and
+		// putting that back would be a downgrade by two versions. Any other
+		// backup is left where it is, and the install cleared as one never
+		// swapped; a stop while it answers leaves the install as it is.
+		if why := backupNotPrevious(ctx, binaryPath+".bak", st.PreviousVersion, seams); why != "" {
+			if err := ctx.Err(); err != nil {
+				fmt.Fprintf(stderr, "updater: stopped while the backup said its version; the install is left as it is, for a later start\n")
+				return err
+			}
+			fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak, "+
+				"since %s: it is left where it is\n", st.TargetVersion, current, binaryPath, why)
+			if err := updater.ClearInstall(dataDir, st); err != nil {
+				fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
+			}
+			return nil
+		}
 		// The veto of the install's version's store migrations first,
 		// durably, then the rename (round 4): a command of that version may be
 		// running from its image, its store open waiting for this lock, and
@@ -2626,6 +2748,20 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); rolling back to .bak\n",
 			st.TargetVersion, current)
 		if err := restore(binaryPath, ".bak"); err != nil {
+			// The vetoed marker stays where nothing was put back for another
+			// process's hold or for the rollback's deadline (backlog B898), for
+			// the next start to ask again within the window, and where no
+			// binary is left, which ends the start; any other failure clears
+			// the install, as before.
+			switch {
+			case errors.Is(err, updater.ErrBinaryMissing):
+				fmt.Fprintf(stderr, "updater: rollback failed, and the bridge's program file is not at its path: %v; the install's marker "+
+					"is kept: %s\n", err, binaryMissing(err))
+				return err
+			case errors.Is(err, updater.ErrBinaryInUse), errors.Is(err, updater.ErrDeadlinePassed):
+				fmt.Fprintf(stderr, "updater: rollback failed: %v; the install's marker is kept, for the next start to ask again\n", err)
+				return nil
+			}
 			fmt.Fprintf(stderr, "updater: rollback failed: %v (manual recovery needed at %s)\n",
 				err, binaryPath)
 		}
@@ -2684,6 +2820,28 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		}
 	}
 	return nil
+}
+
+// backupNotPrevious says why the backup at bak is not the version an install
+// replaced, previous, for the boot rollback to leave it (backlog B898): not a
+// regular file, no version said within seams.probeBound, or another version;
+// "" where it is.
+func backupNotPrevious(ctx context.Context, bak, previous string, seams bootSeams) string {
+	if fi, err := os.Lstat(bak); err != nil || !fi.Mode().IsRegular() {
+		return fmt.Sprintf("there is no backup to put back, a regular file at %s", bak)
+	}
+	probe := seams.probeVersion
+	if probe == nil {
+		probe = updater.ProbeVersionWithin
+	}
+	got, err := probe(ctx, bak, seams.probeBound)
+	if err != nil {
+		return fmt.Sprintf("the backup did not say its version: %v", err)
+	}
+	if !updater.SameVersion(got, previous) {
+		return fmt.Sprintf("the backup is %s, where the install replaced %s", got, previous)
+	}
+	return ""
 }
 
 func main() {
@@ -3089,8 +3247,18 @@ type serveOpts struct {
 	// restoreBackup and saveUpdateState stand in for updater.RollbackBinary
 	// and updater.SaveState in the early rollback and its disarm, so a
 	// boot test can make either fail. Nil (the updater's) in production.
+	// restoreBackup is the crash, the boot and the console's rollbacks'
+	// restore too.
 	restoreBackup   func(dst, backupExt string) error
 	saveUpdateState func(dataDir string, st updater.State) error
+	// probeVersion and checkConfig stand in for updater.ProbeVersionWithin
+	// and updater.CheckConfig where a rollback at a start asks the backup its
+	// version (the early, crash and boot rollbacks) and the crash rollback
+	// its settings check. Nil (the updater's) in production; a boot test
+	// records the bound each is asked within and answers as the backup would
+	// (backlog B898's pin of what holds the install marker's lock).
+	probeVersion func(ctx context.Context, binary string, within time.Duration) (string, error)
+	checkConfig  func(ctx context.Context, binary, configPath string) updater.ConfigCheck
 	// updateReleases is the releases API serve's updater asks (its Client):
 	// nil, GitHub's, everywhere but the boot tests, which point it at a
 	// server of their own and count what it is asked (backlog B761). Per
@@ -4372,8 +4540,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// answered as ready and stayed up (backlog B660; serve_probation.go,
 	// started once ServeTLS runs). Nothing listens yet here, so this
 	// confirms nothing. Failures are logged but non-fatal — operator can
-	// still recover by hand.
-	maybeRollbackOnBoot(ctx, stderr, cfg.DataDir, binaryPath)
+	// still recover by hand — but for a restore that left no binary at its
+	// path, which ends the start here, before the updater and every
+	// listener (backlog B898): this process runs from its image, and what it
+	// would write past this point is what the backup put back must read.
+	if err := maybeRollbackOnBoot(ctx, stderr, cfg.DataDir, binaryPath, opts); errors.Is(err, updater.ErrBinaryMissing) {
+		fmt.Fprintf(stderr, "serve: not starting: the boot's rollback left no binary at its path, and the bridge could not start again\n")
+		return 1
+	}
 
 	// Background updater: polls GitHub Releases on a configurable
 	// cadence (Phase A), exposes operator-triggered Install via the
@@ -4504,11 +4678,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	}()
 
 	updAdapter := updateInfoAdapter{
-		u:          upd,
-		sessions:   sessions,
-		dataDir:    cfg.DataDir,
-		binaryPath: binaryPath,
-		configPath: *configPath,
+		u:             upd,
+		sessions:      sessions,
+		dataDir:       cfg.DataDir,
+		binaryPath:    binaryPath,
+		configPath:    *configPath,
+		restoreBackup: opts.restoreBackup,
 		// Phase B-Windows (PR #48) wired the swap path on Windows
 		// alongside darwin/linux. CanInstall is true everywhere
 		// the binary builds.
