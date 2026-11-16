@@ -403,9 +403,10 @@ func TestARestoreOverAnArmedInstallKeepsEveryRollbackOff(t *testing.T) {
 	// A restore stopped once its record is made and before its first write
 	// to the restored files leaves the record, durable (SaveState's barrier),
 	// and nothing else: the record step is made here as the restore makes it
-	// (updater.DisarmBeforeRestoring, recordRestoredStore's call), standing in
-	// for a kill right after it. The rerun records nothing more, completes,
-	// and every rollback still refuses.
+	// (updater.HoldMarkerForRestore, then its Record: holdRestoreMarker's and
+	// recordRestoredStore's calls), standing in for a kill right after it,
+	// which lets the lock go. The rerun records nothing more, completes, and
+	// every rollback still refuses.
 	t.Run("a rerun after a restore stopped once its record was made", func(t *testing.T) {
 		dst := t.TempDir()
 		live := filepath.Join(dst, backup.ManifestDBFileName)
@@ -414,7 +415,13 @@ func TestARestoreOverAnArmedInstallKeepsEveryRollbackOff(t *testing.T) {
 			t.Fatal(err)
 		}
 		before, _ := os.ReadFile(live)
-		if _, err := updater.DisarmBeforeRestoring(dst, version.ServerVersion); err != nil {
+		hold, err := updater.HoldMarkerForRestore(context.Background(), dst, version.ServerVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = hold.Record()
+		hold.Release()
+		if err != nil {
 			t.Fatal(err)
 		}
 		st, err := updater.LoadState(dst)

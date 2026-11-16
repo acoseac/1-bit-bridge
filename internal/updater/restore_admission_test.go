@@ -4,23 +4,34 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"syscall"
 	"testing"
 	"time"
 )
 
-// theRestores are a restore of the store's two asks of the install marker:
-// its admission, before it writes anything, which records nothing, and its
-// record, just before its first write to the restored files.
+// theRestores are a restore of the store's two asks of the install marker,
+// each under its hold (HoldMarkerForRestore): its admission, before it
+// writes anything, which records nothing, and its record, just before its
+// first write to the restored files.
 var theRestores = []struct {
 	name    string
 	run     func(dataDir, current string) error
 	records bool
 }{
-	{"the restore's admission", AdmitStoreRestore, false},
+	{"the restore's admission", func(dataDir, current string) error {
+		h, err := HoldMarkerForRestore(context.Background(), dataDir, current)
+		h.Release()
+		return err
+	}, false},
 	{"the restore's record", func(dataDir, current string) error {
-		_, err := DisarmBeforeRestoring(dataDir, current)
+		h, err := HoldMarkerForRestore(context.Background(), dataDir, current)
+		if err != nil {
+			return err
+		}
+		defer h.Release()
+		_, err = h.Record()
 		return err
 	}, true},
 }
@@ -94,41 +105,55 @@ func TestARestoreByTheVersionAnInstallReplacesIsRefused(t *testing.T) {
 	})
 }
 
-// TestARestoreByTheVersionAnInstallReplacesIsRefusedWithoutTheLock: the same
-// refusal where the install marker's lock cannot be taken (held by another
-// open past the wait, no lock to give, a failure) and where the filesystem
-// keeps none, by the restore's admission and its record alike, writing
-// nothing: the unlocked disarm went on there before, a migration of the
-// previous version having nothing to record.
+// TestARestoreByTheVersionAnInstallReplacesIsRefusedWithoutTheLock: a
+// restore refuses where the install marker's lock cannot be held
+// (ErrMarkerLockUnavailable), whatever the marker holds and where there is
+// none, writing nothing: held by another open past the wait, no lock to
+// give, a failure, and a filesystem that keeps none. Until B653 PR 2a's third
+// round a disarm that could not take the lock went on where it had nothing
+// to write, an absent marker among them, and an installer that held the lock
+// could arm its install once the restore went on.
 func TestARestoreByTheVersionAnInstallReplacesIsRefusedWithoutTheLock(t *testing.T) {
 	shortStateLockWait(t, 100*time.Millisecond)
+	markers := []struct {
+		name  string
+		state *State
+	}{
+		{"no marker", nil},
+		{"an install over this version", &State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
+			AttemptedAt: time.Now().UTC().Add(-time.Minute), SwapStarted: true}},
+		{"an install of this version", &State{Status: "installing", TargetVersion: "0.2.1", PreviousVersion: "0.2.0",
+			AttemptedAt: time.Now().UTC().Add(-time.Minute), SwapStarted: true}},
+	}
 	check := func(t *testing.T, dir string, run func(dataDir, current string) error) {
 		t.Helper()
-		before, err := os.ReadFile(StatePath(dir))
-		if err != nil {
-			t.Fatal(err)
+		before, beforeErr := os.ReadFile(StatePath(dir))
+		err := run(dir, "0.2.1")
+		if !errors.Is(err, ErrMarkerLockUnavailable) {
+			t.Fatalf("a restore without the marker's lock held = %v, want ErrMarkerLockUnavailable", err)
 		}
-		err = run(dir, "0.2.1")
-		if !errors.Is(err, ErrRestoreByPreviousVersion) {
-			t.Fatalf("a restore run as 0.2.1 without the marker's lock = %v, want ErrRestoreByPreviousVersion", err)
-		}
-		if after, _ := os.ReadFile(StatePath(dir)); !bytes.Equal(before, after) {
-			t.Errorf("the refused restore wrote the marker: %s", after)
+		after, afterErr := os.ReadFile(StatePath(dir))
+		if !bytes.Equal(before, after) || errors.Is(beforeErr, fs.ErrNotExist) != errors.Is(afterErr, fs.ErrNotExist) {
+			t.Errorf("the refused restore changed the marker: %q (%v), was %q (%v)", after, afterErr, before, beforeErr)
 		}
 	}
-	for _, r := range theRestores {
-		t.Run("held by another open/"+r.name, func(t *testing.T) {
-			dir := t.TempDir()
-			if err := SaveState(dir, armedForBarrier()); err != nil {
-				t.Fatal(err)
-			}
-			holder, err := LockState(context.Background(), dir)
-			if err != nil || !holder.Held() {
-				t.Fatalf("hold the marker's lock: %+v, %v", holder, err)
-			}
-			defer holder.Release()
-			check(t, dir, r.run)
-		})
+	for _, m := range markers {
+		for _, r := range theRestores {
+			t.Run("held by another open/"+m.name+"/"+r.name, func(t *testing.T) {
+				dir := t.TempDir()
+				if m.state != nil {
+					if err := SaveState(dir, *m.state); err != nil {
+						t.Fatal(err)
+					}
+				}
+				holder, err := LockState(context.Background(), dir)
+				if err != nil || !holder.Held() {
+					t.Fatalf("hold the marker's lock: %+v, %v", holder, err)
+				}
+				defer holder.Release()
+				check(t, dir, r.run)
+			})
+		}
 	}
 	for _, tc := range []struct {
 		name string
@@ -138,15 +163,51 @@ func TestARestoreByTheVersionAnInstallReplacesIsRefusedWithoutTheLock(t *testing
 		{"an I/O error", syscall.EIO},
 		{"a filesystem that keeps none", syscall.EOPNOTSUPP},
 	} {
-		for _, r := range theRestores {
-			t.Run(tc.name+"/"+r.name, func(t *testing.T) {
-				stubStateTryLock(t, tc.err)
-				dir := t.TempDir()
-				if err := SaveState(dir, armedForBarrier()); err != nil {
-					t.Fatal(err)
-				}
-				check(t, dir, r.run)
-			})
+		for _, m := range markers {
+			for _, r := range theRestores {
+				t.Run(tc.name+"/"+m.name+"/"+r.name, func(t *testing.T) {
+					stubStateTryLock(t, tc.err)
+					dir := t.TempDir()
+					if m.state != nil {
+						if err := SaveState(dir, *m.state); err != nil {
+							t.Fatal(err)
+						}
+					}
+					check(t, dir, r.run)
+				})
+			}
 		}
 	}
+}
+
+// TestARestoreHoldsTheMarkersLockUntilItLetsItGo: while a restore holds the
+// install marker's lock, another taker (an install, a migration) cannot take
+// it; the record under the hold takes it no second time, so it answers within
+// a wait shorter than any taker's; and once the hold is let go, twice or
+// more, the lock is free.
+func TestARestoreHoldsTheMarkersLockUntilItLetsItGo(t *testing.T) {
+	shortStateLockWait(t, 200*time.Millisecond)
+	dir := t.TempDir()
+	if err := SaveState(dir, State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
+		AttemptedAt: time.Now().UTC().Add(-time.Minute), SwapStarted: true}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := HoldMarkerForRestore(context.Background(), dir, "0.2.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other, err := LockState(context.Background(), dir); !errors.Is(err, ErrStateLockHeld) {
+		other.Release()
+		t.Fatalf("another taker while the restore holds the marker's lock = %v, want ErrStateLockHeld", err)
+	}
+	if res, err := h.Record(); err != nil || !res.StoreRecorded {
+		t.Fatalf("the record under the hold = %+v, %v; want it recorded without the lock taken again", res, err)
+	}
+	h.Release()
+	h.Release()
+	other, err := LockState(context.Background(), dir)
+	if err != nil || !other.Held() {
+		t.Fatalf("a taker once the restore let the lock go = %+v, %v; want it held", other, err)
+	}
+	other.Release()
 }

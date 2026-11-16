@@ -61,41 +61,48 @@ func restoreReplacesDatabase(snapshotDir, dbTarget string, files []string) bool 
 	return !errors.Is(err, fs.ErrNotExist)
 }
 
-// admitRestoredStore is the restore's admission in the install marker in the
-// data dir that holds the database (updater.AdmitStoreRestore), asked before
-// the restore writes anything, the player seal's completion included: it
-// refuses, writing nothing, wherever the record just before the first write
-// to the restored files (recordRestoredStore) would refuse, so a refusal
-// leaves the destination as it was. The record asks again under the marker's
-// lock, for an install armed in between.
-func admitRestoredStore(dbTarget string) error {
-	if err := updater.AdmitStoreRestore(filepath.Dir(dbTarget), version.ServerVersion); err != nil {
-		return fmt.Errorf("the install marker refuses the restore of the library database: %w; nothing was restored", err)
+// holdRestoreMarker takes the install marker's lock in the data dir that
+// holds the database for a restore that replaces it
+// (updater.HoldMarkerForRestore), before the restore's turn of the config
+// file's lock (the marker's lock first, as every writer that takes both
+// takes them) and before anything of the destination but the store's
+// lifetime lock is made, and makes the restore's admission under it,
+// writing nothing: a lock that cannot be held, a veto, a hold of the
+// install, and this version the one an armed install replaces each refuse
+// the restore with nothing restored. The restore holds it through its
+// record and the database's replacement, so no install is armed between
+// them (backlog B653 PR 2a's third round), and lets it go right after the
+// database's copy, before the epoch's open, which can take it again. Its wait
+// is LockState's, never stopped by the restore's context, which stops
+// nothing once the source's lock is held.
+func holdRestoreMarker(dbTarget string) (*updater.RestoreHold, error) {
+	h, err := updater.HoldMarkerForRestore(context.Background(), filepath.Dir(dbTarget), version.ServerVersion)
+	if err != nil {
+		return nil, fmt.Errorf("the install marker refuses the restore of the library database: %w; nothing was restored", err)
 	}
-	return nil
+	return h, nil
 }
 
-// recordRestoredStore records, before the restore's first write to the
-// restored files, that this version changes the store, in an armed install
-// marker in the data dir that holds the database: updater.DisarmBeforeRestoring,
-// the admission every migrating open makes (B613, B660) and the restore's own
-// refusal beside it, asked whatever the snapshot's version (backlog B653 PR
-// 2a). A snapshot at this version's ladder top, from another installation or
-// a version with the same ladder, migrates nothing, so the epoch's open
-// records nothing, and an armed install's crash rollback would then put the
-// previous binary back over a store it does not read. Where an install is
-// armed and this version is not the backup's it records DataDirOpenedBy and
-// StoreMigratedBy durably, in one write, and every rollback then refuses; it
-// refuses, writing nothing, under a veto of this version's migrations
-// (ErrMigrationVetoed), while the install awaits its confirmation after a
-// start that did not end cleanly (ErrMigrationHeld), where this version is
-// the one the armed install replaces (ErrRestoreByPreviousVersion: a
-// migration of its own needs no record, a restore of a newer store would
-// have none), and where a record is due and the marker's lock cannot be
-// taken. A marker it could not read is removed and said, as the store's own
-// open says it.
-func recordRestoredStore(dbTarget string) error {
-	res, err := updater.DisarmBeforeRestoring(filepath.Dir(dbTarget), version.ServerVersion)
+// recordRestoredStore records under the restore's hold of the install marker's
+// lock (RestoreHold.Record), before the restore's first write, the player
+// seal's completion included, that this version changes the store, in an
+// armed install marker in the data dir that holds the database: the record
+// every migrating open makes (B613, B660) and the restore's own refusal beside
+// it, asked whatever the snapshot's version (backlog B653 PR 2a). A snapshot
+// at this version's ladder top, from another installation or a version with
+// the same ladder, migrates nothing, so the epoch's open records nothing, and
+// an armed install's crash rollback would then put the previous binary back
+// over a store it does not read. Where an install is armed and this version is
+// not the backup's it records DataDirOpenedBy and StoreMigratedBy durably, in
+// one write, and every rollback then refuses; it refuses, writing nothing,
+// under a veto of this version's migrations (ErrMigrationVetoed), while the
+// install awaits its confirmation after a start that did not end cleanly
+// (ErrMigrationHeld), and where this version is the one the armed install
+// replaces (ErrRestoreByPreviousVersion: a migration of its own needs no
+// record, a restore of a newer store would have none). A marker it could not
+// read is removed and said, as the store's own open says it.
+func recordRestoredStore(h *updater.RestoreHold) error {
+	res, err := h.Record()
 	if err != nil {
 		return fmt.Errorf("record in the install marker that the restore replaces the library database: %w; nothing was restored", err)
 	}

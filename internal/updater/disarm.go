@@ -193,7 +193,7 @@ func MigrationVetoed(st State, current string) bool {
 // migrate the store whatever the count (DisarmResult.Permit; MigrationPermit,
 // B660's second round).
 func AdmitBoot(ctx context.Context, dataDir, current string, save func(dataDir string, st State) error) (DisarmResult, error) {
-	res, err := disarm(ctx, dataDir, current, save, false, MigrationPermit{}, noRestore)
+	res, err := disarm(ctx, dataDir, current, save, false, MigrationPermit{})
 	if err == nil {
 		res.Permit = MigrationPermit{dataDir: filepath.Clean(dataDir), version: current}
 	}
@@ -235,19 +235,19 @@ func DisarmBeforeMigrating(dataDir, current string) (DisarmResult, error) {
 // that carries permit: serve's own start's, whose admission gave it
 // (AdmitBoot), migrates the store whatever the install's count.
 func DisarmBeforeMigratingAdmitted(dataDir, current string, permit MigrationPermit) (DisarmResult, error) {
-	return disarm(context.Background(), dataDir, current, nil, true, permit, noRestore)
+	return disarm(context.Background(), dataDir, current, nil, true, permit)
 }
 
 // ErrRestoreByPreviousVersion is what a restore of the store's refusal
-// matches (AdmitStoreRestore, DisarmBeforeRestoring) where an install is
+// matches (HoldMarkerForRestore, RestoreHold.Record) where an install is
 // armed and the restore runs as the version the install replaces
 // (State.PreviousVersion).
 var ErrRestoreByPreviousVersion = errors.New("the version an armed install replaces does not restore the store")
 
-// restoreMode is what a disarm does for a restore of the store: nothing
-// (noRestore, every open's and serve's admission), the restore's admission,
-// which writes nothing (AdmitStoreRestore), or its record
-// (DisarmBeforeRestoring).
+// restoreMode is what a disarm under the install marker's lock does for a
+// restore of the store: nothing (noRestore, every open's and serve's
+// admission), the restore's admission, which writes nothing
+// (HoldMarkerForRestore), or its record (RestoreHold.Record).
 type restoreMode int
 
 const (
@@ -256,38 +256,89 @@ const (
 	restoreRecord
 )
 
-// AdmitStoreRestore is the admission of a restore that replaces the store,
-// asked before the restore writes anything (backup.RestoreWithOptions, ahead
-// of the player seal's completion; backlog B653 PR 2a): it refuses, writing
-// nothing, wherever the restore's record (DisarmBeforeRestoring) would
-// refuse: under a veto of current's store migrations (ErrMigrationVetoed),
-// while the install awaits its confirmation after a start that did not end
-// cleanly (ErrMigrationHeld), where an install is armed and current is the
-// version it replaces (ErrRestoreByPreviousVersion), and, where the install
-// marker's lock cannot be taken, wherever a record would be due or the marker
-// cannot be read. A marker it cannot read under the lock it leaves to the
-// record, which removes it. It holds the install marker's lock (LockState)
-// from its read to its answer.
-func AdmitStoreRestore(dataDir, current string) error {
-	_, err := disarm(context.Background(), dataDir, current, nil, true, MigrationPermit{}, restoreAdmission)
-	return err
+// RestoreHold is a restore's hold of the install marker's lock
+// (HoldMarkerForRestore), from the restore's admission until the database
+// it replaces is in place: its record (Record) is made under it, and no
+// install can be armed between the admission and the record, or between the
+// record and the replacement (backlog B653 PR 2a's third round: a record
+// that let the lock go left the replacement to an install armed after it,
+// unrecorded). Release lets it go, once, however often it is called.
+type RestoreHold struct {
+	lock    *StateLock
+	dataDir string
+	current string
+	once    sync.Once
 }
 
-// DisarmBeforeRestoring is DisarmBeforeMigrating for a restore that replaces
-// the store (backup.RestoreWithOptions, just before its first write to the
-// restored files, whatever the snapshot's version; backlog B653 PR 2a): it
-// records, and refuses, as a migrating open does, and it refuses too, writing
-// nothing, where an install is armed and current is the version the install
-// replaces (State.PreviousVersion; ErrRestoreByPreviousVersion), with the
-// install marker's lock or without it. That version's own migrations need no
-// record (armsStoreRecord), but a restore may put a newer version's store in
-// place, over which a rollback of the install would then put current's binary
-// back with nothing recorded to stop it. A store's open never asks it: a
-// rollback legitimately runs as the previous version, whose migrations
+// HoldMarkerForRestore takes the install marker's lock in dataDir for a
+// restore of the store by current that replaces the database
+// (backup.RestoreWithOptions), and holds it. A lock that cannot be held is
+// refused (ErrMarkerLockUnavailable), whatever the marker holds and where
+// there is none: another holder past LockState's wait (an installer holding
+// it could arm its install once the restore went on), no lock to give, a
+// failure, and a filesystem that keeps none; a wait ctx ended returns ctx's
+// error. Under the lock it makes the restore's admission, writing nothing:
+// it refuses wherever the record would, under a veto of current's store
+// migrations (ErrMigrationVetoed), while the install awaits its
+// confirmation after a start that did not end cleanly (ErrMigrationHeld),
+// and where an install is armed and current is the version it replaces
+// (ErrRestoreByPreviousVersion: that version's own migrations need no
+// record, armsStoreRecord, but a restore may put a newer version's store in
+// place, over which a rollback of the install would put current's binary
+// back), letting the lock go; a marker it cannot read it leaves to the
+// record, which removes it. A store's open never asks it: a rollback
+// legitimately runs as the previous version, whose migrations
 // DisarmBeforeMigrating admits.
-func DisarmBeforeRestoring(dataDir, current string) (DisarmResult, error) {
-	return disarm(context.Background(), dataDir, current, nil, true, MigrationPermit{}, restoreRecord)
+func HoldMarkerForRestore(ctx context.Context, dataDir, current string) (*RestoreHold, error) {
+	lock, err := LockState(ctx, dataDir)
+	if err != nil {
+		var refused *StateLockError
+		if !errors.As(err, &refused) {
+			return nil, err
+		}
+		return nil, &restoreLockError{cause: err}
+	}
+	if !lock.Held() {
+		return nil, &restoreLockError{cause: lock.Unheld()}
+	}
+	h := &RestoreHold{lock: lock, dataDir: dataDir, current: current}
+	if _, err := disarmHeld(dataDir, current, nil, true, migrationGate{ask: true}, restoreAdmission); err != nil {
+		h.Release()
+		return nil, err
+	}
+	return h, nil
 }
+
+// Record is the restore's record, made under the hold, which it never takes
+// again: what a migrating store open records (DisarmBeforeMigrating), with
+// its refusals and the restore's own (HoldMarkerForRestore's), asked again
+// of the marker as it stands under the lock.
+func (h *RestoreHold) Record() (DisarmResult, error) {
+	return disarmHeld(h.dataDir, h.current, nil, true, migrationGate{ask: true}, restoreRecord)
+}
+
+// Release lets the install marker's lock go, once; safe on a nil hold.
+func (h *RestoreHold) Release() {
+	if h == nil {
+		return
+	}
+	h.once.Do(h.lock.Release)
+}
+
+// restoreLockError is a restore refused for the install marker's lock: it
+// matches ErrMarkerLockUnavailable, unwraps to the lock's own answer, and
+// names no path.
+type restoreLockError struct{ cause error }
+
+func (e *restoreLockError) Error() string {
+	return fmt.Sprintf("the install marker's lock cannot be held (%s), and the restore holds it until the library "+
+		"database is replaced, so that no install is armed unrecorded meanwhile: run the restore again once it is free",
+		fsutil.ErrorWithoutPath(e.cause))
+}
+
+func (e *restoreLockError) Is(target error) bool { return target == ErrMarkerLockUnavailable }
+
+func (e *restoreLockError) Unwrap() error { return e.cause }
 
 // restoreByPreviousVersion reports whether a restore of the store by current
 // is refused under st (ErrRestoreByPreviousVersion): an install is armed and
@@ -310,9 +361,8 @@ func restoreByPreviousVersionError(st State, current string) error {
 // *StateLockError is a lock that could not be taken. A migration that has no
 // permission for its open asks, of the marker it reads under that lock,
 // whether the count holds a serve's start running now (migrationGate).
-// restore says what it does for a restore of the store (restoreMode).
 func disarm(ctx context.Context, dataDir, current string, save func(dataDir string, st State) error, migrating bool,
-	permit MigrationPermit, restore restoreMode) (DisarmResult, error) {
+	permit MigrationPermit) (DisarmResult, error) {
 	gate := migrationGate{ask: migrating && !permit.admits(dataDir, current)}
 	lock, err := LockState(ctx, dataDir)
 	if err != nil {
@@ -320,10 +370,10 @@ func disarm(ctx context.Context, dataDir, current string, save func(dataDir stri
 		if !errors.As(err, &refused) {
 			return DisarmResult{}, err
 		}
-		return disarmUnlocked(dataDir, current, migrating, gate, restore, err)
+		return disarmUnlocked(dataDir, current, migrating, gate, err)
 	}
 	defer lock.Release()
-	res, err := disarmHeld(dataDir, current, save, migrating, gate, restore)
+	res, err := disarmHeld(dataDir, current, save, migrating, gate, noRestore)
 	res.NoLocks = lock.Unheld()
 	return res, err
 }
@@ -339,10 +389,9 @@ func migrationHeldError(why string) error {
 // install, record a migration begun, lift a veto of current's migrations, or
 // remove a marker it cannot read, and a migration refuses under that veto as
 // it does with the lock. An admission's count without the lock is
-// CountMissed's (backlog B760). A restore of the store refuses where an
-// install is armed and current is the version it replaces, as it does with
-// the lock, and its admission writes nothing and runs no barrier.
-func disarmUnlocked(dataDir, current string, migrating bool, gate migrationGate, restore restoreMode, lockErr error) (DisarmResult, error) {
+// CountMissed's (backlog B760). A restore of the store never comes here: it
+// refuses a lock it cannot hold (HoldMarkerForRestore).
+func disarmUnlocked(dataDir, current string, migrating bool, gate migrationGate, lockErr error) (DisarmResult, error) {
 	st, err := LoadState(dataDir)
 	held := ""
 	if err == nil && migrating {
@@ -355,8 +404,6 @@ func disarmUnlocked(dataDir, current string, migrating bool, gate migrationGate,
 		return DisarmResult{}, migrationVetoedError(st, current)
 	case held != "":
 		return DisarmResult{}, migrationHeldError(held)
-	case restore != noRestore && restoreByPreviousVersion(st, current):
-		return DisarmResult{}, restoreByPreviousVersionError(st, current)
 	case MigrationVetoed(st, current):
 		return DisarmResult{}, fmt.Errorf("could not lift the install marker's veto of %s's store migrations, "+
 			"since its lock cannot be taken: %w", current, lockErr)
@@ -366,9 +413,6 @@ func disarmUnlocked(dataDir, current string, migrating bool, gate migrationGate,
 	case migrating && armsStoreRecord(st, current):
 		return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s began a migration of the store, "+
 			"since its lock cannot be taken, so no step is run: %w", current, lockErr)
-	}
-	if restore == restoreAdmission {
-		return DisarmResult{State: st}, nil
 	}
 	if err := syncMarkerDir(dataDir); err != nil {
 		return DisarmResult{}, fmt.Errorf("the install marker as it stands may not outlive a power loss: %w", err)

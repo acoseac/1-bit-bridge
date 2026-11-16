@@ -66,7 +66,7 @@ func TestDisarmRefusalsKeepCausesWithoutPaths(t *testing.T) {
 			if err := os.Mkdir(StatePath(dir), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			_, err := disarmUnlocked(dir, "0.2.3", false, migrationGate{}, noRestore, lockErr)
+			_, err := disarmUnlocked(dir, "0.2.3", false, migrationGate{}, lockErr)
 			requirePathlessDisarm(t, dir, err)
 			if !errors.Is(err, lockErr) || !errors.Is(err, lockErr.Err) {
 				t.Errorf("refusal lost its lock cause: %v", err)
