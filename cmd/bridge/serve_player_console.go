@@ -27,8 +27,10 @@ import (
 // boot plan, the bridgePlayer serve started, GET /v1/outputs' own view of it
 // (bridgeOutput.Facts), the engine's snapshot and the live config the console
 // hands it. It writes nothing (the console writes the config, through the live
-// holder), starts nothing and dials nothing. Its reads of the box are the
-// bridge's ALSA readers over hostTrees, bounded, one at a time.
+// holder), starts nothing and dials nothing; the one thing it asks of the
+// player is the console's test tone, which the running player's backend plays
+// (serve_player_tone.go). Its reads of the box are the bridge's ALSA readers
+// over hostTrees, bounded, one at a time.
 
 // The selection tokens a DAC listing hands out: how long one is good for, and
 // how many the view keeps.
@@ -342,6 +344,7 @@ func (c *consolePlayer) running(ctx context.Context, live *config.Config) (admin
 	if eng == nil {
 		return run, facts, nil
 	}
+	run.Tone = c.toneView()
 	snap := eng.Snapshot()
 	run.Transport = engineTransportWord(snap)
 	run.Track = c.track(ctx, snap)

@@ -495,8 +495,9 @@ type Deps struct {
 	// PlayerOutput is the bridge's own player as the console's Player page
 	// asks it (B601, handlers_player_output.go): cmd/bridge implements it
 	// over serve's player, its boot plan and the box's DAC readings, so this
-	// package imports no player package. Nil leaves the page saying that no
-	// player is wired here, and every route of it refusing.
+	// package imports no player package; its test tone plays through the
+	// running player's backend. Nil leaves the page saying that no player is
+	// wired here, and every route of it refusing.
 	PlayerOutput PlayerOutput
 
 	// AnalysisSweep returns the serve-side auto-analysis sweeper's
@@ -1999,12 +2000,15 @@ func (s *Server) Handler() http.Handler {
 	// through the live holder, and each route refuses, before anything is
 	// read or written, where the player cannot run: a public bridge, a host
 	// that is not Linux, a player block that does not read, a setting the
-	// control plane owns.
+	// control plane owns. The test tone (B601) writes nothing: it plays
+	// through the running player's DAC until its request ends, and no route
+	// stops it.
 	mux.HandleFunc("GET /api/output/player", s.apiPlayerOutputStatus)
 	mux.HandleFunc("GET /api/output/player/dacs", s.apiPlayerOutputDACs)
 	mux.HandleFunc("POST /api/output/player/enabled", s.apiPlayerOutputEnabled)
 	mux.HandleFunc("POST /api/output/player/openhome", s.apiPlayerOutputOpenHome)
 	mux.HandleFunc("POST /api/output/player/dac", s.apiPlayerOutputDAC)
+	mux.HandleFunc("POST /api/output/player/tone", s.apiPlayerOutputTone)
 	// Log export. All GET: reads, not mutations, so csrfGuard passes them
 	// through as it does every other read on this listener. The exports are
 	// downloads rather than JSON a cross-origin page could read back.

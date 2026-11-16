@@ -261,8 +261,13 @@ func (cfg Config) resolveSample(ep Endpoint, sf sampleFormat) (request, error) {
 
 // open is Open over a kernel seam and a clock. Once the node is open, every
 // refusal goes out through release, and so does a panic in its setup, which
-// is the caller's to recover, so a refused open leaves nothing open.
-func open(s sys, now func() time.Time, ep Endpoint, cfg Config) (*Device, error) {
+// is the caller's to recover, so a refused open leaves nothing open. A
+// release that answers an error leaves it unknown whether the node is still
+// held: the refusal then carries ErrReleaseUnconfirmed and the close's error
+// beside its own (B601), its Reason still the refusal's. A PCM session's open
+// goes on to its next packing all the same, as the sink drops a close's error;
+// the console's test tone stops there, and fences the device.
+func open(s sys, now func() time.Time, ep Endpoint, cfg Config) (_ *Device, err error) {
 	if err := ep.validate(); err != nil {
 		return nil, err
 	}
@@ -278,10 +283,10 @@ func open(s sys, now func() time.Time, ep Endpoint, cfg Config) (*Device, error)
 	set := false
 	defer func() {
 		if !set {
-			_ = d.release()
+			err = nativeCleanupError(err, d.release())
 		}
 	}()
-	if err := d.setUp(want); err != nil {
+	if err = d.setUp(want); err != nil {
 		return nil, err
 	}
 	set = true

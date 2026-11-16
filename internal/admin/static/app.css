@@ -2864,6 +2864,15 @@ ul.histogram li {
 }
 .player-output-openhome .panel-head { margin-bottom: 8px; }
 .player-output-openhome .panel-head h3 { margin: 0; }
+/* The test tone's level, length, Play and Stop, one row that wraps at 375px. */
+.player-output-tone {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.player-output-tone select { min-width: 0; max-width: 100%; }
 
 /* ---------------- Duplicates page ---------------- */
 /* Policy radios: one option per row, description wraps under the label. */

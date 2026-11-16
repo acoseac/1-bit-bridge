@@ -50,6 +50,13 @@ type fakePlayerOutput struct {
 	// Report call: onPlatform under mu.
 	onPlatform func()
 	onReport   func(live *config.Config)
+	// tone is what Tone answers; toneLive and toneReq are what the last Tone
+	// was asked with, and onTone, while set, runs inside each Tone with its
+	// context (the request's), outside mu.
+	tone     PlayerToneResult
+	toneLive *config.Config
+	toneReq  PlayerToneRequest
+	onTone   func(ctx context.Context)
 }
 
 // choicePark is one Chosen held inside the DAC route's config turn: parked
@@ -225,6 +232,18 @@ func (f *fakePlayerOutput) Withholds(before, after *config.Config) bool {
 		return f.withheld(*boot, before) == "" && f.withheld(*boot, after) != ""
 	}
 	return f.withholds
+}
+
+func (f *fakePlayerOutput) Tone(ctx context.Context, live *config.Config, req PlayerToneRequest) PlayerToneResult {
+	f.count("tone")
+	f.mu.Lock()
+	f.toneLive, f.toneReq = live, req
+	res, hook := f.tone, f.onTone
+	f.mu.Unlock()
+	if hook != nil {
+		hook(ctx)
+	}
+	return res
 }
 
 // newPlayerTestServer is newTestServer with the Player page's provider, its
