@@ -100635,3 +100635,128 @@ tree with them the budgets check is clean (`output.md` 89,402,
 `check-doc-budgets.py`, `rules-for.py` and `move_entry.py` pass, and
 cmd/bridge's `TestEveryCitedTestNameExists` passes over it and fails on a ghost
 planted in its History.
+
+## 2026-11-15 — B601's round 2: the review's findings
+
+Branch `feat/b601-pcm-tone` from 40059a0f. Commits: 1fb3470b (a player
+write's body that cannot be read names no address), 57dea394 (the Player
+page ends its tone as a navigation begins, and speaks again only from the
+status), 0f00f340 (`no_format`), 66891f42 (the first record names no worker,
+host or scratch path, and says where the rules landed), 096d5563 (the
+rules), then this record. Every run: Go 1.27.3, TMPDIR on a disk-backed
+directory.
+
+### A body its reader could not read
+
+`decodePlayerBody`, the decoder of the Player page's four writes, wrote the
+decoder's error into the response, and the decoder hands back a body
+reader's error as it is (under Go 1.27's JSON too, whose syntax errors
+unwrap an I/O error to it): a client that stops sending until the read times
+out, or resets the connection, gives a `*net.OpError` whose words name both
+ends of the socket, `read tcp <local>-><remote>: i/o timeout`. The body is
+now read through `bodyReader`, which keeps the first error its reader
+answered other than the body's end, beneath the bound, so the bound's
+`*http.MaxBytesError` is never one; where it holds one, in either decode, the
+write answers 400 `bad_json` in fixed words and logs one Info line with the
+route and the cause: a socket error's words with its two ends left out, and
+any dotted IPv4 or bracketed IPv6 address left in them replaced, loopback's
+too (the console's login security log is the one place a client's address
+is kept). A fault of the JSON (a syntax error, a value of another type, a key
+the write does not take, a body cut short) or of its size keeps the
+decoder's words, and a body past the bound after its object says so, where
+it said "one JSON object, and nothing after it". Before the fix
+`TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress` failed all 40 of its
+cases (five errors, four routes, the read failing inside the object and after
+it), the response carrying `read tcp 192.0.2.10:47789->198.51.100.23:54321:
+read: connection reset by peer`, and `TestAPlayerWritesJSONFaultKeepsItsWords`
+its four cases of a body past the bound after its object.
+
+### A navigation's start
+
+`boostSwap` tore the page's scope down only once the next page's fetch and
+body were in, so a boosted navigation that stalled left the tone playing,
+its whole length where it never answered. `boostSwap` now dispatches `leave`
+on `pageLeaving` before its fetch, and the Player page ends its tone there
+as Stop does (`stopPlayerTone`: the request aborted, the stop confirmed from
+the status). The scope still ends at the swap: tearing it down at the
+start would leave a page that stays mounted, while the navigation stalls,
+with none of its listeners. The router's refusals (a modified click, another
+target, a download, another origin, an anchor on the page, the page's own
+address, a popstate within it) call no `boostSwap`, so they end nothing. A
+full navigation the router does not take is still ended by `pagehide`.
+
+### A page the back/forward cache shows again
+
+`renderPlayerOutputTone` writes the tone's line over an idle tone only where
+the line is empty or it last showed a tone that was not idle (`busyShown`),
+so a line the page wrote itself, "Playing…", stood over an idle tone once
+`pagehide` had aborted the request: the abort's catch says nothing, and the
+five-second paint left the line as it was. Hidden, the page now ends its
+tone and a Stop's confirmation and marks the line for the status
+(`hidePlayerTone`); shown again (`pageshow`, persisted), on the DOM and the
+listeners it had, it empties the line, sets Play and Stop as for no tone out,
+ends a confirmation still out, and reads the status at once
+(`showPlayerToneAgain`), whose tone `renderPlayerOutputTone` then says, idle
+included.
+
+### The Stop's confirmation, bounded
+
+A Stop's confirmation asked its three-second deadline only after a read of
+the status nothing bounded. Each read now carries a signal (`API.get` takes
+one) that ends at what is left of the three seconds and with the page's
+scope, and no read starts past them, so a read that never answers is said
+not confirmed at three seconds.
+
+### `no_format`
+
+A tone none of whose eight (rate, format) pairs the kernel takes ended
+`open_refused`, the word of a DAC that refused to open (busy, denied, gone),
+so the page could not tell the two apart. It ends `no_format` now, a word of
+`ToneWords`' list with its sentence on the page.
+
+### Refuted: the hold's one timer
+
+`hold` arms one timer for its wait, the first time it waits, with the bound
+of the holder it found. A second holder after the first could only be a
+probe or a tone that took the slot between the first's end and the Start's
+taking it, and neither can: `hold` counts itself among `waiters` under
+`b.mu` before it lets the lock go to wait (`backend.go` lines 941 to 944),
+and `reserveProbe` (`probe.go` line 201) and `reserveTone` (`tone.go` line
+329) refuse while `waiters` is not zero; a session in the slot is
+`ErrOverlap`, which waits for nothing. So a Start waits for one holder at
+most, under that holder's bound, `ProbeWait` or `ToneYield`, both one
+second. The tests' held timers are keyed by duration, which a probe's wait
+and a tone's share, and no tone test arms a probe's wait.
+
+### Reds, controls and runs
+
+Each fix was shown red before it was made: the body tests through a
+names-only shim of the two new names; the page's three tests on the app.js
+before the change, the structural parts failing (`stopPlayerTone`,
+`pageLeaving`'s dispatch before the fetch, the `pageshow` listener, the
+bounded read); `no_format` through a shim of its name. The page's scripts
+run under node where node is installed, and none was installed here: each
+assembled script was read through and checked for balance, and
+`requireCarried` passes on it. Their harness's clock now moves only as a run
+advances it, and the status is painted by the shipped `renderPlayerOutput`,
+its other panels stubbed.
+
+Nineteen negative controls, each predicted in a file before it ran and none
+touching a tracked file (a Go mutation handed to the compiler through
+`-overlay`, an app.js one written into a scratch tree that prebuilt test
+binaries read as their working directory's): all 19 red as predicted, among
+them the log keeping the socket's ports where its addresses were scrubbed and
+its ends not left out, a body's end taken for a read failure, the dispatch
+moved after the fetch, the router ending the tone at every click, `pagehide`
+leaving a Stop's confirmation running, a confirmation's read unbounded,
+`API.get` dropping its signal, and `no_format` with no sentence on the page.
+At 096d5563: `GOOS=linux GOARCH=386 make vet` clean, and `make fmt vet test
+build-all` passed with a 45-minute package timeout, its fmt rewriting nothing
+(cmd/bridge 1,703.4 s, manifest 1,659.9 s, admin 1,321.6 s; `check-build-tags:
+OK`; the six builds). Under `-race`, 50 times each: the body test (1,798.1 s),
+the JSON-fault test and the page's three (1,369.9 s; their node parts skip
+without node), alsapcm's two (6.3 s) and cmd/bridge's word test (1.3 s), every
+run green; the first try of the admin ones met go test's ten-minute default
+with no failure and was run again at sixty minutes. go1.27.3's gofmt lists
+none of the changed files, and `make docs-check` is clean (`admin-console.md`
+97,892 bytes).
