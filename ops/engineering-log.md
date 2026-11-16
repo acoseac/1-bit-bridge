@@ -102396,3 +102396,142 @@ right after the record; the seal completed first again; no release after the
 copy; a lock that cannot be taken gone on unheld; a filesystem that keeps none
 admitted; the record taking the lock again; and an identity that cannot be
 read kept as none.
+
+## 2026-11-16 — B653 PR 2a round 4: the epoch is minted once bridge.yaml's lock is let go
+
+**The cycle.** Since round 3 the restore takes the install marker's lock
+before bridge.yaml's (`backup.go`'s lines 617-631 at `a6bbe935`) and lets
+the marker go once the database is copied (line 870), and it minted the
+epoch right there (line 881, `manifest.ResetBackupEpoch`), inside the copy
+loop, bridge.yaml's lock still held. Where the restored store has a
+migration step pending, that open takes the marker's lock again
+(`disarmBeforeMigrating`, `migration_disarm.go:38`), so the order became
+bridge.yaml's, then the marker's, and a writer that takes the marker's lock
+and then bridge.yaml's waited on the restore while the restore waited on it,
+until the writer's config wait (`config.LockWait`, 5 s) refused it, the
+database already replaced.
+
+**The change.** The mint (`mintRestoredEpoch`, after `RestoreWithOptions` in
+backup.go: its WAL and SHM removal and its busy-checkpoint warning word for
+word) runs from a defer `RestoreWithOptions` registers before bridge.yaml's
+unlock (`backup.go:634-642` at `6ff6ddc7`; the unlock's defer is at 649), so
+it runs after that unlock and before the defers registered earlier: the
+marker's release (625, a no-op by then), the snapshot folder's let-go (599)
+and the store's hold (592). It runs on every return once the database is
+replaced (`dbReplaced`, set at 890 after the copy at 878): a later file's
+failure, the late refusal at bridge.yaml's own write (`partialRestoreError`,
+820), and a return with nothing after it. Its error is joined to the
+restore's (`errors.Join`, only where the mint failed). The files after
+bridge.db in a snapshot (the token store, the TLS pair, bridge.yaml, the
+console account and the harvest state, in `captureInto`'s order,
+`backup.go:330-358`) are written in the loop as before, bridge.yaml through
+the turn (817), all of them before the unlock.
+
+**The window after the unlock.** Nothing opens the store between
+bridge.yaml's unlock and the mint. Every opener of the live database takes
+the store's lifetime lock shared and is refused beside the restore's
+exclusive hold, which `RestoreWithOptions` takes at 588 and lets go in 592's
+defer, after the mint. Bridge restore, the one production caller
+(`cmd/bridge/backup.go:566`), holds that lock from 486 to its return (496),
+inside the data dir's lock (465-466), which serve and every command that
+takes it are refused beside. In this process the deferred calls run in
+sequence on the restore's goroutine.
+
+**Writers of bridge.yaml after the unlock.** Those that take the data dir's
+lock (serve, the bind, reset-player and clear-missing) wait for bridge
+restore to end. Those that take bridge.yaml's lock alone can write in the
+window: library add and remove (`config.Edit`, `library.go:120` and `:213`;
+a third root is saved without opening the store, and a transition opens it
+and is refused by the hold), init (`saveInitConfig`, which compares the file
+with the one it read first) and serve's seed (only where no file is). None
+of them changes what the mint does. Its target was captured before the
+unlock (`dbReplaced`, from `dst.ManifestDB`, which bridge restore worked out
+from the config it read before its prompt, and which the restore compared
+with what its turn found, `configStillAsRead`), and the mint reads nothing
+of bridge.yaml (`ResetBackupEpoch`, `sync_epoch.go:119-149`: `OpenStore` of
+that path, the epoch's replacement and a checkpoint; `disarmBeforeMigrating`
+takes the data dir from the database's own directory).
+
+**A crash in that window** leaves the restored database on the snapshot's
+epoch. So did a crash at `a6bbe935` between the copy (859) and the mint
+(881); the window is now longer by the files after bridge.db and the
+unlock. The next open neither mints nor notices (the store opens on the
+snapshot's epoch, and serve serves it), the next backup carries it, and
+running the restore again mints a new one. A full restore writes no journal
+(`restore_journal.go:13`); PR 2b's database-only restore keeps one.
+
+**Main.** `2e02d905` has the same reversal in the restore: bridge.yaml's
+lock (`backup.go:562`) held across `ResetBackupEpoch` (781), fixed here.
+Library add and remove open the store inside `config.Edit`
+(`library.go:120` and `:213`, through `openManifestStore` at 410 and 271),
+so where a migration step is pending that open takes the marker's lock
+under bridge.yaml's: left to an item of its own. The other turns open no
+store and take no marker lock: init's (`init.go:1013`), the seed's
+(`main.go:3439`), the bind's (`output_dac_bind.go:641`) and the console's
+(the holder's turn; its save of update checks off takes the marker's lock
+before it, `handlers_api.go:2667-2730`).
+
+**Windows identity.** `raceAnInstall` took the live database's identity
+before and after the replacement by `os.Lstat`. Go 1.27.3's Lstat of a
+regular file answers from `GetFileAttributesEx` and keeps the path alone
+(`os/stat_windows.go:37-48`), and `os.SameFile` reads the file ID through
+that path when it compares (`os/types_windows.go:287-336`, `loadFileId`,
+called from `sameFile` at 353), so after the replacement both sides named
+the new file, and both round-3 race tests refused the correct code on
+windows-latest. A handle's `Stat` reads the ID at once
+(`os/stat_windows.go:17-22` and 108-123, `statHandle`;
+`os/types_windows.go:46-79`, the path left empty so that SameFile does not
+read it again). The handle cannot stay open across the replacement:
+`os.Open` is `syscall.Open` (`os/file_windows.go:157-162`), whose share mode
+is `FILE_SHARE_READ|FILE_SHARE_WRITE` (`syscall/syscall_windows.go:395`), no
+delete, which refuses the rename that replaces the file. So `liveFile` reads
+the identity and the bytes through one handle, closed before the restore
+runs, and an install counts the database replaced when its ID or its bytes
+differ from the old file's: an ID the old file freed cannot read as no
+replacement.
+
+**The busy test.** `TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy` passed
+no `--config`. In this branch's order the look comes after the config, the
+data dir's lock, the store's lock and the journal, so it failed (`config
+load failed: no config found`) on every runner without a config (run
+43858844891), and passed on a Mac only by loading the Mac's own bridge.yaml
+and taking that data dir's locks. It now restores into an install of its
+own (`seedRestorableInstall`) under `isolateConfigEnv`: the
+`defaultConfigDirFn` seam and a working directory of its own, both put back
+by its cleanup, never a variable cleared and never the package's working
+directory, which its tests read sources relative to. It was the one call of
+`restoreCmd` in cmd/bridge's tests without `--config`.
+
+**Reds and controls.** Before the change,
+`TestAWriterOfTheMarkerThenTheConfigMeetsNoLockCycleBesideARestore` failed
+in 8.97 s, naming the cycle (the writer refused after 5 s). It is driven by
+handshakes on the locks (the restore's `afterDatabaseCopy` hook,
+`config.LockWaitedForTest` and `updater.SetStateLockWaitingForTest`) over
+bounded channels, and its cleanup lets go of both callers and joins them.
+`TestARestoreRefusedAtBridgeYAMLStillMintsItsEpoch` passed there, the mint
+then being inside the loop. Five controls by overlay
+(`.tmp/_b653p2a/controls4.py`), all red: the change reverted (the cycle, in
+8.92 s); the epoch minted only where the restore succeeded (the late
+refusal keeps the snapshot's epoch); the marker's lock let go once the
+record is made, with a pause before the copy (both race tests,
+`replaced:false` read through the handles); the lock let go right after the
+admission (the first test by `replaced`, the second by the previous
+version's refusal); and the busy test's cases without `--config` (exit 2,
+no config found under the isolation).
+
+**The gate.** At `af1958b3`, `go vet` with the release tags for linux,
+darwin and windows was clean, and the race run of internal/backup,
+internal/manifest and cmd/bridge passed the first two (830 s and 1,670 s)
+and failed cmd/bridge's `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`.
+Its excusal of the restore's `ResetBackupEpoch` is keyed by the calling
+file, and the helper then made that call from restore_store.go: a tree-wide
+guard no run of internal/backup alone could see. The helper moved to
+backup.go unchanged (`6ff6ddc7`), and there the vets were clean again and
+the race run of the three packages passed: internal/backup in 830 s,
+internal/manifest in 1,669 s and cmd/bridge in 1,729 s. The x50 runs under
+-race beside 16 CPU hogs, killed by their captured PIDs, passed at both
+heads: the lock-cycle test, the late refusal's and the two race tests in
+1,178 s at `af1958b3` and 1,170 s at `6ff6ddc7`, the busy test in 115 s and
+113 s. The Windows experiment is `.tmp/_b653p2a/b653p2a-r4-windows.yml`: the
+two race tests, the lock-cycle test and the busy test, `-v -count=20` on
+windows-latest, each to show 20 `--- PASS` lines and no `--- FAIL`.
