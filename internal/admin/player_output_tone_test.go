@@ -752,6 +752,79 @@ func TestAStopNotConfirmedGivesWayOnceTheDACCloses(t *testing.T) {
 	}
 }
 
+// TestTheToneBeforeARefusedPlayDoesNotPaintOverIt (B601's round 5): a newer
+// Play the bridge refuses (409) keeps its words while the status still reads
+// the tone before it letting go of the DAC: such a status neither repaints the
+// line nor leaves it for the next status to say again (busyShown), so the idle
+// status after it does not say how the earlier tone ended either. Until then
+// the earlier tone's stop_unconfirmed painted its warning over the refusal,
+// and the idle status after it said how that tone had ended. A status that
+// reads idle, playing (a later tone, another page's included) or
+// release_unconfirmed (whose restart warning replaces the refusal) ends that,
+// and the status speaks as ever from then on; the page's wiring, a Play's
+// start, a Stop's confirmation and the page's being hidden and shown again end
+// it too. A Play that ran keeps the warning it answered for the next status.
+// Where node is installed it runs the shipped page, each case after a tone
+// that answered stop_unconfirmed and a newer Play refused (409 tone_playing):
+// stop_unconfirmed, idle, then a later tone playing and idle;
+// stop_unconfirmed then release_unconfirmed; stop_unconfirmed then playing,
+// with no idle between; and the page hidden and shown again from the cache
+// while the status reads stop_unconfirmed.
+func TestTheToneBeforeARefusedPlayDoesNotPaintOverIt(t *testing.T) {
+	src := readConsoleJS(t, "static/app.js")
+	render := stripJSComments(extractJSFunctionIfPresentOrEmpty(src, "renderPlayerOutputTone"))
+	requireInOrder(t, "renderPlayerOutputTone", render, "if (!tone || playerTone.controller || playerTone.confirming) return;",
+		`if (["idle", "playing", "release_unconfirmed"].includes(tone.state)) playerTone.refusalShown = false;`,
+		"if (playerTone.refusalShown) return;", `const busy = tone.state !== "idle";`)
+	wire := stripJSComments(extractJSFunctionIfPresentOrEmpty(src, "wirePlayerOutputTone"))
+	requireInOrder(t, "wirePlayerOutputTone", wire, "playerTone.busyShown = false;", "playerTone.refusalShown = false;",
+		`play.addEventListener("click", async () => {`, "playerTone.busyShown = false;", "playerTone.refusalShown = false;",
+		`await API.post("/api/output/player/tone"`, `showPlayerToneLine("err"`, "playerTone.refusalShown = err.status === 409;")
+	for _, name := range []string{"hidePlayerTone", "showPlayerToneAgain", "confirmPlayerToneStop"} {
+		if !strings.Contains(stripJSComments(extractJSFunctionIfPresentOrEmpty(src, name)), "playerTone.refusalShown = false;") {
+			t.Errorf("%s leaves a refused Play's hold on the tone's line in place", name)
+		}
+	}
+	script, assembled := tonePageScript(t, src, toneRefusedRun)
+	requireCarried(t, script, assembled[len(script):], src)
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; the rest runs the shipped page")
+	}
+	raw := runScriptUnderNode(t, node, assembled, struct{}{})
+	var runs []struct {
+		Name    string `json:"name"`
+		Refusal string `json:"refusal"`
+		Steps   []struct {
+			State     string `json:"state"`
+			Line      string `json:"line"`
+			BusyShown bool   `json:"busyShown"`
+			Words     string `json:"words"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil || len(runs) != 4 {
+		t.Fatalf("node answered %s: %v", raw, err)
+	}
+	// Each case's statuses in turn: whether the refusal's words stand (true)
+	// or the status's own are painted (false).
+	for i, kept := range [][]bool{{true, true, false, false}, {true, false}, {true, false}, {false}} {
+		r := runs[i]
+		if !strings.HasPrefix(r.Refusal, "The tone did not play: ") || len(r.Steps) != len(kept) {
+			t.Errorf("%s: %+v; want the newer Play's refusal, then %d statuses", r.Name, r, len(kept))
+			continue
+		}
+		for j, s := range r.Steps {
+			if kept[j] && (s.Line != r.Refusal || s.BusyShown) {
+				t.Errorf("%s: a status reading %s left the line %q, busyShown %v; want the refusal's words, %q, and nothing for the next status to say again",
+					r.Name, s.State, s.Line, s.BusyShown, r.Refusal)
+			}
+			if !kept[j] && (s.Words == "" || s.Line != s.Words) {
+				t.Errorf("%s: a status reading %s left the line %q; want the status's own words, %q", r.Name, s.State, s.Line, s.Words)
+			}
+		}
+	}
+}
+
 // tonePageHarness is the tone's page as the shipped functions see it: buttons
 // and selects by id, whose click runs their listeners; a document and a window
 // whose listeners a scope's signal removes and whose events the run
@@ -1097,6 +1170,51 @@ await warning("a confirmation that read stop_unconfirmed, a newer Play refused, 
   stop(); await settle();
   play(); await settle();
   posts[1].reject(sounding()); await settle();
+});
+console.log(JSON.stringify(out));
+`
+
+// toneRefusedRun, for each case, plays a tone that answers stop_unconfirmed
+// and then a newer one the bridge refuses (409 tone_playing), then paints the
+// statuses the case queues one by one, as the five-second paint does, or
+// hides the page and shows it again from the cache; and prints the refusal's
+// words and, after each status, what the line says, busyShown, and the
+// shipped words of that status's tone.
+const toneRefusedRun = `
+const play = () => el("player-output-tone-play").click();
+const unconfirmed = { outcome: "stop_unconfirmed", admitted: true, format: "S24_3LE", rateHz: 48000, validBits: 24, frames: 4800 };
+const toneHeld = () => Object.assign(new Error("a tone plays"), { status: 409, code: "tone_playing" });
+const seen = (state) => ({ state, line: el("player-output-tone-msg").textContent, busyShown: playerTone.busyShown,
+  words: playerToneStatusText(status(state).running.tone) });
+const polls = (...states) => async () => {
+  const steps = [];
+  for (const state of states) {
+    statuses = [status(state)];
+    loadPlayerOutput();
+    await settle();
+    steps.push(seen(state));
+  }
+  return steps;
+};
+async function refused(name, after) {
+  freshPage();
+  play(); await settle();
+  posts[0].resolve(unconfirmed); await settle();
+  play(); await settle();
+  posts[1].reject(toneHeld()); await settle();
+  const refusal = el("player-output-tone-msg").textContent;
+  const steps = await after();
+  out.push({ name, refusal, steps });
+}
+await refused("stop_unconfirmed, idle, then a later tone playing and idle", polls("stop_unconfirmed", "idle", "playing", "idle"));
+await refused("stop_unconfirmed, then release_unconfirmed", polls("stop_unconfirmed", "release_unconfirmed"));
+await refused("stop_unconfirmed, then playing with no idle between", polls("stop_unconfirmed", "playing"));
+await refused("hidden and shown again from the cache while the status reads stop_unconfirmed", async () => {
+  statuses = [status("stop_unconfirmed")];
+  dispatchWindow("pagehide");
+  dispatchWindow("pageshow", { type: "pageshow", persisted: true });
+  await settle();
+  return [seen("stop_unconfirmed")];
 });
 console.log(JSON.stringify(out));
 `
