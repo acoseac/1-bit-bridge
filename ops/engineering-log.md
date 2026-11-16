@@ -100768,8 +100768,8 @@ none of the changed files, and `make docs-check` is clean (`admin-console.md`
 
 Branch `feat/b601-pcm-tone` from e4bcdece. Commits: aca5038e (the tests
 ahead of their fix), fa0e89ef (the fix), df474469 (the bare IPv6 scrub),
-c782e655 and 2c2c9120 (wording), then this record; the rules' change is a
-patch beside the branch.
+c782e655 and 2c2c9120 (wording), then this record; the rules' change is
+commit 9fe39f93 on the branch.
 
 A status read that answered after the page had moved on painted over it.
 Play moved `stopSeq` and not the paints' sequence, so a Stop's
