@@ -234,7 +234,9 @@ backup`, or `bridge doctor`. Stop it, then restore again. It refuses as well
 where the data directory's storage grants no file locks, since it cannot then
 show that nothing has the database open: put the data directory on storage
 that grants them. While restore runs, every other bridge command refuses to
-open the database.
+open the database. A bridge from before this lock was added takes no lock
+that restore can see, so stop every bridge process of an earlier version,
+and every command one of them runs, before you restore.
 
 While an update the bridge installed waits to be confirmed after a start that
 did not end cleanly, restore refuses to replace the database, with nothing
