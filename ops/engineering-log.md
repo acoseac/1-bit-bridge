@@ -103890,6 +103890,166 @@ beside 8 CPU hogs passed (2,500 passes), as did the gate. `internal/updater`'s
 `installCandidateCopy`, checked, stays: it hard-links but on Windows, and no
 test there is parallel.
 
+## 2026-11-17 — B925: three transcode tests fail by their own message, not by a hang
+
+Branch `fix/b925-transcode-test-hangs`, from main 711e3cbf. 2e166023 changes
+two test files and nothing else; this record follows it.
+
+Three tests in `internal/transcode` park their pool's one worker in a runner
+stub, and `t.Cleanup(p.Stop)` waits for every worker to return
+(`p.wg.Wait()`, `pool.go` :887). A failure before the test let its runner go
+left that wait for good, and the package's 30-minute timeout then reported a
+hang with no cause: a failing test's message is held until the test ends, so
+the timeout's panic drops it. `TestPoolActiveWorkersReflectsInflight`
+(`pool_test.go`) parked its runner on `<-release` alone (:523), closed only at
+:571, after the Fatal calls at :559 and :566, and :553 should the runner start
+just as that wait gives up. `TestPoolOptimizeBacklogDrainsBeforeUpscale`
+(`pool_priority_test.go`) parked its first runner call on `<-releaseFirst`
+inside its `sync.Once` (:150-153), closed only at :195, after :177, :182 and
+:191; and its deadline Fatalf (:207-209), like
+`TestPoolUpscaleProgressUnderInterleavedLoad`'s (:305-307), was made holding
+`processedMu`. `Fatalf` ends the test's goroutine before its `Unlock`, so a
+runner then waits at `processedMu.Lock()` (:154, :264) for good, and the stop
+with it. `TestPoolBackgroundOptimizeUsesUpscaleLane`'s runner returns on its
+context as well, so its stop ends whatever the cleanup order.
+
+Both parked waits now also end on the job's context, which `Stop` cancels
+(`select { case <-release: case <-ctx.Done(): }`, and the same for
+`releaseFirst`), each runner returning what it returned before; the job's own
+timeout is the default ten minutes, so in a run that passes only the release
+ends the wait. The two deadline Fatalf calls report `n`, the count the loop
+read under the lock just before, and hold no lock. The three tests stop their
+pool through `stopPoolWithin` (B924), each registered where its
+`t.Cleanup(p.Stop)` was, so the cleanup order is unchanged and a worker that
+still never returns fails the test by name ("the pool did not stop within …")
+after 30 s. `TestPoolOptimizeBacklogDrainsBeforeUpscale`'s parked call still
+waits inside its `Once`; nothing asks that `Once` meanwhile (one worker, and
+the stop reaches the call through its context).
+
+When `stopPoolWithin` gives up, the stranded worker stays parked for the rest
+of the test process, and the store's cleanup, registered earlier and so run
+later, runs under it. That is acceptable only in a deliberately failing run,
+the two controls below; no passing run printed the stop's diagnostic.
+
+Each forced run was `go test -race -count=1 -overlay <map> -run '^<name>$'
+-timeout 90s ./internal/transcode`, without `-v`, as CI runs it. The map gave
+main's or 2e166023's two test files with the injection, written into a scratch
+directory, every inserted statement joined onto an existing line so that a
+line number is that side's own; the tree was never edited (`git status` clean
+before and after). The never-closed release (tests 1 and 2) was a
+`t.Fatal("forced")` just before the test closes `release` or `releaseFirst`.
+The fatal under `processedMu` (tests 2 and 3) was one handshake, the same on
+every side: each runner call, once entered, signals a buffered `entered` and
+parks on `fatalBranch` just before its `processedMu.Lock()`; the test waits for
+`entered` (10 s at most), its deadline is set a second in the past, so its first
+look takes the fatal branch, and that branch closes `fatalBranch` on the
+Fatalf's own line, just before the Fatalf (after main's `processedMu.Lock()`).
+
+At main all four hung until "panic: test timed out after 1m30s", with neither
+"forced" nor "worker drained only" anywhere in the output, `Stop` in
+`p.wg.Wait()` under the test's `Fatal` or `Fatalf`, and the worker at
+`pool_test.go:523` [chan receive] (test 1), at `pool_priority_test.go:152`
+[chan receive] inside `sync.(*Once).doSlow` (test 2's release), and in
+`sync.(*Mutex).Lock` at `pool_priority_test.go:154` (test 2's handshake) and
+:264 (test 3). At 2e166023 the same four failed in 0.79-0.81 s on their own
+messages ("forced" twice, "worker drained only 0 of 6 jobs within deadline",
+"worker drained only 0 of 20 jobs within deadline"), with no stop diagnostic;
+with no injection each test passed. Control 1, test 1 without its
+`ctx.Done()` case and with the release injection: "forced", then "the pool
+did not stop within 30s: a worker never exited", the test failing in 30.91 s
+with no panic. Control 2, test 3 with main's under-lock Fatalf put back and
+the handshake: "worker drained only 0 of 20 jobs within deadline", then the
+same named stop failure, in 30.94 s; and with `t.Cleanup(p.Stop)` put back as
+well, the 90 s panic, its worker in `sync.(*Mutex).Lock` at :269, main's
+behaviour.
+
+At 2e166023, with Go 1.27.3: `make fmt` changed nothing; `make vet` exited 0
+for linux/amd64, darwin/arm64 and windows/amd64 (`CGO_ENABLED=0` for the two);
+`go test -race -count=20 -v -run` over the three tests printed 60 `--- PASS`
+lines and no stop diagnostic; `go test -race ./internal/transcode` passed in
+180 s; and `make docs-check` passed with this record.
+
+## 2026-11-17 — B884 follow-up: the sweeper pointer's exception, and the managed bridge in the README
+
+The rules are `cli-serve.md`'s sweeper line (56) and its long form in
+`ops/History-rules-cli-serve.md`; this is the record. Docs and rules alone,
+on eaca26cc: no code changes.
+
+### What changed
+
+- **The sweeper pointer.** B884's round 4 condensed the sweeper entry to a
+  pointer (`move_entry.py --text`), which kept "fails CLOSED on nil" and
+  dropped the long form's exception, "`analysisSweeper.active()` returns
+  false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s nil
+  arm reads the other way and is its own call". The pointer carries it again,
+  and the pointer and the long form both name the fingerprint sweep's two
+  predicates, since "its nil arm" alone left open which one, and a change
+  could have "fixed" either the wrong way: its `enabled` lets a pass run
+  when nil (`cmd/bridge/fingerprint_sweeper.go` 176, `if enabled != nil &&
+  !enabled()`; production hands it `fingerprintReady`, `main.go` 5597),
+  and its `enrichmentOn` fails closed, a nil one running no pass and
+  recording none (the doc, 172-173; the pass, 179-185, through
+  `enrichgate.CancelWhenOff`, whose `on` reads a nil switch as off,
+  `internal/enrichgate/enrichgate.go` 73 and 139-141;
+  `TestNoSwitchIsOffForTheSweepAndTheCoverRefresh`).
+  `analysisSweeper.active()` is `cmd/bridge/analyze.go` 796.
+- **The long form's place.** Round 4's move appended the entry at the end
+  of its section, below the B617 cover adapter bullet, whose "(unlike the
+  sweep's `enabled`, the bullet above)" it made false. The entry stands
+  directly above that bullet now (History lines 2301 and 2311), the two in
+  the rules file's order (56, 57). "above" was not changed to "below": two
+  unrelated bullets, `flag.Parse`'s scope and the feature gates, stood
+  between them.
+- **The room.** `cli-serve.md` stood at 99,914 bytes of its 100,000, and
+  the pointer grew by 269. `move_entry.py --largest` offers one entry, line
+  69, and refuses to move it (its Don't sentence needs a 766-byte pointer).
+  The tsnet state-file line (111, backlog B828) was the verbatim twin of the
+  first bullet of its long form (History line 6110 now): the rules line ends
+  at its Don't sentence, and the five tests that pin it stay named in that
+  bullet, verbatim, which is unchanged. 308 bytes fewer, the file at 99,875.
+- **README.md.** The note "The bridge's files inside a library root" says
+  that on a managed bridge, one whose `bridge.yaml` lists
+  `deployment.managedControls` (`config.DeploymentConfig.IsManaged`,
+  `internal/config/config.go` 1559-1561; `managedSettings` alone does not
+  make one), `bridge doctor` and the console's Diagnostics page leave the
+  warning out, and that `bridge init` and the log still warn; the rest of
+  the note is as it was. The doctors: `internal/doctor/doctor.go` 553
+  (`d.InstallLayout != nil && !d.Managed`), over the Deps
+  `buildDoctorDepsRun` sets (`InstallLayout` at `cmd/bridge/doctor.go` 400,
+  `Managed` from `cfg.Deployment.IsManaged()` at 450), which the console's
+  runner builds and runs too (1146-1153);
+  `TestAManagedBridgesDoctorSaysNothingOfItsLayout` pins it. Init and the
+  log ask nothing of `IsManaged`: init's `warnInstallLayout` calls at
+  `cmd/bridge/init.go` 751 (a config it keeps) and 975 (one it wrote),
+  serve's `logInstallLayout` at `cmd/bridge/main.go` 3703, and the two
+  functions themselves (`cmd/bridge/install_layout.go` 33-39 and 66-70).
+  Init never rewrites a managed config (`refuseRewrite`,
+  `cmd/bridge/init_rewrite.go` 486-494, over `madeElsewhere`'s
+  `deployment.managedControls`, 513-516), so its line there comes from a run
+  that keeps it.
+
+### Not changed
+
+B884's dated transcripts above keep round 4's elision of a removed test's
+name in their six lines (`…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePath…`),
+as `build-ci-tests.md`'s rule on a note that names a removed test has it:
+reworded, never exempted (its long form in
+`ops/History-rules-build-ci-tests.md`, the bullet on `_test.go` comments and
+the one after it). Restoring the name with an exemption, which a review
+suggested, would change that rule, which is not this follow-up's;
+`cited_test_names_test.go` is untouched.
+
+### Checks
+
+`make docs-check` passes (the budgets and their self-test, and rules-for's
+and `move_entry.py`'s self-tests; `cli-serve.md` 99.9 % of its budget, said
+close). It runs no Go, so the citation guard ran apart, `go test -tags
+ts_omit_webclient,ts_omit_debugeventbus ./cmd/bridge -run
+TestEveryCitedTestNameExists -count=1`, ok, and so did internal/config's
+`TestTheReadmeNamesEveryPathSettingLoadResolves`, ok. `verify_moves.py
+--base eaca26cc`, the sweeper's two blocks and the state-file line named as
+edits, finds every other block of the base in place.
+
 ## 2026-11-17 — B930: the ticker's mid-prune cancel test times its pass and its return apart
 
 CI run 44097405776, attempt 1, `test (windows-latest)`, on B730 B1's

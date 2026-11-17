@@ -2298,6 +2298,16 @@ mentions across the four `ops/audit-*.md` files.
 
 - **`bridge fingerprint` takes `--config` and follows its switch while a lookup run runs: `BRIDGE_ENRICH_ENABLED`, else the file `--config` names (one that is not there refuses), else the file at the default path, else on, read as the run starts and then once a second by one goroutine started right after that read, before the key check and the fpcalc probe (`fingerprintSwitch.follow`), which ends the run's context at the read that finds the switch off, or finds a config it read gone or no longer loading; the run then exits 1 in the refusal's words, and its client and its context ask only the last read's answer** (2026-11-07, backlog B617's third and fourth rounds; `enrichment.md`'s B617 bullet). **Don't read the switch once, follow it only once the probe is done, take a `--config` file that is not there for on, re-read the config at each ask, or let a config found at the start that is gone read as the default.** `TestBridgeFingerprintReadsTheConfigItIsGiven`, `TestBridgeFingerprintFollowsItsSwitchWhileItRuns`, `TestBridgeFingerprintFollowsItsSwitchFromItsFirstRead` and `TestTheFingerprintSwitchIsReadAtMostOnceASecond` pin it.
 
+- **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
+  belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
+  returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
+  `enabled` reads the other way, a nil one letting the pass run
+  (`enabled != nil && !enabled()`), and is its own call, while its
+  `enrichmentOn` fails closed, as every switch `enrichgate` asks does (the
+  bullet below): a nil one runs no pass and records none
+  (`TestNoSwitchIsOffForTheSweepAndTheCoverRefresh`). A disabled pass records
+  NO status, so the Jobs card keeps its last real breakdown.
+
 - **Serve's harvest cover adapter (`atlasCoverRefetcher`) asks `enrich.enabled` before each refetch and runs it on the switch's context, and a refetch the switch stopped is `atlasharvest.ErrCoversPaused`, never the miss a CAA answer is, and a refetch whose cover the premium fetch's write committed is got whatever the switch says by then, so the harvest settles it; the adapter's switch, and the fingerprint sweep's `enrichmentOn`, are off when nil, as every switch `enrichgate` asks (unlike the sweep's `enabled`, the bullet above)** (2026-11-06, backlog B617, round 3 for the nil, round 5 for a committed cover; `enrichment.md`'s B617 bullet). **Don't answer a switched-off refetch (false, nil): six of those drop a pending cover; don't answer a committed cover with a pause, which fetches it again; and don't read a nil switch as on.** `TestTheCoverAdapterAsksAtlasNothingWhileEnrichmentIsOff`, `TestTheHarvestRunsWithEnrichmentOff`, `TestNoSwitchIsOffForTheSweepAndTheCoverRefresh` and `TestAPremiumUpgradeWrittenAfterTheFlipIsGot` pin it.
 
 - **`flag.Parse` stops at the first non-flag argument, so an unguarded
@@ -2312,12 +2322,6 @@ mentions across the four `ops/audit-*.md` files.
   will be refused should not first cost a recursive `WalkDir`. Asserting on the
   refusal STATUS cannot catch the ordering — 503-before and 404-after are both
   "refused"; assert on which one comes back for a nonexistent path.
-
-- **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
-  belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
-  returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
-  nil arm reads the other way and is its own call. A disabled pass records NO
-  status, so the Jobs card keeps its last real breakdown.
 
 ## Scanner, deletion passes, and manifest writes
 
