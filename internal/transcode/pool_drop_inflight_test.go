@@ -166,14 +166,17 @@ func TestDropInflightEmptyMapReturnsZero(t *testing.T) {
 const stopReserve = 10 * time.Second
 
 // stopPoolWithin is p.Stop with a bound of its own: limit, capped by the test
-// binary's deadline less stopReserve, so a worker that never exits fails the
+// binary's deadline less stopReserve (at most half the time left), so a worker that never exits fails the
 // test by name instead of holding it to the binary's deadline (B924).
 func stopPoolWithin(t *testing.T, p *Pool, limit time.Duration) {
 	t.Helper()
 	bound := limit
 	if deadline, ok := t.Deadline(); ok {
-		if left := time.Until(deadline) - stopReserve; left < bound {
-			bound = max(left, 0)
+		// The reserve never takes more than half of what is left, so a run
+		// short of time still gives the stop a positive budget.
+		left := time.Until(deadline)
+		if b := left - min(stopReserve, left/2); b < bound {
+			bound = b
 		}
 	}
 	stopped := make(chan struct{})
