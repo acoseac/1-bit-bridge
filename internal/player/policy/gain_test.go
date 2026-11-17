@@ -25,7 +25,7 @@ func wantGain(t *testing.T, what string, g Gain, reason engine.Reason) {
 // after its DoP decoder and a raw-maximum control on firmware 0100.
 func analogueProfile() *dacprofile.Profile {
 	return &dacprofile.Profile{ID: "test.dac", DoP: &dacprofile.DoP{
-		HeardMaxBitRate:      dsd256,
+		HeardBitRates:        []int{dsd64, dsd128, dsd256},
 		AnalogVolumeControls: []dacprofile.AnalogControl{{ControlID: dacprofile.ControlID{Interface: "MIXER", Name: "Master Playback Volume", Index: 0}}},
 		UnityAtRawMax: []dacprofile.RawMaxControl{{ControlID: dacprofile.ControlID{Interface: "MIXER", Name: "Digital Playback Volume", Index: 0},
 			RawMax: 255, BCDDevice: []string{"0100"}, Evidence: dacprofile.Evidence{Kind: "document", Title: "Manual", Section: "4.2"}}},

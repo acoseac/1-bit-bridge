@@ -120,6 +120,8 @@ var reviewedBuildSites = map[string][]string{
 		"GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo \"$TEMP\")",
 		"run: go vet -tags @TAGS@ ./...",
 		"run: go test -tags @TAGS@ -timeout 30m ./...",
+		"go run -tags @TAGS@ ./scripts/dac-profiles/ios-export -check",
+		"go test -tags @TAGS@ ./internal/player/dacprofile ./scripts/dac-profiles/ios-export -count=1 -v",
 	},
 	".goreleaser.yaml": {
 		"- go run ./scripts/third-party-licenses",
@@ -186,6 +188,10 @@ var reviewedBuildSites = map[string][]string{
 	},
 	"scripts/alsa-abi/check.sh": {
 		"go test -tags @TAGS@ ./internal/alsapcm -run '^TestUAPIMatchesTheKernelHeader$' -count=1 -v -args -abi-probe=\"$work/probe.txt\" | tee \"$work/go-test.txt\"",
+	},
+	"scripts/dac-profiles/README.md": {
+		"go run -tags @TAGS@ ./scripts/dac-profiles/ios-export",
+		"go run -tags @TAGS@ ./scripts/dac-profiles/ios-export -check",
 	},
 	"scripts/dac-profiles/kernel-check.sh": {
 		"go test -tags @TAGS@ ./internal/player/dacprofile -run '^TestTheKernelSeedIsThePinnedTags$' -count=1 -v -args -kernel-quirks=\"$quirks\" | tee \"$work/go-test.txt\"",

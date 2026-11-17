@@ -138,7 +138,7 @@ func conditions(transport string) map[string]condition {
 		"the profile heard or stated DoP at r, or DoP confirmed": {fail: []failure{
 			{"none of them", ReasonConfirmationRequired, func(r *rig) { r.profileDoP = nil; r.confirmed = nil }},
 			{"a claim only below the rate", ReasonConfirmationRequired, func(r *rig) {
-				r.profileDoP = &dacprofile.DoP{HeardMaxBitRate: dsd64, StatedMaxBitRate: dsd64}
+				r.profileDoP = &dacprofile.DoP{HeardBitRates: []int{dsd64}, StatedMaxBitRate: dsd64}
 				r.confirmed = nil
 			}},
 		}},

@@ -1,0 +1,2385 @@
+{
+  "baselineVersion" : 1,
+  "genericNames" : [
+    "Headphones",
+    "Combo384 Amanero",
+    "CX31993 HIFI AUDIO"
+  ],
+  "iosCommit" : "6a1241eb9da11c43fc2b61e158582fa17c0d3040",
+  "knownSiblings" : [
+    {
+      "live" : "mytek.brooklyn.dac.plus",
+      "name" : "Mytek Brooklyn Bridge II",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : "mytek.brooklyn.dac.plus",
+      "name" : "Mytek Brooklyn Bridge",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : "mytek.brooklyn.dac.plus",
+      "name" : "Mytek Brooklyn DAC",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "Mytek Manhattan II",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : "topping.e30ii",
+      "name" : "TOPPING E30 II Lite",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : "topping.e30ii",
+      "name" : "TOPPING E30II Lite",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : "topping.e30ii",
+      "name" : "TOPPING E30",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : "jcally.jm98max",
+      "name" : "JCALLY JM98MAX 2",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : "jcally.jm98max",
+      "name" : "JCALLY JM98MAX2",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "JM20MAX",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "JM20 MAX",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "JM20PRO",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "JM12",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "JM6 PRO",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "FIIO KA1",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "FIIO KA2",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "FIIO KA5",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "FIIO KA15",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "AudioQuest DragonFly Black v1.5",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "AudioQuest DragonFly Red v1.0",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "AudioQuest DragonFly v1.2",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "iFi GO link 2",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "iFi GO link Max",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "iFi GO link 2 Max",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    }
+  ],
+  "parityCorpus" : [
+    {
+      "exception" : false,
+      "live" : "chord.hugo2",
+      "name" : "hugo 2",
+      "strict" : {
+        "known" : {
+          "id" : "chord.hugo2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.hugo2",
+      "name" : "hugo2",
+      "strict" : {
+        "known" : {
+          "id" : "chord.hugo2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.mojo2",
+      "name" : "mojo 2",
+      "strict" : {
+        "known" : {
+          "id" : "chord.mojo2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.mojo2",
+      "name" : "mojo2",
+      "strict" : {
+        "known" : {
+          "id" : "chord.mojo2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.hugott2",
+      "name" : "hugo tt 2",
+      "strict" : {
+        "known" : {
+          "id" : "chord.hugott2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.hugott2",
+      "name" : "hugo tt2",
+      "strict" : {
+        "known" : {
+          "id" : "chord.hugott2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.qutest",
+      "name" : "qutest",
+      "strict" : {
+        "known" : {
+          "id" : "chord.qutest",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : true,
+      "live" : "mytek.brooklyn.dac.plus",
+      "name" : "brooklyn",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ifi.golink",
+      "name" : "ifi usb audio se",
+      "strict" : {
+        "known" : {
+          "id" : "ifi.golink",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ifi.generic",
+      "name" : "ifi (by amr)",
+      "strict" : {
+        "known" : {
+          "id" : "ifi.generic",
+          "scope" : "family",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : true,
+      "live" : "fiio.ka3",
+      "name" : "ka3",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka3",
+      "name" : "fiio ka3",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka3",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka11",
+      "name" : "fiio ka11",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka11",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka13",
+      "name" : "ka13",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka13",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka17",
+      "name" : "fiio ka17",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka17",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.qx13",
+      "name" : "qx13",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.qx13",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "snowsky.tinya",
+      "name" : "snowsky tiny a",
+      "strict" : {
+        "known" : {
+          "id" : "snowsky.tinya",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ddhifi.headphonezone.dac",
+      "name" : "headphone zone x ddhifi dac",
+      "strict" : {
+        "known" : {
+          "id" : "ddhifi.headphonezone.dac",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "jcally.jm98max",
+      "name" : "jm98max",
+      "strict" : {
+        "known" : {
+          "id" : "jcally.jm98max",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "luxsin.x8",
+      "name" : "luxsin x8",
+      "strict" : {
+        "known" : {
+          "id" : "luxsin.x8",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "topping.e30ii",
+      "name" : "e30 ii",
+      "strict" : {
+        "known" : {
+          "id" : "topping.e30ii",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "topping.e30ii",
+      "name" : "e30ii",
+      "strict" : {
+        "known" : {
+          "id" : "topping.e30ii",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : true,
+      "live" : "topping.e30ii",
+      "name" : "topping e30",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "audioquest.dragonfly.cobalt",
+      "name" : "dragonfly cobalt",
+      "strict" : {
+        "known" : {
+          "id" : "audioquest.dragonfly.cobalt",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "audioquest.dragonfly.copper",
+      "name" : "dragonfly copper",
+      "strict" : {
+        "known" : {
+          "id" : "audioquest.dragonfly.copper",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "apple.usbc.adapter",
+      "name" : "usb-c to 3.5 mm headphone jack adapter",
+      "strict" : {
+        "known" : {
+          "id" : "apple.usbc.adapter",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "apple.usbc.adapter",
+      "name" : "usb-c headphone",
+      "strict" : {
+        "known" : {
+          "id" : "apple.usbc.adapter",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ifi.golink",
+      "name" : "iFi USB Audio SE",
+      "strict" : {
+        "known" : {
+          "id" : "ifi.golink",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ifi.generic",
+      "name" : "iFi (by AMR) HD USB Audio ",
+      "strict" : {
+        "known" : {
+          "id" : "ifi.generic",
+          "scope" : "family",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka11",
+      "name" : "FIIO KA11",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka11",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka17",
+      "name" : "FIIO KA17 ",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka17",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.qx13",
+      "name" : "FIIO QX13 ",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.qx13",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "snowsky.tinya",
+      "name" : "SNOWSKY TINY A",
+      "strict" : {
+        "known" : {
+          "id" : "snowsky.tinya",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ddhifi.headphonezone.dac",
+      "name" : "Headphone Zone x ddHiFi DAC",
+      "strict" : {
+        "known" : {
+          "id" : "ddhifi.headphonezone.dac",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "jcally.jm98max",
+      "name" : "JM98MAX",
+      "strict" : {
+        "known" : {
+          "id" : "jcally.jm98max",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "luxsin.x8",
+      "name" : "Luxsin X8",
+      "strict" : {
+        "known" : {
+          "id" : "luxsin.x8",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "audioquest.dragonfly.copper",
+      "name" : "AudioQuest DragonFly Copper v1.0",
+      "strict" : {
+        "known" : {
+          "id" : "audioquest.dragonfly.copper",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.hugo2",
+      "name" : "Chord Hugo 2",
+      "strict" : {
+        "known" : {
+          "id" : "chord.hugo2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.mojo2",
+      "name" : "Chord Mojo 2",
+      "strict" : {
+        "known" : {
+          "id" : "chord.mojo2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.hugott2",
+      "name" : "Hugo TT 2",
+      "strict" : {
+        "known" : {
+          "id" : "chord.hugott2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "chord.qutest",
+      "name" : "Chord Qutest",
+      "strict" : {
+        "known" : {
+          "id" : "chord.qutest",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka13",
+      "name" : "FiiO KA13",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka13",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka11",
+      "name" : "FIIO KA11",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka11",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka11",
+      "name" : "FiiO KA11",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka11",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka3",
+      "name" : "FiiO KA3",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka3",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka17",
+      "name" : "FiiO KA17",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka17",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "FIIO KA1",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "FIIO KA2",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka3",
+      "name" : "FIIO KA3",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka3",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "FIIO KA5",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka13",
+      "name" : "FIIO KA13",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka13",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "FIIO KA15",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.qx13",
+      "name" : "FIIO QX13 ",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.qx13",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "snowsky.tinya",
+      "name" : "SNOWSKY TINY A",
+      "strict" : {
+        "known" : {
+          "id" : "snowsky.tinya",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "luxsin.x8",
+      "name" : "Luxsin X8",
+      "strict" : {
+        "known" : {
+          "id" : "luxsin.x8",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ddhifi.headphonezone.dac",
+      "name" : "Headphone Zone x ddHiFi DAC",
+      "strict" : {
+        "known" : {
+          "id" : "ddhifi.headphonezone.dac",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "jcally.jm98max",
+      "name" : "JM98MAX",
+      "strict" : {
+        "known" : {
+          "id" : "jcally.jm98max",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "jcally.jm98max",
+      "name" : "jm98max",
+      "strict" : {
+        "known" : {
+          "id" : "jcally.jm98max",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "JM20MAX",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "JM20 MAX",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "JM20PRO",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "JM12",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "JM6 PRO",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "fiio.ka17",
+      "name" : "FIIO KA17 ",
+      "strict" : {
+        "known" : {
+          "id" : "fiio.ka17",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "audioquest.dragonfly.copper",
+      "name" : "AudioQuest DragonFly Copper v1.0",
+      "strict" : {
+        "known" : {
+          "id" : "audioquest.dragonfly.copper",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "audioquest.dragonfly.copper",
+      "name" : "AUDIOQUEST DRAGONFLY COPPER V1.0",
+      "strict" : {
+        "known" : {
+          "id" : "audioquest.dragonfly.copper",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "audioquest.dragonfly.cobalt",
+      "name" : "AudioQuest DragonFly Cobalt v1.0",
+      "strict" : {
+        "known" : {
+          "id" : "audioquest.dragonfly.cobalt",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "AudioQuest DragonFly Black v1.5",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "AudioQuest DragonFly Red v1.0",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "AudioQuest DragonFly v1.2",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ifi.golink",
+      "name" : "iFi USB Audio SE",
+      "strict" : {
+        "known" : {
+          "id" : "ifi.golink",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ifi.golink",
+      "name" : "IFI USB AUDIO SE",
+      "strict" : {
+        "known" : {
+          "id" : "ifi.golink",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ifi.generic",
+      "name" : "iFi (by AMR) HD USB Audio ",
+      "strict" : {
+        "known" : {
+          "id" : "ifi.generic",
+          "scope" : "family",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ifi.generic",
+      "name" : "iFi (by AMR) HD+ USB Audio",
+      "strict" : {
+        "known" : {
+          "id" : "ifi.generic",
+          "scope" : "family",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "ifi.generic",
+      "name" : "iFi (by AMR) GO bar",
+      "strict" : {
+        "known" : {
+          "id" : "ifi.generic",
+          "scope" : "family",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "GO link",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "ZEN DAC V2",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "hip-dac",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "hip dac",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "GO bar",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "GOBar",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "GO-bar",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "mytek.brooklyn.dac.plus",
+      "name" : "Mytek Brooklyn DAC+",
+      "strict" : {
+        "known" : {
+          "id" : "mytek.brooklyn.dac.plus",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "mytek.brooklyn.dac.plus",
+      "name" : "Brooklyn DAC+",
+      "strict" : {
+        "known" : {
+          "id" : "mytek.brooklyn.dac.plus",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : true,
+      "live" : "mytek.brooklyn.dac.plus",
+      "name" : "Brooklyn DAC",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "Mytek Manhattan II",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : true,
+      "live" : "fiio.ka3",
+      "name" : "KA3",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : true,
+      "live" : "topping.e30ii",
+      "name" : "TOPPING E30",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    }
+  ],
+  "rows" : [
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dop",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "chord.hugo2",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "hugo 2",
+        "hugo2"
+      ],
+      "maker" : "Chord Electronics",
+      "name" : "Chord Hugo 2",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "hugo 2",
+          "hugo2"
+        ]
+      },
+      "order" : 1,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : 600,
+        "dsdResyncMs" : 700,
+        "ioBufferMs" : 40,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : 30
+      },
+      "volumeTopology" : "dacOwnsGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dop",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "chord.mojo2",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "mojo 2",
+        "mojo2"
+      ],
+      "maker" : "Chord Electronics",
+      "name" : "Chord Mojo 2",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "mojo 2",
+          "mojo2"
+        ]
+      },
+      "order" : 2,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : 400,
+        "dsdResyncMs" : 500,
+        "ioBufferMs" : 40,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : 30
+      },
+      "volumeTopology" : "dacOwnsGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "chord.hugott2",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "hugo tt 2",
+        "hugo tt2"
+      ],
+      "maker" : "Chord Electronics",
+      "name" : "Chord Hugo TT 2",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "hugo tt 2",
+          "hugo tt2"
+        ]
+      },
+      "order" : 3,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : 600,
+        "dsdResyncMs" : 700,
+        "ioBufferMs" : 40,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : 30
+      },
+      "volumeTopology" : "dacOwnsGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "chord.qutest",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "qutest"
+      ],
+      "maker" : "Chord Electronics",
+      "name" : "Chord Qutest",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "qutest"
+        ]
+      },
+      "order" : 4,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : 500,
+        "dsdResyncMs" : 700,
+        "ioBufferMs" : 40,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : 30
+      },
+      "volumeTopology" : "dacOwnsGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+          {
+            "failure" : "carrierRefused",
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-06-21",
+              "kind" : "fieldLog"
+            }
+          }
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "mytek.brooklyn.dac.plus",
+      "legacyCeiling" : "dsd128",
+      "legacyPatterns" : [
+        "brooklyn"
+      ],
+      "maker" : "Mytek Digital",
+      "name" : "Mytek Brooklyn DAC+",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "brooklyn dac+"
+        ]
+      },
+      "order" : 5,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 384000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : 40,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "dacOwnsGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+          {
+            "failure" : "carrierRefused",
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-10-18",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "heard" : [
+          {
+            "rate" : "dsd64",
+            "source" : {
+              "date" : "2026-10-18",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-10-18",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "ifi.golink",
+      "legacyCeiling" : "dsd128",
+      "legacyPatterns" : [
+        "ifi usb audio se"
+      ],
+      "maker" : "iFi audio",
+      "name" : "iFi GO link",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "iFi USB Audio SE"
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "ifi usb audio se"
+        ]
+      },
+      "order" : 6,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 384000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "hostSyncedDACGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : "Siblings under this name, not this row's own evidence: DSD64 and DSD128 heard over DoP on one unit (a submission, 2026-09-23); DSD256 refused over DoP on two units (2026-09-08, 2026-09-23).",
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "ifi.generic",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "ifi (by amr)"
+      ],
+      "maker" : "iFi audio",
+      "name" : "iFi USB DAC",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "iFi (by AMR) HD USB Audio "
+        ],
+        "scope" : "family",
+        "tokens" : [
+          "ifi (by amr)"
+        ]
+      },
+      "order" : 7,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 384000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "unknown"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "fiio.ka3",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "ka3",
+        "fiio ka3"
+      ],
+      "maker" : "FiiO",
+      "name" : "FiiO KA3",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "fiio ka3"
+        ]
+      },
+      "order" : 8,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 384000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : 40,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "unknown"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+          {
+            "failure" : "carrierRefused",
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-10-04",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "heard" : [
+          {
+            "rate" : "dsd64",
+            "source" : {
+              "date" : "2026-10-04",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-10-04",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "unrecorded",
+          "source" : null,
+          "upTo" : null
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "fiio.ka11",
+      "legacyCeiling" : "dsd128",
+      "legacyPatterns" : [
+        "fiio ka11"
+      ],
+      "maker" : "FiiO",
+      "name" : "FiiO KA11",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "FIIO KA11"
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "fiio ka11"
+        ]
+      },
+      "order" : 9,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 384000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "hostSyncedDACGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "fiio.ka13",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "ka13"
+      ],
+      "maker" : "FiiO",
+      "name" : "FiiO KA13",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "ka13"
+        ]
+      },
+      "order" : 10,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 384000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : 40,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "unknown"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+          {
+            "failure" : "carrierRefused",
+            "rate" : "dsd512",
+            "source" : {
+              "date" : "2026-11-02",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "heard" : [
+          {
+            "rate" : "dsd64",
+            "source" : {
+              "date" : "2026-11-02",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-11-02",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-11-02",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "unrecorded",
+          "source" : null,
+          "upTo" : null
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "fiio.ka17",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "fiio ka17"
+      ],
+      "maker" : "FiiO",
+      "name" : "FiiO KA17",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "FIIO KA17 "
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "fiio ka17"
+        ]
+      },
+      "order" : 11,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "hostSyncedDACGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+          {
+            "rate" : "dsd64",
+            "source" : {
+              "date" : "2026-10-13",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-10-13",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-10-13",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "hiddenMode" : true,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "unrecorded",
+          "source" : null,
+          "upTo" : null
+        }
+      },
+      "hiddenMode" : true,
+      "id" : "fiio.qx13",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "qx13"
+      ],
+      "maker" : "FiiO",
+      "name" : "FiiO QX13",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "FIIO QX13 "
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "qx13"
+        ]
+      },
+      "order" : 12,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : 800,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "hostSyncedDACGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+          {
+            "failure" : "carrierRefused",
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-10-13",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "heard" : [
+          {
+            "rate" : "dsd64",
+            "source" : {
+              "date" : "2026-10-13",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-10-13",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "unrecorded",
+          "source" : null,
+          "upTo" : null
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "snowsky.tinya",
+      "legacyCeiling" : "dsd128",
+      "legacyPatterns" : [
+        "snowsky tiny a"
+      ],
+      "maker" : "Snowsky",
+      "name" : "Snowsky Tiny A",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "SNOWSKY TINY A"
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "snowsky tiny a"
+        ]
+      },
+      "order" : 13,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 384000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : 800,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "hostSyncedDACGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+          {
+            "failure" : "noLockProxy",
+            "rate" : "dsd64",
+            "source" : {
+              "date" : "2026-10-24",
+              "kind" : "submission"
+            }
+          },
+          {
+            "failure" : "noLockProxy",
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-10-24",
+              "kind" : "submission"
+            }
+          },
+          {
+            "failure" : "noLockProxy",
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-10-24",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "noDSD",
+          "source" : {
+            "date" : null,
+            "kind" : "chipSpecification"
+          },
+          "upTo" : null
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "ddhifi.headphonezone.dac",
+      "legacyCeiling" : "none",
+      "legacyPatterns" : [
+        "headphone zone x ddhifi dac"
+      ],
+      "maker" : "ddHiFi",
+      "name" : "Headphone Zone x ddHiFi Hi-Res DAC",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "Headphone Zone x ddHiFi DAC"
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "headphone zone x ddhifi dac"
+        ]
+      },
+      "order" : 14,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 384000
+      },
+      "timing" : {
+        "coldStartExtraMs" : 600,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "unknown"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+          {
+            "failure" : "heardSilence",
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-10-25",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "heard" : [
+          {
+            "rate" : "dsd64",
+            "source" : {
+              "date" : "2026-10-25",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-10-25",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "retailer"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "jcally.jm98max",
+      "legacyCeiling" : "dsd128",
+      "legacyPatterns" : [
+        "jm98max"
+      ],
+      "maker" : "JCALLY",
+      "name" : "JCALLY JM98MAX",
+      "nameKeys" : {
+        "excludedTokens" : [
+          "jm98max 2",
+          "jm98max2"
+        ],
+        "portNames" : [
+          "JM98MAX"
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "jm98max"
+        ]
+      },
+      "order" : 15,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "hostSyncedDACGain"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+          {
+            "rate" : "dsd64",
+            "source" : {
+              "date" : "2026-10-13",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-10-13",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-10-13",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "unrecorded",
+          "source" : null,
+          "upTo" : null
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "luxsin.x8",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "luxsin x8"
+      ],
+      "maker" : "Luxsin",
+      "name" : "Luxsin X8",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "Luxsin X8"
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "luxsin x8"
+        ]
+      },
+      "order" : 16,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : 800,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "unknown"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd256"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "topping.e30ii",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "e30 ii",
+        "e30ii",
+        "topping e30"
+      ],
+      "maker" : "Topping",
+      "name" : "Topping E30 II",
+      "nameKeys" : {
+        "excludedTokens" : [
+          "lite"
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "e30 ii",
+          "e30ii"
+        ]
+      },
+      "order" : 17,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : 40,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "unknown"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "noDSD",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : null
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "audioquest.dragonfly.cobalt",
+      "legacyCeiling" : "none",
+      "legacyPatterns" : [
+        "dragonfly cobalt"
+      ],
+      "maker" : "AudioQuest",
+      "name" : "AudioQuest DragonFly Cobalt",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "dragonfly cobalt"
+        ]
+      },
+      "order" : 18,
+      "pcm" : {
+        "bitDepth" : 24,
+        "maxRateHz" : 96000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "unknown"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+          {
+            "failure" : "noLockProxy",
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-11-03",
+              "kind" : "submission"
+            }
+          },
+          {
+            "failure" : "noLockProxy",
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-11-03",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "noDSD",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : null
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "audioquest.dragonfly.copper",
+      "legacyCeiling" : "none",
+      "legacyPatterns" : [
+        "dragonfly copper"
+      ],
+      "maker" : "AudioQuest",
+      "name" : "AudioQuest DragonFly Copper",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "AudioQuest DragonFly Copper v1.0"
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "dragonfly copper"
+        ]
+      },
+      "order" : 19,
+      "pcm" : {
+        "bitDepth" : 24,
+        "maxRateHz" : 96000
+      },
+      "timing" : {
+        "coldStartExtraMs" : 300,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "unknown"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+
+        ],
+        "heard" : [
+
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "noDSD",
+          "source" : {
+            "date" : null,
+            "kind" : "pcmCeiling"
+          },
+          "upTo" : null
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "apple.usbc.adapter",
+      "legacyCeiling" : "none",
+      "legacyPatterns" : [
+        "usb-c to 3.5 mm headphone jack adapter",
+        "usb-c headphone"
+      ],
+      "maker" : "Apple",
+      "name" : "Apple USB-C to 3.5 mm Adapter",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "usb-c to 3.5 mm headphone jack adapter",
+          "usb-c headphone"
+        ]
+      },
+      "order" : 20,
+      "pcm" : {
+        "bitDepth" : 24,
+        "maxRateHz" : 48000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "unknown"
+    }
+  ]
+}
