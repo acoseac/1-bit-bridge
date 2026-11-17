@@ -1,14 +1,17 @@
 # The DAC profile database's checks
 
-`internal/player/dacprofile/profiles.json` is the bridge player's reviewed
-database of DAC profiles (B728; `ops/plan-b728-dsd-capability-design.md`,
-section 2): what is known of a DAC model's DSD, keyed by its USB identity and
-embedded in the binary. The package's own tests hold the file to its schema
-and its rules on every test run: the matches, no two profiles of one
-identity, product strings for shared reference IDs, a provenance line for
-every claim, the closed caveat list, and the file's canonical form. Two of its
-claims rest on files outside this repository, and these two checks hold them
-to those files.
+`internal/player/dacprofile/profiles.json` is the DAC catalog: the bridge
+player's reviewed database of DAC profiles (B728;
+`ops/plan-b728-dsd-capability-design.md`, section 2), what is known of a DAC
+model's DSD, keyed by its USB identity and embedded in the binary, and since
+B730 B1 the one source of the iOS app's DAC registry, each row's iOS
+projection. The package's own tests hold the file to its schema and its rules
+on every test run: the matches, no two profiles of one identity, product
+strings for shared reference IDs, a provenance line for every claim, DoP
+evidence rate by rate, the iOS name keys, the closed caveat list, and the
+file's canonical form. Two checks hold it to files outside this repository:
+the kernel seed to the kernel's quirks, and the iOS projection, through its
+export, to the iOS registry's baseline.
 
 ## The kernel seed: `kernel-check.sh`
 
@@ -53,58 +56,89 @@ To follow a newer kernel, move the pin in `internal/alsapcm/uapi.go` (see
 `scripts/alsa-abi/README.md`), run this script, and seed, change or drop what
 it reports.
 
-## The iOS DoP evidence: `ios-check.py`
+## The iOS projection and its export: `ios-export`
 
-A profile's DoP claim comes from a row of the iOS app's registry,
-`DACProfile.swift`, at a named commit ("DACProfile.swift mytek.brooklyn.dac.plus
-at iOS cd125088"). The author of a database PR reads the registry at that
-commit and checks that no imported heard or stated DoP rate exceeds its row's
-`maxDSDRate`:
+Since B730 B1 the catalog is the one source of the iOS app's DAC registry. A
+profile's `ios` object is its registry row in the app's words: its order (the
+app's live matcher takes the first row whose patterns a port's name holds,
+until iOS PR 3), its maker, its legacy patterns and ceiling (the row's
+`matchPatterns` and `maxDSDRate` as the registry holds them, which iOS PR 3
+retires), its port names (verbatim, a trailing space kept), its name tokens
+and excluded tokens (iOS PR 1's strict keys, never the legacy patterns: the
+KA3's token is `FiiO KA3`, not `KA3`), its scope (`model`, or `family`, whose
+siblings' results are its sibling note's alone), its PCM ceiling, its volume
+topology and its times in whole milliseconds; `iosGenericNames` are the names
+that name no model. Every name is printable ASCII. A profile with no `match`
+is iOS's alone: it makes no claim only a match reaches, and `Match` never
+knows it. The player reads none of the projection.
+
+`ios-export` reads the embedded catalog and writes `DACCatalog.ios.json`
+beside itself: the rows with `ios`, by `ios.order`, each with what the app
+reads (the projection, the hidden-mode caveat, and the DoP evidence below)
+and nothing only the bridge reads. Run it from the repository root after a
+change of the catalog, and commit what it writes:
 
 ```sh
-python3 scripts/dac-profiles/ios-check.py --registry ~/dev/com.acoseac.dsdplayer/com.acoseac.dsdplayer/DACProfile.swift --commit <sha>
-python3 scripts/dac-profiles/ios-check.py --self-test   # what CI's dac-profiles job runs
+go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/dac-profiles/ios-export
+go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/dac-profiles/ios-export -check
 ```
 
-A rate a device refused is not compared with the row, which may keep a
-published maximum beside a refusal at or below it (`ifi.generic` keeps DSD256
-while both its measured units refused it); the refusal's evidence is in the
-row's comments, and the database's lint holds it to the profile's own
-provenance. A heard rate is a listening: a row whose rate a negotiation, a
-hardware confirmation or a DoP lock reached gives no heard rate (the design's
-section 1.1: the iOS lock hears nothing back).
+The second writes nothing and exits 1 when the file is not what the catalog
+exports now; both print the file's SHA-256, which iOS PR 2 pins beside the
+bridge commit it came from, so a catalog change is a bridge PR, then a
+re-pin. CI's `dac-profiles` job runs `-check` and the catalog's tests. The
+export's tests hold it to its golden and to the iOS registry's baseline,
+`ios-export/testdata/ios-registry-6a1241eb.json`: a dump of the live
+registry's objects at iOS 6a1241eb, pinned by its SHA-256, an input never
+derived from the catalog. A parity failure is fixed in the catalog, never in
+the baseline.
+
+### DoP evidence, rate by rate
+
+A profile's `dop` holds `heardBitRates`, the rates a listening heard, each a
+listening at that rate, which says nothing of the rates below it, and never
+one a negotiation, a hardware confirmation or a DoP lock reached (the
+design's section 1.1: the iOS lock hears nothing back); `refusedBitRates`,
+the rates that failed, which may lie below a heard one; and one statement at
+most: `statedMaxBitRate`, a maker's figure that says DoP, or
+`statedWithoutDoP`, a DSD figure that names no transport (`{"kind": "dsd",
+"maxBitRate": N}`) or no DSD at all (`{"kind": "none", "maxBitRate": 0}`),
+which the player never reads.
 
 The lint reads a dop line's evidence in one fixed form, and nothing else of
-it. Its clauses are the text after `dop: `, split on `;` and trimmed; a
-clause that starts with a marker, `heard`, `refused` or `silence at` (any
-case, a word boundary after it), is the marker, its rates separated by
-commas, then a colon or the clause's end, and credits those rates alone:
+it. Its clauses are the text after `dop: `, split on `;` and trimmed. A
+clause that starts with a marker (in any case, a word boundary after it) is
+the marker, its rates separated by commas, then a colon or the clause's end,
+and credits those alone:
+
+- `heard`: the rates a listening heard;
+- `refused`, `silence at`, `noise at` and `no frames at`: the rates that
+  failed, their carrier refused, played as silence or as noise, or no
+  attempt's frames taken;
+- `stated DoP to` and `stated DSD to`, each with one rate, and `stated no
+  DSD`, with none: the statement.
 
 ```text
-dop: heard DSD64, DSD128: iOS profile <row>, clean with PEQ off (iOS <commit>)
-dop: refused DSD256: <source>; silence at DSD512: <source>
+dop: heard DSD64, DSD128: submission 2026-10-18; refused DSD256: submission 2026-10-18 (its carrier refused)
+dop: stated DSD to DSD256: maker (the row's note, iOS 6a1241eb: a DSD256 figure that names no transport)
 ```
 
-What follows the colon is free text that nothing reads, so it may say
-anything, a negation included (`refused DSD256: no supported altsetting`). A
-clause that starts with no marker is free text too, and evidence of nothing
-(`DSD128's carrier reached a DoP lock`). A marker clause of any other shape
-(`heard at DSD128`, `heard DSD64 and DSD128`, `heard DSD128 not`, a marker
-with no rates) is a lint error that shows the form, and so is a rate both
-heard and refused in one profile's provenance (`heard DSD256; silence at
-DSD256`). `refused` and `silence at` are one result, a refusal, which two
-units may give in two ways (`refused DSD256: unit 1 would not negotiate;
-silence at DSD256: unit 2 played it silent`).
-The heard rate needs a `heard` clause that lists it, and each refused rate a
-`refused` or `silence at` one. `ios-check.py` reads the profiles' DoP fields
-and not these lines. It prints one line a
-profile and exits 1 on a violation; paste its output into the PR. The
-registry's prose is never read, only each row's id and its `maxDSDRate`: its
-comments are blanked, line and block (which nest, as Swift's do), outside
-string literals, then the contents of every string literal but a row's id, so
-a note naming a rate before its row's own is never read as the row's, and what
-the reader does not read (a block comment left open, a multi-line or raw
-string, an interpolation) is refused, never read past. Only a row's DoP evidence, its caveats and its DSD resync delay, a
-measured value that seeds the profile's `timing.dsdPrefillMs` ("timing: iOS
-profile chord.hugo2's DSD resync delay, 0.7 s (iOS cd125088)"), are imported,
-never its name patterns, a resync delay as policy, volume topology or notes.
+The rates heard clauses credit are `heardBitRates`, failure clauses' are
+`refusedBitRates`, and the statement clause is the statement, each both ways.
+A rate heard and failed is a contradiction, while the four failures are one
+result, which two units may give in two ways. What follows the colon is free
+text, so it may say anything, a negation included (`refused DSD256: no
+supported altsetting`); a clause that starts with no marker is evidence of
+nothing (`DSD128's carrier reached a DoP lock`); and a marker clause of any
+other shape (`heard at DSD128`, `heard DSD64 and DSD128`, `stated DoP up to
+DSD256`) is a lint error that shows the form.
+
+In a profile with `ios`, the text after each marker clause's colon opens with
+its source's head: its kind (`submission`, `field log`, `maker`, `pcm
+ceiling`, `chip specification` or `retailer`) and its date where it has one,
+then nothing, `, ` or ` (` and free text. One clause credits each rate and
+the statement, and the export reads that clause's head alone as the entry's
+source (`fieldLog`, `2026-06-21`). A source names a kind and a date, never a
+person. A DoP claim's `source` is its own row of the registry
+("DACProfile.swift <row> at iOS <commit>"), a dated listening or a dated
+maker's document.

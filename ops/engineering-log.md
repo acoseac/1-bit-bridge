@@ -103037,3 +103037,108 @@ halves passed); `go test -race -count=1 -timeout 45m ./internal/admin/
 windows/amd64 (`CGO_ENABLED=0` for the two) exited 0 each. go1.27.3's gofmt
 lists none of the changed Go files, and the names check over the branch's
 commit messages and added lines since main finds nothing in this round's.
+
+## 2026-11-17 — B730 B1: the DAC catalog becomes canonical, with an `ios` projection
+
+`internal/player/dacprofile` moves to schema 2 and becomes the one source of
+the iOS app's DAC registry (the design's sections 3.3, 5.2 and 5.3; iOS PR 1
+at iOS 6a1241eb). Rules: `.claude/rules/dac-catalog.md`, long forms in
+`ops/History-rules-dac-catalog.md`; `player.md`'s DAC profile line amended
+with no growth (99,436 to 99,394 bytes).
+
+### The hazard
+
+- A heard rate read as a maximum: `policy.go` took every rate up to
+  `HeardMaxBitRate` as heard, which admits DoP under `auto` with no
+  confirmation, so a sparse list read so would send DoP where nobody
+  listened. The player now reads the rate's own entry
+  (`slices.Contains(p.HeardBitRates, bitRate)`), its one changed line; every
+  policy fixture's maximum became every rate up to it, and no outcome moved.
+- A DSD figure filed as DoP's: the design put the Mytek's DSD256, a figure
+  that names no transport, in `statedMaxBitRate`, which the explicit `dop`
+  reads as a claim. It is `statedWithoutDoP {dsd, DSD256}`, which the player
+  never reads.
+- An iOS-only row that matches a USB unit: a known unit plays native under
+  `auto` and takes the row's timing. A row with `match: []` is allowed only
+  beside `ios`, makes no claim only a match reaches, and `Match` reads
+  neither `ios` nor a name.
+- An export out of order or a legacy field not verbatim, and a token that
+  claims another maker's DAC: held by the export's parity with the baseline
+  and the name-key lint.
+
+### What changes
+
+1. Schema 2 (0411830c): `heardBitRates`, `statedWithoutDoP`, the failure
+   markers `noise at` and `no frames at`, the statements `stated DoP to`,
+   `stated DSD to` and `stated no DSD`, credited rate by rate and both ways
+   (the at-or-below rule went; heard and failed at one rate stays a
+   contradiction); a DoP source that is its own row, a dated listening or a
+   dated maker's document; `Profile.ios` and `iosGenericNames`, with the
+   lint iOS PR 1 runs (tokens of four characters or more, no token and
+   generic name or another row's token or port name one inside the other,
+   port names unique folded, printable ASCII, orders 1 to N, a head on every
+   clause of an iOS row and one clause a rate, the legacy ceiling consistent
+   with the evidence); `clone` copies the new slices and pointers. The
+   database and the QX13 fixture took the mechanical change (the fixture its
+   missing statement clause); the baseline the dispatch gave was committed
+   byte for byte. 449 lines grown in `dacprofile.go`, `lint.go` and
+   `match.go`, 414 added code lines, of the 450 the brief allows.
+2. The seed (bc9d6671): the 18 iOS-only rows and the Hugo 2's and the
+   Mytek's projections, from the baseline, with dated sources and no person
+   named. The Hugo 2's maker statement of DoP to DSD256 is recorded (the
+   owner's answer, Q1): for a bound Hugo 2 an explicit `dop` asks no
+   confirmation at DSD64 to DSD256, and its rung reads `reported` unless
+   better evidence exists.
+3. The export (dcdd9c49): `scripts/dac-profiles/ios-export`, its golden and
+   its parity tests; 256 lines in `main.go`.
+4. CI, docs and rules: `ios-check.py` retired, `gate.yml`'s `dac-profiles`
+   job runs `-check` and the catalog's tests, both lines and the README's
+   two in the build-site census.
+
+### The two SHA-256s
+
+- The baseline, `scripts/dac-profiles/ios-export/testdata/ios-registry-6a1241eb.json`
+  (the live registry's objects at iOS 6a1241eb, as the dispatch gave it):
+  `16f75f690368a46c50aa757d677da1c6bc192eeb4970d6b7c0c7b2fadb37a52f`.
+- The export, `scripts/dac-profiles/ios-export/DACCatalog.ios.json`, which
+  iOS PR 2 pins with the commit that carries it on main:
+  `d134affbf89487aa36135cb294bcc1f5d18ad3bfdb039d361af0607263f5cc6c`.
+
+The baseline holds six source kinds, where the brief named iOS PR 1's
+four: `chipSpecification` (the ddHiFi's statement of no DSD) and `retailer`
+(the JM98MAX's DSD figure) beside `submission`, `fieldLog`, `maker` and
+`pcmCeiling`. The heads take all six, so the export matches the baseline.
+The Copper fails at DSD128 and DSD256 alone, and its DSD64 is neither heard
+nor failed, as the baseline holds it. The legacy patterns and tokens are
+written with the casing iOS PR 1's brief and the design give for the
+registry's literals; the parity compares them after iOS's fold.
+
+### Reds, greens and controls
+
+Each commit's tests were red against the code before it and green after:
+commit 1's twelve through `go test -overlay` on the base's code with the new
+names alone added, commit 2's four on commit 1's database, commit 3's on an
+export of nothing (`TestTheExportIsDeterministic` passes there, since an
+empty export is deterministic, and goes red under its control). Every
+control ran as an overlay, or for the golden's byte on disk restored from
+memory and checked against its committed SHA-256, and went red as
+predicted: accepting schema 1; dropping each of an iOS-only row's
+analogue and raw-maximum refusals; any row's ref as a row's own; no
+printable check; no excluded-token check; demanding a heard clause for the
+highest heard rate alone; the at-or-below rule restored; no both-set check;
+no head check; the own row held against itself (every pair test red); no
+length rule; failed rates at the ceiling allowed; an identity claim on every
+row (at commit 2: `profile chord.mojo2: the "identity" claim names no
+provenance`); the heard rate read up to the highest; `clone`'s thirteen new
+copies, one at a time; `Match` falling back to a port name; the QX13 given
+the fixture's alternative; the Mytek's DSD256 as DoP's; `statedWithoutDoP`
+read as stated; the golden's byte flipped; a maker changed; the rows in the
+database's order; the iFi rows' orders swapped (row parity red, the corpus
+first hits green, the synthetic name's first hit red); KA13's legacy
+ceiling lowered to DSD128 (that field alone); `E30II` dropped from the E30
+II's tokens; `TOPPING E30` dropped from its patterns. A first mutation of
+the highest-heard control also reddened the QX13 test and the clause test,
+since it changed the variable the reverse check reads too; the narrow
+mutation went as predicted.
+
+The gate's runs on this commit are in the PR body.
