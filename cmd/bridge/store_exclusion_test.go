@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -220,7 +221,10 @@ func TestTheDoctorSaysNotCheckedWhereTheStoreLockRefuses(t *testing.T) {
 // (backup.CheckRestoreSource) runs no such hook, so a directory that is no
 // snapshot shows the order: it is refused for the lock, never as no snapshot
 // (exit 2), which a hold taken after the look, still before the prompt,
-// would answer.
+// would answer. The database-only restore (backlog B653 PR 2b1) is refused
+// alike, with its snapshot, with one that is not there, and with none, the
+// form that finishes an unfinished restore, which asks its journal only
+// under the lock.
 func TestEveryRestoreTakesTheStoresLockBeforeItsPrompt(t *testing.T) {
 	cfgPath, dataDir, snap := seedRestorableInstall(t, closedAdminAddr(t))
 	var looked atomic.Int32
@@ -250,5 +254,26 @@ func TestEveryRestoreTakesTheStoresLockBeforeItsPrompt(t *testing.T) {
 		strings.Contains(stderr.String(), "not a recognized snapshot") {
 		t.Fatalf("bridge restore of a directory that is no snapshot, beside an open store = %d, want 1 for the lock before the snapshot is looked at\nstdout:\n%s\nstderr:\n%s",
 			code, stdout.String(), stderr.String())
+	}
+	for _, args := range [][]string{
+		{"--config", cfgPath, "--database-only", snap},
+		{"--config", cfgPath, "--database-only", filepath.Join(t.TempDir(), "no-such-snapshot")},
+		{"--config", cfgPath, "--database-only"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		code = restoreCmd(context.Background(), args, strings.NewReader("yes\n"), &stdout, &stderr)
+		if code != 1 || !strings.Contains(stderr.String(), "a bridge command has the library database open") ||
+			strings.Contains(stderr.String(), "Type 'yes'") || strings.Contains(stderr.String(), "not a recognized snapshot") ||
+			strings.Contains(stdout.String(), "Restore the library database") {
+			t.Fatalf("bridge restore %v beside an open store = %d, want 1 for the lock before its look and its prompt\nstdout:\n%s\nstderr:\n%s",
+				args[2:], code, stdout.String(), stderr.String())
+		}
+	}
+	if n := looked.Load(); n != 0 {
+		t.Errorf("a database-only restore looked at its snapshot %d time(s) before the store's lock refused it", n)
+	}
+	if _, err := os.Lstat(manifest.RestoreStagingPath(dataDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused database-only restore staged its copy: %v", err)
 	}
 }
