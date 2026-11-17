@@ -1,0 +1,1114 @@
+{
+  "exportVersion": 1,
+  "genericNames": [
+    "Headphones",
+    "Combo384 Amanero",
+    "CX31993 HIFI AUDIO"
+  ],
+  "rows": [
+    {
+      "id": "chord.hugo2",
+      "name": "Chord Hugo 2",
+      "maker": "Chord Electronics",
+      "legacyPatterns": [
+        "Hugo 2",
+        "Hugo2"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "dacOwnsGain",
+      "timing": {
+        "ioBufferMs": 40,
+        "dsdResyncMs": 700,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": 600,
+        "transitionCushionMs": 30
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "Hugo 2",
+          "Hugo2"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "dop",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "chord.mojo2",
+      "name": "Chord Mojo 2",
+      "maker": "Chord Electronics",
+      "legacyPatterns": [
+        "Mojo 2",
+        "Mojo2"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "dacOwnsGain",
+      "timing": {
+        "ioBufferMs": 40,
+        "dsdResyncMs": 500,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": 400,
+        "transitionCushionMs": 30
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "Mojo 2",
+          "Mojo2"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "dop",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "chord.hugott2",
+      "name": "Chord Hugo TT 2",
+      "maker": "Chord Electronics",
+      "legacyPatterns": [
+        "Hugo TT 2",
+        "Hugo TT2"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "dacOwnsGain",
+      "timing": {
+        "ioBufferMs": 40,
+        "dsdResyncMs": 700,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": 600,
+        "transitionCushionMs": 30
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "Hugo TT 2",
+          "Hugo TT2"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "chord.qutest",
+      "name": "Chord Qutest",
+      "maker": "Chord Electronics",
+      "legacyPatterns": [
+        "Qutest"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "dacOwnsGain",
+      "timing": {
+        "ioBufferMs": 40,
+        "dsdResyncMs": 700,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": 500,
+        "transitionCushionMs": 30
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "Qutest"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "mytek.brooklyn.dac.plus",
+      "name": "Mytek Brooklyn DAC+",
+      "maker": "Mytek Digital",
+      "legacyPatterns": [
+        "Brooklyn"
+      ],
+      "legacyCeiling": "dsd128",
+      "pcm": {
+        "maxRateHz": 384000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "dacOwnsGain",
+      "timing": {
+        "ioBufferMs": 40,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "Brooklyn DAC+"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [
+          {
+            "rate": "dsd256",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "fieldLog",
+              "date": "2026-06-21"
+            }
+          }
+        ],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "ifi.golink",
+      "name": "iFi GO link",
+      "maker": "iFi audio",
+      "legacyPatterns": [
+        "iFi USB Audio SE"
+      ],
+      "legacyCeiling": "dsd128",
+      "pcm": {
+        "maxRateHz": 384000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "hostSyncedDACGain",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "iFi USB Audio SE"
+        ],
+        "tokens": [
+          "iFi USB Audio SE"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [
+          {
+            "rate": "dsd64",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-18"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-18"
+            }
+          }
+        ],
+        "failed": [
+          {
+            "rate": "dsd256",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-18"
+            }
+          }
+        ],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "ifi.generic",
+      "name": "iFi USB DAC",
+      "maker": "iFi audio",
+      "legacyPatterns": [
+        "iFi (by AMR)"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 384000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "iFi (by AMR) HD USB Audio "
+        ],
+        "tokens": [
+          "iFi (by AMR)"
+        ],
+        "excludedTokens": [],
+        "scope": "family"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": "Siblings under this name, not this row's own evidence: DSD64 and DSD128 heard over DoP on one unit (a submission, 2026-09-23); DSD256 refused over DoP on two units (2026-09-08, 2026-09-23)."
+      }
+    },
+    {
+      "id": "fiio.ka3",
+      "name": "FiiO KA3",
+      "maker": "FiiO",
+      "legacyPatterns": [
+        "KA3",
+        "FiiO KA3"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 384000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": 40,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "FiiO KA3"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "fiio.ka11",
+      "name": "FiiO KA11",
+      "maker": "FiiO",
+      "legacyPatterns": [
+        "FIIO KA11"
+      ],
+      "legacyCeiling": "dsd128",
+      "pcm": {
+        "maxRateHz": 384000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "hostSyncedDACGain",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "FIIO KA11"
+        ],
+        "tokens": [
+          "FIIO KA11"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [
+          {
+            "rate": "dsd64",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-04"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-04"
+            }
+          }
+        ],
+        "failed": [
+          {
+            "rate": "dsd256",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-04"
+            }
+          }
+        ],
+        "statement": {
+          "case": "unrecorded",
+          "upTo": null,
+          "source": null
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "fiio.ka13",
+      "name": "FiiO KA13",
+      "maker": "FiiO",
+      "legacyPatterns": [
+        "KA13"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 384000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": 40,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "KA13"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "fiio.ka17",
+      "name": "FiiO KA17",
+      "maker": "FiiO",
+      "legacyPatterns": [
+        "FIIO KA17"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "hostSyncedDACGain",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "FIIO KA17 "
+        ],
+        "tokens": [
+          "FIIO KA17"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [
+          {
+            "rate": "dsd64",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-02"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-02"
+            }
+          },
+          {
+            "rate": "dsd256",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-02"
+            }
+          }
+        ],
+        "failed": [
+          {
+            "rate": "dsd512",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-02"
+            }
+          }
+        ],
+        "statement": {
+          "case": "unrecorded",
+          "upTo": null,
+          "source": null
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "fiio.qx13",
+      "name": "FiiO QX13",
+      "maker": "FiiO",
+      "legacyPatterns": [
+        "QX13"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "hostSyncedDACGain",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": 800,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": true,
+      "nameKeys": {
+        "portNames": [
+          "FIIO QX13 "
+        ],
+        "tokens": [
+          "QX13"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [
+          {
+            "rate": "dsd64",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-13"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-13"
+            }
+          },
+          {
+            "rate": "dsd256",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-13"
+            }
+          }
+        ],
+        "failed": [],
+        "statement": {
+          "case": "unrecorded",
+          "upTo": null,
+          "source": null
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "snowsky.tinya",
+      "name": "Snowsky Tiny A",
+      "maker": "Snowsky",
+      "legacyPatterns": [
+        "SNOWSKY TINY A"
+      ],
+      "legacyCeiling": "dsd128",
+      "pcm": {
+        "maxRateHz": 384000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "hostSyncedDACGain",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": 800,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "SNOWSKY TINY A"
+        ],
+        "tokens": [
+          "SNOWSKY TINY A"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [
+          {
+            "rate": "dsd64",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-13"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-13"
+            }
+          }
+        ],
+        "failed": [
+          {
+            "rate": "dsd256",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-13"
+            }
+          }
+        ],
+        "statement": {
+          "case": "unrecorded",
+          "upTo": null,
+          "source": null
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "ddhifi.headphonezone.dac",
+      "name": "Headphone Zone x ddHiFi Hi-Res DAC",
+      "maker": "ddHiFi",
+      "legacyPatterns": [
+        "Headphone Zone x ddHiFi DAC"
+      ],
+      "legacyCeiling": "none",
+      "pcm": {
+        "maxRateHz": 384000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": 600,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "Headphone Zone x ddHiFi DAC"
+        ],
+        "tokens": [
+          "Headphone Zone x ddHiFi DAC"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [
+          {
+            "rate": "dsd64",
+            "failure": "noLockProxy",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-24"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "failure": "noLockProxy",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-24"
+            }
+          },
+          {
+            "rate": "dsd256",
+            "failure": "noLockProxy",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-24"
+            }
+          }
+        ],
+        "statement": {
+          "case": "noDSD",
+          "upTo": null,
+          "source": {
+            "kind": "chipSpecification",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "jcally.jm98max",
+      "name": "JCALLY JM98MAX",
+      "maker": "JCALLY",
+      "legacyPatterns": [
+        "JM98MAX"
+      ],
+      "legacyCeiling": "dsd128",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "hostSyncedDACGain",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "JM98MAX"
+        ],
+        "tokens": [
+          "JM98MAX"
+        ],
+        "excludedTokens": [
+          "JM98MAX 2",
+          "JM98MAX2"
+        ],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [
+          {
+            "rate": "dsd64",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-25"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-25"
+            }
+          }
+        ],
+        "failed": [
+          {
+            "rate": "dsd256",
+            "failure": "heardSilence",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-25"
+            }
+          }
+        ],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "retailer",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "luxsin.x8",
+      "name": "Luxsin X8",
+      "maker": "Luxsin",
+      "legacyPatterns": [
+        "Luxsin X8"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": 800,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "Luxsin X8"
+        ],
+        "tokens": [
+          "Luxsin X8"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [
+          {
+            "rate": "dsd64",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-13"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-13"
+            }
+          },
+          {
+            "rate": "dsd256",
+            "source": {
+              "kind": "submission",
+              "date": "2026-10-13"
+            }
+          }
+        ],
+        "failed": [],
+        "statement": {
+          "case": "unrecorded",
+          "upTo": null,
+          "source": null
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "topping.e30ii",
+      "name": "Topping E30 II",
+      "maker": "Topping",
+      "legacyPatterns": [
+        "E30 II",
+        "E30II",
+        "TOPPING E30"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": 40,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "E30 II",
+          "E30II"
+        ],
+        "excludedTokens": [
+          "Lite"
+        ],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd256",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "audioquest.dragonfly.cobalt",
+      "name": "AudioQuest DragonFly Cobalt",
+      "maker": "AudioQuest",
+      "legacyPatterns": [
+        "DragonFly Cobalt"
+      ],
+      "legacyCeiling": "none",
+      "pcm": {
+        "maxRateHz": 96000,
+        "bitDepth": 24
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "DragonFly Cobalt"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "noDSD",
+          "upTo": null,
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "audioquest.dragonfly.copper",
+      "name": "AudioQuest DragonFly Copper",
+      "maker": "AudioQuest",
+      "legacyPatterns": [
+        "DragonFly Copper"
+      ],
+      "legacyCeiling": "none",
+      "pcm": {
+        "maxRateHz": 96000,
+        "bitDepth": 24
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": 300,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "AudioQuest DragonFly Copper v1.0"
+        ],
+        "tokens": [
+          "DragonFly Copper"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [
+          {
+            "rate": "dsd128",
+            "failure": "noLockProxy",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-03"
+            }
+          },
+          {
+            "rate": "dsd256",
+            "failure": "noLockProxy",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-03"
+            }
+          }
+        ],
+        "statement": {
+          "case": "noDSD",
+          "upTo": null,
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    },
+    {
+      "id": "apple.usbc.adapter",
+      "name": "Apple USB-C to 3.5 mm Adapter",
+      "maker": "Apple",
+      "legacyPatterns": [
+        "USB-C to 3.5 mm Headphone Jack Adapter",
+        "USB-C Headphone"
+      ],
+      "legacyCeiling": "none",
+      "pcm": {
+        "maxRateHz": 48000,
+        "bitDepth": 24
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [],
+        "tokens": [
+          "USB-C to 3.5 mm Headphone Jack Adapter",
+          "USB-C Headphone"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [],
+        "statement": {
+          "case": "noDSD",
+          "upTo": null,
+          "source": {
+            "kind": "pcmCeiling",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
+    }
+  ]
+}
