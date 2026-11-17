@@ -21,9 +21,9 @@ import (
 const golden = "DACCatalog.ios.json"
 
 // baselineSHA256 is the SHA-256 of the iOS registry's baseline the dispatch
-// gave (testdata/ios-registry-6a1241eb.json), a dump of the live registry's
-// objects at iOS 6a1241eb: an input, never derived from the catalog.
-const baselineSHA256 = "16f75f690368a46c50aa757d677da1c6bc192eeb4970d6b7c0c7b2fadb37a52f"
+// gave (testdata/ios-registry-3145606a.json), a dump of the live registry's
+// objects at iOS 3145606a: an input, never derived from the catalog.
+const baselineSHA256 = "a91415f917dcf6f18da58e6d265ad9af46b65b9c2a0e6e0f7852d92105749167"
 
 // fresh is the embedded catalog's export.
 func fresh(t *testing.T) []byte {
@@ -210,7 +210,7 @@ func TestAnUnrecordedRowExportsNoEvidence(t *testing.T) {
 }
 
 // corpusName is a name of the baseline's parity corpus or its known
-// siblings, with the live matcher's answer at iOS 6a1241eb (null for none),
+// siblings, with the live matcher's answer at iOS 3145606a (null for none),
 // the strict matcher's, and whether iOS PR 1 declares the two apart.
 type corpusName struct {
 	Name      string
@@ -314,7 +314,7 @@ func foldAll(v any) any {
 // from the live one in the corpus exactly for the four names iOS PR 1
 // declares.
 func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("testdata", "ios-registry-6a1241eb.json"))
+	b, err := os.ReadFile(filepath.Join("testdata", "ios-registry-3145606a.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

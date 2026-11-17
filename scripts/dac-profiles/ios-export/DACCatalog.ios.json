@@ -1109,6 +1109,82 @@
         },
         "siblingNote": null
       }
+    },
+    {
+      "id": "onix.betaxi2",
+      "name": "Onix Beta XI2",
+      "maker": "Onix",
+      "legacyPatterns": [
+        "ONIX XI2"
+      ],
+      "legacyCeiling": "dsd256",
+      "pcm": {
+        "maxRateHz": 768000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "hostSyncedDACGain",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "ONIX XI2"
+        ],
+        "tokens": [
+          "ONIX XI2"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [
+          {
+            "rate": "dsd64",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-17"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-17"
+            }
+          },
+          {
+            "rate": "dsd256",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-17"
+            }
+          }
+        ],
+        "failed": [
+          {
+            "rate": "dsd512",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-17"
+            }
+          }
+        ],
+        "statement": {
+          "case": "dsdWithoutDoPStatement",
+          "upTo": "dsd512",
+          "source": {
+            "kind": "maker",
+            "date": null
+          }
+        },
+        "siblingNote": null
+      }
     }
   ]
 }

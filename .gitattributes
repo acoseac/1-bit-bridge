@@ -33,7 +33,7 @@ internal/player/dacprofile/profiles.json text eol=lf
 # The iOS registry's baseline the catalog's export is held to is the dump
 # the dispatch gave, pinned by its SHA-256 (B730 B1); a CRLF checkout would
 # change the digest.
-scripts/dac-profiles/ios-export/testdata/ios-registry-6a1241eb.json text eol=lf
+scripts/dac-profiles/ios-export/testdata/ios-registry-3145606a.json text eol=lf
 # The catalog's iOS export is compared byte for byte with a fresh export, and
 # the iOS app pins its SHA-256; a CRLF checkout would change both.
 scripts/dac-profiles/ios-export/DACCatalog.ios.json text eol=lf

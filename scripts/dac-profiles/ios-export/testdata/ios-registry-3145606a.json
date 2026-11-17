@@ -5,7 +5,7 @@
     "Combo384 Amanero",
     "CX31993 HIFI AUDIO"
   ],
-  "iosCommit" : "6a1241eb9da11c43fc2b61e158582fa17c0d3040",
+  "iosCommit" : "3145606a59e688773f064fcdee44240bf8b9efe0",
   "knownSiblings" : [
     {
       "live" : "mytek.brooklyn.dac.plus",
@@ -171,6 +171,20 @@
     {
       "live" : null,
       "name" : "iFi GO link 2 Max",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "ONIX XI1",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "live" : null,
+      "name" : "Onix Alpha XI1",
       "strict" : {
         "unknown" : "noMatch"
       }
@@ -491,6 +505,18 @@
     },
     {
       "exception" : false,
+      "live" : "onix.betaxi2",
+      "name" : "onix xi2",
+      "strict" : {
+        "known" : {
+          "id" : "onix.betaxi2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
       "live" : "ifi.golink",
       "name" : "iFi USB Audio SE",
       "strict" : {
@@ -604,6 +630,18 @@
       "strict" : {
         "known" : {
           "id" : "audioquest.dragonfly.copper",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "onix.betaxi2",
+      "name" : "ONIX XI2",
+      "strict" : {
+        "known" : {
+          "id" : "onix.betaxi2",
           "scope" : "model",
           "tier" : "exact"
         }
@@ -953,6 +991,46 @@
       "exception" : false,
       "live" : null,
       "name" : "AudioQuest DragonFly v1.2",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "onix.betaxi2",
+      "name" : "ONIX XI2",
+      "strict" : {
+        "known" : {
+          "id" : "onix.betaxi2",
+          "scope" : "model",
+          "tier" : "exact"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : "onix.betaxi2",
+      "name" : "onix xi2",
+      "strict" : {
+        "known" : {
+          "id" : "onix.betaxi2",
+          "scope" : "model",
+          "tier" : "token"
+        }
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "ONIX XI1",
+      "strict" : {
+        "unknown" : "noMatch"
+      }
+    },
+    {
+      "exception" : false,
+      "live" : null,
+      "name" : "Onix Alpha XI1",
       "strict" : {
         "unknown" : "noMatch"
       }
@@ -2380,6 +2458,86 @@
         "transitionCushionMs" : null
       },
       "volumeTopology" : "unknown"
+    },
+    {
+      "evidence" : {
+        "failed" : [
+          {
+            "failure" : "carrierRefused",
+            "rate" : "dsd512",
+            "source" : {
+              "date" : "2026-11-17",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "heard" : [
+          {
+            "rate" : "dsd64",
+            "source" : {
+              "date" : "2026-11-17",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd128",
+            "source" : {
+              "date" : "2026-11-17",
+              "kind" : "submission"
+            }
+          },
+          {
+            "rate" : "dsd256",
+            "source" : {
+              "date" : "2026-11-17",
+              "kind" : "submission"
+            }
+          }
+        ],
+        "hiddenMode" : false,
+        "siblingNote" : null,
+        "statement" : {
+          "case" : "dsdWithoutDoPStatement",
+          "source" : {
+            "date" : null,
+            "kind" : "maker"
+          },
+          "upTo" : "dsd512"
+        }
+      },
+      "hiddenMode" : false,
+      "id" : "onix.betaxi2",
+      "legacyCeiling" : "dsd256",
+      "legacyPatterns" : [
+        "onix xi2"
+      ],
+      "maker" : "Onix",
+      "name" : "Onix Beta XI2",
+      "nameKeys" : {
+        "excludedTokens" : [
+
+        ],
+        "portNames" : [
+          "ONIX XI2"
+        ],
+        "scope" : "model",
+        "tokens" : [
+          "onix xi2"
+        ]
+      },
+      "order" : 21,
+      "pcm" : {
+        "bitDepth" : 32,
+        "maxRateHz" : 768000
+      },
+      "timing" : {
+        "coldStartExtraMs" : null,
+        "dsdResyncMs" : null,
+        "ioBufferMs" : null,
+        "pcmEntryResyncMs" : null,
+        "transitionCushionMs" : null
+      },
+      "volumeTopology" : "hostSyncedDACGain"
     }
   ]
 }
