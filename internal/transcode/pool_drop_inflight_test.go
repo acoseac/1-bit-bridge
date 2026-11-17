@@ -161,10 +161,21 @@ func TestDropInflightEmptyMapReturnsZero(t *testing.T) {
 	}
 }
 
-// stopPoolWithin is p.Stop with a bound of its own: a worker that never exits
-// fails the test by name instead of holding it to the binary's deadline (B924).
-func stopPoolWithin(t *testing.T, p *Pool, bound time.Duration) {
+// stopReserve is the time a pool's stop leaves before the test binary's
+// deadline, so the cleanups after it still run (as backup's waitWithin does).
+const stopReserve = 10 * time.Second
+
+// stopPoolWithin is p.Stop with a bound of its own: limit, capped by the test
+// binary's deadline less stopReserve, so a worker that never exits fails the
+// test by name instead of holding it to the binary's deadline (B924).
+func stopPoolWithin(t *testing.T, p *Pool, limit time.Duration) {
 	t.Helper()
+	bound := limit
+	if deadline, ok := t.Deadline(); ok {
+		if left := time.Until(deadline) - stopReserve; left < bound {
+			bound = max(left, 0)
+		}
+	}
 	stopped := make(chan struct{})
 	go func() { p.Stop(); close(stopped) }()
 	select {
