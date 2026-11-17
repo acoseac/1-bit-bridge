@@ -103797,3 +103797,84 @@ since it changed the variable the reverse check reads too; the narrow
 mutation went as predicted.
 
 The gate's runs on this commit are in the PR body.
+
+## 2026-11-17 — B884 follow-up: the sweeper pointer's exception, and the managed bridge in the README
+
+The rules are `cli-serve.md`'s sweeper line (56) and its long form in
+`ops/History-rules-cli-serve.md`; this is the record. Docs and rules alone,
+on eaca26cc: no code changes.
+
+### What changed
+
+- **The sweeper pointer.** B884's round 4 condensed the sweeper entry to a
+  pointer (`move_entry.py --text`), which kept "fails CLOSED on nil" and
+  dropped the long form's exception, "`analysisSweeper.active()` returns
+  false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s nil
+  arm reads the other way and is its own call". The pointer carries it again,
+  and the pointer and the long form both name the fingerprint sweep's two
+  predicates, since "its nil arm" alone left open which one, and a change
+  could have "fixed" either the wrong way: its `enabled` lets a pass run
+  when nil (`cmd/bridge/fingerprint_sweeper.go` 176, `if enabled != nil &&
+  !enabled()`; production hands it `fingerprintReady`, `main.go` 5597),
+  and its `enrichmentOn` fails closed, a nil one running no pass and
+  recording none (the doc, 172-173; the pass, 179-185, through
+  `enrichgate.CancelWhenOff`, whose `on` reads a nil switch as off,
+  `internal/enrichgate/enrichgate.go` 73 and 139-141;
+  `TestNoSwitchIsOffForTheSweepAndTheCoverRefresh`).
+  `analysisSweeper.active()` is `cmd/bridge/analyze.go` 796.
+- **The long form's place.** Round 4's move appended the entry at the end
+  of its section, below the B617 cover adapter bullet, whose "(unlike the
+  sweep's `enabled`, the bullet above)" it made false. The entry stands
+  directly above that bullet now (History lines 2301 and 2311), the two in
+  the rules file's order (56, 57). "above" was not changed to "below": two
+  unrelated bullets, `flag.Parse`'s scope and the feature gates, stood
+  between them.
+- **The room.** `cli-serve.md` stood at 99,914 bytes of its 100,000, and
+  the pointer grew by 269. `move_entry.py --largest` offers one entry, line
+  69, and refuses to move it (its Don't sentence needs a 766-byte pointer).
+  The tsnet state-file line (111, backlog B828) was the verbatim twin of the
+  first bullet of its long form (History line 6110 now): the rules line ends
+  at its Don't sentence, and the five tests that pin it stay named in that
+  bullet, verbatim, which is unchanged. 308 bytes fewer, the file at 99,875.
+- **README.md.** The note "The bridge's files inside a library root" says
+  that on a managed bridge, one whose `bridge.yaml` lists
+  `deployment.managedControls` (`config.DeploymentConfig.IsManaged`,
+  `internal/config/config.go` 1559-1561; `managedSettings` alone does not
+  make one), `bridge doctor` and the console's Diagnostics page leave the
+  warning out, and that `bridge init` and the log still warn; the rest of
+  the note is as it was. The doctors: `internal/doctor/doctor.go` 553
+  (`d.InstallLayout != nil && !d.Managed`), over the Deps
+  `buildDoctorDepsRun` sets (`InstallLayout` at `cmd/bridge/doctor.go` 400,
+  `Managed` from `cfg.Deployment.IsManaged()` at 450), which the console's
+  runner builds and runs too (1146-1153);
+  `TestAManagedBridgesDoctorSaysNothingOfItsLayout` pins it. Init and the
+  log ask nothing of `IsManaged`: init's `warnInstallLayout` calls at
+  `cmd/bridge/init.go` 751 (a config it keeps) and 975 (one it wrote),
+  serve's `logInstallLayout` at `cmd/bridge/main.go` 3703, and the two
+  functions themselves (`cmd/bridge/install_layout.go` 33-39 and 66-70).
+  Init never rewrites a managed config (`refuseRewrite`,
+  `cmd/bridge/init_rewrite.go` 486-494, over `madeElsewhere`'s
+  `deployment.managedControls`, 513-516), so its line there comes from a run
+  that keeps it.
+
+### Not changed
+
+B884's dated transcripts above keep round 4's elision of a removed test's
+name in their six lines (`…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePath…`),
+as `build-ci-tests.md`'s rule on a note that names a removed test has it:
+reworded, never exempted (its long form in
+`ops/History-rules-build-ci-tests.md`, the bullet on `_test.go` comments and
+the one after it). Restoring the name with an exemption, which a review
+suggested, would change that rule, which is not this follow-up's;
+`cited_test_names_test.go` is untouched.
+
+### Checks
+
+`make docs-check` passes (the budgets and their self-test, and rules-for's
+and `move_entry.py`'s self-tests; `cli-serve.md` 99.9 % of its budget, said
+close). It runs no Go, so the citation guard ran apart, `go test -tags
+ts_omit_webclient,ts_omit_debugeventbus ./cmd/bridge -run
+TestEveryCitedTestNameExists -count=1`, ok, and so did internal/config's
+`TestTheReadmeNamesEveryPathSettingLoadResolves`, ok. `verify_moves.py
+--base eaca26cc`, the sweeper's two blocks and the state-file line named as
+edits, finds every other block of the base in place.

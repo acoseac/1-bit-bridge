@@ -117,6 +117,8 @@ Prefer the newest snapshot; see the [backup guide](docs/backup.md).
 
 `bridge init`, `bridge doctor` (and the console's Diagnostics page) and the bridge's log warn when `bridge.yaml` or the data directory (`dataDir`) is inside one of your library roots, or is one. A library root is often a network share or a USB disk, and while one stops answering, every bridge command that reads what is inside it waits on it, `bridge serve`, `bridge doctor` and `bridge status` among them. The warning changes nothing, and the bridge keeps working where it is.
 
+On a managed bridge, one whose `bridge.yaml` lists `deployment.managedControls` (`deployment.managedSettings` alone does not make a bridge managed), `bridge doctor` and the console's Diagnostics page leave the warning out: whoever runs that bridge decides where its files live, and its reader has no shell on the machine to move them. `bridge init`, which keeps a managed bridge's `bridge.yaml` and never rewrites it, and the bridge's log still warn there.
+
 The settings in `bridge.yaml` that name paths:
 
 - `libraryRoots`
