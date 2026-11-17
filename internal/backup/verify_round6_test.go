@@ -106,8 +106,8 @@ func TestAVerdictsWriteIsAdmittedOnlyBeforeAGiveUp(t *testing.T) {
 // TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp is backlog B653's sixth
 // round's red for the removals a verdict's write makes once it is durable
 // (Codex's P1 on round 5, the Claude API's Low, both reviews of the round's
-// brief): a write whose removal of the veto in the bundle stalls past the
-// write's bound is given up, its caller told so; once the stall ends, that
+// brief): a write whose removal of the veto in the bundle stalls is given up
+// while it stalls, its caller told so; once the stall ends, that
 // removal, already under way when the give-up came, finishes, and the next,
 // of the veto beside the bundle, never begins, so no reader reads the
 // snapshot verified. That one exception is pinned beside it: a lone veto
@@ -134,8 +134,11 @@ func TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp(t *testing.T) {
 					}
 				}
 			}
-			// The real check keeps its bound; only the parked write expires.
-			t.Cleanup(backup.SetStepBoundForTest(dir, 300*time.Millisecond, "its verdict's write"))
+			// The real check keeps its bound; the parked write is given up at its
+			// gate once it has reached the park, never by a bound from its
+			// admission, which a slow host passes first (backlog B914).
+			gate, restoreGate := backup.SetStepGateForTest(root, filepath.Base(dir), "its verdict's write")
+			t.Cleanup(restoreGate)
 			p := newParking()
 			t.Cleanup(backup.SetRemoveVetoForTest(func(path string) error {
 				if path == inBundle {
@@ -145,6 +148,7 @@ func TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp(t *testing.T) {
 			}))
 			callerDone := make(chan struct{})
 			t.Cleanup(func() {
+				gate.FireAll()
 				p.release()
 				waitCaller(t, callerDone)
 				awaitClean(t)
@@ -154,18 +158,32 @@ func TestNoVetoRemovalBeginsAfterItsWriteIsGivenUp(t *testing.T) {
 				err error
 			}
 			done := make(chan answer, 1)
-			started := time.Now()
 			go func() {
 				defer close(callerDone)
 				res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
 				done <- answer{res, err}
 			}()
+			// An answer that comes first is kept where the write is parked (a
+			// park, once entered, stays seen), and is a failure where it is not.
+			var a answer
+			answered := false
 			select {
 			case <-p.entered:
+			case a = <-done:
+				select {
+				case <-p.entered:
+					answered = true
+				default:
+					t.Fatalf("the verification answered %v (write %v) before its write reached the park", a.err, a.res.Write)
+				}
 			case <-time.After(30 * time.Second):
 				t.Fatal("the write never began to remove a veto")
 			}
-			a := requireReturnedWithin(t, done, started, 5*time.Second+2*backup.StopWriteBound+3*time.Second, "the verification whose veto's removal stalls")
+			fired := time.Now()
+			gate.Fire("its verdict's write")
+			if !answered {
+				a = requireReturnedWithin(t, done, fired, 2*backup.StopWriteBound+3*time.Second, "the verification whose veto's removal stalls")
+			}
 			if a.res.Found.DatabaseState != backup.StateVerified || a.res.Found.FilesState != backup.StateVerified {
 				t.Fatalf("the check found %s/%s, want VERIFIED: the test did not reach the case", a.res.Found.DatabaseState, a.res.Found.FilesState)
 			}
@@ -291,25 +309,62 @@ func TestARecordNotReadBackIsSaidApartFromItsWrite(t *testing.T) {
 			root := filepath.Dir(dir)
 			readFailed := errors.New("injected: the read-back failed")
 			stageFailed := errors.New("injected: the staging failed")
+			verify := func() (backup.VerifyResult, error) {
+				return backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
+			}
 			switch tc {
 			case "a read-back given up":
-				t.Cleanup(backup.SetStepBoundForTest(dir, 300*time.Millisecond, "its read of the record after it"))
+				// The verification runs on a goroutine of its own, and its parked
+				// read-back is given up at its gate once it has reached the park,
+				// never by a bound from its admission (backlog B914).
+				gate, restoreGate := backup.SetStepGateForTest(root, filepath.Base(dir), "its read of the record after it")
+				t.Cleanup(restoreGate)
 				p := newParking()
 				t.Cleanup(backup.SetReadBackFailureForTest(func(string) error {
 					p.park()
 					return nil
 				}))
+				callerDone := make(chan struct{})
 				t.Cleanup(func() {
+					gate.FireAll()
 					p.release()
+					waitCaller(t, callerDone)
 					awaitClean(t)
 				})
+				call := verify
+				verify = func() (backup.VerifyResult, error) {
+					done := make(chan verifyAnswer, 1)
+					go func() {
+						defer close(callerDone)
+						res, err := call()
+						done <- verifyAnswer{res, err}
+					}()
+					// An answer that comes first is kept where the read-back is
+					// parked, and is a failure where it is not.
+					select {
+					case <-p.entered:
+					case a := <-done:
+						select {
+						case <-p.entered:
+							return a.res, a.err
+						default:
+							t.Fatalf("the verification answered %v before its read-back reached the park", a.err)
+						}
+					case <-time.After(30 * time.Second):
+						t.Fatal("the read-back never began")
+					}
+					fired := time.Now()
+					gate.Fire("its read of the record after it")
+					a := requireReturnedWithin(t, done, fired, 2*backup.StopWriteBound+3*time.Second, "the verification whose read-back stalls")
+					return a.res, a.err
+				}
 			default:
 				t.Cleanup(backup.SetReadBackFailureForTest(func(string) error { return readFailed }))
 			}
 			if tc == "a write that failed" {
 				t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(string) error { return stageFailed }, nil, nil))
 			}
-			res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{BackupsRoot: root})
+			res, err := verify()
 			if res.RecordRead || !errors.Is(err, backup.ErrRecordNotReadBack) || res.ReadErr == nil {
 				t.Fatalf("the verification answered %v, read back %v (%v); want its read-back said to have read nothing, and why", err, res.RecordRead, res.ReadErr)
 			}
