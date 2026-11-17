@@ -97191,7 +97191,7 @@ is clean with it.
 
 The rule is `cli-serve.md`'s B884 line, and its long form is in
 `ops/History-rules-cli-serve.md` ("B884 — the bridge's own files inside a
-library root"); this is the evidence. Linux amd64 (legion0), Go 1.27.3, the
+library root"); this is the evidence. Linux amd64, Go 1.27.3, the
 Makefile's tags, TMPDIR on disk (`~/onebit/tmp`). B650 (#1461) is not on
 main and this step does not build on it: on b9f50244 the doctor still loads
 the config on its own goroutine and stats each root unbounded.
@@ -97249,7 +97249,7 @@ the config on its own goroutine and stats each root unbounded.
 ### The Windows forms against Go's own
 
 The check parses each OS's forms itself, so the host's filepath proves
-nothing of Windows on Linux. On legion0 a scratch program (not committed)
+nothing of Windows on Linux. On the Linux test host a scratch program (not committed)
 put a copy of `layout.go` beside Go 1.27.3's Windows source, copied from
 `internal/filepathlite/path_windows.go`, `path.go` and
 `path/filepath/path_windows.go` (renamed so it builds on Linux), and compared
@@ -97337,7 +97337,7 @@ after. Every one as predicted:
 ### The gates
 
 On 72b98e96, in one hold of the build lock (16:23 to 16:54, `gate.py`), with
-`-p` and `-parallel` at 8, half legion0's cores: `go vet ./...` with the
+`-p` and `-parallel` at 8, half the host's cores: `go vet ./...` with the
 Makefile's tags as GOOS linux, darwin and windows, clean; under `-race
 -count=50`, the new tests of internal/config (the six of `layout_test.go`) ok
 in 11 s, of internal/doctor (`TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine`)
@@ -97352,15 +97352,15 @@ applied `scripts/check-doc-budgets.py` is clean (`cli-serve.md` 98,564 bytes),
 `internal/config/layout.go`, and `TestEveryCitedTestNameExists` passes (and
 fails on a ghost citation planted in the copy's History file, so it read the
 copy). `make test` and `make build-all` were not run: the brief asked for the
-packages. The Windows forms run on CI's windows leg as on legion0's Linux.
+packages. The Windows forms run on CI's windows leg as on the Linux test host.
 
 ## 2026-11-13 — B884 round 2: the move advice keeps every relative path's meaning, and serve's order is pinned
 
 The rule is `cli-serve.md`'s B884 line, and its long form is in
 `ops/History-rules-cli-serve.md` (its *Round 2* paragraph); this is the
-evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR on
+evidence. Linux amd64, Go 1.27.3, the Makefile's tags, TMPDIR on
 disk (`~/onebit/tmp`). The review of step 1 (72b98e96, its rules 8ec96ef6),
-Codex's and Carbon's, raised two items, each checked against the code before
+the two reviews, raised two items, each checked against the code before
 it was fixed; the code is 38c089d2. Nothing new touches the filesystem and
 nothing refuses: the advice changes only its words, and the seam is a test's.
 
@@ -97470,7 +97470,7 @@ the files put back with `git checkout --` and checked against HEAD's bytes,
 ### The gates
 
 On 38c089d2, in one hold of the build lock (18:02 to 18:32, `gate.py`), with
-`-p` and `-parallel` at 8, half legion0's cores: `go vet ./...` with the
+`-p` and `-parallel` at 8, half the host's cores: `go vet ./...` with the
 Makefile's tags as GOOS linux, darwin and windows, clean; under `-race
 -count=50`, the B884 tests of internal/config (the seven of `layout_test.go`)
 ok in 13 s, of internal/doctor
@@ -97497,11 +97497,11 @@ test` and `make build-all` were not run: the brief asked for the packages.
 
 The rule is `cli-serve.md`'s B884 line, and its long form is in
 `ops/History-rules-cli-serve.md` (*The words* and *Round 3*); this is the
-evidence. Linux amd64 (legion0), Go 1.27.3, the Makefile's tags, TMPDIR on
+evidence. Linux amd64, Go 1.27.3, the Makefile's tags, TMPDIR on
 disk (`~/onebit/tmp`). A scope cut after the review of round 2: every
 reviewer found round 2's generated advice pinning a setting that points into
 the data directory being moved (`tlsCertPath: ./data/server.crt`,
-`upscale.variantsDir: data/variants`) to its old place, and Carbon a
+`upscale.variantsDir: data/variants`) to its old place, and one review found a
 `dataDir` left out that reads either way. The code is 4b274341, on round 2's
 rules (7f389016). Nothing new touches the filesystem and nothing refuses.
 

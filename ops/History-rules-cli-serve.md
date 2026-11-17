@@ -5426,7 +5426,7 @@ Dir and Join; the production wrapper, `LayoutOf`, passes runtime.GOOS, and the
 table runs every OS's forms on any host. Proved three ways: the table, hand
 written; `TestTheLayoutsFormsAreThisHostsFilepath`, which holds the port to the
 host's own filepath and to `ResolvePath` (POSIX on Linux and macOS, Windows'
-on the windows leg); and, on legion0, a scratch copy of the port against Go's
+on the windows leg); and, on the Linux test host, a scratch copy of the port against Go's
 Windows source compiled on Linux (the record has the run). It touches
 nothing: no stat, no link resolved, no open, so a root whose mount does not
 answer cannot hold it. `TestTheLayoutCheckRunsOnStringsAlone` reads
@@ -5494,7 +5494,7 @@ install keeps working whatever its layout.
 *What it leaves.* `upscale.variantsDir` and `upscale.tempDir` keep their
 refusals through `fsutil.IsUnderAny`, and should not follow: a refusal there
 keeps writes out of a root, and a lexical check would let a link into a root
-through (CodeRabbit's Major on PR D1, why the resolution is there). Of the
+through (a review's Major on PR D1, why the resolution is there). Of the
 other callers of `fsutil.IsUnderAny`, none should either: each decides a
 write, a read, an unlink or a refusal, where a link must be seen through
 (the record lists them). Not checked here: tlsCertPath and tlsKeyPath,
