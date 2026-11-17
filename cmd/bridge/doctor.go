@@ -401,6 +401,9 @@ func buildDoctorDepsRun(ctx context.Context, cfgPath string, absentIsPreSetup bo
 			// The newest snapshot written and the newest whose database is
 			// verified, from their manifests (backlog B653).
 			d.Backups = doctorBackups(cfg)
+			// An unfinished database-only restore, and the originals the
+			// finished ones kept (backlog B653 PR 2b1).
+			d.RestoreOriginals = doctorRestoreOriginals(d.ConfigFile.Path, cfg.DataDir)
 			// The cert pair `bridge serve` would load — an explicit
 			// `tlsCertPath` included, which the cert checks used to
 			// ignore in favour of the DataDir defaults and so graded a

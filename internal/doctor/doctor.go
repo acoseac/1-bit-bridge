@@ -381,6 +381,13 @@ type Deps struct {
 	// does: an install it is about to write has no snapshot to grade.
 	Backups func(ctx context.Context) []Check
 
+	// RestoreOriginals is the restore-originals line (backlog B653 PR 2b1):
+	// cmd/bridge's doctorRestoreOriginals, one source for bridge doctor and
+	// the console's doctor, a fail while an unfinished restore of the
+	// library database stands. Run places it after the backups' lines, and
+	// a managed bridge skips it. A nil func skips it too.
+	RestoreOriginals func(ctx context.Context) []Check
+
 	// LogPath is the file the log-file-size line grades, cmd/bridge's
 	// doctorLogs: for bridge doctor run from a shell the installed bridge's
 	// log, on Windows the one bridge logs reads by its install check, and
@@ -545,6 +552,13 @@ func Run(ctx context.Context, d Deps) Report {
 	}
 	if d.Backups != nil {
 		out = append(out, d.Backups(ctx)...)
+	}
+	if d.RestoreOriginals != nil {
+		if d.Managed {
+			out = append(out, ok(checkNameRestoreOriginals, "managed bridge: its restores are its operator's, check skipped"))
+		} else {
+			out = append(out, d.RestoreOriginals(ctx)...)
+		}
 	}
 	if d.PlayerStorage != nil {
 		out = append(out, d.PlayerStorage(ctx)...)
@@ -1736,6 +1750,10 @@ func checkFingerprintToolchain(ctx context.Context, d Deps) Check {
 }
 
 // --- helpers ---
+
+// checkNameRestoreOriginals is the restore-originals line's name, which
+// cmd/bridge's check gives it too.
+const checkNameRestoreOriginals = "restore-originals"
 
 func ok(name, summary string) Check {
 	return Check{Name: name, Status: OK, Summary: summary}

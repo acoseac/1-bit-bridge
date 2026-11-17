@@ -29,6 +29,9 @@ const restoreHandBackSection = `"Put the originals back by hand" in docs/backup.
 // its store, the full restore's refusal, every stop of the bounded path and
 // the doctor say it.
 func restoreRemedy(configPath, dataDir string) string {
+	if configPath == "" {
+		configPath = "<bridge.yaml>"
+	}
 	return fmt.Sprintf("Finish it with `bridge restore --database-only --config %s`, run by the bridge version that began it (no snapshot argument): "+
 		"it completes a restore whose database is installed, and puts any other back. Its original database files are in %s; "+
 		"to put them back by hand, see %s.", restoreConfigArg(configPath), backup.RestoreRemedyArchive(dataDir), restoreHandBackSection)
@@ -46,7 +49,7 @@ func restoreConfigArg(path string) string {
 		}
 	}
 	switch {
-	case plain:
+	case plain, path == "<bridge.yaml>":
 		return path
 	case runtime.GOOS == "windows":
 		return quoteCmd(path)
