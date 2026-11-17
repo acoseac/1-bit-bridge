@@ -884,10 +884,16 @@ func (r *rig) newRelease(version string) {
 	r.set("FAKE_UPDATE_TO", path, "FAKE_UPDATE_VERSION", version)
 }
 
+// writeFile writes b at path with mode, holding syscall.ForkLock for reading
+// across the write: a fork takes it for writing, so no child forked meanwhile
+// inherits the write descriptor and leaves the file busy to exec (ETXTBSY).
 func writeFile(t *testing.T, path string, b []byte, mode os.FileMode) {
 	t.Helper()
 	mkdirAll(t, filepath.Dir(path))
-	if err := os.WriteFile(path, b, mode); err != nil {
+	syscall.ForkLock.RLock()
+	err := os.WriteFile(path, b, mode)
+	syscall.ForkLock.RUnlock()
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(path, mode); err != nil {
