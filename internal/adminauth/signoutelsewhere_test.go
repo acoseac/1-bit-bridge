@@ -99,10 +99,7 @@ func TestASignOutElsewhereEndsTheRunningBridgesSessionsAtTheirNextRequest(t *tes
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, path, first, _ := runningBridge(t)
-			second, err := a.CreateSession("admin")
-			if err != nil {
-				t.Fatal(err)
-			}
+			second := signIn(t, a, "admin", leakedPassword)
 
 			tc.signOut(t, path)
 
@@ -113,7 +110,7 @@ func TestASignOutElsewhereEndsTheRunningBridgesSessionsAtTheirNextRequest(t *tes
 				}
 			}
 			requireEndedOnDisk(t, path, tc.name, first, second)
-			if err := a.Verify("admin", tc.password); err != nil {
+			if _, err := a.Verify("admin", tc.password); err != nil {
 				t.Errorf("after %s, the running bridge refuses the password it should accept: %v", tc.name, err)
 			}
 		})
@@ -127,28 +124,34 @@ func TestASignOutElsewhereEndsTheRunningBridgesSessionsAtTheirNextRequest(t *tes
 // TestAWriteByTheRunningBridgeKeepsARotationMadeElsewhere for the sessions:
 // built before the read, the set wrote every signed-out session back into the
 // file the sign-out had emptied, for the next restart to sign in again.
+//
+// The login's write is refused, as in that test: its check was made before
+// the sign-out, so its session is one the sign-out must end (Admission,
+// backlog B881), and it writes nothing.
 func TestAWriteByTheRunningBridgeDoesNotBringBackSignedOutSessions(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		write func(t *testing.T, a *Store, first, second string, clock *testClock)
+		name string
+		// write is the running store's write. checked is a login's check made
+		// before the sign-out, which only the login uses.
+		write func(t *testing.T, a *Store, first, second string, clock *testClock, checked Admission)
 		// ended are the sessions the running bridge held before the
 		// sign-out and must hold none of afterwards.
 		ended func(first, second string) []string
 	}{
-		{"a login",
-			func(t *testing.T, a *Store, _, _ string, _ *testClock) {
-				if _, err := a.CreateSession("admin"); err != nil {
-					t.Fatal(err)
+		{"a login checked before the sign-out",
+			func(t *testing.T, a *Store, _, _ string, _ *testClock, checked Admission) {
+				if _, err := a.CreateSession(checked); !errors.Is(err, ErrCredentialsChanged) {
+					t.Fatalf("a login checked before the sign-out = %v, want ErrCredentialsChanged", err)
 				}
 			},
 			func(first, second string) []string { return []string{first, second} }},
 		{"a logout",
-			func(t *testing.T, a *Store, _, second string, _ *testClock) {
+			func(t *testing.T, a *Store, _, second string, _ *testClock, _ Admission) {
 				a.DeleteSession(second)
 			},
 			func(first, _ string) []string { return []string{first} }},
 		{"the shutdown flush",
-			func(t *testing.T, a *Store, _, _ string, _ *testClock) {
+			func(t *testing.T, a *Store, _, _ string, _ *testClock, _ Admission) {
 				if err := a.FlushSessions(); err != nil {
 					t.Fatal(err)
 				}
@@ -157,19 +160,17 @@ func TestAWriteByTheRunningBridgeDoesNotBringBackSignedOutSessions(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, path, first, clock := runningBridge(t)
-			second, err := a.CreateSession("admin")
-			if err != nil {
-				t.Fatal(err)
-			}
+			second := signIn(t, a, "admin", leakedPassword)
 			// Activity inside the debounce window, so the flush row has
 			// something pending, from before the sign-out.
 			clock.t = clock.t.Add(time.Second)
 			if _, err := a.ValidateSession(first); err != nil {
 				t.Fatal(err)
 			}
+			checked := admit(t, a, "admin", leakedPassword)
 
 			signOutElsewhere(t, path)
-			tc.write(t, a, first, second, clock)
+			tc.write(t, a, first, second, clock, checked)
 
 			ended := tc.ended(first, second)
 			requireEndedOnDisk(t, path, tc.name, ended...)
@@ -197,13 +198,7 @@ func TestASessionMadeAfterASignOutIsKept(t *testing.T) {
 	clock.t = fileSignOut(t, path).Add(-time.Hour)
 
 	// A login: the credential check reads the file, and takes the sign-out.
-	if err := a.Verify("admin", leakedPassword); err != nil {
-		t.Fatal(err)
-	}
-	after, err := a.CreateSession("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
+	after := signIn(t, a, "admin", leakedPassword)
 	if _, err := a.ValidateSession(after); err != nil {
 		t.Fatalf("a session made after the sign-out was refused: %v", err)
 	}
@@ -222,7 +217,7 @@ func TestASessionMadeAfterASignOutIsKept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Verify("admin", leakedPassword); err != nil {
+	if _, err := c.Verify("admin", leakedPassword); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.ValidateSession(after); err != nil {
@@ -256,13 +251,7 @@ func TestEverySignOutChangesTheMarker(t *testing.T) {
 	if _, err := a.ValidateSession(first); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("the first sign-out did not reach the running bridge (err=%v)", err)
 	}
-	if err := a.Verify("admin", leakedPassword); err != nil {
-		t.Fatal(err)
-	}
-	between, err := a.CreateSession("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
+	between := signIn(t, a, "admin", leakedPassword)
 	marker := fileSignOut(t, path)
 
 	signOutAt()
@@ -280,27 +269,59 @@ func TestEverySignOutChangesTheMarker(t *testing.T) {
 // the bridge's commit must not rename the sessions it staged over the file the
 // sign-out emptied. It reads the file once more before its commit, and the
 // rebuilt write takes the sign-out first.
+//
+// A login's write is refused there as well: its check was made before the
+// sign-out, which its session must not outlive (Admission, backlog B881).
+// Until B881 the login was CreateSession alone, and the rebuilt write's read
+// ended its session in memory while CreateSession still answered success.
 func TestASignOutDuringASessionWriteIsNotUndone(t *testing.T) {
-	a, path, first, _ := runningBridge(t)
-	fired := false
-	beforeCommitHook = func() {
-		if !fired {
-			fired = true
-			signOutElsewhere(t, path)
-		}
-	}
-	t.Cleanup(func() { beforeCommitHook = nil })
+	for _, tc := range []struct {
+		name string
+		// write is the session write the sign-out lands inside; checked is a
+		// login's check made before the write began.
+		write func(t *testing.T, a *Store, first string, clock *testClock, checked Admission)
+	}{
+		{"session activity past the debounce",
+			func(t *testing.T, a *Store, first string, clock *testClock, _ Admission) {
+				clock.t = clock.t.Add(sessionFlushInterval + time.Second)
+				if _, err := a.ValidateSession(first); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{"a login, refused",
+			func(t *testing.T, a *Store, _ string, _ *testClock, checked Admission) {
+				if _, err := a.CreateSession(checked); !errors.Is(err, ErrCredentialsChanged) {
+					t.Errorf("a login whose write found a sign-out on its read again = %v, want ErrCredentialsChanged", err)
+				}
+				if n := a.SessionCount(); n != 0 {
+					t.Errorf("the running bridge holds %d sessions after the sign-out, want none", n)
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, path, first, clock := runningBridge(t)
+			checked := admit(t, a, "admin", leakedPassword)
+			fired := false
+			beforeCommitHook = func() {
+				if !fired {
+					fired = true
+					signOutElsewhere(t, path)
+				}
+			}
+			t.Cleanup(func() { beforeCommitHook = nil })
 
-	signedIn, err := a.CreateSession("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !fired {
-		t.Fatal("the sign-out never ran: the session write did not reach its commit")
-	}
-	requireEndedOnDisk(t, path, "a sign-out landing inside a session write", first, signedIn)
-	if _, err := a.ValidateSession(first); !errors.Is(err, ErrSessionNotFound) {
-		t.Errorf("the running bridge still holds a signed-out session (err=%v)", err)
+			tc.write(t, a, first, clock, checked)
+			if !fired {
+				t.Fatal("the sign-out never ran: the session write did not reach its commit")
+			}
+			requireEndedOnDisk(t, path, "a sign-out landing inside "+tc.name, first)
+			if c, err := OpenStore(path); err != nil || c.SessionCount() != 0 {
+				t.Errorf("the file after a sign-out landing inside %s holds sessions (err=%v)", tc.name, err)
+			}
+			if _, err := a.ValidateSession(first); !errors.Is(err, ErrSessionNotFound) {
+				t.Errorf("the running bridge still holds a signed-out session (err=%v)", err)
+			}
+		})
 	}
 }
 
@@ -324,9 +345,7 @@ func TestAWriteThatKeepsTheSessionsCarriesTheSignOut(t *testing.T) {
 	}
 
 	// And the running bridge's own writes carry it too.
-	if _, err := a.CreateSession("admin"); err != nil {
-		t.Fatal(err)
-	}
+	signIn(t, a, "admin", rotatedPassword)
 	if got := fileSignOut(t, path); !got.Equal(marker) {
 		t.Errorf("the running bridge's session write wrote marker %s over %s", got, marker)
 	}
@@ -509,10 +528,7 @@ func TestASignOutDoesNotWriteOverAStoreItCannotRead(t *testing.T) {
 // bridge, so it needs no marker.
 func TestEndOtherSessionsKeepsOnlyTheCallers(t *testing.T) {
 	a, path, caller, clock := runningBridge(t)
-	stale, err := a.CreateSession("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
+	stale := signIn(t, a, "admin", leakedPassword)
 	// stale idles past the timeout while the others stay active, so it is
 	// already signed out and must not be counted. The others are made
 	// before it expires: a login sweeps expired sessions, and one made after
@@ -520,11 +536,7 @@ func TestEndOtherSessionsKeepsOnlyTheCallers(t *testing.T) {
 	clock.t = clock.t.Add(SessionIdleTimeout - time.Hour)
 	var others []string
 	for i := 0; i < 2; i++ {
-		raw, err := a.CreateSession("admin")
-		if err != nil {
-			t.Fatal(err)
-		}
-		others = append(others, raw)
+		others = append(others, signIn(t, a, "admin", leakedPassword))
 	}
 	if _, err := a.ValidateSession(caller); err != nil {
 		t.Fatal(err)
@@ -586,10 +598,7 @@ func TestEndOtherSessionsNeedsALiveCaller(t *testing.T) {
 // failure that runs on every platform.
 func TestEndOtherSessionsReportsAnEndItCouldNotSave(t *testing.T) {
 	a, path, caller, _ := runningBridge(t)
-	other, err := a.CreateSession("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
+	other := signIn(t, a, "admin", leakedPassword)
 	beforeCommitHook = func() { touchInPlace(t, path) }
 	t.Cleanup(func() { beforeCommitHook = nil })
 
@@ -738,7 +747,7 @@ func TestAWriteThatSupersedesASignOutIsLeftAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Verify("admin", third); err != nil {
+	if _, err := c.Verify("admin", third); err != nil {
 		t.Errorf("the rotation after the first one was written over by the first one's confirmation: %v", err)
 	}
 	if _, err := a.ValidateSession(first); !errors.Is(err, ErrSessionNotFound) {

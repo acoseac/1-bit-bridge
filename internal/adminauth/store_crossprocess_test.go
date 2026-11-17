@@ -42,11 +42,7 @@ func runningBridge(t *testing.T) (a *Store, path, session string, clock *testClo
 	if err := a.SetInitialPassword("admin", leakedPassword); err != nil {
 		t.Fatal(err)
 	}
-	session, err = a.CreateSession("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a, path, session, clock
+	return a, path, signIn(t, a, "admin", leakedPassword), clock
 }
 
 // rotateElsewhere is `bridge admin reset-password --keep-sessions` run against
@@ -74,11 +70,11 @@ func requireRotationOnDisk(t *testing.T, path, after string) {
 	if err != nil {
 		t.Fatalf("after %s, the store no longer opens: %v", after, err)
 	}
-	if err := c.Verify("admin", rotatedPassword); err != nil {
+	if _, err := c.Verify("admin", rotatedPassword); err != nil {
 		t.Errorf("after %s, the file refuses the rotated password (%v): the running "+
 			"bridge wrote the credential it held in memory back over the rotation", after, err)
 	}
-	if err := c.Verify("admin", leakedPassword); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := c.Verify("admin", leakedPassword); !errors.Is(err, ErrInvalidCredentials) {
 		t.Errorf("after %s, the file still accepts the leaked password (err=%v)", after, err)
 	}
 }
@@ -107,26 +103,37 @@ func damage(t *testing.T, path string) (saved []byte) {
 //
 // Each row's write is the running store's FIRST act after the rotation, so a
 // row cannot pass on a credential another path already re-read.
+//
+// The login's is the one write the store refuses. Its check, made before the
+// rotation, compared the password the rotation replaced, so its session is
+// refused (Admission, backlog B881) and nothing is written over the rotation.
+// Until B881 the row's login was CreateSession alone, which checked nothing,
+// and its write landed beside the rotated credential.
 func TestAWriteByTheRunningBridgeKeepsARotationMadeElsewhere(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		write func(t *testing.T, a *Store, session string, clock *testClock)
+		name string
+		// write is the running store's write. checked is a login's check made
+		// before the rotation, which only the login uses.
+		write func(t *testing.T, a *Store, session string, clock *testClock, checked Admission)
+		// refused is a write the store must refuse, which leaves the file
+		// byte for byte as the rotation wrote it.
+		refused bool
 	}{
-		{"a login", func(t *testing.T, a *Store, _ string, _ *testClock) {
-			if _, err := a.CreateSession("admin"); err != nil {
-				t.Fatal(err)
+		{"a login checked before the rotation", func(t *testing.T, a *Store, _ string, _ *testClock, checked Admission) {
+			if _, err := a.CreateSession(checked); !errors.Is(err, ErrCredentialsChanged) {
+				t.Fatalf("a login checked against the password the rotation replaced = %v, want ErrCredentialsChanged", err)
 			}
-		}},
-		{"session activity past the debounce", func(t *testing.T, a *Store, session string, clock *testClock) {
+		}, true},
+		{"session activity past the debounce", func(t *testing.T, a *Store, session string, clock *testClock, _ Admission) {
 			clock.t = clock.t.Add(sessionFlushInterval + time.Second)
 			if _, err := a.ValidateSession(session); err != nil {
 				t.Fatal(err)
 			}
-		}},
-		{"a logout", func(t *testing.T, a *Store, session string, _ *testClock) {
+		}, false},
+		{"a logout", func(t *testing.T, a *Store, session string, _ *testClock, _ Admission) {
 			a.DeleteSession(session)
-		}},
-		{"the shutdown flush", func(t *testing.T, a *Store, session string, clock *testClock) {
+		}, false},
+		{"the shutdown flush", func(t *testing.T, a *Store, session string, clock *testClock, _ Admission) {
 			// Activity inside the debounce window writes nothing and leaves
 			// the flush something to land, which is a restart after a console
 			// request in the last 30 seconds.
@@ -137,21 +144,29 @@ func TestAWriteByTheRunningBridgeKeepsARotationMadeElsewhere(t *testing.T) {
 			if err := a.FlushSessions(); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, path, session, clock := runningBridge(t)
+			checked := admit(t, a, "admin", leakedPassword)
 			rotateElsewhere(t, path)
 			rotated, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			tc.write(t, a, session, clock)
+			tc.write(t, a, session, clock, checked)
 			requireRotationOnDisk(t, path, tc.name)
+			got, _ := os.ReadFile(path)
+			if tc.refused {
+				if !bytes.Equal(got, rotated) {
+					t.Errorf("after %s, which the store refused, the file is not what the rotation wrote", tc.name)
+				}
+				return
+			}
 			// And the write itself landed. A write that only refused to
 			// commit would keep the rotation too, while the running
 			// bridge's sessions never reached the file again.
-			if got, _ := os.ReadFile(path); bytes.Equal(got, rotated) {
+			if bytes.Equal(got, rotated) {
 				t.Errorf("after %s, the file is exactly what the rotation wrote: the running "+
 					"bridge's write never landed", tc.name)
 			}
@@ -167,10 +182,10 @@ func TestTheRunningBridgeVerifiesARotationMadeElsewhere(t *testing.T) {
 	a, path, _, _ := runningBridge(t)
 	rotateElsewhere(t, path)
 
-	if err := a.Verify("admin", leakedPassword); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := a.Verify("admin", leakedPassword); !errors.Is(err, ErrInvalidCredentials) {
 		t.Errorf("the running bridge still accepts the leaked password after a rotation (err=%v)", err)
 	}
-	if err := a.Verify("admin", rotatedPassword); err != nil {
+	if _, err := a.Verify("admin", rotatedPassword); err != nil {
 		t.Errorf("the running bridge refuses the rotated password: %v", err)
 	}
 }
@@ -192,10 +207,7 @@ func TestARotationCarriesTheRunningBridgesSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	// While b waits at its prompt.
-	signedIn, err := a.CreateSession("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
+	signedIn := signIn(t, a, "admin", leakedPassword)
 	a.DeleteSession(signedOut)
 	if err := b.ResetPassword("admin", rotatedPassword, KeepSessions); err != nil {
 		t.Fatal(err)
@@ -222,32 +234,66 @@ func TestARotationCarriesTheRunningBridgesSessions(t *testing.T) {
 // which reset-password can land its rotation, and committing a file built
 // from the credential read before them puts the old one back. The write
 // reads the credential once more before its commit and rebuilds around a
-// change, keeping the session it was writing.
+// change, keeping the change it was writing.
+//
+// A login is the write that does not keep its change: its check compared the
+// password the rotation replaced, and the rebuilt write's read is where its
+// session is admitted, so it is refused there (Admission, backlog B881). Until
+// B881 the login was CreateSession alone, and its rebuilt write landed it
+// beside the rotated credential.
 func TestARotationDuringASessionWriteIsNotUndone(t *testing.T) {
-	a, path, _, _ := runningBridge(t)
-	fired := false
-	beforeCommitHook = func() {
-		if !fired {
-			fired = true
-			rotateElsewhere(t, path)
-		}
-	}
-	t.Cleanup(func() { beforeCommitHook = nil })
+	for _, tc := range []struct {
+		name string
+		// write is the session write the rotation lands inside, by the
+		// running bridge a, which also holds second; checked is a login's
+		// check made before the write began.
+		write func(t *testing.T, a *Store, second string, checked Admission)
+		// held reports whether the reopened store c shows the write's change.
+		held func(c *Store, second string) bool
+	}{
+		{"a logout",
+			func(t *testing.T, a *Store, second string, _ Admission) { a.DeleteSession(second) },
+			func(c *Store, second string) bool {
+				_, err := c.ValidateSession(second)
+				return errors.Is(err, ErrSessionNotFound)
+			}},
+		{"a login, refused",
+			func(t *testing.T, a *Store, _ string, checked Admission) {
+				if _, err := a.CreateSession(checked); !errors.Is(err, ErrCredentialsChanged) {
+					t.Errorf("a login whose write found a rotation on its read again = %v, want ErrCredentialsChanged", err)
+				}
+				if n := a.SessionCount(); n != 2 {
+					t.Errorf("the running bridge holds %d sessions after the refused login, want its 2", n)
+				}
+			},
+			func(c *Store, _ string) bool { return c.SessionCount() == 2 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, path, _, _ := runningBridge(t)
+			second := signIn(t, a, "admin", leakedPassword)
+			checked := admit(t, a, "admin", leakedPassword)
+			fired := false
+			beforeCommitHook = func() {
+				if !fired {
+					fired = true
+					rotateElsewhere(t, path)
+				}
+			}
+			t.Cleanup(func() { beforeCommitHook = nil })
 
-	signedIn, err := a.CreateSession("admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !fired {
-		t.Fatal("the rotation never ran: the session write did not reach its commit")
-	}
-	requireRotationOnDisk(t, path, "a rotation landing inside a session write")
-	c, err := OpenStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.ValidateSession(signedIn); err != nil {
-		t.Errorf("the login whose write was rebuilt is not in the file: %v", err)
+			tc.write(t, a, second, checked)
+			if !fired {
+				t.Fatal("the rotation never ran: the session write did not reach its commit")
+			}
+			requireRotationOnDisk(t, path, "a rotation landing inside "+tc.name)
+			c, err := OpenStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.held(c, second) {
+				t.Errorf("the file after %s, whose write was rebuilt around the rotation, does not show it", tc.name)
+			}
+		})
 	}
 }
 
@@ -278,11 +324,9 @@ func TestARotationDoesNotCommitOverASessionChangeMadeDuringItsWrite(t *testing.T
 			}},
 		{"a login",
 			func(t *testing.T, a *Store, _ string) string {
-				raw, err := a.CreateSession("admin")
-				if err != nil {
-					t.Fatal(err)
-				}
-				return raw
+				// Checked and admitted before the rotation lands: it reads
+				// the file as it was, which the rotation has not replaced.
+				return signIn(t, a, "admin", leakedPassword)
 			},
 			func(c *Store, session string) bool {
 				_, err := c.ValidateSession(session)
@@ -357,6 +401,11 @@ func TestSessionsHeldWhileTheStoreIsGoneLandOnceItIsBack(t *testing.T) {
 // once the file reads again, at the latest at the shutdown flush. A
 // logout is the case where both halves matter: overwriting undoes a rotation,
 // and dropping it undoes the logout at the next restart.
+//
+// A login was a row here until backlog B881, held in memory and landed by the
+// flush. Its session is admitted on the read its write is built from now, so
+// a login the file cannot be read for is refused and holds nothing:
+// TestALoginTheFileCannotBeReadForIsRefused.
 func TestAWriteThatCannotReadTheStoreDoesNotOverwriteIt(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -375,22 +424,6 @@ func TestAWriteThatCannotReadTheStoreDoesNotOverwriteIt(t *testing.T) {
 			func(c *Store, session string) bool {
 				_, err := c.ValidateSession(session)
 				return errors.Is(err, ErrSessionNotFound)
-			}},
-		{"a login",
-			// Nothing here may validate the new session: a validate marks
-			// the set pending by itself, which would land the login at the
-			// flush even when the login's own failed write left nothing
-			// pending. The test body validates it after the flush.
-			func(t *testing.T, a *Store, _ string) string {
-				raw, err := a.CreateSession("admin")
-				if err != nil {
-					t.Fatalf("a login failed because the store could not be written: %v", err)
-				}
-				return raw
-			},
-			func(c *Store, session string) bool {
-				_, err := c.ValidateSession(session)
-				return err == nil
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -499,14 +532,14 @@ func TestVerifyRefusesWhenTheStoreCannotBeRead(t *testing.T) {
 	a, path, _, _ := runningBridge(t)
 	saved := damage(t, path)
 
-	if err := a.Verify("admin", leakedPassword); err == nil {
+	if _, err := a.Verify("admin", leakedPassword); err == nil {
 		t.Fatal("Verify accepted a password with the store file unreadable")
 	}
 
 	if err := os.WriteFile(path, saved, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Verify("admin", leakedPassword); err != nil {
+	if _, err := a.Verify("admin", leakedPassword); err != nil {
 		t.Errorf("Verify still refuses once the file reads again: %v", err)
 	}
 }
@@ -534,7 +567,7 @@ func TestADeletedStoreFileIsNoCredential(t *testing.T) {
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a session write recreated the deleted store file (stat err=%v)", err)
 	}
-	if err := a.Verify("admin", leakedPassword); !errors.Is(err, ErrNotInitialised) {
+	if _, err := a.Verify("admin", leakedPassword); !errors.Is(err, ErrNotInitialised) {
 		t.Errorf("Verify with the store file gone = %v, want ErrNotInitialised", err)
 	}
 }
@@ -575,7 +608,7 @@ func TestAnInitialCredentialIsNotWrittenOverAnother(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Verify("admin", leakedPassword); err != nil {
+	if _, err := c.Verify("admin", leakedPassword); err != nil {
 		t.Errorf("the first credential was replaced: %v", err)
 	}
 }
@@ -604,7 +637,7 @@ func TestARotationLeavesLoginTicketsAlone(t *testing.T) {
 	if after, err := os.ReadFile(ticketPath); err != nil || !bytes.Equal(before, after) {
 		t.Errorf("the rotation changed the login ticket's file (err=%v)", err)
 	}
-	if user, err := a.RedeemLoginTicket(ticket); err != nil || user != "admin" {
+	if user, err := redeemed(a.RedeemLoginTicket(ticket)); err != nil || user != "admin" {
 		t.Errorf("a ticket minted before the rotation = (%q, %v), want (admin, nil)", user, err)
 	}
 }
@@ -635,7 +668,7 @@ func TestRedemptionRefusesAnAccountReplacedElsewhere(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if user, err := a.RedeemLoginTicket(ticket); !errors.Is(err, ErrTicketInvalid) {
+	if user, err := redeemed(a.RedeemLoginTicket(ticket)); !errors.Is(err, ErrTicketInvalid) {
 		t.Errorf("a ticket for an account replaced elsewhere = (%q, %v), want ErrTicketInvalid", user, err)
 	}
 }
@@ -688,7 +721,7 @@ func TestRedemptionThatCannotReadTheStoreDoesNotSpendTheTicket(t *testing.T) {
 	if err := os.WriteFile(path, saved, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if user, err := a.RedeemLoginTicket(ticket); err != nil || user != "admin" {
+	if user, err := redeemed(a.RedeemLoginTicket(ticket)); err != nil || user != "admin" {
 		t.Errorf("the ticket after the file reads again = (%q, %v), want (admin, nil): "+
 			"the failed redemption spent it", user, err)
 	}

@@ -34,10 +34,10 @@ func TestSeedFromEnvInitialisesAnEmptyStore(t *testing.T) {
 	if s.Username() != "admin" {
 		t.Errorf("username = %q, want the default %q", s.Username(), "admin")
 	}
-	if err := s.Verify("admin", "a-perfectly-fine-secret"); err != nil {
+	if _, err := s.Verify("admin", "a-perfectly-fine-secret"); err != nil {
 		t.Errorf("the seeded credential does not verify: %v", err)
 	}
-	if err := s.Verify("admin", "something-else"); err == nil {
+	if _, err := s.Verify("admin", "something-else"); err == nil {
 		t.Error("Verify accepted a wrong password")
 	}
 }
@@ -66,7 +66,7 @@ func TestSeedFromEnvDoesNotResetAConfiguredStore(t *testing.T) {
 		t.Error("a configured store was re-seeded — a rotated password would be " +
 			"silently undone by every restart")
 	}
-	if err := s.Verify("admin", "the-rotated-secret"); err != nil {
+	if _, err := s.Verify("admin", "the-rotated-secret"); err != nil {
 		t.Errorf("the rotated password no longer verifies: %v", err)
 	}
 }
@@ -89,7 +89,7 @@ func TestSeedFromEnvPrefersTheFileForm(t *testing.T) {
 	if _, err := s.SeedFromEnv(); err != nil {
 		t.Fatalf("SeedFromEnv: %v", err)
 	}
-	if err := s.Verify("admin", "from-the-mounted-file"); err != nil {
+	if _, err := s.Verify("admin", "from-the-mounted-file"); err != nil {
 		t.Errorf("the file's secret does not verify — the inline variable won, or the "+
 			"trailing newline was kept: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestSeededCredentialSurvivesRestart(t *testing.T) {
 	if !s2.IsInitialised() {
 		t.Fatal("the seeded credential was not persisted")
 	}
-	if err := s2.Verify("admin", "a-perfectly-fine-secret"); err != nil {
+	if _, err := s2.Verify("admin", "a-perfectly-fine-secret"); err != nil {
 		t.Errorf("verify after reopen: %v", err)
 	}
 }

@@ -21,6 +21,28 @@ func newStore(t *testing.T) *Store {
 	return s
 }
 
+// admit is a console login's check on s: the Admission the login's session
+// is made under.
+func admit(t testing.TB, s *Store, username, password string) Admission {
+	t.Helper()
+	a, err := s.Verify(username, password)
+	if err != nil {
+		t.Fatalf("Verify(%q): %v", username, err)
+	}
+	return a
+}
+
+// signIn is a console login on s, the check and then the session it admits,
+// and returns the session's raw token.
+func signIn(t testing.TB, s *Store, username, password string) string {
+	t.Helper()
+	raw, err := s.CreateSession(admit(t, s, username, password))
+	if err != nil {
+		t.Fatalf("CreateSession for %q: %v", username, err)
+	}
+	return raw
+}
+
 func TestAdminBcryptCostIsAtLeast12(t *testing.T) {
 	// Compile-time-style guard via runtime assertion: the
 	// adminBcryptCost constant must stay at 12+ so brute-force
@@ -51,7 +73,7 @@ func TestMintInitialThenVerifyRoundTrip(t *testing.T) {
 	if s.Username() != "admin" {
 		t.Errorf("Username = %q, want %q", s.Username(), "admin")
 	}
-	if err := s.Verify("admin", plaintext); err != nil {
+	if _, err := s.Verify("admin", plaintext); err != nil {
 		t.Errorf("Verify with returned plaintext: %v", err)
 	}
 }
@@ -72,7 +94,7 @@ func TestVerifyRejectsWrongPassword(t *testing.T) {
 	if _, err := s.MintInitial("admin"); err != nil {
 		t.Fatal(err)
 	}
-	err := s.Verify("admin", "definitely-not-the-password")
+	_, err := s.Verify("admin", "definitely-not-the-password")
 	if !errors.Is(err, ErrInvalidCredentials) {
 		t.Errorf("Verify wrong password: got %v, want ErrInvalidCredentials", err)
 	}
@@ -81,7 +103,7 @@ func TestVerifyRejectsWrongPassword(t *testing.T) {
 func TestVerifyRejectsWrongUsername(t *testing.T) {
 	s := newStore(t)
 	plaintext, _ := s.MintInitial("admin")
-	err := s.Verify("attacker", plaintext)
+	_, err := s.Verify("attacker", plaintext)
 	if !errors.Is(err, ErrInvalidCredentials) {
 		t.Errorf("Verify wrong username: got %v, want ErrInvalidCredentials", err)
 	}
@@ -89,7 +111,7 @@ func TestVerifyRejectsWrongUsername(t *testing.T) {
 
 func TestVerifyOnUninitialisedReturnsNotInitialised(t *testing.T) {
 	s := newStore(t)
-	err := s.Verify("admin", "any")
+	_, err := s.Verify("admin", "any")
 	if !errors.Is(err, ErrNotInitialised) {
 		t.Errorf("Verify uninitialised: got %v, want ErrNotInitialised", err)
 	}
@@ -114,7 +136,7 @@ func TestPasswordPersistsAcrossReopen(t *testing.T) {
 	if !s2.IsInitialised() {
 		t.Fatal("reopened store should be initialised")
 	}
-	if err := s2.Verify("admin", plaintext); err != nil {
+	if _, err := s2.Verify("admin", plaintext); err != nil {
 		t.Errorf("Verify on reopened store: %v", err)
 	}
 }
@@ -125,10 +147,10 @@ func TestResetPasswordChangesHashAndKeepsUsername(t *testing.T) {
 	if err := s.ResetPassword("admin", "new-strong-pw-XYZ", EndSessions); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Verify("admin", old); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := s.Verify("admin", old); !errors.Is(err, ErrInvalidCredentials) {
 		t.Errorf("Verify with old password after reset: got %v, want ErrInvalidCredentials", err)
 	}
-	if err := s.Verify("admin", "new-strong-pw-XYZ"); err != nil {
+	if _, err := s.Verify("admin", "new-strong-pw-XYZ"); err != nil {
 		t.Errorf("Verify with new password: %v", err)
 	}
 }
@@ -154,9 +176,9 @@ func TestResetPasswordRejectsEmptyPassword(t *testing.T) {
 
 func TestSessionLifecycle(t *testing.T) {
 	s := newStore(t)
-	_, _ = s.MintInitial("admin")
+	password, _ := s.MintInitial("admin")
 
-	raw, err := s.CreateSession("admin")
+	raw, err := s.CreateSession(admit(t, s, "admin", password))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,12 +209,12 @@ func TestSessionLifecycle(t *testing.T) {
 
 func TestSessionIdleTimeoutExpires(t *testing.T) {
 	s := newStore(t)
-	_, _ = s.MintInitial("admin")
+	password, _ := s.MintInitial("admin")
 	// Inject a controllable clock.
 	tick := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return tick }
 
-	raw, _ := s.CreateSession("admin")
+	raw := signIn(t, s, "admin", password)
 	if _, err := s.ValidateSession(raw); err != nil {
 		t.Fatalf("Validate immediately after create: %v", err)
 	}
@@ -206,11 +228,11 @@ func TestSessionIdleTimeoutExpires(t *testing.T) {
 
 func TestSessionHardCapExpires(t *testing.T) {
 	s := newStore(t)
-	_, _ = s.MintInitial("admin")
+	password, _ := s.MintInitial("admin")
 	tick := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return tick }
 
-	raw, _ := s.CreateSession("admin")
+	raw := signIn(t, s, "admin", password)
 
 	// Keep the session "active" by validating just under the idle
 	// timeout, but cross the hard cap.
@@ -230,22 +252,18 @@ func TestCreateSessionSweepsExpiredSessions(t *testing.T) {
 	// new one, keeping the map proportional to LIVE sessions rather
 	// than to lifetime logins.
 	s := newStore(t)
-	_, _ = s.MintInitial("admin")
+	password, _ := s.MintInitial("admin")
 	tick := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return tick }
 
-	if _, err := s.CreateSession("admin"); err != nil {
-		t.Fatal(err)
-	}
+	signIn(t, s, "admin", password)
 	if s.SessionCount() != 1 {
 		t.Fatalf("SessionCount = %d, want 1", s.SessionCount())
 	}
 
 	// Cross the idle timeout WITHOUT re-validating the first session.
 	tick = tick.Add(SessionIdleTimeout + time.Minute)
-	if _, err := s.CreateSession("admin"); err != nil {
-		t.Fatal(err)
-	}
+	signIn(t, s, "admin", password)
 	// Only the fresh session should remain — the stale one was swept.
 	if got := s.SessionCount(); got != 1 {
 		t.Errorf("SessionCount = %d after expired-session sweep, want 1", got)
@@ -256,17 +274,20 @@ func TestCreateSessionEvictsOldestAtCap(t *testing.T) {
 	// When the map is full of genuinely-live sessions, a new login must
 	// evict the least-recently-used one rather than grow past the cap.
 	s := newStore(t)
-	_, _ = s.MintInitial("admin")
+	password, _ := s.MintInitial("admin")
 	tick := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return tick }
 
 	// Fill to the cap. Step the clock so LastUsedAt ordering is
 	// deterministic — the first-created session is the LRU eviction
 	// target. Every session stays within the idle window, so the
-	// sweep never fires and the cap is the only bound exercised.
+	// sweep never fires and the cap is the only bound exercised. One
+	// check admits them all: nothing changes the credential or signs
+	// out in between.
+	checked := admit(t, s, "admin", password)
 	var oldestRaw string
 	for i := 0; i < maxSessions; i++ {
-		raw, err := s.CreateSession("admin")
+		raw, err := s.CreateSession(checked)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -280,7 +301,7 @@ func TestCreateSessionEvictsOldestAtCap(t *testing.T) {
 	}
 
 	// One more login must hold the ceiling by evicting the oldest.
-	newestRaw, err := s.CreateSession("admin")
+	newestRaw, err := s.CreateSession(checked)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,10 +335,12 @@ func TestConcurrentLoginsDoNotRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 10; j++ {
-				if err := s.Verify("admin", plaintext); err != nil {
+				checked, err := s.Verify("admin", plaintext)
+				if err != nil {
 					t.Errorf("Verify in goroutine: %v", err)
+					return
 				}
-				raw, err := s.CreateSession("admin")
+				raw, err := s.CreateSession(checked)
 				if err != nil {
 					t.Errorf("CreateSession: %v", err)
 					return

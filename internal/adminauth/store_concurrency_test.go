@@ -48,7 +48,7 @@ func TestResetPasswordConcurrentWithVerify(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_ = s.Verify("admin", pw(0))
+					_, _ = s.Verify("admin", pw(0))
 				}
 			}
 		}()
@@ -64,10 +64,10 @@ func TestResetPasswordConcurrentWithVerify(t *testing.T) {
 	// The final assertions run while the background goroutines are still
 	// spinning — harmless, Verify is concurrent-safe and these use distinct
 	// passwords. The deferred cleanup stops + joins them on return.
-	if err := s.Verify("admin", pw(rounds-1)); err != nil {
+	if _, err := s.Verify("admin", pw(rounds-1)); err != nil {
 		t.Fatalf("Verify final password: %v", err)
 	}
-	if err := s.Verify("admin", pw(0)); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := s.Verify("admin", pw(0)); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("Verify stale password: got %v, want ErrInvalidCredentials", err)
 	}
 }
