@@ -104187,3 +104187,154 @@ the repository's tags (ok, 65.2 s); `go vet` with the tags for linux, darwin
 and windows (clean); `make fmt` (no change); `make docs-check` (ok); the
 file's five tests and cmd/bridge's four source guards under the race
 detector (ok).
+
+## 2026-11-17 — B898FU2: the harvest helper's real-hold case is back, its hold asking to read and to write
+
+Branch `test/b898fu2-real-hold`, from main 4f76724a: test files, this log,
+and a rule in `.claude/rules/build-ci-tests.md` with its long form. Commits:
+d0480421 (round 1's probe), d707abb4 (control 1), a369c9e2 (control 2), then
+this commit (the helper's retry back, the rule and this record). Every run
+here: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR on
+disk.
+
+### What the runner showed
+
+B898 PR 3's round 5 removed `…HarvestHelperReadsPastAHoldOnTheStateFile`
+(58927057) after its premise failed in every subtest on windows-latest:
+`os.ReadFile` beside a handle that asks for `GENERIC_READ` and shares nothing
+answered nil. Round 1's probe, `…AShareNothingHandleRefusesARead` (d0480421,
+gone with d707abb4), failed by design on PR #1501's first run, its
+windows-latest leg, 2026-11-17, with one message holding every fact. The
+process: go1.27.3 on Windows 10.0.26100, its token elevated, SeBackupPrivilege
+held and enabled. On a file of `t.TempDir()`'s and on the harvest state file
+`pendingCoverState` writes, each written afresh for each hold and each held at
+the hold's first attempt, the held handle and a handle the path opened asking
+no access named the same file (volume serial and file index), on NTFS:
+
+- (a) `GENERIC_READ`, share 0: `os.ReadFile` not refused (19 and 223 bytes
+  read); beside the hold, an open for reading made without
+  `FILE_FLAG_BACKUP_SEMANTICS`, an open for writing and an open for deleting
+  each refused with `ERROR_SHARING_VIOLATION` (32);
+- (b) `GENERIC_READ|GENERIC_WRITE`, share 0: `os.ReadFile` refused at its open
+  with `ERROR_SHARING_VIOLATION`, and the three opens beside it too;
+- (c) `os.OpenFile` read-write, which shares reading and writing, with
+  `LockFileEx`'s exclusive lock over every byte: `os.ReadFile` refused at its
+  read with `ERROR_LOCK_VIOLATION` (33); the opens for reading and for writing
+  made, the open for deleting refused (32).
+
+Go's read-only open sets `FILE_FLAG_BACKUP_SEMANTICS`, for directories
+(go1.27.3 `src/syscall/syscall_windows.go:414-425`). (a)'s results are
+consistent with that open being let past a hold that only reads by the
+enabled privilege, while a hold that also writes refuses it. That is an
+inference, not an established cause: the probe varied neither the privilege
+nor the flag alone, and its open without the flag differed from
+`os.ReadFile`'s otherwise too (it shared deleting, and read nothing). Round
+5's premise failure, the same hold of the same file, fits the same reading;
+that run's process facts were not recorded. (c) is a fact only: the read
+retry (`internal/atomicwrite/read_windows.go:9-11`) asks again on 32 and 5
+alone, and stays as it is.
+
+### The restored case
+
+`TestTheHarvestHelperReadsPastAHoldOnTheStateFile`
+(`cmd/bridge/serve_enrichment_switch_windows_test.go:43-65`) is back as
+58927057 removed it, `readPastAHold` restored to
+`serve_enrichment_switch_test.go` byte for byte as 58927057's parent had it
+(the stand-in test calls it again), with one change in code: the hold asks
+for `GENERIC_READ|GENERIC_WRITE`, sharing nothing (:51). Its premise check
+stays first (:60-62): a read beside the hold not refused with
+`ERROR_SHARING_VIOLATION` fails the case, "the case holds nothing". The
+hold's own open still waits out a scanner's hold of the file the fixture
+wrote. Its doc says why the hold asks to write, as the inference above.
+
+### The controls, for CI
+
+Each control commit is red by design. The orchestrator pushes them in order,
+each run completed before the next push, then this commit:
+
+1. d707abb4: the probe gone, the case restored with its hold sharing reading
+   and writing (`FILE_SHARE_READ|FILE_SHARE_WRITE`), nothing else. Predicted
+   on windows-latest: the case's three subtests fail at
+   `serve_enrichment_switch_windows_test.go:61`, "a read beside a handle that
+   shares nothing = <nil>, want ERROR_SHARING_VIOLATION: the case holds
+   nothing", and nothing else fails: the Linux and macOS legs do not build
+   the case, and its Linux half passed here.
+2. a369c9e2: the hold shares nothing again, and `readPendingCovers` reads
+   once, without `atomicwrite.ReadWithRetryCtx`. Predicted on windows-latest:
+   the case's three subtests fail on the read under the hold, the sharing
+   violation unretried, at `serve_enrichment_switch_test.go:658` (no covers
+   after one refusal), :664 (the violation, not `ErrReadBusy`) and :672
+   (`pendingCoversNow`'s `t.Fatal`). The helper is shared, so on every leg
+   `TestTheHarvestHelperReadsPastAStandInHold` fails at the same three
+   lines, and the composition cases fail for each refusal:
+   `TestTheStandInRetryKeepsWindowsOwnRetry` at
+   `serve_enrichment_switch_windows_test.go:26` and :27 on Windows,
+   `TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` at
+   `serve_enrichment_switch_other_test.go:29` and :30 elsewhere. On this host
+   a369c9e2's Linux half failed so, and `TestTheHarvestRunsWithEnrichmentOff`
+   passed; the composition case's lines had first been predicted at the
+   helper's :636, wrongly, since `readsPastOneRefusal` calls `t.Helper()`.
+
+This commit restores the retry, and the case is to pass on windows-latest.
+The three runs are the PR's.
+
+### The sweep, by operation
+
+Every open with `GENERIC_READ` and share 0 in a Windows test, multi-line
+calls included (each `CreateFile(` in the tree read):
+
+- (i) A hold meant to make a READ fail: none left. The removed case's hold
+  (58927057's parent, `serve_enrichment_switch_windows_test.go:42`) and the
+  probe's (a) (d0480421, `serve_enrichment_switch_probe_windows_test.go:117`)
+  were the only ones, and the run above makes such a hold suspect on an
+  elevated runner.
+- (ii) A hold meant to make a RENAME or DELETE fail:
+  `internal/updater/held_windows_test.go:83`, `holdShareNone`, whose own
+  premise requires a rename of the held file to answer
+  `ERROR_SHARING_VIOLATION` (:94-103), used at :167, :195, :229 and :328 and
+  at `rollback_running_windows_test.go:52`. Left as they are: the open for
+  deleting beside (a) was refused.
+- (iii) An exclusive-open check for other handles:
+  `cmd/bridge/snapshot_hold_windows_test.go:20` (`processHoldsFile`, its call
+  over :20-28), called at `serve_backup_shutdown_test.go:132`.
+
+Outside the census: the read holds that ask to write too, (b)'s shape, each
+with a read premise first, `internal/atlasharvest/state_busy_windows_test.go:65`
+and `internal/backup/sharing_windows_test.go:261` (`holdSharingNothing` in
+each); `internal/backup/sharing_windows_test.go:89` and :170, `GENERIC_WRITE`
+sharing writing and deleting but not reading; and
+`internal/fsutil/rename_noreplace_windows_test.go:201`, which shares reading
+and writing. Production's opens are not in the census.
+
+### The rule
+
+`.claude/rules/build-ci-tests.md:165` follows B898's line (:164) with one for
+a read, and its long form follows B898's entry in
+`ops/History-rules-build-ci-tests.md` (under "Build, CI, and test
+discipline"): a Windows test of a read another process's handle refuses holds
+the file through a handle that asks for reading and writing and shares
+nothing, and requires a read beside it to answer `ERROR_SHARING_VIOLATION`
+before anything else.
+
+### Runs
+
+On this commit's tree, in one build-slot session, the host otherwise idle:
+`make fmt` changed nothing; `make vet` (linux/amd64) and `go vet ./...` with
+the tags for darwin/arm64 and windows/amd64 (`CGO_ENABLED=0`), clean; `go test
+-c` of `./cmd/bridge` for windows/amd64 builds; `go test -race -count=50` at
+GOMAXPROCS 8 of the stand-in test, whose code changed (`readPastAHold` back),
+and of the file's two other harvest tests, 50 of 50 each, no data race
+(`TestTheHarvestHelperReadsPastAStandInHold` 1.58 to 1.59 s a run,
+`TestTheHarvestRunsWithEnrichmentOff` 1.43 to 1.48 s,
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` 0.43 to 0.44 s; the
+package 175.8 s); `make docs-check`, ok (the worst load 84.7% before, 84.9%
+after; `build-ci-tests.md` 60,158 bytes before, 60,798 after); cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers`, ok; and `scripts/doc-split/verify_moves.py --base
+a369c9e2`, PASS, nothing lost and two new blocks, the rule and its long form.
+`TestTheHarvestHelperReadsPastAHoldOnTheStateFile` and
+`TestTheStandInRetryKeepsWindowsOwnRetry` build on Windows alone, and their
+runs are the PR's. Round 1's probe was vetted and compiled for windows/amd64
+and windows/arm64 here, and cmd/bridge's doc guards were shown to read its
+Windows-only file: a ghost citation, and a doc opening with a name nothing
+declares, each red.

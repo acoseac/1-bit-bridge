@@ -547,10 +547,10 @@ func harvestPendingCovers(t *testing.T, dataDir string) map[string]int {
 // poll for the settled covers (backlog B898), then atomicwrite.ErrReadBusy.
 func readPendingCovers(ctx context.Context, dataDir string, read func(string) ([]byte, error)) (map[string]int, error) {
 	var raw []byte
-	if err := func() (err error) {
+	if err := atomicwrite.ReadWithRetryCtx(ctx, func() (err error) {
 		raw, err = read(harvestStatePath(dataDir))
 		return err
-	}(); err != nil {
+	}); err != nil {
 		return nil, err
 	}
 	var st atlasharvest.State
