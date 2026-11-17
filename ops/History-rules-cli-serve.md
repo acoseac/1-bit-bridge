@@ -2300,6 +2300,18 @@ mentions across the four `ops/audit-*.md` files.
 
 - **Serve's harvest cover adapter (`atlasCoverRefetcher`) asks `enrich.enabled` before each refetch and runs it on the switch's context, and a refetch the switch stopped is `atlasharvest.ErrCoversPaused`, never the miss a CAA answer is, and a refetch whose cover the premium fetch's write committed is got whatever the switch says by then, so the harvest settles it; the adapter's switch, and the fingerprint sweep's `enrichmentOn`, are off when nil, as every switch `enrichgate` asks (unlike the sweep's `enabled`, the bullet above)** (2026-11-06, backlog B617, round 3 for the nil, round 5 for a committed cover; `enrichment.md`'s B617 bullet). **Don't answer a switched-off refetch (false, nil): six of those drop a pending cover; don't answer a committed cover with a pause, which fetches it again; and don't read a nil switch as on.** `TestTheCoverAdapterAsksAtlasNothingWhileEnrichmentIsOff`, `TestTheHarvestRunsWithEnrichmentOff`, `TestNoSwitchIsOffForTheSweepAndTheCoverRefresh` and `TestAPremiumUpgradeWrittenAfterTheFlipIsGot` pin it.
 
+- **Feature gates on a mutation handler run BEFORE path resolution and the
+  folder walk.** Both checks depend only on the decoded body, and a request that
+  will be refused should not first cost a recursive `WalkDir`. Asserting on the
+  refusal STATUS cannot catch the ordering — 503-before and 404-after are both
+  "refused"; assert on which one comes back for a nonexistent path.
+
+- **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
+  belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
+  returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
+  nil arm reads the other way and is its own call. A disabled pass records NO
+  status, so the Jobs card keeps its last real breakdown.
+
 ## Scanner, deletion passes, and manifest writes
 
 - **Shutdown joins every background writer**, and the wait must be written
@@ -6151,3 +6163,180 @@ the terminal)"", and the guards were green. Eight controls, each predicted
 before it ran, were red where predicted and nowhere else, among them the
 brief's: `console: true` dropped from `adminDoctorRunnerFor`. The record is in
 `ops/engineering-log.md`, 2026-11-14, B618 round 3.
+
+## B653 PR 2b1 — the database-only restore, and its one way back (2026-11-17)
+
+- **`bridge restore --database-only` restores the library database alone from a snapshot whose database is VERIFIED as every reader reads it, keeping the files it replaces in `restore-originals/<stamp>/` (`backup.RestoreDatabase`), and with its journal standing finishes or puts back an unfinished one and nothing else (`backup.FinishDatabaseRestore`): an `installed` one is completed, any other is put back, never forward** (2026-11-17, backlog B653 PR 2b1). **Don't move an original before its hash is synced and the journal stands, rename over an entry, move anything back before every name is classified, remove the journal before the harvest's rewind is durable, or read a snapshot on the way back.** Both doctors' `restore-originals` line fails while its journal stands. `TestARestoreStoppedAtEveryStepFollowsItsStateTable` and `TestTheWayBackRefusesWhatItCannotProve` pin it.
+
+**Why.** A damaged library database had one recovery, the full restore, and it destroys the evidence: it removes the live `-wal`
+and `-shm`, and every commit not yet checkpointed with them, overwrites `bridge.db` and every other file the snapshot holds,
+takes a database whose record is not VERIFIED, restarts no deletion coverage and keeps no journal. The database-only restore
+keeps what it replaces and leaves every file but the database as it is; the harvest's sync position alone is rewound, since the
+restored library is a new history.
+
+**The command** (`restoreCmd`, `databaseOnlyRestoreCmd`, `finishDatabaseRestoreCmd`). `bridge restore [--config X] [--yes]
+--database-only [--full] <snapshot-dir>`, the flags before the snapshot; `--full` without `--database-only` refuses (exit 2).
+After the config, the data dir's lock, the admin probe and the store's lifetime lock taken exclusively, the journal is asked
+before any snapshot is looked at: while one stands the full restore refuses, saying the remedy; `--database-only` with a snapshot
+or with `--full` refuses (exit 2) before anything is read; and `--database-only` alone is the way back. With none, the snapshot
+is required, and the look before the prompt (`backup.CheckRestoreSource`, which answers the manifest it read and its record as
+`readVerdict` reads it: the two veto lookups, the owner probed where the record holds a PENDING, all on its bounded worker)
+refuses a schema outside 1 to `backup.SchemaVersion`, a manifest listing no database with a baseline, and any database verdict
+but VERIFIED, a VERIFIED beside its veto reading INCOMPLETE `unsynced` (`backup.DatabaseRestoreRefusal`); `ErrSnapshotBusy`
+stays exit 1 and `ErrNotASnapshot` exit 2. Then the free space (twice the database's baseline on the data dir's volume), the
+description on stdout and the question on stderr, with no "Newer" line, and the admin probe again.
+
+**Phase B prepares a copy and changes no original.** Under the store's exclusive hold (counted on the command's) and the
+journal's check, the directory barrier is probed (below), then the snapshot folder's lock is taken (`holdSource`). The early
+admission: the install marker's lock and its admission (`holdRestoreMarker`, recording nothing); bridge.yaml's turn, compared
+with the bytes the command read (`configStillAsRead`); the database VERIFIED as every reader reads it; and the root form
+(below); the turn let go, then the marker, before the copy. What an earlier run left at the staged names is removed by name,
+regular files only (`bridge.db-restore`, its `-wal`, `-shm` and `-journal`, `bridge.db-restore.tmp-*`,
+`bridge.db-restore.json.tmp-*`), never a lock file (`bridge.db-restore-open.lock`, `bridge.db-restore-migrate.lock`). The copy
+streams into `bridge.db-restore.tmp-<random>`, the context asked between chunks and the bytes hashed as they stream, given the
+live database's owner and mode (else the data dir's owner, and 0644), held to the baseline's size and SHA-256, synced, and
+renamed onto the staging name (`manifest.RestoreStagingPath`) by the no-replace rename, which a platform with none refuses
+there. Its `user_version` is read through the snapshot reader (1 to the ladder's top). `manifest.PrepareRestoredDatabase` opens
+it through the store's own open (its own lifetime and ladder locks; a pending step records in the live install marker, the
+staged copy being in the data dir), writes a new epoch and restarts the deletion journal's coverage
+(`resetDeletionJournalCoverageTx`, unchanged) in one transaction under the store's writer lock, and checkpoints with TRUNCATE,
+its answer read by `checkpointTruncate`, the one reading `ResetBackupEpoch` shares (`ErrEpochCheckpointBusy` refuses). The
+staged WAL must then be absent or empty: one holding frames refuses, the staged set removed whole. Then the marker's lock
+again, held to `installed`; the read-only check of the prepared copy through the snapshot reader (`quick_check`, or
+`integrity_check` and `foreign_key_check` with `--full`; the ladder top's schema; the epoch and the coverage read back and
+compared with what the preparation wrote); its size and SHA-256 through one handle, which syncs it, and the data dir synced;
+then bridge.yaml's turn again, the config and the root form compared again, and the store change recorded
+(`RestoreHold.Record`). A failure or a stop before the swap restores nothing: the staged set is removed and every original is
+as it was; a record the marker already made stays, and only keeps a rollback off.
+
+**Phase C, the journaled swap** (`swapDatabase`); from its first step the context stops nothing. C0 reads each original
+(`bridge.db`, `-wal`, `-shm`, `-journal`): one absent is recorded absent; a regular file is opened once (read-only through
+`fsutil.OpenAsFile` off Windows, for writing on Windows, whose `FlushFileBuffers` needs it), hashed whole as it streams, synced
+through that handle and closed before any rename; any other kind, a read that does not finish or a sync that fails refuses with
+nothing moved. C1 makes `restore-originals/` where it is not there (a link or another kind there refuses), a folder named by
+the restore's UTC time, made exclusively (a count where the name is taken), and moves the run's record (`restore.json`: the
+snapshot, the time, each original's name, presence, size and SHA-256) into it from the data dir by the no-replace rename, the
+cross-directory probe (unsupported or EXDEV refuses, nothing moved). C2 publishes the journal (`bridge.db-restore.json`, phase
+`forward`): staged, synced, renamed by the no-replace rename, the data dir synced. C3 moves the sidecars, then C4 the database,
+into the run's folder, each by the no-replace rename, the folder and the data dir synced after each group. C5 requires no
+sidecar at its live name before and after the prepared copy's rename onto `bridge.db`: one before stops with `forward` kept;
+one after sends the installed copy back to the staging name and stops with `forward` kept (a taken staging name stops naming
+both); then the live file's size and SHA-256 must be the prepared copy's, by its content, never an identity taken before the
+rename. C5′ records `installed` durably, then lets bridge.yaml's turn go, then the marker's lock. C6 rewinds the harvest's sync
+position (`atlasharvest`'s `ResetSyncPosition`: the results cursor, the last submit and the last booklet check to zero; the
+credential, its expiry, its base and the pending covers kept; no file made where none stands; a present file written as the
+clean state unless it holds those bytes already, a file that does not decode included), syncs the state file and the data dir,
+and only then removes the journal; a rewind or a barrier that fails stops with `installed` kept, which the way back runs again.
+The originals and their record stay.
+
+**The barrier** (`restoreBarrier`, `probeRestoreBarrier`). Every directory sync of the restore goes through the strict writer's
+probe (`atomicwrite.ProbeDurable`), which syncs each directory from the one named up to the data dir. Before anything is staged
+the data dir is probed: `atomicwrite.ErrBarrierFailed` (a network or FUSE mount answering a directory fsync EINVAL, ENOTSUP or
+EOPNOTSUPP) refuses with nothing moved, in words that name the filesystem's limit, since no file's sync can order the journal
+before the renames it guards; any other failure of the probe refuses too; and `atomicwrite.ErrNoDirectoryBarrier` (Windows)
+goes on, each rename there atomic and not known durable (backlog B920).
+
+**The locks, in order.**
+
+| Phase | Acquisitions, in order |
+|---|---|
+| A | the data dir's → the store's, exclusively (a try); the journal asked under it |
+| A's look | none: a bounded worker, lock probes only |
+| B, the early admission | A's → the snapshot folder's (15 s) → the marker's (30 s) → bridge.yaml's (5 s); bridge.yaml's let go, then the marker's |
+| B, the copy and the preparation | the data dir's → the store's → the snapshot folder's → the staged store's own lifetime lock, shared → its ladder (5 min) → the marker's inside, only for a pending step; all of the staged store's let go at its close |
+| B, the check and the record | the data dir's → the store's → the snapshot folder's → the marker's (held to C5′) → the check → bridge.yaml's (held to C5′) → `Record` |
+| C0 to C5′ | the data dir's → the store's → the snapshot folder's → the marker's → bridge.yaml's |
+| C6 | bridge.yaml's let go, then the marker's; the data dir's → the store's → the snapshot folder's kept |
+| A put-back in Phase C | bridge.yaml's let go, then the marker's; the data dir's → the store's and the snapshot folder's hold kept |
+| The way back | the data dir's → the store's, exclusively, and nothing else |
+
+They are let go in reverse; nothing takes the marker's lock while it holds bridge.yaml's.
+
+**The journal** (`internal/backup/restore_journal.go`), at `manifest.RestoreJournalPath`, JSON: `format` 1, `id`, `startedAt`,
+`bridgeVersion`, `phase` (`forward`, `installed`, `puttingBack`), `archive` (`restore-originals/<stamp>`, one element of the
+run's shape), `prepared` {size, sha256}, `originals` (exactly the four names, each {name, present, size, sha256}) and
+`snapshot` {given, abs, folder}, which words alone read. Its reader takes a regular file of at most 64 KiB, opened through
+`fsutil.OpenAsFile` (a named pipe refused at once), of format 1, a known phase, the four names and a confined archive, and
+refuses anything else, the journal kept (`backup.ErrRestoreJournalUnread`). A phase changes by a staged, synced write renamed
+over the journal alone, the data dir synced, before the first rename of its direction. While any entry stands at its name every
+opener of the live database refuses (B653 PR 2a's check), and `manifest.CheckRestoreJournal` names the way out: `bridge restore
+--database-only`, run by the bridge version that began it.
+
+**The put-back, one routine** (`putBack`, `internal/backup/restore_putback.go`), for a failure of a rename in C3, C4 or C5 and
+for the way back. It reads every name first: each original's live name and its name in the run's folder, and the staging name,
+each regular file hashed. Each original recorded there must be in the folder with its recorded size and SHA-256 and its live
+name empty (or, for the database alone, holding the prepared copy while the staging name is empty), or at its live name with
+its recorded content and not in the folder (never moved, or put back already); each one recorded absent must be absent from
+both, but for a live database that is the prepared copy. The live database is the installed copy only while its original is in
+the folder or was recorded absent: once the original is back at its name it is the original, whatever bytes the two share, and
+nothing moves it. Anything else stops before anything moves, naming where every original is: an entry planted at a live name, a
+copy of an original beside its archived self, a second database, a sidecar beside the prepared copy, an archived entry that is
+no regular file, other content, an original in neither place. Only then is `puttingBack` written, so a refusal of the
+classification leaves a `forward` journal byte for byte; then the installed copy goes aside to the staging name first, and each
+original goes back by the no-replace rename, the database first and its sidecars after, the folder and the data dir synced
+after each group; the whole set is read again, and only once every original recorded there is at its name with its content
+and every one recorded absent is absent is the journal removed. It reads no snapshot, opens no database, and takes no lock its
+caller does not hold.
+
+**The terminal state.** C6 and the put-back remove the journal before they tidy, so a stop or a barrier that fails after the
+removal leaves no journal, only leftovers (the staged copy and its sidecars, the run's record and its folder where the record
+is all the folder holds): a finished restore, or a finished put-back. The next run finds no journal, so it is an ordinary
+restore or nothing, and the next restore's removal by name takes the leftovers.
+
+**The way back** (`backup.PlanFinishDatabaseRestore`, `backup.FinishDatabaseRestore`): `bridge restore --database-only` with
+a journal standing, and nothing else. It reads the journal, and refuses one that does not read and one another bridge version
+began (`backup.ErrRestoreByAnotherVersion`: finish it with the bridge version that began it), moving nothing; asks, unless
+`--yes`, naming the snapshot, the phase, where each original is and what it will do; probes the admin port again; then plans
+again and requires the plan consented to. An `installed` restore whose live database is the prepared copy, no sidecar beside
+it, is completed (C6); any other is put back. It never runs Phase B again, never reads the source and never continues C3 to C5:
+a restore interrupted before `installed` is put back, and finishing one means running the restore again from its snapshot.
+
+**The remedy** (`restoreRemedy`) is one text, which serve's refusal of its store, the full restore's refusal, every stop of the
+way back and the doctor say: `bridge restore --database-only --config <the config this process read>`, where the originals are,
+absolute (the run's folder the journal names, else `<dataDir>/restore-originals/`), and the section "Put the originals back by
+hand" of `docs/backup.md`.
+
+**The root form a database-only restore asks of its snapshot** (2026-11-17, backlog B653 PR 2b1). The scanner stores a track's path bare under a library of one root and below its root's folder name (`filepath.Base(root) + "/" + rel`) under a library of several, so a database indexed under one form names no file of a library configured in the other, and one indexed under several roots names its files by those roots' folder names exactly as written; serve refuses two roots with one folder name without regard to case (`serve_check.go`, `bridgefs.ValidateRoots`). A database restored alone keeps this bridge's config, so `backup.checkRootForm` admits it only where the form it was indexed under is the form the config gives now:
+
+- **The evidence is the snapshot's bridge.yaml and nothing else.** It must be listed in the manifest's `files` with a baseline; it is Lstat'ed (a regular file; a link, a directory or any other kind refuses), opened through `fsutil.OpenAsFile` inside `atomicwrite.ReadWithRetryCtx` (a named pipe refused at once, a Windows sharing violation waited out), read at most its baseline's size and one byte, hashed as it is read, and must equal the baseline in size and SHA-256; absent, unlisted, without a baseline, changed, grown or undecodable settings refuse (`backup.ErrRootFormUnproven`), naming the full restore, which puts the settings back with the database. The database's verification shows neither the file's presence nor its contents (a source not named or not there is simply not captured), and the files' verdict takes no part: a certificate that failed its baseline refuses nothing, a changed bridge.yaml does. A read that fails for another cause (permission, busy past the retries) is the read's error, not a refusal of the form: it proves nothing either way.
+- **Both sides are read as the file writes them.** `config.FileLibraryRoots` is `LibraryRootsOf` without its `BRIDGE_LIBRARY_ROOTS` step (the decoder `Load`'s is, `DecodeFile`, unknown keys refused, its words through `ValueFreeYAMLError`), each root resolved against the directory of this bridge's config, never the snapshot's folder; so an override in the restoring shell decides neither side (a documented residual: an override at either side's time is outside the comparison), and a relative root names the folder it names for this bridge.
+- **The comparison.** `multi := len(roots) > 1` on each side; forms that differ refuse (`backup.ErrRootFormChanged`). Zero roots and one are one form whatever the root's path or folder name: a single root moved is a question of the library's paths, which then match the new root's files or not, as after a hand edit of the root. Several roots against several pass only where the multisets of `filepath.Base` of the resolved roots are equal byte for byte, so a difference of case alone refuses (the stored prefix is the exact name); a folder name that is empty, `.` (an empty root's), `..`, or holds a separator (the root of a filesystem) refuses on either side whatever the other names (`ErrRootFormUnproven`: the form cannot be shown by folder names). Rows an upstream routes (`upnp_track_routing`) take no part: the guard compares configs, never rows.
+- **The words** name each side's roots by their count and their folder names alone (`one library root ("Music")`, `2 library roots ("Music", "NAS")`), never a path or another value of either config, and end "nothing was restored: restore the snapshot whole (bridge restore without --database-only), which puts its settings back with its database".
+
+`TestTheRootFormIsDecidedFromVerifiedSettings` (21 rows: one against two, two against one and none, other names, case alone, a filesystem root and an empty root among several, settings changed, grown, unlisted, without a baseline, missing, a directory, a link to the captured bytes and undecodable, a single root moved, none against one, the same names in another order, relative roots resolved against this bridge's config, and the variable deciding neither side) and config's `TestFileLibraryRootsIsWhatTheFileSays` pin it. Its negative controls (each red as predicted but one, recorded): the snapshot side resolved against its own folder, a case-folded comparison, the baseline check dropped, a read bounded at the baseline's size, the environment on this bridge's side alone, on the snapshot's alone and on both (only the "forms differ" row: a variable applied to both sides gives both one root), any folder name taken, the Lstat kind check dropped (the link row; the directory row stays green, held by `OpenAsFile`'s own refusal), and the file-only reader keeping the environment.
+
+**The doctor** (`doctorRestoreOriginals`, one source for bridge doctor and the console's doctor through
+`buildDoctorDepsWith`; `doctor.Deps.RestoreOriginals`, placed after the backups' lines) says the database-only restore's
+state on its `restore-originals` line: a fail while an unfinished restore's journal stands, a journal that does not read
+included, its hint the remedy above; a warn while a restore holds the store (`manifest.ErrStoreRestoring`), and, not
+checked, where the store's lock cannot be had; ok naming the sets of originals kept and their size, or that none were;
+and, on a managed bridge, ok with the check skipped. It asks `doctorStoreGate` first, so a data dir its record refuses is
+not checked and nothing is made there (the hold makes its lock file), and with no data dir it holds nothing. Its hold,
+`manifest.HoldLiveStore`, shared, stands across every read it classifies (the journal as the way back reads it, the folder
+of originals), which run on a goroutine of their own, waited for `doctorBackupsBound` at most; that goroutine lets the hold
+go when its reads end, so a restore that comes while the line reads is refused, never classified as half-done.
+
+**The store path pin** (`TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`) admits `manifest.RestoreStagingPath(dataDir)`
+beside `manifest.DefaultDBPath(dataDir)`, and nothing else: both are in the data dir, so a migration the preparation runs
+records in the live install marker.
+
+**What stays open**, by backlog ID alone: B919, B920 and B921. Not built: the full restore keeping its originals and restarting
+the deletion journal's coverage, an `--undo`, and a console surface (`admin-console.md`); the by-hand move-back is in
+`docs/backup.md`.
+
+`TestADatabaseOnlyRestoreReplacesTheDatabaseAndKeepsTheOriginals` (three layouts of the originals),
+`TestADatabaseOnlyRestoreTakesOnlyAVerifiedDatabase`, `TestASnapshotChangedAfterItsVerificationIsRefused`,
+`TestAFailureWhilePreparingLeavesEveryOriginal`, `TestARestoreRefusesAFilesystemThatCannotSyncADirectory`,
+`TestTheOriginalsAreDurableBeforeTheInstall`, `TestASharingViolationMidSwapPutsBackWhatItMoved`,
+`TestAnEntryAtATakenNameStopsTheRestoreAndKeepsTheJournal`, `TestTheHarvestCursorIsResetOnlyOnceTheRestoreIsInstalled`,
+`TestTheRestoreOriginalsFolderIsKeptAcrossRuns`, `TestTheOriginalsSurviveEveryPruneAndSweep`,
+`TestAJournalStandingRefusesANewRestoreBeforeItsSnapshot`, `TestARestoreStoppedAtEveryStepFollowsItsStateTable` (each step of
+the swap and of its put-back, in a process of its own that kills itself there, over three layouts, the openers' admission asked
+of a copy of the data dir), `TestTheWayBackRefusesWhatItCannotProve`, `TestAPutBackClassifiesEveryNameBeforeItMovesOne`,
+`TestTheRootFormIsDecidedFromVerifiedSettings`, config's `TestFileLibraryRootsIsWhatTheFileSays` the doctor's
+`TestTheRestoreOriginalsLineSaysWhatIsKeptAndWhatIsUnfinished`, `TestAnUnrelatedDatabaseWhereTheInstallWasDueIsNeverTakenForIt`,
+`TestAnEntryMadeAtAPutBacksTargetIsNeverReplaced`, `TestTheSwapsOwnPutBackClassifiesBeforeItMoves`,
+`TestAConfigChangedDuringThePreparationRestoresNothing`, atlasharvest's `TestResetSyncPositionRewindsThePositionAlone`, and the
+command's `TestTheWayBackNeedsNoSourceAndNeverPreparesAgain`, `TestTheDatabaseOnlyLookRefusesBeforeItsPrompt`,
+`TestAConfigChangedDuringTheConfirmationRestoresNothing`, `TestTheRestoresWordsNameTheWayOn` and `TestEveryRestoreTakesTheStoresLockBeforeItsPrompt`'s
+database-only rows pin it.

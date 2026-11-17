@@ -482,3 +482,108 @@ backup or an identity-free restore. Other local seal-repair errors are logged
 by backup, which still requires a valid captured UUID/floor pair; an
 identity-free restore keeps the box's identity and floor and restores ordinary
 data.
+
+### Restore the database alone
+
+When the library database is damaged, or you want an earlier library index
+back while keeping everything else (paired devices, the TLS certificate, the
+settings, the console account and the player), restore the database alone:
+
+```sh
+bridge restore --config /path/to/bridge.yaml --database-only /path/to/snapshot
+```
+
+Give the flags before the snapshot. It takes the database of a snapshot whose
+database check reads `VERIFIED` (`bridge doctor`'s `backup-verified` line
+names the newest one), and refuses any other before it asks you to confirm,
+with nothing restored: a snapshot from a newer bridge, one whose database
+failed or did not finish its check, and one whose record cannot be trusted.
+The other files' verdict is reported and never required. With `--full` after
+`--database-only`, the database it prepares is checked with SQLite's
+`integrity_check` and `foreign_key_check` rather than `quick_check`.
+
+It restores nothing else: the token store, the TLS pair, `bridge.yaml`, the
+console account, the player's files and the library stay as they are. The
+harvest's sync position is rewound, so the next harvest submits the restored
+library again, and its credential is kept. Paired apps see the restored
+database as a new library history and make a full sync. The paragraphs above
+on the data directory's lock, on commands that have the database open and on
+an update on probation apply to it as they do to the full restore.
+
+The library's roots must have the form the snapshot's database was indexed
+under: one root or none on both sides, or several on both with the same
+folder names, exactly as written. The snapshot's own `bridge.yaml`, unchanged
+since it was captured, says which form that was. A snapshot without it, or
+whose roots have another form, is refused with nothing restored; the full
+restore, without `--database-only`, puts the settings back with the database.
+A root set through `BRIDGE_LIBRARY_ROOTS` takes no part in the comparison, and
+a single root moved elsewhere is restored, its paths matching the files under
+the new root or not.
+
+The files it replaces are kept, never deleted: `bridge.db`, and its
+`bridge.db-wal`, `bridge.db-shm` and `bridge.db-journal` where they were
+there, move unopened into a folder of their own under `restore-originals/` in
+the data directory, beside `backups/`, with a record of each (`restore.json`:
+its name, size and SHA-256). Nothing the bridge runs removes them; delete such
+a folder once you no longer need it. The restore needs free space for twice
+the snapshot's database, and refuses a data directory on storage that cannot
+sync a directory (some network and FUSE mounts), with nothing restored. On
+Windows no directory can be synced, so each of its steps is atomic and not
+known to survive a power loss (backlog B920).
+
+#### When a restore of the database alone does not finish
+
+While it moves files, the restore keeps a journal, `bridge.db-restore.json`
+beside the database. While that journal stands the bridge refuses to start,
+every command refuses to open the database, and `bridge doctor` names the way
+out, which is one command, with no snapshot:
+
+```sh
+bridge restore --config /path/to/bridge.yaml --database-only
+```
+
+Run it with the bridge version that began the restore: another version
+refuses, with nothing moved. It reads no snapshot, so one removed since is no
+obstacle. If the restored database was in place, it completes the restore;
+otherwise it puts every original file back where it was, each checked by its
+SHA-256, and removes the journal. It asks you to confirm, naming what it
+found, unless you give `--yes`.
+
+It stops with the journal kept and nothing moved, saying where every original
+is, wherever what it finds is not what the restore recorded:
+
+- an entry at a name where none was due (a file put there, or a `-wal` beside
+  the restored database): move that entry out of the data directory, then run
+  the command again;
+- an original that is neither at its name nor in its `restore-originals/`
+  folder, or one whose content changed: put the originals back by hand, below;
+- a journal it cannot read, or one another bridge version began whose version
+  you cannot run: put the originals back by hand, below.
+
+A restore that stopped once its journal was gone is finished: what it left at
+the names it stages under (`bridge.db-restore` and its sidecars) the next
+restore removes.
+
+#### Put the originals back by hand
+
+When the command cannot run, put the originals back by hand, with every bridge
+process stopped:
+
+1. Open the folder under `restore-originals/` that the restore's words name
+   and read its `restore.json`: it lists each original and whether it was
+   there.
+2. Move whatever stands at `bridge.db`, `bridge.db-wal`, `bridge.db-shm` and
+   `bridge.db-journal` in the data directory into a folder of your own.
+3. Move each original in that folder back to its name in the data directory,
+   an original the bridge could not read whole included.
+4. Remove `bridge.db-restore.json`, then start the bridge.
+
+To keep the restored database instead, leave it at `bridge.db`, move any
+`-wal` or `-shm` beside it away, and remove the journal.
+
+`rm bridge.db*` is no recovery: it removes the journal and the staged copy
+with the database, and the lock files beside it, which every bridge process
+that has the database open holds, so never run it while one runs. The
+originals stay in `restore-originals/`.
+
+What the restore leaves open is tracked as backlog B919, B920 and B921.

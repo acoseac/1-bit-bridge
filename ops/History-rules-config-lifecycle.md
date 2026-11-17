@@ -1597,7 +1597,7 @@ during a swap leaves a `.bridge-swap-*`. The record is in
 
 ## A marker's write trusted once its barrier answered, one lock for the rollback and every migration, and the interrupted rollback reconciled (backlog B613's round 3, 2026-11-02)
 
-- **…and a marker's write is trusted only once its barrier has answered, one lock (`<dataDir>/update-state.lock`, `updater.LockState`) keeps the early rollback and every store open that migrates apart, a directory fsync the filesystem cannot do (EINVAL, ENOTSUP, EOPNOTSUPP) is taken as done, said once, and the boot reconciles an interrupted rollback** (2026-11-02, backlog B613's round 3). **Don't trust a marker a failed barrier left without the barrier again, take any other fsync answer, or an open or a close failing, for a filesystem that cannot fsync a directory, publish the marker through a rename that runs a barrier of its own, lock `update-state.json` or remove the lock file, take the lock before server.lock or the ladder or either while holding it, write the marker in a guarded step without it, migrate under a rollback of the running version under way, stamp an interrupted rollback installed before the store opens, read it as an install marker or a hold alone, restore from it at boot, keep a later spelling of a Windows variable, or open a store anywhere but `manifest.DefaultDBPath(dataDir)`.** `TestADisarmRunsTheBarrierAgainOverARecordItCouldNotMakeDurable`, `TestADisarmRunsTheBarrierAgainOverARemovalItCouldNotMakeDurable`, `TestServeRefusesUntilTheMarkersBarrierAnswers`, `TestTheMarkersBarrierTakesOnlyADirectorySyncTheFilesystemCannotDo`, `TestDarwinsFullSyncFallsBackToAnOrdinaryFsync`, `TestTheMarkersWriteRunsOnlyItsOwnBarrier`, `TestADisarmWithoutTheLockWritesNothing`, `TestAMigrationThatHoldsTheMarkersLockFirstStopsTheRollback`, `TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration`, `TestAMigrationRefusesWhileARollbackOfItsVersionIsUnderWay`, `TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback`, `TestARefusedStartFinishesAnInterruptedRollbackOnlyOnItsProof`, `TestAPatchedPreviousVersionKeepsTheHoldOfARollbackThatFinished`, `TestTheSettingsDigestKeepsTheVariableTheOSReads` and `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase` pin it.
+- **…and a marker's write is trusted only once its barrier has answered, one lock (`<dataDir>/update-state.lock`, `updater.LockState`) keeps the early rollback and every store open that migrates apart, a directory fsync the filesystem cannot do (EINVAL, ENOTSUP, EOPNOTSUPP) is taken as done, said once, and the boot reconciles an interrupted rollback** (2026-11-02, backlog B613's round 3). **Don't trust a marker a failed barrier left without the barrier again, take any other fsync answer, or an open or a close failing, for a filesystem that cannot fsync a directory, publish the marker through a rename that runs a barrier of its own, lock `update-state.json` or remove the lock file, take the lock before server.lock or the ladder or either while holding it, write the marker in a guarded step without it, migrate under a rollback of the running version under way, stamp an interrupted rollback installed before the store opens, read it as an install marker or a hold alone, restore from it at boot, keep a later spelling of a Windows variable, or open a store anywhere but `manifest.DefaultDBPath(dataDir)`, or, for the database-only restore's staged copy alone, `manifest.RestoreStagingPath(dataDir)` (B653 PR 2b1).** `TestADisarmRunsTheBarrierAgainOverARecordItCouldNotMakeDurable`, `TestADisarmRunsTheBarrierAgainOverARemovalItCouldNotMakeDurable`, `TestServeRefusesUntilTheMarkersBarrierAnswers`, `TestTheMarkersBarrierTakesOnlyADirectorySyncTheFilesystemCannotDo`, `TestDarwinsFullSyncFallsBackToAnOrdinaryFsync`, `TestTheMarkersWriteRunsOnlyItsOwnBarrier`, `TestADisarmWithoutTheLockWritesNothing`, `TestAMigrationThatHoldsTheMarkersLockFirstStopsTheRollback`, `TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration`, `TestAMigrationRefusesWhileARollbackOfItsVersionIsUnderWay`, `TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback`, `TestARefusedStartFinishesAnInterruptedRollbackOnlyOnItsProof`, `TestAPatchedPreviousVersionKeepsTheHoldOfARollbackThatFinished`, `TestTheSettingsDigestKeepsTheVariableTheOSReads` and `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase` pin it.
 
 *A failed barrier, trusted later* (Codex's and Argon's P1 on round 2). The
 marker's write renames its new file into place and then fsyncs the data
@@ -4144,3 +4144,33 @@ F2, F3, F4, F7, F8 and F9.
   "dst is never absent" is false by construction for the two-rename commit.
 
 *Since backlog B898 (2026-11-15).* **The new bytes are STAGED beside `dst` before anything is vacated, so the no-file window is two adjacent renames and never encloses a copy; since backlog B898 the staging comes before the swap is armed, and the settings check's copy, beside `dst` already (`checkedBeside`: its directory and its `.bridge-check-` name), is taken as it is and given `dst`'s mode.** **Don't stage a candidate twice, or arm the swap before its staging.** Every production install stages its verified candidate beside the binary for its settings check (`stageForCheck`), so the swap's own staging made a second copy after `armSwap`, and a hold on it (a scanner reading the copy the check had just run) failed a swap already armed. The swap now takes that copy as its staged file, and stages only a candidate that is elsewhere (an install with no settings path, the tests), before it arms, on the swap's forward deadline, so that the time a staging takes, a copy across volumes among it, is the probes' after it; on Unix the copy's mode is set from `dst`'s as the staging set it (`TestASwapOfTheCheckedCandidateGivesItTheBinarysMode`, under the runbook's umask), and the cross-device copy is shown to run (`TestSwapBinaryFallsBackToCopyOnCrossDeviceRename`: the staging's rename refused, the file at `dst` another than the source).
+
+- **…and every stored name is one a pairing code can CARRY** (#1046). The
+  app also refuses a `name=` over 256 Characters ("Pairing code's name field
+  is too long.") and one that is not UTF-8 (Foundation leaves the item with
+  no value: "missing the name field"). The console took any length (257
+  characters answered 200 `live`, and the next QR did not pair), and `bridge
+  init --name $'Caf\xe9 Tunes'`, "Café" typed in a Latin-1 terminal, was
+  saved as `!!binary` and served with `name=Caf%E9`. **The cap,
+  `config.MaxLibraryNameLength`, is 256 RUNES**: a Character is one or more
+  scalars, so that is never more than 256 Characters on any iOS version,
+  whatever Unicode tables it segments by, and Go has no grapheme
+  segmentation to count the app's way. It is conservative for multi-scalar
+  Characters (37 family emoji, 259 scalars, are refused; the app counts 37).
+  Don't count bytes: 256 `é` must pass. **Refuse what the operator types,
+  repair what is already stored** (#1042's rule, one step on):
+  `config.CheckLibraryName` refuses in the PATCH (400 `validate`, nothing
+  written) and in init's `--name` (exit 2, before anything is written),
+  through `CleanTypedLibraryName` since B744 (the next bullet), and
+  init's prompt asks again; `Normalize` repairs a config's or an override's
+  name (`config.RepairLibraryName`: U+FFFD for bytes that are not UTF-8,
+  its control characters removed, cut
+  to 256 runes and re-trimmed, with a WARN), because a `Load` refusal would
+  stop a bridge from starting over a display name. init keeps and offers an
+  install's name AS LOAD SERVES IT, or its prompt would offer a name it then
+  refuses. Don't cut in the PATCH instead: that stores a name nobody typed.
+  **Nor in the console**: the name box has NO `maxlength`. It counts UTF-16
+  units, so it stopped names the handler takes (129 emoji), and it cut a
+  paste without a word; the handler's 400 is what the page shows ("Save
+  failed: libraryName: must be at most 256 characters, …"). Added in #1046's
+  first round, removed on review (CodeRabbit).

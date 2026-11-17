@@ -103037,3 +103037,129 @@ halves passed); `go test -race -count=1 -timeout 45m ./internal/admin/
 windows/amd64 (`CGO_ENABLED=0` for the two) exited 0 each. go1.27.3's gofmt
 lists none of the changed Go files, and the names check over the branch's
 commit messages and added lines since main finds nothing in this round's.
+
+## 2026-11-17 — B653 PR 2b1: `bridge restore --database-only`, and its one way back
+
+Branch `feat/b653p2b1-database-only-restore`, on main fcdf951c, whose
+modules (#1488's) the build host's cache now holds. 5c5b3652 is the restore
+(`backup.RestoreDatabase`), its journal, the one routine that puts the
+originals back, the bounded way back with a journal standing
+(`backup.PlanFinishDatabaseRestore`, `backup.FinishDatabaseRestore`), the
+look's record as `readVerdict` reads it, the remedy text serve, the full
+restore and the way back say (`restoreRemedy`), the harvest's rewind
+(`StateStore.ResetSyncPosition`), the root form from the snapshot's verified
+settings (`checkRootForm`, `config.FileLibraryRoots`), the staged copy's
+preparation (`manifest.PrepareRestoredDatabase`, with the checkpoint's
+reading shared with `ResetBackupEpoch`: `checkpointTruncate`) and the store
+path pin's one exception (`manifest.RestoreStagingPath`); the rules' change
+is a patch of its own.
+
+**What a database-only restore does.** It takes the database of a snapshot
+whose record reads VERIFIED as every reader reads it, under the snapshot
+folder's lock; refuses a filesystem that will not sync a directory before it
+stages anything; copies the database into the data dir held to its baseline,
+migrates it through the store's own open, gives it a new epoch and restarts
+the deletion journal's coverage in one transaction, checks it read-only and
+hashes it, then records the store change in an armed install marker; then
+swaps under a journal: each original hashed and synced where it stands, a
+folder of its own under `restore-originals/` with its record, the journal
+(`forward`), the sidecars and the database moved there by the no-replace
+rename, the prepared copy renamed in and checked by its content, `installed`
+recorded, the harvest's sync position rewound durably, and only then the
+journal removed. A failure of a rename in the swap puts the originals back
+through the routine the way back runs, which classifies every name before it
+writes `puttingBack` or moves anything, moves a live prepared copy aside
+first, checks each original by its SHA-256 before and after it moves, and
+removes the journal only once the whole set verifies. A journal begun by
+another bridge version, or one that does not read, is refused with nothing
+moved. Every rule and its long form: `cli-serve.md`'s B653 PR 2b1 line and
+`ops/History-rules-cli-serve.md`'s section of that name.
+
+**The tests** (each drives an API main lacks):
+`TestADatabaseOnlyRestoreReplacesTheDatabaseAndKeepsTheOriginals` (three
+layouts of the originals: the database with a WAL and a -shm, the database
+alone, none), `TestADatabaseOnlyRestoreTakesOnlyAVerifiedDatabase` (a VERIFIED
+beside its veto, a FAILED record, a snapshot of no baseline; the look's
+refusal and the restore's), `TestASnapshotChangedAfterItsVerificationIsRefused`,
+`TestAFailureWhilePreparingLeavesEveryOriginal` (a busy checkpoint),
+`TestARestoreRefusesAFilesystemThatCannotSyncADirectory` (EINVAL, ENOTSUP,
+EOPNOTSUPP; Windows skips, B920), `TestTheOriginalsAreDurableBeforeTheInstall`
+(an original's sync, and the folder's after C3),
+`TestASharingViolationMidSwapPutsBackWhatItMoved`,
+`TestAnEntryAtATakenNameStopsTheRestoreAndKeepsTheJournal`,
+`TestTheHarvestCursorIsResetOnlyOnceTheRestoreIsInstalled` (a put-back, a
+rewind that fails then its retry, no harvest state, one that does not
+decode), `TestTheRestoreOriginalsFolderIsKeptAcrossRuns`,
+`TestTheOriginalsSurviveEveryPruneAndSweep`,
+`TestAJournalStandingRefusesANewRestoreBeforeItsSnapshot`,
+`TestARestoreStoppedAtEveryStepFollowsItsStateTable` (each step of the swap
+and of its put-back, the restore run in a process of its own that kills
+itself there, over the three layouts; an opener's admission asked of a copy
+of the data dir, so nothing is opened on the fixture whose bytes are then
+checked), `TestTheWayBackRefusesWhatItCannotProve` (another version, an
+unrelated database of the original's size in the folder, the staging name
+taken beside the installed copy, a journal that is a directory, too large or
+of another format; from a `forward` and a `puttingBack` journal alike),
+`TestAPutBackClassifiesEveryNameBeforeItMovesOne` (a planted file with no
+rename made, an original returned and altered, an original in neither place,
+the installed copy aside before a sidecar returns, the run's folder kept
+while it holds more than its record, an original identical to the prepared
+copy), `TestTheRootFormIsDecidedFromVerifiedSettings` (21 rows, red at main
+through an overlay shim on its 15 refusal rows) and config's
+`TestFileLibraryRootsIsWhatTheFileSays`.
+
+**The rules.** Three entries moved out verbatim to make room, by
+`scripts/doc-split/move_entry.py` (proven by `verify_moves.py --base
+5c5b3652`: PASS, three blocks, 2,834 bytes): from `cli-serve.md` "Feature
+gates on a mutation handler run BEFORE path resolution and the folder walk"
+(its line 64) and "A sweeper's `enabled` predicate fails CLOSED on nil" (its
+line 55), 99,569 to 99,015 bytes, to `ops/History-rules-cli-serve.md`; from
+`config-lifecycle.md` "…and every stored name is one a pairing code can
+CARRY" (its line 170), 98,156 to 96,192 bytes, to
+`ops/History-rules-config-lifecycle.md`. Then: `cli-serve.md` gains the
+database-only restore's line (843 bytes, 99,858 in all) and its long form;
+`config-lifecycle.md`'s B613 round-3 line and its long form admit the staged
+copy at `manifest.RestoreStagingPath(dataDir)` alone (96,301);
+`scanner.md`'s B613 line says the same, its two B653 PR 2a lines and their
+long forms say the database-only restore is built, and its globs take
+`internal/manifest/restore_prepare*.go` (51,058 to 51,399);
+`enrichment.md` gains the harvest's rewind (45,703 to 46,469);
+`admin-console.md` gains the console's refusal of a restore for whenever one
+is built (96,998 to 97,482); and `docs/backup.md` gains "Restore the database
+alone", with "Put the originals back by hand", which the remedy text cites.
+The whole patch's `verify_moves.py` lists as missing exactly those seven
+edited blocks (the four lines and the three long forms that are their
+twins), each with its successor.
+
+**What stays open**, by backlog ID: B919, B920 and B921.
+
+## 2026-11-17 — B653 PR 2b1: the manifest's epoch, a delta's `epoch=`, and the clock guard
+
+A database-only restore begins a new history of the library, and the delta cursors paired clients hold were issued by the history it discarded. The restore restarts the deletion journal's coverage past the restored stamps, which makes every such cursor incomplete wherever the discarded history's stamps never ran ahead of the restoring host's clock; this PR adds the two measures for where they did, and states the guard's scope (the rule is wire.md's epoch bullet, its long form `ops/History-rules-wire.md`).
+
+`DeltaSinceCovered` answers covered only for `C <= since < next`, the coverage start and the stamp the next write would carry read in one read transaction at the store's clock. Every manifest response carries `epoch`, the backup epoch (`Manifest.Epoch`, `responseEpoch`), the full manifest, every page and a delta; a since-request may send `epoch=`, read through `safeQuery` on the delta alone and handed to the Provider (`manifest.ClientEpoch`, `api.ManifestProvider.WriteManifest`'s new argument), and one that is not the bridge's, an empty one included, answers `deltaIncomplete` with no `deleted` and the tracks as they are (`deltaDeletionFields`, both legs). `/v1/health.features` gains `manifestEpoch` (41 keys, the capacity with them). PROTOCOL.md: the parameter, the response field, the two added incomplete causes, a History epoch subsection, the example and the paging line; additive, `ProtocolVersion` stays 1.
+
+Red first at fcdf951c, through `go test -overlay` over a `git archive` copy of HEAD with names-only shims (the new names and signatures, main's behaviour: no epoch filled, none compared, no guard, no feature): `TestTheManifestCarriesItsEpochAndADeltaFromAnotherIsIncomplete` failed every row (the full manifest's, both pages', every delta's epoch empty; another and an empty epoch answered complete with a `deleted` key; the handler handed the provider no epoch; `manifestEpoch` absent); `TestACursorPastAnythingThisHistoryIssuedIsIncomplete` failed its step-back and ran-ahead cases, its below-the-stamp case and its last case passing there as here (the last pins the scope as it stands: what a cursor the clock has passed again leaves is backlog B919's); `TestTheStreamedManifestIsTheBuiltOneInEveryView` failed on the epoch of both legs and on the epoch a restore replaced; `TestHealthFeaturesCompleteSet` failed on the missing key. Green at the change: both packages whole, once (`internal/manifest` 195 s, `internal/api` 39 s), the touched tests `-race -count=3`, `go vet` of both for linux/amd64, windows, darwin and linux/386, cmd/bridge's `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` and `TestTheWireManifestIsTheProvidersAlone`.
+
+Eleven negative controls, each predicted before its run and red as predicted: the guard dropped (the step-back, the at-the-stamp and the ran-ahead rows), `<` written `<=` (the at-the-stamp row alone), the epoch comparison dropped (another and an empty epoch, the parity test), the paged manifest's epoch dropped (both pages), the streamed epoch key dropped (the full and delta rows, the parity test), the handler's forwarding dropped, an empty `epoch=` read as none sent (its row and the forwarding row), the feature dropped (`TestHealthFeaturesCompleteSet` and the feature row), its capacity left at 40 (`TestHealthFeatureCapacityCoversEveryKey`), the goldens keeping `epoch` (`TestTheGoldenManifestOfEachView`, all four), and `TestJournal_PruneAdvancesCoverage` asked with its clock not past its cursor, which is why that test's clock moves now.
+
+**B653 PR 2b1, the database-only restore's negative controls** (2026-11-17). Twenty-six mutations, each predicted by
+name before its run (`controls.predictions.txt`), each applied to a tree copy of the branch and put back after its run,
+each built: every one turned its predicted tests red. The archived original matched by size alone (T44's unrelated
+database, both phases); the journal's version not compared (T44's version rows); C0's sync of an original dropped (T46);
+the swap's put-back publishing `puttingBack` before it classifies (`TestTheSwapsOwnPutBackClassifiesBeforeItMoves`); the
+installed copy moved aside after the originals return (T45's order row and T19's two C5 rows, and, unpredicted, T45's
+row of an original identical to the prepared copy, whose return then meets the installed copy at its name); the journal
+removed with the harvest's rewind failed (T40's retry row); an original already back taken without its hash (T45's
+altered row); the run's folder removed with more than its record in it (T45); the doctor's hold let go before its reads
+(T34's barrier row); the look's and the admission's raw record in place of `readVerdict` (T9's vetoed row, each); no
+durable `puttingBack` (T19's three `P:published` rows and the put-back race row); a live database taken for the installed
+copy without its hash (T38) and no sidecar check before an installed restore's completion (T38's WAL row); the snapshot
+looked at before the journal; the harvest rewound in Phase B (T40's put-back row); no config check at the turn taken again
+after the preparation (T17's preparation row); the put-back's moves by a replacing rename (the race row, red because the
+replacing rename makes no stop and never reaches the seam before the no-replace call); C5's check after its rename dropped
+(T22); no comparison of the staged copy with its baseline (T11); the epoch the preparation read written back, and no
+coverage restart (T8, three layouts each); the checkpoint's answer ignored (T15's busy row); the folder of originals under
+`backups/` (T23); no harvest rewind (T8); and the barrier probe taking a failed directory sync for done (all three errno
+rows). The command's own three (the way back reading the source, the look's schema bound dropped, the look reading no
+veto) went red in its tests. The gate's runs and the CI legs are in the PR's body.
