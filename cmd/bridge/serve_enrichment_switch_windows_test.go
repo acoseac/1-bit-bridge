@@ -48,7 +48,7 @@ func TestTheHarvestHelperReadsPastAHoldOnTheStateFile(t *testing.T) {
 		if err := atomicwrite.ReadWithRetryCtx(t.Context(), func() error {
 			name, err := windows.UTF16PtrFromString(path)
 			if err == nil {
-				h, err = windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+				h, err = windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
 			}
 			return err
 		}); err != nil {
