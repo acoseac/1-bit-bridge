@@ -68,9 +68,15 @@ and excluded tokens (iOS PR 1's strict keys, never the legacy patterns: the
 KA3's token is `FiiO KA3`, not `KA3`), its scope (`model`, or `family`, whose
 siblings' results are its sibling note's alone), its PCM ceiling, its volume
 topology and its times in whole milliseconds; `iosGenericNames` are the names
-that name no model. Every name is printable ASCII. A profile with no `match`
-is iOS's alone: it makes no claim only a match reaches, and `Match` never
-knows it. The player reads none of the projection.
+that name no model, and `iosKnownSiblings` iOS PR 1's known siblings, models
+with no row of their own, as the registry's baseline lists them: the lint
+refuses a catalog whose keys answer one of them with a model row through the
+strict matcher, by a port name, matched exactly before any token and never
+ruled out by an excluded token, or by a token none of the row's excluded
+tokens rules out (`TOPPING E30 II Lite` and the E30 II's `Lite`). Every
+legacy pattern, name key and generic name is printable ASCII. A profile with
+no `match` is iOS's alone: it makes no claim only a match reaches, and
+`Match` never knows it. The player reads none of the projection.
 
 `ios-export` reads the embedded catalog and writes `DACCatalog.ios.json`
 beside itself: the rows with `ios`, by `ios.order`, each with what the app
@@ -135,8 +141,9 @@ DSD256`) is a lint error that shows the form.
 
 In a profile with `ios`, the text after each marker clause's colon opens with
 its source's head: its kind (`submission`, `field log`, `maker`, `pcm
-ceiling`, `chip specification` or `retailer`) and its date where it has one,
-then nothing, `, ` or ` (` and free text. One clause credits each rate and
+ceiling`, `chip specification` or `retailer`) and its date, which a
+`submission` and a `field log` always name and the other four name where
+they have one, then nothing, `, ` or ` (` and free text. One clause credits each rate and
 the statement, and the export reads that clause's head alone as the entry's
 source (`fieldLog`, `2026-06-21`). A source names a kind and a date, never a
 person. A DoP claim's `source` is its own row of the registry

@@ -36,6 +36,32 @@
       "why": "the default string of the CX31993 DAC chip, which dongles of many makers carry (iOS 6a1241eb)"
     }
   ],
+  "iosKnownSiblings": [
+    "Mytek Brooklyn Bridge II",
+    "Mytek Brooklyn Bridge",
+    "Mytek Brooklyn DAC",
+    "Mytek Manhattan II",
+    "TOPPING E30 II Lite",
+    "TOPPING E30II Lite",
+    "TOPPING E30",
+    "JCALLY JM98MAX 2",
+    "JCALLY JM98MAX2",
+    "JM20MAX",
+    "JM20 MAX",
+    "JM20PRO",
+    "JM12",
+    "JM6 PRO",
+    "FIIO KA1",
+    "FIIO KA2",
+    "FIIO KA5",
+    "FIIO KA15",
+    "AudioQuest DragonFly Black v1.5",
+    "AudioQuest DragonFly Red v1.0",
+    "AudioQuest DragonFly v1.2",
+    "iFi GO link 2",
+    "iFi GO link Max",
+    "iFi GO link 2 Max"
+  ],
   "profiles": [
     {
       "id": "auralic.altair.g1",
