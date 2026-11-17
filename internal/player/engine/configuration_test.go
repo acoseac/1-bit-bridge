@@ -525,6 +525,7 @@ func TestAReservationGrantedAsItsCallerLeavesIsLetGo(t *testing.T) {
 // changes nothing, the second release publishing no snapshot.
 func TestTwoReservationsHoldUntilBothAreLetGo(t *testing.T) {
 	h := startHarness(t)
+	mark := h.appliedMark()
 	h.insert("a")
 	h.available()
 	first, err := h.reserveWithin("the first reservation")
@@ -539,6 +540,11 @@ func TestTwoReservationsHoldUntilBothAreLetGo(t *testing.T) {
 		t.Fatal("the first let go, and no reservation is shown while the second is held")
 	}
 	h.refused("play while the second is held", h.eng.Play(bg), ReasonConfiguring)
+	// The insert's ID left less than a block reserved ahead, so it began a
+	// reservation write on a goroutine of its own, and the owner publishes a
+	// snapshot as it handles that write's report. The window below opens once
+	// it has, so a snapshot published in it is the second release's (B916).
+	h.waitApplied("handled reservation", mark)
 	before, changed := h.snap(), h.eng.Changed()
 	h.releaseWithin("the first's release again", first)
 	select {
