@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -330,7 +331,7 @@ func TestNoDoPOnAnUnknownDACWithoutConfirmation(t *testing.T) {
 		}
 		// A known DAC whose profile claims DoP to DSD64 alone.
 		k := newRig(t).everything(mode).withoutNative()
-		k.profileDoP = &dacprofile.DoP{HeardMaxBitRate: dsd64, StatedMaxBitRate: dsd64}
+		k.profileDoP = &dacprofile.DoP{HeardBitRates: []int{dsd64}, StatedMaxBitRate: dsd64}
 		k.confirmed = nil
 		wantOutcome(t, mode+" on a known DAC at its claimed rate", k.plan(dsd64), OutcomeDoP)
 		for _, rate := range []int{dsd128, dsd256} {
@@ -382,7 +383,7 @@ func TestAStateThatDoesNotReadRefusesEveryRate(t *testing.T) {
 func TestAProfilesRefusedRateOutranksItsStatedMaximumAndAConfirmation(t *testing.T) {
 	for _, mode := range []string{dsdstate.ModeDoP, dsdstate.ModeAuto} {
 		r := newRig(t).everything(mode).withoutNative()
-		r.profileDoP = &dacprofile.DoP{HeardMaxBitRate: dsd128, StatedMaxBitRate: dsd256, RefusedBitRates: []int{dsd256}}
+		r.profileDoP = &dacprofile.DoP{HeardBitRates: []int{dsd64, dsd128}, StatedMaxBitRate: dsd256, RefusedBitRates: []int{dsd256}}
 		r.forget(dsdstate.TransportDoP, dsd256)
 		wantOutcome(t, mode+" at a heard rate", r.plan(dsd128), OutcomeDoP)
 		p := r.plan(dsd256)
@@ -416,6 +417,115 @@ func TestAProfilesRefusedRateOutranksItsStatedMaximumAndAConfirmation(t *testing
 	n := newRig(t).everything(dsdstate.ModeNative).withoutCarrier()
 	n.profileNative = &dacprofile.Native{MaxBitRate: dsd64, Formats: []string{"DSD_U32_BE"}, Source: dacprofile.Source{Kind: dacprofile.SourceCapture}}
 	wantOutcome(t, "native past its claim's maximum", n.plan(dsd256), OutcomeNative)
+}
+
+// TestAHeardRateAdmitsOnlyItself: a profile's heard DoP rates are each a
+// listening at that rate and say nothing of the rates below them, so under
+// auto, on a known DAC with no native DSD, its DoP carrier offered, the gain
+// at unity and first use acknowledged, with no confirmation, DoP plays at a
+// heard rate alone: heard at DSD128 converts DSD64, and heard at DSD64 and
+// DSD256 converts DSD128.
+func TestAHeardRateAdmitsOnlyItself(t *testing.T) {
+	for _, tc := range []struct {
+		heard []int
+		dop   []int
+	}{
+		{[]int{dsd128}, []int{dsd128}},
+		{[]int{dsd64, dsd256}, []int{dsd64, dsd256}},
+	} {
+		r := newRig(t).everything(dsdstate.ModeAuto).withoutNative()
+		r.profileDoP, r.confirmed = &dacprofile.DoP{HeardBitRates: tc.heard}, nil
+		s := Effective(r.inputs())
+		for _, rate := range dsdRates {
+			want := OutcomeConverted
+			if slices.Contains(tc.dop, rate) {
+				want = OutcomeDoP
+			}
+			d := s.At(rate).DoP
+			if !d.Offered || !d.Gain.Unity || !d.Acknowledged || d.Confirmed {
+				t.Errorf("heard %v, %d: the rig's DoP is %+v, want offered, at unity, acknowledged and unconfirmed", tc.heard, rate, d)
+			}
+			wantOutcome(t, fmt.Sprintf("auto, heard %v, at %d", tc.heard, rate), s.At(rate).Plan, want)
+		}
+	}
+}
+
+// TestAStatementWithoutDoPAdmitsNoDoP (the shipped database): a maker's DSD
+// figure that names no transport, the captured Mytek's DSD256, is no DoP
+// claim, so an explicit dop asks for the confirmation at DSD64 and DSD128,
+// where nothing is heard or refused, and reports no rung there; a maker's
+// statement of DoP, the Hugo 2's to DSD256, admits an explicit dop at DSD64 to
+// DSD256 with its carrier offered, the gain at unity and first use
+// acknowledged, no confirmation asked and no rejection, and reads reported
+// where no higher evidence exists; and auto plays DoP on neither, since
+// neither has a rate heard.
+func TestAStatementWithoutDoPAdmitsNoDoP(t *testing.T) {
+	shipped, err := dacprofile.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured := func(vendorID, productID uint16, iface int, product string) dacprofile.Key {
+		k, err := dacprofile.NewKey(vendorID, productID, &iface, &product)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	as := func(r *rig, k dacprofile.Key) Inputs {
+		in := r.inputs()
+		in.Unit.Key, in.State.DACs[0].Key, in.Profiles = k, k, shipped
+		return in
+	}
+	for _, tc := range []struct {
+		name         string
+		key          dacprofile.Key
+		dop, refused []int
+	}{
+		{"the Mytek", captured(0x25ce, 0x0025, 0, "Brooklyn DAC+"), nil, []int{dsd256}},
+		{"the Hugo 2", captured(0x245f, 0x0815, 1, "Hugo2"), dsdRates, nil},
+	} {
+		r := newRig(t).everything(dsdstate.ModeDoP).withoutNative()
+		r.confirmed = nil
+		for _, rate := range tc.refused {
+			r.forget(dsdstate.TransportDoP, rate)
+		}
+		s := Effective(as(r, tc.key))
+		if !s.Known {
+			t.Fatalf("%s is unknown to the shipped database", tc.name)
+		}
+		for _, rate := range dsdRates {
+			at, what := s.At(rate), fmt.Sprintf("%s under dop at %d", tc.name, rate)
+			switch {
+			case slices.Contains(tc.dop, rate):
+				if d := at.DoP; !d.Offered || !d.Gain.Unity || !d.Acknowledged || d.Confirmed || d.Rejected {
+					t.Errorf("%s: DoP is %+v, want offered, at unity, acknowledged, unconfirmed and not rejected", what, d)
+				}
+				wantOutcome(t, what, at.Plan, OutcomeDoP)
+			case slices.Contains(tc.refused, rate):
+				wantOutcome(t, what, at.Plan, OutcomeRefused, ReasonDoPNotOffered)
+			default:
+				wantOutcome(t, what, at.Plan, OutcomeRefused, ReasonConfirmationRequired)
+			}
+		}
+		a := newRig(t).everything(dsdstate.ModeAuto).withoutNative()
+		a.confirmed = nil
+		for _, rate := range dsdRates {
+			wantOutcome(t, fmt.Sprintf("%s under auto at %d", tc.name, rate), Effective(as(a, tc.key)).At(rate).Plan, OutcomeConverted)
+		}
+		// The rung with every higher evidence absent: no listener answer,
+		// nothing observed, and no probe answer for the carrier.
+		q := newRig(t).everything(dsdstate.ModeDoP).withoutNative()
+		q.confirmed, q.listener, q.evidence = nil, nil, nil
+		for _, rate := range dsdRates {
+			delete(q.probe, alsapcm.ProbeCandidate{Format: format.S32LE, RateHz: rate / 16})
+		}
+		rs := Effective(as(q, tc.key))
+		for _, rate := range dsdRates {
+			if got, want := rs.At(rate).DoP.Evidence, slices.Contains(tc.dop, rate); (got == RungReported) != want {
+				t.Errorf("%s at %d: DoP's rung is %q, want reported %v", tc.name, rate, got, want)
+			}
+		}
+	}
 }
 
 // TestEachTuplePublishesItsHighestRungOnThisFirmware: a tuple's rung is the

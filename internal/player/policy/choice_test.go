@@ -196,13 +196,13 @@ func TestDoPOnAnUnknownDACNeedsConfirmation(t *testing.T) {
 	t.Run("a profile that claims DoP at a lower rate alone", func(t *testing.T) {
 		r := newRig(t)
 		r.known = true
-		r.profileDoP = &dacprofile.DoP{HeardMaxBitRate: dsd64}
+		r.profileDoP = &dacprofile.DoP{HeardBitRates: []int{dsd64}}
 		refusedWith(t, r.inputs(), dop, ChoiceConfirmationRequired)
 	})
 	t.Run("a profile that claims DoP at every rate it is offered at", func(t *testing.T) {
 		r := newRig(t)
 		r.known = true
-		r.profileDoP = &dacprofile.DoP{HeardMaxBitRate: dsd128, StatedMaxBitRate: dsd256}
+		r.profileDoP = &dacprofile.DoP{HeardBitRates: []int{dsd64, dsd128}, StatedMaxBitRate: dsd256}
 		st := choose(t, r.inputs(), dop)
 		if got := dacOfState(t, st).DoPConfirmed; got != nil {
 			t.Errorf("a write that needed no confirmation and carried none wrote one: %+v", got)
@@ -410,7 +410,7 @@ func TestAnAcknowledgementOnAutoCoversTheTransportsAutoPlays(t *testing.T) {
 		r := newRig(t)
 		r.known = true
 		r.profileNative = &dacprofile.Native{MaxBitRate: dsd256, Formats: []string{"DSD_U32_BE"}}
-		r.profileDoP = &dacprofile.DoP{HeardMaxBitRate: dsd256}
+		r.profileDoP = &dacprofile.DoP{HeardBitRates: []int{dsd64, dsd128, dsd256}}
 		return r
 	}
 	t.Run("native at the lower rates, DoP above them", func(t *testing.T) {

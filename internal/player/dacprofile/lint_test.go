@@ -1,6 +1,7 @@
 package dacprofile
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -44,12 +45,14 @@ func dropLine(p *Profile, claim string) {
 }
 
 // TestEveryClaimNamesItsProvenance: every claim of the embedded database's
-// profiles (its identity, native, DoP, timing and each caveat) has a line in
-// its provenance naming its source and its date or version, and every shared
+// profiles (its identity, which only a profile with a match makes, native,
+// DoP, timing, each caveat and its iOS projection) has a line in its
+// provenance naming its source and its date or version, and every shared
 // reference ID says why, with its source; and the lint refuses a claim with
 // no line, a line naming no date or version (or a date that is none), an
-// email, a line for a claim the profile does not make or for none at all, and
-// a source of a kind the claim cannot have or that does not say where it is.
+// email, a line for a claim the profile does not make or for none at all, a
+// source of a kind the claim cannot have or that does not say where it is,
+// and an ios line that is not the profile's own registry row.
 func TestEveryClaimNamesItsProvenance(t *testing.T) {
 	db := mustDefault(t)
 	if problems := db.Lint(); len(problems) > 0 {
@@ -59,7 +62,13 @@ func TestEveryClaimNamesItsProvenance(t *testing.T) {
 		t.Fatalf("the embedded database holds %d profiles and %d shared reference IDs", len(db.Profiles), len(db.SharedReferenceIDs))
 	}
 	for _, p := range db.Profiles {
-		claims := []string{"identity"}
+		var claims []string
+		if len(p.Match) > 0 {
+			claims = append(claims, "identity")
+		}
+		if p.IOS != nil {
+			claims = append(claims, "ios")
+		}
 		if p.Native != nil {
 			claims = append(claims, "native")
 		}
@@ -115,6 +124,18 @@ func TestEveryClaimNamesItsProvenance(t *testing.T) {
 		{"an iOS source naming no row", func(p *Profile) { p.DoP.Source.Ref = "DACProfile.swift at iOS cd125088" }, "DACProfile.swift"},
 		{"an iOS source naming no commit", func(p *Profile) { p.DoP.Source.Ref = "DACProfile.swift fixture.dac" }, "DACProfile.swift"},
 	})
+	runDBCases(t, []dbCase{
+		{"no ios line", func(db *Database) { dropLine(&db.Profiles[0], "ios") }, `"ios"`},
+		{"an identity line on a profile with no match", func(db *Database) {
+			db.Profiles[0].Provenance = append(db.Profiles[0].Provenance, "identity: a placeholder, 2026-11-17")
+		}, "does not make"},
+		{"an ios line naming another row", func(db *Database) {
+			db.Profiles[0].Provenance[1] = "ios: DACProfile.swift fixture.bravo at iOS 6a1241eb"
+		}, "own registry row"},
+		{"an ios line with more than its row", func(db *Database) {
+			db.Profiles[0].Provenance[1] += ", the row's notes"
+		}, "own registry row"},
+	})
 
 	for _, tc := range []struct {
 		name  string
@@ -154,7 +175,7 @@ func TestAHeardRateIsAHearingNeverALock(t *testing.T) {
 		{"another rate heard and this one's lock, a clause each", dopLine("heard DSD64; DSD128 reached a DoP lock"), "DSD128"},
 	})
 	p := fixtureProfile("fixture.dac", "00d1")
-	p.DoP.HeardMaxBitRate = 0
+	p.DoP.HeardBitRates = nil
 	dopLine("DSD128 a DoP lock and no hearing")(&p)
 	if problems := fixture(nil, p).Lint(); len(problems) > 0 {
 		t.Errorf("a refusal with no heard rate lints as %v", problems)
@@ -184,10 +205,10 @@ func TestARefusedRateNamesItsRefusal(t *testing.T) {
 	}
 }
 
-// TestNoEmbeddedDoPLineReadsAsAHearing: a profile whose DoP evidence holds no
-// heard rate (the Mytek's: a refusal, beside a DoP lock that hears nothing)
-// has no dop line that reads as a hearing, so a heard rate added to it below
-// its refusals, with no listening behind it, is refused by the lint.
+// TestNoEmbeddedDoPLineReadsAsAHearing: no embedded profile's dop lines read
+// as a hearing of a rate it neither heard nor failed (the Mytek's DSD64 and
+// DSD128, beside a DoP lock that hears nothing), so each such rate added to
+// its heardBitRates, with no listening behind it, is refused by the lint.
 func TestNoEmbeddedDoPLineReadsAsAHearing(t *testing.T) {
 	db, err := Default()
 	if err != nil {
@@ -195,15 +216,16 @@ func TestNoEmbeddedDoPLineReadsAsAHearing(t *testing.T) {
 	}
 	tried := 0
 	for _, p := range db.Profiles {
-		if p.DoP == nil || p.DoP.HeardMaxBitRate != 0 {
+		if p.DoP == nil {
 			continue
 		}
 		for _, r := range dsdRates {
-			if slices.ContainsFunc(p.DoP.RefusedBitRates, func(refused int) bool { return refused <= r }) {
-				break
+			if slices.Contains(p.DoP.HeardBitRates, r) || slices.Contains(p.DoP.RefusedBitRates, r) {
+				continue
 			}
 			d := *p.DoP
-			d.HeardMaxBitRate = r
+			d.HeardBitRates = append(slices.Clone(d.HeardBitRates), r)
+			slices.Sort(d.HeardBitRates)
 			q := p
 			q.DoP = &d
 			want := fmt.Sprintf("credits DSD%d as heard", r/44100)
@@ -249,101 +271,98 @@ func TestADopClauseCreditsOnlyTheRatesItsFormLists(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		text    string // the dop line's clauses, after "dop: "
-		heard   int
+		heard   []int
 		refused []int
 		want    string // what a problem says, or "" for a profile that lints clean
 	}{
 		// The form, which credits.
-		{"heard, one rate, at the clause's end", "heard DSD128", dsd128, nil, ""},
-		{"heard, its rates by commas, a colon and free text", "heard DSD64, DSD128: clean with PEQ off", dsd128, nil, ""},
-		{"a marker in capitals", "Heard DSD128", dsd128, nil, ""},
-		{"refused", "refused DSD256: the unit would not negotiate its carrier", 0, []int{dsd256}, ""},
-		{"silence at, in capitals", "SILENCE AT DSD256: no audio output", 0, []int{dsd256}, ""},
-		{"spaces around a comma and before the colon", "heard DSD64 ,DSD128 : clean", dsd128, nil, ""},
-		{"free text may negate anything after the colon", "refused DSD256: no supported altsetting", 0, []int{dsd256}, ""},
-		{"one rate under one marker twice", "heard DSD128; heard DSD128: a second unit", dsd128, nil, ""},
-		{"free text beside the form proves nothing and is allowed", "refused DSD256: would not negotiate; DSD128's carrier reached a DoP lock", 0, []int{dsd256}, ""},
+		{"heard, one rate, at the clause's end", "heard DSD128", []int{dsd128}, nil, ""},
+		{"heard, its rates by commas, a colon and free text", "heard DSD64, DSD128: clean with PEQ off", []int{dsd64, dsd128}, nil, ""},
+		{"a marker in capitals", "Heard DSD128", []int{dsd128}, nil, ""},
+		{"refused", "refused DSD256: the unit would not negotiate its carrier", nil, []int{dsd256}, ""},
+		{"silence at, in capitals", "SILENCE AT DSD256: no audio output", nil, []int{dsd256}, ""},
+		{"spaces around a comma and before the colon", "heard DSD64 ,DSD128 : clean", []int{dsd64, dsd128}, nil, ""},
+		{"free text may negate anything after the colon", "refused DSD256: no supported altsetting", nil, []int{dsd256}, ""},
+		{"one rate under one marker twice", "heard DSD128; heard DSD128: a second unit", []int{dsd128}, nil, ""},
+		{"free text beside the form proves nothing and is allowed", "refused DSD256: would not negotiate; DSD128's carrier reached a DoP lock", nil, []int{dsd256}, ""},
 		// The reviewers' "rejected though true", in the form, and as written.
-		{"in the form: refused, no supported altsetting", "refused DSD256: no supported 705.6 kHz altsetting", 0, []int{dsd256}, ""},
-		{"in the form: heard, no clicks or dropouts", "heard DSD128: no clicks or dropouts", dsd128, nil, ""},
-		{"in the form: silence at, no audio output", "silence at DSD256: no audio output", 0, []int{dsd256}, ""},
-		{"as written: DSD256 refused: no supported altsetting", "DSD256 refused: no supported 705.6 kHz altsetting", 0, []int{dsd256}, refused256},
-		{"as written: DSD128 heard: no clicks", "DSD128 heard: no clicks or dropouts", dsd128, nil, heard128},
-		{"as written: DSD256 played as silence", "DSD256 played as silence: no audio output", 0, []int{dsd256}, refused256},
+		{"in the form: refused, no supported altsetting", "refused DSD256: no supported 705.6 kHz altsetting", nil, []int{dsd256}, ""},
+		{"in the form: heard, no clicks or dropouts", "heard DSD128: no clicks or dropouts", []int{dsd128}, nil, ""},
+		{"in the form: silence at, no audio output", "silence at DSD256: no audio output", nil, []int{dsd256}, ""},
+		{"as written: DSD256 refused: no supported altsetting", "DSD256 refused: no supported 705.6 kHz altsetting", nil, []int{dsd256}, refused256},
+		{"as written: DSD128 heard: no clicks", "DSD128 heard: no clicks or dropouts", []int{dsd128}, nil, heard128},
+		{"as written: DSD256 played as silence", "DSD256 played as silence: no audio output", nil, []int{dsd256}, refused256},
 		// The reviewers' "accepted though false".
-		{"heard at DSD64 but not at DSD128", "heard at DSD64 but not at DSD128", dsd128, nil, form},
-		{"the unit refused DSD512, not DSD256", "the unit refused DSD512, not DSD256", 0, []int{dsd256}, refused256},
-		{`DSD128 was a DoP lock, not "heard"`, `DSD128 was a DoP lock, not "heard"`, dsd128, nil, heard128},
-		{"heard at DSD128, the unit did not play the DSD256 file as silence", "heard at DSD128, the unit did not play the DSD256 file as silence", dsd128, []int{dsd256}, form},
-		{"DSD128 locked yes, heard no", "DSD128 locked yes, heard no", dsd128, nil, heard128},
+		{"heard at DSD64 but not at DSD128", "heard at DSD64 but not at DSD128", []int{dsd128}, nil, form},
+		{"the unit refused DSD512, not DSD256", "the unit refused DSD512, not DSD256", nil, []int{dsd256}, refused256},
+		{`DSD128 was a DoP lock, not "heard"`, `DSD128 was a DoP lock, not "heard"`, []int{dsd128}, nil, heard128},
+		{"heard at DSD128, the unit did not play the DSD256 file as silence", "heard at DSD128, the unit did not play the DSD256 file as silence", []int{dsd128}, []int{dsd256}, form},
+		{"DSD128 locked yes, heard no", "DSD128 locked yes, heard no", []int{dsd128}, nil, heard128},
 		// A marker clause in any other shape.
-		{"heard DSD64 but not at DSD128", "heard DSD64 but not at DSD128", dsd64, nil, form},
-		{"heard DSD128 not", "heard DSD128 not", dsd128, nil, form},
-		{"heard DSD64 and DSD128", "heard DSD64 and DSD128", dsd128, nil, form},
-		{"heard at DSD128", "heard at DSD128", dsd128, nil, form},
-		{"a marker with no rates", "heard", dsd128, nil, form},
-		{"a marker with no rates before its colon", "refused: the unit would not negotiate", 0, []int{dsd256}, form},
-		{"silence at with no rates", "silence at", 0, []int{dsd256}, form},
-		{"a comma with no rate after it", "heard DSD128,", dsd128, nil, form},
-		{"a rate in lower case", "heard dsd128", dsd128, nil, form},
-		{"a rate past DSD512", "heard DSD1024: a rate no claim names", dsd128, nil, "is not a DSD rate"},
+		{"heard DSD64 but not at DSD128", "heard DSD64 but not at DSD128", []int{dsd64}, nil, form},
+		{"heard DSD128 not", "heard DSD128 not", []int{dsd128}, nil, form},
+		{"heard DSD64 and DSD128", "heard DSD64 and DSD128", []int{dsd128}, nil, form},
+		{"heard at DSD128", "heard at DSD128", []int{dsd128}, nil, form},
+		{"a marker with no rates", "heard", []int{dsd128}, nil, form},
+		{"a marker with no rates before its colon", "refused: the unit would not negotiate", nil, []int{dsd256}, form},
+		{"silence at with no rates", "silence at", nil, []int{dsd256}, form},
+		{"a comma with no rate after it", "heard DSD128,", []int{dsd128}, nil, form},
+		{"a rate in lower case", "heard dsd128", []int{dsd128}, nil, form},
+		{"a rate past DSD512", "heard DSD1024: a rate no claim names", []int{dsd128}, nil, "is not a DSD rate"},
 		// Clauses that start with no marker: free text, evidence of nothing.
-		{"a marker run into its rate", "heardDSD128", dsd128, nil, heard128},
-		{"refusal is no marker", "refusal of DSD256", 0, []int{dsd256}, refused256},
-		{"a DoP lock", "DSD128's carrier reached a DoP lock", dsd128, nil, heard128},
+		{"a marker run into its rate", "heardDSD128", []int{dsd128}, nil, heard128},
+		{"refusal is no marker", "refusal of DSD256", nil, []int{dsd256}, refused256},
+		{"a DoP lock", "DSD128's carrier reached a DoP lock", []int{dsd128}, nil, heard128},
 		// A rate heard and refused; refused and silence at are one result.
-		{"heard and silence at one rate", "heard DSD256; silence at DSD256", dsd256, nil, heardAndRefused},
-		{"heard and refused at one rate", "heard DSD128; refused DSD128", dsd128, nil, heardAndRefused},
-		{"refused and silence at one rate, one result", "refused DSD256; silence at DSD256", 0, []int{dsd256}, ""},
+		{"heard and silence at one rate", "heard DSD256; silence at DSD256", []int{dsd256}, nil, heardAndRefused},
+		{"heard and refused at one rate", "heard DSD128; refused DSD128", []int{dsd128}, nil, heardAndRefused},
+		{"refused and silence at one rate, one result", "refused DSD256; silence at DSD256", nil, []int{dsd256}, ""},
 		{"two units, one refused it and one played it silent",
-			"refused DSD256: unit 1 would not negotiate (iOS cd125088); silence at DSD256: unit 2 played it silent (iOS cd125088)", 0, []int{dsd256}, ""},
+			"refused DSD256: unit 1 would not negotiate (iOS cd125088); silence at DSD256: unit 2 played it silent (iOS cd125088)", nil, []int{dsd256}, ""},
 		// Round 3's wordings: the negations it read, which credit nothing now.
-		{"round 3: not heard", "DSD128 was not heard, DSD256 refused", dsd128, nil, heard128},
-		{"round 3: never heard", "DSD128 never heard, DSD256 refused", dsd128, nil, heard128},
-		{"round 3: wasn't heard", "DSD128 wasn't heard, DSD256 refused", dsd128, nil, heard128},
-		{"round 3: wasn’t heard, a typographic apostrophe", "DSD128 wasn’t heard, DSD256 refused", dsd128, nil, heard128},
-		{"round 3: cannot be heard", "DSD128 cannot be heard, DSD256 refused", dsd128, nil, heard128},
-		{"round 3: without being heard", "DSD128 played without being heard, DSD256 refused", dsd128, nil, heard128},
-		{"round 3: no rate heard", "no DSD128 heard, DSD256 refused", dsd128, nil, heard128},
-		{"round 3: heard: no", "DSD128 heard: no, DSD256 refused", dsd128, nil, heard128},
-		{"round 3: heard nothing", "DSD128 heard nothing, DSD256 refused", dsd128, nil, heard128},
-		{"round 3: not refused", "heard at DSD128, DSD256 was not refused", dsd128, []int{dsd256}, form},
-		{"round 3: never refused", "heard at DSD128, DSD256 never refused", dsd128, []int{dsd256}, form},
-		{"round 3: didn't refuse", "heard at DSD128, the unit didn't refuse DSD256", dsd128, []int{dsd256}, form},
-		{"round 3: cannot refuse", "heard at DSD128, the unit cannot refuse DSD256", dsd128, []int{dsd256}, form},
-		{"round 3: no refusal", "heard at DSD128, no refusal at DSD256", dsd128, []int{dsd256}, form},
-		{"round 3: without refusal", "heard at DSD128, DSD256 played without refusal", dsd128, []int{dsd256}, form},
-		{"round 3: neither refused nor silent", "heard at DSD128, DSD256 neither refused nor silent", dsd128, []int{dsd256}, form},
-		{"round 3: refused: none", "heard at DSD128, DSD256 refused: none", dsd128, []int{dsd256}, form},
-		{"round 3: not played as silence", "heard at DSD128, DSD256 not played as silence", dsd128, []int{dsd256}, form},
-		{"round 3: did not play it as silence", "heard at DSD128, DSD256 did not play it as silence", dsd128, []int{dsd256}, form},
-		{"round 3: never silent", "heard at DSD128, DSD256 never silent", dsd128, []int{dsd256}, form},
-		{"round 3: wasn't silent", "heard at DSD128, DSD256 wasn't silent", dsd128, []int{dsd256}, form},
-		{"round 3: without silence", "heard at DSD128, DSD256 played without silence", dsd128, []int{dsd256}, form},
-		{"round 3: no silence", "heard at DSD128, no silence at DSD256", dsd128, []int{dsd256}, form},
+		{"round 3: not heard", "DSD128 was not heard, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 3: never heard", "DSD128 never heard, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 3: wasn't heard", "DSD128 wasn't heard, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 3: wasn’t heard, a typographic apostrophe", "DSD128 wasn’t heard, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 3: cannot be heard", "DSD128 cannot be heard, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 3: without being heard", "DSD128 played without being heard, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 3: no rate heard", "no DSD128 heard, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 3: heard: no", "DSD128 heard: no, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 3: heard nothing", "DSD128 heard nothing, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 3: not refused", "heard at DSD128, DSD256 was not refused", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: never refused", "heard at DSD128, DSD256 never refused", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: didn't refuse", "heard at DSD128, the unit didn't refuse DSD256", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: cannot refuse", "heard at DSD128, the unit cannot refuse DSD256", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: no refusal", "heard at DSD128, no refusal at DSD256", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: without refusal", "heard at DSD128, DSD256 played without refusal", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: neither refused nor silent", "heard at DSD128, DSD256 neither refused nor silent", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: refused: none", "heard at DSD128, DSD256 refused: none", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: not played as silence", "heard at DSD128, DSD256 not played as silence", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: did not play it as silence", "heard at DSD128, DSD256 did not play it as silence", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: never silent", "heard at DSD128, DSD256 never silent", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: wasn't silent", "heard at DSD128, DSD256 wasn't silent", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: without silence", "heard at DSD128, DSD256 played without silence", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: no silence", "heard at DSD128, no silence at DSD256", []int{dsd128}, []int{dsd256}, form},
 		// Round 3's pins, a negation of another verb, which it took as evidence.
-		{"round 3: which it would not negotiate", "heard at DSD128; the unit refused DSD256's 705.6 kHz carrier, which it would not negotiate", dsd128, []int{dsd256}, form},
-		{"round 3: would not negotiate and was refused", "heard at DSD128, DSD256 would not negotiate and was refused", dsd128, []int{dsd256}, form},
-		{"round 3: never at DSD256, which the unit refused", "heard at DSD128 with no click, never at DSD256, which the unit refused", dsd128, []int{dsd256}, form},
-		{"round 3: heard no click", "heard no click at DSD128, DSD256 played as silence, not as noise", dsd128, []int{dsd256}, form},
-		{"round 3: was heard, not merely locked", "DSD128 was heard, not merely locked; DSD256 refused", dsd128, []int{dsd256}, heard128},
+		{"round 3: which it would not negotiate", "heard at DSD128; the unit refused DSD256's 705.6 kHz carrier, which it would not negotiate", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: would not negotiate and was refused", "heard at DSD128, DSD256 would not negotiate and was refused", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: never at DSD256, which the unit refused", "heard at DSD128 with no click, never at DSD256, which the unit refused", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: heard no click", "heard no click at DSD128, DSD256 played as silence, not as noise", []int{dsd128}, []int{dsd256}, form},
+		{"round 3: was heard, not merely locked", "DSD128 was heard, not merely locked; DSD256 refused", []int{dsd128}, []int{dsd256}, heard128},
 		// Round 2's wordings.
-		{"round 2: hardware-confirmed", "DSD128 hardware-confirmed, DSD256 refused", dsd128, nil, heard128},
-		{"round 2: reached DoP lock", "DSD128 reached DoP lock, DSD256 refused", dsd128, nil, heard128},
-		{"round 2: negotiated exactly", "DSD128's carrier negotiated exactly, DSD256 refused", dsd128, nil, heard128},
-		{"round 2: heard at another rate", "heard at DSD64, DSD256 refused", dsd128, nil, form},
-		{"round 2: another rate heard, this one's lock", "heard at DSD64; DSD128 reached a DoP lock; DSD256 refused", dsd128, nil, form},
-		{"round 2: carrier refused on a device", "DSD256's carrier refused on a device, DSD128 a DoP lock and no hearing", 0, []int{dsd256}, refused256},
-		{"round 2: DSD256 not", "heard at DSD128, DSD256 not", dsd128, []int{dsd256}, form},
-		{"round 2: another rate refused", "heard at DSD128, DSD512 refused", dsd128, []int{dsd256}, form},
-		{"round 2: another rate refused, this one's lock", "heard at DSD128; DSD512 refused; DSD256 reached a DoP lock", dsd128, []int{dsd256}, form},
-		{"round 2: played as silence", "heard at DSD128, DSD256 played as silence", dsd128, []int{dsd256}, form},
+		{"round 2: hardware-confirmed", "DSD128 hardware-confirmed, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 2: reached DoP lock", "DSD128 reached DoP lock, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 2: negotiated exactly", "DSD128's carrier negotiated exactly, DSD256 refused", []int{dsd128}, nil, heard128},
+		{"round 2: heard at another rate", "heard at DSD64, DSD256 refused", []int{dsd128}, nil, form},
+		{"round 2: another rate heard, this one's lock", "heard at DSD64; DSD128 reached a DoP lock; DSD256 refused", []int{dsd128}, nil, form},
+		{"round 2: carrier refused on a device", "DSD256's carrier refused on a device, DSD128 a DoP lock and no hearing", nil, []int{dsd256}, refused256},
+		{"round 2: DSD256 not", "heard at DSD128, DSD256 not", []int{dsd128}, []int{dsd256}, form},
+		{"round 2: another rate refused", "heard at DSD128, DSD512 refused", []int{dsd128}, []int{dsd256}, form},
+		{"round 2: another rate refused, this one's lock", "heard at DSD128; DSD512 refused; DSD256 reached a DoP lock", []int{dsd128}, []int{dsd256}, form},
+		{"round 2: played as silence", "heard at DSD128, DSD256 played as silence", []int{dsd128}, []int{dsd256}, form},
 	} {
 		p := fixtureProfile("fixture.dac", "00d1")
-		p.DoP.HeardMaxBitRate, p.DoP.RefusedBitRates = tc.heard, append([]int{}, tc.refused...)
-		if tc.heard == 0 && len(tc.refused) == 0 {
-			p.DoP.StatedMaxBitRate = dsd64
-		}
+		p.DoP.HeardBitRates, p.DoP.RefusedBitRates = tc.heard, append([]int{}, tc.refused...)
 		p.Provenance[2] = "dop: " + tc.text + "; iOS profile fixture.dac (iOS cd125088)"
 		problems := fixture(nil, p).Lint()
 		switch {
@@ -504,27 +523,44 @@ func TestTheCaveatCodesAreAClosedList(t *testing.T) {
 }
 
 // TestTheSchemaRefusesWhatItDoesNotDescribe: Parse refuses a field the
-// schema does not have, anything after the object and another schema version;
+// schema does not have (schema 1's heardMaxBitRate, an iOS key among them),
+// anything after the object and another schema version, schema 1 included;
 // and the lint refuses what no reading or no claim can be: an ID not in
 // usbid.Hex16's form, an interface past a byte, a product string the sysfs
 // reader never returns, an empty firmware list, an alternative given twice,
-// a profile with no alternative, no name, or an ID not in the dotted form,
-// two profiles of one ID, a format ALSA's DSD does not have, a rate not
-// DSD64 to DSD512, a refused rate heard, a DoP claim that claims nothing, a
-// timing that gives none or is past five seconds, and a shared reference ID
-// listed twice or not in Hex16's form.
+// a profile with no alternative and no iOS projection, no name, or an ID not
+// in the dotted form, two profiles of one ID, a format ALSA's DSD does not
+// have, a rate not DSD64 to DSD512, heard rates out of order or twice, a DoP
+// claim that claims nothing, a timing that gives none or is past five
+// seconds, a shared reference ID listed twice or not in Hex16's form; a
+// profile with no match that claims what only a match reaches (native,
+// timing, an analogue or raw-maximum control); a DoP source that is another
+// row's, or a listening or a maker's document with no date; and an iOS name
+// that is not printable ASCII, blank, not trimmed or given twice.
 func TestTheSchemaRefusesWhatItDoesNotDescribe(t *testing.T) {
+	valid, err := json.Marshal(iosPair())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(valid); err != nil {
+		t.Fatalf("Parse refuses the iOS pair: %v", err)
+	}
 	for _, tc := range []struct{ name, data string }{
-		{"a field the schema does not have", `{"schemaVersion": 1, "sharedReferenceIds": [], "profiles": [], "overrides": []}`},
-		{"something after the object", `{"schemaVersion": 1, "sharedReferenceIds": [], "profiles": []} {}`},
-		{"another schema version", `{"schemaVersion": 2, "sharedReferenceIds": [], "profiles": []}`},
+		{"a field the schema does not have", `{"schemaVersion": 2, "sharedReferenceIds": [], "profiles": [], "overrides": []}`},
+		{"something after the object", `{"schemaVersion": 2, "sharedReferenceIds": [], "profiles": []} {}`},
+		{"another schema version", `{"schemaVersion": 1, "sharedReferenceIds": [], "profiles": []}`},
 		{"no schema version", `{"sharedReferenceIds": [], "profiles": []}`},
+		{"schema 1's heard maximum", strings.Replace(string(valid), `"heardBitRates":`, `"heardMaxBitRate":2822400,"heardBitRates":`, 1)},
+		{"a key the iOS projection does not have", strings.Replace(string(valid), `"maker":`, `"colour":"red","maker":`, 1)},
 	} {
+		if tc.data == string(valid) {
+			t.Fatalf("%s: the mutation missed", tc.name)
+		}
 		if _, err := Parse([]byte(tc.data)); err == nil {
 			t.Errorf("Parse takes %s", tc.name)
 		}
 	}
-	if _, err := Parse([]byte(`{"schemaVersion": 1, "sharedReferenceIds": [], "profiles": []}`)); err != nil {
+	if _, err := Parse([]byte(`{"schemaVersion": 2, "sharedReferenceIds": [], "iosGenericNames": [], "profiles": []}`)); err != nil {
 		t.Errorf("Parse refuses an empty database: %v", err)
 	}
 	alt := func(f func(m *Match)) func(p *Profile) {
@@ -551,16 +587,76 @@ func TestTheSchemaRefusesWhatItDoesNotDescribe(t *testing.T) {
 		{"no format", func(p *Profile) { p.Native.Formats = nil }, "format"},
 		{"a format listed twice", func(p *Profile) { p.Native.Formats = []string{"DSD_U32_BE", "DSD_U32_BE"} }, "format"},
 		{"a native rate that is no DSD rate", func(p *Profile) { p.Native.MaxBitRate = 2822401 }, "rate"},
-		{"a DoP rate past DSD512", func(p *Profile) { p.DoP.HeardMaxBitRate = 45158400 }, "rate"},
+		{"a DoP rate past DSD512", func(p *Profile) { p.DoP.HeardBitRates = []int{45158400} }, "rate"},
+		{"a heard rate that is no DSD rate", func(p *Profile) { p.DoP.HeardBitRates = []int{176400} }, "is not a DSD rate"},
+		{"heard rates out of order", func(p *Profile) { p.DoP.HeardBitRates = []int{5644800, 2822400} }, "ascending"},
+		{"a heard rate listed twice", func(p *Profile) { p.DoP.HeardBitRates = []int{5644800, 5644800} }, "ascending"},
 		{"a refused rate that is no DSD rate", func(p *Profile) { p.DoP.RefusedBitRates = []int{176400} }, "rate"},
-		{"a refused rate that was heard", func(p *Profile) { p.DoP.RefusedBitRates = []int{5644800} }, "heard"},
 		{"a refused rate listed twice", func(p *Profile) { p.DoP.RefusedBitRates = []int{11289600, 11289600} }, "twice"},
 		{"a DoP claim that claims nothing", func(p *Profile) {
-			p.DoP.HeardMaxBitRate, p.DoP.RefusedBitRates = 0, []int{}
+			p.DoP.HeardBitRates, p.DoP.RefusedBitRates = nil, []int{}
 		}, "claims nothing"},
 		{"a timing that gives none", func(p *Profile) { p.Timing = &Timing{} }, "timing"},
 		{"a prefill past five seconds", func(p *Profile) { p.Timing.DSDPrefillMs = 5001 }, "timing"},
 		{"a negative settle", func(p *Profile) { p.Timing.PCMEntryMs = -1 }, "timing"},
+		{"a DoP source that is a listening with no date", func(p *Profile) {
+			p.DoP.Source = Source{Kind: SourceListening, Ref: "a listening on a phone"}
+		}, "names its date"},
+		{"a DoP source that is a maker's document with no date", func(p *Profile) {
+			p.DoP.Source = Source{Kind: SourceMaker, Ref: "the maker's specification"}
+		}, "names its date"},
+	})
+	p := fixtureProfile("fixture.dac", "00d1")
+	p.DoP.Source = Source{Kind: SourceMaker, Ref: "the maker's specification, 2026-11-01"}
+	if problems := fixture(nil, p).Lint(); len(problems) > 0 {
+		t.Errorf("a DoP claim sourced to a dated maker's document lints as %v", problems)
+	}
+	only := func(f func(p *Profile)) func(db *Database) { return func(db *Database) { f(&db.Profiles[0]) } }
+	keys := func(f func(x *IOS)) func(db *Database) { return only(func(p *Profile) { f(p.IOS) }) }
+	runDBCases(t, []dbCase{
+		{"no match and no iOS projection", only(func(p *Profile) { p.IOS = nil; dropLine(p, "ios") }), "no match alternative"},
+		{"no match and a native claim", only(func(p *Profile) {
+			q := fixtureProfile("fixture.alpha", "00d1")
+			p.Native = q.Native
+			p.Provenance = append(p.Provenance, q.Provenance[1])
+		}), "has no native claim"},
+		{"no match and a timing", only(func(p *Profile) {
+			p.Timing = &Timing{DSDPrefillMs: 700}
+			p.Provenance = append(p.Provenance, "timing: a resync delay, 0.7 s (iOS 6a1241eb)")
+		}), "has no timing"},
+		{"no match and an analogue control", only(func(p *Profile) {
+			p.DoP.AnalogVolumeControls = []AnalogControl{{ControlID: ControlID{Interface: "MIXER", Name: "Master", Index: 0}, Provenance: "a test, 2026-11-17"}}
+		}), "has no analogue control"},
+		{"no match and a raw-maximum control", only(func(p *Profile) {
+			p.DoP.UnityAtRawMax = []RawMaxControl{{ControlID: ControlID{Interface: "MIXER", Name: "PCM", Index: 0}, RawMax: 127,
+				BCDDevice: []string{"0101"}, Evidence: Evidence{Kind: "document", Title: "Manual", Section: "4.2"}}}
+		}), "has no raw-maximum control"},
+		{"a DoP source naming another row", only(func(p *Profile) {
+			p.DoP.Source.Ref = "DACProfile.swift fixture.bravo at iOS 6a1241eb"
+		}), "own row of the iOS registry"},
+		{"another name scope", keys(func(x *IOS) { x.NameScope = "brand" }), "nameScope"},
+		{"a port name holding a NUL", keys(func(x *IOS) { x.PortNames = []string{"FIXTURE\x00Alpha"} }), "not printable ASCII"},
+		{"a token holding a line feed", keys(func(x *IOS) { x.NameTokens = []string{"Alpha\n"} }), "not printable ASCII"},
+		{"a token holding a letter past ASCII", keys(func(x *IOS) { x.NameTokens = []string{"Alph\xc3\xa9"} }), "not printable ASCII"},
+		{"an excluded token holding a carriage return", keys(func(x *IOS) { x.ExcludedTokens = []string{"Li\rte"} }), "not printable ASCII"},
+		{"a legacy pattern holding a tab", keys(func(x *IOS) { x.LegacyPatterns = []string{"Al\tpha"} }), "not printable ASCII"},
+		{"a generic name holding a carriage return", func(db *Database) { db.IOSGenericNames[0].Name = "Head\rphones" }, "not printable ASCII"},
+		{"a blank port name", keys(func(x *IOS) { x.PortNames = []string{"  "} }), "is blank"},
+		{"an empty token", keys(func(x *IOS) { x.NameTokens = []string{"Alpha", ""} }), "is blank"},
+		{"a token with white space around it", keys(func(x *IOS) { x.NameTokens = []string{" Alpha"} }), "white space around it"},
+		{"a generic name with white space around it", func(db *Database) { db.IOSGenericNames[0].Name = "Headphones " }, "white space around it"},
+		{"a token twice, folded", keys(func(x *IOS) { x.NameTokens = []string{"Alpha", "ALPHA"} }), "listed twice"},
+		{"an excluded token twice", keys(func(x *IOS) { x.ExcludedTokens = []string{"Lite", "lite"} }), "listed twice"},
+		{"a port name twice, trimmed and folded", keys(func(x *IOS) { x.PortNames = []string{"FIXTURE Alpha ", "fixture alpha"} }), "listed twice"},
+		{"a generic name twice, folded", func(db *Database) {
+			db.IOSGenericNames = append(db.IOSGenericNames, GenericName{Name: "HEADPHONES", Why: "the same name (iOS 6a1241eb)"})
+		}, "listed twice"},
+		{"a generic name with no why", func(db *Database) { db.IOSGenericNames[0].Why = "" }, "says no why"},
+		{"an excluded token inside the row's own token", keys(func(x *IOS) { x.ExcludedTokens = []string{"lph"} }), "inside the row's own token"},
+		{"a maker with white space around it", keys(func(x *IOS) { x.Maker = "Fixture " }), "maker"},
+		{"a volume topology that is no case name", keys(func(x *IOS) { x.VolumeTopology = "DAC owns gain" }), "case name"},
+		{"a PCM depth iOS does not have", keys(func(x *IOS) { x.PCM.BitDepth = 20 }), "PCM ceiling"},
+		{"an iOS time past five seconds", keys(func(x *IOS) { x.Timing.DSDResyncMs = ptr(5001) }), "iOS time"},
 	})
 	for _, tc := range []struct{ name, id string }{
 		{"an ID with capitals", "Fixture.DAC"},
@@ -585,5 +681,235 @@ func TestTheSchemaRefusesWhatItDoesNotDescribe(t *testing.T) {
 		if problems := fixture(tc.shared).Lint(); len(problems) == 0 {
 			t.Errorf("%s lints clean", tc.name)
 		}
+	}
+}
+
+// TestEachDoPRateIsCreditedRateByRate: a DoP claim's rates and its dop
+// clauses agree rate by rate, both ways: a heard rate no heard clause lists
+// (DSD64 beside a clause for DSD128 alone, which a heard maximum let pass),
+// a heard clause for a rate heardBitRates does not list, a refused rate no
+// failure clause lists and a failure clause for a rate refusedBitRates does
+// not list are each a problem naming the rate; and noise at and no frames at
+// credit a failure as refused and silence at do.
+func TestEachDoPRateIsCreditedRateByRate(t *testing.T) {
+	dop := func(heard, refused []int, text string) func(p *Profile) {
+		return func(p *Profile) {
+			p.DoP.HeardBitRates, p.DoP.RefusedBitRates = heard, refused
+			p.Provenance[2] = "dop: " + text
+		}
+	}
+	runLintCases(t, []lintCase{
+		{"DSD64 heard beside a clause for DSD128 alone", dop([]int{2822400, 5644800}, []int{11289600},
+			"heard DSD128: a listening (iOS cd125088); refused DSD256: a refusal (iOS cd125088)"), "credits DSD64 as heard"},
+		{"a heard clause for a rate the list does not hold", dop([]int{5644800}, []int{11289600},
+			"heard DSD64, DSD128: a listening (iOS cd125088); refused DSD256: a refusal (iOS cd125088)"), "credits DSD64 as heard, and heardBitRates"},
+		{"a refused rate no clause credits", dop([]int{5644800}, []int{11289600, 22579200},
+			"heard DSD128: a listening (iOS cd125088); refused DSD256: a refusal (iOS cd125088)"), "refused rate DSD512 has no dop clause"},
+		{"a failure clause for a rate the list does not hold", dop([]int{5644800}, []int{11289600},
+			"heard DSD128: a listening (iOS cd125088); refused DSD256, DSD512: a refusal (iOS cd125088)"), "credits DSD512 as failed"},
+	})
+	for _, marker := range []string{"noise at", "no frames at"} {
+		p := fixtureProfile("fixture.dac", "00d1")
+		p.Provenance[2] = "dop: heard DSD128: a listening (iOS cd125088); " + marker + " DSD256: a refusal (iOS cd125088)"
+		if problems := fixture(nil, p).Lint(); len(problems) > 0 {
+			t.Errorf("%s DSD256 lints as %v", marker, problems)
+		}
+	}
+}
+
+// TestAFailureBelowAHeardRateIsKept: a rate that failed below a heard one is
+// evidence the schema keeps (DSD64 refused beside DSD128 heard, where a heard
+// maximum read DSD64 as heard), and lints clean; one rate heard and failed is
+// a contradiction under each failure marker.
+func TestAFailureBelowAHeardRateIsKept(t *testing.T) {
+	p := fixtureProfile("fixture.dac", "00d1")
+	p.DoP.HeardBitRates, p.DoP.RefusedBitRates = []int{5644800}, []int{2822400}
+	p.Provenance[2] = "dop: heard DSD128: a listening (iOS cd125088); refused DSD64: a refusal (iOS cd125088)"
+	if problems := fixture(nil, p).Lint(); len(problems) > 0 {
+		t.Errorf("a refusal below a heard rate lints as %v", problems)
+	}
+	var cases []lintCase
+	for _, marker := range []string{"refused", "silence at", "noise at", "no frames at"} {
+		cases = append(cases, lintCase{"heard and " + marker + " at DSD128", func(p *Profile) {
+			p.DoP.RefusedBitRates = []int{5644800, 11289600}
+			p.Provenance[2] = "dop: heard DSD128: a listening (iOS cd125088); " + marker + " DSD128, DSD256: a refusal (iOS cd125088)"
+		}, "DSD128 is both heard and refused"})
+	}
+	runLintCases(t, cases)
+}
+
+// TestAStatementIsOneOfThree: a DoP claim's statement is the maker's DoP
+// figure, a DSD figure that says nothing of DoP, or no DSD at all, at most
+// one of them, and its clause (stated DoP to, stated DSD to, stated no DSD)
+// says the same: a clause for another statement or for none, a statement no
+// clause credits, a statement clause in no form, both set, no DSD with a
+// rate or beside a heard rate, and a kind off the two are each a problem.
+func TestAStatementIsOneOfThree(t *testing.T) {
+	stated := func(rate int, without *Statement, clause string) func(p *Profile) {
+		return func(p *Profile) {
+			p.DoP.StatedMaxBitRate, p.DoP.StatedWithoutDoP = rate, without
+			if clause != "" {
+				p.Provenance[2] += "; " + clause
+			}
+		}
+	}
+	dsd256, none := &Statement{Kind: StatementDSD, MaxBitRate: 11289600}, &Statement{Kind: StatementNone}
+	for _, tc := range []struct {
+		name   string
+		mutate func(p *Profile)
+	}{
+		{"DoP stated to DSD256", stated(11289600, nil, "stated DoP to DSD256: the maker's specification (iOS 6a1241eb)")},
+		{"a DSD figure to DSD256", stated(0, dsd256, "Stated DSD to DSD256: the maker's specification (iOS 6a1241eb)")},
+		{"no DSD", func(p *Profile) {
+			stated(0, none, "stated no DSD: the maker's specification (iOS 6a1241eb)")(p)
+			p.DoP.HeardBitRates = nil
+			p.Provenance[2] = strings.Replace(p.Provenance[2], "heard DSD128: iOS profile fixture.dac (iOS cd125088); ", "", 1)
+		}},
+	} {
+		p := fixtureProfile("fixture.dac", "00d1")
+		tc.mutate(&p)
+		if problems := fixture(nil, p).Lint(); len(problems) > 0 {
+			t.Errorf("%s lints as %v", tc.name, problems)
+		}
+	}
+	runLintCases(t, []lintCase{
+		{"a clause for another rate", stated(11289600, nil, "stated DoP to DSD128: the maker (iOS 6a1241eb)"), `"stated DoP to DSD128"`},
+		{"a clause for another statement", stated(11289600, nil, "stated DSD to DSD256: the maker (iOS 6a1241eb)"), `"stated DSD to DSD256"`},
+		{"a statement no clause credits", stated(0, dsd256, ""), "statement has no dop clause"},
+		{"a clause and no statement", stated(0, nil, "stated no DSD: the maker (iOS 6a1241eb)"), `"stated no DSD"`},
+		{"a statement clause in no form", stated(11289600, nil, "stated DoP up to DSD256: the maker (iOS 6a1241eb)"), "statement not in the form"},
+		{"both set", stated(11289600, dsd256, "stated DoP to DSD256: the maker (iOS 6a1241eb)"), "at most one is set"},
+		{"no DSD with a rate", stated(0, &Statement{Kind: StatementNone, MaxBitRate: 2822400}, "stated no DSD: the maker (iOS 6a1241eb)"), "statedWithoutDoP is"},
+		{"no DSD beside a heard rate", stated(0, none, "stated no DSD: the maker (iOS 6a1241eb)"), "beside a heard rate"},
+		{"a kind off the two", stated(0, &Statement{Kind: "dop", MaxBitRate: 11289600}, "stated DSD to DSD256: the maker (iOS 6a1241eb)"), "statedWithoutDoP is"},
+	})
+}
+
+// TestAnIOSRowsClausesNameTheirSource: in a profile with an iOS projection
+// every marker clause's text after its colon opens with its source's head,
+// one of iOS's kinds in words and a date where it has one, then nothing, ", "
+// or " (", and one clause credits each rate and the statement: a clause
+// with no colon, no head, a kind iOS does not have, a date that is none or a
+// head run into its text, and a rate or the statement credited twice, are
+// each a problem; the same clauses in a profile without one lint clean.
+func TestAnIOSRowsClausesNameTheirSource(t *testing.T) {
+	const kept = "; refused DSD256: field log 2026-06-21; stated DSD to DSD256: maker (the row's note, iOS 6a1241eb)"
+	heads := []struct{ name, heard, words string }{
+		{"no colon", "heard DSD64", "source's head"},
+		{"no head", "heard DSD64: a listening on 2026-10-04", "source's head"},
+		{"a kind iOS does not have", "heard DSD64: forum post 2026-10-04", "source's head"},
+		{"a date that is none", "heard DSD64: submission 2026-13-45", "source's head"},
+		{"a head run into its text", "heard DSD64: submissions, 2026-10-04", "source's head"},
+		{"a rate credited twice", "heard DSD64: submission 2026-10-04; heard DSD64: field log 2026-10-21", "credited by 2 dop clauses"},
+	}
+	var cases []dbCase
+	for _, h := range heads {
+		cases = append(cases, dbCase{h.name, func(db *Database) { db.Profiles[0].Provenance[0] = "dop: " + h.heard + kept }, h.words})
+	}
+	cases = append(cases, dbCase{"the statement credited twice", func(db *Database) {
+		db.Profiles[0].Provenance[0] += "; stated DSD to DSD256: retailer (iOS 6a1241eb)"
+	}, "statement is credited by 2 dop clauses"})
+	runDBCases(t, cases)
+	for _, h := range heads {
+		p := fixtureProfile("fixture.dac", "00d1")
+		p.DoP.HeardBitRates = []int{2822400}
+		p.Provenance[2] = "dop: " + h.heard + "; refused DSD256: a refusal (iOS cd125088)"
+		if problems := fixture(nil, p).Lint(); len(problems) > 0 {
+			t.Errorf("%s, in a profile without an iOS projection, lints as %v", h.name, problems)
+		}
+	}
+}
+
+// TestTheIOSNameKeysLint: iOS PR 1's lint over the name keys, folded, across
+// two profiles only: a token under four characters (KA3); a token inside a
+// generic name or one inside a token; a token inside another profile's token
+// or port name, or one of those inside it (Hugo beside Hugo 2), but never a
+// profile's own token inside its own port name (qx13 in FIIO QX13 ); a port
+// name two profiles give, trimmed and folded (FIIO KA17 and FIIO KA17), or
+// that is a generic name; a family row with no sibling note or one saying a
+// word never said of DSD, and a model row with one; and an order given twice
+// or skipped.
+func TestTheIOSNameKeysLint(t *testing.T) {
+	first := func(f func(x *IOS)) func(db *Database) { return func(db *Database) { f(db.Profiles[0].IOS) } }
+	second := func(f func(x *IOS)) func(db *Database) { return func(db *Database) { f(db.Profiles[1].IOS) } }
+	tokens := func(a, b string) func(db *Database) {
+		return func(db *Database) {
+			db.Profiles[0].IOS.NameTokens, db.Profiles[1].IOS.NameTokens = []string{a}, []string{b}
+		}
+	}
+	runDBCases(t, []dbCase{
+		{"a token of three characters", first(func(x *IOS) { x.NameTokens = []string{"KA3"} }), "shorter than 4"},
+		{"a token inside a generic name", first(func(x *IOS) { x.NameTokens = []string{"amanero"} }), "lie one inside the other"},
+		{"a generic name inside a token", first(func(x *IOS) { x.NameTokens = []string{"Combo384 Amanero DAC"} }), "lie one inside the other"},
+		{"a token inside another profile's token", tokens("Hugo", "Hugo 2"), `"Hugo" lies inside profile fixture.bravo's token "Hugo 2"`},
+		{"another profile's token inside a token", tokens("Hugo 2", "Hugo"), `"Hugo" lies inside profile fixture.alpha's token "Hugo 2"`},
+		{"a token inside another profile's port name", second(func(x *IOS) { x.NameTokens = []string{"Alpha"} }), "port name"},
+		{"another profile's port name inside a token", second(func(x *IOS) { x.NameTokens = []string{"Bravo", "the fixture alpha DAC"} }), "port name"},
+		{"a port name two profiles give", func(db *Database) {
+			db.Profiles[0].IOS.PortNames, db.Profiles[1].IOS.PortNames = []string{"FIIO KA17 "}, []string{"FIIO KA17"}
+		}, `both give the port name "FIIO KA17"`},
+		{"a port name that is a generic name", first(func(x *IOS) { x.PortNames = []string{"headphones "} }), "is the generic name"},
+		{"a family row with no sibling note", first(func(x *IOS) { x.NameScope = "family" }), "sibling note says"},
+		{"a sibling note saying a word never said", first(func(x *IOS) {
+			x.NameScope, x.SiblingNote = "family", ptr("A sibling locked at DSD128 (a submission, 2026-09-23).")
+		}), `says "locked"`},
+		{"a model row with a sibling note", first(func(x *IOS) { x.SiblingNote = ptr("a sibling's result") }), "no sibling note"},
+		{"a family row with a heard rate of its own", func(db *Database) {
+			pr := &db.Profiles[0]
+			pr.IOS.NameScope, pr.IOS.SiblingNote = "family", ptr("Siblings under this name, not this row's own evidence: DSD64 heard over DoP on one unit (a submission, 2026-09-23).")
+			if pr.DoP == nil {
+				pr.DoP = &DoP{}
+			}
+			pr.DoP.HeardBitRates = []int{2822400}
+		}, "no heard or failed rate of its own"},
+		{"a family row with a failed rate of its own", func(db *Database) {
+			pr := &db.Profiles[0]
+			pr.IOS.NameScope, pr.IOS.SiblingNote = "family", ptr("Siblings under this name, not this row's own evidence: DSD64 heard over DoP on one unit (a submission, 2026-09-23).")
+			if pr.DoP == nil {
+				pr.DoP = &DoP{}
+			}
+			pr.DoP.RefusedBitRates = []int{22579200}
+		}, "no heard or failed rate of its own"},
+		{"an order given twice", second(func(x *IOS) { x.Order = 1 }), "hold order 1"},
+		{"an order skipped", second(func(x *IOS) { x.Order = 3 }), "hold order 2"},
+	})
+	db := iosPair()
+	db.Profiles[0].IOS.PortNames, db.Profiles[0].IOS.NameTokens = []string{"FIIO QX13 "}, []string{"qx13"}
+	if problems := db.Lint(); len(problems) > 0 {
+		t.Errorf("a token inside its own profile's port name lints as %v", problems)
+	}
+}
+
+// TestTheLegacyCeilingAgreesWithTheEvidence: an iOS row's legacy ceiling
+// agrees with its DoP evidence as iOS PR 1 checks it: no DSD stated with a
+// ceiling, a ceiling of 0 with no statement of no DSD, a heard rate above the
+// ceiling and a failed rate at or below it are each a problem.
+func TestTheLegacyCeilingAgreesWithTheEvidence(t *testing.T) {
+	ceiling := func(rate int, f func(d *DoP, line *string)) func(db *Database) {
+		return func(db *Database) {
+			p := &db.Profiles[0]
+			p.IOS.LegacyCeilingBitRate = rate
+			if f != nil {
+				f(p.DoP, &p.Provenance[0])
+			}
+		}
+	}
+	none := func(d *DoP, line *string) {
+		d.HeardBitRates, d.StatedWithoutDoP = nil, &Statement{Kind: StatementNone}
+		*line = "dop: refused DSD256: field log 2026-06-21; stated no DSD: maker (iOS 6a1241eb)"
+	}
+	runDBCases(t, []dbCase{
+		{"no DSD stated with a ceiling", ceiling(5644800, none), "0 exactly where the maker states no DSD"},
+		{"a ceiling of 0 with a DSD figure", ceiling(0, nil), "0 exactly where the maker states no DSD"},
+		{"a heard rate above the ceiling", ceiling(2822400, func(d *DoP, line *string) {
+			d.HeardBitRates = []int{2822400, 5644800}
+			*line = strings.Replace(*line, "heard DSD64:", "heard DSD64, DSD128:", 1)
+		}), "heard DSD128 lies above the legacy ceiling"},
+		{"a failed rate at the ceiling", ceiling(11289600, nil), "failed DSD256 lies at or below the legacy ceiling"},
+	})
+	db := iosPair()
+	ceiling(0, none)(db)
+	if problems := db.Lint(); len(problems) > 0 {
+		t.Errorf("no DSD stated under a ceiling of 0 lints as %v", problems)
 	}
 }

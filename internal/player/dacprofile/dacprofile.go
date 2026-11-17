@@ -16,10 +16,11 @@
 // when exactly one profile has an alternative it matches (Match): none, or
 // two, and it is unknown. Nothing is matched by name: the iOS registry
 // matches the name iOS gives a port, by substring, first hit first, because
-// iOS shows no USB IDs, and none of that matcher is imported. A vendor and
-// product ID that many products ship, a reference firmware's, is a shared
-// reference ID (SharedReferenceIDs), and an alternative on one names its
-// product string, which Lint requires and Match asks again.
+// iOS shows no USB IDs, and Match reads none of the names the catalog keeps
+// for it. A vendor and product ID that many products ship, a reference
+// firmware's, is a shared reference ID (SharedReferenceIDs), and an
+// alternative on one names its product string, which Lint requires and Match
+// asks again.
 //
 // A profile's claims, each with its source and its date or version, one line
 // a claim in its provenance, and never a host name, a serial, a person's name
@@ -31,15 +32,20 @@
 //     and seeds nothing, and neither does a shared reference ID without its
 //     product string. The live altsets still decide what is offered: the
 //     claim makes the model known.
-//   - DoP: the rates a listening heard on a device (never one a negotiation or
-//     a DoP lock reached: those hear nothing), the maker's stated rate and the
-//     rates a device refused, from the iOS registry at a named commit, which
-//     with its caveats and a DSD resync delay (Timing) is all that is
-//     imported from it, each heard and refused rate credited by a clause of
-//     its dop line in evidence's one form ("heard DSD128: <source>", "refused
-//     DSD256: <source>", "silence at DSD256: <source>"; Lint); and the model's
-//     level controls the DoP gain check passes over (AnalogVolumeControls,
-//     UnityAtRawMax), each with its own provenance or evidence.
+//   - DoP: rate by rate, the rates a listening heard on a device (never one a
+//     negotiation or a DoP lock reached: those hear nothing, and a heard rate
+//     says nothing of the rates below it), the rates that failed on one, and
+//     the maker's statement, from the iOS registry at a named commit, a
+//     listening or a maker's document, each rate and the statement credited
+//     by a clause of its dop line in evidence's one form ("heard DSD128:
+//     <source>", "refused DSD256: <source>", "stated DoP to DSD256: <source>";
+//     Lint); and the model's level controls the DoP gain check passes over
+//     (AnalogVolumeControls, UnityAtRawMax), each with its own provenance or
+//     evidence.
+//   - IOS: the model's row of the iOS app's registry (B730 B1), the catalog
+//     its one source, which the player never reads. A profile with no match
+//     alternative is iOS's alone: it makes no claim only a match reaches and
+//     matches no unit.
 //   - Timing: the DSD silence each hardware run starts with, which a model's
 //     DSD resync delay in the iOS registry, a measured value, may seed
 //     (DSDPrefillMs; "timing: iOS profile <row>'s DSD resync delay, 0.7 s
@@ -61,8 +67,9 @@ import (
 	"io"
 )
 
-// SchemaVersion is the schema profiles.json is written in.
-const SchemaVersion = 1
+// SchemaVersion is the schema profiles.json is written in: 2 since B730 B1,
+// which took DoP evidence rate by rate and added the iOS projection.
+const SchemaVersion = 2
 
 // DefaultDSDPrefillMs is the DSD silence a hardware run starts with where a
 // profile gives none: iOS's DSD resync default (the design's section 2.1).
@@ -93,8 +100,18 @@ const (
 	// SourceCapture is a capture of a real unit on Linux, dated in the ref.
 	SourceCapture = "capture"
 	// SourceIOSRegistry is a row of the iOS app's DACProfile.swift at a commit:
-	// "DACProfile.swift <row id> at iOS <commit>".
+	// "DACProfile.swift <row id> at iOS <commit>", the profile's own row.
 	SourceIOSRegistry = "ios-registry"
+	// SourceListening is a listening on a device, and SourceMaker a maker's
+	// document, each dated in the ref.
+	SourceListening = "listening"
+	SourceMaker     = "maker"
+)
+
+// The kinds of a statement without DoP (Statement).
+const (
+	StatementDSD  = "dsd"
+	StatementNone = "none"
 )
 
 // Database is profiles.json.
@@ -103,7 +120,17 @@ type Database struct {
 	// SharedReferenceIDs are the vendor and product IDs many products ship:
 	// an alternative on one names its product string.
 	SharedReferenceIDs []SharedID `json:"sharedReferenceIds"`
-	Profiles           []Profile  `json:"profiles"`
+	// IOSGenericNames are names iOS gives a port that name no DAC model, a
+	// chip's or a board's default string, which no match reads.
+	IOSGenericNames []GenericName `json:"iosGenericNames"`
+	Profiles        []Profile     `json:"profiles"`
+}
+
+// GenericName is a name of IOSGenericNames, and why it names no model, with
+// its source.
+type GenericName struct {
+	Name string `json:"name"`
+	Why  string `json:"why"`
 }
 
 // SharedID is a shared reference ID, and why it is one, with its source.
@@ -119,21 +146,26 @@ type Profile struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	// Match is the model's alternatives: a unit matching one is this model.
+	// None is a profile of the iOS projection alone, which IOS must be.
 	Match   []Match  `json:"match"`
 	Native  *Native  `json:"native"`
 	DoP     *DoP     `json:"dop"`
 	Timing  *Timing  `json:"timing"`
 	Caveats []Caveat `json:"caveats"`
-	// Provenance is one line a claim: "identity: …", "native: …", "dop: …",
-	// "timing: …" and "caveat <code>: …", each naming its source and its date
-	// or version. A dop line's clauses (the text after "dop: ", split on
-	// semicolons and trimmed) credit DoP rates only in one form: a marker,
-	// heard, refused or silence at, its rates separated by commas, then a
-	// colon and free text, or the clause's end ("refused DSD256: the unit
-	// would not negotiate its carrier (iOS cd125088)"). A clause that starts
-	// with no marker is free text and evidence of nothing; a marker clause of
-	// another shape, or a rate both heard and refused (refused and silence at
-	// are one result), is a problem.
+	// IOS is the model's iOS registry row, null where the app has none.
+	IOS *IOS `json:"ios"`
+	// Provenance is one line a claim: "identity: …" (a profile with a match
+	// alone), "native: …", "dop: …", "timing: …", "caveat <code>: …" and
+	// "ios: DACProfile.swift <id> at iOS <commit>", each naming its source
+	// and its date or version. A dop line's clauses (the text after "dop: ",
+	// split on semicolons and trimmed) credit DoP evidence only in one form: a
+	// marker, its rates separated by commas, then a colon and free text, or
+	// the clause's end ("refused DSD256: the unit would not negotiate its
+	// carrier (iOS cd125088)"). The markers are heard; the failures refused,
+	// silence at, noise at and no frames at; and the statements stated DoP to
+	// and stated DSD to, with one rate, and stated no DSD. With IOS, the text
+	// after a colon opens with its source's head (Credit). A marker clause of
+	// another shape, or a rate heard and failed, is a problem.
 	Provenance []string `json:"provenance"`
 }
 
@@ -160,18 +192,21 @@ type Native struct {
 	Source  Source   `json:"source"`
 }
 
-// DoP is what is known of the model's DSD over PCM.
+// DoP is what is known of the model's DSD over PCM, rate by rate.
 type DoP struct {
-	// HeardMaxBitRate is the highest rate a listening on a device heard,
-	// never one a negotiation, a hardware confirmation or a DoP lock reached
-	// (section 1.1: the iOS lock hears nothing back), and a heard clause of a
-	// dop provenance line lists it ("heard DSD128: <source>", the form
-	// Provenance gives); StatedMaxBitRate is the maker's figure; 0 is none.
-	HeardMaxBitRate  int `json:"heardMaxBitRate"`
-	StatedMaxBitRate int `json:"statedMaxBitRate"`
-	// RefusedBitRates are the rates a device refused, or played as silence,
-	// each listed by a refused or a silence at clause of a dop provenance line
-	// ("refused DSD256: <source>", "silence at DSD256: <source>").
+	// HeardBitRates are the rates a listening on a device heard, ascending,
+	// each heard itself and saying nothing of the rates below it, and never
+	// one a negotiation, a hardware confirmation or a DoP lock reached
+	// (section 1.1: the iOS lock hears nothing back).
+	HeardBitRates []int `json:"heardBitRates"`
+	// StatedMaxBitRate is the maker's figure for DoP, 0 for none;
+	// StatedWithoutDoP is a maker's statement that says nothing of DoP, which
+	// the player never reads. At most one is set.
+	StatedMaxBitRate int        `json:"statedMaxBitRate"`
+	StatedWithoutDoP *Statement `json:"statedWithoutDoP"`
+	// RefusedBitRates are the rates that failed on a device: its carrier
+	// refused, played as silence or noise, or no attempt's frames taken. A
+	// failed rate may lie below a heard one.
 	RefusedBitRates []int `json:"refusedBitRates"`
 	// AnalogVolumeControls are the controls this model applies after its DoP
 	// decoder, which the DoP gain check passes over.
@@ -180,6 +215,55 @@ type DoP struct {
 	// is unity on this model, on the firmware each lists.
 	UnityAtRawMax []RawMaxControl `json:"unityAtRawMax"`
 	Source        Source          `json:"source"`
+}
+
+// Statement is a maker's statement that says nothing of DoP: a DSD figure,
+// native or its transport unstated, to MaxBitRate (StatementDSD), or that the
+// model plays no DSD (StatementNone, MaxBitRate 0).
+type Statement struct {
+	Kind       string `json:"kind"`
+	MaxBitRate int    `json:"maxBitRate"`
+}
+
+// IOS is a model's row in the iOS app's registry (DACProfile.swift), which
+// scripts/dac-profiles/ios-export writes the app's copy from.
+type IOS struct {
+	// Order is the row's place in the registry, 1 to N: until iOS PR 3 the
+	// app takes the first row whose patterns a port's name holds.
+	Order int    `json:"order"`
+	Maker string `json:"maker"`
+	// LegacyPatterns are the row's matchPatterns and LegacyCeilingBitRate its
+	// maxDSDRate (0 for none), as the registry holds them until iOS PR 3.
+	LegacyPatterns       []string `json:"legacyPatterns"`
+	LegacyCeilingBitRate int      `json:"legacyCeilingBitRate"`
+	// PortNames are names iOS gave a port of the model, verbatim; NameTokens
+	// and ExcludedTokens are the tokens that rule a name in and out; a family
+	// scope is a name several models share, whose results are SiblingNote's.
+	PortNames      []string `json:"portNames"`
+	NameTokens     []string `json:"nameTokens"`
+	ExcludedTokens []string `json:"excludedTokens"`
+	NameScope      string   `json:"nameScope"`
+	SiblingNote    *string  `json:"siblingNote"`
+	PCM            IOSPCM   `json:"pcm"`
+	// VolumeTopology is the row's iOS case name (dacOwnsGain).
+	VolumeTopology string    `json:"volumeTopology"`
+	Timing         IOSTiming `json:"timing"`
+}
+
+// IOSPCM is the PCM ceiling an iOS row states.
+type IOSPCM struct {
+	MaxRateHz int `json:"maxRateHz"`
+	BitDepth  int `json:"bitDepth"`
+}
+
+// IOSTiming is an iOS row's times in whole milliseconds, each null where
+// the row gives none.
+type IOSTiming struct {
+	IOBufferMs          *int `json:"ioBufferMs"`
+	DSDResyncMs         *int `json:"dsdResyncMs"`
+	PCMEntryResyncMs    *int `json:"pcmEntryResyncMs"`
+	ColdStartExtraMs    *int `json:"coldStartExtraMs"`
+	TransitionCushionMs *int `json:"transitionCushionMs"`
 }
 
 // ControlID names a card's control as ALSA does: its interface (MIXER, CARD,
