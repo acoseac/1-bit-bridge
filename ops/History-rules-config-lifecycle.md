@@ -4173,4 +4173,4 @@ F2, F3, F4, F7, F8 and F9.
   units, so it stopped names the handler takes (129 emoji), and it cut a
   paste without a word; the handler's 400 is what the page shows ("Save
   failed: libraryName: must be at most 256 characters, …"). Added in #1046's
-  first round, removed on review (CodeRabbit).
+  first round, removed on review.
