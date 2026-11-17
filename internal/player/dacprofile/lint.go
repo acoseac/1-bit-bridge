@@ -43,30 +43,55 @@ var (
 	reTag       = regexp.MustCompile(`\bv\d+\.\d+\b`)
 	reIOSCommit = regexp.MustCompile(`\biOS [0-9a-f]{7,40}\b`)
 	reKernelRef = regexp.MustCompile(`^sound/usb/quirks\.c at v\d+\.\d+$`)
-	reIOSRef    = regexp.MustCompile(`^DACProfile\.swift [a-z0-9]+(?:[.-][a-z0-9]+)+ at iOS [0-9a-f]{7,40}$`)
+	// reIOSRef is a row of the iOS registry at a commit, the row its group.
+	reIOSRef = regexp.MustCompile(`^DACProfile\.swift ([a-z0-9]+(?:[.-][a-z0-9]+)+) at iOS [0-9a-f]{7,40}$`)
 	// reNeverSaid are the words never used of DSD on the bridge's player (the
 	// design's section 1.3), with their inflections: no note claims a DAC
-	// decodes DSD. It reads caveat notes, never provenance, whose free text
-	// says what was observed, a DoP lock included.
+	// decodes DSD. It reads caveat notes and a family's sibling note, never
+	// provenance, whose free text says what was observed, a DoP lock
+	// included.
 	reNeverSaid = regexp.MustCompile(`(?i)\b(verif(?:y|ies|ied)|decod(?:e|es|ed|ing)|bit-exact|bit-perfect|lock(?:s|ed|ing)?|seal(?:s|ed)?|qualif(?:y|ies|ied))\b`)
 	// reMarker is a dop clause that starts with a marker, in any case, with a
-	// word boundary after it.
-	reMarker = regexp.MustCompile(`^(?i:heard|refused|silence at)\b`)
-	// reEvidence is a marker clause in the form evidence is written in: the
-	// marker, its rates separated by commas, then a colon and anything else,
-	// which nothing reads, or the clause's end.
-	reEvidence = regexp.MustCompile(`^(?i:heard|refused|silence at)\s+(DSD\d+(?:\s*,\s*DSD\d+)*)\s*(?::|$)`)
-	reRateName = regexp.MustCompile(`DSD\d+`)
+	// word boundary after it: stated opens each of the three statements.
+	reMarker = regexp.MustCompile(`^(?i:heard|refused|silence at|noise at|no frames at|stated)\b`)
+	// reEvidence is a rate marker's clause in the form evidence is written
+	// in: the marker, its rates separated by commas, then a colon and anything
+	// else, which nothing reads but a head (reHead), or the clause's end.
+	reEvidence = regexp.MustCompile(`^(?i:heard|refused|silence at|noise at|no frames at)\s+(DSD\d+(?:\s*,\s*DSD\d+)*)\s*(?::|$)`)
+	// reStatement is a statement's clause in that form: stated DoP to or
+	// stated DSD to and its one rate, or stated no DSD.
+	reStatement = regexp.MustCompile(`^(?i:stated (dop|dsd) to)\s+(DSD\d+)\s*(?::|$)|^(?i:stated no dsd)\s*(?::|$)`)
+	reRateName  = regexp.MustCompile(`DSD\d+`)
+	// reHead is the head a clause's text after its colon opens with in a
+	// profile with an iOS projection: its source's kind, iOS's (submission,
+	// fieldLog, maker, pcmCeiling, chipSpecification, retailer) in words, and
+	// a date where the source has one, then the text's end, ", " or " (".
+	reHead = regexp.MustCompile(`^(submission|field log|maker|pcm ceiling|chip specification|retailer)(?: (\d{4}-\d{2}-\d{2}))?(?:$|, | \()`)
+	// datedHeads are the kinds whose head always names its date, a submission
+	// and a field log, as each of theirs does in the registry's baseline and
+	// in the catalog; a maker, a PCM ceiling, a chip specification and a
+	// retailer name none there, and none is asked of them.
+	datedHeads = []string{"submission", "field log"}
+	// reCaseName is a Swift enum case's name, as an iOS volume topology is.
+	reCaseName = regexp.MustCompile(`^[a-z][A-Za-z0-9]*$`)
 )
 
-// The markers a dop clause starts with to credit the rates it lists: heard, a
-// listening heard them; refused and silence at, a device refused them or
-// played them as silence (the design's section 2.1).
+// The markers a dop clause starts with to credit what it lists (the design's
+// section 2.1; B730): heard; the failures, a carrier refused, silence, noise
+// or no attempt's frames taken; and the statements.
 const (
-	markerHeard   = "heard"
-	markerRefused = "refused"
-	markerSilence = "silence at"
+	markerHeard      = "heard"
+	markerRefused    = "refused"
+	markerSilence    = "silence at"
+	markerNoise      = "noise at"
+	markerNoFrames   = "no frames at"
+	markerStatedDoP  = "stated DoP to"
+	markerStatedDSD  = "stated DSD to"
+	markerStatedNone = "stated no DSD"
 )
+
+// minTokenLen is the fewest characters an iOS name token holds (iOS PR 1).
+const minTokenLen = 4
 
 // dsdName is a rate of dsdRates as a claim names it: DSD and the rate's
 // multiple of 44.1 kHz (DSD128).
@@ -94,10 +119,12 @@ func (l *linter) add(format string, args ...any) {
 // usbid.Hex16's form and product strings the sysfs reader returns; a shared
 // reference ID matched without its product string; two profiles one unit
 // could match; a claim, a shared ID, an analogue control or a raw-maximum
-// entry without its provenance or evidence; a caveat off the closed list.
-// The kernel-derived claims against the pinned tag, and the iOS registry's
-// rates against their rows, are checked against those files
-// (TestTheKernelSeedIsThePinnedTags, scripts/dac-profiles).
+// entry without its provenance or evidence; a caveat off the closed list;
+// DoP evidence its clauses do not credit rate by rate; and an iOS projection
+// iOS PR 1's checks refuse, a known sibling its strict matcher answers with a
+// model row included. The kernel-derived claims are checked against the
+// pinned tag (TestTheKernelSeedIsThePinnedTags), and the iOS projection
+// against the registry's baseline by its export (scripts/dac-profiles).
 func (db *Database) Lint() []error {
 	var l linter
 	if db.SchemaVersion != SchemaVersion {
@@ -122,6 +149,16 @@ func (db *Database) Lint() []error {
 			l.sourced(who+": its why", s.Why)
 		}
 	}
+	var generic []string
+	for _, g := range db.IOSGenericNames {
+		generic = append(generic, g.Name)
+		if who := fmt.Sprintf("iOS generic name %q", g.Name); strings.TrimSpace(g.Why) == "" {
+			l.add("%s: says no why", who)
+		} else {
+			l.sourced(who+": its why", g.Why)
+		}
+	}
+	l.names("iOS generic name", generic, true)
 	ids := map[string]bool{}
 	for i := range db.Profiles {
 		p := &db.Profiles[i]
@@ -139,6 +176,7 @@ func (db *Database) Lint() []error {
 		l.profile(who, p, shared)
 	}
 	l.overlaps(db)
+	l.nameKeys(db)
 	return l.problems
 }
 
@@ -153,8 +191,23 @@ func (l *linter) profile(who string, p *Profile, shared map[[2]uint16]bool) {
 	if p.Name == "" || strings.TrimSpace(p.Name) != p.Name {
 		l.add("%s: a name is set, with no white space around it", who)
 	}
-	if len(p.Match) == 0 {
+	if len(p.Match) == 0 && p.IOS == nil {
 		l.add("%s: no match alternative", who)
+	}
+	if len(p.Match) == 0 && p.IOS != nil {
+		for _, c := range []struct {
+			name string
+			set  bool
+		}{
+			{"native claim", p.Native != nil},
+			{"timing", p.Timing != nil},
+			{"analogue control", p.DoP != nil && len(p.DoP.AnalogVolumeControls) > 0},
+			{"raw-maximum control", p.DoP != nil && len(p.DoP.UnityAtRawMax) > 0},
+		} {
+			if c.set {
+				l.add("%s: a profile with no match alternative is iOS's alone and has no %s, which only a match reaches", who, c.name)
+			}
+		}
 	}
 	for j, m := range p.Match {
 		mw := fmt.Sprintf("%s, match %d", who, j+1)
@@ -169,13 +222,16 @@ func (l *linter) profile(who string, p *Profile, shared map[[2]uint16]bool) {
 		l.native(who, p.Native)
 	}
 	if p.DoP != nil {
-		l.dop(who, p.DoP)
+		l.dop(who, p)
 		l.dopEvidence(who, p)
 	}
 	if p.Timing != nil {
 		l.timing(who, p.Timing)
 	}
 	l.caveats(who, p.Caveats)
+	if p.IOS != nil {
+		l.ios(who, p)
+	}
 	l.provenance(who, p)
 }
 
@@ -270,13 +326,16 @@ func (l *linter) native(who string, n *Native) {
 	}
 }
 
-func (l *linter) dop(who string, d *DoP) {
-	for _, r := range []struct {
-		name string
-		rate int
-	}{{"heardMaxBitRate", d.HeardMaxBitRate}, {"statedMaxBitRate", d.StatedMaxBitRate}} {
-		if r.rate != 0 && !slices.Contains(dsdRates, r.rate) {
-			l.add("%s: DoP %s %d is not a DSD rate from DSD64 to DSD512", who, r.name, r.rate)
+func (l *linter) dop(who string, p *Profile) {
+	d := p.DoP
+	if d.StatedMaxBitRate != 0 && !slices.Contains(dsdRates, d.StatedMaxBitRate) {
+		l.add("%s: DoP statedMaxBitRate %d is not a DSD rate from DSD64 to DSD512", who, d.StatedMaxBitRate)
+	}
+	for i, r := range d.HeardBitRates {
+		if !slices.Contains(dsdRates, r) {
+			l.add("%s: heard rate %d is not a DSD rate from DSD64 to DSD512", who, r)
+		} else if i > 0 && r <= d.HeardBitRates[i-1] {
+			l.add("%s: heardBitRates lists %d after %d: ascending, each rate once", who, r, d.HeardBitRates[i-1])
 		}
 	}
 	seen := map[int]bool{}
@@ -288,15 +347,32 @@ func (l *linter) dop(who string, d *DoP) {
 			l.add("%s: refused rate %d is listed twice", who, r)
 		}
 		seen[r] = true
-		if d.HeardMaxBitRate != 0 && r <= d.HeardMaxBitRate {
-			l.add("%s: refused rate %d is at or below the rate heard, %d", who, r, d.HeardMaxBitRate)
+	}
+	if s := d.StatedWithoutDoP; s != nil {
+		if !(s.Kind == StatementDSD && slices.Contains(dsdRates, s.MaxBitRate) || s.Kind == StatementNone && s.MaxBitRate == 0) {
+			l.add("%s: statedWithoutDoP is {\"kind\": \"dsd\", \"maxBitRate\": <a DSD rate>} or {\"kind\": \"none\", \"maxBitRate\": 0}", who)
+		}
+		if d.StatedMaxBitRate != 0 {
+			l.add("%s: the DoP claim holds a statement of DoP and one without it: at most one is set", who)
+		}
+		if s.Kind == StatementNone && len(d.HeardBitRates) > 0 {
+			l.add("%s: a statement of no DSD beside a heard rate", who)
 		}
 	}
-	if d.HeardMaxBitRate == 0 && d.StatedMaxBitRate == 0 && len(d.RefusedBitRates) == 0 {
+	if len(d.HeardBitRates) == 0 && d.StatedMaxBitRate == 0 && d.StatedWithoutDoP == nil && len(d.RefusedBitRates) == 0 {
 		l.add("%s: the DoP claim claims nothing: no rate heard, stated or refused", who)
 	}
-	if d.Source.Kind != SourceIOSRegistry || !reIOSRef.MatchString(d.Source.Ref) {
-		l.add("%s: the DoP claim's source is the iOS registry, \"DACProfile.swift <row> at iOS <commit>\"", who)
+	switch d.Source.Kind {
+	case SourceIOSRegistry:
+		if !ownRow(d.Source.Ref, p.ID) {
+			l.add("%s: the DoP claim's source is the profile's own row of the iOS registry, \"DACProfile.swift %s at iOS <commit>\"", who, p.ID)
+		}
+	case SourceListening, SourceMaker:
+		if !hasDate(d.Source.Ref) || strings.Contains(d.Source.Ref, "@") {
+			l.add("%s: a DoP claim's %s source names its date, and no email address", who, d.Source.Kind)
+		}
+	default:
+		l.add("%s: the DoP claim's source is the iOS registry, \"DACProfile.swift <row> at iOS <commit>\", a listening or a maker's document, not %q", who, d.Source.Kind)
 	}
 	analogue := map[ControlID]bool{}
 	for _, c := range d.AnalogVolumeControls {
@@ -328,26 +404,27 @@ func (l *linter) dop(who string, d *DoP) {
 	}
 }
 
-// dopEvidence holds a DoP claim's rates to its provenance, whose evidence is
-// written in one form, since a lint cannot read prose: round 3 read negation,
-// and the review of #1402 broke the reading from both sides. A dop line's
-// clauses are the text after "dop: ", split on semicolons and trimmed. A
-// clause that starts with a marker (heard, refused or silence at, in any
-// case, a word boundary after it) must be the marker, its rates separated by
-// commas, then a colon or the clause's end (reEvidence), and credits those
-// rates alone; what follows the colon is read by nothing, so it may say
-// anything, a negation included. A marker clause of any other shape is a
-// problem that shows the form to write. A clause that starts with no marker
-// is free text and evidence of nothing ("DSD128's carrier reached a DoP
-// lock"): a negotiation, a hardware confirmation or a DoP lock is evidence of
-// the transport, which no field here holds. The heard rate needs a heard
-// clause that lists it, each refused rate a refused or silence at clause, and
-// a rate both heard and refused in one profile's provenance is a
-// contradiction; refused and silence at are one result, a refusal, which two
-// units may give in two ways ("refused DSD256: unit 1 …; silence at DSD256:
-// unit 2 …"). A rate dop refuses as no DSD rate is not asked for again.
-func (l *linter) dopEvidence(who string, p *Profile) {
-	markers := map[int][]string{}
+// Credit is a marker clause of a profile's dop lines: its marker as written
+// above (markerHeard), the rates it credits, and the kind and the date ("" for
+// none) of its head (reHead), which ios-export reads as the entry's source.
+type Credit struct {
+	Marker     string
+	BitRates   []int
+	Kind, Date string
+	clause     string
+}
+
+// Credits are the marker clauses of p's dop lines in evidence's form, in
+// order, as Lint reads them.
+func (p *Profile) Credits() []Credit { return p.credits(func(string, ...any) {}) }
+
+// credits are p's marker clauses in the form Provenance gives, each clause
+// of another shape and each rate that is none told to problem. What follows
+// a clause's colon is read by nothing but its head, so it may say anything, a
+// negation included; a clause that starts with no marker is evidence of
+// nothing ("DSD128's carrier reached a DoP lock": a lock hears nothing).
+func (p *Profile) credits(problem func(format string, args ...any)) []Credit {
+	var cs []Credit
 	for _, line := range p.Provenance {
 		text, ok := strings.CutPrefix(line, "dop: ")
 		if !ok {
@@ -355,46 +432,123 @@ func (l *linter) dopEvidence(who string, p *Profile) {
 		}
 		for _, clause := range strings.Split(text, ";") {
 			clause = strings.TrimSpace(clause)
-			m := reMarker.FindString(clause)
-			if m == "" {
+			marker := strings.ToLower(reMarker.FindString(clause))
+			if marker == "" {
 				continue
 			}
-			marker := strings.ToLower(m)
-			f := reEvidence.FindStringSubmatch(clause)
-			if f == nil {
-				l.add("%s: the dop clause %q starts with the marker %q and is not in the form evidence is written in, %q: the marker, its rates separated by commas, then a colon and anything else, or the clause's end",
-					who, clause, marker, marker+" DSD64, DSD128: <source>")
+			c := Credit{Marker: marker, clause: clause}
+			var f []string
+			if marker == "stated" {
+				if f = reStatement.FindStringSubmatch(clause); f == nil {
+					problem("the dop clause %q is a statement not in the form evidence is written in: %q, %q or %q", clause, markerStatedDoP+" DSD256: <source>", markerStatedDSD+" DSD256: <source>", markerStatedNone+": <source>")
+					continue
+				}
+				c.Marker = map[string]string{"dop": markerStatedDoP, "dsd": markerStatedDSD, "": markerStatedNone}[strings.ToLower(f[1])]
+				f[1] = f[2]
+			} else if f = reEvidence.FindStringSubmatch(clause); f == nil {
+				problem("the dop clause %q starts with the marker %q and is not in the form evidence is written in, %q: the marker, its rates separated by commas, then a colon and anything else, or the clause's end", clause, marker, marker+" DSD64, DSD128: <source>")
 				continue
 			}
 			for _, name := range reRateName.FindAllString(f[1], -1) {
-				rate, ok := dsdRateNamed(name)
-				if !ok {
-					l.add("%s: the dop clause %q lists %s, which is not a DSD rate from DSD64 to DSD512", who, clause, name)
-					continue
+				if rate, ok := dsdRateNamed(name); ok {
+					c.BitRates = append(c.BitRates, rate)
+				} else {
+					problem("the dop clause %q lists %s, which is not a DSD rate from DSD64 to DSD512", clause, name)
 				}
-				if !slices.Contains(markers[rate], marker) {
-					markers[rate] = append(markers[rate], marker)
+			}
+			if strings.HasSuffix(f[0], ":") {
+				if h := reHead.FindStringSubmatch(strings.TrimSpace(clause[len(f[0]):])); h != nil && (h[2] == "" || hasDate(h[2])) {
+					c.Kind, c.Date = h[1], h[2]
 				}
+			}
+			cs = append(cs, c)
+		}
+	}
+	return cs
+}
+
+// dopEvidence holds a DoP claim to its clauses (credits), written in one form
+// since a lint cannot read prose (round 3 read negation, and the review of
+// #1402 broke the reading from both sides), rate by rate and both ways: the
+// rates heard clauses credit are heardBitRates, failure clauses' are
+// refusedBitRates, and the statement clauses credit the claim's statement. A
+// rate heard and failed is a contradiction; the four failures are one result,
+// which two units may give in two ways. In a profile with an iOS projection
+// every marker clause has its head, a dated kind's with its date, and one
+// clause credits each rate and the statement.
+func (l *linter) dopEvidence(who string, p *Profile) {
+	d := p.DoP
+	cs := p.credits(func(format string, args ...any) { l.add("%s: "+format, append([]any{who}, args...)...) })
+	heard, failed := map[int][]string{}, map[int][]string{}
+	var stated []string
+	for _, c := range cs {
+		if c.Kind == "" && p.IOS != nil {
+			l.add("%s: the dop clause %q, in a profile with an iOS projection, opens its text after a colon with its source's head: %s, then a date where it has one (%q)", who, c.clause, "submission, field log, maker, pcm ceiling, chip specification or retailer", "heard DSD128: submission 2026-10-04 (…)")
+		}
+		if c.Date == "" && p.IOS != nil && slices.Contains(datedHeads, c.Kind) {
+			l.add("%s: the dop clause %q, in a profile with an iOS projection, heads a %s with no date, and a submission's or a field log's head names its date (%q)", who, c.clause, c.Kind, "heard DSD128: submission 2026-10-04 (…)")
+		}
+		switch {
+		case c.Marker == markerHeard:
+			for _, r := range c.BitRates {
+				heard[r] = append(heard[r], c.Marker)
+			}
+		case strings.HasPrefix(c.Marker, "stated"):
+			s := c.Marker
+			for _, r := range c.BitRates {
+				s += " " + dsdName(r)
+			}
+			stated = append(stated, s)
+		default:
+			for _, r := range c.BitRates {
+				failed[r] = append(failed[r], c.Marker)
 			}
 		}
 	}
 	for _, r := range dsdRates {
-		ms := markers[r]
-		if slices.Contains(ms, markerHeard) && (slices.Contains(ms, markerRefused) || slices.Contains(ms, markerSilence)) {
-			l.add("%s: %s is both heard and refused in its dop clauses (%q): heard is one result, and refused and silence at are the other, which two units may give in two ways",
-				who, dsdName(r), ms)
+		if len(heard[r]) > 0 && len(failed[r]) > 0 {
+			l.add("%s: %s is both heard and refused in its dop clauses (%q): heard is one result, and refused, silence at, noise at and no frames at, which two units may give in two ways, the other", who, dsdName(r), append(heard[r], failed[r]...))
+		}
+		if listed := slices.Contains(d.HeardBitRates, r); listed && len(heard[r]) == 0 {
+			l.add("%s: a heard DoP rate is a listening, and no dop clause credits %s as heard: write %q in the dop line (a clause that starts with no marker is evidence of nothing, and a negotiation, a hardware confirmation or a DoP lock hears nothing, section 1.1)", who, dsdName(r), markerHeard+" "+dsdName(r)+": <source>")
+		} else if !listed && len(heard[r]) > 0 {
+			l.add("%s: a dop clause credits %s as heard, and heardBitRates does not list it", who, dsdName(r))
+		}
+		if listed := slices.Contains(d.RefusedBitRates, r); listed && len(failed[r]) == 0 {
+			l.add("%s: refused rate %s has no dop clause that credits it: write %q, or %q, %q or %q for a rate a device played as silence or noise or took no frames of", who, dsdName(r), markerRefused+" "+dsdName(r)+": <source>", markerSilence+" "+dsdName(r), markerNoise+" "+dsdName(r), markerNoFrames+" "+dsdName(r))
+		} else if !listed && len(failed[r]) > 0 {
+			l.add("%s: a dop clause credits %s as failed (%q), and refusedBitRates does not list it", who, dsdName(r), failed[r])
+		}
+		if n := len(heard[r]) + len(failed[r]); p.IOS != nil && n > 1 {
+			l.add("%s: %s is credited by %d dop clauses, and in a profile with an iOS projection one clause credits each rate", who, dsdName(r), n)
 		}
 	}
-	if h := p.DoP.HeardMaxBitRate; slices.Contains(dsdRates, h) && !slices.Contains(markers[h], markerHeard) {
-		l.add("%s: a heard DoP rate is a listening, and no dop clause credits %s as heard: write %q in the dop line (a clause that starts with no marker is evidence of nothing, and a negotiation, a hardware confirmation or a DoP lock hears nothing, section 1.1)",
-			who, dsdName(h), markerHeard+" "+dsdName(h)+": <source>")
-	}
-	for _, r := range p.DoP.RefusedBitRates {
-		if slices.Contains(dsdRates, r) && !slices.Contains(markers[r], markerRefused) && !slices.Contains(markers[r], markerSilence) {
-			l.add("%s: refused rate %s has no dop clause that credits it: write %q, or %q for a rate a device played as silence",
-				who, dsdName(r), markerRefused+" "+dsdName(r)+": <source>", markerSilence+" "+dsdName(r)+": <source>")
+	want := statement(d)
+	for _, s := range stated {
+		if s != want {
+			l.add("%s: a dop clause credits %q, and the DoP claim's statement is %q", who, s, want)
 		}
 	}
+	if want != "" && len(stated) == 0 {
+		l.add("%s: the DoP claim's statement has no dop clause that credits it: write %q", who, want+": <source>")
+	}
+	if p.IOS != nil && len(stated) > 1 {
+		l.add("%s: the statement is credited by %d dop clauses, and in a profile with an iOS projection one clause credits it", who, len(stated))
+	}
+}
+
+// statement is the clause that credits d's statement, its marker and its
+// rate, or "" for none.
+func statement(d *DoP) string {
+	switch s := d.StatedWithoutDoP; {
+	case d.StatedMaxBitRate != 0:
+		return markerStatedDoP + " " + dsdName(d.StatedMaxBitRate)
+	case s != nil && s.Kind == StatementNone:
+		return markerStatedNone
+	case s != nil:
+		return markerStatedDSD + " " + dsdName(s.MaxBitRate)
+	}
+	return ""
 }
 
 // String names a control as interface/name/index.
@@ -492,9 +646,229 @@ func (l *linter) caveats(who string, cs []Caveat) {
 	}
 }
 
-// claimsOf are the claims p makes, by the name a provenance line starts with.
+// ios checks a profile's iOS projection on its own; nameKeys checks it
+// beside the others'.
+func (l *linter) ios(who string, p *Profile) {
+	x := p.IOS
+	if x.Maker == "" || strings.TrimSpace(x.Maker) != x.Maker {
+		l.add("%s: the iOS maker is set, with no white space around it", who)
+	}
+	for _, s := range x.LegacyPatterns {
+		l.printable(who+": a legacy pattern", s)
+	}
+	if c := x.LegacyCeilingBitRate; c != 0 && !slices.Contains(dsdRates, c) {
+		l.add("%s: the legacy ceiling %d is 0 or a DSD rate from DSD64 to DSD512", who, c)
+	}
+	l.names(who+": the port name", x.PortNames, false)
+	l.names(who+": the name token", x.NameTokens, true)
+	l.names(who+": the excluded token", x.ExcludedTokens, true)
+	for _, t := range x.NameTokens {
+		if len(t) < minTokenLen {
+			l.add("%s: the name token %q is shorter than %d characters", who, t, minTokenLen)
+		}
+		for _, e := range x.ExcludedTokens {
+			if strings.Contains(fold(t), fold(e)) {
+				l.add("%s: the excluded token %q lies inside the row's own token %q, whose names it would rule out", who, e, t)
+			}
+		}
+	}
+	switch x.NameScope {
+	case "model":
+		if x.SiblingNote != nil {
+			l.add("%s: a model row carries no sibling note", who)
+		}
+	case "family":
+		if x.SiblingNote == nil || strings.TrimSpace(*x.SiblingNote) == "" {
+			l.add("%s: a family row's sibling note says what its siblings showed", who)
+		} else if w := reNeverSaid.FindString(*x.SiblingNote); w != "" {
+			l.add("%s: the sibling note says %q, never said of DSD on the bridge's player", who, strings.ToLower(w))
+		}
+		// A family row has no heard or failed rate of its own: its siblings' results live in the note alone, as
+		// iOS PR 1's evidence table keeps ifi.generic's empty (its DoPEvidenceTests). Without this check, only the
+		// export's parity with the pinned baseline would refuse one.
+		if p.DoP != nil && (len(p.DoP.HeardBitRates) > 0 || len(p.DoP.RefusedBitRates) > 0) {
+			l.add("%s: a family row has no heard or failed rate of its own: its siblings' results go in the sibling note", who)
+		}
+	default:
+		l.add("%s: nameScope %q is model or family", who, x.NameScope)
+	}
+	if x.PCM.MaxRateHz <= 0 || !slices.Contains([]int{16, 24, 32}, x.PCM.BitDepth) {
+		l.add("%s: the iOS PCM ceiling is a rate and a depth of 16, 24 or 32 bits", who)
+	}
+	if !reCaseName.MatchString(x.VolumeTopology) {
+		l.add("%s: the volume topology %q is an iOS case name (dacOwnsGain)", who, x.VolumeTopology)
+	}
+	t := x.Timing
+	for _, v := range []*int{t.IOBufferMs, t.DSDResyncMs, t.PCMEntryResyncMs, t.ColdStartExtraMs, t.TransitionCushionMs} {
+		if v != nil && (*v < 0 || *v > MaxTimingMs) {
+			l.add("%s: an iOS time is null or 0 to %d ms, not %d", who, MaxTimingMs, *v)
+		}
+	}
+	l.legacyCeiling(who, p)
+}
+
+// legacyCeiling holds an iOS row's legacy ceiling to its DoP evidence as iOS
+// PR 1 does: 0 exactly for a statement of no DSD, every heard rate at or
+// below it, and no failed rate, where iOS sends DoP.
+func (l *linter) legacyCeiling(who string, p *Profile) {
+	c, d := p.IOS.LegacyCeilingBitRate, DoP{}
+	if p.DoP != nil {
+		d = *p.DoP
+	}
+	if none := d.StatedWithoutDoP != nil && d.StatedWithoutDoP.Kind == StatementNone; none != (c == 0) {
+		l.add("%s: the legacy ceiling is 0 exactly where the maker states no DSD", who)
+	}
+	for _, r := range d.HeardBitRates {
+		if r > c {
+			l.add("%s: heard %s lies above the legacy ceiling", who, dsdName(r))
+		}
+	}
+	for _, r := range d.RefusedBitRates {
+		if r <= c {
+			l.add("%s: failed %s lies at or below the legacy ceiling, where iOS sends DoP", who, dsdName(r))
+		}
+	}
+}
+
+// names checks a list of iOS names: each printable ASCII and not blank,
+// trimmed where trim, and none twice, compared trimmed and folded.
+func (l *linter) names(who string, list []string, trim bool) {
+	seen := map[string]bool{}
+	for _, s := range list {
+		l.printable(who, s)
+		k := fold(strings.TrimSpace(s))
+		switch {
+		case k == "":
+			l.add("%s %q is blank", who, s)
+		case trim && strings.TrimSpace(s) != s:
+			l.add("%s %q has white space around it", who, s)
+		case seen[k]:
+			l.add("%s %q is listed twice", who, s)
+		}
+		seen[k] = true
+	}
+}
+
+// printable refuses an iOS name that is not printable ASCII, on which Swift's
+// lowercased() and fold agree.
+func (l *linter) printable(who, s string) {
+	if strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r > 0x7e }) {
+		l.add("%s %q is not printable ASCII", who, s)
+	}
+}
+
+// fold is s with A to Z in lower case and nothing else changed.
+func fold(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			r += 'a' - 'A'
+		}
+		return r
+	}, s)
+}
+
+// nameKeys holds the iOS rows to iOS PR 1's lint, names folded: orders 1 to
+// N, each once; no port name twice or a generic name; no token and generic
+// name one inside the other; across two profiles only, no token and
+// another's token or port name one inside the other (a profile's own token
+// inside its own port name is how it matches); and no known sibling the
+// strict matcher answers with a model row, by either of its keys.
+func (l *linter) nameKeys(db *Database) {
+	var rows []*Profile
+	for i := range db.Profiles {
+		if db.Profiles[i].IOS != nil {
+			rows = append(rows, &db.Profiles[i])
+		}
+	}
+	orders := map[int]int{}
+	for _, p := range rows {
+		orders[p.IOS.Order]++
+	}
+	for o := 1; o <= len(rows); o++ {
+		if orders[o] != 1 {
+			l.add("the iOS rows: %d hold order %d, and the orders are 1 to %d, each once", orders[o], o, len(rows))
+		}
+	}
+	ports := map[string]string{}
+	for _, p := range rows {
+		for _, n := range p.IOS.PortNames {
+			k := fold(strings.TrimSpace(n))
+			if id, ok := ports[k]; ok && id != p.ID {
+				l.add("profiles %s and %s both give the port name %q", id, p.ID, strings.TrimSpace(n))
+			}
+			ports[k] = p.ID
+			for _, g := range db.IOSGenericNames {
+				if fold(strings.TrimSpace(g.Name)) == k {
+					l.add("profile %s: the port name %q is the generic name %q", p.ID, n, g.Name)
+				}
+			}
+		}
+		for _, t := range p.IOS.NameTokens {
+			ft := fold(t)
+			for _, g := range db.IOSGenericNames {
+				if fg := fold(strings.TrimSpace(g.Name)); strings.Contains(fg, ft) || strings.Contains(ft, fg) {
+					l.add("profile %s: the token %q and the generic name %q lie one inside the other", p.ID, t, g.Name)
+				}
+			}
+			for _, q := range rows {
+				if q == p {
+					continue
+				}
+				for _, u := range q.IOS.NameTokens {
+					if strings.Contains(fold(u), ft) {
+						l.add("profile %s: the token %q lies inside profile %s's token %q", p.ID, t, q.ID, u)
+					}
+				}
+				for _, n := range q.IOS.PortNames {
+					if fn := fold(strings.TrimSpace(n)); strings.Contains(fn, ft) || strings.Contains(ft, fn) {
+						l.add("profile %s: the token %q and profile %s's port name %q lie one inside the other", p.ID, t, q.ID, n)
+					}
+				}
+			}
+		}
+	}
+	for _, s := range db.IOSKnownSiblings {
+		if hits, key := strictHits(s, db.IOSGenericNames, rows); len(hits) == 1 && hits[0].IOS.NameScope == "model" {
+			l.add("profile %s: the known sibling %q reaches this model row through the strict matcher, by its %s", hits[0].ID, s, key)
+		}
+	}
+}
+
+// strictHits are the rows iOS PR 1's strict matcher finds for a port's name
+// under the first of its two keys any row holds, and that key; one row is its
+// answer, and two or none answer no row. A generic name finds none; then the
+// rows with a port name that is the name, both trimmed and the case kept,
+// which no excluded token rules out; then the rows holding a token the name
+// holds and none of their excluded tokens, folded.
+func strictHits(name string, generic []GenericName, rows []*Profile) ([]*Profile, string) {
+	if slices.ContainsFunc(generic, func(g GenericName) bool { return fold(strings.TrimSpace(g.Name)) == fold(strings.TrimSpace(name)) }) {
+		return nil, ""
+	}
+	holds := func(ts []string) bool {
+		return slices.ContainsFunc(ts, func(t string) bool { return strings.Contains(fold(name), fold(t)) })
+	}
+	for _, key := range []string{"port name", "token"} {
+		var hits []*Profile
+		for _, p := range rows {
+			if key == "port name" && slices.ContainsFunc(p.IOS.PortNames, func(n string) bool { return strings.TrimSpace(n) == strings.TrimSpace(name) }) ||
+				key == "token" && holds(p.IOS.NameTokens) && !holds(p.IOS.ExcludedTokens) {
+				hits = append(hits, p)
+			}
+		}
+		if len(hits) > 0 {
+			return hits, key
+		}
+	}
+	return nil, ""
+}
+
+// claimsOf are the claims p makes, by the name a provenance line starts with:
+// identity only for a profile with a match.
 func claimsOf(p *Profile) []string {
-	claims := []string{"identity"}
+	var claims []string
+	if len(p.Match) > 0 {
+		claims = append(claims, "identity")
+	}
 	if p.Native != nil {
 		claims = append(claims, "native")
 	}
@@ -509,13 +883,16 @@ func claimsOf(p *Profile) []string {
 			claims = append(claims, "caveat "+c.Code)
 		}
 	}
+	if p.IOS != nil {
+		claims = append(claims, "ios")
+	}
 	return claims
 }
 
 // knownClaim reports whether name is a claim a profile can make.
 func knownClaim(name string) bool {
 	switch name {
-	case "identity", "native", "dop", "timing":
+	case "identity", "native", "dop", "timing", "ios":
 		return true
 	}
 	code, ok := strings.CutPrefix(name, "caveat ")
@@ -523,7 +900,8 @@ func knownClaim(name string) bool {
 }
 
 // provenance checks that each claim p makes has a line, "<claim>: …", naming
-// a dated or versioned source, and that no line names another claim.
+// a dated or versioned source, that no line names another claim, and that
+// an ios line names the profile's own registry row.
 func (l *linter) provenance(who string, p *Profile) {
 	made := claimsOf(p)
 	lined := map[string]bool{}
@@ -532,9 +910,11 @@ func (l *linter) provenance(who string, p *Profile) {
 		claim, text, ok := strings.Cut(line, ": ")
 		switch {
 		case !ok || !knownClaim(claim):
-			l.add("%s names no claim (identity, native, dop, timing or caveat <code>)", lw)
+			l.add("%s names no claim (identity, native, dop, timing, caveat <code> or ios)", lw)
 		case !slices.Contains(made, claim):
 			l.add("%s is for a %s claim the profile does not make", lw, claim)
+		case claim == "ios" && !ownRow(text, p.ID):
+			l.add("%s is the profile's own registry row, \"ios: DACProfile.swift %s at iOS <commit>\"", lw, p.ID)
 		default:
 			lined[claim] = true
 			l.sourced(lw, text)
@@ -557,6 +937,13 @@ func (l *linter) sourced(who, text string) {
 	if !hasDate(text) && !reTag.MatchString(text) && !reIOSCommit.MatchString(text) {
 		l.add("%s names no date or version of its source", who)
 	}
+}
+
+// ownRow reports whether ref is the profile id's own row of the iOS
+// registry at a commit.
+func ownRow(ref, id string) bool {
+	m := reIOSRef.FindStringSubmatch(ref)
+	return m != nil && m[1] == id
 }
 
 // hasDate reports whether text holds a date, YYYY-MM-DD, that is one.

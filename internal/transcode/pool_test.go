@@ -514,13 +514,19 @@ func TestPoolActiveWorkersReflectsInflight(t *testing.T) {
 
 	p := NewPool(store, 1, 4)
 	p.fsyncFn = noopFsync
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { stopPoolWithin(t, p, 30*time.Second) })
 
 	started := make(chan struct{})
 	release := make(chan struct{})
 	p.runner = func(ctx context.Context, _ JobSpec) (RunResult, error) {
 		close(started)
-		<-release // hold the worker busy until the test releases it
+		// Hold the worker busy until the test releases it, or until Stop
+		// cancels the job: a failure before the release fails by its own
+		// message instead of leaving the cleanup's stop waiting (B925).
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
 		// Synthetic failure → the runner-error terminal path (which, like
 		// every terminal path, clears the slot via finishJob). Avoids the
 		// variant FK that a success path's UpsertVariant would hit.

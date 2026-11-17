@@ -2298,7 +2298,30 @@ mentions across the four `ops/audit-*.md` files.
 
 - **`bridge fingerprint` takes `--config` and follows its switch while a lookup run runs: `BRIDGE_ENRICH_ENABLED`, else the file `--config` names (one that is not there refuses), else the file at the default path, else on, read as the run starts and then once a second by one goroutine started right after that read, before the key check and the fpcalc probe (`fingerprintSwitch.follow`), which ends the run's context at the read that finds the switch off, or finds a config it read gone or no longer loading; the run then exits 1 in the refusal's words, and its client and its context ask only the last read's answer** (2026-11-07, backlog B617's third and fourth rounds; `enrichment.md`'s B617 bullet). **Don't read the switch once, follow it only once the probe is done, take a `--config` file that is not there for on, re-read the config at each ask, or let a config found at the start that is gone read as the default.** `TestBridgeFingerprintReadsTheConfigItIsGiven`, `TestBridgeFingerprintFollowsItsSwitchWhileItRuns`, `TestBridgeFingerprintFollowsItsSwitchFromItsFirstRead` and `TestTheFingerprintSwitchIsReadAtMostOnceASecond` pin it.
 
+- **A sweeper's `enabled` predicate fails CLOSED on nil**, and the gate check
+  belongs in the loop's callback, not buried in the pass. `analysisSweeper.active()`
+  returns false for a nil sweeper or a nil predicate; `runFingerprintSweeper`'s
+  `enabled` reads the other way, a nil one letting the pass run
+  (`enabled != nil && !enabled()`), and is its own call, while its
+  `enrichmentOn` fails closed, as every switch `enrichgate` asks does (the
+  bullet below): a nil one runs no pass and records none
+  (`TestNoSwitchIsOffForTheSweepAndTheCoverRefresh`). A disabled pass records
+  NO status, so the Jobs card keeps its last real breakdown.
+
 - **Serve's harvest cover adapter (`atlasCoverRefetcher`) asks `enrich.enabled` before each refetch and runs it on the switch's context, and a refetch the switch stopped is `atlasharvest.ErrCoversPaused`, never the miss a CAA answer is, and a refetch whose cover the premium fetch's write committed is got whatever the switch says by then, so the harvest settles it; the adapter's switch, and the fingerprint sweep's `enrichmentOn`, are off when nil, as every switch `enrichgate` asks (unlike the sweep's `enabled`, the bullet above)** (2026-11-06, backlog B617, round 3 for the nil, round 5 for a committed cover; `enrichment.md`'s B617 bullet). **Don't answer a switched-off refetch (false, nil): six of those drop a pending cover; don't answer a committed cover with a pause, which fetches it again; and don't read a nil switch as on.** `TestTheCoverAdapterAsksAtlasNothingWhileEnrichmentIsOff`, `TestTheHarvestRunsWithEnrichmentOff`, `TestNoSwitchIsOffForTheSweepAndTheCoverRefresh` and `TestAPremiumUpgradeWrittenAfterTheFlipIsGot` pin it.
+
+- **`flag.Parse` stops at the first non-flag argument, so an unguarded
+  subcommand silently WIDENS its scope.** `bridge enrichment retry
+  Artist/Album` parsed with `--path` empty, and an empty scope is the whole
+  library: a whole-library `enriched_at` reset and a delta to every paired
+  device in place of one album. `library remove` had guarded this since PR #78.
+  Any command whose empty scope means "everything" needs `fs.NArg()`.
+
+- **Feature gates on a mutation handler run BEFORE path resolution and the
+  folder walk.** Both checks depend only on the decoded body, and a request that
+  will be refused should not first cost a recursive `WalkDir`. Asserting on the
+  refusal STATUS cannot catch the ordering — 503-before and 404-after are both
+  "refused"; assert on which one comes back for a nonexistent path.
 
 ## Scanner, deletion passes, and manifest writes
 
@@ -5386,6 +5409,226 @@ The inventory, each site at this round's commit and what it names:
 Forty-nine sites: twenty whose words changed, twenty-nine that named the
 snapshot as given already or name no path in it.
 
+The record is in `ops/engineering-log.md`, 2026-11-12, B826.
+
+## B884 — the bridge's own files inside a library root (2026-11-13)
+
+- **bridge init, bridge doctor and serve warn, and never refuse, where the config file or the data directory lies inside a library root or is one, from one check that touches nothing (`config.LayoutOf`), and say the layout's fact and then its hazard, and nothing else** (2026-11-13, backlog B884; round 4, 2026-11-17). **Don't let the check stat, resolve or open anything or call what may, compare by a string prefix, refuse a layout, give a healthy layout a doctor line, let init say it twice, say on any surface what to do about a layout, or name a path in serve's line or log it after the roots' check (`serveOpts.rootsCheck`); and don't move `upscale.variantsDir`'s or `upscale.tempDir`'s refusal onto it: they resolve links on purpose.** → History-rules-cli-serve.md
+
+*The hazard.* A library root is often a network or removable mount, and while
+one stops answering, a stat of anything under it waits in the kernel for as
+long as the mount does, with nothing to cancel it. `bridge doctor`, `bridge
+status` and `bridge serve` read their own files first: the config file, and
+the data directory (the database, the install marker, the player's storage,
+the tokens). B650 bounded every step of the doctor that touches a root, but
+these are the commands' own files, which every one of them must read, so a
+config file or a data directory inside a root takes them all down with the
+mount. Nothing said so: Validate checks `upscale.variantsDir` and
+`upscale.tempDir` against the roots, through `fsutil.IsUnderAny`, which
+resolves every root (a touch a dead mount can hold itself), and nothing
+checked the data directory or the config file. The whole fix is about eight
+places (backlog B884); this step makes the layout visible.
+
+*The check* (`internal/config/layout.go`). One predicate: is path P inside, or
+equal to, root R. Both are made absolute as Load makes them, against the
+config file's directory (`ResolvePath`'s rule: an absolute path cleaned, a
+relative one joined to that directory, Windows' joins included, so a path
+rooted with no drive, `\data`, and one relative to another drive, `D:data`,
+land where `filepath.Join` puts them), then compared by their names below
+their volumes, never as strings: `/music2` is not inside `/music`. The check
+takes an explicit OS and parses its forms itself (`pathForms`): POSIX's, one
+root and the slash, names compared byte for byte; and Windows', volume names
+(a drive letter, a UNC share, a device path), both slashes, a device path of
+a drive or a share read as that drive or share (`\\?\C:`, `\\.\C:`, `\??\C:`,
+`\\?\UNC\host\share`), and names compared without regard to case, each
+character of the Basic Multilingual Plane upper-cased by Unicode's simple
+mapping, as NTFS's table maps a code unit (so the Kelvin sign is not k). The
+forms are a port of go1.27.3's own IsAbs, Clean (its postClean included, and
+the lazy buffer that postClean reads past what was written, as Go's does),
+Dir and Join; the production wrapper, `LayoutOf`, passes runtime.GOOS, and the
+table runs every OS's forms on any host. Proved three ways: the table, hand
+written; `TestTheLayoutsFormsAreThisHostsFilepath`, which holds the port to the
+host's own filepath and to `ResolvePath` (POSIX on Linux and macOS, Windows'
+on the windows leg); and, on the Linux test host, a scratch copy of the port against Go's
+Windows source compiled on Linux (the record has the run). It touches
+nothing: no stat, no link resolved, no open, so a root whose mount does not
+answer cannot hold it. `TestTheLayoutCheckRunsOnStringsAlone` reads
+layout.go's source and refuses any import but runtime (GOOS alone), strconv,
+strings, unicode and unicode/utf8, and any call but a builtin, a function or
+method the file declares, strings.Builder's, and those packages' own; it
+fails on the import and on the call, whatever the answer.
+
+*What it does not see.* What it does not resolve: a layout joined only
+through a symbolic link, a Windows junction or short name, a bind mount, or a
+case a macOS volume folds (darwin compares as POSIX does: whether a volume
+folds case is the volume's to say, and asking it is a touch), and Windows'
+own trimming of a name's trailing dots and spaces, which Load does not do
+either. `TestALayoutJoinedOnlyThroughALinkIsMissed` says so with a real link.
+
+*The words.* Two sets, `InstallLayout`'s, and each says the layout's fact
+and then its hazard, and nothing after it (round 4). The fact names the
+config file and the data directory, each with the first root in
+libraryRoots order that holds it, "is inside" that root, or "is" it where
+the file is that root itself, the two in one clause only where one root
+holds both inside it: "the config file and the data directory (dataDir) are
+inside library root libraryRoots[0]"; "the config file is inside library
+root libraryRoots[0], and the data directory (dataDir) is library root
+libraryRoots[1]"; "the data directory (dataDir) is library root
+libraryRoots[0]". A root can name the config file itself: Load takes it
+(Validate asks only that a root is not empty, and leaves its being a
+directory to `CheckLibraryRootsAccessible`, which serve runs after its
+line), and the words say "the config file is library root libraryRoots[0]".
+The hazard is one sentence, `layoutRisk`: "a library root is often a mount,
+and while one stops answering, every bridge command that reads what is
+inside it waits on it, serve, doctor and status among them". The CLI's
+words (`Summary(true)`, `Hint`, `Warning`: bridge init's line, which adds
+the one period that ends it, and both doctors' line and hint, the hint the
+hazard alone) name each by its path, the root beside its place in
+libraryRoots: B505's rule takes a path the operator configured
+(`LibraryRootError` and init's directory errors name the path the operator
+must find and fix), and the doctor's library-roots and data-dir lines print
+paths already. The journal's (`JournalLine`) name each by its setting alone
+(the config file; the data directory (dataDir); library root
+libraryRoots[i]), as every line about the config there does.
+
+*Where each surface says it.* bridge init, on stderr, once, for the layout it
+actually wrote (the roots it saved, a public rewrite's kept roots included,
+which its preflight deliberately does not grade, `namedRoots`) or kept (the
+kept config's own data directory and roots as its file says them,
+`priorInstallFile`, whatever the run named; a config that does not read names
+none), after the save or at the keep. Its preflight carries no such line
+(`initPreflightDeps` leaves `doctor.Deps.InstallLayout` nil), so a run says it
+once whether the preflight runs or `--skip-doctor` passes it. bridge doctor
+and the console's doctor carry a new warn-only line, install-layout, right
+after data-dir (`doctor.Deps.InstallLayout`, from `doctorInstallLayout` in
+`buildDoctorDepsWith`, for a config that loads), omitted where neither file
+lies inside a root, so a healthy report is byte for byte what it was, and
+skipped on a managed bridge (`Deps.Managed`): its files are the host's to
+move, and its reader has no shell to move them with (the rule on advice that
+needs a shell, `config-lifecycle.md`). A line of its own rather than a warn
+on data-dir, which keeps its fails and their words: a data directory that is
+a regular file inside a root fails data-dir as before, the layout's warn
+beside it. The console's doctor builds its Deps from the config it loads at
+each run, so a root added through POST /api/roots is in its next report.
+serve logs one Warn at each start, right after the config's own refusals and
+before its roots' check (`CheckLibraryRootsAccessible`) and the data
+directory's preparation, though not before every touch of a root: Load has
+validated a non-empty `upscale.variantsDir` or `upscale.tempDir` through
+`fsutil.IsUnderAny`, which resolves the roots, before it (round 3). A root
+added while serve runs is the doctor's to say. No surface refuses: an
+install keeps working whatever its layout.
+
+*What it leaves.* `upscale.variantsDir` and `upscale.tempDir` keep their
+refusals through `fsutil.IsUnderAny`, and should not follow: a refusal there
+keeps writes out of a root, and a lexical check would let a link into a root
+through (a review's Major on PR D1, why the resolution is there). Of the
+other callers of `fsutil.IsUnderAny`, none should either: each decides a
+write, a read, an unlink or a refusal, where a link must be seen through
+(the record lists them). Not checked here: tlsCertPath and tlsKeyPath,
+autocert.cacheDir, the log file. The rest of B884's places, bounding the
+commands' own reads, are its later steps.
+
+*Round 2* (the review of step 1). Load resolves seven settings against the
+config file's directory (`resolvePaths`), and step 1's advice to move
+bridge.yaml kept dataDir's meaning alone: a config at /srv/music/conf with
+`libraryRoots: [..]`, moved to /etc/bridge as advised, would serve /etc.
+Round 2's CLI words, wherever they said to move bridge.yaml (init's line,
+both doctors' hint), named all seven, in resolvePaths' order, to be set to
+an absolute path first where relative, and said what a `BRIDGE_*` variable
+that gives one does: Load resolves it the same way, so it is changed where
+it is set; round 3 took those steps out of the words (below). Which of them
+were relative was not asked: init's kept config, the environment and the
+file each say it differently, so the list was the whole fixed one, and
+round 2's advice test read resolvePaths' source for the settings the words
+had to name (since round 3, the settings the doc must name; since round 4,
+`TestTheReadmeNamesEveryPathSettingLoadResolves`). The journal's words are
+step 1's: they name no value (B505), and the round kept them as they were.
+Nothing held serve's line before its roots' check either: step 1's serve
+tests read the journal once `runServe` had returned, and the check's refusal
+of a loopback install goes to stderr, outside the journal.
+`serveOpts.rootsCheck`, nil in production, stands in for the check where
+serve enters it, and `TestServeSaysItsLayoutBeforeItTouchesARoot` reads the
+journal there, over roots that answer and over a root that is not there
+(`writeLayoutConfigLeaving` makes every root but that one), so a line
+logged after the check fails it. Two cases the review asked for passed from
+the start and stay as guards: serve run from inside a root with a relative
+`--config` warns once, and a kept config with no dataDir names its default
+data directory inside a root.
+
+*Round 3: the words name the layout, and the steps moved to one doc* (a
+scope cut, after the review of round 2). Each round whose words generated
+the steps to move the files met a layout they broke: round 2's, which set
+each relative path setting to an absolute path before the move, pinned a
+setting that points into the data directory being moved (`tlsCertPath:
+./data/server.crt`, `upscale.variantsDir: data/variants`) to its old place,
+which breaks every paired device's pin or makes a directory inside the root
+again, and a dataDir left out read either way. So round 3's CLI words
+generated no step: they said one fixed sentence, the same for every layout,
+and sent the operator to a procedure in README.md, which round 4 took out
+with the sentence (below). The console's doctor carries the CLI's words,
+paths included: its report is a success body, where the console keeps a
+path the operator configured (`admin-console.md`'s B604 bullets), B505's
+rule takes such a path, and a managed bridge has no line. The claim that
+serve says its line before anything touches a root was false, in the rule,
+`runServe`'s comment, `serveOpts.rootsCheck`'s and the order test's: Load
+validates a non-empty `upscale.variantsDir` or `upscale.tempDir` through
+`fsutil.IsUnderAny`, which resolves each root's links, before the line; the
+order test proves the order against `CheckLibraryRootsAccessible` alone (its
+name kept, which the dated records cite), and that earlier path is left as
+it is, a follow-up.
+
+*Round 4: the fact and the hazard, and nothing else* (a scope cut, after the
+review of round 3). Every finding on the advice to move the files came from
+the remedy: the steps generated in rounds 1 and 2, and round 3's README
+procedure, which a written-out `tlsCertPath` or `tlsKeyPath` under a moved
+data directory defeated (the next start mints a new pair, which every paired
+device refuses), whose "a relative path keeps its meaning" held only where
+the relative layout was kept, whose carve-out missed a folder it moves that
+is or holds a root, and which missed a custom TLS pair and
+`autocert.cacheDir`; and serve's journal still said round 1's per-layout
+advice (`journalFix`). B884's job is to make the layout visible, and how to
+move an install is the operator's decision, so every surface says the
+layout's fact and the hazard, and nothing after it: `Hint` is `layoutRisk`
+alone, `Warning` and `JournalLine` the fact, by path and by setting, then
+`layoutRisk`; `layoutFix`, `layoutDoc`, `layoutDocSection` and `journalFix`
+are gone. Round 1's per-layout journal words never reached main, so nothing
+that shipped changes. README.md's procedure went with them: a short note,
+"The bridge's files inside a library root", says what the warning means and
+lists the settings in bridge.yaml that name paths, how a relative one
+resolves and what a `BRIDGE_*` variable does, and no step. One change to the
+fact: a file that is the first root holding it is said to be that root,
+where round 3 said it was inside it (bridge init --dir /cfg --library
+/cfg/data: "the data directory /cfg/data is library root /cfg/data
+(libraryRoots[0])"). A data directory that holds a root, the config apart,
+is said on no surface: a root inside the data directory is not the data
+directory inside a root; the config inside that root is said alone. The
+tests find a layout's warning by the hazard, whatever its fact says (an
+equality line has no "inside"), and count it before any exact pin.
+
+*The tests.* In internal/config: `TestThePredicateComparesEachOSsFormsByTheirNames`,
+`TestTheLayoutResolvesRelativePathsAsLoadDoes`,
+`TestTheLayoutsFormsAreThisHostsFilepath`, `TestTheLayoutCheckRunsOnStringsAlone`,
+`TestALayoutJoinedOnlyThroughALinkIsMissed`,
+`TestTheLayoutsWordsNameWhatLiesInsideWhichRoot`, `TestNoSurfaceSaysWhatToDo`
+and `TestTheReadmeNamesEveryPathSettingLoadResolves` (round 2's advice test,
+renamed in round 4); in internal/doctor,
+`TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine`; in cmd/bridge,
+`TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot`,
+`TestNoDoctorWarnsOfASiblingThatSharesARootsPrefix`,
+`TestADataDirectoryThatIsAFileInsideARootFailsAndWarnsBeside`,
+`TestAManagedBridgesDoctorSaysNothingOfItsLayout`,
+`TestTheDoctorsReportOfAHealthyLayoutIsAsItWas`,
+`TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps`,
+`TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory`,
+`TestBridgeInitSaysNothingOfAHealthyLayout`,
+`TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot`,
+`TestServeSaysEachLayoutAtItsStart`,
+`TestServeWithARelativeConfigInsideARootWarnsOnce`,
+`TestServeSaysItsLayoutBeforeItTouchesARoot`,
+`TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns` and
+`TestEverySurfaceSaysALayoutsFactAndHazardAlone`. The record is in
+`ops/engineering-log.md`, 2026-11-13, B884 step 1 and its rounds 2 and 3,
+and 2026-11-17, its round 4.
 **A busy manifest before the prompt** (2026-11-15, backlog B898 PR 2). The look
 before the prompt read `manifest.json` once (`readManifest`, a raw
 `os.ReadFile`), and on Windows a verification renaming that snapshot's

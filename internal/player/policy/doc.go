@@ -36,11 +36,13 @@
 //     the unit's firmware, noise or nothing, takes a transport out at that
 //     rate whatever the positive inputs say (a profile claim, a driver
 //     acceptance, streaming observed, an earlier clean).
-//  3. A profile's refused DoP rate (dop.refusedBitRates) outranks its stated
-//     maximum and the user's confirmation, and only this box's own latest
-//     listener answer for DoP at that rate, clean, overrides it. A profile's
-//     native claim holds no refusal: its maximum bounds what it reports,
-//     never what is offered, which the live altsets and the probe decide.
+//  3. A profile's DoP evidence is per rate: a rate is heard only where
+//     dop.heardBitRates lists it, never because a higher one is. Its refused
+//     DoP rate (dop.refusedBitRates) outranks heard, its stated maximum and
+//     the user's confirmation, and only this box's own latest listener
+//     answer for DoP at that rate, clean, overrides it. A profile's native
+//     claim holds no refusal: its maximum bounds what it reports, never what
+//     is offered, which the live altsets and the probe decide.
 //  4. DoP needs the gain check (CheckGain): the playback path's gain stages
 //     all visible, and every level control at unity, whatever its name.
 //

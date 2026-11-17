@@ -132,6 +132,17 @@ func TestABackupCancelledBeforeItsPruneReportsNothing(t *testing.T) {
 // B653's fourth round the pass's context cancelled itself, from a custom Err,
 // on the first ask after that snapshot had gone; the prune runs on its hold's
 // context since, derived from the pass's, whose Err asks no parent's.)
+//
+// The run has two bounds (backlog B930). The startup pass up to the cancel,
+// a capture, its verification and the prune up to its ask, has its own
+// (startupPassBound), and the ticker's return has 10 s from the cancel, each
+// instant taken where it happens: the prune's goroutine notes the cancel's
+// and closes a channel, so the hook never waits, and the ticker's goroutine
+// notes its return. The one bound before ran from the ticker's start, so a
+// pass slow to reach the prune read as a ticker slow to return after a
+// cancel that had not come. The verification's worker answers before it lets
+// its holds go, so they are drained (awaitHoldsLetGo) before the seam is put
+// back and the folder removed.
 func TestABackupCancelledMidPruneReportsWhatItDeleted(t *testing.T) {
 	dataDir := t.TempDir()
 	src := backup.Sources{DataDir: dataDir, ManifestDB: filepath.Join(dataDir, "bridge.db")}
@@ -149,20 +160,61 @@ func TestABackupCancelledMidPruneReportsWhatItDeleted(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var once sync.Once
+	var cancelledAt time.Time // written before cancelled closes
+	cancelled := make(chan struct{})
 	t.Cleanup(backup.SetMetadataForTest(func(p string) (string, error) {
 		if filepath.Base(p) == filepath.Base(old[0]) {
-			once.Do(cancel)
+			once.Do(func() {
+				cancelledAt = time.Now()
+				cancel()
+				close(cancelled)
+			})
 		}
 		return fsutil.ResolveLinks(p)
 	}, nil))
+	// After the ticker's drain and before the seam's restore: cleanups run
+	// last-registered first.
+	t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 	done := make(chan struct{})
 	drainLoopOnCleanup(t, cancel, done, "the backup ticker")
 	var stdout, stderr safeBuffer
+	var returnedAt time.Time // written before done closes
+	startedAt := time.Now()
 	go func() {
 		defer close(done)
 		runBackupTicker(ctx, src, func() int { return 1 }, staticInterval(24*time.Hour), nil, &stdout, &stderr, nil)
+		returnedAt = time.Now()
 	}()
-	waitClosed(t, done, "the backup ticker")
+	// Each bound is judged by the instants of its events, taken where they
+	// happen, never by when this goroutine wakes: an event and its wait's
+	// timer can both be ready.
+	select {
+	case <-cancelled:
+	case <-time.After(startupPassBound):
+	}
+	reached := false
+	select {
+	case <-cancelled:
+		reached = cancelledAt.Sub(startedAt) <= startupPassBound
+	default:
+	}
+	if !reached {
+		t.Fatalf("the startup pass did not reach the prune within %v\nstdout %q\nstderr %q",
+			startupPassBound, stdout.String(), stderr.String())
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Until(cancelledAt.Add(10 * time.Second))):
+	}
+	returned := false
+	select {
+	case <-done:
+		returned = returnedAt.Sub(cancelledAt) <= 10*time.Second
+	default:
+	}
+	if !returned {
+		t.Fatal("the backup ticker did not return within 10s of its cancel")
+	}
 
 	if got := stderr.String(); got != "" {
 		t.Errorf("a prune stopped by shutdown was reported as a failure:\n%s", got)
@@ -177,6 +229,20 @@ func TestABackupCancelledMidPruneReportsWhatItDeleted(t *testing.T) {
 		}
 	}
 }
+
+// startupPassBound is how long TestABackupCancelledMidPruneReportsWhatItDeleted
+// waits for its startup pass to reach the prune (backlog B930). Measured on
+// Linux under the race detector, from the ticker's start to the prune's ask:
+// 0.24 to 0.25 s in 50 runs on a quiet host, which the windows-latest
+// runner's median slowdown of 1.48 makes 0.37 s; and, with the test pinned
+// beside 16 and then 24 busy processes on its 8 CPUs, 9.2 to 10.4 s in 8 runs
+// and 14.3 to 15.5 s in 16, nearly all of it the verification's check, whose
+// thread runs at the lowest priority, which a busy host starves. Under the
+// second load the one 10 s bound from the ticker's start failed all 8 runs,
+// as a ticker that did not return after its cancel. Sixty seconds is nearly
+// four times the slowest pass measured, and a pass that never reaches the
+// prune still fails long before the binary's deadline.
+const startupPassBound = 60 * time.Second
 
 // TestABackupThatFailsIsStillReported is the control on the tests above.
 // The silence covers a pass the cancel stopped, and a pass that failed on
