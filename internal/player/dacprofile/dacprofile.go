@@ -123,7 +123,11 @@ type Database struct {
 	// IOSGenericNames are names iOS gives a port that name no DAC model, a
 	// chip's or a board's default string, which no match reads.
 	IOSGenericNames []GenericName `json:"iosGenericNames"`
-	Profiles        []Profile     `json:"profiles"`
+	// IOSKnownSiblings are iOS PR 1's known siblings, as the registry's
+	// baseline lists them: models beside a row's with no row of their own,
+	// whose names its strict matcher must answer with no model row (Lint).
+	IOSKnownSiblings []string  `json:"iosKnownSiblings"`
+	Profiles         []Profile `json:"profiles"`
 }
 
 // GenericName is a name of IOSGenericNames, and why it names no model, with
