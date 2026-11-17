@@ -344,157 +344,212 @@ func TestALayoutJoinedOnlyThroughALinkIsMissed(t *testing.T) {
 	}
 }
 
-// wantCLIFix is what the CLI's words say to do, for every layout (backlog
-// B884's round 3): one fixed sentence, and the section of the bridge's
-// README.md that has the steps. It ends with no period: bridge init's line
-// adds one.
-const wantCLIFix = "move bridge.yaml and the data directory out of every library root, and check every path setting in " +
-	"bridge.yaml; see \"Moving the bridge's files out of a library root\" in the bridge's README.md"
+// layoutWordCases are layouts and the fact each surface says of them (backlog
+// B884's round 4): what lies inside which root, or is one, by path for the
+// CLI and by setting for the journal, "" where nothing lies inside a root.
+// Each file is named with the first root, in libraryRoots order, that holds
+// it: "is inside" it, or "is" it where it is that root itself, which Load
+// takes for the config file too (Validate leaves a root's being a directory
+// to CheckLibraryRootsAccessible, which serve runs after its line); and the
+// two share one clause only where one root holds both inside it.
+var layoutWordCases = []struct {
+	name             string
+	cfg, data        string
+	roots            []string
+	summary, byNames string
+}{
+	{
+		name: "the data directory inside a root", cfg: "/etc/b/bridge.yaml", data: "/m/.bridge", roots: []string{"/m"},
+		summary: "the data directory /m/.bridge is inside library root /m (libraryRoots[0])",
+		byNames: "the data directory (dataDir) is inside library root libraryRoots[0]",
+	},
+	{
+		name: "the data directory that is a root", cfg: "/etc/b/bridge.yaml", data: "/m", roots: []string{"/m"},
+		summary: "the data directory /m is library root /m (libraryRoots[0])",
+		byNames: "the data directory (dataDir) is library root libraryRoots[0]",
+	},
+	{
+		name: "the data directory inside a first root and a later root itself", cfg: "/etc/b/bridge.yaml", data: "/m/d", roots: []string{"/m", "/m/d"},
+		summary: "the data directory /m/d is inside library root /m (libraryRoots[0])",
+		byNames: "the data directory (dataDir) is inside library root libraryRoots[0]",
+	},
+	{
+		name: "the data directory a first root itself and inside a later one", cfg: "/etc/b/bridge.yaml", data: "/m/d", roots: []string{"/m/d", "/m"},
+		summary: "the data directory /m/d is library root /m/d (libraryRoots[0])",
+		byNames: "the data directory (dataDir) is library root libraryRoots[0]",
+	},
+	{
+		name: "the config file inside a root", cfg: "/m/conf/bridge.yaml", data: "/var/lib/b", roots: []string{"/x", "/m"},
+		summary: "the config file /m/conf/bridge.yaml is inside library root /m (libraryRoots[1])",
+		byNames: "the config file is inside library root libraryRoots[1]",
+	},
+	{
+		name: "a root that names the config file itself", cfg: "/m/bridge.yaml", data: "/var/lib/b", roots: []string{"/m/bridge.yaml"},
+		summary: "the config file /m/bridge.yaml is library root /m/bridge.yaml (libraryRoots[0])",
+		byNames: "the config file is library root libraryRoots[0]",
+	},
+	{
+		name: "both inside one root", cfg: "/m/b/bridge.yaml", data: "/m/b/data", roots: []string{"/m", "/m/b"},
+		summary: "the config file /m/b/bridge.yaml and the data directory /m/b/data are inside library root /m (libraryRoots[0])",
+		byNames: "the config file and the data directory (dataDir) are inside library root libraryRoots[0]",
+	},
+	{
+		name: "both inside two roots", cfg: "/a/bridge.yaml", data: "/b/data", roots: []string{"/b", "/a"},
+		summary: "the config file /a/bridge.yaml is inside library root /a (libraryRoots[1]), and the data directory /b/data inside library root /b (libraryRoots[0])",
+		byNames: "the config file is inside library root libraryRoots[1], and the data directory (dataDir) inside library root libraryRoots[0]",
+	},
+	{
+		name: "the config file inside one root and the data directory another", cfg: "/m/conf/bridge.yaml", data: "/d", roots: []string{"/m", "/d"},
+		summary: "the config file /m/conf/bridge.yaml is inside library root /m (libraryRoots[0]), and the data directory /d is library root /d (libraryRoots[1])",
+		byNames: "the config file is inside library root libraryRoots[0], and the data directory (dataDir) is library root libraryRoots[1]",
+	},
+	{
+		name: "the config file inside the root the data directory is", cfg: "/m/bridge.yaml", data: "/m", roots: []string{"/m"},
+		summary: "the config file /m/bridge.yaml is inside library root /m (libraryRoots[0]), and the data directory /m is library root /m (libraryRoots[0])",
+		byNames: "the config file is inside library root libraryRoots[0], and the data directory (dataDir) is library root libraryRoots[0]",
+	},
+	{
+		name: "the config file a root and the data directory inside another", cfg: "/m/bridge.yaml", data: "/d/data", roots: []string{"/m/bridge.yaml", "/d"},
+		summary: "the config file /m/bridge.yaml is library root /m/bridge.yaml (libraryRoots[0]), and the data directory /d/data inside library root /d (libraryRoots[1])",
+		byNames: "the config file is library root libraryRoots[0], and the data directory (dataDir) inside library root libraryRoots[1]",
+	},
+	{
+		name: "a root inside the data directory", cfg: "/etc/b/bridge.yaml", data: "/srv", roots: []string{"/srv/music"},
+	},
+	{
+		name: "the config file inside a root inside the data directory", cfg: "/srv/music/bridge.yaml", data: "/srv", roots: []string{"/srv/music"},
+		summary: "the config file /srv/music/bridge.yaml is inside library root /srv/music (libraryRoots[0])",
+		byNames: "the config file is inside library root libraryRoots[0]",
+	},
+	{
+		name: "apart", cfg: "/etc/b/bridge.yaml", data: "/var/lib/b", roots: []string{"/m"},
+	},
+}
 
 // TestTheLayoutsWordsNameWhatLiesInsideWhichRoot pins the words bridge init,
-// bridge doctor and serve say a layout in: what lies inside which root, why
-// that is a risk, and what to do, for the data directory, the data directory
-// that is a root, the config file, and both (one warning naming both). The
-// CLI's words name each by its path, the root beside its place in
-// libraryRoots, and say what to do in one fixed sentence that sends the
-// operator to the steps, generating none (backlog B884's round 3); the
-// journal's name each by its setting, carry no path (B505) and no doc, and
-// keep their words byte for byte.
+// bridge doctor and serve say a layout in, for each of layoutWordCases: the
+// fact, then the hazard, and nothing else (backlog B884's round 4). The CLI's
+// fact names each file by its path and the root beside its place in
+// libraryRoots; the journal's names each by its setting and carries no path
+// (B505). The hint is the hazard alone, the same for every layout, and
+// bridge init's line adds the one period that ends it; a layout with nothing
+// inside a root says nothing.
 func TestTheLayoutsWordsNameWhatLiesInsideWhichRoot(t *testing.T) {
-	for _, tc := range []struct {
-		name             string
-		cfg, data        string
-		roots            []string
-		summary, byNames string
-		journalFix       string
-	}{
-		{
-			name: "the data directory", cfg: "/etc/b/bridge.yaml", data: "/m/.bridge", roots: []string{"/m"},
-			summary:    "the data directory /m/.bridge is inside library root /m (libraryRoots[0])",
-			byNames:    "the data directory (dataDir) is inside library root libraryRoots[0]",
-			journalFix: "move the data directory outside every library root, and set dataDir in bridge.yaml to its new path",
-		},
-		{
-			name: "the data directory equal to the root", cfg: "/etc/b/bridge.yaml", data: "/m", roots: []string{"/m"},
-			summary:    "the data directory /m is inside library root /m (libraryRoots[0])",
-			byNames:    "the data directory (dataDir) is inside library root libraryRoots[0]",
-			journalFix: "move the data directory outside every library root, and set dataDir in bridge.yaml to its new path",
-		},
-		{
-			name: "the config file", cfg: "/m/conf/bridge.yaml", data: "/var/lib/b", roots: []string{"/x", "/m"},
-			summary: "the config file /m/conf/bridge.yaml is inside library root /m (libraryRoots[1])",
-			byNames: "the config file is inside library root libraryRoots[1]",
-			journalFix: "move bridge.yaml outside every library root, first setting dataDir in it to the data " +
-				"directory's absolute path: a relative dataDir resolves beside bridge.yaml",
-		},
-		{
-			name: "both in one root", cfg: "/m/b/bridge.yaml", data: "/m/b/data", roots: []string{"/m", "/m/b"},
-			summary: "the config file /m/b/bridge.yaml and the data directory /m/b/data are inside library root /m (libraryRoots[0])",
-			byNames: "the config file and the data directory (dataDir) are inside library root libraryRoots[0]",
-			journalFix: "move bridge.yaml and the data directory outside every library root, keeping dataDir " +
-				"pointed at the data directory: a relative dataDir (./data unless set) resolves beside bridge.yaml",
-		},
-		{
-			name: "both in two roots", cfg: "/a/bridge.yaml", data: "/b/data", roots: []string{"/b", "/a"},
-			summary: "the config file /a/bridge.yaml is inside library root /a (libraryRoots[1]), and the data directory /b/data inside library root /b (libraryRoots[0])",
-			byNames: "the config file is inside library root libraryRoots[1], and the data directory (dataDir) inside library root libraryRoots[0]",
-			journalFix: "move bridge.yaml and the data directory outside every library root, keeping dataDir " +
-				"pointed at the data directory: a relative dataDir (./data unless set) resolves beside bridge.yaml",
-		},
-	} {
+	for _, tc := range layoutWordCases {
 		t.Run(tc.name, func(t *testing.T) {
 			l := layoutOn("linux", tc.cfg, tc.data, tc.roots)
+			if l.Inside() != (tc.summary != "") {
+				t.Errorf("Inside() = %v, want %v", l.Inside(), tc.summary != "")
+			}
 			if got := l.Summary(true); got != tc.summary {
 				t.Errorf("Summary(byPath) = %q\nwant %q", got, tc.summary)
 			}
 			if got := l.Summary(false); got != tc.byNames {
 				t.Errorf("Summary(by setting) = %q\nwant %q", got, tc.byNames)
 			}
-			if got, want := l.Hint(), layoutRisk+"; "+wantCLIFix; got != want {
-				t.Errorf("Hint() = %q\nwant %q", got, want)
+			hint, warning, journal := "", "", ""
+			if tc.summary != "" {
+				hint, warning, journal = layoutRisk, tc.summary+": "+layoutRisk, tc.byNames+": "+layoutRisk
 			}
-			if got, want := l.Warning(), tc.summary+": "+layoutRisk+"; "+wantCLIFix; got != want {
-				t.Errorf("Warning() = %q\nwant %q", got, want)
+			if got := l.Hint(); got != hint {
+				t.Errorf("Hint() = %q\nwant %q", got, hint)
 			}
-			journal := l.JournalLine()
-			if want := tc.byNames + ": " + layoutRisk + "; " + tc.journalFix; journal != want {
-				t.Errorf("JournalLine() = %q\nwant %q, as it was", journal, want)
+			if got := l.Warning(); got != warning {
+				t.Errorf("Warning() = %q\nwant %q", got, warning)
 			}
-			for _, p := range append(slices.Clone(tc.roots), tc.cfg, tc.data, "README") {
-				if strings.Contains(journal, p) {
-					t.Errorf("the journal's line names %s: %q", p, journal)
+			if got := l.JournalLine(); got != journal {
+				t.Errorf("JournalLine() = %q\nwant %q", got, journal)
+			}
+			for _, p := range append(slices.Clone(tc.roots), tc.cfg, tc.data) {
+				if strings.Contains(l.JournalLine(), p) {
+					t.Errorf("the journal's line names %s: %q", p, l.JournalLine())
 				}
 			}
 		})
 	}
-	healthy := layoutOn("linux", "/etc/b/bridge.yaml", "/var/lib/b", []string{"/m"})
-	if healthy.Inside() || healthy.Summary(true) != "" || healthy.Hint() != "" || healthy.Warning() != "" || healthy.JournalLine() != "" {
-		t.Errorf("a layout with nothing inside a root says %q, %q, %q, %q", healthy.Summary(true), healthy.Hint(), healthy.Warning(), healthy.JournalLine())
+}
+
+// TestNoSurfaceSaysWhatToDo (backlog B884's round 4): what every layout is
+// said in, its fact and the hazard, says nothing of what to do. Round 3's
+// fixed sentence and the README.md section it sent the operator to, and the
+// journal's three sentences of rounds 1 to 3, are in none of them, nor is any
+// verb a remedy is said with; and the hazard is this sentence, word for word.
+func TestNoSurfaceSaysWhatToDo(t *testing.T) {
+	const hazard = "a library root is often a mount, and while one stops answering, every bridge command that " +
+		"reads what is inside it waits on it, serve, doctor and status among them"
+	if layoutRisk != hazard {
+		t.Errorf("the hazard is %q\nwant %q", layoutRisk, hazard)
+	}
+	remedies := []string{
+		"move bridge.yaml and the data directory out of every library root, and check every path setting in bridge.yaml",
+		"Moving the bridge's files out of a library root",
+		"move the data directory outside every library root, and set dataDir in bridge.yaml to its new path",
+		"move bridge.yaml outside every library root, first setting dataDir in it to the data directory's absolute path",
+		"move bridge.yaml and the data directory outside every library root, keeping dataDir pointed at the data directory",
+		"README", "move", "set ", "setting", "see ", "check", "keep", "point",
+	}
+	for _, tc := range layoutWordCases {
+		l := layoutOn("linux", tc.cfg, tc.data, tc.roots)
+		for _, said := range []string{l.Summary(true), l.Summary(false), l.Hint(), l.Warning(), l.JournalLine()} {
+			var found []string
+			for _, r := range remedies {
+				if strings.Contains(said, r) {
+					found = append(found, r)
+				}
+			}
+			if len(found) > 0 {
+				t.Errorf("%s: %q says %q", tc.name, said, found)
+			}
+		}
 	}
 }
 
-// TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (backlog
-// B884's rounds 2 and 3): the CLI's advice keeps every relative path's
-// meaning by sending the operator to the steps, never by generating them. For
-// every layout, the config file alone, the data directory alone, the data
-// directory that is the root, both, and a data directory left at its default
-// beside the config, it is the one fixed sentence, which ends with no period
-// (bridge init's line adds one); the section it names is in the bridge's
-// README.md, once, and names each setting Load resolves beside the config
-// (read from resolvePaths here, so a setting added there is one the steps
-// must name) and the BRIDGE_* variables that win over the file. The
-// journal's words name no doc.
-func TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning(t *testing.T) {
-	for _, tc := range []struct{ name, cfg, data string }{
-		{"the config file alone", "/m/conf/bridge.yaml", "/var/lib/b"},
-		{"the data directory alone", "/etc/b/bridge.yaml", "/m/b/data"},
-		{"the data directory that is the root", "/etc/b/bridge.yaml", "/m"},
-		{"both", "/m/b/bridge.yaml", "/m/b/data"},
-		{"the default data directory", "/m/b/bridge.yaml", DefaultDataDir},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			l := layoutOn("linux", tc.cfg, tc.data, []string{"/m"})
-			if !l.Inside() {
-				t.Fatalf("the layout %s, %s is inside no root", tc.cfg, tc.data)
-			}
-			hint := l.Hint()
-			if want := layoutRisk + "; " + wantCLIFix; hint != want {
-				t.Errorf("the advice is %q\nwant the one fixed sentence %q", hint, want)
-			}
-			if strings.HasSuffix(hint, ".") {
-				t.Errorf("the advice ends with a period, which bridge init's line doubles: %q", hint)
-			}
-			if j := l.JournalLine(); strings.Contains(j, "README") {
-				t.Errorf("the journal's line names a doc: %q", j)
-			}
-		})
-	}
-	section := readmeSection(t, "Moving the bridge's files out of a library root")
+// TestTheReadmeNamesEveryPathSettingLoadResolves (backlog B884's rounds 3 and
+// 4): the bridge's README.md says what the layout's warning means in a
+// section of its own, and lists there the settings that name paths: each
+// setting Load resolves beside the config (read from resolvePaths here, so a
+// setting added there turns this red), and what a BRIDGE_* variable does to
+// one. It lists them, and lists no steps: round 3's section, which did, is
+// gone from the file.
+func TestTheReadmeNamesEveryPathSettingLoadResolves(t *testing.T) {
+	readme := readmeText(t)
+	section := readmeSection(t, readme, "The bridge's files inside a library root")
 	for _, key := range settingsResolvedBesideTheConfig(t) {
 		if !strings.Contains(section, "`"+key+"`") {
-			t.Errorf("README.md's steps do not name %s, which Load resolves beside the config", key)
+			t.Errorf("README.md's section does not name %s, which Load resolves beside the config", key)
 		}
 	}
 	if !strings.Contains(section, "`BRIDGE_") {
-		t.Errorf("README.md's steps do not say what a BRIDGE_* variable does")
+		t.Errorf("README.md's section does not say what a BRIDGE_* variable does")
+	}
+	if strings.Contains(section, "\n1. ") || strings.Contains(section, "\n   1. ") || strings.Contains(section, "\n  1. ") {
+		t.Errorf("README.md's section lists steps:\n%s", section)
+	}
+	if old := "Moving the bridge's files out of a library root"; strings.Contains(readme, old) {
+		t.Errorf("README.md still holds round 3's section %q", old)
 	}
 }
 
-// readmeSection is the second-level section of the bridge's README.md titled
-// title, from its heading to the next one, failing where the file holds no
-// such heading, or more than one.
-func readmeSection(t *testing.T, title string) string {
+// readmeText is the bridge's README.md, its line ends as LF.
+func readmeText(t *testing.T) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	return strings.ReplaceAll(string(raw), "\r\n", "\n")
+}
+
+// readmeSection is the second-level section of readme titled title, from its
+// heading to the next one, failing where readme holds no such heading, or
+// more than one.
+func readmeSection(t *testing.T, readme, title string) string {
+	t.Helper()
 	heading := "\n## " + title + "\n"
-	if n := strings.Count(text, heading); n != 1 {
+	if n := strings.Count(readme, heading); n != 1 {
 		t.Fatalf("README.md has %d sections titled %q, want one", n, title)
 	}
-	section := text[strings.Index(text, heading)+len(heading):]
+	section := readme[strings.Index(readme, heading)+len(heading):]
 	if end := strings.Index(section, "\n## "); end >= 0 {
 		section = section[:end]
 	}

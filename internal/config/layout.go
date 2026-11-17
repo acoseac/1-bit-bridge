@@ -33,14 +33,17 @@ import (
 
 // InstallLayout is where the config file and the data directory lie against
 // the library roots, as LayoutOf found them: each of the two inside the first
-// root, in libraryRoots order, that holds it, or inside none.
+// root, in libraryRoots order, that holds it, or that root itself, or inside
+// none.
 type InstallLayout struct {
 	configFile, dataDir string
 	roots               []string
 	forms               pathForms
 	// configIn and dataIn are the place in roots of the first root that holds
-	// the config file and the data directory, -1 for none.
+	// the config file and the data directory, -1 for none; configIs and dataIs
+	// say each is that root itself.
 	configIn, dataIn int
+	configIs, dataIs bool
 }
 
 // LayoutOf compares the config file at configFile, the data directory dataDir
@@ -70,106 +73,95 @@ func layoutOn(goos, configFile, dataDir string, roots []string) InstallLayout {
 			continue
 		}
 		if l.configIn < 0 && cfg != "" && f.within(cfg, root) {
-			l.configIn = i
+			l.configIn, l.configIs = i, f.within(root, cfg)
 		}
 		if l.dataIn < 0 && dataOK && f.within(data, root) {
-			l.dataIn = i
+			l.dataIn, l.dataIs = i, f.within(root, data)
 		}
 	}
 	return l
 }
 
 // Inside says whether the config file or the data directory lies inside a
-// library root.
+// library root, or is one.
 func (l InstallLayout) Inside() bool { return l.configIn >= 0 || l.dataIn >= 0 }
 
-// Summary names what lies inside which root, "" where nothing does: the
-// doctor's install-layout line. byPath names the config file, the data
-// directory and the root by their paths, the root beside its place in
-// libraryRoots: the CLI's own output, where B505's rule takes a path the
-// operator configured. Without it they are named by their settings alone, as
-// every other line about the config in the journal names them.
+// Summary is the layout's fact, "" where nothing lies inside a root: the
+// config file and the data directory, each with the first root that holds it,
+// "is inside" it, or "is" it where it is that root itself, which Load takes
+// for the config file too (Validate leaves a root's being a directory to
+// CheckLibraryRootsAccessible); the two in one clause only where one root
+// holds both inside it. It is the doctor's install-layout line. byPath names
+// the config file, the data directory and the root by their paths, the root
+// beside its place in libraryRoots: the CLI's own output, where B505's rule
+// takes a path the operator configured. Without it they are named by their
+// settings alone, as every other line about the config in the journal names
+// them.
 func (l InstallLayout) Summary(byPath bool) string {
 	switch {
-	case l.configIn >= 0 && l.dataIn == l.configIn:
+	case l.configIn >= 0 && l.dataIn == l.configIn && !l.configIs && !l.dataIs:
 		return l.configNamed(byPath) + " and " + l.dataNamed(byPath) + " are inside " + l.rootNamed(l.configIn, byPath)
 	case l.configIn >= 0 && l.dataIn >= 0:
-		return l.configNamed(byPath) + " is inside " + l.rootNamed(l.configIn, byPath) +
-			", and " + l.dataNamed(byPath) + " inside " + l.rootNamed(l.dataIn, byPath)
+		return l.configNamed(byPath) + relation(l.configIs, false) + l.rootNamed(l.configIn, byPath) +
+			", and " + l.dataNamed(byPath) + relation(l.dataIs, true) + l.rootNamed(l.dataIn, byPath)
 	case l.configIn >= 0:
-		return l.configNamed(byPath) + " is inside " + l.rootNamed(l.configIn, byPath)
+		return l.configNamed(byPath) + relation(l.configIs, false) + l.rootNamed(l.configIn, byPath)
 	case l.dataIn >= 0:
-		return l.dataNamed(byPath) + " is inside " + l.rootNamed(l.dataIn, byPath)
+		return l.dataNamed(byPath) + relation(l.dataIs, false) + l.rootNamed(l.dataIn, byPath)
 	}
 	return ""
 }
 
-// layoutRisk is why a file of the bridge's own inside a root is a risk.
+// relation is how a file stands to the root that holds it: " is " that root,
+// " is inside " it, or " inside " alone in a clause after another, whose "is"
+// it shares.
+func relation(is, shared bool) string {
+	switch {
+	case is:
+		return " is "
+	case shared:
+		return " inside "
+	}
+	return " is inside "
+}
+
+// layoutRisk is why a file of the bridge's own inside a root is a risk: the
+// hazard, which every surface says after the layout's fact, and nothing after
+// it (backlog B884's round 4). The words make the layout visible and say
+// nothing of what to do, which is the operator's to decide: what a move must
+// change depends on what each path setting points at, and the advice of each
+// earlier round, steps generated in rounds 1 and 2 and a procedure in the
+// README in round 3, met layouts it did not fit. The README lists the settings
+// that name paths.
 const layoutRisk = "a library root is often a mount, and while one stops answering, every bridge command " +
 	"that reads what is inside it waits on it, serve, doctor and status among them"
 
-// layoutDoc and layoutDocSection are where the steps to move the bridge's own
-// files out of a library root are written: a section of the bridge's
-// README.md, which TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning
-// holds to its title and to every setting Load resolves beside the config.
-const (
-	layoutDoc        = "README.md"
-	layoutDocSection = "Moving the bridge's files out of a library root"
-)
-
-// layoutFix is what the CLI's words say to do, whatever lies inside which
-// root: one fixed sentence, and where the steps are (backlog B884's round 3).
-// What a move must change depends on what each path setting points at,
-// relative or not, into what moves or at what stays, which the steps say how
-// to tell. The first two rounds' words generated those steps, and each met a
-// layout they broke (round 1's kept dataDir's meaning alone, round 2's pinned
-// a setting pointing into the data directory to its old place), so the words
-// generate none. It ends with no period, which bridge init's line adds.
-const layoutFix = "move bridge.yaml and the data directory out of every library root, and check every path setting in " +
-	"bridge.yaml; see \"" + layoutDocSection + "\" in the bridge's " + layoutDoc
-
-// Hint is why the layout Summary names is a risk, and what to do, in the
-// CLI's words, "" where nothing lies inside a root: both doctors' hint, and
-// bridge init's line after its summary. It is the same for every layout:
-// Summary says what lies inside.
+// Hint is the hazard, "" where nothing lies inside a root: both doctors'
+// hint, under the line Summary says. It is the same for every layout.
 func (l InstallLayout) Hint() string {
 	if !l.Inside() {
 		return ""
 	}
-	return layoutRisk + "; " + layoutFix
+	return layoutRisk
 }
 
-// Warning is the CLI's one line, Summary by path and then Hint: what bridge
-// init prints. "" where nothing lies inside a root.
+// Warning is the CLI's one line, Summary by path and then the hazard: what
+// bridge init prints, which adds the one period that ends it. "" where
+// nothing lies inside a root.
 func (l InstallLayout) Warning() string {
 	if !l.Inside() {
 		return ""
 	}
-	return l.Summary(true) + ": " + l.Hint()
+	return l.Summary(true) + ": " + layoutRisk
 }
 
 // JournalLine is serve's one line in its journal, "" where nothing lies inside
-// a root: Summary by setting, why it is a risk, and what to do in words of the
-// journal's own, which name no value (B505) and no doc, and are as backlog
-// B884's first two rounds left them.
+// a root: Summary by setting and then the hazard, which name no value (B505).
 func (l InstallLayout) JournalLine() string {
 	if !l.Inside() {
 		return ""
 	}
-	return l.Summary(false) + ": " + layoutRisk + "; " + l.journalFix()
-}
-
-// journalFix is what the journal says to do for what lies inside.
-func (l InstallLayout) journalFix() string {
-	switch {
-	case l.configIn >= 0 && l.dataIn >= 0:
-		return "move bridge.yaml and the data directory outside every library root, keeping dataDir pointed at the " +
-			"data directory: a relative dataDir (" + DefaultDataDir + " unless set) resolves beside bridge.yaml"
-	case l.configIn >= 0:
-		return "move bridge.yaml outside every library root, first setting dataDir in it to the data directory's " +
-			"absolute path: a relative dataDir resolves beside bridge.yaml"
-	}
-	return "move the data directory outside every library root, and set dataDir in bridge.yaml to its new path"
+	return l.Summary(false) + ": " + layoutRisk
 }
 
 func (l InstallLayout) configNamed(byPath bool) string {

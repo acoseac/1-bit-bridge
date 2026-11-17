@@ -40,12 +40,12 @@ func warnInstallLayout(w io.Writer, cfgPath, dataDir string, roots []string) {
 
 // doctorInstallLayout is doctor.Deps.InstallLayout for the config at cfgFile,
 // which loaded as cfg: one warn naming the config file or the data directory
-// inside a library root, by path, with the root's place in libraryRoots, its
-// hint the CLI's words and where the steps are, or no line at all. The
-// console's doctor builds it from the config it loads at each run
-// (buildDoctorDepsWith), so a root added while serve runs is there; its
-// report is a success body, where the console shows the paths the operator
-// configured, as its data-dir and library-roots lines do.
+// inside a library root, or that is one, by path, with the root's place in
+// libraryRoots, its hint the hazard, or no line at all. The console's doctor
+// builds it from the config it loads at each run (buildDoctorDepsWith), so a
+// root added while serve runs is there; its report is a success body, where
+// the console shows the paths the operator configured, as its data-dir and
+// library-roots lines do.
 func doctorInstallLayout(cfgFile string, cfg *config.Config) func(context.Context) []doctor.Check {
 	return func(context.Context) []doctor.Check {
 		l := config.LayoutOf(cfgFile, cfg.DataDir, cfg.LibraryRoots)
@@ -59,10 +59,10 @@ func doctorInstallLayout(cfgFile string, cfg *config.Config) func(context.Contex
 
 // logInstallLayout is serve's journal line on the layout it starts from, once
 // at the start, logged at Warn where the config file at cfgFile or cfg's data
-// directory lies inside a library root. It names the root by its place in
-// libraryRoots and the data directory by its setting, and no path, as every
-// other line about the config in the journal does (B505). A root added while
-// serve runs is the doctor's to say.
+// directory lies inside a library root, or is one. It names the root by its
+// place in libraryRoots and the data directory by its setting, and no path,
+// as every other line about the config in the journal does (B505). A root
+// added while serve runs is the doctor's to say.
 func logInstallLayout(cfgFile string, cfg *config.Config) {
 	if l := config.LayoutOf(cfgFile, cfg.DataDir, cfg.LibraryRoots); l.Inside() {
 		logger.Warn(l.JournalLine())
