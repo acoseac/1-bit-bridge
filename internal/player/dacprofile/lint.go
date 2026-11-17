@@ -674,6 +674,12 @@ func (l *linter) ios(who string, p *Profile) {
 		} else if w := reNeverSaid.FindString(*x.SiblingNote); w != "" {
 			l.add("%s: the sibling note says %q, never said of DSD on the bridge's player", who, strings.ToLower(w))
 		}
+		// A family row has no heard or failed rate of its own: its siblings' results live in the note alone, as
+		// iOS PR 1's evidence table keeps ifi.generic's empty (its DoPEvidenceTests). Without this check, only the
+		// export's parity with the pinned baseline would refuse one.
+		if p.DoP != nil && (len(p.DoP.HeardBitRates) > 0 || len(p.DoP.RefusedBitRates) > 0) {
+			l.add("%s: a family row has no heard or failed rate of its own: its siblings' results go in the sibling note", who)
+		}
 	default:
 		l.add("%s: nameScope %q is model or family", who, x.NameScope)
 	}

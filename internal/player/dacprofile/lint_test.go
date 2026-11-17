@@ -854,6 +854,22 @@ func TestTheIOSNameKeysLint(t *testing.T) {
 			x.NameScope, x.SiblingNote = "family", ptr("A sibling locked at DSD128 (a submission, 2026-09-23).")
 		}), `says "locked"`},
 		{"a model row with a sibling note", first(func(x *IOS) { x.SiblingNote = ptr("a sibling's result") }), "no sibling note"},
+		{"a family row with a heard rate of its own", func(db *Database) {
+			pr := &db.Profiles[0]
+			pr.IOS.NameScope, pr.IOS.SiblingNote = "family", ptr("Siblings under this name, not this row's own evidence: DSD64 heard over DoP on one unit (a submission, 2026-09-23).")
+			if pr.DoP == nil {
+				pr.DoP = &DoP{}
+			}
+			pr.DoP.HeardBitRates = []int{2822400}
+		}, "no heard or failed rate of its own"},
+		{"a family row with a failed rate of its own", func(db *Database) {
+			pr := &db.Profiles[0]
+			pr.IOS.NameScope, pr.IOS.SiblingNote = "family", ptr("Siblings under this name, not this row's own evidence: DSD64 heard over DoP on one unit (a submission, 2026-09-23).")
+			if pr.DoP == nil {
+				pr.DoP = &DoP{}
+			}
+			pr.DoP.RefusedBitRates = []int{22579200}
+		}, "no heard or failed rate of its own"},
 		{"an order given twice", second(func(x *IOS) { x.Order = 1 }), "hold order 1"},
 		{"an order skipped", second(func(x *IOS) { x.Order = 3 }), "hold order 2"},
 	})
