@@ -305,12 +305,14 @@ func foldAll(v any) any {
 // SHA-256; the export's rows are the baseline's, in its order and field by
 // field, the legacy patterns, the tokens and the excluded tokens compared
 // after iOS's fold, the times in whole milliseconds; its generic names are
-// the baseline's; for every name of the corpus and the known siblings, the
-// live matcher's first hit over the export's legacy patterns is the
-// baseline's, with no exception, and so it is for names two rows' patterns
-// hold, by the baseline's rows; and the strict matcher over the export's keys
-// gives each name the baseline's strict answer, which differs from the live
-// one in the corpus exactly for the four names iOS PR 1 declares.
+// the baseline's, and so are the catalog's known siblings, which its lint
+// keeps off every model row; for every name of the corpus and the known
+// siblings, the live matcher's first hit over the export's legacy patterns is
+// the baseline's, with no exception, and so it is for names two rows'
+// patterns hold, by the baseline's rows; and the strict matcher over the
+// export's keys gives each name the baseline's strict answer, which differs
+// from the live one in the corpus exactly for the four names iOS PR 1
+// declares.
 func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("testdata", "ios-registry-6a1241eb.json"))
 	if err != nil {
@@ -335,6 +337,17 @@ func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
 	}
 	if !slices.Equal(x.GenericNames, base.GenericNames) {
 		t.Errorf("the generic names are %q, the baseline's %q", x.GenericNames, base.GenericNames)
+	}
+	db, err := dacprofile.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var siblings []string
+	for _, c := range base.KnownSiblings {
+		siblings = append(siblings, c.Name)
+	}
+	if !slices.Equal(db.IOSKnownSiblings, siblings) {
+		t.Errorf("the catalog's known siblings are %q, the baseline's %q", db.IOSKnownSiblings, siblings)
 	}
 	if len(rows.Rows) != len(base.Rows) {
 		t.Fatalf("the export has %d rows, the baseline %d", len(rows.Rows), len(base.Rows))

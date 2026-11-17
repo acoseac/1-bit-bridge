@@ -103797,3 +103797,76 @@ since it changed the variable the reverse check reads too; the narrow
 mutation went as predicted.
 
 The gate's runs on this commit are in the PR body.
+
+## 2026-11-17 — B730 B1 follow-up: the catalog lint's parity Lows
+
+Five Lows from B1's review rounds, each checked against the lines first.
+Rules: two entries of `.claude/rules/dac-catalog.md` (their lines and long
+forms in `ops/History-rules-dac-catalog.md`), and the DAC profile entry's
+long form in `ops/History-rules-player.md`, corrected in place.
+
+### What changes
+
+1. Known siblings (f4e1e4d7). The catalog holds iOS PR 1's known siblings
+   at the database level, as iOS keeps them: `iosKnownSiblings`, the
+   baseline's 24 `knownSiblings` names in its order, never exported (the
+   export and its SHA-256, `d134affb…`, stand). The lint answers each name
+   as the strict matcher does (`strictHits`: a generic name finds no row;
+   then a port name that is the name, trimmed and its case kept; then a
+   token the name holds and none of the row's excluded tokens, folded; one
+   row is the answer, two or none no row) and refuses one answered with a
+   model row, by either key: a port name, taken before any token and never
+   ruled out by an excluded token, or a token. Until now the lint had no
+   such check: dropping `Lite` from the E30 II's excluded tokens linted
+   clean. The parity test pins the baseline by its SHA-256 and checks the
+   strict matcher for every sibling, so re-pinning the export removes no
+   guard; the lint's check is wanted because a catalog edit must fail at
+   the lint, before any export or baseline exists. The parity test now
+   also holds the catalog's list to the baseline's. A scratch overlay test
+   (not committed) gave all 112 of the baseline's corpus and sibling names
+   the lint matcher's answer equal to the baseline's strict answer. The
+   list is no field of `Profile`, so `Profile.clone` is unchanged.
+2. The family-rate cases. Each left the fixture's other rate list
+   nonempty, so deleting either operand of the family check's `||` kept
+   both green; each now clears the other list.
+3. Dated heads. In every head of the baseline and the catalog a
+   `submission` (27 baseline sources, 14 catalog clauses) and a `field log`
+   (1 and 1) name their date, and a `maker` (12 and 12), a `pcm ceiling`, a
+   `chip specification` and a `retailer` (1 and 1 each) none. The lint now
+   refuses a `submission` or `field log` head with no date in a row with
+   `ios`, where the head binds, and asks no date of the other four kinds or
+   of a row without `ios`, whose text after a colon is free. A DoP claim's
+   own `listening` and `maker` sources were dated already (B1's rule).
+4. The binding long form. `ops/History-rules-player.md`'s DAC profile
+   entry still described schema 1: the registry's import, the heard
+   maximum and the Hugo 2 with no DoP claim, the statement without
+   `statedWithoutDoP`, three markers, and `ios-check.py` as running. Its
+   text is corrected in place, the bold sentences that `player.md`'s line
+   repeats unchanged, and B1's dated paragraph says so.
+5. An excluded token that holds its row's own token (`JM98MAX 2` beside
+   `JM98MAX`) is pinned valid by a positive case, beside a sibling it keeps
+   off.
+
+32 code lines in `dacprofile.go` and `lint.go` (21 comment lines beside
+them, 26 data lines in `profiles.json`); five new cases, two cases changed.
+
+### Reds, greens and controls
+
+Every run went through `go test -overlay`, leaving the tree untouched, and
+was judged against predictions written first. At the base's `lint.go`
+(0be7bd76) under the new tests and data, the two sibling cases were red
+with the lint saying nothing (the Low itself) and the two dated-head cases
+red; every other case was green. The controls, each red only in its own
+case as predicted: the sibling check removed (both sibling cases); the
+port-name key dropped (the port-name case); the token key dropped (the
+token case); excluded tokens applied to a port name (the port-name case);
+the dated-head check removed (both dated cases); `field log` not dated (its
+case); the check on rows without `ios` (both dated cases' second half,
+which lints such a row); a date asked of all six kinds (the embedded
+catalog no longer parses, and the fixture pair no longer lints); the family
+check's heard operand removed, then its refused operand (each its own case;
+under the base's fixtures neither went red, the Low); an excluded token
+holding its row's token refused (the positive case, and the embedded
+catalog); and a sibling dropped from the catalog (the parity test).
+
+The gate's runs on this commit are in the report.

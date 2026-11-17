@@ -67,6 +67,11 @@ var (
 	// fieldLog, maker, pcmCeiling, chipSpecification, retailer) in words, and
 	// a date where the source has one, then the text's end, ", " or " (".
 	reHead = regexp.MustCompile(`^(submission|field log|maker|pcm ceiling|chip specification|retailer)(?: (\d{4}-\d{2}-\d{2}))?(?:$|, | \()`)
+	// datedHeads are the kinds whose head always names its date, a submission
+	// and a field log, as each of theirs does in the registry's baseline and
+	// in the catalog; a maker, a PCM ceiling, a chip specification and a
+	// retailer name none there, and none is asked of them.
+	datedHeads = []string{"submission", "field log"}
 	// reCaseName is a Swift enum case's name, as an iOS volume topology is.
 	reCaseName = regexp.MustCompile(`^[a-z][A-Za-z0-9]*$`)
 )
@@ -116,8 +121,9 @@ func (l *linter) add(format string, args ...any) {
 // could match; a claim, a shared ID, an analogue control or a raw-maximum
 // entry without its provenance or evidence; a caveat off the closed list;
 // DoP evidence its clauses do not credit rate by rate; and an iOS projection
-// iOS PR 1's checks refuse. The kernel-derived claims are checked against
-// the pinned tag (TestTheKernelSeedIsThePinnedTags), and the iOS projection
+// iOS PR 1's checks refuse, a known sibling its strict matcher answers with a
+// model row included. The kernel-derived claims are checked against the
+// pinned tag (TestTheKernelSeedIsThePinnedTags), and the iOS projection
 // against the registry's baseline by its export (scripts/dac-profiles).
 func (db *Database) Lint() []error {
 	var l linter
@@ -468,8 +474,8 @@ func (p *Profile) credits(problem func(format string, args ...any)) []Credit {
 // refusedBitRates, and the statement clauses credit the claim's statement. A
 // rate heard and failed is a contradiction; the four failures are one result,
 // which two units may give in two ways. In a profile with an iOS projection
-// every marker clause has its head, and one clause credits each rate and the
-// statement.
+// every marker clause has its head, a dated kind's with its date, and one
+// clause credits each rate and the statement.
 func (l *linter) dopEvidence(who string, p *Profile) {
 	d := p.DoP
 	cs := p.credits(func(format string, args ...any) { l.add("%s: "+format, append([]any{who}, args...)...) })
@@ -478,6 +484,9 @@ func (l *linter) dopEvidence(who string, p *Profile) {
 	for _, c := range cs {
 		if c.Kind == "" && p.IOS != nil {
 			l.add("%s: the dop clause %q, in a profile with an iOS projection, opens its text after a colon with its source's head: %s, then a date where it has one (%q)", who, c.clause, "submission, field log, maker, pcm ceiling, chip specification or retailer", "heard DSD128: submission 2026-10-04 (…)")
+		}
+		if c.Date == "" && p.IOS != nil && slices.Contains(datedHeads, c.Kind) {
+			l.add("%s: the dop clause %q, in a profile with an iOS projection, heads a %s with no date, and a submission's or a field log's head names its date (%q)", who, c.clause, c.Kind, "heard DSD128: submission 2026-10-04 (…)")
 		}
 		switch {
 		case c.Marker == markerHeard:
@@ -760,9 +769,10 @@ func fold(s string) string {
 
 // nameKeys holds the iOS rows to iOS PR 1's lint, names folded: orders 1 to
 // N, each once; no port name twice or a generic name; no token and generic
-// name one inside the other; and across two profiles only, no token and
+// name one inside the other; across two profiles only, no token and
 // another's token or port name one inside the other (a profile's own token
-// inside its own port name is how it matches).
+// inside its own port name is how it matches); and no known sibling the
+// strict matcher answers with a model row, by either of its keys.
 func (l *linter) nameKeys(db *Database) {
 	var rows []*Profile
 	for i := range db.Profiles {
@@ -817,6 +827,39 @@ func (l *linter) nameKeys(db *Database) {
 			}
 		}
 	}
+	for _, s := range db.IOSKnownSiblings {
+		if hits, key := strictHits(s, db.IOSGenericNames, rows); len(hits) == 1 && hits[0].IOS.NameScope == "model" {
+			l.add("profile %s: the known sibling %q reaches this model row through the strict matcher, by its %s", hits[0].ID, s, key)
+		}
+	}
+}
+
+// strictHits are the rows iOS PR 1's strict matcher finds for a port's name
+// under the first of its two keys any row holds, and that key; one row is its
+// answer, and two or none answer no row. A generic name finds none; then the
+// rows with a port name that is the name, both trimmed and the case kept,
+// which no excluded token rules out; then the rows holding a token the name
+// holds and none of their excluded tokens, folded.
+func strictHits(name string, generic []GenericName, rows []*Profile) ([]*Profile, string) {
+	if slices.ContainsFunc(generic, func(g GenericName) bool { return fold(strings.TrimSpace(g.Name)) == fold(strings.TrimSpace(name)) }) {
+		return nil, ""
+	}
+	holds := func(ts []string) bool {
+		return slices.ContainsFunc(ts, func(t string) bool { return strings.Contains(fold(name), fold(t)) })
+	}
+	for _, key := range []string{"port name", "token"} {
+		var hits []*Profile
+		for _, p := range rows {
+			if key == "port name" && slices.ContainsFunc(p.IOS.PortNames, func(n string) bool { return strings.TrimSpace(n) == strings.TrimSpace(name) }) ||
+				key == "token" && holds(p.IOS.NameTokens) && !holds(p.IOS.ExcludedTokens) {
+				hits = append(hits, p)
+			}
+		}
+		if len(hits) > 0 {
+			return hits, key
+		}
+	}
+	return nil, ""
 }
 
 // claimsOf are the claims p makes, by the name a provenance line starts with:
