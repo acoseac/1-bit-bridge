@@ -104612,3 +104612,105 @@ the repository's tags (ok, 65.2 s); `go vet` with the tags for linux, darwin
 and windows (clean); `make fmt` (no change); `make docs-check` (ok); the
 file's five tests and cmd/bridge's four source guards under the race
 detector (ok).
+
+## 2026-11-17 — B730 ONIX: the Onix Beta XI2 joins the DAC catalog as an iOS-only row
+
+iOS main added a built-in DAC row, the Onix Beta XI2 (iOS #2486, main
+3145606a). Since B730 B1 the catalog is the one source of the app's DAC
+registry and the export's parity test holds it to a dump of the live
+registry, so until the catalog carried the row the export no longer matched
+iOS, and iOS PR 2, which pins the export, could not land. Catalog data, the
+export's golden, the baseline and its pin, docs and this record; no Go
+production code. Rules: the baseline's file name in the export rule's
+condensed line (`.claude/rules/dac-catalog.md`) and in its long form
+(`ops/History-rules-dac-catalog.md`), which names the baseline's commit
+too; nothing else of either changes.
+
+### The baseline
+
+`scripts/dac-profiles/ios-export/testdata/ios-registry-3145606a.json` is a
+dump of the live registry at iOS 3145606a59e688773f064fcdee44240bf8b9efe0,
+made by the same test as the last and committed byte for byte once its
+SHA-256 was checked against the dispatch's. The dump at iOS 6a1241eb went in
+the same commit, and the pin, the file the test reads, its `eol=lf` line in
+`.gitattributes`, the README, the test's comments and the rule's two forms
+moved with it. A JSON diff against the old dump gives exactly: `iosCommit`;
+one row appended, `onix.betaxi2` at order 21; six parity-corpus names
+inserted (`onix xi2` and `ONIX XI2` twice each, `ONIX XI1`, `Onix Alpha
+XI1`); and two known siblings appended, `ONIX XI1` then `Onix Alpha XI1`.
+No other row changes and `genericNames` is unchanged, so the 20 rows'
+`ios-registry` sources and `ios:` lines at iOS 6a1241eb stay as written. So
+do the long form's dated B1 figures: the baseline's 27 `submission` and 1
+`field log` sources, the catalog's 14 and 1 clauses and the 24 known
+siblings are B1's, at iOS 6a1241eb; at 3145606a they are 31 and 1, 16 and
+1, and 26.
+
+### The row
+
+iOS's alone, as the 18 rows B1 seeded: `match: []`, `native` and `timing`
+null, no caveat, since iOS reports no USB identity and there is nothing to
+key. `ifi.golink` is the nearest shape (host-synced gain, heard DoP rates, a
+refused one, a maker's DSD figure that names no DoP). Every value is the
+baseline row's, mapped as B1's export maps them: order 21, maker `Onix`;
+the legacy pattern, the port name and the token `ONIX XI2`, the registry's
+source literal (its `matchPatterns` and its name key at 3145606a; the
+baseline holds the pattern and the token folded, and the parity compares
+them after iOS's fold); the legacy ceiling DSD256; PCM to 768 kHz at 32
+bits; `hostSyncedDACGain`; every iOS time null. DoP: DSD64, DSD128 and
+DSD256 heard and DSD512 refused, its carrier refused (a submission,
+2026-11-17), and the maker's DSD512, native USB DSD, a figure that names no
+DoP, held as `statedWithoutDoP {dsd, DSD512}`, which the player never reads
+(the baseline's `dsdWithoutDoPStatement` up to DSD512); `statedMaxBitRate`
+0; the source the row itself at iOS 3145606a. Its dop line is in the lint's
+one form, one clause for each rate and for the statement, naming no person.
+The known siblings gain `ONIX XI1` and then `Onix Alpha XI1`, the
+baseline's order; the strict matcher answers both `noMatch`, so neither
+reaches the row.
+
+### The two SHA-256s
+
+- The baseline, `ios-registry-3145606a.json`:
+  `a91415f917dcf6f18da58e6d265ad9af46b65b9c2a0e6e0f7852d92105749167`.
+- The export, `DACCatalog.ios.json`, the row appended and nothing else
+  changed, which iOS PR 2 pins:
+  `46440591b0c329acec7a4bb4541509baef192afe8cf800ac608b1835dd564b2d`.
+
+### Reds, greens and controls
+
+Red first (7a28853b, the baseline and its pin alone):
+`TestTheExportMatchesTheIOSBaseline` failed with two lines, the known
+siblings, the baseline's two beyond the catalog's 24 (`main_test.go:350`),
+then the fatal row count, `the export has 20 rows, the baseline 21`
+(`:353`); every other case of both packages passed. Green (ab1013dd): every
+case of both packages, `TestTheKernelSeedIsThePinnedTags` skipped without
+the kernel file CI's `kernel-check.sh` fetches.
+
+Controls on ab1013dd, predicted first, each an uncommitted change run and
+then restored with `git checkout`, the tree clean after each; each went as
+predicted:
+
+1. the row's `pcm.maxRateHz` at 384000: the parity test red on that field
+   alone, `row 21 (onix.betaxi2), pcm: the export's map[bitDepth:32
+   maxRateHz:384000], the baseline's map[bitDepth:32 maxRateHz:768000]`
+   (`:372`), the golden test red and `-check` exit 1;
+2. `Onix Alpha XI1` dropped from the known siblings: the parity test red on
+   the siblings alone (`:350`), the export unchanged;
+3. one byte of the baseline (`baselineVersion` 1 to 2): the pin red, `the
+   baseline's SHA-256 is bead057c…, not the dispatch's a91415f9…` (`:322`);
+4. the row's tokens widened to `["onix"]`: both suites red, by the
+   catalog's known-sibling lint, `profile onix.betaxi2: the known sibling
+   "ONIX XI1" reaches this model row through the strict matcher, by its
+   token`, and the same for `Onix Alpha XI1`. `Default` lints the embedded
+   catalog as it loads it, so those two lines are the failure of every test
+   of both packages that loads it, the parity test's included, at its
+   export (`:332`), before its strict matcher runs. With the lint's sibling
+   check also switched off for the build alone (`go test -overlay` of
+   `lint.go`, nothing in the tree), the parity test's own matcher answers
+   `"ONIX XI1": the strict matcher over the export's keys answers
+   {"known":{"id":"onix.betaxi2","scope":"model","tier":"token"}}, the
+   baseline {"unknown" : "noMatch"}`, and the same for `Onix Alpha XI1`, as
+   corpus names and as siblings, both then apart from the live answers, and
+   the row's name keys differ; `TestNoKnownSiblingReachesAModelRow` is red
+   there.
+
+The gate's runs on this branch are in the report.

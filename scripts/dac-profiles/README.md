@@ -94,8 +94,8 @@ exports now; both print the file's SHA-256, which iOS PR 2 pins beside the
 bridge commit it came from, so a catalog change is a bridge PR, then a
 re-pin. CI's `dac-profiles` job runs `-check` and the catalog's tests. The
 export's tests hold it to its golden and to the iOS registry's baseline,
-`ios-export/testdata/ios-registry-6a1241eb.json`: a dump of the live
-registry's objects at iOS 6a1241eb, pinned by its SHA-256, an input never
+`ios-export/testdata/ios-registry-3145606a.json`: a dump of the live
+registry's objects at iOS 3145606a, pinned by its SHA-256, an input never
 derived from the catalog. A parity failure is fixed in the catalog, never in
 the baseline.
 
