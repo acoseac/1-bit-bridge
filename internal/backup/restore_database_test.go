@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
@@ -187,6 +188,7 @@ func TestADatabaseOnlyRestoreReplacesTheDatabaseAndKeepsTheOriginals(t *testing.
 			for _, name := range []string{"tokens.json", "server.crt", "server.key", "bridge.yaml"} {
 				others[name] = readBytes(t, filepath.Join(f.dataDir, name))
 			}
+			began := time.Now().UnixNano()
 			res, err := backup.RestoreDatabase(f.snap, f.dataDir, f.opts())
 			if err != nil {
 				t.Fatalf("RestoreDatabase: %v", err)
@@ -199,8 +201,8 @@ func TestADatabaseOnlyRestoreReplacesTheDatabaseAndKeepsTheOriginals(t *testing.
 			}
 			readOnly(t, db, func(rdb *sql.DB) {
 				h, err := manifest.ReadRestoredHistory(t.Context(), rdb)
-				if err != nil || h.Coverage <= 0 {
-					t.Errorf("the restored database's coverage = %+v (%v), want it restarted", h, err)
+				if err != nil || h.Coverage < began {
+					t.Errorf("the restored database's coverage = %+v (%v), want it restarted at the restore (%d) or later", h, err, began)
 				}
 			})
 			if !strings.HasPrefix(res.Archive, filepath.Join(f.dataDir, backup.OriginalsDirName)+string(filepath.Separator)) {
