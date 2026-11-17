@@ -539,7 +539,7 @@ func (rd *reading) dop(bitRate int) DoP {
 	if p := rd.profileDoP(); p != nil {
 		d.ProfileRefused = slices.Contains(p.RefusedBitRates, bitRate)
 		blocked = d.ProfileRefused && !d.Clean
-		d.Heard = !blocked && p.HeardMaxBitRate != 0 && bitRate <= p.HeardMaxBitRate
+		d.Heard = !blocked && slices.Contains(p.HeardBitRates, bitRate)
 		d.Stated = !blocked && p.StatedMaxBitRate != 0 && bitRate <= p.StatedMaxBitRate
 	}
 	c := rd.dac.DoPConfirmed

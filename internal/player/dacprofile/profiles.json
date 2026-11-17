@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "sharedReferenceIds": [
     {
       "vendorId": "0d8c",
@@ -22,6 +22,7 @@
       "why": "XMOS's reference product ID, which the owner identified as shared: an iFi unit carries it, with the product string iFi (by AMR) HD USB Audio (owner capture, Linux, 2026-11-04)"
     }
   ],
+  "iosGenericNames": [],
   "profiles": [
     {
       "id": "auralic.altair.g1",
@@ -48,6 +49,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: owner capture, Linux, 2026-11-04: 1511:0062, the card its audio control interface 0, product string ALTAIR G1 USB Audio 2.0, on bcdDevice 06f2",
         "native: owner capture, Linux, 2026-11-04: the playback stream's interface 1, altset 3, lists DSD_U32_BE at frame rates up to 705600, DSD512 in the 44.1 kHz family"
@@ -72,6 +74,7 @@
         "pcmEntryMs": 0
       },
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: owner capture, Linux, 2026-11-04: 245f:0815, the card its audio control interface 1, product string Hugo2, on bcdDevice 0197",
         "timing: iOS profile chord.hugo2's DSD resync delay, 0.7 s (iOS cd125088)"
@@ -102,6 +105,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0644:8043",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -132,6 +136,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0644:8044",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -162,6 +167,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0644:804a",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -192,6 +198,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0644:806b",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -222,6 +229,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 10cb:0103",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -252,6 +260,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 139f:5504",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
@@ -282,6 +291,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:1002",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -312,6 +322,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:1003",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -342,6 +353,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:3005",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -372,6 +384,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:3006",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -402,6 +415,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:300b",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on each altsetting whose descriptor marks raw data"
@@ -432,6 +446,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:06b2",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -462,6 +477,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:06b4",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -492,6 +508,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:0733",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -522,6 +539,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:09d8",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -552,6 +570,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:09db",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -582,6 +601,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:09dd",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -612,6 +632,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:0a23",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
@@ -642,6 +663,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 1852:5062",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -672,6 +694,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 1852:5065",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
@@ -702,6 +725,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 1db5:0003",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -732,6 +756,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 20b1:3089",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
@@ -762,6 +787,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 21b4:0230",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on each altsetting whose descriptor marks raw data"
@@ -792,6 +818,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 21b4:0232",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on each altsetting whose descriptor marks raw data"
@@ -822,6 +849,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 22e1:ca01",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -852,6 +880,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 249c:9326",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -882,6 +911,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2522:0007",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
@@ -912,6 +942,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2522:0009",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
@@ -942,6 +973,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2522:0012",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
@@ -972,6 +1004,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2616:0106",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -1002,6 +1035,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2622:0041",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -1032,6 +1066,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2772:0230",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
@@ -1062,6 +1097,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 278b:5100",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -1092,6 +1128,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 27f7:3002",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -1122,6 +1159,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 29a2:0086",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -1152,6 +1190,7 @@
       "dop": null,
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 6b42:0042",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
@@ -1180,8 +1219,9 @@
         }
       },
       "dop": {
-        "heardMaxBitRate": 0,
+        "heardBitRates": [],
         "statedMaxBitRate": 0,
+        "statedWithoutDoP": null,
         "refusedBitRates": [
           11289600
         ],
@@ -1194,6 +1234,7 @@
       },
       "timing": null,
       "caveats": [],
+      "ios": null,
       "provenance": [
         "identity: owner capture, Linux, 2026-11-04: 25ce:0025, the card its audio control interface 0, product string Brooklyn DAC+, on bcdDevice 0100",
         "native: owner capture, Linux, 2026-11-04: the playback stream's interface 2, altset 2, lists DSD_U32_BE at frame rates up to 352800, DSD256",

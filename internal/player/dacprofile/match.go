@@ -22,7 +22,8 @@ type Unit struct {
 // and Match does not assume the lint ran). An alternative matches on every
 // field it sets, compared exactly, the product string byte for byte; an
 // alternative on a shared reference ID matches only with its product string.
-// No name is ever compared.
+// No name is ever compared and the iOS projection is never read, so a
+// profile with no alternative, iOS's alone, knows no unit.
 func (db *Database) Match(u Unit) (Profile, bool) {
 	bcd, err := usbid.ParseHex16(u.BCDDevice)
 	hasBCD := err == nil
@@ -101,6 +102,8 @@ func (p Profile) clone() Profile {
 	}
 	if p.DoP != nil {
 		d := *p.DoP
+		d.HeardBitRates = slices.Clone(d.HeardBitRates)
+		d.StatedWithoutDoP = clonePtr(d.StatedWithoutDoP)
 		d.RefusedBitRates = slices.Clone(d.RefusedBitRates)
 		d.AnalogVolumeControls = slices.Clone(d.AnalogVolumeControls)
 		d.UnityAtRawMax = slices.Clone(d.UnityAtRawMax)
@@ -113,7 +116,31 @@ func (p Profile) clone() Profile {
 		t := *p.Timing
 		c.Timing = &t
 	}
+	if p.IOS != nil {
+		x := *p.IOS
+		x.LegacyPatterns = slices.Clone(x.LegacyPatterns)
+		x.PortNames = slices.Clone(x.PortNames)
+		x.NameTokens = slices.Clone(x.NameTokens)
+		x.ExcludedTokens = slices.Clone(x.ExcludedTokens)
+		x.SiblingNote = clonePtr(x.SiblingNote)
+		t := &x.Timing
+		t.IOBufferMs = clonePtr(t.IOBufferMs)
+		t.DSDResyncMs = clonePtr(t.DSDResyncMs)
+		t.PCMEntryResyncMs = clonePtr(t.PCMEntryResyncMs)
+		t.ColdStartExtraMs = clonePtr(t.ColdStartExtraMs)
+		t.TransitionCushionMs = clonePtr(t.TransitionCushionMs)
+		c.IOS = &x
+	}
 	c.Caveats = slices.Clone(p.Caveats)
 	c.Provenance = slices.Clone(p.Provenance)
 	return c
+}
+
+// clonePtr is a pointer to a copy of what p points to, nil for nil.
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }

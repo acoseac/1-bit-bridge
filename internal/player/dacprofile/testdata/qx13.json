@@ -1,6 +1,7 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "sharedReferenceIds": [],
+  "iosGenericNames": [],
   "profiles": [
     {
       "id": "fiio.qx13",
@@ -16,8 +17,13 @@
       ],
       "native": null,
       "dop": {
-        "heardMaxBitRate": 11289600,
+        "heardBitRates": [
+          2822400,
+          5644800,
+          11289600
+        ],
         "statedMaxBitRate": 11289600,
+        "statedWithoutDoP": null,
         "refusedBitRates": [],
         "analogVolumeControls": [],
         "unityAtRawMax": [],
@@ -37,9 +43,10 @@
           "note": "With PEQ on, this DAC plays DoP as noise, and the bridge cannot see the mode: turn PEQ off, or choose Convert to PCM."
         }
       ],
+      "ios": null,
       "provenance": [
         "identity: a test fixture's placeholder ID (vendor ffff), 2026-11-04: the QX13's own USB identity has not been captured",
-        "dop: heard DSD64, DSD128, DSD256: iOS profile fiio.qx13, with PEQ off (iOS cd125088)",
+        "dop: heard DSD64, DSD128, DSD256: iOS profile fiio.qx13, with PEQ off (iOS cd125088); stated DoP to DSD256: iOS profile fiio.qx13 (iOS cd125088)",
         "timing: iOS profile fiio.qx13's PCM-entry resync delay, 0.8 s (iOS cd125088)",
         "caveat dop_noise_in_hidden_mode: iOS profile fiio.qx13, DoP played as noise with PEQ on, the 2.0.1 report (iOS cd125088)"
       ]

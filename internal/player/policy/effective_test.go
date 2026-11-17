@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -330,7 +331,7 @@ func TestNoDoPOnAnUnknownDACWithoutConfirmation(t *testing.T) {
 		}
 		// A known DAC whose profile claims DoP to DSD64 alone.
 		k := newRig(t).everything(mode).withoutNative()
-		k.profileDoP = &dacprofile.DoP{HeardMaxBitRate: dsd64, StatedMaxBitRate: dsd64}
+		k.profileDoP = &dacprofile.DoP{HeardBitRates: []int{dsd64}, StatedMaxBitRate: dsd64}
 		k.confirmed = nil
 		wantOutcome(t, mode+" on a known DAC at its claimed rate", k.plan(dsd64), OutcomeDoP)
 		for _, rate := range []int{dsd128, dsd256} {
@@ -382,7 +383,7 @@ func TestAStateThatDoesNotReadRefusesEveryRate(t *testing.T) {
 func TestAProfilesRefusedRateOutranksItsStatedMaximumAndAConfirmation(t *testing.T) {
 	for _, mode := range []string{dsdstate.ModeDoP, dsdstate.ModeAuto} {
 		r := newRig(t).everything(mode).withoutNative()
-		r.profileDoP = &dacprofile.DoP{HeardMaxBitRate: dsd128, StatedMaxBitRate: dsd256, RefusedBitRates: []int{dsd256}}
+		r.profileDoP = &dacprofile.DoP{HeardBitRates: []int{dsd64, dsd128}, StatedMaxBitRate: dsd256, RefusedBitRates: []int{dsd256}}
 		r.forget(dsdstate.TransportDoP, dsd256)
 		wantOutcome(t, mode+" at a heard rate", r.plan(dsd128), OutcomeDoP)
 		p := r.plan(dsd256)
@@ -416,6 +417,37 @@ func TestAProfilesRefusedRateOutranksItsStatedMaximumAndAConfirmation(t *testing
 	n := newRig(t).everything(dsdstate.ModeNative).withoutCarrier()
 	n.profileNative = &dacprofile.Native{MaxBitRate: dsd64, Formats: []string{"DSD_U32_BE"}, Source: dacprofile.Source{Kind: dacprofile.SourceCapture}}
 	wantOutcome(t, "native past its claim's maximum", n.plan(dsd256), OutcomeNative)
+}
+
+// TestAHeardRateAdmitsOnlyItself: a profile's heard DoP rates are each a
+// listening at that rate and say nothing of the rates below them, so under
+// auto, on a known DAC with no native DSD, its DoP carrier offered, the gain
+// at unity and first use acknowledged, with no confirmation, DoP plays at a
+// heard rate alone: heard at DSD128 converts DSD64, and heard at DSD64 and
+// DSD256 converts DSD128.
+func TestAHeardRateAdmitsOnlyItself(t *testing.T) {
+	for _, tc := range []struct {
+		heard []int
+		dop   []int
+	}{
+		{[]int{dsd128}, []int{dsd128}},
+		{[]int{dsd64, dsd256}, []int{dsd64, dsd256}},
+	} {
+		r := newRig(t).everything(dsdstate.ModeAuto).withoutNative()
+		r.profileDoP, r.confirmed = &dacprofile.DoP{HeardBitRates: tc.heard}, nil
+		s := Effective(r.inputs())
+		for _, rate := range dsdRates {
+			want := OutcomeConverted
+			if slices.Contains(tc.dop, rate) {
+				want = OutcomeDoP
+			}
+			d := s.At(rate).DoP
+			if !d.Offered || !d.Gain.Unity || !d.Acknowledged || d.Confirmed {
+				t.Errorf("heard %v, %d: the rig's DoP is %+v, want offered, at unity, acknowledged and unconfirmed", tc.heard, rate, d)
+			}
+			wantOutcome(t, fmt.Sprintf("auto, heard %v, at %d", tc.heard, rate), s.At(rate).Plan, want)
+		}
+	}
 }
 
 // TestEachTuplePublishesItsHighestRungOnThisFirmware: a tuple's rung is the
