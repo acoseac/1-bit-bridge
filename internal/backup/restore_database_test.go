@@ -197,6 +197,12 @@ func TestADatabaseOnlyRestoreReplacesTheDatabaseAndKeepsTheOriginals(t *testing.
 			if e := epochOf(t, db); e == snapEpoch {
 				t.Errorf("the restored database kept the snapshot's epoch %s", e)
 			}
+			readOnly(t, db, func(rdb *sql.DB) {
+				h, err := manifest.ReadRestoredHistory(t.Context(), rdb)
+				if err != nil || h.Coverage <= 0 {
+					t.Errorf("the restored database's coverage = %+v (%v), want it restarted", h, err)
+				}
+			})
 			if !strings.HasPrefix(res.Archive, filepath.Join(f.dataDir, backup.OriginalsDirName)+string(filepath.Separator)) {
 				t.Fatalf("the originals' folder %s is not in %s", res.Archive, backup.OriginalsDirName)
 			}
@@ -800,6 +806,11 @@ func TestARestoreStoppedAtEveryStepFollowsItsStateTable(t *testing.T) {
 						t.Fatalf("after %s a journal stands: %v, want %v", r.step, stands, r.journal)
 					}
 					requireAdmission(t, f.dataDir, !r.journal)
+					if r.step == "P:published" {
+						if j := journalOf(t, f.dataDir); j.Phase != backup.PhasePuttingBack {
+							t.Errorf("a put-back stopped once published leaves phase %s, want %s", j.Phase, backup.PhasePuttingBack)
+						}
+					}
 					if r.journal {
 						finishDatabaseRestore(t, f.dataDir)
 					} else if _, err := backup.PlanFinishDatabaseRestore(f.dataDir); !errors.Is(err, backup.ErrNoRestoreJournal) {
@@ -1059,4 +1070,139 @@ func TestAPutBackClassifiesEveryNameBeforeItMovesOne(t *testing.T) {
 		}
 		requireNoJournalNoStage(t, f.dataDir)
 	})
+}
+
+// TestAnUnrelatedDatabaseWhereTheInstallWasDueIsNeverTakenForIt is T38: with
+// the originals moved out and the staged copy gone, a valid SQLite file put
+// at the database's name is neither the prepared copy nor the original, and
+// the way back stops with every file and the journal as they were; and a
+// WAL beside an installed copy stops the completion of an `installed`
+// restore.
+func TestAnUnrelatedDatabaseWhereTheInstallWasDueIsNeverTakenForIt(t *testing.T) {
+	t.Run("an unrelated database", func(t *testing.T) {
+		f := newDBFixture(t, withSidecars)
+		stoppedAt(t, f, "C4:synced", false)
+		db := manifest.DefaultDBPath(f.dataDir)
+		if err := os.Remove(manifest.RestoreStagingPath(f.dataDir)); err != nil {
+			t.Fatal(err)
+		}
+		other := filepath.Join(t.TempDir(), "other.db")
+		s, err := manifest.OpenStore(other)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(db, readBytes(t, other), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		state := dataDirState(t, f.dataDir)
+		if _, err := backup.PlanFinishDatabaseRestore(f.dataDir); !errors.Is(err, backup.ErrRestoreStopped) {
+			t.Fatalf("the way back over an unrelated database = %v, want a stop", err)
+		}
+		if got := dataDirState(t, f.dataDir); !mapsEqual(got, state) {
+			t.Error("the stop changed what the data dir holds")
+		}
+	})
+	t.Run("a WAL beside the installed copy", func(t *testing.T) {
+		f := newDBFixture(t, withSidecars)
+		stoppedAt(t, f, "C5'", false)
+		db := manifest.DefaultDBPath(f.dataDir)
+		writeFile(t, db+"-wal", "a WAL something opened beside the restored database")
+		state := dataDirState(t, f.dataDir)
+		_, err := backup.PlanFinishDatabaseRestore(f.dataDir)
+		if !errors.Is(err, backup.ErrRestoreStopped) || !strings.Contains(err.Error(), "bridge.db-wal") {
+			t.Fatalf("the completion beside a WAL = %v, want a stop naming it", err)
+		}
+		if got := dataDirState(t, f.dataDir); !mapsEqual(got, state) {
+			t.Error("the stop changed what the data dir holds")
+		}
+	})
+}
+
+// TestAnEntryMadeAtAPutBacksTargetIsNeverReplaced is T22's race row: an entry
+// made at an original's live name just before the put-back's rename of it
+// (fsutil's seam before the call) is never renamed over; the put-back stops
+// with the journal kept, the entry's bytes and the archived original as
+// they were.
+func TestAnEntryMadeAtAPutBacksTargetIsNeverReplaced(t *testing.T) {
+	f := newDBFixture(t, withSidecars)
+	stoppedAt(t, f, "C4:synced", false)
+	j := journalOf(t, f.dataDir)
+	wal := manifest.DefaultDBPath(f.dataDir) + "-wal"
+	archived := filepath.Join(j.ArchiveDir(f.dataDir), "bridge.db-wal")
+	original := readBytes(t, archived)
+	var planted atomic.Bool
+	t.Cleanup(fsutil.SetBeforeNoReplaceRenameForTest(func(from, to string) {
+		if to == wal && planted.CompareAndSwap(false, true) {
+			writeFile(t, wal, "made at the instant before the rename")
+		}
+	}))
+	plan, err := backup.PlanFinishDatabaseRestore(f.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = backup.FinishDatabaseRestore(f.dataDir, plan, backup.FinishOptions{})
+	if !errors.Is(err, backup.ErrRestoreStopped) {
+		t.Fatalf("the put-back over an entry made at its target = %v, want a stop", err)
+	}
+	if got := string(readBytes(t, wal)); got != "made at the instant before the rename" {
+		t.Errorf("the entry at the target was replaced: %q", got)
+	}
+	if !bytes.Equal(readBytes(t, archived), original) {
+		t.Error("the archived WAL moved or changed")
+	}
+	if journalOf(t, f.dataDir).Phase != backup.PhasePuttingBack {
+		t.Error("the put-back's stop did not keep its journal at puttingBack")
+	}
+}
+
+// TestTheSwapsOwnPutBackClassifiesBeforeItMoves is the in-process put-back's
+// half of T45: a file planted at a sidecar's live name once C3 moved it, then
+// a failure of C4's rename, makes the swap's put-back stop before it moves
+// anything, its journal still `forward`.
+func TestTheSwapsOwnPutBackClassifiesBeforeItMoves(t *testing.T) {
+	f := newDBFixture(t, withSidecars)
+	wal := manifest.DefaultDBPath(f.dataDir) + "-wal"
+	t.Cleanup(backup.SetRestoreStepForTest(func(step string) {
+		if step == "C3:bridge.db-journal:synced" {
+			writeFile(t, wal, "planted once the WAL was moved out")
+		}
+	}))
+	t.Cleanup(backup.SetSwapFaultForTest(func(from, to string) error {
+		if filepath.Base(from) == backup.ManifestDBFileName && strings.Contains(to, backup.OriginalsDirName) {
+			return errors.New("held by another program")
+		}
+		return nil
+	}))
+	_, err := backup.RestoreDatabase(f.snap, f.dataDir, f.opts())
+	if !errors.Is(err, backup.ErrRestoreStopped) {
+		t.Fatalf("RestoreDatabase = %v, want the put-back's stop", err)
+	}
+	if j := journalOf(t, f.dataDir); j.Phase != backup.PhaseForward {
+		t.Errorf("the put-back published %s before its classification refused", j.Phase)
+	}
+	if got := string(readBytes(t, wal)); got != "planted once the WAL was moved out" {
+		t.Errorf("the planted file changed: %q", got)
+	}
+}
+
+// TestAConfigChangedDuringThePreparationRestoresNothing is T17's preparation
+// row: bridge.yaml edited while the staged copy is prepared, its lock let go,
+// refuses at the turn taken again before the record, the stage removed and
+// no original moved.
+func TestAConfigChangedDuringThePreparationRestoresNothing(t *testing.T) {
+	f := newDBFixture(t, withSidecars)
+	before := f.originals(t)
+	t.Cleanup(backup.SetRestoreStepForTest(func(step string) {
+		if step == "B9" {
+			writeFile(t, f.yaml, string(f.cfg)+"# edited while the copy was prepared\n")
+		}
+	}))
+	_, err := backup.RestoreDatabase(f.snap, f.dataDir, f.opts())
+	if err == nil || !strings.Contains(err.Error(), "nothing was restored") {
+		t.Fatalf("RestoreDatabase with the config edited during its preparation = %v, want a refusal", err)
+	}
+	requireUnchanged(t, f, before)
 }

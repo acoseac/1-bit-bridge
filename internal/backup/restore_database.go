@@ -179,6 +179,7 @@ func RestoreDatabase(snapshotDir, dataDir string, opts DatabaseOptions) (res Dat
 	if err := dropStagedSidecars(stage); err != nil {
 		return res, err
 	}
+	step("B9")
 
 	// B11a: the marker's admission again, held to C5′; B10 under it; then
 	// bridge.yaml's turn again (B11b), the config and the root form compared
