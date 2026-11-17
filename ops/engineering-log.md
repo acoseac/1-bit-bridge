@@ -103889,3 +103889,141 @@ and 1,522 ETXTBSY of 6,400 without the lock, 0 with it. The package -race x10
 beside 8 CPU hogs passed (2,500 passes), as did the gate. `internal/updater`'s
 `installCandidateCopy`, checked, stays: it hard-links but on Windows, and no
 test there is parallel.
+
+## 2026-11-17 — B930: the ticker's mid-prune cancel test times its pass and its return apart
+
+CI run 44097405776, attempt 1, `test (windows-latest)`, on B730 B1's
+main-merge head, failed `TestABackupCancelledMidPruneReportsWhatItDeleted`
+with "the backup ticker did not return within 10s of its cancel"
+(`backup_ticker_test.go:165`) after 42.82 s; the same tree's attempt 2 was
+green, and the run's log was not to hand. The bound ran from the ticker's
+start, while the test makes its cancel only at the prune's ask of the first
+snapshot it removes (its `SetMetadataForTest` hook), after the capture and
+the verification: the message named a wait it did not measure. A test's
+reported time includes its cleanups (go1.27.3's `tRunner` runs them before it
+adds the duration: `src/testing/testing.go:2187-2191`, then `:2131`), so the
+42.82 s is the setup, the 10 s wait, the drain's cancel and its wait
+(`drainLoopOnCleanup`, which waits until just before the binary's deadline)
+and the temp dir's removal (Windows' retries, 2 s at most, `:1651-1664`),
+never one wait in the pass.
+
+### The waits before the prune, and the cancel
+
+The fixture's three snapshots are 72 to 120 hours old, so the startup rule
+(`decideStartupPass`, `cmd/bridge/backup.go:978-1000`) captures:
+`backup.Claim` and its `claimLockWait` (`internal/backup/owner.go:223`) are
+not on this path, and `VerifyCmdLockWait` (`verify_lock.go:66`) is `bridge
+backup --verify`'s alone. On the path, each wait and what a cancel does to
+it:
+
+- the listing and the two reads before the capture (`readBounded`,
+  `cmd/bridge/backup.go:1028-1044`): answered, or `StopWriteBound` (2 s)
+  after the cancel;
+- the capture, on the ticker's goroutine: the store's lifetime lock is a try,
+  never a wait (`internal/manifest/store_open_lock.go:251-296`);
+  `retryWhileBusy` (`internal/backup/vacuum.go:231-260`, 5 s at most) stops
+  at the cancel, and the VACUUM INTO at its interrupt but in the commit's
+  last 64 KB (`vacuum.go:20-58`);
+- this process's verification slot (`takeSlot`, `verify_lock.go:280-322`),
+  behind any verification of this process, of any folder, that was not given
+  up, with no bound but its context: the cancel ends it at once, and
+  `abandonPending` (`finish.go:697-744`) answers within `StopWriteBound`;
+- the backups folder's lock (`lockBackupsWith`, `verify_lock.go:113-232`), for
+  up to `AutoLockWait`, which is `VerifyDeadline`, 30 minutes
+  (`verify_lock.go:64-67`): each poll's pause selects on the context
+  (`:124-137`);
+- the verification's caller (`verifyAndThen`, `finish.go:343-368`), answered
+  `StopWriteBound` after the stop at the latest, the worker abandoned; the
+  worker's steps under the lock (`runStep`, `hold.go:521-525`) and its check
+  (`runCheck`, `finish.go:791-810`) are given up `StopWriteBound` and half of
+  it after the stop.
+
+Every one honours the cancel, so no production code changes, and the grace
+`StopWriteBound` keeps after a stop (`hold.release` lets an ownership go
+before the folder's lock) stays as it is.
+
+### Measured on Linux
+
+go1.27.3 and the race detector, the test instrumented through `go test
+-overlay` (one generator putting the same marks into the base's test and the
+new one, the tree untouched), each phase timed where it happens: the hook,
+the ticker's goroutine, and the seams `SetOnSlotWaitForTest`,
+`SetOnLockWaitForTest`, `SetOnCheckEntryForTest`, `SetAfterCheckForTest` and
+`SetOnVerifyEndForTest`.
+
+- Quiet, 50 runs: the setup (`WriteSource`'s ladder and the three snapshots)
+  1.03 to 1.06 s; the ticker's start to the prune's ask 0.24 to 0.25 s (the
+  capture 0.15 s, the check 0.07 s), which the CI run's median slowdown of
+  1.48 makes 0.37 s; the ask to the ticker's return 1 ms at most.
+- The backups folder's lock held by a second holder (an open of its own and
+  the kernel's lock): the verification waits at the lock from 0.15 s. The
+  base's test failed at 10.000 s with the cancel's message, no cancel made;
+  the cleanup's cancel ended the wait and the ticker returned 2.000 s later
+  (`abandonPending` trying the held lock for `StopWriteBound`), 13.07 s in
+  all. The new test fails at 60 s with the pass's message.
+- This process's slot held by another verification (another folder's
+  snapshot, its check parked at its entry): the verification waits at the
+  slot from 0.15 s. The base's test failed at 10.007 s with the same message;
+  the cancel returned the ticker in 0.025 s, 12.34 s in all. The new test:
+  the pass's message at 60.06 s.
+- Load, GOMAXPROCS 2, the test and busy processes pinned to 8 CPUs: beside
+  16, the new test passed 8 of 8, the pass 9.2 to 10.4 s, nearly all of it
+  the check (8.7 to 9.9 s), whose thread runs at the lowest priority (nice 19
+  and the idle I/O class on Linux, background mode on Windows,
+  `priority_windows.go`), and the base's passed 8 of 8, its slowest at
+  9.93 s. Beside 24, the base's failed 8 of 8 at 10.006 to 10.015 s with the
+  cancel's message, each still in its check, no cancel made before the
+  message, and the cleanup's cancel returned the ticker in 0.26 to 0.86 s
+  (14.7 to 15.4 s in all); the new test passed 16 of 16 in two batches, the
+  pass 14.3 to 15.5 s, the return 1 ms at most after the cancel.
+
+So the CI's message reproduces on Linux with nothing held: a pass slow to
+reach the prune, its low-priority check the slow part. No wait in the pass
+outlasts a cancel by more than `StopWriteBound`, and none matches the
+42.82 s; the held lock and the held slot are ceilings of what a holder costs
+once the cancel comes (2.0 s and 0.03 s), not evidence that CI met either.
+What the rest of that run's 42.82 s was is unresolved: its setup's migration
+ladder on a starved Windows disk (a serve boot, which runs the same ladder,
+took more than 30 s on such a host, B63), its pass slowed by the check's
+background mode, its slot behind another test's worker that was not given
+up, and Windows' removal retries for files an abandoned worker still held
+each fit it, and only that run's log would tell them apart.
+
+### What changes
+
+The test gives the pass up to the cancel a bound of its own,
+`startupPassBound`, 60 s ("the startup pass did not reach the prune within
+1m0s", with stdout and stderr), nearly four times the slowest loaded pass
+measured, and the return 10 s from the cancel, its message kept. The
+cancel's instant is noted by the hook on the prune's goroutine, which closes
+a channel and never waits, and the return's by the ticker's goroutine; each
+bound is judged by those instants once its wait ends, so a test goroutine
+woken late, its event and its timer both ready, cannot read a prompt return
+as a slow one. `waitClosed` and its other callers are unchanged.
+
+The verification's worker answers before it lets its holds go, and the test
+put its seam back and removed its folder once the ticker had returned: under
+the base's test the seam went back before the worker's end in 3 of 20 quiet
+runs, and the test ended before the worker in 6 of 8 runs beside 16 busy
+processes. The test now drains the holds (`awaitHoldsLetGo`, registered after
+the seam and before the ticker's drain, so it runs between them); none of the
+new test's instrumented runs since put the seam back before the worker's
+end. With the worker's unlock held 300 ms (`SetOnLockReleaseForTest`, from
+the instrumentation), the drain waited for the worker in 10 of 10 runs, and,
+the drain removed, the test ended before the worker in 10 of 10.
+
+### Reds, greens and controls
+
+Reds at the base, above: the cancel's message with no cancel made, under a
+held lock, a held slot and the 24-process load; the new test passes under
+that load and gives the pass's message where something holds the pass.
+Controls on 496d41bc, each mutation written in for the build and put back at
+once, predicted first, the tree clean after: C1, the test holding the backups
+folder's lock before the ticker starts, red after 63.1 s with the pass's
+message alone (`backup_ticker_test.go:202`); C2, `doSnapshot` sleeping 12 s
+after a pass whose context has ended, red after 13.4 s with the return's
+message alone (`:216`). Gates on 496d41bc: the test `-race -count=50` with
+the repository's tags (ok, 65.2 s); `go vet` with the tags for linux, darwin
+and windows (clean); `make fmt` (no change); `make docs-check` (ok); the
+file's five tests and cmd/bridge's four source guards under the race
+detector (ok).

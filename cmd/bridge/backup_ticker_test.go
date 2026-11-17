@@ -235,13 +235,13 @@ func TestABackupCancelledMidPruneReportsWhatItDeleted(t *testing.T) {
 // Linux under the race detector, from the ticker's start to the prune's ask:
 // 0.24 to 0.25 s in 50 runs on a quiet host, which the windows-latest
 // runner's median slowdown of 1.48 makes 0.37 s; and, with the test pinned
-// beside 16 and then 24 busy processes on its 8 CPUs, 9.2 to 10.4 s and 14.3
-// to 15.3 s in 8 runs each, nearly all of it the verification's check, whose
+// beside 16 and then 24 busy processes on its 8 CPUs, 9.2 to 10.4 s in 8 runs
+// and 14.3 to 15.5 s in 16, nearly all of it the verification's check, whose
 // thread runs at the lowest priority, which a busy host starves. Under the
 // second load the one 10 s bound from the ticker's start failed all 8 runs,
-// as a ticker that did not return after its cancel. Sixty seconds is four
-// times the slowest pass measured, and a pass that never reaches the prune
-// still fails long before the binary's deadline.
+// as a ticker that did not return after its cancel. Sixty seconds is nearly
+// four times the slowest pass measured, and a pass that never reaches the
+// prune still fails long before the binary's deadline.
 const startupPassBound = 60 * time.Second
 
 // TestABackupThatFailsIsStillReported is the control on the tests above.
