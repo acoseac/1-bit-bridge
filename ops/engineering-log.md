@@ -103871,6 +103871,25 @@ catalog); and a sibling dropped from the catalog (the parity test).
 
 The gate's runs on this commit are in the report.
 
+## 2026-11-17 — B915: the installer tests write their stubs under the fork lock
+
+CI run 43963924170 (`test -race (rest)`, Linux) failed
+`TestTheInstallerSaysWhatLetsThePlayerOpenTheDAC/sh`: "ssh: Text file busy".
+`writeFile` held each stub open for writing in `os.WriteFile` while parallel
+installer tests forked, and a child forked then keeps the descriptor until
+its exec, exec of the stub failing ETXTBSY meanwhile. A go1.27.3 fork takes
+`syscall.ForkLock` for writing (`acquireForkLock`, from `forkExec` at
+`src/syscall/exec_unix.go:199`), so f0bab282's `writeFile` holds it for
+reading across the write. Scratch checks (Linux 7.0.0-38, Ubuntu 26.04),
+deleted: a stub held open for writing failed ETXTBSY run as a command, and
+ran closed; guarded, `exec.Cmd.Start` waited at the lock while a stub was held
+open and returned once let go, unguarded it returned while held (21 runs);
+32 goroutines × 200 writes and runs, three rounds under -race: 1,528, 1,549
+and 1,522 ETXTBSY of 6,400 without the lock, 0 with it. The package -race x10
+beside 8 CPU hogs passed (2,500 passes), as did the gate. `internal/updater`'s
+`installCandidateCopy`, checked, stays: it hard-links but on Windows, and no
+test there is parallel.
+
 ## 2026-11-17 — B925: three transcode tests fail by their own message, not by a hang
 
 Branch `fix/b925-transcode-test-hangs`, from main 711e3cbf. 2e166023 changes
