@@ -258,7 +258,9 @@ Fields:
 `bcdDevice` to `bridge output dac inspect --json`; these are the sysfs attributes
 `alsa.Qualification` already reads (`internal/alsa/qualification.go:35-48`). A model with no
 capture stays out of the database. It is unknown, converted by default, and DoP stays selectable
-with the user's confirmation.
+with the user's confirmation. (2026-11-17, B730 B1 amends this: a model with no capture enters as an
+iOS registry row with no match alternative, `match: []`, which matches no unit and makes no claim
+only a match reaches, so for the bridge's player it is still unknown; `.claude/rules/dac-catalog.md`.)
 
 **From the kernel:** the device-specific native DSD quirks in `sound/usb/quirks.c` (the per-ID DSD
 format quirk and the DSD_RAW flag table), at the kernel tag `scripts/alsa-abi` pins. Each becomes
@@ -1713,7 +1715,9 @@ rule that permits it.
       claim without its provenance, let two profiles match one identity, import from the iOS
       registry anything but its DoP evidence, its caveats and a DSD resync delay as timing
       (`dsdPrefillMs`), compare keys field by field, or let an absent interface or product hash
-      like a present one.**"
+      like a present one.**" (2026-11-17, B730 B1 amends the iOS clause: the catalog holds each
+      registry row's iOS projection for its export, and the rule now reads "match a unit by an iOS
+      name, or read a profile's `ios` projection in the player"; `.claude/rules/player.md`.)
     - B3: "**The player's DSD state (`player-dsd.json`) keys each DAC by its model identity, keeps
       a bridge-wide `defaultMode`, records which rates each acknowledgement covers and which
       warnings the app must explain, and makes a write durable before it is answered. A state that

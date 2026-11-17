@@ -97187,6 +97187,506 @@ the tree with this record. The rule change is `rules-b872-r3.patch`: round
 now names the notice's seam, the held wait and its abort; the budgets check
 is clean with it.
 
+## 2026-11-13 — B884 step 1: bridge init, the doctors and serve warn of the bridge's own files inside a library root
+
+The rule is `cli-serve.md`'s B884 line, and its long form is in
+`ops/History-rules-cli-serve.md` ("B884 — the bridge's own files inside a
+library root"); this is the evidence. Linux amd64, Go 1.27.3, the
+Makefile's tags, TMPDIR on disk (`~/onebit/tmp`). B650 (#1461) is not on
+main and this step does not build on it: on b9f50244 the doctor still loads
+the config on its own goroutine and stats each root unbounded.
+
+### Step 0, read-only, at b9f50244
+
+1. How Load resolves the paths: `internal/config/config.go` 3008 `Load` ->
+   3018 `LoadFile` -> 3177 `loadData`: 3181 the decode, 3187 `applyDefaults`
+   (a dataDir left empty is `DefaultDataDir`, `./data`, 3260-3261), 3188
+   `applyEnvOverrides` (`env.go` 239: BRIDGE_DATA_DIR, and BRIDGE_LIBRARY_ROOTS
+   split on the OS's list separator, `env.go` 134-142), 3189 `filepath.Abs` of
+   the config's name, 3193 `resolvePaths(filepath.Dir(abs))`, 3289-3299: each
+   root and the data directory through `ResolvePath` (3329: empty stays empty,
+   an absolute path is cleaned, a relative one joined to the config's
+   directory). Load expands no `~` (init's `expandHome`, `init.go` 1795,
+   expands its own `--dir` and `--library` alone). Serve's boot read is
+   `LoadFileAt` (3099), over the name made absolute as written
+   (`cmd/bridge/main.go` 3428-3432, `configpath.go` 128); `DataDirOf`
+   (`refused.go` 72) repeats the dataDir key's three steps for a config Load
+   refuses.
+2. Where each surface can say it, the config loaded, touching nothing new:
+   init after its save (`cmd/bridge/init.go` 935-946, `cfg` holding the saved
+   data directory and roots, absolute) and at its keep (721-730, `prior`,
+   read at 466-467 from the bytes `readConfigAsIs` read, its paths resolved
+   by `config.ResolvePath`, `init_rewrite.go` 317-351), never in the preflight
+   (651-674), which grades `namedRoots` (538-546: a public run's kept roots are
+   left out on purpose) and runs only without `--skip-doctor`; the doctor in
+   `buildDoctorDepsWith` (`cmd/bridge/doctor.go` 258), inside the arm of a
+   config that loaded (329) beside `DataDirPreparation` (345), and in
+   `doctor.Run` right after that line (`internal/doctor/doctor.go` 501-503);
+   the console's doctor rebuilds those Deps at each run
+   (`adminDoctorRunnerFor`, 1018-1044); serve in `runServe` after its boot
+   read (`main.go` 3458), the config's refusals (3482) and the managed-controls
+   warning (3514-3518), before the roots' stat (3520,
+   `CheckLibraryRootsAccessible`), the record's check (3576) and the data
+   directory's preparation (3589).
+3. Every caller of `fsutil.IsUnderAny` (14 calls in 11 files), none of which
+   could take the lexical check: `internal/config/config.go` 4215 and 4247
+   (`upscale.variantsDir`, `upscale.tempDir`), `internal/admin/handlers_variants_dir.go`
+   246 and `cmd/bridge/variants.go` 130 (the same refusal, kept in lockstep):
+   refusals that keep writes out of a root, which a link into one would pass
+   lexically; `internal/dlna/loopback.go` 170 and 195 and
+   `internal/player/library/library.go` 603 and 616: containment of a file
+   opened for a client, before and after the open; `internal/upload/paths.go`
+   261, `internal/trash/trash.go` 403 and `internal/trash/restore.go` 62:
+   containment of writes and moves under a root (the primary defense on
+   Windows); `internal/enrich/enricher.go` 895 and 1584: the artwork cache's
+   writes; `internal/admin/player_audio.go` 396: a sidecar served only from
+   the variants directory; `cmd/bridge/main.go` 456: the artwork reaper's
+   unlinks; `cmd/bridge/output_play.go` 341: `--state-dir` against serve's data
+   directory, links resolved as the kernel resolves them. Each decides a
+   write, a read, an unlink or a refusal, where a link must be seen through;
+   the lexical check is for an advisory line that must touch nothing.
+
+### The Windows forms against Go's own
+
+The check parses each OS's forms itself, so the host's filepath proves
+nothing of Windows on Linux. On the Linux test host a scratch program (not committed)
+put a copy of `layout.go` beside Go 1.27.3's Windows source, copied from
+`internal/filepathlite/path_windows.go`, `path.go` and
+`path/filepath/path_windows.go` (renamed so it builds on Linux), and compared
+volumeLen, isAbs, clean, dir, join and the resolution against ResolvePath's
+Windows twin over every string of an eight-symbol alphabet up to six long and
+400,000 seeded token strings, against ten absolute bases: 699,593 inputs, 0
+mismatches. Mutations of the copy showed the run reads what it claims:
+postClean's `\??` rule dropped, 2,973 mismatches; postClean reading only what
+was written (Go reads its whole buffer), 4; the device UNC prefix's length cut
+by one, 16,790; Join's `\.\` before `??`, 0, since that branch needs a base of
+a single separator, which is never absolute, so no layout reaches it. On
+CI's windows leg `TestTheLayoutsFormsAreThisHostsFilepath` holds the port to
+Go's own there.
+
+### Red first
+
+At b9f50244, in a copy (`~/onebit/tmp/b884-red`) of the tree with every
+production file B884 changed put back, every one it added left out, the new
+tests from 72b98e96, and a shim of names alone that keeps main's behaviour
+(no check, no words, no doctor line, no init line, no journal line; the
+Deps field added and never asked):
+
+```
+$ go test -C <red> -count=1 -v -run '<B884 tests>' ./internal/config/ ./internal/doctor/ ./cmd/bridge/   (one package at a time)
+--- FAIL: TestThePredicateComparesEachOSsFormsByTheirNames
+    layout_test.go:91: linux: "/music/data" inside or equal to "/music" = false, want true
+--- FAIL: TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine
+    install_layout_test.go:28: the install-layout line was asked 0 times, want once
+--- FAIL: TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot (all four subtests)
+    install_layout_test.go:106: bridge doctor has a install-layout line: false, the console's doctor: false, want one in each
+--- FAIL: TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps (all seven subtests)
+    install_layout_test.go:296: the run said a layout 0 times, want once
+--- FAIL: TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot
+    install_layout_test.go:478: serve logged [] of its layout, want one line beginning "WARN the data directory (dataDir) is inside library root libraryRoots[0]: a library root is often a mount"
+--- FAIL: TestServeSaysEachLayoutAtItsStart (the three inside subtests)
+--- FAIL: TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns
+    install_layout_test.go:591: the console's doctor says {...} (there: false) after the root was added, want a warn "the data directory ... is inside library root ... (libraryRoots[1])"
+--- FAIL: TestADataDirectoryThatIsAFileInsideARootFailsAndWarnsBeside, TestAManagedBridgesDoctorSaysNothingOfItsLayout (its unmanaged half)
+--- PASS: TestNoDoctorWarnsOfASiblingThatSharesARootsPrefix
+--- PASS: TestBridgeInitSaysNothingOfAHealthyLayout
+--- PASS: TestServeSaysEachLayoutAtItsStart/a_sibling_with_a_shared_prefix, /apart
+```
+
+The guards pass at the base: a sibling with a shared prefix and a layout
+apart say nothing there either, and init's stderr over a healthy layout is
+empty at the base as on the branch (its byte-for-byte guard). The doctor's
+guard (`TestTheDoctorsReportOfAHealthyLayoutIsAsItWas`) fails at the base only
+on its wiring check ("bridge doctor wires no layout check"), since it
+compares the report with the check wired against the report without it.
+
+### Controls
+
+Each an uncommitted mutation of the committed tree (72b98e96), predicted in
+writing before the run (`controls.predictions.txt`), the test binaries built
+once per control, the files restored from memory and `git status` clean
+after. Every one as predicted:
+
+- C1, the brief's: the predicate a string prefix. Red: "linux: "/music2"
+  inside or equal to "/music" = true, want false", the doctors' sibling
+  guard ("bridge doctor warns of a sibling that shares the root's prefix"),
+  the doctor's healthy guard on its sibling, init's healthy guard and
+  serve's sibling subtest; the inside cases stayed green.
+- C2, the brief's: `filepath.EvalSymlinks(root)` in the predicate, its answer
+  discarded. Red: "layout.go imports path/filepath: the layout check runs on
+  strings alone, and reaches no filesystem" and "layout.go calls
+  filepath.EvalSymlinks: the layout check stats, resolves and opens nothing";
+  every answer unchanged, the link limit's test included.
+- C3, init's preflight carrying the line: the five subtests with the
+  preflight on and the run's roots inside said it twice; the skipped and
+  the keep (its run's roots apart) stayed green.
+- C4, the written layout's roots the preflight's: the public rewrite said
+  nothing. C5, the kept layout's roots the run's: the keep said nothing.
+- C6, the managed skip removed: the doctor's ordering test and the managed
+  test red.
+- C7, an ok line over a healthy layout: the doctor's healthy guard (both
+  subtests), the sibling guard and the console's test (its first run has a
+  line). C8, init's warning writing over a healthy layout: init's healthy
+  guard alone.
+- C9, serve logging twice: the start test and the three inside subtests.
+  C10, serve's journal naming paths: the same.
+- C11, Windows' names compared exactly: the case rows and the UNC row. C12,
+  device paths read as they are: the device rows.
+- C13, the doctor's check not wired: every doctor and console test.
+
+### The gates
+
+On 72b98e96, in one hold of the build lock (16:23 to 16:54, `gate.py`), with
+`-p` and `-parallel` at 8, half the host's cores: `go vet ./...` with the
+Makefile's tags as GOOS linux, darwin and windows, clean; under `-race
+-count=50`, the new tests of internal/config (the six of `layout_test.go`) ok
+in 11 s, of internal/doctor (`TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine`)
+ok in 2 s, and of cmd/bridge (the ten of `install_layout_test.go`, two full
+serve boots among them) ok in 160 s; and `go test -race -count=1 -timeout
+120m` of `./cmd/bridge/` (1,589 s, which holds `TestEveryCitedTestNameExists`),
+`./internal/doctor/` (7 s) and `./internal/config/` (16 s): all ok.
+go1.27.3's gofmt lists none of the Go files the change touches. The rules
+patch applies at 72b98e96 (`git apply --check`), and on a copy with it
+applied `scripts/check-doc-budgets.py` is clean (`cli-serve.md` 98,564 bytes),
+`verify_moves.py --base HEAD` passes, `rules-for.py` names `cli-serve.md` for
+`internal/config/layout.go`, and `TestEveryCitedTestNameExists` passes (and
+fails on a ghost citation planted in the copy's History file, so it read the
+copy). `make test` and `make build-all` were not run: the brief asked for the
+packages. The Windows forms run on CI's windows leg as on the Linux test host.
+
+## 2026-11-13 — B884 round 2: the move advice keeps every relative path's meaning, and serve's order is pinned
+
+The rule is `cli-serve.md`'s B884 line, and its long form is in
+`ops/History-rules-cli-serve.md` (its *Round 2* paragraph); this is the
+evidence. Linux amd64, Go 1.27.3, the Makefile's tags, TMPDIR on
+disk (`~/onebit/tmp`). The review of step 1 (72b98e96, its rules 8ec96ef6),
+the two reviews, raised two items, each checked against the code before
+it was fixed; the code is 38c089d2. Nothing new touches the filesystem and
+nothing refuses: the advice changes only its words, and the seam is a test's.
+
+### The items, as found
+
+1. The advice to move bridge.yaml kept one setting's meaning of seven.
+   `internal/config/config.go` 3289, `resolvePaths`, resolves against the
+   config file's directory each library root (3297), dataDir (3299),
+   tlsCertPath (3300), tlsKeyPath (3301), autocert.cacheDir (3309),
+   upscale.variantsDir (3318) and upscale.tempDir (3319); step 1's words
+   named dataDir alone, so a config at /srv/music/conf with
+   `libraryRoots: [..]`, moved to /etc/bridge as advised, would serve /etc.
+   Fixed in the CLI's words alone: `internal/config/layout.go` 116
+   (`layoutPathSettings`, the seven in resolvePaths' order), 134 (`Advice`,
+   its two byPath branches that move bridge.yaml) and 166
+   (`keepingRelativePaths`: the seven, dataDir's place, and a `BRIDGE_*`
+   variable's value resolved the same way and changed where it is set);
+   the journal's branches are as they were (B505).
+2. Nothing held serve's line before its roots' check: step 1's serve tests
+   read the journal once `runServe` had returned, and the check's refusal of
+   a loopback install goes to stderr (`cmd/bridge/main.go` 3546-3549),
+   outside the journal, so a line logged after the check passed them.
+   Fixed with a seam: `serveOpts.rootsCheck` (`main.go` 2946, nil in
+   production, `(*config.Config).CheckLibraryRootsAccessible` then), taken
+   where serve enters the check (3535-3539), right after
+   `logInstallLayout` (3533). Step 1's order was right; the gap was the
+   test, so the new case passes on step 1's order and goes red under the
+   brief's control (D2 below).
+
+Two cases the review asked for passed from the start, on step 1's code, and
+stay as guards: serve run by `t.Chdir` into a root with `--config
+bridge.yaml` logs one Warn, the config file inside libraryRoots[0]
+(`TestServeWithARelativeConfigInsideARootWarnsOnce`); and init keeping a
+config with no dataDir, in a folder inside a root, warns once, naming
+`<that folder>/data` (`TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory`).
+
+Of the review's lows, init's `prior.DataDir` is resolved by the time its
+line reads it: `priorInstallFrom` (`cmd/bridge/init_rewrite.go` 317, called
+at `init.go` 467) defaults it (335-337) and resolves it against the config
+file's absolute directory (330-334, 344), as it does the roots (347-349),
+before `init.go` 471 takes it and 732 hands it to `warnInstallLayout`; a
+`BRIDGE_*` variable is not applied there, since init keeps the file's own
+values. The other two lows (canonicalVolume's `/`, the AST guard's flat
+declared set) were left as the brief asked.
+
+### Red first
+
+In the worktree, on 8ec96ef6's code with round 2's item-1 tests and the two
+regression cases (before `layout.go` changed; the order case came with its
+seam, and its red is control D2):
+
+```
+$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run '^(TestTheLayoutsWordsNameWhatLiesInsideWhichRoot|…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning)$' ./internal/config/
+--- FAIL: …TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (both subtests)
+    layout_test.go:490: the advice to move bridge.yaml does not say "set each of libraryRoots, dataDir, tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir and upscale.tempDir that is relative in it to an absolute path, since each resolves beside bridge.yaml"
+    layout_test.go:493: the advice to move bridge.yaml does not say what a BRIDGE_* variable that gives one does
+    layout_test.go:500: the advice pins dataDir where the data directory is: false, want true   (the config file alone)
+    layout_test.go:497: the advice says dataDir follows the data directory: false, want true   (both)
+--- FAIL: TestTheLayoutsWordsNameWhatLiesInsideWhichRoot (the_config_file, both_in_one_root, both_in_two_roots)
+$ go test ... -run '^(TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot|TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps|TestServeSaysEachLayoutAtItsStart|TestServeWithARelativeConfigInsideARootWarnsOnce|TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory)$' ./cmd/bridge/
+--- FAIL: TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot (the config file, both)
+    install_layout_test.go:126: the install-layout hint names the settings a move of bridge.yaml must keep: false, want true
+--- FAIL: TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps (the six subtests that move bridge.yaml)
+    install_layout_test.go:333 (:357, :375, :395, :409): the run's warning names the settings a move of bridge.yaml must keep: false, want true
+--- PASS: TestServeSaysEachLayoutAtItsStart (the journal's words, unchanged)
+--- PASS: TestServeWithARelativeConfigInsideARootWarnsOnce
+--- PASS: TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory
+```
+
+The data directory's own cases stayed green, as the words for them did not
+change. After the fix, every B884 test passes: internal/config's seven,
+internal/doctor's one and cmd/bridge's thirteen.
+
+### Controls
+
+Each an uncommitted mutation of 38c089d2, predicted in writing before the
+run (`controls2.predictions.txt`), the test binaries built once per control,
+the files put back with `git checkout --` and checked against HEAD's bytes,
+`git status` clean after. Every one as predicted:
+
+- D1, the brief's: the sentence removed from both branches that move
+  bridge.yaml. Red: `…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning`
+  (both subtests, layout_test.go:490, :493, :497, :500), the words test's
+  three subtests that move bridge.yaml, both doctors' config and both
+  subtests, and init's six that move bridge.yaml; green: the kept config's
+  default data directory and serve's journal.
+- D2, the brief's: `logInstallLayout` moved to just after the check
+  returns, before its errors are handled. Red: both subtests of
+  `TestServeSaysItsLayoutBeforeItTouchesARoot` ("install_layout_test.go:729:
+  as serve entered its roots' check it had logged [] of its layout"); green:
+  step 1's serve tests and the relative `--config` case, which read the
+  journal after serve returned, the gap item 2 names.
+- D3, the journal given the CLI's sentence (the byPath branches taken by
+  setting too): the advice test (the journal changed), the words test's
+  three subtests that move bridge.yaml, and the config and both subtests
+  of `TestServeSaysEachLayoutAtItsStart` (install_layout_test.go:560,
+  "serve's journal line carries the CLI's words for a move of
+  bridge.yaml", and :564, a path).
+- D4, an eighth setting resolved beside the config (autocert.email through
+  `ResolvePath` in `resolvePaths`), the words unchanged: the advice test red
+  in both subtests, its want read from resolvePaths ("... upscale.tempDir and
+  autocert.email ..."); the words test green.
+- D5, the order case's fixture making the root it was told to leave absent:
+  "install_layout_test.go:710: the root ... is there: true, want false" in
+  the absent subtest alone.
+
+### The gates
+
+On 38c089d2, in one hold of the build lock (18:02 to 18:32, `gate.py`), with
+`-p` and `-parallel` at 8, half the host's cores: `go vet ./...` with the
+Makefile's tags as GOOS linux, darwin and windows, clean; under `-race
+-count=50`, the B884 tests of internal/config (the seven of `layout_test.go`)
+ok in 13 s, of internal/doctor
+(`TestRunPrintsTheInstallLayoutLineAfterTheDataDirLine`, untouched this
+round) ok in 2 s, and of cmd/bridge (the thirteen of
+`install_layout_test.go`) ok in 153 s; and `go test -race -count=1 -timeout
+120m` of `./cmd/bridge/` (1,577 s, which holds
+`TestEveryCitedTestNameExists`), `./internal/doctor/` (7 s) and
+`./internal/config/` (15 s): all ok. go1.27.3's gofmt lists none of the Go
+files B884 touches. The rules patch applies at 38c089d2 (`git apply
+--check`), and on a copy with it applied `scripts/check-doc-budgets.py` is
+clean (`cli-serve.md` 98,684 bytes, and 99,905 with B650's open rules patch
+beside it, which applies in either order), `rules-for.py` names
+`cli-serve.md` for `internal/config/layout.go` and `cmd/bridge/main.go`, and
+`TestEveryCitedTestNameExists` passes there (and fails on a ghost citation
+planted in the copy's History file, so it read the copy).
+`verify_moves.py --base HEAD`, the two History paragraphs and the line
+named as edits, fails on one block alone, the line's verbatim History twin:
+an edit accounts for one copy and the base held two. With the twin put back
+it passes, and the twin in the patch is the new line byte for byte. `make
+test` and `make build-all` were not run: the brief asked for the packages.
+
+## 2026-11-13 — B884 round 3: the warning names the layout; the steps to move it live in README.md
+
+The rule is `cli-serve.md`'s B884 line, and its long form is in
+`ops/History-rules-cli-serve.md` (*The words* and *Round 3*); this is the
+evidence. Linux amd64, Go 1.27.3, the Makefile's tags, TMPDIR on
+disk (`~/onebit/tmp`). A scope cut after the review of round 2: every
+reviewer found round 2's generated advice pinning a setting that points into
+the data directory being moved (`tlsCertPath: ./data/server.crt`,
+`upscale.variantsDir: data/variants`) to its old place, and one review found a
+`dataDir` left out that reads either way. The code is 4b274341, on round 2's
+rules (7f389016). Nothing new touches the filesystem and nothing refuses.
+
+### What changed
+
+- The CLI's words, bridge init's line and both doctors' hint, are what lies
+  inside which root (unchanged), why it is a risk (unchanged) and one fixed
+  sentence, the same for every layout, with no period at its end:
+  "move bridge.yaml and the data directory out of every library root, and
+  check every path setting in bridge.yaml; see "Moving the bridge's files
+  out of a library root" in the bridge's README.md" (`internal/config/layout.go`
+  128 `layoutFix`, 135 `Hint`, 144 `Warning`). Init's line ends with the one
+  period `warnInstallLayout` adds (`cmd/bridge/install_layout.go` 38). The
+  platform's default directory is no longer offered, and
+  `keepingRelativePaths`, `layoutPathSettings`, `suggestion` and
+  `platformConfigDir` are gone.
+- The journal's words are byte for byte as before (`JournalLine`, 155;
+  `journalFix`, 163), split from the CLI's: they name no value and no doc.
+- README.md gains "Moving the bridge's files out of a library root", after
+  "Backup and restore": README.md is the bridge's doc that says where the
+  config and the data go on each platform; `docs/docker.md` covers a
+  container alone, and the user docs on 1-bit.app are another repo's. It
+  covers the brief's five points and the review's three: stop the service and
+  every command that writes first (systemd's unit embeds `--config` and runs
+  in the data directory, `internal/packaging/systemd.service.tmpl` 8-9, with
+  `Restart=always`; launchd's plist the same with `KeepAlive`); the seven
+  settings Load resolves beside the config, judged by what each points at
+  (relative or absolute, into what moved or at what stayed); the defaults
+  that follow `dataDir` (`tls.DefaultPaths`, `internal/tls/tls.go` 81;
+  `EffectiveAutocertCacheDir`, `config.go` 1868; `EffectiveVariantsDir`,
+  2425) told apart from settings written out; a written-out
+  `upscale.variantsDir` or `upscale.tempDir`, which Validate refuses inside a
+  root (`validateVariantsDir`, 4201; `validateRenderTempDir`, 4240), so it is
+  never a warning case and never moves with a data directory that was in one;
+  `./data` for a `dataDir` left out; `BRIDGE_*` variables over the file;
+  keeping the TLS pair (`LoadOrGenerateWithOptions` mints one where neither
+  file is there, `tls.go` 147-155, and every pin breaks), checked with
+  `bridge doctor --config`, whose tls-cert line says `absent (init will mint)`
+  then; the service pointed at the new place by `bridge init --dir`, keeping
+  the config (`finishInit` writes the unit again with the new `--config` and
+  data directory, `init.go` 1303-1308; `--yes` needs `--library` even when it
+  keeps a config, 518-520); and a procedure of its own for a data directory
+  that is a library root, which leaves the music and moves the bridge's own
+  entries (a snapshot carries neither the playlist covers, the booklets nor
+  the caches, so a backup and restore would lose them).
+- The false claims are gone from the code: `serveOpts.rootsCheck`'s comment
+  (`main.go` 2939) and `runServe`'s (3527-3534) say the line comes before the
+  roots' check and the data directory's preparation, and that it is not
+  before every touch of a root, which the order test's and
+  `TestServeSaysEachLayoutAtItsStart`'s comments now say too. The rule and
+  the History, and round 2's rule that the words enumerate every setting,
+  change in the rules patch.
+
+### The review's items
+
+1. The doc: the separate procedure, the stop, the service and the explicit
+   settings, above. The warning tests' configs set neither
+   `upscale.variantsDir` nor `upscale.tempDir`.
+2. The false claims: above.
+3. Serve's line is byte for byte as round 2 left it, and pinned for each
+   layout: `TestServeSaysEachLayoutAtItsStart` (the data directory that is a
+   root, the config file, both), `TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot`
+   and `TestServeWithARelativeConfigInsideARootWarnsOnce` compare the whole
+   recorded line; green before the change and after it.
+4. The console's doctor builds its line from `doctorInstallLayout`, the
+   CLI's words, so its report carries the paths and the doc's name. They may
+   appear there: the report is a success body (GET /api/doctor answers 200),
+   where the console keeps a path the operator configured
+   (`admin-console.md`'s B604 bullets: no path in an error body, a path the
+   console was configured with in a success body), as its data-dir and
+   library-roots lines do; B505's rule takes a path the operator configured;
+   the line is skipped on a managed bridge. No change;
+   `TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns` now pins
+   the hint.
+5. Round 2's advice tests are rewritten, their names kept, since the dated
+   records cite them: `…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning`
+   pins the fixed sentence for the config file alone, the data directory
+   alone, the data directory that is the root, both and the default
+   `dataDir`, refuses a period at its end, and holds README.md's section to
+   its title, once, and to every setting resolvePaths resolves (round 2's
+   reading of resolvePaths, kept for it) and to `BRIDGE_`;
+   `TestTheLayoutsWordsNameWhatLiesInsideWhichRoot` pins both sets of words
+   for five layouts. Its platform-default subtest is gone with the offer.
+   cmd/bridge's `layoutMoveKeys`, `layoutMoveEnv` and `platformDirForLayout`
+   are gone; the doctors' hint, init's line and the kept default's line are
+   pinned whole.
+6. The rules change only in `rules-b884-r3.patch`.
+7. The punctuation: the sentence ends with no period, and init's line is
+   pinned whole, its one period included (`requireOneLayoutWarning`, control
+   E2).
+
+Of the follow-up the brief names: Load validates a non-empty
+`upscale.variantsDir` or `upscale.tempDir` through `fsutil.IsUnderAny`,
+which resolves each root's links (`fsutil/symlink.go` 157-187), before
+serve's line, so a root whose mount does not answer holds that load and the
+line with it. Left as it is.
+
+### Red first
+
+On round 2's code (7f389016) with round 3's tests, internal/config's through
+a shim of names that maps `Hint`, `Warning` and `JournalLine` onto round 2's
+`Advice` and `Line` (an untracked test file, removed after):
+
+```
+$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run '^(TestTheLayoutsWordsNameWhatLiesInsideWhichRoot|…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning)$' ./internal/config/
+--- FAIL: TestTheLayoutsWordsNameWhatLiesInsideWhichRoot (all five layouts)
+    layout_test.go:414: Hint() = "... move the data directory outside every library root, and set dataDir ..."
+    layout_test.go:417: Warning() = "the data directory /m/.bridge is inside library root /m (libraryRoots[0]): ..."
+--- FAIL: …TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (all five subtests)
+    layout_test.go:462: the advice is "... move bridge.yaml outside every library root; before you move it, ..."
+    layout_test.go:472: README.md has 0 sections titled "Moving the bridge's files out of a library root", want one
+$ go test ... -run '<the thirteen B884 tests>' ./cmd/bridge/
+--- FAIL: TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot (all four)
+    install_layout_test.go:135: the install-layout hint is "..."
+--- FAIL: TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps (all seven)
+    install_layout_test.go:315 (:332, :354, :370, :388, :400): the run's stderr carries the warning 0 times, want once
+--- FAIL: TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns   (install_layout_test.go:598)
+--- FAIL: TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory          (install_layout_test.go:649)
+--- PASS: the journal's pins, the healthy and sibling guards, the managed case, the order case
+```
+
+After the change every B884 test passes: internal/config's seven,
+internal/doctor's one and cmd/bridge's thirteen.
+
+### Controls
+
+Each an uncommitted mutation of 4b274341, predicted in writing before the
+run (`controls3.predictions.txt`), the test binaries built once per control,
+the files put back with `git checkout --` and checked against HEAD's bytes,
+`git status` clean after. Every one as predicted:
+
+- E1, the brief's: round 2's generated advice back in `Hint`. Red: the words
+  test (layout_test.go:414, :417, all five layouts), the advice test (all
+  five), both doctors (install_layout_test.go:135, all four), init (all
+  seven), the kept default and the console; green: serve's three journal
+  pins.
+- E2, the sentence ending with a period: the advice test
+  (layout_test.go:465, "the advice ends with a period, which bridge init's
+  line doubles"), the words test, both doctors, init and the kept default
+  red; serve's journal green.
+- E3, the journal given the doc's name: the words test (:421, every
+  layout's journal pin; :425, "the journal's line names README"), the advice
+  test, and serve's three journal pins (install_layout_test.go:485, :535,
+  :622) red; both doctors and the order case green.
+- E4, README.md's section renamed: the advice test alone
+  (layout_test.go:472, "README.md has 0 sections titled ...").
+- E5, the section no longer naming `upscale.tempDir`: the advice test
+  (layout_test.go:475, "README.md's steps do not name upscale.tempDir").
+- E6, an eighth setting resolved beside the config (autocert.email in
+  resolvePaths), the doc unchanged: the advice test (:475, "do not name
+  autocert.email"); the words test green.
+
+### The gates
+
+On 4b274341. Under `-race -count=50`, one package at a time outside the
+build lock (a single package needs none), with `-p` and `-parallel` at 8:
+internal/config's seven B884 tests ok in 47 s, internal/doctor's one in 21 s
+and cmd/bridge's thirteen in 542 s (476 s of tests), beside three other
+workers' runs. In one hold of the build lock (01:12 to 01:39):
+`go run ./scripts/third-party-licenses -check-build-tags`, OK (the census
+reads the README.md section's commands as words, none a build); `go vet
+./...` with the Makefile's tags as GOOS linux, darwin and windows, clean;
+and `go test -race -count=1 -timeout 120m` of `./cmd/bridge/` (1,600 s,
+which holds `TestEveryCitedTestNameExists` and the doc-comment sweeps),
+`./internal/doctor/` (8 s) and `./internal/config/` (16 s): all ok. An
+earlier full run of cmd/bridge outside the lock, at a load near 25 on 16
+cores, failed `TestTheTickerAndTheDoctorNameAPruneGivenUp` alone ("the prune
+answered <nil>, want it given up"), a backup test B884 does not reach: it
+failed 8 of 10 runs then (each about 9.5 s), and passed 10 of 10 at
+4b274341 and at b9f50244 in archive copies, and 10 of 10 in the worktree at
+a load near 5 (each about 1.8 s); B869's fix for it (3a976ffc) is not on
+this branch. go1.27.3's gofmt lists none of the Go files B884 touches. The
+rules patch applies at 4b274341 (`git apply --check`), and on a copy with it
+applied `scripts/check-doc-budgets.py` is clean (`cli-serve.md` 98,667
+bytes, 17 fewer than round 2 left it, the B884 line 1,344 bytes; 99,888 with
+B650's open rules patch beside it, which applies in either order),
+`rules-for.py` names `cli-serve.md` for `internal/config/layout.go`, and
+`TestEveryCitedTestNameExists` passes there (and fails on a ghost citation
+planted in the copy's History file, so it read the copy).
+`verify_moves.py --base HEAD`, the line and the four History paragraphs
+named as edits, fails on one block alone, the line's verbatim History twin:
+an edit accounts for one copy and the base held two. With the twin put
+back it passes, and the twin in the patch is the new line byte for byte.
+`make test` and `make build-all` were not run: the brief asked for the
+packages.
 ## 2026-11-14 — B650 round 2: bridge doctor's gathers share one read of the box, and the root tests read their waits on the runner's clock
 
 The rules are `output.md`'s B650 line (the checklist's read) and the long
@@ -103037,6 +103537,339 @@ halves passed); `go test -race -count=1 -timeout 45m ./internal/admin/
 windows/amd64 (`CGO_ENABLED=0` for the two) exited 0 each. go1.27.3's gofmt
 lists none of the changed Go files, and the names check over the branch's
 commit messages and added lines since main finds nothing in this round's.
+
+## 2026-11-17 — B884 round 4: the warning states the fact and the hazard, and nothing else
+
+The rule is `cli-serve.md`'s B884 line, and its long form is in
+`ops/History-rules-cli-serve.md` (*The words* and *Round 4*); this is the
+evidence. Linux amd64, Go 1.27.3, the Makefile's tags, TMPDIR on disk. A
+scope cut after the review of round 3, whose findings held five times, each
+in the advice to move the files (round 3's README procedure: a written-out
+TLS pair under a moved data directory, a relative path's meaning, a folder
+that is or holds a root, a custom TLS pair and `autocert.cacheDir`; and the
+journal's round 1 advice, `journalFix`), while B884's job is to make the
+layout visible. The code is 8097690e, on round 3 and its rules (3f766599)
+merged with main (9d6896f7) and 94cd0e5b. Nothing new touches the
+filesystem and nothing refuses.
+
+### What changed
+
+- `internal/config/layout.go`: `Hint` is `layoutRisk` alone, `Warning`
+  `Summary(true) + ": " + layoutRisk`, `JournalLine`
+  `Summary(false) + ": " + layoutRisk`; `layoutFix`, `layoutDoc`,
+  `layoutDocSection` and `journalFix` are gone. Init's line keeps the one
+  period `warnInstallLayout` adds. Round 1's per-layout journal words never
+  reached main (`git grep` at 711e3cbf finds none of B884's code), so
+  nothing that shipped changes.
+- The equality: `layoutOn` records, with the first root that holds each
+  file, whether the file is that root (`configIs`, `dataIs`, `within` asked
+  both ways: no new import, and `TestTheLayoutCheckRunsOnStringsAlone`
+  passes), and `Summary` says "is" of such a file and "is inside" of one
+  inside it (`relation`), the two in one clause only where one root holds
+  both inside it. A root can name the config file itself: Load takes it
+  (`Validate` asks only that a root is not empty, `config.go` 3855-3873,
+  and leaves its being a directory to `CheckLibraryRootsAccessible`,
+  4844-4860, which serve runs after its line), so it is said, "the config
+  file X is library root X (libraryRoots[0])", and a loopback serve then
+  refuses the root at its roots' check (`config: `, exit 2; a public one
+  warns and goes on); the words table and the matrix pin it.
+- What each surface says, `bridge init --dir /cfg --library /cfg/data`
+  (the data directory is the root): init, `warning: the data directory
+  /cfg/data is library root /cfg/data (libraryRoots[0]): <hazard>.`; both
+  doctors, an `install-layout` warn whose line is that fact and whose hint
+  is the hazard; serve's journal, `the data directory (dataDir) is library
+  root libraryRoots[0]: <hazard>`. And `--dir /Music --library /Music`
+  (both inside the one root): `the config file /Music/bridge.yaml and the
+  data directory /Music/data are inside library root /Music
+  (libraryRoots[0])` in init's line and the doctors', and `the config file
+  and the data directory (dataDir) are inside library root libraryRoots[0]`
+  in the journal, each followed by the hazard alone.
+- README.md: round 3's procedure and its sub-section are gone. A note,
+  "The bridge's files inside a library root", says what the warning means
+  and that it changes nothing, lists the settings in bridge.yaml that name
+  paths, and says how a relative one resolves and what a `BRIDGE_*`
+  variable does (`applyEnvOverrides` runs before `resolvePaths`,
+  `config.go` 3188-3193). Its test, round 2's advice test renamed
+  `TestTheReadmeNamesEveryPathSettingLoadResolves` (its old name promised
+  advice), still reads resolvePaths' assignments, so an eighth path setting
+  turns it red, and requires `BRIDGE_`, no numbered step and round 3's
+  title gone from the file.
+- The console: `doctorInstallLayout` gives `Summary(true)`, with the
+  configured paths, in GET /api/doctor's success body, which
+  `auth-tls.md`'s rule allows (never in an error body); unchanged, and a
+  managed bridge has no line.
+- The collectors: `requireOneLayoutWarning` counts init's warnings by the
+  hazard and `layoutLines` takes the journal's records by it, whatever
+  their fact says, before any exact pin. A guard,
+  `TestNoSurfaceSaysWhatToDo`, holds every layout's words free of round 3's
+  sentence, the README section's title, the journal's three sentences and
+  any verb of a remedy, and `TestEverySurfaceSaysALayoutsFactAndHazardAlone`
+  scans every stream init, both doctors and serve write for the first three.
+
+### Red first
+
+On round 3's code (94cd0e5b) with round 4's tests, which need no shim:
+
+```
+$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -run '<the eight config tests>' ./internal/config/
+--- FAIL: TestTheLayoutsWordsNameWhatLiesInsideWhichRoot (the 12 rows with words: the remedy after the hazard; in 6, "is inside" of a file that is its root)
+--- FAIL: TestNoSurfaceSaysWhatToDo
+--- FAIL: TestTheReadmeNamesEveryPathSettingLoadResolves   README.md has 0 sections titled "The bridge's files inside a library root"
+$ go test ... -run '<the fourteen cmd tests>' ./cmd/bridge/
+--- FAIL: TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot (all four: the hint; "is inside" of the data directory that is a root)
+--- FAIL: TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps (all eight)
+--- FAIL: TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot, TestServeSaysEachLayoutAtItsStart (three),
+          TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns, TestServeWithARelativeConfigInsideARootWarnsOnce,
+          TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory, TestServeSaysItsLayoutBeforeItTouchesARoot (both)
+--- FAIL: TestEverySurfaceSaysALayoutsFactAndHazardAlone (five of six layouts)
+--- PASS: the sibling, the data directory that is a file, the managed case, the healthy report, init's healthy runs,
+          and the matrix's data directory that holds the root with the config apart, said nowhere in round 3 too
+```
+
+Each collector counted one warning in every red case, and the exact pin
+failed after it. After the change every B884 test passes.
+
+### Controls
+
+Each an uncommitted mutation of 8097690e's `layout.go`, predicted in
+writing first (`controls4.predictions.txt`), both packages' B884 tests run,
+the file put back with `git checkout --` and checked against HEAD's bytes,
+`git status` clean after:
+
+- C1, `journalFix()` back into `JournalLine()`: red, the words test (its 12
+  rows with words), the guard, and every journal pin (serve's once, each
+  (three), relative, order (both), and the matrix's five layouts with a
+  line); green, every CLI and doctor pin. As predicted.
+- C2, `layoutFix` back into `Warning()`: red, the words test, the guard,
+  init (all eight), the kept default and the matrix's five; green, the
+  doctors, the console and the journal. As predicted.
+- C3, "is inside" of a data directory that is its root (`dataIs` never
+  set): red, the words test's four equality rows of the data directory,
+  init's `--dir C --library C/data`, the doctors' and serve's data
+  directory that is a root, the console's root added while serve runs, and
+  the matrix's `--dir C --library C/data` and config inside the root the
+  data directory is; green, the guard and every other layout. As predicted.
+- C4, the config check dropped: red, the counterexample (the matrix's data
+  directory holding the root with the config inside it, said nowhere, and
+  the words row), and every case with the config inside a root, among them
+  `TestTheLayoutResolvesRelativePathsAsLoadDoes`; green, the layouts of the
+  data directory alone. One prediction missed:
+  `TestThePredicateComparesEachOSsFormsByTheirNames` stayed green, since it
+  asks `pathForms.within` alone, which C4 does not change.
+
+### The gates
+
+On 8097690e. Under `-race -count=50`, one package at a time outside the
+build lock (a single package needs none), with `-p` and `-parallel` at 8:
+internal/config's four tests round 4 touched (the words, the guard, the
+README test and the check's own source test) ok in 5 s, and cmd/bridge's
+twelve ok in 184 s (158 s of tests). In one hold of the build lock (10:38 to
+11:05), over a `git archive` copy of 8097690e with this patch laid on (the
+copy is what lands, and cmd/bridge's `TestEveryCitedTestNameExists` reads
+the docs the patch changes): `go test -race -count=1 -timeout 120m` of
+`./cmd/bridge/` (1,600 s), `./internal/doctor/` (11 s) and
+`./internal/config/` (15 s), all ok; `go run
+./scripts/third-party-licenses -check-build-tags`, OK; and, in the worktree,
+`go vet ./...` with the Makefile's tags as GOOS linux, darwin and windows,
+clean, as was each touched package's vet before it. go1.27.3's gofmt lists
+none of the Go files B884 touches. 8097690e alone fails
+`TestEveryCitedTestNameExists` on the old README test's name, which the
+dated records cite until this patch elides it; on the patched copy it
+passes, and it fails on a ghost citation planted in the copy's History
+file, so it read the copy. The patch applies at 8097690e (`git apply
+--check`), and on the copy `scripts/check-doc-budgets.py` is clean:
+`cli-serve.md` 99,914 bytes, against 100,946 at 94cd0e5b, after three
+entries that had no History pointer moved out with `move_entry.py --line`
+and `--text`, each pointer keeping the entry's binding sentences verbatim
+(line 95, `flag.Parse` and an unguarded subcommand's scope; 65, the feature
+gates before path resolution; 56, a sweeper's `enabled` predicate), since
+`--largest`'s one candidate, line 77, cannot move (its own Don't sentence
+needs a 766-byte pointer), and the B884 line cut from 1,344 to 774 bytes.
+`verify_moves.py --base 94cd0e5b`, the line and four History paragraphs
+named as edits, fails on one block alone, the line's verbatim History twin:
+an edit accounts for one copy and the base held two. With the twin put back
+it passes, the three moved entries found verbatim in the History file, and
+the twin in the patch is the new line byte for byte. `rules-for.py` names
+`cli-serve.md` for `internal/config/layout.go`. `make test` and `make
+build-all` were not run: the brief asked for the packages.
+
+## 2026-11-17 — B730 B1: the DAC catalog becomes canonical, with an `ios` projection
+
+`internal/player/dacprofile` moves to schema 2 and becomes the one source of
+the iOS app's DAC registry (the design's sections 3.3, 5.2 and 5.3; iOS PR 1
+at iOS 6a1241eb). Rules: `.claude/rules/dac-catalog.md`, long forms in
+`ops/History-rules-dac-catalog.md`; `player.md`'s DAC profile line amended
+with no growth (99,436 to 99,394 bytes).
+
+### The hazard
+
+- A heard rate read as a maximum: `policy.go` took every rate up to
+  `HeardMaxBitRate` as heard, which admits DoP under `auto` with no
+  confirmation, so a sparse list read so would send DoP where nobody
+  listened. The player now reads the rate's own entry
+  (`slices.Contains(p.HeardBitRates, bitRate)`), its one changed line; every
+  policy fixture's maximum became every rate up to it, and no outcome moved.
+- A DSD figure filed as DoP's: the design put the Mytek's DSD256, a figure
+  that names no transport, in `statedMaxBitRate`, which the explicit `dop`
+  reads as a claim. It is `statedWithoutDoP {dsd, DSD256}`, which the player
+  never reads.
+- An iOS-only row that matches a USB unit: a known unit plays native under
+  `auto` and takes the row's timing. A row with `match: []` is allowed only
+  beside `ios`, makes no claim only a match reaches, and `Match` reads
+  neither `ios` nor a name.
+- An export out of order or a legacy field not verbatim, and a token that
+  claims another maker's DAC: held by the export's parity with the baseline
+  and the name-key lint.
+
+### What changes
+
+1. Schema 2 (0411830c): `heardBitRates`, `statedWithoutDoP`, the failure
+   markers `noise at` and `no frames at`, the statements `stated DoP to`,
+   `stated DSD to` and `stated no DSD`, credited rate by rate and both ways
+   (the at-or-below rule went; heard and failed at one rate stays a
+   contradiction); a DoP source that is its own row, a dated listening or a
+   dated maker's document; `Profile.ios` and `iosGenericNames`, with the
+   lint iOS PR 1 runs (tokens of four characters or more, no token and
+   generic name or another row's token or port name one inside the other,
+   port names unique folded, printable ASCII, orders 1 to N, a head on every
+   clause of an iOS row and one clause a rate, the legacy ceiling consistent
+   with the evidence); `clone` copies the new slices and pointers. The
+   database and the QX13 fixture took the mechanical change (the fixture its
+   missing statement clause); the baseline the dispatch gave was committed
+   byte for byte. 449 lines grown in `dacprofile.go`, `lint.go` and
+   `match.go`, 414 added code lines, of the 450 the brief allows.
+2. The seed (bc9d6671): the 18 iOS-only rows and the Hugo 2's and the
+   Mytek's projections, from the baseline, with dated sources and no person
+   named. The Hugo 2's maker statement of DoP to DSD256 is recorded (the
+   owner's answer, Q1): for a bound Hugo 2 an explicit `dop` asks no
+   confirmation at DSD64 to DSD256, and its rung reads `reported` unless
+   better evidence exists.
+3. The export (dcdd9c49): `scripts/dac-profiles/ios-export`, its golden and
+   its parity tests; 256 lines in `main.go`.
+4. CI, docs and rules: `ios-check.py` retired, `gate.yml`'s `dac-profiles`
+   job runs `-check` and the catalog's tests, both lines and the README's
+   two in the build-site census.
+
+### The two SHA-256s
+
+- The baseline, `scripts/dac-profiles/ios-export/testdata/ios-registry-6a1241eb.json`
+  (the live registry's objects at iOS 6a1241eb, as the dispatch gave it):
+  `16f75f690368a46c50aa757d677da1c6bc192eeb4970d6b7c0c7b2fadb37a52f`.
+- The export, `scripts/dac-profiles/ios-export/DACCatalog.ios.json`, which
+  iOS PR 2 pins with the commit that carries it on main:
+  `d134affbf89487aa36135cb294bcc1f5d18ad3bfdb039d361af0607263f5cc6c`.
+
+The baseline holds six source kinds, where the brief named iOS PR 1's
+four: `chipSpecification` (the ddHiFi's statement of no DSD) and `retailer`
+(the JM98MAX's DSD figure) beside `submission`, `fieldLog`, `maker` and
+`pcmCeiling`. The heads take all six, so the export matches the baseline.
+The Copper fails at DSD128 and DSD256 alone, and its DSD64 is neither heard
+nor failed, as the baseline holds it. The legacy patterns and tokens are
+written with the casing iOS PR 1's brief and the design give for the
+registry's literals; the parity compares them after iOS's fold.
+
+### Reds, greens and controls
+
+Each commit's tests were red against the code before it and green after:
+commit 1's twelve through `go test -overlay` on the base's code with the new
+names alone added, commit 2's four on commit 1's database, commit 3's on an
+export of nothing (`TestTheExportIsDeterministic` passes there, since an
+empty export is deterministic, and goes red under its control). Every
+control ran as an overlay, or for the golden's byte on disk restored from
+memory and checked against its committed SHA-256, and went red as
+predicted: accepting schema 1; dropping each of an iOS-only row's
+analogue and raw-maximum refusals; any row's ref as a row's own; no
+printable check; no excluded-token check; demanding a heard clause for the
+highest heard rate alone; the at-or-below rule restored; no both-set check;
+no head check; the own row held against itself (every pair test red); no
+length rule; failed rates at the ceiling allowed; an identity claim on every
+row (at commit 2: `profile chord.mojo2: the "identity" claim names no
+provenance`); the heard rate read up to the highest; `clone`'s thirteen new
+copies, one at a time; `Match` falling back to a port name; the QX13 given
+the fixture's alternative; the Mytek's DSD256 as DoP's; `statedWithoutDoP`
+read as stated; the golden's byte flipped; a maker changed; the rows in the
+database's order; the iFi rows' orders swapped (row parity red, the corpus
+first hits green, the synthetic name's first hit red); KA13's legacy
+ceiling lowered to DSD128 (that field alone); `E30II` dropped from the E30
+II's tokens; `TOPPING E30` dropped from its patterns. A first mutation of
+the highest-heard control also reddened the QX13 test and the clause test,
+since it changed the variable the reverse check reads too; the narrow
+mutation went as predicted.
+
+The gate's runs on this commit are in the PR body.
+
+## 2026-11-17 — B730 B1 follow-up: the catalog lint's parity Lows
+
+Five Lows from B1's review rounds, each checked against the lines first.
+Rules: two entries of `.claude/rules/dac-catalog.md` (their lines and long
+forms in `ops/History-rules-dac-catalog.md`), and the DAC profile entry's
+long form in `ops/History-rules-player.md`, corrected in place.
+
+### What changes
+
+1. Known siblings (f4e1e4d7). The catalog holds iOS PR 1's known siblings
+   at the database level, as iOS keeps them: `iosKnownSiblings`, the
+   baseline's 24 `knownSiblings` names in its order, never exported (the
+   export and its SHA-256, `d134affb…`, stand). The lint answers each name
+   as the strict matcher does (`strictHits`: a generic name finds no row;
+   then a port name that is the name, trimmed and its case kept; then a
+   token the name holds and none of the row's excluded tokens, folded; one
+   row is the answer, two or none no row) and refuses one answered with a
+   model row, by either key: a port name, taken before any token and never
+   ruled out by an excluded token, or a token. Until now the lint had no
+   such check: dropping `Lite` from the E30 II's excluded tokens linted
+   clean. The parity test pins the baseline by its SHA-256 and checks the
+   strict matcher for every sibling, so re-pinning the export removes no
+   guard; the lint's check is wanted because a catalog edit must fail at
+   the lint, before any export or baseline exists. The parity test now
+   also holds the catalog's list to the baseline's. A scratch overlay test
+   (not committed) gave all 112 of the baseline's corpus and sibling names
+   the lint matcher's answer equal to the baseline's strict answer. The
+   list is no field of `Profile`, so `Profile.clone` is unchanged.
+2. The family-rate cases. Each left the fixture's other rate list
+   nonempty, so deleting either operand of the family check's `||` kept
+   both green; each now clears the other list.
+3. Dated heads. In every head of the baseline and the catalog a
+   `submission` (27 baseline sources, 14 catalog clauses) and a `field log`
+   (1 and 1) name their date, and a `maker` (12 and 12), a `pcm ceiling`, a
+   `chip specification` and a `retailer` (1 and 1 each) none. The lint now
+   refuses a `submission` or `field log` head with no date in a row with
+   `ios`, where the head binds, and asks no date of the other four kinds or
+   of a row without `ios`, whose text after a colon is free. A DoP claim's
+   own `listening` and `maker` sources were dated already (B1's rule).
+4. The binding long form. `ops/History-rules-player.md`'s DAC profile
+   entry still described schema 1: the registry's import, the heard
+   maximum and the Hugo 2 with no DoP claim, the statement without
+   `statedWithoutDoP`, three markers, and `ios-check.py` as running. Its
+   text is corrected in place, the bold sentences that `player.md`'s line
+   repeats unchanged, and B1's dated paragraph says so.
+5. An excluded token that holds its row's own token (`JM98MAX 2` beside
+   `JM98MAX`) is pinned valid by a positive case, beside a sibling it keeps
+   off.
+
+32 code lines in `dacprofile.go` and `lint.go` (21 comment lines beside
+them, 26 data lines in `profiles.json`); five new cases, two cases changed.
+
+### Reds, greens and controls
+
+Every run went through `go test -overlay`, leaving the tree untouched, and
+was judged against predictions written first. At the base's `lint.go`
+(0be7bd76) under the new tests and data, the two sibling cases were red
+with the lint saying nothing (the Low itself) and the two dated-head cases
+red; every other case was green. The controls, each red only in its own
+case as predicted: the sibling check removed (both sibling cases); the
+port-name key dropped (the port-name case); the token key dropped (the
+token case); excluded tokens applied to a port name (the port-name case);
+the dated-head check removed (both dated cases); `field log` not dated (its
+case); the check on rows without `ios` (both dated cases' second half,
+which lints such a row); a date asked of all six kinds (the embedded
+catalog no longer parses, and the fixture pair no longer lints); the family
+check's heard operand removed, then its refused operand (each its own case;
+under the base's fixtures neither went red, the Low); an excluded token
+holding its row's token refused (the positive case, and the embedded
+catalog); and a sibling dropped from the catalog (the parity test).
+
+The gate's runs on this commit are in the report.
 
 ## 2026-11-17 — B915: the installer tests write their stubs under the fork lock
 

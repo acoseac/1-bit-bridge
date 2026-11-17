@@ -439,8 +439,8 @@ func ChoiceState(mode string) dsdstate.State {
 }
 
 // KnownProfiles is a profile database that knows the test DAC: native DSD
-// in DSD_U32_BE to DSD256 from a capture, DoP heard to DSD128, and timing
-// (nil for the defaults).
+// in DSD_U32_BE to DSD256 from a capture, DoP heard at DSD64 and DSD128, and
+// timing (nil for the defaults).
 func KnownProfiles(timing *dacprofile.Timing) *dacprofile.Database {
 	iface, product := 0, DACProductName
 	return &dacprofile.Database{SchemaVersion: dacprofile.SchemaVersion, Profiles: []dacprofile.Profile{{
@@ -448,7 +448,7 @@ func KnownProfiles(timing *dacprofile.Timing) *dacprofile.Database {
 		Match: []dacprofile.Match{{VendorID: "1234", ProductID: "5678", Interface: &iface, Product: &product}},
 		Native: &dacprofile.Native{MaxBitRate: DSD256, Formats: []string{"DSD_U32_BE"},
 			Source: dacprofile.Source{Kind: dacprofile.SourceCapture, Ref: "a test's capture, 2026-11-06"}},
-		DoP: &dacprofile.DoP{HeardMaxBitRate: DSD128,
+		DoP: &dacprofile.DoP{HeardBitRates: []int{DSD64, DSD128},
 			Source: dacprofile.Source{Kind: dacprofile.SourceCapture, Ref: "a test's listening, 2026-11-06"}},
 		Timing: timing,
 	}}}

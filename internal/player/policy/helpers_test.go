@@ -129,7 +129,7 @@ func (r *rig) answer(f format.ALSAFormat, rateHz int, a alsapcm.ProbeAnswer, msb
 func (r *rig) everything(mode string) *rig {
 	r.known = true
 	r.profileNative = &dacprofile.Native{MaxBitRate: dsd256, Formats: []string{"DSD_U32_BE"}, Source: dacprofile.Source{Kind: dacprofile.SourceCapture, Ref: "owner capture, Linux, 2026-11-04"}}
-	r.profileDoP = &dacprofile.DoP{HeardMaxBitRate: dsd256, StatedMaxBitRate: dsd256}
+	r.profileDoP = &dacprofile.DoP{HeardBitRates: []int{dsd64, dsd128, dsd256}, StatedMaxBitRate: dsd256}
 	r.mode = mode
 	r.acknowledge(dsdstate.TransportNative)
 	r.acknowledge(dsdstate.TransportDoP)

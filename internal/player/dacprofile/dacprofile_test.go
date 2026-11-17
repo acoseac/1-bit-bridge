@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -69,9 +70,9 @@ func fixtureProfile(id, productID string) Profile {
 		Match: []Match{{VendorID: "ffff", ProductID: productID}},
 		Native: &Native{MaxBitRate: 11289600, Formats: []string{"DSD_U32_BE"},
 			Source: Source{Kind: SourceCapture, Ref: "owner capture, Linux, 2026-11-04: interface 1 altset 2"}},
-		DoP: &DoP{HeardMaxBitRate: 5644800, RefusedBitRates: []int{11289600},
+		DoP: &DoP{HeardBitRates: []int{5644800}, RefusedBitRates: []int{11289600},
 			AnalogVolumeControls: []AnalogControl{}, UnityAtRawMax: []RawMaxControl{},
-			Source: Source{Kind: SourceIOSRegistry, Ref: "DACProfile.swift fixture.dac at iOS cd125088"}},
+			Source: Source{Kind: SourceIOSRegistry, Ref: "DACProfile.swift " + id + " at iOS cd125088"}},
 		Timing:  &Timing{DSDPrefillMs: 700},
 		Caveats: []Caveat{{Code: CaveatTransitionClicks, Transport: "dop", Note: "This DAC clicks as DoP starts at DSD128 and DSD256."}},
 		Provenance: []string{
@@ -84,9 +85,64 @@ func fixtureProfile(id, productID string) Profile {
 	}
 }
 
+// iosFixture is a profile of the iOS projection alone at order in the
+// registry, valid in every field, its name keys built on token: no match,
+// DoP heard at DSD64 and failed at DSD256 beside a maker's DSD figure to
+// DSD256, each clause headed, under a legacy ceiling of DSD128.
+func iosFixture(id string, order int, token string) Profile {
+	return Profile{
+		ID: id, Name: "Fixture " + token, Match: []Match{}, Caveats: []Caveat{},
+		DoP: &DoP{HeardBitRates: []int{2822400}, StatedWithoutDoP: &Statement{Kind: StatementDSD, MaxBitRate: 11289600},
+			RefusedBitRates: []int{11289600}, AnalogVolumeControls: []AnalogControl{}, UnityAtRawMax: []RawMaxControl{},
+			Source: Source{Kind: SourceIOSRegistry, Ref: "DACProfile.swift " + id + " at iOS 6a1241eb"}},
+		IOS: &IOS{Order: order, Maker: "Fixture", LegacyPatterns: []string{token}, LegacyCeilingBitRate: 5644800,
+			PortNames: []string{"FIXTURE " + token + " "}, NameTokens: []string{token}, ExcludedTokens: []string{"Lite"},
+			NameScope: "model", PCM: IOSPCM{MaxRateHz: 384000, BitDepth: 32}, VolumeTopology: "unknown",
+			Timing: IOSTiming{IOBufferMs: ptr(40)}},
+		Provenance: []string{
+			"dop: heard DSD64: submission 2026-10-04 (with PEQ off); refused DSD256: field log 2026-06-21; stated DSD to DSD256: maker (the row's note, iOS 6a1241eb)",
+			"ios: DACProfile.swift " + id + " at iOS 6a1241eb",
+		},
+	}
+}
+
 // fixture is a database of the given profiles and shared reference IDs.
 func fixture(shared []SharedID, profiles ...Profile) *Database {
 	return &Database{SchemaVersion: SchemaVersion, SharedReferenceIDs: shared, Profiles: profiles}
+}
+
+// iosPair is a database of two iOS rows, iosFixture's on the tokens Alpha
+// and Bravo, beside two of the generic names.
+func iosPair() *Database {
+	db := fixture(nil, iosFixture("fixture.alpha", 1, "Alpha"), iosFixture("fixture.bravo", 2, "Bravo"))
+	db.IOSGenericNames = []GenericName{
+		{Name: "Headphones", Why: "the name iOS gives a Lightning headphone accessory (iOS 6a1241eb)"},
+		{Name: "Combo384 Amanero", Why: "an interface board's default string (iOS 6a1241eb)"},
+	}
+	return db
+}
+
+// dbCase is a mutation of iosPair and what the lint must say of the result.
+type dbCase struct {
+	name   string
+	mutate func(db *Database)
+	words  string
+}
+
+// runDBCases lints iosPair under each mutation and requires a problem saying
+// the case's words; the pair itself must lint clean.
+func runDBCases(t *testing.T, cases []dbCase) {
+	t.Helper()
+	if problems := iosPair().Lint(); len(problems) > 0 {
+		t.Fatalf("the iOS pair lints as %v", problems)
+	}
+	for _, tc := range cases {
+		db := iosPair()
+		tc.mutate(db)
+		if problems := db.Lint(); !lintSays(problems, "", tc.words) {
+			t.Errorf("%s: the lint says %v, want a problem saying %q", tc.name, problems, tc.words)
+		}
+	}
 }
 
 // sharedIFi is the XMOS reference ID the captured iFi unit carries, listed as
@@ -312,12 +368,50 @@ func TestNoTwoProfilesMatchOneIdentity(t *testing.T) {
 	}
 }
 
+// TestAnIOSOnlyRowMatchesNoUnit: a profile with no match alternative, iOS's
+// row alone, knows no unit: not one of the four captured units, not a unit
+// built from any other profile's alternative, and not a unit whose product
+// string is one of the row's port names or tokens, under the placeholder
+// vendor or a captured unit's IDs.
+func TestAnIOSOnlyRowMatchesNoUnit(t *testing.T) {
+	db := mustDefault(t)
+	iosOnly := map[string]bool{}
+	units := []Unit{capturedAuralic(t), capturedMytek(t), capturedHugo2(t), capturedIFi(t)}
+	for _, p := range db.Profiles {
+		if len(p.Match) == 0 {
+			iosOnly[p.ID] = true
+			for _, name := range append(slices.Clone(p.IOS.PortNames), p.IOS.NameTokens...) {
+				name = strings.TrimSpace(name)
+				units = append(units, unit(t, 0xffff, 0x0013, ptr(0), &name, ""), unit(t, 0x245f, 0x0815, ptr(1), &name, "0197"))
+			}
+		}
+		for _, m := range p.Match {
+			v, _ := strconv.ParseUint(m.VendorID, 16, 16)
+			pid, _ := strconv.ParseUint(m.ProductID, 16, 16)
+			bcd := ""
+			if len(m.BCDDevice) > 0 {
+				bcd = m.BCDDevice[0]
+			}
+			units = append(units, unit(t, uint16(v), uint16(pid), m.Interface, m.Product, bcd))
+		}
+	}
+	if len(iosOnly) == 0 {
+		t.Fatal("the embedded database holds no iOS-only row, so nothing was checked")
+	}
+	for _, u := range units {
+		if p, ok := db.Match(u); ok && iosOnly[p.ID] {
+			t.Errorf("the unit %q is known as the iOS-only row %s", u.Key.Canonical(), p.ID)
+		}
+	}
+}
+
 // TestTheQX13CarriesItsHiddenModeCaveat: the QX13 shape (the design's
 // section 2.1 example), as a test fixture on a placeholder ID, parses, and
 // the unit on it is known with the dop_noise_in_hidden_mode caveat on DoP
-// and its note; no QX13 profile, and nothing on the placeholder ID, ships in
-// the embedded database, since the QX13's USB identity has not been captured;
-// and a placeholder written where an ID goes does not parse.
+// and its note; the embedded database's QX13 is iOS's row alone, with no
+// match, since the QX13's USB identity has not been captured, nothing it
+// ships names the placeholder vendor or knows the fixture's unit; and a
+// placeholder written where an ID goes does not parse.
 func TestTheQX13CarriesItsHiddenModeCaveat(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("testdata", "qx13.json"))
 	if err != nil {
@@ -336,14 +430,18 @@ func TestTheQX13CarriesItsHiddenModeCaveat(t *testing.T) {
 	if i < 0 || p.Caveats[i].Transport != "dop" || p.Caveats[i].Note == "" {
 		t.Errorf("the QX13's caveats: %+v", p.Caveats)
 	}
-	if p.DoP == nil || p.DoP.HeardMaxBitRate != 11289600 {
+	if p.DoP == nil || !slices.Equal(p.DoP.HeardBitRates, []int{2822400, 5644800, 11289600}) {
 		t.Errorf("the QX13's DoP: %+v", p.DoP)
 	}
 
 	shipped := mustDefault(t)
+	if i := slices.IndexFunc(shipped.Profiles, func(q Profile) bool { return q.ID == "fiio.qx13" }); i < 0 ||
+		len(shipped.Profiles[i].Match) != 0 || shipped.Profiles[i].IOS == nil {
+		t.Errorf("the embedded database's QX13 is not iOS's row alone, its identity not captured")
+	}
 	for _, q := range shipped.Profiles {
-		if q.ID == "fiio.qx13" || strings.Contains(strings.ToLower(q.Name), "qx13") {
-			t.Errorf("the embedded database carries a QX13 profile, %s, before its identity is captured", q.ID)
+		if slices.ContainsFunc(q.Match, func(m Match) bool { return m.VendorID == "ffff" }) {
+			t.Errorf("the embedded database's %s names the placeholder vendor ffff", q.ID)
 		}
 	}
 	if got := matched(shipped, qx13); got != "" {
@@ -362,13 +460,15 @@ func TestTheQX13CarriesItsHiddenModeCaveat(t *testing.T) {
 // profile holds what its capture and its iOS row establish, and nothing they
 // do not: the AURALiC native DSD to DSD512 from its stream file and no DoP
 // claim (it has no iOS row); the Mytek native DSD to DSD256 from its stream
-// file, and DoP refused at DSD256 (its carrier refused on a device, iOS
-// mytek.brooklyn.dac.plus) with no rate heard, since the row's DSD128 is a
-// DoP lock, which section 1.1 says hears nothing; the Hugo 2 no native claim
-// (its stream file lists PCM alone) and no DoP claim (its row's DSD256 is a
-// negotiation and a DoP lock, not a hearing), with its DSD resync delay as the
-// prefill; none states a rate its iOS row does not, and none lists an analogue
-// or raw-maximum control, which no capture showed.
+// file, and DoP refused at DSD256 (its carrier refused on a device, a field
+// log of 2026-06-21) with no rate heard, since the row's DSD128 is a DoP
+// lock, which section 1.1 says hears nothing, and its maker's DSD256, a
+// figure that names no transport, held as a statement without DoP, never as
+// DoP's; the Hugo 2 no native claim (its stream file lists PCM alone), no
+// rate heard (its row's DSD256 is a negotiation and a DoP lock, not a
+// hearing), and its maker's statement of DoP to DSD256, with its DSD resync
+// delay as the prefill; none lists an analogue or raw-maximum control, which
+// no capture showed.
 func TestTheCapturedModelsAreSeededAsTheirEvidenceSays(t *testing.T) {
 	db := mustDefault(t)
 	byID := map[string]Profile{}
@@ -378,10 +478,10 @@ func TestTheCapturedModelsAreSeededAsTheirEvidenceSays(t *testing.T) {
 	native := func(rate int, kind string) *Native {
 		return &Native{MaxBitRate: rate, Formats: []string{"DSD_U32_BE"}, Source: Source{Kind: kind}}
 	}
-	dop := func(heard, stated int, refused []int, row string) *DoP {
-		return &DoP{HeardMaxBitRate: heard, StatedMaxBitRate: stated, RefusedBitRates: refused,
+	dop := func(stated int, without *Statement, refused []int, row string) *DoP {
+		return &DoP{HeardBitRates: []int{}, StatedMaxBitRate: stated, StatedWithoutDoP: without, RefusedBitRates: refused,
 			AnalogVolumeControls: []AnalogControl{}, UnityAtRawMax: []RawMaxControl{},
-			Source: Source{Kind: SourceIOSRegistry, Ref: "DACProfile.swift " + row + " at iOS cd125088"}}
+			Source: Source{Kind: SourceIOSRegistry, Ref: "DACProfile.swift " + row + " at iOS 6a1241eb"}}
 	}
 	for _, tc := range []struct {
 		id      string
@@ -394,9 +494,9 @@ func TestTheCapturedModelsAreSeededAsTheirEvidenceSays(t *testing.T) {
 		{"auralic.altair.g1", Match{VendorID: "1511", ProductID: "0062", Product: ptr("ALTAIR G1 USB Audio 2.0")},
 			native(22579200, SourceCapture), nil, 0, 0},
 		{"mytek.brooklyn.dac.plus", Match{VendorID: "25ce", ProductID: "0025", Product: ptr("Brooklyn DAC+")},
-			native(11289600, SourceCapture), dop(0, 0, []int{11289600}, "mytek.brooklyn.dac.plus"), 0, 0},
+			native(11289600, SourceCapture), dop(0, &Statement{Kind: StatementDSD, MaxBitRate: 11289600}, []int{11289600}, "mytek.brooklyn.dac.plus"), 0, 0},
 		{"chord.hugo2", Match{VendorID: "245f", ProductID: "0815", Product: ptr("Hugo2")},
-			nil, nil, 700, 0},
+			nil, dop(11289600, nil, []int{}, "chord.hugo2"), 700, 0},
 	} {
 		p, ok := byID[tc.id]
 		if !ok {
@@ -445,19 +545,50 @@ func TestTheEmbeddedDatabaseIsWrittenInItsCanonicalForm(t *testing.T) {
 }
 
 // TestMatchHandsOutACopy: what Match returns shares nothing with the
-// database, so a caller that changes it changes no later answer.
+// database, so a caller that changes it changes no later answer: a profile
+// with every slice populated and every pointer set, its DoP evidence and its
+// iOS projection included, each element and pointee changed.
 func TestMatchHandsOutACopy(t *testing.T) {
-	db := mustDefault(t)
-	p, ok := db.Match(capturedMytek(t))
+	full := fixtureProfile("fixture.copy", "00f1")
+	full.Match[0] = Match{VendorID: "ffff", ProductID: "00f1", Interface: ptr(1), Product: ptr("Copy DAC"), BCDDevice: []string{"0101"}}
+	full.DoP.StatedWithoutDoP = &Statement{Kind: StatementDSD, MaxBitRate: 11289600}
+	full.DoP.AnalogVolumeControls = []AnalogControl{{ControlID: ControlID{Interface: "MIXER", Name: "Master", Index: 0}, Provenance: "a test, 2026-11-17"}}
+	full.DoP.UnityAtRawMax = []RawMaxControl{{ControlID: ControlID{Interface: "MIXER", Name: "PCM", Index: 0}, RawMax: 127, BCDDevice: []string{"0101"}}}
+	full.IOS = iosFixture("fixture.copy", 1, "Copy").IOS
+	full.IOS.SiblingNote = ptr("a sibling's result (a submission, 2026-09-23)")
+	full.IOS.Timing = IOSTiming{IOBufferMs: ptr(40), DSDResyncMs: ptr(700), PCMEntryResyncMs: ptr(800), ColdStartExtraMs: ptr(600), TransitionCushionMs: ptr(30)}
+	db := fixture(nil, full)
+	u := unit(t, 0xffff, 0x00f1, ptr(1), ptr("Copy DAC"), "0101")
+	p, ok := db.Match(u)
 	if !ok {
-		t.Fatal("the Mytek is unknown")
+		t.Fatal("the fixture is unknown")
 	}
-	p.Match[0].ProductID = "0000"
+	want, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &p.Match[0]
+	*m.Interface, *m.Product, m.BCDDevice[0] = 2, "", "0000"
 	p.Native.Formats[0] = "DSD_U8"
+	p.DoP.HeardBitRates[0] = 0
+	p.DoP.StatedWithoutDoP.MaxBitRate = 0
 	p.DoP.RefusedBitRates[0] = 0
+	p.DoP.AnalogVolumeControls[0].Name = ""
+	p.DoP.UnityAtRawMax[0].BCDDevice[0] = ""
+	p.Timing.DSDPrefillMs = 0
+	p.Caveats[0].Note = ""
 	p.Provenance[0] = ""
-	q, ok := db.Match(capturedMytek(t))
-	if !ok || q.Match[0].ProductID != "0025" || q.Native.Formats[0] != "DSD_U32_BE" || q.DoP.RefusedBitRates[0] != 11289600 || q.Provenance[0] == "" {
-		t.Errorf("a change to an answer reached the database: %+v", q)
+	x := p.IOS
+	x.Order, x.PCM.BitDepth = 9, 16
+	x.LegacyPatterns[0], x.PortNames[0], x.NameTokens[0], x.ExcludedTokens[0], *x.SiblingNote = "", "", "", "", ""
+	for _, v := range []*int{x.Timing.IOBufferMs, x.Timing.DSDResyncMs, x.Timing.PCMEntryResyncMs, x.Timing.ColdStartExtraMs, x.Timing.TransitionCushionMs} {
+		*v = -1
+	}
+	q, ok := db.Match(u)
+	if !ok {
+		t.Fatal("the fixture is unknown after a change to an answer")
+	}
+	if got, err := json.Marshal(q); err != nil || !bytes.Equal(got, want) {
+		t.Errorf("a change to an answer reached the database:\n got %s\nwant %s", got, want)
 	}
 }

@@ -113,6 +113,20 @@ Stop the service before `bridge restore`. When moving to another box, stop
 the source too: two boxes running one identity at once are unsupported.
 Prefer the newest snapshot; see the [backup guide](docs/backup.md).
 
+## The bridge's files inside a library root
+
+`bridge init`, `bridge doctor` (and the console's Diagnostics page) and the bridge's log warn when `bridge.yaml` or the data directory (`dataDir`) is inside one of your library roots, or is one. A library root is often a network share or a USB disk, and while one stops answering, every bridge command that reads what is inside it waits on it, `bridge serve`, `bridge doctor` and `bridge status` among them. The warning changes nothing, and the bridge keeps working where it is.
+
+The settings in `bridge.yaml` that name paths:
+
+- `libraryRoots`
+- `dataDir`
+- `tlsCertPath` and `tlsKeyPath`
+- `autocert.cacheDir`
+- `upscale.variantsDir` and `upscale.tempDir`
+
+A relative one resolves against the folder that holds `bridge.yaml`. A `BRIDGE_*` environment variable wins over the setting it names (`BRIDGE_DATA_DIR` over `dataDir`, `BRIDGE_LIBRARY_ROOTS` over `libraryRoots`), and a relative value it gives resolves beside `bridge.yaml` as well.
+
 ## Updates
 
 The bridge checks GitHub for a newer release, on by default: one request to

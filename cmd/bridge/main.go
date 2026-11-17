@@ -3094,6 +3094,14 @@ type serveOpts struct {
 	// name there, a thousand lines before the holder is told what was read
 	// (B506's fourth round). Per invocation for tailscaleCLI's reason.
 	afterConfigRead func()
+	// rootsCheck stands in for serve's check of its library roots
+	// (config.Config.CheckLibraryRootsAccessible), which serve enters right
+	// after it logs its layout's line, and is entered where that check is.
+	// Nil (the config's own) everywhere but the boot tests: one records what
+	// serve had logged as the check was entered, the layout's line among it
+	// (backlog B884's round 2), and runs the check itself. Per invocation for
+	// tailscaleCLI's reason.
+	rootsCheck func(*config.Config) []*config.LibraryRootError
 	// tailscaleCLI stands in for the host's Tailscale CLI in the cli-mode
 	// auto-pilot. Nil (the host's CLI) everywhere but the boot tests,
 	// which pass a fake so a mint can be held open across a shutdown
@@ -3684,8 +3692,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			"entries", strings.Join(unknown, ", "),
 			"known", strings.Join(config.KnownManagedControls(), ", "))
 	}
+	// The config file or the data directory inside a library root (backlog
+	// B884), said once at each start, before the roots' check below and
+	// before the data directory is prepared: the check touches nothing, so a
+	// mount that does not answer cannot hold it. It is not before every touch
+	// of a root: the config's load has validated a non-empty
+	// upscale.variantsDir or upscale.tempDir through fsutil.IsUnderAny, which
+	// resolves each root's links, and a root whose mount does not answer
+	// holds that load, and this line with it. Never a refusal.
+	logInstallLayout(*configPath, cfg)
 
-	if rootErrs := cfg.CheckLibraryRootsAccessible(); len(rootErrs) > 0 {
+	checkRoots := (*config.Config).CheckLibraryRootsAccessible
+	if opts.rootsCheck != nil {
+		checkRoots = opts.rootsCheck
+	}
+	if rootErrs := checkRoots(cfg); len(rootErrs) > 0 {
 		if cfg.IsPublic() {
 			for _, e := range rootErrs {
 				logger.Warn("library root not accessible at startup — scan will retry, manifest will reflect what's currently visible",
