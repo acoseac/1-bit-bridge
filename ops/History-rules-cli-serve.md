@@ -6311,7 +6311,9 @@ state on its `restore-originals` line: a fail while an unfinished restore's jour
 included, its hint the remedy above; a warn while a restore holds the store (`manifest.ErrStoreRestoring`), and, not
 checked, where the store's lock cannot be had; ok naming the sets of originals kept and their size, or that none were;
 and, on a managed bridge, ok with the check skipped. It asks `doctorStoreGate` first, so a data dir its record refuses is
-not checked and nothing is made there (the hold makes its lock file), and with no data dir it holds nothing. Its hold,
+not checked and nothing is made there (the hold makes its lock file), and with no data dir it holds nothing; where neither a
+journal nor a folder of originals stands, by Lstat, it holds and makes nothing either, so an ordinary doctor run changes
+nothing in the data dir (`TestBridgeDoctorReadsNothingOfThePlayersDSDState`). Otherwise its hold,
 `manifest.HoldLiveStore`, shared, stands across every read it classifies (the journal as the way back reads it, the folder
 of originals), which run on a goroutine of their own, waited for `doctorBackupsBound` at most; that goroutine lets the hold
 go when its reads end, so a restore that comes while the line reads is refused, never classified as half-done.
@@ -6339,4 +6341,9 @@ of a copy of the data dir), `TestTheWayBackRefusesWhatItCannotProve`, `TestAPutB
 `TestAConfigChangedDuringThePreparationRestoresNothing`, atlasharvest's `TestResetSyncPositionRewindsThePositionAlone`, and the
 command's `TestTheWayBackNeedsNoSourceAndNeverPreparesAgain`, `TestTheDatabaseOnlyLookRefusesBeforeItsPrompt`,
 `TestAConfigChangedDuringTheConfirmationRestoresNothing`, `TestTheRestoresWordsNameTheWayOn` and `TestEveryRestoreTakesTheStoresLockBeforeItsPrompt`'s
-database-only rows pin it.
+database-only rows, and `TestADatabaseOnlyRestoreOverAnArmedInstallKeepsEveryRollbackOff` (an armed install's rollbacks kept
+off; a hold, a veto and this version the one an install replaces each refused before anything is copied) and
+`TestADatabaseOnlyRestoreNeitherReadsNorWritesThePlayersFiles`, pin it. A refusal once Phase C has begun and before the
+journal stands (C0, C1, a publication that did not land) removes the staged copy as every refusal before it does
+(T46's C0 row). The journal and the run's record are staged with the install's owner (`fsutil.KeepOwner`), as every job
+writer's file is (`TestJobWritersKeepTheInstallOwner`).

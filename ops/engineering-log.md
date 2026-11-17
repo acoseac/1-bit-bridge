@@ -103163,3 +103163,16 @@ coverage restart (T8, three layouts each); the checkpoint's answer ignored (T15'
 `backups/` (T23); no harvest rewind (T8); and the barrier probe taking a failed directory sync for done (all three errno
 rows). The command's own three (the way back reading the source, the look's schema bound dropped, the look reading no
 veto) went red in its tests. The gate's runs and the CI legs are in the PR's body.
+
+**B653 PR 2b1, what the first gate found** (2026-11-17). `make test` on d5770e32 failed two of cmd/bridge's guards, both
+right: `TestJobWritersKeepTheInstallOwner` (the journal's and the record's staging write made its file with no owner
+step, so a restore run as root would leave an entry the service cannot write; it now takes the owner of what it replaces,
+`fsutil.KeepOwner`) and `TestBridgeDoctorReadsNothingOfThePlayersDSDState` (the doctor's restore-originals line took the
+store's hold, which makes its lock file, in a data dir where nothing of a restore stood; it now looks by Lstat first and
+holds nothing there). A review of the swap found a third: a refusal once Phase C began and before the journal stood (C0,
+C1, a publication that did not land) left the staged copy behind, and T46's C0 row had passed only because its failing
+sync struck the prepared copy's hash at B10 first; the cleanup now runs until the journal stands, and the row fails the
+originals' sync alone. Three more controls, predicted first and red as predicted: the final record omitted (T14's armed
+install), the install marker's early admission dropped (its three refusals, then made after the copy), and the staged copy
+kept past a C0 refusal (T46's C0 row). The new rows were red at the base through a names-only shim, as were the other
+twenty-one restore tests and the harvest rewind's.

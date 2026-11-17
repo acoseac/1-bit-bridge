@@ -34,7 +34,10 @@ var onRestoreOriginalsHeld atomic.Pointer[func()]
 // not checked; and ok otherwise, naming the sets of originals the database-
 // only restores kept and their size. With no data dir it holds nothing and
 // says so; a data dir its record refuses (doctorStoreGate) is not checked and
-// nothing is made in it, since the hold makes its lock file. Under the hold,
+// nothing is made in it, since the hold makes its lock file; and where
+// neither a journal nor a folder of originals stands, by Lstat, there is
+// nothing to classify and nothing is held or made (an ordinary doctor run
+// changes nothing in the data dir). Otherwise, under the hold,
 // taken shared (manifest.HoldLiveStore) and let go only once the reads it
 // classifies have ended, it reads the journal as the restore's recovery reads
 // it and lists the folder of originals, on a goroutine of its own, waited for
@@ -55,6 +58,11 @@ func restoreOriginalsCheck(ctx context.Context, cfgPath, dataDir string) doctor.
 	}
 	if err := doctorStoreGate(cfgPath, dataDir); err != nil {
 		return doctor.Check{Name: name, Status: doctor.Warn, Summary: "not checked: " + err.Error()}
+	}
+	_, journalErr := os.Lstat(manifest.RestoreJournalPath(manifest.DefaultDBPath(dataDir)))
+	_, archiveErr := os.Lstat(filepath.Join(dataDir, backup.OriginalsDirName))
+	if errors.Is(journalErr, fs.ErrNotExist) && errors.Is(archiveErr, fs.ErrNotExist) {
+		return doctor.Check{Name: name, Status: doctor.OK, Summary: "no database-only restore has kept originals"}
 	}
 	release, err := manifest.HoldLiveStore(manifest.DefaultDBPath(dataDir))
 	switch {

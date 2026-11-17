@@ -39,13 +39,21 @@ func restoreOriginalsLine(t *testing.T, cfgPath string, managed bool) doctor.Che
 // unfinished restore's journal stands, its hint the remedy every surface
 // says (the command with this config, the folder of originals, the by-hand
 // section); warns while a restore holds the store, and, not checked, where
-// its lock cannot be had; is skipped on a managed bridge; and holds the
-// store's lock across the reads it classifies, so a restore that comes while
-// it reads is refused.
+// its lock cannot be had; is skipped on a managed bridge; makes nothing where
+// nothing of a restore stands; and holds the store's lock across the reads
+// it classifies, so a restore that comes while it reads is refused.
 func TestTheRestoreOriginalsLineSaysWhatIsKeptAndWhatIsUnfinished(t *testing.T) {
 	cfgPath, dataDir, _ := backupInstall(t)
-	if c := restoreOriginalsLine(t, cfgPath, false); c.Status != doctor.OK || !strings.Contains(c.Summary, "no database-only restore has kept originals") {
+	lock := manifest.StoreOpenLockPath(manifest.DefaultDBPath(dataDir))
+	_ = os.Remove(lock)
+	if c := restoreOriginalsCheck(t.Context(), cfgPath, dataDir); c.Status != doctor.OK || !strings.Contains(c.Summary, "no database-only restore has kept originals") {
 		t.Errorf("with nothing kept: %+v", c)
+	}
+	if _, err := os.Lstat(lock); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the line made the store's lock file where nothing of a restore stands: %v", err)
+	}
+	if c := restoreOriginalsLine(t, cfgPath, false); c.Status != doctor.OK || !strings.Contains(c.Summary, "no database-only restore has kept originals") {
+		t.Errorf("both doctors with nothing kept: %+v", c)
 	}
 	run := filepath.Join(dataDir, backup.OriginalsDirName, "2026-11-17T05-00-00Z")
 	if err := os.MkdirAll(run, 0o700); err != nil {

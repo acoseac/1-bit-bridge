@@ -150,13 +150,13 @@ func RestoreDatabase(snapshotDir, dataDir string, opts DatabaseOptions) (res Dat
 	}
 
 	// B6: what an earlier run left at the staged names, by name; from here
-	// until the swap begins, a failure removes what this run staged.
+	// until the journal stands, a failure removes what this run staged.
 	if err := removeStaged(dataDir); err != nil {
 		return res, fmt.Errorf("remove what an earlier restore staged in the data directory: %w; nothing was restored", err)
 	}
-	swapBegun := false
+	journaled := false
 	defer func() {
-		if !swapBegun {
+		if !journaled {
 			if rerr := removeStaged(dataDir); rerr != nil {
 				warn(fmt.Sprintf("restore: a staged file was left in the data directory (%v), which the next restore removes", rerr))
 			}
@@ -220,8 +220,7 @@ func RestoreDatabase(snapshotDir, dataDir string, opts DatabaseOptions) (res Dat
 	if j.ID, err = randomID(); err != nil {
 		return res, err
 	}
-	swapBegun = true
-	return swapDatabase(dataDir, j, harvest, releaseConfig, releaseMarker, warn, res)
+	return swapDatabase(dataDir, j, harvest, releaseConfig, releaseMarker, warn, res, &journaled)
 }
 
 // admitDatabaseRestore is the admission before anything is copied (B5, then
@@ -450,10 +449,13 @@ func checkPrepared(ctx context.Context, stage, dataDir string, full bool, hist m
 }
 
 // swapDatabase is Phase C (§4.3): from its first step on the context stops
-// nothing. A refusal before the journal is published (C0, C1) moves nothing;
-// a failure of a rename in C3, C4 or C5 puts the originals back, the config's
-// turn and the marker's lock let go first; a stop keeps the journal.
-func swapDatabase(dataDir string, j *RestoreJournal, harvest string, releaseConfig, releaseMarker func(), warn func(string), res DatabaseResult) (DatabaseResult, error) {
+// nothing. A refusal before the journal is published (C0, C1, a publication
+// that did not land) moves nothing, and its caller removes the staged copy;
+// once the journal stands (journaled), the staged copy is the journal's: a
+// failure of a rename in C3, C4 or C5 puts the originals back, the config's
+// turn and the marker's lock let go first, and a stop keeps the journal.
+func swapDatabase(dataDir string, j *RestoreJournal, harvest string, releaseConfig, releaseMarker func(), warn func(string), res DatabaseResult,
+	journaled *bool) (DatabaseResult, error) {
 	// C0: every original read whole, hashed and synced where it stands.
 	for _, name := range originalNames() {
 		at, err := readAndSyncOriginal(filepath.Join(dataDir, name))
@@ -476,7 +478,7 @@ func swapDatabase(dataDir string, j *RestoreJournal, harvest string, releaseConf
 	res.Archive, res.Originals = archive, j.Originals
 	record := *j
 	record.Phase = ""
-	staged, err := writeStagedJSON(dataDir, &record)
+	staged, err := writeStagedJSON(dataDir, filepath.Join(archive, originalsRecordName), &record)
 	if err == nil {
 		if err = fsutil.RenameNoReplace(staged, filepath.Join(archive, originalsRecordName)); err != nil {
 			_ = os.Remove(staged)
@@ -501,8 +503,10 @@ func swapDatabase(dataDir string, j *RestoreJournal, harvest string, releaseConf
 			_ = os.Remove(archive)
 			return res, fmt.Errorf("%w; nothing was restored", err)
 		}
+		*journaled = true
 		return res, &RestoreStoppedError{Phase: j.Phase, Why: err.Error()}
 	}
+	*journaled = true
 	step("C2")
 	putBackAfter := func(cause error) (DatabaseResult, error) {
 		releaseConfig()

@@ -373,18 +373,26 @@ func TestARestoreRefusesAFilesystemThatCannotSyncADirectory(t *testing.T) {
 }
 
 // TestTheOriginalsAreDurableBeforeTheInstall is T46: an original whose sync
-// fails stops the restore at C0, nothing moved and no journal; and a sync of
-// the run's folder that fails once its sidecars are in it puts every
+// fails stops the restore at C0, nothing moved, no journal and the staged
+// copy removed (the prepared copy's own sync, at B10, goes through); and a
+// sync of the run's folder that fails once its sidecars are in it puts every
 // original back before anything is installed.
 func TestTheOriginalsAreDurableBeforeTheInstall(t *testing.T) {
 	t.Run("an original's sync", func(t *testing.T) {
 		f := newDBFixture(t, withSidecars)
 		before := f.originals(t)
-		restore := backup.SetOriginalSyncForTest(func(*os.File) error { return errors.New("the disk refused the sync") })
+		var c0 atomic.Bool
+		restore := backup.SetOriginalSyncForTest(func(file *os.File) error {
+			if file.Name() == manifest.RestoreStagingPath(f.dataDir) {
+				return file.Sync()
+			}
+			c0.Store(true)
+			return errors.New("the disk refused the sync")
+		})
 		_, err := backup.RestoreDatabase(f.snap, f.dataDir, f.opts())
 		restore()
-		if err == nil || !strings.Contains(err.Error(), "the disk refused the sync") || !strings.Contains(err.Error(), "nothing was restored") {
-			t.Fatalf("RestoreDatabase = %v, want C0's refusal", err)
+		if err == nil || !c0.Load() || !strings.Contains(err.Error(), "read and sync bridge.db") || !strings.Contains(err.Error(), "nothing was restored") {
+			t.Fatalf("RestoreDatabase = %v (an original's sync asked: %v), want C0's refusal", err, c0.Load())
 		}
 		requireUnchanged(t, f, before)
 	})

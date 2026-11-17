@@ -265,8 +265,11 @@ func stagedJSONPrefix() string {
 }
 
 // writeStagedJSON writes v as JSON into a new file of stagedJSONPrefix's
-// name in dataDir, synced and closed, and answers its path.
-func writeStagedJSON(dataDir string, v any) (string, error) {
+// name in dataDir, given the owner of what it will replace or of the
+// directory it will land in (fsutil.KeepOwner, dst: a restore run as root
+// leaves an entry the service can read and write), synced and closed, and
+// answers its path.
+func writeStagedJSON(dataDir, dst string, v any) (string, error) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return "", err
@@ -280,7 +283,10 @@ func writeStagedJSON(dataDir string, v any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, werr := f.Write(append(data, '\n'))
+	werr := fsutil.KeepOwner(f, dst)
+	if werr == nil {
+		_, werr = f.Write(append(data, '\n'))
+	}
 	if werr == nil {
 		werr = f.Sync()
 	}
@@ -298,7 +304,7 @@ func writeStagedJSON(dataDir string, v any) (string, error) {
 // synced, renamed onto its name by the no-replace rename, the data dir
 // synced (restoreBarrier).
 func publishJournal(dataDir string, j *RestoreJournal) error {
-	staged, err := writeStagedJSON(dataDir, j)
+	staged, err := writeStagedJSON(dataDir, journalPath(dataDir), j)
 	if err != nil {
 		return fmt.Errorf("write the restore's journal: %w", err)
 	}
@@ -318,7 +324,7 @@ func publishJournal(dataDir string, j *RestoreJournal) error {
 func setJournalPhase(dataDir string, j *RestoreJournal, phase string) error {
 	next := *j
 	next.Phase = phase
-	staged, err := writeStagedJSON(dataDir, &next)
+	staged, err := writeStagedJSON(dataDir, journalPath(dataDir), &next)
 	if err != nil {
 		return fmt.Errorf("write the restore's journal: %w", err)
 	}
