@@ -263,18 +263,25 @@ Query parameters:
 - `since` (optional): if set, only tracks whose server-side **`indexed_at` watermark** advanced past `since` are included (folders filter on their `mtime`). This is deliberately NOT file mtime — enrichment, metadata reconciliation, variant writes, and duplicate-suppression lifts all strict-advance `indexed_at` precisely so incremental syncs surface them without the file changing on disk. (An earlier revision of this document said "mtime > since" for tracks; that was a documentation error — the behaviour has always been the indexed watermark.) If unset, the full manifest is returned.
 - `limit` (optional, **v1.1+**): positive integer. Server returns up to `limit` tracks in a single paginated page. Must NOT be combined with `since` (returns 400 — since-deltas are small by construction).
 - `cursor` (optional, **v1.1+**): opaque token from the previous page's `nextCursor`. On the first page, omit. Iterate until `nextCursor` is null in the response.
+- `epoch` (optional, with `since` only; additive, health key `manifestEpoch`): the `epoch` of the manifest response the client took its `since` cursor from (History epoch, below). Ignored on a request without `since`.
 
 Delta deletions (additive, since the deletion-journal batch — `protocolVersion` stays `1`):
 - A **delta** response (`since` set) MAY carry two additional top-level fields sourced from the server's deletion journal:
   - `deleted` (`[string]`, `omitempty`): library-relative track paths whose rows were **removed** — or duplicate-suppressed out of the served set — since the client's `since` cursor. The client should delete its rows for these paths (its own remap/heal machinery applies first, exactly as on a full-scan prune). A path never appears in both `tracks` and `deleted` within one response. Paths use the same relative form `Track.path` uses (no leading slash).
-  - `deltaIncomplete` (`bool`, `omitempty`): `true` when the server cannot answer the cursor with a **complete** deletion list — the cursor predates the journal's coverage window (journal created after the client's last sync, a mass-delete coverage reset, an update over rows the client format gate now holds back (WavPack and Monkey's Audio, below), or retention pruning — tombstones are kept ~180 days), the list overflowed the response cap (~20k), or the journal could not be read. When set, `deleted` is absent and the client SHOULD escalate to a full sync to reconcile removals. The delta's `tracks` remain valid either way.
+  - `deltaIncomplete` (`bool`, `omitempty`): `true` when the server cannot answer the cursor with a **complete** deletion list — the cursor predates the journal's coverage window (journal created after the client's last sync, a mass-delete coverage reset, an update over rows the client format gate now holds back (WavPack and Monkey's Audio, below), or retention pruning — tombstones are kept ~180 days), the cursor is at or past the stamp the bridge's next write would carry (its clock stepped back after it issued the cursor, or the cursor is of a history a restore discarded), the request's `epoch` is not the bridge's (History epoch, below), the list overflowed the response cap (~20k), or the journal could not be read. When set, `deleted` is absent and the client SHOULD escalate to a full sync to reconcile removals. The delta's `tracks` remain valid either way.
 - **Full and paginated responses never carry either field** — their track list is authoritative and the client's full-scan diff owns deletions there.
 - Clients MUST NOT infer deletion from a path's absence in a delta (unchanged rows are legitimately absent); `deleted` is the only delta deletion signal. Pre-journal clients ignore both fields and keep the old behaviour (deletions arrive via full sync only).
 - Server-side, every track-DELETE writer journals its reaped paths in the same transaction (a threshold reap, an explicit batch/prefix delete, a clear-missing sweep, a duplicate-suppression transition), and re-adding a path — or a suppressed copy returning to the served set — clears its tombstone.
 
+History epoch — `epoch` (additive; health key `manifestEpoch`; `protocolVersion` stays `1`):
+- Every manifest response (the full one, each page of a paginated run, and a delta) carries a top-level `epoch` (`string`, `omitempty`): the bridge's backup epoch, 32 hex characters, the value `GET /v1/favorites` and the playlist list carry. It names one history of the library: a restore of the bridge's database begins a new one, with a new epoch, and the journal of the new history holds none of the old one's deletions. It is absent where the bridge cannot read it.
+- A client keeps the `epoch` of the response it adopts its `since` cursor from, beside that cursor, and sends it back as `epoch=` on its next delta. A delta whose `epoch` is not the bridge's, an empty one included, answers `deltaIncomplete: true` with no `deleted`; its `tracks` are still valid, and the client escalates to a full sync, whose responses carry the current epoch. A response with no `epoch` gives the client none to keep, and its next delta sends none.
+- A paginated full sync whose pages carry different epochs (a restore between two pages) is restarted from the first page.
+- A delta that sends no `epoch` (every client before this key) is answered as before: by the deletion journal's coverage and the cursor's place below the bridge's next stamp. A bridge that does not advertise `manifestEpoch` ignores the parameter.
+
 Pagination semantics:
 - Pages are ordered by track `path` ASC; the cursor is the last path of the previous page, or, for a request that declares formats in `X-Bridge-Formats`, an opaque token naming them and that path (a cursor of other formats is `410` `manifest_cursor_view`: Client formats, below).
-- **First-page-only fields.** `folders` and `total` are sent only on the first page (request has no `cursor`). Subsequent pages omit them to avoid ~250k rows of redundant JSON on a 50k-track library with 5k folders. `libraryRoots` and `generatedAt` are cheap scalars and ship on every page.
+- **First-page-only fields.** `folders` and `total` are sent only on the first page (request has no `cursor`). Subsequent pages omit them to avoid ~250k rows of redundant JSON on a 50k-track library with 5k folders. `libraryRoots`, `generatedAt` and `epoch` are cheap scalars and ship on every page.
 - A short read (fewer rows than `limit`) or empty page means the iteration is done; `nextCursor` is absent.
 - Server enforces an upper bound (5000 today) on `limit` silently — a client requesting more gets capped but not rejected.
 - Clients that don't send `limit` get the v1.0 single-shot response; no compatibility break.
@@ -285,6 +292,7 @@ Pagination semantics:
 {
   "version": 1,
   "generatedAt": "2026-04-23T11:41:01Z",
+  "epoch": "7f3c1a9e4b20d8aa11c0e6f54d2b7091",
   "libraryRoots": ["Music"],
   "folders": [
     { "path": "Music/Artist/Album", "mtime": "2026-04-20T12:00:00Z" }

@@ -4634,6 +4634,13 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval func() time.Duration
 // (WriteManifest, BuildManifestPage), which alone asks enrich.enabled before
 // it builds the enrichmentProgress block. This one always carries it.
 func BuildManifest(ctx context.Context, store *Store, roots []string, since time.Time, view formatgate.Set) (*Manifest, error) {
+	return buildManifest(ctx, store, roots, since, ClientEpoch{}, view)
+}
+
+// buildManifest is BuildManifest for a delta request that may have sent the
+// epoch its cursor was issued in (ClientEpoch), as writeManifestGated takes
+// it.
+func buildManifest(ctx context.Context, store *Store, roots []string, since time.Time, epoch ClientEpoch, view formatgate.Set) (*Manifest, error) {
 	var sp *time.Time
 	if !since.IsZero() {
 		sp = &since
@@ -4659,6 +4666,7 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 	m := &Manifest{
 		Version:      1,
 		GeneratedAt:  time.Now().UTC(),
+		Epoch:        responseEpoch(ctx, store),
 		LibraryRoots: basenames,
 		Folders:      folders,
 		Tracks:       tracks,
@@ -4666,7 +4674,7 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 	// Delta-only tombstone fields (deletion_journal.go) — parity with
 	// writeManifestGated's since-leg; full manifests never carry either.
 	if !since.IsZero() {
-		deleted, incomplete := deltaDeletionFields(ctx, store, since, view)
+		deleted, incomplete := deltaDeletionFields(ctx, store, since, m.Epoch, epoch, view)
 		m.Deleted = deleted
 		m.DeltaIncomplete = incomplete
 	}
@@ -4739,9 +4747,9 @@ func enrichmentProgressBlock(ctx context.Context, store *Store, view formatgate.
 //
 // **Wire shape parity with BuildManifest** is enforced by emitting the
 // same JSON keys in the same order, with the same omitempty rules:
-// version → generatedAt → libraryRoots → folders (omit when empty) →
-// tracks (always emitted as `[]` for empty libraries) →
-// enrichmentProgress (omit on counter failure).
+// version → generatedAt → epoch (omit when it cannot be read) →
+// libraryRoots → folders (omit when empty) → tracks (always emitted as
+// `[]` for empty libraries) → enrichmentProgress (omit on counter failure).
 //
 // **Mid-stream errors are unrecoverable** — the headers and prefix are
 // already on the wire, so we can't switch to a 5xx. The error is
@@ -4752,7 +4760,7 @@ func enrichmentProgressBlock(ctx context.Context, store *Store, view formatgate.
 // BuildManifest semantics), and view is the formats the client declared
 // (format_view.go).
 func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, view formatgate.Set) error {
-	return writeManifestGated(ctx, w, store, roots, since, view, false, true)
+	return writeManifestGated(ctx, w, store, roots, since, ClientEpoch{}, view, false, true)
 }
 
 // writeManifestGated is the gated worker behind the public
@@ -4773,7 +4781,11 @@ func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []strin
 // block is not: a folder is a directory the walk saw, whether or not it
 // holds tracks, so one holding only files of a format a view does not
 // declare is listed to it as a folder holding no audio always was.
-func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, view formatgate.Set, withVariants, withProgress bool) (err error) {
+//
+// epoch is what a delta request sent of the history its cursor was issued
+// in (ClientEpoch); the response carries the bridge's own, read before the
+// stream begins (responseEpoch).
+func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, epoch ClientEpoch, view formatgate.Set, withVariants, withProgress bool) (err error) {
 	// Folders ship ONLY on the full-manifest leg. A delta sync
 	// (`since` set) used to walk + marshal the ENTIRE folders table on
 	// every foreground sync — a per-sync DB query + payload cost on
@@ -4800,6 +4812,7 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// a client can actually fetch from the stream below. Operator-facing
 	// admin surfaces keep full-store counts instead.
 	ep := enrichmentProgressBlock(ctx, store, view, withProgress, nil, "EnrichmentCounts")
+	current := responseEpoch(ctx, store)
 
 	basenames := make([]string, len(roots))
 	for i, r := range roots {
@@ -4840,6 +4853,12 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	}
 	if err := writeField(`,"generatedAt":`, time.Now().UTC()); err != nil {
 		return err
+	}
+	// Match Manifest's `omitempty` on Epoch — none read → no key.
+	if current != "" {
+		if err := writeField(`,"epoch":`, current); err != nil {
+			return err
+		}
 	}
 	if err := writeField(`,"libraryRoots":`, basenames); err != nil {
 		return err
@@ -4905,7 +4924,7 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// and buffered legs cannot drift (the parity test compares both).
 	// Full + paginated legs never emit either field.
 	if !since.IsZero() {
-		deleted, incomplete := deltaDeletionFields(ctx, store, since, view)
+		deleted, incomplete := deltaDeletionFields(ctx, store, since, current, epoch, view)
 		if len(deleted) > 0 {
 			if err := writeField(`,"deleted":`, deleted); err != nil {
 				return err
@@ -4983,9 +5002,12 @@ func buildManifestPageGated(ctx context.Context, store *Store, roots []string, c
 	for i, r := range roots {
 		basenames[i] = filepath.Base(r)
 	}
+	// Every page carries the epoch, so a client restarts a walk whose pages
+	// change it.
 	m := &Manifest{
 		Version:      1,
 		GeneratedAt:  time.Now().UTC(),
+		Epoch:        responseEpoch(ctx, store),
 		LibraryRoots: basenames,
 	}
 	// Only the first page pays the folders + total + enrichment-counts

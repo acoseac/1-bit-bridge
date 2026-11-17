@@ -47,6 +47,7 @@ var wantAllHealthFeatures = []string{
 	"localOutputs",
 	"loudness",
 	"lyrics",
+	"manifestEpoch",
 	"operatorDrivenUpscale",
 	"outputReading",
 	"pairingEventsSupported",

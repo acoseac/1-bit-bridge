@@ -41,7 +41,7 @@ func TestTheManifestOmitsEnrichmentProgressWhileOff(t *testing.T) {
 	stream := func(since time.Time) func(*testing.T) map[string]json.RawMessage {
 		return func(t *testing.T) map[string]json.RawMessage {
 			var buf bytes.Buffer
-			if err := p.WriteManifest(ctx, &buf, since, formatgate.Set{}); err != nil {
+			if err := p.WriteManifest(ctx, &buf, since, ClientEpoch{}, formatgate.Set{}); err != nil {
 				t.Fatal(err)
 			}
 			return topLevelKeys(t, buf.Bytes())

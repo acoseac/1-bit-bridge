@@ -33,7 +33,7 @@ type stubSearcher struct {
 
 // The two ManifestProvider methods /v1/search never calls. Present so
 // the stub satisfies the interface the Server field is typed as.
-func (s *stubSearcher) WriteManifest(context.Context, io.Writer, time.Time, formatgate.Set) error {
+func (s *stubSearcher) WriteManifest(context.Context, io.Writer, time.Time, manifest.ClientEpoch, formatgate.Set) error {
 	return nil
 }
 

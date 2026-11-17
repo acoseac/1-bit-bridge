@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/formatgate"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
 func TestAcceptsGzip(t *testing.T) {
@@ -109,7 +110,7 @@ type fakeStreamingProvider struct {
 	body []byte
 }
 
-func (f *fakeStreamingProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time, _ formatgate.Set) error {
+func (f *fakeStreamingProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time, _ manifest.ClientEpoch, _ formatgate.Set) error {
 	// Skip the Write entirely when body is empty so the test fake
 	// matches realistic behaviour: a real manifest streamer with an
 	// empty library returns without invoking Write, leaving the

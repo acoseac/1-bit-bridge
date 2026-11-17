@@ -632,9 +632,17 @@ type Folder struct {
 //     pages. `Since`-delta mode is never paginated — deltas are
 //     bounded by construction.
 type Manifest struct {
-	Version      int       `json:"version"`
-	GeneratedAt  time.Time `json:"generatedAt"`
-	LibraryRoots []string  `json:"libraryRoots"`
+	Version     int       `json:"version"`
+	GeneratedAt time.Time `json:"generatedAt"`
+	// Epoch is the history the response belongs to: the backup epoch
+	// (Store.BackupEpoch), which a restore of the database replaces. A
+	// client keeps it with the cursor it adopts and sends it back on its
+	// next delta (`epoch=`), and restarts a paged full sync whose pages
+	// change it. Every response carries it, full, paged and delta, and none
+	// does where it cannot be read. Additive (`omitempty`); ProtocolVersion
+	// stays 1.
+	Epoch        string   `json:"epoch,omitempty"`
+	LibraryRoots []string `json:"libraryRoots"`
 	// Folders carries the directory list. Present on non-paginated
 	// responses AND on the first page of a pagination run; absent
 	// (via omitempty) on subsequent pages. Clients MUST tolerate

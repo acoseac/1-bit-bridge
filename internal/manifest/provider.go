@@ -187,9 +187,11 @@ func (p *Provider) enrichmentGate() bool {
 // disconnect mid-response (slow network, iOS app backgrounded mid-sync,
 // slow-read DOS) terminates the SQLite scan instead of running to EOF.
 //
-// view is the formats the request declared (format_view.go).
-func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Time, view formatgate.Set) error {
-	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, view, p.upscaleGate(), p.enrichmentGate())
+// epoch is what a delta request sent of the history its cursor was issued
+// in (ClientEpoch), and view is the formats the request declared
+// (format_view.go).
+func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Time, epoch ClientEpoch, view formatgate.Set) error {
+	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, epoch, view, p.upscaleGate(), p.enrichmentGate())
 }
 
 // BuildManifestPage satisfies api.ManifestProvider for the paginated

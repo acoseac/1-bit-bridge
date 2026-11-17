@@ -346,7 +346,10 @@ func TestJournal_PruneAdvancesCoverage(t *testing.T) {
 		t.Fatalf("a cursor older than the prune horizon must read as not covered")
 	}
 	// A cursor inside the retention window AND after the store's
-	// coverage seed (store creation time) stays covered.
+	// coverage seed (store creation time) stays covered, asked once the
+	// clock has passed it, as every cursor a response issued is (the clock
+	// guard: a cursor past the next stamp is no cursor of this history).
+	s.now = func() time.Time { return base.Add(2 * time.Second) }
 	covered, err = s.DeltaSinceCovered(ctx, base.Add(time.Second))
 	if err != nil || !covered {
 		t.Fatalf("a fresh cursor must stay covered (covered=%v err=%v)", covered, err)

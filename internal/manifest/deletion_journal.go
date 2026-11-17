@@ -41,6 +41,7 @@ package manifest
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strconv"
 	"time"
 
@@ -269,22 +270,43 @@ func (s *Store) DeletedSince(ctx context.Context, since time.Time, view formatga
 }
 
 // DeltaSinceCovered reports whether the journal is complete for a client
-// syncing from `since`. False when the coverage marker is absent (a
-// pre-v41 store state that should not occur post-migration — answered
-// conservatively as NOT covered) or when `since` predates it.
+// syncing from `since`: covered only for C <= since < next, C the coverage
+// start and next the stamp the next write would carry
+// (selectNextDeltaStampSQL with the store's clock), both read in one read
+// transaction. False when the coverage marker is absent (a pre-v41 store
+// state that should not occur post-migration — answered conservatively as
+// NOT covered), when `since` predates it, and when `since` is at or past
+// next: every cursor this history issued, its clock at a response or its
+// watermark, is below next unless the clock stepped back since, and one at
+// or past it is a cursor no write of this history made, such as one of a
+// history a restore discarded whose stamps ran ahead of this clock, so a
+// full sync is the answer until the clock or the watermark passes it
+// (B653). Its scope is the cursors the clock has not passed; what a cursor
+// the clock has passed again leaves is backlog B919's.
 func (s *Store) DeltaSinceCovered(ctx context.Context, since time.Time) (bool, error) {
-	raw, err := s.GetScanState(ctx, deletionJournalCoverageKey)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return false, err
 	}
-	if raw == "" {
+	defer func() { _ = tx.Rollback() }()
+	var raw string
+	err = tx.QueryRowContext(ctx, `SELECT v FROM scan_state WHERE k = ?`, deletionJournalCoverageKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && raw == "") {
 		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 	startNs, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		return false, nil // unparseable marker → conservative
 	}
-	return since.UnixNano() >= startNs, nil
+	next, err := readNextDeltaStamp(ctx, tx, s.now().UnixNano())
+	if err != nil {
+		return false, err
+	}
+	sinceNs := since.UnixNano()
+	return sinceNs >= startNs && sinceNs < next, nil
 }
 
 // deltaDeletionFields resolves the since-leg's `deleted` +
@@ -297,7 +319,17 @@ func (s *Store) DeltaSinceCovered(ctx context.Context, since time.Time) (bool, e
 // blip is expensive but SAFE; silently omitting deletions is the exact
 // divergence the journal exists to close. The list is view's
 // (DeletedSince).
-func deltaDeletionFields(ctx context.Context, store *Store, since time.Time, view formatgate.Set) ([]string, bool) {
+//
+// A cursor of another history is not covered either: where the request
+// sent an epoch (ClientEpoch.Sent) that is not current, the one the
+// response carries, or current is empty because it could not be read, the
+// answer is `deltaIncomplete: true` before the journal is asked. A restore
+// of the database replaces the epoch, and its journal never held the
+// discarded history's deletions (B653).
+func deltaDeletionFields(ctx context.Context, store *Store, since time.Time, current string, epoch ClientEpoch, view formatgate.Set) ([]string, bool) {
+	if epoch.Sent && (current == "" || epoch.Value != current) {
+		return nil, true
+	}
 	covered, err := store.DeltaSinceCovered(ctx, since)
 	if err != nil {
 		logger.Warn("delta coverage probe failed", "err", err)

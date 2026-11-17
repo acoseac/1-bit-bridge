@@ -1465,7 +1465,7 @@ func TestProviderWriteManifestReflectsSetRoots(t *testing.T) {
 	}
 
 	var pre bytes.Buffer
-	if err := p.WriteManifest(context.Background(), &pre, time.Time{}, formatgate.All()); err != nil {
+	if err := p.WriteManifest(context.Background(), &pre, time.Time{}, ClientEpoch{}, formatgate.All()); err != nil {
 		t.Fatal(err)
 	}
 	mf := decode(&pre)
@@ -1475,7 +1475,7 @@ func TestProviderWriteManifestReflectsSetRoots(t *testing.T) {
 
 	sc.SetRoots([]string{a, b})
 	var post bytes.Buffer
-	if err := p.WriteManifest(context.Background(), &post, time.Time{}, formatgate.All()); err != nil {
+	if err := p.WriteManifest(context.Background(), &post, time.Time{}, ClientEpoch{}, formatgate.All()); err != nil {
 		t.Fatal(err)
 	}
 	mf = decode(&post)

@@ -277,7 +277,8 @@ func TestAnAllWavPackLibraryIsAnHonestEmptyFeedToAClientThatDeclaresNothing(t *t
 }
 
 // TestTheStreamedManifestIsTheBuiltOneInEveryView keeps the streaming and the
-// buffered legs to one answer in each view, full and delta.
+// buffered legs to one answer in each view, full and delta, the store's
+// epoch on both.
 func TestTheStreamedManifestIsTheBuiltOneInEveryView(t *testing.T) {
 	root := t.TempDir()
 	store, sc := newScanFixture(t, root)
@@ -286,6 +287,10 @@ func TestTheStreamedManifestIsTheBuiltOneInEveryView(t *testing.T) {
 	writeMinimalFLAC(t, filepath.Join(root, "A", "03.flac"), 44100, 16, map[string]string{"TITLE": "Three"})
 	scanOnce(t, sc, "the library")
 	ctx := context.Background()
+	epoch, err := store.BackupEpoch(ctx)
+	if err != nil || epoch == "" {
+		t.Fatalf("BackupEpoch = %q, %v", epoch, err)
+	}
 	for _, view := range allViews {
 		for _, since := range []time.Time{{}, time.Unix(1, 0)} {
 			built, err := BuildManifest(ctx, store, []string{root}, since, view)
@@ -296,6 +301,9 @@ func TestTheStreamedManifestIsTheBuiltOneInEveryView(t *testing.T) {
 			if got, want := pathsOfManifest(streamed), pathsOfManifest(built); !slices.Equal(got, want) {
 				t.Errorf("view %q since %v: streamed %q, built %q", view.Key(), since, got, want)
 			}
+			if built.Epoch != epoch || streamed.Epoch != epoch {
+				t.Errorf("view %q since %v: epoch built %q, streamed %q, want the store's %q", view.Key(), since, built.Epoch, streamed.Epoch, epoch)
+			}
 			wantN := 0
 			for _, p := range []string{"A/01.wv", "A/02.ape", "A/03.flac"} {
 				if view.Takes(p) {
@@ -304,6 +312,49 @@ func TestTheStreamedManifestIsTheBuiltOneInEveryView(t *testing.T) {
 			}
 			if len(built.Tracks) != wantN {
 				t.Errorf("view %q since %v: %d tracks, want %d", view.Key(), since, len(built.Tracks), wantN)
+			}
+		}
+	}
+	// A delta that sends an epoch is answered alike by both legs: as before
+	// with the store's, deltaIncomplete with another, and so with the one
+	// the store held before a restore replaced it.
+	since := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	legs := func(t *testing.T, sent ClientEpoch) (built, streamed *Manifest) {
+		t.Helper()
+		built, err := buildManifest(ctx, store, []string{root}, since, sent, formatgate.Set{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if err := writeManifestGated(ctx, &buf, store, []string{root}, since, sent, formatgate.Set{}, false, true); err != nil {
+			t.Fatal(err)
+		}
+		streamed = &Manifest{}
+		if err := json.Unmarshal(buf.Bytes(), streamed); err != nil {
+			t.Fatalf("decode: %v\n%s", err, buf.Bytes())
+		}
+		return built, streamed
+	}
+	replaced, err := ReplaceBackupEpoch(ctx, store.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name       string
+		sent       ClientEpoch
+		incomplete bool
+	}{
+		{"none sent", ClientEpoch{}, false},
+		{"the store's", ClientEpoch{Value: replaced, Sent: true}, false},
+		{"the one a restore replaced", ClientEpoch{Value: epoch, Sent: true}, true},
+		{"an empty one", ClientEpoch{Sent: true}, true},
+	} {
+		built, streamed := legs(t, c.sent)
+		for leg, m := range map[string]*Manifest{"built": built, "streamed": streamed} {
+			if m.Epoch != replaced || m.DeltaIncomplete != c.incomplete || (c.incomplete && len(m.Deleted) != 0) {
+				t.Errorf("%s, %s: epoch %q, incomplete %v, deleted %q; want epoch %q, incomplete %v",
+					c.name, leg, m.Epoch, m.DeltaIncomplete, m.Deleted, replaced, c.incomplete)
 			}
 		}
 	}
@@ -458,7 +509,7 @@ func TestAnUpgradeOverAGatedRowSendsEveryDeltaCursorToAFullSync(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = s.Close() })
-			if _, incomplete := deltaDeletionFields(ctx, s, cursor, formatgate.Set{}); incomplete != c.incomplete {
+			if _, incomplete := deltaDeletionFields(ctx, s, cursor, "", ClientEpoch{}, formatgate.Set{}); incomplete != c.incomplete {
 				t.Errorf("a delta from the cursor before the upgrade: deltaIncomplete %v, want %v", incomplete, c.incomplete)
 			}
 			var tombstones int

@@ -52,12 +52,15 @@ type fakeManifestProvider struct {
 	lastPageCursor string
 	lastPageLimit  int
 	// lastSince captures the since arg passed to WriteManifest so tests
-	// can assert the handler forwards `?since=` correctly.
+	// can assert the handler forwards `?since=` correctly, and lastEpoch
+	// the epoch arg, `?epoch=`.
 	lastSince time.Time
+	lastEpoch manifest.ClientEpoch
 }
 
-func (f *fakeManifestProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time, _ formatgate.Set) error {
+func (f *fakeManifestProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time, epoch manifest.ClientEpoch, _ formatgate.Set) error {
 	f.lastSince = since
+	f.lastEpoch = epoch
 	if f.err != nil {
 		return f.err
 	}

@@ -70,8 +70,8 @@ func writeB489GoldenLibrary(t *testing.T, lib string) {
 }
 
 // goldenManifest is m as the goldens hold it: what the clock, the temporary
-// directory and the run decide (generatedAt, libraryRoots, a track's
-// firstIndexedAt) left out, indented.
+// directory and the run decide (generatedAt, the store's epoch, libraryRoots,
+// a track's firstIndexedAt) left out, indented.
 func goldenManifest(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	var m map[string]any
@@ -79,6 +79,7 @@ func goldenManifest(t *testing.T, raw []byte) []byte {
 		t.Fatalf("decode: %v\n%s", err, raw)
 	}
 	delete(m, "generatedAt")
+	delete(m, "epoch")
 	delete(m, "libraryRoots")
 	if tracks, ok := m["tracks"].([]any); ok {
 		for _, tr := range tracks {

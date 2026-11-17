@@ -411,9 +411,11 @@ type ManifestProvider interface {
 	// terminates the SQLite scan instead of running it to EOF holding
 	// connection resources.
 	//
-	// view is the formats the request declared (formats.go): every row,
-	// tombstone and count is that view's.
-	WriteManifest(ctx context.Context, w io.Writer, since time.Time, view formatgate.Set) error
+	// epoch is what a delta request sent of the history its cursor was
+	// issued in (`epoch=`); a delta whose epoch is not the bridge's answers
+	// `deltaIncomplete`. view is the formats the request declared
+	// (formats.go): every row, tombstone and count is that view's.
+	WriteManifest(ctx context.Context, w io.Writer, since time.Time, epoch manifest.ClientEpoch, view formatgate.Set) error
 	// BuildManifestPage is the v1.1 paginated-manifest variant used
 	// when the client asks for `?limit=`. `cursor=""` requests the
 	// first page. Callers iterate until the returned page's
@@ -1991,12 +1993,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 40 covers the current maximum
+	// appends in lex order. Capacity 41 covers the current maximum
 	// (atlasEnrichment + booklets + bridgeOutput + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
 	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + localOutputs +
-	// loudness + lyrics +
+	// loudness + lyrics + manifestEpoch +
 	// operatorDrivenUpscale + outputReading + pairingEventsSupported + playbackHistory +
 	// playbackHistoryRead + playlistBackup + playlistFiles +
 	// playlistFilesPaged + playlistListRevision +
@@ -2008,7 +2010,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 40)
+	feats := make([]string, 0, 41)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -2155,6 +2157,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if s.lyricsStore != nil {
 		feats = append(feats, "lyrics")
 	}
+	// `manifestEpoch` advertises the history's epoch on every manifest
+	// response (`epoch`, full, paged and delta) and that a delta's `epoch=`
+	// is honoured: one that is not this bridge's answers deltaIncomplete
+	// (backlog B653). Every bridge from this build on: it is not a setting.
+	// Alpha-sorted between `lyrics` and `operatorDrivenUpscale` (l < m < o).
+	feats = append(feats, "manifestEpoch")
 	if s.upscaleActive() {
 		if s.batchCoordinator != nil {
 			feats = append(feats, "operatorDrivenUpscale")
@@ -2619,7 +2627,9 @@ func endpointURLs(eps []advertise.Endpoint) []string {
 // Query parameter combinations:
 //   - no params               → full manifest, v1.0 behaviour
 //   - ?since=<rfc3339>        → since-delta (never paginated, by
-//     construction small)
+//     construction small); `&epoch=<epoch>` names the history the cursor
+//     was issued in, and one that is not the bridge's answers
+//     deltaIncomplete (read on the delta alone)
 //   - ?limit=N[&cursor=<opq>] → paginated full manifest (v1.1). Empty
 //     cursor requests the first page; the
 //     caller iterates until NextCursor is nil.
@@ -2696,6 +2706,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	// request and OOM-killed the process. Headers go out before the
 	// first track row; mid-stream errors can only be logged.
 	var since time.Time
+	var epoch manifest.ClientEpoch
 	if sinceRaw != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, sinceRaw)
 		if err != nil {
@@ -2704,6 +2715,10 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		since = parsed
+		// The history the client's cursor was issued in, where it sent
+		// one: an `epoch=` present, empty included, is compared with the
+		// bridge's own.
+		epoch = manifest.ClientEpoch{Value: q.Get("epoch"), Sent: q.Has("epoch")}
 	}
 	// Defer WriteHeader until the streamer writes its first byte, so
 	// failures inside WriteManifest's pre-stream DB reads (ListFolders,
@@ -2757,7 +2772,7 @@ func (s *Server) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	// iOS backgrounded mid-sync, attacker slow-reading) interrupts the
 	// SQLite scan within the next per-row check instead of running to
 	// EOF holding the read lock and CPU.
-	writeErr := s.manifest.WriteManifest(r.Context(), bodyWriter, since, view)
+	writeErr := s.manifest.WriteManifest(r.Context(), bodyWriter, since, epoch, view)
 
 	// Flush the gzip trailer ONLY if any compressed byte already
 	// reached the wire. `dw.written` is the authoritative signal:
