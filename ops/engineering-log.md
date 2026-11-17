@@ -104423,3 +104423,112 @@ f3ac81aa and at this record's commit. On a copy of the tracked tree with it and 
 --base HEAD --edit '- **A timeout is not a failure, and the difference is one flag.**'` passes, and cmd/bridge's
 `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration` pass there, the first failing on a citation
 planted in that copy's History file.
+
+## 2026-11-17 — B897 round 4: one-file flags beside both go tests, and the leg check reads if
+
+Branch `fix/b897-make-test-headroom-v2` at 52f35f4b. 4e122e6d merges main at 58833287 (B925 and B884's follow-up) as
+a commit of its own, this file taking main's entries and then B897's; e6d1e6c6 is the change; the commit that carries
+this record follows it. The rules line and its long form ship as a patch (`rules-b897-r4.patch`).
+
+### Why the split, and not one native go test at 45 minutes
+
+Raising the single native go test to 45m for every package would delay every package's hang by 15 minutes. The split
+keeps 30m for all but the three slow packages, and gives those a runner's cores of their own.
+
+### The round 3 review's findings
+
+1. **The required status checks.** The round's brief records that the repository's branch protection answers "Branch
+   not protected" and its rulesets list is empty (read 2026-11-17), so no check name is required, and no fan-in job is
+   added. The legs report as `test (windows-latest, slow)`, `test (windows-latest, rest)`,
+   `test (macos-latest, slow)` and `test (macos-latest, rest)`. `gate` (`gate.yml:719-722`) needs `cross-platform` by the job's id, whose
+   result is the whole matrix's, and runs on `if: always()`; its verification step (`:751-770`) counts every need
+   whose result is not success (`:761`) and exits 1 on any (`:766-768`). Run as written
+   (`.tmp/_b897/r4/fanin.py`: the step's script read from the workflow, under bash -eo pipefail with jq, every other
+   need a success) it exited 1 with cross-platform failure, cancelled and skipped, its summary naming
+   `cross-platform=<result>` beside every other need's success, and 0 with success. A whole job skipped fails the gate;
+   a test step skipped alone would leave the leg green, which the leg check now refuses (4).
+2. **Concurrent go tests and one output file: refused, not merged.** `Makefile:81-85` (the comment), `:87`
+   (`ONE_FILE_TEST_FLAGS`: coverprofile, cpuprofile, memprofile, blockprofile, mutexprofile, trace, o) and `:97-101`:
+   where both go tests would run, each word of `go env GOFLAGS` and of TEST_PKGS's flags is read with a leading quote,
+   one or two dashes and `test.` taken off and its value after = dropped; a name on the list is refused before either
+   go test starts, the message naming the word and where it came from ("make test: -coverprofile=coverage.out, from
+   TEST_PKGS, names one file, which make test's two go tests, run at once, would both write: select the packages of
+   one of them, or run go test yourself"). One go test alone takes the flag as go test does. A refusal and not a
+   merge: a merge would strip both spellings from every source (TEST_PKGS, GOFLAGS from the environment and from go
+   env's file), wait for both groups, and write one profile with one `mode` line, whatever a failing group left,
+   where the refusal is a few lines of the recipe; a caller who wants a whole profile runs go test with a timeout of
+   their own. go1.27.3's go test takes `-test.` forms of the profile flags (`flagdefs.go`'s `passFlagToTest`) and
+   splits GOFLAGS with quotes (`goflags.go`'s `quoted.Split`), hence the prefix and the quote. The census reviews the
+   new recipe line (`tags.go:145-167`); CONTRIBUTING.md (`:57-61`) says it.
+3. **bash 3.2 and `set -e`: no change, as the brief decided.** Here, `set -e; x=$(printf 'a\nb\n'; exit 3); echo
+   after; true` stopped with status 3 and printed nothing in dash and in bash 5.3.9, with `-c` and with `-ec`
+   (`.tmp/_b897/r4/sete.py`). The Makefile sets no SHELL, so make runs the recipe with /bin/sh and GNU make's default
+   `-c`: dash on Linux. The repository's Makefile in a two-package module whose second package imports a module that
+   cannot be found (`.tmp/_b897/r4/partial_list.py`): go list printed both packages and exited 1, and make test stopped
+   at the assignment, make's exit 2, with no go test and no go env called. The harness's new case, a go list that
+   lists packages and then fails (`maketest_test.go:390-394`), pins it on whichever /bin/sh make uses, macOS's on CI.
+   The listing stays a plain assignment in a statement of its own; `local` or `export` before it would hand on their
+   own status.
+4. **The leg check reads if and continue-on-error.** `nativetest_test.go`: `leeway` (`:121`) reads a job's or a
+   step's key as a YAML node, so a boolean, a string and an expression read as written, and finds any `if`, and any
+   `continue-on-error` but the boolean false; `readNativeJob` (`:135`) asks it of the cross-platform job and of its
+   test step (the step named test, and any that runs native-test.sh), and finds `NATIVE_TEST_DRY_RUN` anywhere in the
+   workflow (`:202`), which makes a leg print its go test and run none.
+   `TestTheNativeLegsRunEveryPackageOnceAndTheSlowOnesAt45m` (`:226`) fails on any finding in gate.yml;
+   `TestTheNativeJobCheckRefusesALegThatCanPassWithoutItsTests` (`:385`) runs `readNativeJob` on gate.yml with each key
+   added (an if on the job, `if: false` on it, `continue-on-error: true` and an expression on it, an if,
+   `if: ${{ false }}` and `continue-on-error: true` on the step, the dry-run switch in the step's env), one finding each, and on
+   gate.yml as it is and with `continue-on-error: false`, none. `TestTheNativeScriptFailsAsItsGoTestFails` (`:357`)
+   holds both groups' step to a go test's exit status 3.
+
+### Red first, and the controls
+
+Predicted in `.tmp/_b897/r4/controls.predictions.txt` before the runs; each in a copy of the tracked tree outside the
+worktree (`.tmp/_b897/r4/controls.py`), the mutated files put back from memory after each run, the copy compared with
+the tree and removed:
+
+| Run | Result |
+|---|---|
+| R1 52f35f4b's Makefile under this round's tests | red: the 13 refusal cases; green: the 4 taken cases, and the go list that lists and then fails |
+| R2 52f35f4b's tree, gate.yml with `if: matrix.group == 'rest'` on the test step | green: round 3's check misses it |
+| R3 52f35f4b's tree, gate.yml with `continue-on-error: true` on the job | green: missed |
+| R4 52f35f4b's tree, gate.yml with `NATIVE_TEST_DRY_RUN: 1` in the test step's env | green: missed |
+| R5 to R7 this round's tree with R2's to R4's gate.yml | red, each by its finding |
+| C1 the one-file check removed | the 13 refusal cases |
+| C2 GOFLAGS not asked | the 3 GOFLAGS cases |
+| C3 one dash taken off, not two | "two dashes" and the kept GOFLAGS (`--coverprofile`) |
+| C4 `test.` not taken off | "test." |
+| C5 a leading quote not taken off | the quoted GOFLAGS entry |
+| C6 the check beside one go test too | the 2 cases one go test alone takes |
+| C7 the whole word matched, not its name | 12 refusal cases, all but the flag and its value apart |
+| C8 `o` off the list | "-o" |
+| C9 `leeway` reads no if | the 4 if fixtures |
+| C10 any boolean continue-on-error passes | the 2 `continue-on-error: true` fixtures |
+| C11 the test step's keys not read | the 3 test-step fixtures |
+| C12 the dry-run text check removed | the dry-run fixture |
+| C13 native-test.sh's go test status masked (`\|\| true`) | both groups of the exit-status test |
+| C14 the recipe's go list status masked (`\|\| true`) | the go list that lists and then fails (an empty listing is still refused) |
+
+Every one went as predicted; `git status` was clean before and after.
+
+### Runs
+
+In the build slot, 18:09 to 18:14 (`.tmp/_b897/r4/gates.py`), with go1.27.3 and a fresh TMPDIR on disk: `make fmt`
+changed nothing; `go vet` with the tags for linux, darwin and windows, clean; `make check-build-tags`, OK; `make
+docs-check`, ok; the dry run of native-test.sh on Linux, slow exactly cmd/bridge, internal/backup and
+internal/manifest at `-p 3 -timeout 45m`, the rest at 30m; `make test TEST_PKGS='./... -coverprofile=coverage.out'`
+and `GOFLAGS=-coverprofile=coverage.out make test` with the real go, each refused before any go test, no coverage.out
+written; and `make test P=8 TEST_PKGS='-count=1 ./scripts/third-party-licenses/'`, ok in 284.8 s under `-race`, the census over the real tree among it.
+
+### Not run here
+
+This host does not push, so the round's CI items are left to the PR: its run on this head (the four legs' names and
+conclusions and the slow leg's package times), a red leg's step, job and gate (a test that fails at once in a package
+one leg runs, pushed and then reverted), and a leg skipped on CI. Nor could it read the organization-level rules
+(`rules/branches/main`) one review asked to read on the day of the final push.
+
+The rules patch (`rules-b897-r4.patch`) applies at e6d1e6c6 and at this record's commit. On a copy of the tracked tree
+with it and this record applied, `check-doc-budgets.py` is ok (`build-ci-tests.md` 62,312 bytes), the doc tools'
+self-tests pass, and cmd/bridge's `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration` pass, the
+first failing on a citation planted in that copy's History file. `verify_moves.py --base HEAD` lists as missing the two
+copies of B897's entry the patch edits, the rules line and its History twin, both replaced, and nothing else.
