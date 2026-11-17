@@ -103798,6 +103798,177 @@ mutation went as predicted.
 
 The gate's runs on this commit are in the PR body.
 
+## 2026-11-17 — B730 B1 follow-up: the catalog lint's parity Lows
+
+Five Lows from B1's review rounds, each checked against the lines first.
+Rules: two entries of `.claude/rules/dac-catalog.md` (their lines and long
+forms in `ops/History-rules-dac-catalog.md`), and the DAC profile entry's
+long form in `ops/History-rules-player.md`, corrected in place.
+
+### What changes
+
+1. Known siblings (f4e1e4d7). The catalog holds iOS PR 1's known siblings
+   at the database level, as iOS keeps them: `iosKnownSiblings`, the
+   baseline's 24 `knownSiblings` names in its order, never exported (the
+   export and its SHA-256, `d134affb…`, stand). The lint answers each name
+   as the strict matcher does (`strictHits`: a generic name finds no row;
+   then a port name that is the name, trimmed and its case kept; then a
+   token the name holds and none of the row's excluded tokens, folded; one
+   row is the answer, two or none no row) and refuses one answered with a
+   model row, by either key: a port name, taken before any token and never
+   ruled out by an excluded token, or a token. Until now the lint had no
+   such check: dropping `Lite` from the E30 II's excluded tokens linted
+   clean. The parity test pins the baseline by its SHA-256 and checks the
+   strict matcher for every sibling, so re-pinning the export removes no
+   guard; the lint's check is wanted because a catalog edit must fail at
+   the lint, before any export or baseline exists. The parity test now
+   also holds the catalog's list to the baseline's. A scratch overlay test
+   (not committed) gave all 112 of the baseline's corpus and sibling names
+   the lint matcher's answer equal to the baseline's strict answer. The
+   list is no field of `Profile`, so `Profile.clone` is unchanged.
+2. The family-rate cases. Each left the fixture's other rate list
+   nonempty, so deleting either operand of the family check's `||` kept
+   both green; each now clears the other list.
+3. Dated heads. In every head of the baseline and the catalog a
+   `submission` (27 baseline sources, 14 catalog clauses) and a `field log`
+   (1 and 1) name their date, and a `maker` (12 and 12), a `pcm ceiling`, a
+   `chip specification` and a `retailer` (1 and 1 each) none. The lint now
+   refuses a `submission` or `field log` head with no date in a row with
+   `ios`, where the head binds, and asks no date of the other four kinds or
+   of a row without `ios`, whose text after a colon is free. A DoP claim's
+   own `listening` and `maker` sources were dated already (B1's rule).
+4. The binding long form. `ops/History-rules-player.md`'s DAC profile
+   entry still described schema 1: the registry's import, the heard
+   maximum and the Hugo 2 with no DoP claim, the statement without
+   `statedWithoutDoP`, three markers, and `ios-check.py` as running. Its
+   text is corrected in place, the bold sentences that `player.md`'s line
+   repeats unchanged, and B1's dated paragraph says so.
+5. An excluded token that holds its row's own token (`JM98MAX 2` beside
+   `JM98MAX`) is pinned valid by a positive case, beside a sibling it keeps
+   off.
+
+32 code lines in `dacprofile.go` and `lint.go` (21 comment lines beside
+them, 26 data lines in `profiles.json`); five new cases, two cases changed.
+
+### Reds, greens and controls
+
+Every run went through `go test -overlay`, leaving the tree untouched, and
+was judged against predictions written first. At the base's `lint.go`
+(0be7bd76) under the new tests and data, the two sibling cases were red
+with the lint saying nothing (the Low itself) and the two dated-head cases
+red; every other case was green. The controls, each red only in its own
+case as predicted: the sibling check removed (both sibling cases); the
+port-name key dropped (the port-name case); the token key dropped (the
+token case); excluded tokens applied to a port name (the port-name case);
+the dated-head check removed (both dated cases); `field log` not dated (its
+case); the check on rows without `ios` (both dated cases' second half,
+which lints such a row); a date asked of all six kinds (the embedded
+catalog no longer parses, and the fixture pair no longer lints); the family
+check's heard operand removed, then its refused operand (each its own case;
+under the base's fixtures neither went red, the Low); an excluded token
+holding its row's token refused (the positive case, and the embedded
+catalog); and a sibling dropped from the catalog (the parity test).
+
+The gate's runs on this commit are in the report.
+
+## 2026-11-17 — B915: the installer tests write their stubs under the fork lock
+
+CI run 43963924170 (`test -race (rest)`, Linux) failed
+`TestTheInstallerSaysWhatLetsThePlayerOpenTheDAC/sh`: "ssh: Text file busy".
+`writeFile` held each stub open for writing in `os.WriteFile` while parallel
+installer tests forked, and a child forked then keeps the descriptor until
+its exec, exec of the stub failing ETXTBSY meanwhile. A go1.27.3 fork takes
+`syscall.ForkLock` for writing (`acquireForkLock`, from `forkExec` at
+`src/syscall/exec_unix.go:199`), so f0bab282's `writeFile` holds it for
+reading across the write. Scratch checks (Linux 7.0.0-38, Ubuntu 26.04),
+deleted: a stub held open for writing failed ETXTBSY run as a command, and
+ran closed; guarded, `exec.Cmd.Start` waited at the lock while a stub was held
+open and returned once let go, unguarded it returned while held (21 runs);
+32 goroutines × 200 writes and runs, three rounds under -race: 1,528, 1,549
+and 1,522 ETXTBSY of 6,400 without the lock, 0 with it. The package -race x10
+beside 8 CPU hogs passed (2,500 passes), as did the gate. `internal/updater`'s
+`installCandidateCopy`, checked, stays: it hard-links but on Windows, and no
+test there is parallel.
+
+## 2026-11-17 — B925: three transcode tests fail by their own message, not by a hang
+
+Branch `fix/b925-transcode-test-hangs`, from main 711e3cbf. 2e166023 changes
+two test files and nothing else; this record follows it.
+
+Three tests in `internal/transcode` park their pool's one worker in a runner
+stub, and `t.Cleanup(p.Stop)` waits for every worker to return
+(`p.wg.Wait()`, `pool.go` :887). A failure before the test let its runner go
+left that wait for good, and the package's 30-minute timeout then reported a
+hang with no cause: a failing test's message is held until the test ends, so
+the timeout's panic drops it. `TestPoolActiveWorkersReflectsInflight`
+(`pool_test.go`) parked its runner on `<-release` alone (:523), closed only at
+:571, after the Fatal calls at :559 and :566, and :553 should the runner start
+just as that wait gives up. `TestPoolOptimizeBacklogDrainsBeforeUpscale`
+(`pool_priority_test.go`) parked its first runner call on `<-releaseFirst`
+inside its `sync.Once` (:150-153), closed only at :195, after :177, :182 and
+:191; and its deadline Fatalf (:207-209), like
+`TestPoolUpscaleProgressUnderInterleavedLoad`'s (:305-307), was made holding
+`processedMu`. `Fatalf` ends the test's goroutine before its `Unlock`, so a
+runner then waits at `processedMu.Lock()` (:154, :264) for good, and the stop
+with it. `TestPoolBackgroundOptimizeUsesUpscaleLane`'s runner returns on its
+context as well, so its stop ends whatever the cleanup order.
+
+Both parked waits now also end on the job's context, which `Stop` cancels
+(`select { case <-release: case <-ctx.Done(): }`, and the same for
+`releaseFirst`), each runner returning what it returned before; the job's own
+timeout is the default ten minutes, so in a run that passes only the release
+ends the wait. The two deadline Fatalf calls report `n`, the count the loop
+read under the lock just before, and hold no lock. The three tests stop their
+pool through `stopPoolWithin` (B924), each registered where its
+`t.Cleanup(p.Stop)` was, so the cleanup order is unchanged and a worker that
+still never returns fails the test by name ("the pool did not stop within …")
+after 30 s. `TestPoolOptimizeBacklogDrainsBeforeUpscale`'s parked call still
+waits inside its `Once`; nothing asks that `Once` meanwhile (one worker, and
+the stop reaches the call through its context).
+
+When `stopPoolWithin` gives up, the stranded worker stays parked for the rest
+of the test process, and the store's cleanup, registered earlier and so run
+later, runs under it. That is acceptable only in a deliberately failing run,
+the two controls below; no passing run printed the stop's diagnostic.
+
+Each forced run was `go test -race -count=1 -overlay <map> -run '^<name>$'
+-timeout 90s ./internal/transcode`, without `-v`, as CI runs it. The map gave
+main's or 2e166023's two test files with the injection, written into a scratch
+directory, every inserted statement joined onto an existing line so that a
+line number is that side's own; the tree was never edited (`git status` clean
+before and after). The never-closed release (tests 1 and 2) was a
+`t.Fatal("forced")` just before the test closes `release` or `releaseFirst`.
+The fatal under `processedMu` (tests 2 and 3) was one handshake, the same on
+every side: each runner call, once entered, signals a buffered `entered` and
+parks on `fatalBranch` just before its `processedMu.Lock()`; the test waits for
+`entered` (10 s at most), its deadline is set a second in the past, so its first
+look takes the fatal branch, and that branch closes `fatalBranch` on the
+Fatalf's own line, just before the Fatalf (after main's `processedMu.Lock()`).
+
+At main all four hung until "panic: test timed out after 1m30s", with neither
+"forced" nor "worker drained only" anywhere in the output, `Stop` in
+`p.wg.Wait()` under the test's `Fatal` or `Fatalf`, and the worker at
+`pool_test.go:523` [chan receive] (test 1), at `pool_priority_test.go:152`
+[chan receive] inside `sync.(*Once).doSlow` (test 2's release), and in
+`sync.(*Mutex).Lock` at `pool_priority_test.go:154` (test 2's handshake) and
+:264 (test 3). At 2e166023 the same four failed in 0.79-0.81 s on their own
+messages ("forced" twice, "worker drained only 0 of 6 jobs within deadline",
+"worker drained only 0 of 20 jobs within deadline"), with no stop diagnostic;
+with no injection each test passed. Control 1, test 1 without its
+`ctx.Done()` case and with the release injection: "forced", then "the pool
+did not stop within 30s: a worker never exited", the test failing in 30.91 s
+with no panic. Control 2, test 3 with main's under-lock Fatalf put back and
+the handshake: "worker drained only 0 of 20 jobs within deadline", then the
+same named stop failure, in 30.94 s; and with `t.Cleanup(p.Stop)` put back as
+well, the 90 s panic, its worker in `sync.(*Mutex).Lock` at :269, main's
+behaviour.
+
+At 2e166023, with Go 1.27.3: `make fmt` changed nothing; `make vet` exited 0
+for linux/amd64, darwin/arm64 and windows/amd64 (`CGO_ENABLED=0` for the two);
+`go test -race -count=20 -v -run` over the three tests printed 60 `--- PASS`
+lines and no stop diagnostic; `go test -race ./internal/transcode` passed in
+180 s; and `make docs-check` passed with this record.
+
 ## 2026-11-17 — B884 follow-up: the sweeper pointer's exception, and the managed bridge in the README
 
 The rules are `cli-serve.md`'s sweeper line (56) and its long form in

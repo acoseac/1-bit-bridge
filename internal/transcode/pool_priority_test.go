@@ -149,14 +149,18 @@ func TestPoolOptimizeBacklogDrainsBeforeUpscale(t *testing.T) {
 	p.runner = func(ctx context.Context, spec JobSpec) (RunResult, error) {
 		firstJobOnce.Do(func() {
 			close(firstJobParked)
-			<-releaseFirst
+			// Stop's cancel ends a park the test never released (B925).
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+			}
 		})
 		processedMu.Lock()
 		processed = append(processed, spec.Kind)
 		processedMu.Unlock()
 		return RunResult{SizeBytes: 0}, nil
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { stopPoolWithin(t, p, 30*time.Second) })
 
 	mkSpec := func(i int, kind JobKind) JobSpec {
 		return JobSpec{
@@ -204,9 +208,10 @@ func TestPoolOptimizeBacklogDrainsBeforeUpscale(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			processedMu.Lock()
-			t.Fatalf("worker drained only %d of 6 jobs within deadline", len(processed))
-			processedMu.Unlock()
+			// n was read under the lock above: a Fatalf made holding
+			// processedMu would keep it, and the runner waiting for it
+			// would hold the cleanup's stop (B925).
+			t.Fatalf("worker drained only %d of 6 jobs within deadline", n)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -266,7 +271,7 @@ func TestPoolUpscaleProgressUnderInterleavedLoad(t *testing.T) {
 		processedMu.Unlock()
 		return RunResult{SizeBytes: 0}, nil
 	}
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { stopPoolWithin(t, p, 30*time.Second) })
 
 	mkSpec := func(i int, kind JobKind) JobSpec {
 		return JobSpec{
@@ -302,9 +307,10 @@ func TestPoolUpscaleProgressUnderInterleavedLoad(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			processedMu.Lock()
-			t.Fatalf("worker drained only %d of 20 jobs within deadline", len(processed))
-			processedMu.Unlock()
+			// n was read under the lock above: a Fatalf made holding
+			// processedMu would keep it, and the runner waiting for it
+			// would hold the cleanup's stop (B925).
+			t.Fatalf("worker drained only %d of 20 jobs within deadline", n)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

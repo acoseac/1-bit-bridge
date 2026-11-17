@@ -787,11 +787,13 @@ func TestAStatementIsOneOfThree(t *testing.T) {
 
 // TestAnIOSRowsClausesNameTheirSource: in a profile with an iOS projection
 // every marker clause's text after its colon opens with its source's head,
-// one of iOS's kinds in words and a date where it has one, then nothing, ", "
-// or " (", and one clause credits each rate and the statement: a clause
-// with no colon, no head, a kind iOS does not have, a date that is none or a
-// head run into its text, and a rate or the statement credited twice, are
-// each a problem; the same clauses in a profile without one lint clean.
+// one of iOS's kinds in words and a date where it has one, a submission's
+// and a field log's always, then nothing, ", " or " (", and one clause
+// credits each rate and the statement: a clause with no colon, no head, a
+// kind iOS does not have, a date that is none, a head run into its text, a
+// submission's or a field log's head with no date, and a rate or the
+// statement credited twice, are each a problem; the same clauses in a
+// profile without one, where no head is read, lint clean.
 func TestAnIOSRowsClausesNameTheirSource(t *testing.T) {
 	const kept = "; refused DSD256: field log 2026-06-21; stated DSD to DSD256: maker (the row's note, iOS 6a1241eb)"
 	heads := []struct{ name, heard, words string }{
@@ -800,6 +802,8 @@ func TestAnIOSRowsClausesNameTheirSource(t *testing.T) {
 		{"a kind iOS does not have", "heard DSD64: forum post 2026-10-04", "source's head"},
 		{"a date that is none", "heard DSD64: submission 2026-13-45", "source's head"},
 		{"a head run into its text", "heard DSD64: submissions, 2026-10-04", "source's head"},
+		{"a submission with no date", "heard DSD64: submission (one unit)", "heads a submission with no date"},
+		{"a field log with no date", "heard DSD64: field log, its row's log", "heads a field log with no date"},
 		{"a rate credited twice", "heard DSD64: submission 2026-10-04; heard DSD64: field log 2026-10-21", "credited by 2 dop clauses"},
 	}
 	var cases []dbCase
@@ -827,8 +831,10 @@ func TestAnIOSRowsClausesNameTheirSource(t *testing.T) {
 // profile's own token inside its own port name (qx13 in FIIO QX13 ); a port
 // name two profiles give, trimmed and folded (FIIO KA17 and FIIO KA17), or
 // that is a generic name; a family row with no sibling note or one saying a
-// word never said of DSD, and a model row with one; and an order given twice
-// or skipped.
+// word never said of DSD, a model row with one, and a family row with a heard
+// or a failed rate of its own, its other list empty; and an order given twice
+// or skipped. An excluded token that holds its own row's token (JM98MAX 2
+// beside JM98MAX) lints clean, keeping a sibling's longer name off the row.
 func TestTheIOSNameKeysLint(t *testing.T) {
 	first := func(f func(x *IOS)) func(db *Database) { return func(db *Database) { f(db.Profiles[0].IOS) } }
 	second := func(f func(x *IOS)) func(db *Database) { return func(db *Database) { f(db.Profiles[1].IOS) } }
@@ -860,7 +866,7 @@ func TestTheIOSNameKeysLint(t *testing.T) {
 			if pr.DoP == nil {
 				pr.DoP = &DoP{}
 			}
-			pr.DoP.HeardBitRates = []int{2822400}
+			pr.DoP.HeardBitRates, pr.DoP.RefusedBitRates = []int{2822400}, nil
 		}, "no heard or failed rate of its own"},
 		{"a family row with a failed rate of its own", func(db *Database) {
 			pr := &db.Profiles[0]
@@ -868,7 +874,7 @@ func TestTheIOSNameKeysLint(t *testing.T) {
 			if pr.DoP == nil {
 				pr.DoP = &DoP{}
 			}
-			pr.DoP.RefusedBitRates = []int{22579200}
+			pr.DoP.HeardBitRates, pr.DoP.RefusedBitRates = nil, []int{22579200}
 		}, "no heard or failed rate of its own"},
 		{"an order given twice", second(func(x *IOS) { x.Order = 1 }), "hold order 1"},
 		{"an order skipped", second(func(x *IOS) { x.Order = 3 }), "hold order 2"},
@@ -877,6 +883,41 @@ func TestTheIOSNameKeysLint(t *testing.T) {
 	db.Profiles[0].IOS.PortNames, db.Profiles[0].IOS.NameTokens = []string{"FIIO QX13 "}, []string{"qx13"}
 	if problems := db.Lint(); len(problems) > 0 {
 		t.Errorf("a token inside its own profile's port name lints as %v", problems)
+	}
+	db = iosPair()
+	db.Profiles[0].IOS.ExcludedTokens, db.IOSKnownSiblings = []string{"Alpha 2", "Alpha2"}, []string{"FIXTURE Alpha 2", "FIXTURE ALPHA2"}
+	if problems := db.Lint(); len(problems) > 0 {
+		t.Errorf("an excluded token that holds its own row's token lints as %v", problems)
+	}
+}
+
+// TestNoKnownSiblingReachesAModelRow: no known sibling (iosKnownSiblings,
+// iOS PR 1's list) reaches a model row through the strict matcher, by either
+// of its keys, so a catalog edit that lets one in fails at the lint, before
+// any export or baseline: the E30 II Lite's name given to the E30 II as a
+// port name, which the matcher takes before any token and no excluded token
+// rules out, and the E30 II's excluded token Lite dropped, which lets the
+// Lite's names reach it by its tokens, are each refused.
+func TestNoKnownSiblingReachesAModelRow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(x *IOS)
+		words  string
+	}{
+		{"a sibling's name as the model's port name", func(x *IOS) { x.PortNames = append(x.PortNames, "TOPPING E30 II Lite") },
+			`"TOPPING E30 II Lite" reaches this model row through the strict matcher, by its port name`},
+		{"the excluded token that keeps the sibling off dropped", func(x *IOS) { x.ExcludedTokens = nil },
+			`"TOPPING E30II Lite" reaches this model row through the strict matcher, by its token`},
+	} {
+		db := mustDefault(t)
+		i := slices.IndexFunc(db.Profiles, func(p Profile) bool { return p.ID == "topping.e30ii" })
+		if i < 0 || !slices.Contains(db.IOSKnownSiblings, "TOPPING E30 II Lite") {
+			t.Fatal("the embedded database holds no E30 II row, or not its Lite among the known siblings")
+		}
+		tc.mutate(db.Profiles[i].IOS)
+		if problems := db.Lint(); !lintSays(problems, "profile topping.e30ii", tc.words) {
+			t.Errorf("%s: the lint says %v, want a problem saying %q", tc.name, problems, tc.words)
+		}
 	}
 }
 
