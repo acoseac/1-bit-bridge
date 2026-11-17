@@ -62,9 +62,45 @@ build-all: check-build-tags
 test test-fast: export TMPDIR := $(TMPDIR)
 test test-fast: override TMPDIR := $(if $(strip $(TMPDIR)),$(TMPDIR),$(CURDIR)/.tmp)
 
+# cmd/bridge and internal/manifest run in a go test of their own, beside the
+# one for every other package, with -timeout 45m (B897;
+# ops/History-rules-build-ci-tests.md). Each runs its tests one after another,
+# so its time is their sum: under -race on a 16-core Linux host cmd/bridge ran
+# 1,634 s alone and up to 1,822 s beside a second run of it, and manifest up
+# to 1,789 s, against the 30m every other package keeps (2026-11-14), where a
+# wait that gives up at the binary's deadline less 30 s gave up at once. go
+# test applies one -timeout to each package's test binary of an invocation,
+# so a cap of their own takes an invocation of its own. -p: with nothing else
+# selected the slow go test takes P; beside the others' it takes 2 for two
+# slow packages (the others' P-1) and 1 for one (the others' P), so the two
+# build and run no more than P+1 things at once, and at P=1 both take 1. A
+# selection that lists no package fails. TEST_PKGS's words that begin with
+# ./, ../ or /, or name the module, are its packages, which go list expands;
+# every other word, a flag or a flag's value, goes to each go test as it
+# stands, after the packages, so a flag whose value is a path is written
+# -flag=path.
+SLOW_TEST_PKGS := github.com/acoseac/1-bit-bridge/cmd/bridge github.com/acoseac/1-bit-bridge/internal/manifest
+TEST_PATTERNS  := . .. ./% ../% /% github.com/acoseac/1-bit-bridge github.com/acoseac/1-bit-bridge/%
+test_packages   = $(filter $(TEST_PATTERNS),$(TEST_PKGS))
+test_flags      = $(filter-out $(TEST_PATTERNS),$(TEST_PKGS))
+
 test:
 	@mkdir -p "$(TMPDIR)"
-	TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $(P) -race -timeout 30m $(TEST_PKGS)
+	@set -e; pkgs=$$(go list -tags "$(GO_TAGS)" -race $(test_packages)); slow=; rest=; n=0; \
+	for p in $$pkgs; do case " $(SLOW_TEST_PKGS) " in *" $$p "*) slow="$$slow $$p"; n=$$((n + 1));; *) rest="$$rest $$p";; esac; done; \
+	if [ -z "$$slow$$rest" ]; then echo "make test: no package matches $(test_packages)" >&2; exit 1; fi; \
+	if [ -z "$$rest" ]; then sp=$(P); elif [ $(P) -le 1 ]; then sp=1; rp=1; elif [ $$n -ge 2 ]; then sp=2; rp=$$(($(P) - 1)); else sp=1; rp=$(P); fi; \
+	status=0; \
+	if [ -n "$$slow" ]; then \
+		echo TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $$sp -race -timeout 45m$$slow $(test_flags) \&; \
+		TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $$sp -race -timeout 45m$$slow $(test_flags) & slow_test=$$!; \
+	fi; \
+	if [ -n "$$rest" ]; then \
+		echo TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $$rp -race -timeout 30m$$rest $(test_flags); \
+		TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $$rp -race -timeout 30m$$rest $(test_flags) || status=1; \
+	fi; \
+	[ -z "$$slow" ] || wait $$slow_test || status=1; \
+	exit $$status
 
 # Fast inner-loop tests: no race detector — much faster to build and a
 # fraction of the RAM, so it won't thrash on a loaded machine. Use while

@@ -506,23 +506,28 @@ jobs:
   # Executing the platform code at all is the point; the race detector
   # stays on the Linux `test` job above, which is where it is cheap.
   cross-platform:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, ${{ matrix.group }})
     runs-on: ${{ matrix.os }}
-    # 60, not 30: the per-package `go test -timeout 30m` below has to be
-    # able to actually reach its ceiling on more than one slow package
-    # without the job being killed out from under it first. A job killed
-    # at the wall clock loses the log tail, which is the part worth
-    # reading.
-    timeout-minutes: 60
+    # 75: one wave of the slow group's 45-minute binaries, which its legs run
+    # at once (-p 3, see the test step), plus the setup the job always had
+    # around its tests, so a 45-minute binary's timeout panic, goroutines
+    # and all, prints before the job is cancelled; a job killed at the wall
+    # clock loses the log tail, which is the part worth reading. Not three
+    # times 45: the slow packages do not run one after another (backlog
+    # B897).
+    timeout-minutes: 75
     permissions:
       contents: read
     strategy:
-      # One platform's failure must not cancel the other's run: on the
-      # first pass we want the full picture from both, not whichever
-      # broke first.
+      # One leg's failure must not cancel the others' runs: on the first
+      # pass we want the full picture from every leg, not whichever broke
+      # first.
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
+        # .github/scripts/native-test.sh's two groups, each leg a runner
+        # of its own (see the test step).
+        group: [slow, rest]
     defaults:
       run:
         # bash on every runner (Git Bash on Windows) so one recipe works
@@ -551,9 +556,10 @@ jobs:
           path: |
             ${{ steps.gocache.outputs.build }}
             ${{ steps.gocache.outputs.mod }}
-          key: ${{ runner.os }}-gobuild-xplat-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          key: ${{ runner.os }}-gobuild-xplat-${{ matrix.group }}-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/*.go') }}
           restore-keys: |
-            ${{ runner.os }}-gobuild-xplat-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-xplat-${{ matrix.group }}-${{ hashFiles('**/go.sum') }}-
+            ${{ runner.os }}-gobuild-xplat-${{ matrix.group }}-
             ${{ runner.os }}-gobuild-xplat-
       # Defender scans every file the suite writes and holds a handle
       # across the scan. Go's `t.TempDir()` cleanup is a single
@@ -594,25 +600,39 @@ jobs:
           pwsh -Command "(Get-MpPreference).ExclusionPath" || true
       # Native vet matters most on Windows: the `unsafeptr` analyzer is
       # the real check on `doctor_windows.go`'s Syscall6 argument
-      # liveness, and it cannot run from a non-Windows host.
+      # liveness, and it cannot run from a non-Windows host. Once per
+      # platform, on the rest leg, the shorter of the two.
       - name: vet
+        if: matrix.group == 'rest'
         run: go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...
-      # -timeout 30m, matching the Makefile's `test` target rather than
-      # taking Go's 10m/package default. The Makefile already documents
-      # why 10m is too short even on Linux (internal/adminauth pays real
-      # bcrypt cost-12 per simulated login across its rate-limit tests);
-      # Windows is slower still, and the first full run had
+      # -timeout 30m for the rest, matching the Makefile's `test` target
+      # rather than taking Go's 10m/package default. The Makefile already
+      # documents why 10m is too short even on Linux (internal/adminauth
+      # pays real bcrypt cost-12 per simulated login across its rate-limit
+      # tests); Windows is slower still, and the first full run had
       # internal/admin and internal/manifest both stop dead at 600.0s —
       # the default ceiling, not a hang. Those two showed up as ordinary
       # failures, which is the misleading part: a package timeout is
       # reported like a test failure, so it inflates the triage list with
       # entries that were never really broken.
       #
-      # `go test` applies the timeout PER package binary, so the job-level
-      # timeout-minutes above has to leave room for several slow packages
-      # in sequence — hence 60 there against 30 here.
+      # -timeout 45m for the slow group: cmd/bridge, internal/backup and
+      # internal/manifest (backlog B897). On run 44097405776 (attempt 1) a
+      # slow Windows runner took every package a median 1.48x longer than
+      # main's run an hour before: cmd/bridge 1731.1 s, 96 % of its 30m;
+      # internal/backup met the 30m cap and failed; internal/manifest
+      # 1297.2 s; internal/admin 1078.7 s. On main this leg's cmd/bridge had
+      # gone from 1026.9 to 1206.9 s and internal/backup from 987.2 to
+      # 1184.8 s in one day. go test applies one -timeout to each package's
+      # test binary of an invocation, so a longer cap for three packages
+      # takes an invocation of their own, which the matrix gives a runner of
+      # its own: two invocations on one 4-vCPU runner would slow each other.
+      # The slow leg runs its three at once (-p 3): one after another they
+      # would outlast the job's timeout-minutes. No -race here: it needs
+      # cgo and a C toolchain on Windows; the race detector stays on the
+      # Linux `test` job above. The script refuses an empty group.
       - name: test
-        run: go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m ./...
+        run: bash .github/scripts/native-test.sh ${{ matrix.group }}
 
   # Single green signal that fans in the parallel jobs. `if: always()` + the
   # explicit result check means a failed (or cancelled) dependency fails the

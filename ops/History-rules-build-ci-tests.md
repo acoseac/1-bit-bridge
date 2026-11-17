@@ -1375,6 +1375,140 @@ walk seam (`sweepWalkDir`, `hashCostWalkDir`, `flacWalkDir`).
 and `TestARemovalRemovesWhatTheWalkReaches` pin it. Record:
 `ops/engineering-log.md`, B567.
 
+### B897 — make test and the native legs run their slow packages in a go test of their own (2026-11-14, 2026-11-17)
+
+- **`make test` runs cmd/bridge and internal/manifest in a `go test` of their own with `-timeout 45m`, beside the one for every other package, which keeps `30m`; CI's native Windows and macOS legs run cmd/bridge, internal/backup and internal/manifest as a matrix leg of their own (`.github/scripts/native-test.sh slow`: `-p 3 -timeout 45m`, no `-race`) and every other package as another (`rest`, `30m`), in a job of 75 minutes; a make test selection that lists no package fails, and so does a native group that lists none** (2026-11-14 and 2026-11-17, backlog B897). **Don't put a slow package back in the others' go test or give them its 45m, run a slow group's packages one after another (`-p 1`, which on the native leg outlasts the job), run the two native groups in one step on one runner, or take a wait derived from the binary's deadline that gave up in its last 30 s for the test's assertion: check the package's time against its timeout, and its stacks, first.**
+
+cmd/bridge's 1,532 top-level tests run one after another but two (1,530
+sequential, 1,626 s summed, the two parallel ones 6 s), so the package takes
+the sum of its tests and `-parallel` touches nothing. On a 16-core Linux host
+(make test's `-race`, the release tags, `-p 8 -parallel 8 -count=1`, TMPDIR
+on disk, `go test -json`) its binary ran 1,633.6 s of its 1,800 alone in the
+build slot, at a mean load of 2.4, and 1,728.5 s beside a second run with the
+same flags, started with it (2.9; the second ran 1,728.0 s): 9.2 and 4.0 %
+short of the cap. B567's whole `make test P=8` runs had put it at 1,708 to
+1,733 s, and at 1,781 and 1,791 s beside another worker's `bridge.test`,
+where `TestTransientRepairFailuresEarnNoStrikeThroughTheLookup` and
+`TestMixedCaseConcurrentLookupsEnqueueOnce` failed "the analysis pool never
+settled" within a second: `regenFixture.settle` waits until
+`serveGiveUpTime`, the binary's deadline less `serveWaitReserve` (30 s), so a
+wait armed in the binary's last 30 s gives up at once. A census by an overlay
+hook on the two helpers that read `t.Deadline()` found 414 of the 1,532 tests
+arming such a give-up: `serveDeadlineLess` (`serve_wait_test.go`) for 326
+that wait on serve at the deadline less 30 s and 387 drains at less 10 s, and
+`testDeadline` (`output_hotplug_test.go`) for 6 hotplug waits at less 5 s. No
+test dominates: alone the slowest took 31.9 s, the 20 slowest 267 s (16 %),
+the 50 slowest 474 s (29 %).
+
+go test hands one `-timeout` to every package's binary in an invocation, and
+kills a binary at that timeout and a tenth (or a minute) more (cmd/go's
+`test.go`), so no flag, `-exec` wrapper or TestMain gives one package more
+than the rest: a timeout of a package's own takes an invocation of its own.
+The other ways out measured worse. Moving cmd/bridge's slowest tests into
+another package would have to move about the thirty slowest to win 20 % under
+load, and they drive package main (`runServe`, the commands), which no other
+package can import, so production code would move with them. A build slot for
+make test keeps out only what takes the slot, and B567's competitor was a
+`go test` run outside it, which takes no lock. And raising every package's
+timeout would make a hang anywhere in make test take 45 minutes to show.
+
+The recipe lists TEST_PKGS's package words (those that begin with `./`, `../`
+or `/`, or name the module) with `go list -tags … -race`, so a pattern go list
+refuses fails make test before any go test runs, and a listing with no
+package fails it too, in its own words: a directory that holds no package is
+go list's warning and exit 0, which round 1 passed having run nothing.
+cmd/bridge and internal/manifest (`SLOW_TEST_PKGS`) run in a go test in the
+background with `-timeout 45m`, every other package in one with `30m`. Its
+`-p`: P with nothing else selected; beside the other, 2 for two slow packages
+(the other P-1) and 1 for one (the other P), so the two never build and run
+more than P+1 things at once; 1 and 1 at P=1. Round 1 ran cmd/bridge alone
+there, at `-p 1` beside the other, which with manifest beside it would have
+run the two longest suites (1,821.6 and 1,788.9 s in its third proof run) one
+after the other. TEST_PKGS's other words, flags and their values as they
+stand (`-count=1 -parallel 8`, `-timeout 60m`, `-run 'A B'`), go to both
+after the packages, where go test still reads them as its flags (cmd/go's
+`testflag.go`), so a caller's own `-timeout` still wins, and a flag whose
+value is a path is written `-flag=path`. make test waits for both and fails
+when either fails.
+
+`TestMakeTestRunsTheSlowPackagesInAGoTestOfTheirOwn` and
+`TestMakeTestFailsWhenEitherGoTestFails` run the Makefile against a stand-in
+`go`, which records each call, lists a few patterns (one with go's warning
+and no package), sorts a go test that names cmd/bridge or internal/manifest
+to the slow side, and holds each go test until the other has started; make's
+output goes to a file, because `Cmd.Wait` waits on a pipe until every holder
+has closed it, which hid a recipe that did not wait for the slow go test
+(round 1's first control batch). Round 1's eleven negative controls and round
+2's ten were each red: the timeout, the two run one after the other, either
+status dropped, the wait, `-p`, the flags' order and their reach, every word
+to go list, go list without `-race`, a slow package in both go tests, a go
+list failure ignored; the empty-listing refusal, round 1's `-p 1`, manifest
+out of the slow set; and on the native side backup moved to the rest leg, a
+package in neither group, a matrix leg dropped, the job's name without its
+group, the slow group at 30m or at `-p 1`, and the script's own empty-group
+refusal. The build-site census reviews the recipe's logical line and the
+script's command.
+
+CI's race shards keep `-race -timeout 30m` for every group (`test-shard.sh`):
+a `bridge` or `manifest` shard runs a quarter of its package. The native legs
+ran `go test -tags … -timeout 30m ./...` without `-race`, which round 1
+judged needed none of this from four fast runs' logs (cmd/bridge 709 to 928 s
+on windows-latest). That was wrong. Run 44097405776, attempt 1, failed the
+Windows leg: a slow runner took every package a median 1.48x main's time an
+hour earlier, cmd/bridge 1,731.1 s (96 % of its 30m), internal/backup to its
+cap and a failure, internal/manifest 1,297.2 s, internal/admin 1,078.7 s; and
+main's own leg had grown 17 to 20 % in a day (cmd/bridge 1,026.9 to 1,206.9
+s, internal/backup 987.2 to 1,184.8 s, 2026-11-16 to 11-17). So
+`cross-platform` is a matrix of `os` and `group`, four legs named
+`test (<os>, <group>)` and cached by group, whose test step runs
+`.github/scripts/native-test.sh <group>`: `slow`, the literal cmd/bridge,
+internal/backup and internal/manifest, each of which go list must list, at
+`-p 3 -timeout 45m`; `rest`, every other package of the tagged
+`go list ./...`, at `30m`; a group that lists nothing fails. A matrix,
+because two go test invocations on one 4-vCPU runner contend for its cores
+and slow each other, which is the cap problem again; `-p 3`, because the
+three one after another (1,731.1 + 1,800 + 1,297.2 s on the failed run) would
+pass 75 minutes before the setup; and `timeout-minutes: 75`, one wave of
+45-minute binaries and the setup, so that a binary's own timeout panic, with
+its goroutines, prints before the job is cancelled. internal/manifest is in
+both slow sets for its waits derived from the deadline (`watchGiveUp`), where
+a late slowdown fails as an assertion; internal/backup is in the native set
+alone (874 to 929 s under make test's load in round 1, half its cap).
+`TestTheNativeLegsRunEveryPackageOnceAndTheSlowOnesAt45m` holds the job to
+literal oracles (the three import paths, the four legs) and, for
+windows/amd64 and darwin/arm64, each group's dry run to that target's own
+tagged go list: the slow group exactly the three, at 45m and `-p 3` or more,
+the rest at 30m, neither empty, no package twice, their union the listing.
+`TestTheNativeScriptRefusesAnEmptyGroup` holds the script's refusal.
+
+With round 1's recipe, three separate make test runs (`make test P=8
+TEST_PKGS='-count=1 -parallel 8 ./...'`, uncached, each beside a competing
+cmd/bridge run with Step 0's flags, started five minutes before the first and
+restarted as it ended) passed, 89 packages each: cmd/bridge's binary ran
+1,762.6, 1,788.7 and 1,821.6 s of its 2,700, 34.7, 33.8 and 32.5 % to spare,
+the last past the 30m it had. The competitor, still at 30m, failed two of its
+three whole runs beside them as B567's had: a deadline-derived wait gave up
+at once 1,773 s in, and a run timed out at 1,800 s after four tests had given
+up in its last 17 s; and the base recipe under the same load failed make
+test, cmd/bridge failing at 1,777.9 s. internal/manifest, as sequential and
+left at 30m then, used 97.2, 98.7 and 99.4 % of it, and 98.2 % under the base
+recipe, which is why round 2 moved it into the 45-minute go test.
+
+A cap hit is read from times and stacks. `serveDeadlineLess`
+(`cmd/bridge/serve_wait_test.go`) gives a wait up at the binary's deadline
+less its reserve, before the binary's own alarm, so a package that runs out
+of time can fail as an assertion ("the analysis pool never settled") rather
+than as "test timed out": read a late failure from the package's time
+against its timeout and from the goroutine stacks, never from the failing
+test's words. A longer cap also stretches such waits: in the 45-minute
+packages one that never ends blocks about 44.5 minutes before it fails
+(`serveDeadlineLess`, `testDeadline` in `output_hotplug_test.go`,
+`watchGiveUp` in internal/manifest), a backlog item of its own; waits
+bounded on their own (`waitUntilSubtreeScanIsInFlight`, internal/backup's
+`waitWithin`) are not stretched.
+
+Record: `ops/engineering-log.md`, B897 (2026-11-14 and 2026-11-17).
+
 ### B520 — self-dial candidate search (2026-10-26)
 
 - **A host-address test must establish self-dialability, not just bindability, without switching to loopback or an unspecified address when the specific-IP branch is its subject.** B520 tries every non-loopback IPv4 candidate with a bounded bind/dial and source-IP check, listing failures when none works; skip locally, fail when `CI` is set. Preserve the logging negative control in the engineering log.

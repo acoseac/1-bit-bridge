@@ -107,6 +107,11 @@ var reviewedBuildSites = map[string][]string{
 		"go test -tags @TAGS@ -p \"$(cores)\" \"${RACE_FLAGS[@]}\" \"${all[@]}\"",
 		"go test -tags @TAGS@ \"$pkg\" \"${RACE_FLAGS[@]}\" -run \"^($(printf '%s\\n' \"$part\" | paste -sd'|' -))\\$\"",
 	},
+	".github/scripts/native-test.sh": {
+		// The native legs' go test (B897): the flags and packages it appends
+		// are the group's, -timeout among them.
+		"cmd=(go test -tags @TAGS@)",
+	},
 	".github/workflows/fuzz.yml": {
 		"go test -tags @TAGS@ -list 'Fuzz.*' ./... 2>/dev/null > /tmp/list.txt || true",
 		"go test -tags @TAGS@ ${{ matrix.target.package }} -exec \"prlimit --as=${FUZZ_AS_LIMIT} --\" -run XXX -fuzz '^${{ matrix.target.name }}$' -fuzztime ${{ inputs.fuzztime || '5m' }} -fuzzminimizetime 1s",
@@ -119,7 +124,6 @@ var reviewedBuildSites = map[string][]string{
 		"BRIDGE_TEST_SMALL_VOLUME=/mnt/b264-small go test -tags @TAGS@ ./internal/transcode/ -run 'TestARenditionThatCouldNotBeWrittenWholeIsNotPublished' -count=1 -v",
 		"GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo \"$TEMP\")",
 		"run: go vet -tags @TAGS@ ./...",
-		"run: go test -tags @TAGS@ -timeout 30m ./...",
 		"go run -tags @TAGS@ ./scripts/dac-profiles/ios-export -check",
 		"go test -tags @TAGS@ ./internal/player/dacprofile ./scripts/dac-profiles/ios-export -count=1 -v",
 	},
@@ -138,7 +142,24 @@ var reviewedBuildSites = map[string][]string{
 		"GOOS=linux GOARCH=amd64 go build -tags \"$(GO_TAGS)\" -p $(P) -ldflags \"$(LDFLAGS)\" -o $(DIST)/$(BINARY)-linux-amd64 $(PKG)",
 		"GOOS=windows GOARCH=amd64 go build -tags \"$(GO_TAGS)\" -p $(P) -ldflags \"$(LDFLAGS)\" -o $(DIST)/$(BINARY)-windows-amd64.exe $(PKG)",
 		"GOOS=windows GOARCH=arm64 go build -tags \"$(GO_TAGS)\" -p $(P) -ldflags \"$(LDFLAGS)\" -o $(DIST)/$(BINARY)-windows-arm64.exe $(PKG)",
-		"TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $(P) -race -timeout 30m $(TEST_PKGS)",
+		// make test's recipe, one logical line: cmd/bridge and internal/manifest
+		// in a go test of their own beside the other packages' (B897), each Go
+		// line here one of the recipe's.
+		`@set -e; pkgs=$$(go list -tags "$(GO_TAGS)" -race $(test_packages)); slow=; rest=; n=0; ` +
+			`for p in $$pkgs; do case " $(SLOW_TEST_PKGS) " in *" $$p "*) slow="$$slow $$p"; n=$$((n + 1));; *) rest="$$rest $$p";; esac; done; ` +
+			`if [ -z "$$slow$$rest" ]; then echo "make test: no package matches $(test_packages)" >&2; exit 1; fi; ` +
+			`if [ -z "$$rest" ]; then sp=$(P); elif [ $(P) -le 1 ]; then sp=1; rp=1; elif [ $$n -ge 2 ]; then sp=2; rp=$$(($(P) - 1)); else sp=1; rp=$(P); fi; ` +
+			`status=0; ` +
+			`if [ -n "$$slow" ]; then ` +
+			`echo TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $$sp -race -timeout 45m$$slow $(test_flags) \&; ` +
+			`TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $$sp -race -timeout 45m$$slow $(test_flags) & slow_test=$$!; ` +
+			`fi; ` +
+			`if [ -n "$$rest" ]; then ` +
+			`echo TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $$rp -race -timeout 30m$$rest $(test_flags); ` +
+			`TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $$rp -race -timeout 30m$$rest $(test_flags) || status=1; ` +
+			`fi; ` +
+			`[ -z "$$slow" ] || wait $$slow_test || status=1; ` +
+			`exit $$status`,
 		"TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $(P) $(TEST_PKGS)",
 		"BRIDGE_DSD_FIXTURE_TESTS=1 go test -tags \"$(GO_TAGS)\" ./internal/transcode/ -run 'TestDSDRender_|TestDSDLowpass|TestRunDSD' -count=1 -v",
 		"BRIDGE_INSTALL_TEST_SHELLS=\"$(INSTALLER_SHELLS)\" go test -tags \"$(GO_TAGS)\" -count=1 ./scripts/install-test/",

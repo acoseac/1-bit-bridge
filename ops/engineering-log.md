@@ -103889,3 +103889,377 @@ and 1,522 ETXTBSY of 6,400 without the lock, 0 with it. The package -race x10
 beside 8 CPU hogs passed (2,500 passes), as did the gate. `internal/updater`'s
 `installCandidateCopy`, checked, stays: it hard-links but on Windows, and no
 test there is parallel.
+
+## 2026-11-14 — B897: make test runs cmd/bridge in a go test of its own, with 45 minutes
+
+Branch `fix/b897-make-test-headroom` from main fe5e331d. Commits 1d71c6df (the recipe, its
+census line, the tests, CONTRIBUTING's sentence, the comment in `test-shard.sh`), efc2eaa9 (the tests' make writes
+its output to a file) and the one that carries this record. The rules line and its long form ship as
+`rules-b897.patch` (`build-ci-tests.md`, `ops/History-rules-build-ci-tests.md`).
+
+### Step 0
+
+Measured as make test runs it (`.tmp/_b897/step0.py`, inside the build slot): `go test -json -tags
+ts_omit_webclient,ts_omit_debugeventbus -p 8 -race -timeout 30m -count=1 -parallel 8 ./cmd/bridge`, which are B567's
+make test flags (`P=8`, `-count=1 -parallel 8` in TEST_PKGS), with `GOTOOLCHAIN=go1.27.3`, each run's TMPDIR a fresh
+directory under `~/onebit/tmp`, and a sampler of the host's load and of the CPU other workers' test processes used.
+The time is the binary's own, the package event's `Elapsed`: no build, no lock wait.
+
+| Run | Binary's time | Of 1,800 s | Mean load (max) | Other workers' cores |
+|---|---|---|---|---|
+| alone, 07:43 to 08:10 | 1,633.6 s | 90.8 % | 2.43 (4.34) | 0.71 |
+| beside a second run with the same flags, both started at 08:10 | 1,728.5 s (the second: 1,728.0 s) | 96.0 % | 2.87 (5.72) | 0.63 |
+
+Of the package's 1,532 top-level tests, 1,530 run one after another (1,626 s summed alone, 1,722 s beside) and two
+in parallel (6 s), so its time is the sum of its tests' and `-parallel` changes nothing. No test dominates; the 20
+slowest alone, with their time beside the second run:
+
+| # | Test | Alone (s) | Beside (s) | Starts at, alone (s) |
+|---|---|---|---|---|
+| 1 | `TestRestoreRefusesAFloorItsManifestDoesNotList` | 31.9 | 53.4 | 578 |
+| 2 | `TestAShutdownWaitsForTheStartupSnapshotToCloseItsFile` | 26.5 | 26.7 | 750 |
+| 3 | `TestAServeRunAgainInTheSameProcessKeepsTheUploadsOff` | 18.3 | 18.5 | 1481 |
+| 4 | `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings` | 17.0 | 17.0 | 1384 |
+| 5 | `TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads` | 15.2 | 16.3 | 170 |
+| 6 | `TestAFreshProcessReadsNoVerifiedAVerificationCouldNotRecord` | 14.2 | 15.8 | 140 |
+| 7 | `TestServeStopWithThePlayersStorageStalled` | 13.7 | 13.6 | 1212 |
+| 8 | `TestAPreReadyStopWhoseTeardownOutlastsTheBudgetIsTakenBack` | 12.6 | 12.5 | 1286 |
+| 9 | `TestNoDocblockNamesAnotherDeclaration` | 12.1 | 12.7 | 332 |
+| 10 | `TestAnOnDemandRenditionIsQueuedOnlyWhereItHasRoom` | 11.3 | 11.5 | 664 |
+| 11 | `TestAStopWhileAConfirmationWaitsWritesNothing` | 11.3 | 11.4 | 1321 |
+| 12 | `TestServeSharesDiscoveryAcrossItsEligibleDevices` | 10.0 | 10.4 | 1047 |
+| 13 | `TestARefusedStartPutsTheBackupBackWhereItsCountAsksForTheCrashRollback` | 9.8 | 10.0 | 796 |
+| 14 | `TestServeStartsThePlayerOnlyWhenEveryGateHolds` | 9.6 | 9.4 | 1166 |
+| 15 | `TestEveryCitedTestNameExists` | 9.6 | 9.8 | 247 |
+| 16 | `TestServeStopWithAPlayerCallHeldInTheKernel` | 9.1 | 9.1 | 1188 |
+| 17 | `TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback` | 9.0 | 10.1 | 1352 |
+| 18 | `TestGCEmptyCatalogOverrideNamesEveryFlagTheRunNeeds` | 8.9 | 8.8 | 447 |
+| 19 | `TestTheTickerSaysWhatAGivenUpVerificationsRecordReads` | 8.9 | 9.3 | 186 |
+| 20 | `TestServeLeavesAnInstallItCannotProveAsItIs` | 8.4 | 9.0 | 1401 |
+
+They sum to 267.4 s alone (16 % of the package) and 295.2 s beside; the 50 slowest to 474 s alone (29 %). The load
+added 95 s: 22 s of it to `TestRestoreRefusesAFloorItsManifestDoesNotList`, a little to nearly every other test.
+
+The loaded run failed one test, and not by its time: `TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead`
+(`doctor_config_dir_test.go:156`), "port-api: the row says "[FAIL] port-api :7788 in use" and Setup's preflight
+"[ok] port-api free (:7788)"". The test holds the default ports with `holdLoopbackPort`
+(`doctor_ungraded_ports_test.go:152`), which takes a port another process holds as held; the second suite, at the
+same test in the same second, held 7788 and 7789 for the row's probe and let them go before Setup's. Its run passed.
+That is a follow-up (below), not this change's, and the proof's competitor starts five minutes ahead so the two
+suites are never in step.
+
+Which tests read `t.Deadline()` and give up before it: two helpers in `cmd/bridge`, `serveDeadlineLess`
+(`serve_wait_test.go:62-68`), under `serveGiveUpTime` (line 46, the deadline less `serveWaitReserve`, 30 s, line 34),
+`serveGiveUp` (line 52) and `serveDrainGiveUp` (line 58, less `serveDrainReserve`, 10 s, line 42), and
+`testDeadline` (`output_hotplug_test.go:107-113`, less 5 s). A census of which tests arm them: an overlay
+(`go test -overlay`, the tree untouched) that records `t.Name()` and the caller at each, over one non-race run of the
+package (`.tmp/_b897/census/`, 658 s): 414 of the 1,532 top-level tests, 326 through a serve wait (30 s), 387
+through a drain (10 s), 6 through the hotplug waits (5 s); the list with each wait's site is
+`~/onebit/jobs/b897/deadline-census.txt`. The busiest sites: `main_test.go:199` `waitForListening` (231 tests),
+`background_drain_test.go:72` and `:120` (276 and 114), `serve_player_test.go:457` and `:526` (75 each),
+`serve_data_dir_record_test.go:58` (69), `serve_config_path_test.go:280` `waitForAdminReady` (60). B567's two
+failures were `waveform_regen_test.go:254-270`, `regenFixture.settle`, through `serveGiveUpTime`: a wait armed in the
+binary's last 30 s gives up at once, which is how a package at its cap reads as an assertion. Elsewhere,
+`t.Deadline()` is read by `internal/doctor` (`probe_deadline_test.go:20`, `stand_in_pid_test.go:54`,
+`hidden_bridge_linux_test.go:467`), `internal/admin` (`shutdown_test.go:116`, `:130`,
+`handlers_player_output_test.go:695`), `internal/manifest` (`watcher_test.go:69`, `scanner_dupes_defer_test.go:179`),
+`internal/analyze` (`repair_test.go:521`), `internal/player/openhome` (`listener_test.go:55`) and
+`internal/updater` (`rollback_running_windows_test.go:22`).
+
+### The choice
+
+go test hands one `-timeout` to every package's binary in an invocation (cmd/go's `testflag.go` turns it into
+`-test.timeout`) and kills a binary at that timeout and a tenth, or a minute, more (`test.go` 819 to 855, go1.27.3),
+so neither a flag, an `-exec` wrapper nor a TestMain can give one package more than the rest: (b), a timeout of
+cmd/bridge's own, takes an invocation of its own. (a), moving the slowest tests to another package, would have to
+move about the 30 slowest (346 s alone, 21 %) to win 20 % under load, and they drive package main (`runServe`, the
+commands), which no other package can import: production code would move with them, which this change may not do.
+(c), a build slot for make test, keeps out only what takes the slot; B567's competitor was another worker's
+`go test` outside it, and neither a bare `go test` nor the workers' single-package runners take a lock. A bare
+raise of make test's timeout for every package was not taken either: a hang anywhere would take 45 minutes to show.
+45 minutes, because B567's worst, 1,791 s, is then 66 % of it, and Step 0's loaded run 64 %.
+
+The recipe (`Makefile`, the comment above `test`) lists TEST_PKGS's package words with `go list -tags … -race`, runs
+cmd/bridge's go test in the background with `-timeout 45m` (`-p 1` beside the other, P alone) and the other packages'
+at P with `30m`, passes TEST_PKGS's other words to both after the packages, where go test still reads them as its
+flags (`testflag.go` 242 to 325), and fails when either fails, having waited for both. The build-site census reviews
+its logical line (`tags.go`, the Makefile's entry); `make check-build-tags` refused the recipe before that line was
+added, and passes with it. `RACE_FLAGS` in `test-shard.sh` (the guard at `tags.go:78`) is unchanged: every CI shard
+keeps 30m, and its comment says why the bridge group's differs from make test's.
+
+### Controls
+
+Predicted in `.tmp/_b897/draft/controls.predictions.txt` before each batch (`.tmp/_b897/draft/controls.py`: exact-once
+mutations of the committed Makefile, each tested in a scratch copy of the licence tool's package, `go.mod`,
+`.goreleaser.yaml` and the mutated Makefile, the tree untouched):
+
+| Control | Red |
+|---|---|
+| C1 cmd/bridge's go test at 30m | its four cases that run it |
+| C2 the two go tests one after the other | the three cases that run both ("ran with the other's not started") |
+| C3 the other packages' status not kept (`set -e` ends the recipe) | `the other packages' fails` (make returned before cmd/bridge's go test ended) |
+| C4 cmd/bridge's go test not waited for | `cmd/bridge's fails` (make succeeded), `the other packages' fails` |
+| C5 cmd/bridge's go test at P beside the other | the three cases that run both |
+| C6 the flags before the other packages | the three cases with flags |
+| C7 no flags for cmd/bridge's go test | `flags before the packages` |
+| C8 every TEST_PKGS word to go list | the three cases with flags |
+| C9 go list without `-race` | every case of the first test |
+| C10 cmd/bridge in the other packages' go test too | its four cases and every failure case but go list's |
+| C11 a go list that fails, ignored | `go list fails` |
+
+In the first batch C3 stayed green and C4 was red on `cmd/bridge's fails` alone: the test gave make a `bytes.Buffer`,
+so exec copied its output through a pipe, and `Cmd.Wait` waits until every holder of that pipe has closed it, the go
+test a broken recipe left running included. efc2eaa9 gives make a file; the second batch, predicted with C3 and C4
+as above (and C10's wider red, seen in the first), was red as predicted in all eleven. `git status` was clean after
+both. The scratch copy's run of the base Makefile was red in every case too.
+
+The licence tool's package under `-race` at 1d71c6df: ok (284 s), `TestRealTreeBuildSiteCensus` over the real tree
+among it; `go vet` of it for linux, darwin and windows, clean; go1.27.3's gofmt lists nothing.
+
+### Proof
+
+Three separate make test invocations at efc2eaa9, inside the build slot (`.tmp/_b897/proof2.py`, 09:43 to 11:22):
+`make test P=8 TEST_PKGS='-count=1 -parallel 8 ./...'` with `GOTOOLCHAIN=go1.27.3` and each run's TMPDIR fresh under
+`~/onebit/tmp`, so every package ran uncached and the recipe's flag path carried `-count=1 -parallel 8` to both go
+tests. Beside them a competing run with Step 0's flags (`go test -json … -p 8 -race -timeout 30m -count=1 -parallel 8
+./cmd/bridge`) started five minutes before the first and was restarted each time it ended, so it ran throughout and
+never in step with the measured suite. Before the runs, in the same session: `make test TEST_PKGS='-run
+^TestEveryCitedTestNameExists$$ ./cmd/bridge/ ./internal/sweeptest/'` printed and ran the two go tests (cmd/bridge's
+`-p 1 -race -timeout 45m … -run …` in the background, sweeptest's `-p 4 -race -timeout 30m`), both ok; `go vet -tags
+ts_omit_webclient,ts_omit_debugeventbus ./...` for linux, darwin and windows, each clean. Each package's time is its
+go test line, the binary's own run; headroom is what is left of its timeout.
+
+| Run | make test | cmd/bridge (45m) | Headroom | internal/manifest (30m) | Headroom | internal/admin (30m) | Mean load (max) |
+|---|---|---|---|---|---|---|---|
+| 1 (09:48 to 10:19) | ok, 89 packages, 1,844 s | 1,762.6 s | 34.7 % | 1,748.8 s | 2.8 % | 1,214.9 s | 5.19 (10.14) |
+| 2 (10:19 to 10:50) | ok, 89 packages, 1,864 s | 1,788.7 s | 33.8 % | 1,777.1 s | 1.3 % | 1,238.5 s | 5.64 (11.86) |
+| 3 (10:50 to 11:22) | ok, 89 packages, 1,877 s | 1,821.6 s | 32.5 % | 1,788.9 s | 0.6 % | 1,240.3 s | 5.18 (9.77) |
+
+Run 3's cmd/bridge ran past the 30m it had before. The competitor, still on 30m, ran three whole runs beside them:
+1,753 s, ok; 1,784 s, failed as B567's did, `TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`'s four cases
+"the analysis pool never settled" within a second each, 1,773 s in; and 1,803 s, `panic: test timed out after
+30m0s` at 1,800 s, after four tests had given up in its last 17 s
+(`TestTheWatcherKeepsTheRowsOfAVariantsVolumeThatIsAwayAfterARender`,
+`TestARenderIntoAVariantsVolumeThatIsBackPublishes`, `TestAVariantSweepDuringAMoveKeepsTheRowsTheMoveRelocated`,
+`TestAWatcherTickBetweenTheFileAndTheRowKeepsTheMovedRow`). Its runs used 1,253, 1,268 and 1,219 CPU-seconds: the
+suite runs on about 0.7 of a core, so what slows it under load is not a want of cores.
+
+The control, 11:50 to 12:26 in a session of its own: the base commit's recipe (fe5e331d's Makefile, run with
+`make -f`: one go test, every package at 30m) under the same load, its competitor started five minutes ahead. make
+test failed: cmd/bridge's binary failed at 1,777.9 s of its 1,800 as B567's had,
+`TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`'s cases "the analysis pool never settled" in its last 30 s,
+while `internal/manifest` took 1,767.8 s, within the three runs' range, and `internal/admin` 1,217.4 s: running
+cmd/bridge in a go test of its own did not slow the other packages measurably. `make build-all P=8` after it: ok
+(`check-build-tags: OK`, the six binaries).
+
+`internal/manifest`, as sequential (none of its 276 test files calls `t.Parallel()`) and left at 30m by this
+change, used 97.2, 98.7 and 99.4 % of its timeout under the same load in the three runs, and 98.2 % in the
+control's: it is make test's next package to meet its cap (the follow-ups below).
+
+### Native CI
+
+Corrected 2026-11-17 (round 2, below). This paragraph said that windows-latest's and macos-latest's `go test -tags …
+-timeout 30m ./...` (no `-race`) needed none of this, by four fast runs' logs (2026-11-09 and 12): cmd/bridge took
+708.9, 836.8, 881.3 and 928.4 s on windows-latest (39 to 52 % of 30m) and 354.2 s on macos-latest (20 %),
+`internal/manifest` 620.9 to 818.7 s and `internal/admin` 366.1 to 648.5 s on windows-latest, and the whole test step
+18.5 to 31.4 minutes of the job's `timeout-minutes: 60`. That was wrong: four runs said nothing of a slow runner. Run
+44097405776, attempt 1, the run that promoted B897, failed its native `test (windows-latest)` leg after this change
+would have merged: its runner took every package a median 1.48x longer than main's run of the leg an hour earlier,
+cmd/bridge 1,731.1 s (96 % of its 30m), `internal/backup` to its 1,800 s cap and a failure, `internal/manifest`
+1,297.2 s (72 %) and `internal/admin` 1,078.7 s (60 %). And main's own leg grew 17 to 20 % in one day, from 11-16 to
+11-17: cmd/bridge from 1,026.9 to 1,206.9 s, `internal/backup` from 987.2 to 1,184.8 s. (The run's times are its job
+log's as this round's brief quoted them; they were not read again here.) Round 2 gives cmd/bridge, `internal/backup`
+and `internal/manifest` a matrix leg of their own there, at `-timeout 45m`. CI's race shards keep `-timeout 30m`.
+
+### Follow-ups, for the backlog
+
+1. `internal/manifest` under make test: 97.2, 98.7 and 99.4 % of its 30m in the three runs above, fully sequential,
+   and with deadline-derived waits of its own (`watcher_test.go:69`, `scanner_dupes_defer_test.go:179`). The same
+   recipe takes it with one more name beside cmd/bridge's, or its own shards.
+2. `make test-fast` passes no `-timeout`, so every package has Go's 10 minutes, and cmd/bridge without `-race` took
+   657.8 s in the census run here (GOMAXPROCS 8, a host load near 5).
+3. `holdLoopbackPort` (`doctor_ungraded_ports_test.go:152`) takes a port another process holds as held, so two
+   cmd/bridge suites on one host can fail `TestMenuDoctorPreviewsSetupOverAnInstallThisUserCannotRead`, as Step 0's
+   loaded run did.
+
+The rules patch applies at this record's commit; on a copy of the tracked tree with it and this record applied,
+`check-doc-budgets.py` is ok (`build-ci-tests.md` 41,701 bytes), the doc tools' self-tests pass, `verify_moves.py
+--base HEAD --edit '- **A timeout is not a failure, and the difference is one flag.**'` passes, and cmd/bridge's
+`TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration` pass there, the first failing on a
+citation planted in that copy's History file.
+
+## 2026-11-17 — B897 round 2: the native legs' slow group, make test's manifest, and a selection that lists nothing
+
+Branch `fix/b897-make-test-headroom` at 428cb484, round 1's last commit. e5150608 merges main at e8aa10e5 (B884 at
+78b6e451, B730 B1 at eaca26cc and its follow-up) as a commit of its own, this file taking main's block and then round
+1's; f3ac81aa is the change, and the commit that carries this record follows it. The rules line and its long form ship
+as a patch again (`rules-b897-r2.patch`, rounds 1 and 2 together).
+
+### Why
+
+Run 44097405776's native Windows leg (the Native CI paragraph above, corrected): on a runner that took every package a
+median 1.48x main's time, cmd/bridge took 96 % of its 30m and `internal/backup` met it, and main's own leg had grown 17
+to 20 % in a day. And round 1 left make test's `internal/manifest` at 30m, of which its three proof runs used 97.2,
+98.7 and 99.4 % (1,788.9 s in run 3; round 1's first follow-up): it runs its tests one after another, as cmd/bridge
+does, and its watcher tests give up at the binary's deadline less a reserve (`watchGiveUp`, below), so a late slowdown
+there fails as an assertion before the cap.
+
+### The native legs
+
+go test applies one `-timeout` to each package's test binary of an invocation, so packages that need a longer cap take
+an invocation of their own. `.github/scripts/native-test.sh` (new) runs one of two groups. `slow` is the literal list
+at :47-51, `cmd/bridge`, `internal/backup` and `internal/manifest`, each of which `go list -tags … ./...` must list
+(:79-86), run as `go test -tags … -p 3 -timeout 45m` (:106-108). `rest` is every package that listing gives but those
+three (:88-94), at `-timeout 30m` and go's own `-p` (:110). A group that lists no package fails its leg (:101-104),
+and so does a group the script does not know (:95-98). No `-race`, as before: on Windows it needs cgo and a C
+toolchain. `NATIVE_TEST_DRY_RUN=1` prints the command, a word a line, in place of running it (:114-117). The header
+comment (:1-41) says why, with the run's numbers.
+
+`.github/workflows/gate.yml`'s `cross-platform` job runs it as a matrix of `os` and `group` (:526-530), four legs on
+four runners, named `test (${{ matrix.os }}, ${{ matrix.group }})` (:509) so that no two legs share a check's name. The
+build cache's key and its restore keys carry the group (:559-563), so the two legs of a platform do not save one key,
+and the last restore key, without the group, takes either leg's cache. Vet runs once a platform, on the rest leg
+(:605-607). The test step runs the script (:634-635), and its comment (:608-633) gives the run's numbers and why the
+groups and `-p 3`. `timeout-minutes` is 75 (:511-518): one wave of the slow group's 45-minute binaries, which run at
+once, and the setup the job always had, so that a binary's own timeout panic, its goroutines with it, prints before
+the job is cancelled. The comments replace the two that read the 60 as room for several slow packages to meet their
+ceilings in sequence, so that nobody raises the cap to three times 45 or runs the slow group at `-p 1`: its three one
+after another, 1,731.1 + 1,800 + 1,297.2 s on the failed run, already pass 75 minutes. The gate's fan-in (`gate`,
+:719-721) reads `needs.cross-platform` by the job's id, whose result is the whole matrix's, so it is unchanged.
+
+A matrix, not `&` and `wait` in one step: two go test invocations on one 4-vCPU runner contend for its cores and slow
+each other, the cap problem again, and a leg each keeps each group's log and exit status its own, with no status to
+carry across a `wait`. It costs a second runner a platform, and the job's setup (the checkout, Go, the cache, and on
+Windows Defender's exclusion) once more on each.
+
+### make test
+
+`Makefile` :82 names `cmd/bridge` and `internal/manifest` (`SLOW_TEST_PKGS`); :89-90 sort go list's packages between
+the two go tests; :94-97 run the slow one in the background at `-timeout 45m`, :98-101 the others at `30m`, and :102
+waits for it. TEST_PKGS works as in round 1. Its `-p` (:92): with nothing else selected the slow go test takes P;
+beside the others it takes 2 for two slow packages, the others P-1, and 1 for one, the others P; at P=1 both take 1.
+So the two never build and run more than P+1 things at once, and the two slow packages run side by side: round 1's
+`-p 1` beside the others would have made the two longest suites of its run 3 (1,821.6 and 1,788.9 s) one sum, about
+an hour. The comment above `test` (:65-81) says the same. `internal/backup` keeps 30m here: round 1's three loaded runs
+took it 874.0, 894.4 and 928.6 s.
+
+A listing with no package fails (:91), saying "make test: no package matches" and the patterns. go list answers a
+pattern that matches nothing in two ways: a directory that is there and holds no package (`./docs/...`) is a warning
+and exit 0, which round 1's recipe passed having run nothing and this one refuses; a directory that is not there
+(`./internal/nonexistent/...`) is go list's own error, exit 1, on which `set -e` failed round 1's recipe already
+(`.tmp/_b897/r2/empty_real.py`, both recipes on both patterns). A selection of slow packages alone, or of others
+alone, runs the go test it has.
+
+CONTRIBUTING.md (:47-57) states the two sets apart, make test's (cmd/bridge and manifest at 45 minutes, backup among
+the 30-minute rest) and the native legs' (cmd/bridge, backup and manifest), and that a TEST_PKGS that lists nothing
+fails. `test-shard.sh`'s note on RACE_FLAGS (:75-78) names both of make test's packages; RACE_FLAGS stays `-race
+-timeout 30m`. The build-site census reviews the recipe's new logical line and the script's command (`tags.go`
+:145-162 and :110-114); the workflow's `go test` line it listed is gone with the step. `make check-build-tags` passes.
+
+### Tests
+
+- `TestMakeTestRunsTheSlowPackagesInAGoTestOfTheirOwn` (`maketest_test.go:221`, round 1's test of the same shape,
+  renamed). The stand-in `go` sorts a go test that names cmd/bridge or internal/manifest to the slow side (:57), and
+  answers `./internal/nonexistent/...` as go answers `./docs/...`, a warning and no package (:49). Its cases
+  (:238-318): every package at P=4, 8, 2 and 1 (the -p table, the P=1 case by its flags, with no overlap asked), one
+  other package, cmd/bridge alone, internal/manifest alone, both slow packages, internal/manifest and another package,
+  flags before the packages, a timeout of the caller's own and a quoted value.
+- `TestMakeTestFailsWhenEitherGoTestFails` (`:367`): each side's failure and both, go list's failure, and a selection
+  that matches nothing (:382-386), where make fails, says "make test: no package matches
+  ./internal/nonexistent/...", and runs no go test.
+- `TestTheNativeLegsRunEveryPackageOnceAndTheSlowOnesAt45m` (`nativetest_test.go:165`), on literal oracles: the three
+  import paths and the four legs. It decodes the job strictly and requires the matrix's keys to be `os` and `group`
+  and their product the four legs, the name and the cache key to carry the group and the name the os, the test step to
+  run the script, and timeout-minutes of 75 or more. Then, for windows/amd64 and darwin/arm64, it compares each
+  group's dry run with that target's own tagged `go list`: the tags, no `-race`, 45m and 30m, the slow group at `-p 3`
+  or more, neither group empty, the slow group exactly the three, no package twice, the union the listing. It skips on
+  Windows, where the dry run needs bash.
+- `TestTheNativeScriptRefusesAnEmptyGroup` (`:257`): a stand-in go whose listing holds the three alone fails the rest
+  group, and one that does not list `internal/backup` fails the slow group; neither runs go test.
+
+### Red first, and the controls
+
+Round 1's tree under the new tests (428cb484's Makefile and workflow, no script), predicted in
+`.tmp/_b897/r2/controls.predictions.txt` before the runs, was red as predicted: the eight make test cases whose
+selection holds manifest (every package at P=4, 8, 2 and 1, manifest alone, both slow packages, manifest and another,
+flags before the packages); the three failure cases that run go test, since round 1's go test for the others named
+manifest, which the stand-in takes for the slow side, so no rest side ran; the empty selection; and both native tests
+whole. Green: one other package, cmd/bridge alone, a timeout of the caller's own, a quoted value, go list
+fails.
+
+A negative control for each new check (`.tmp/_b897/r2/controls.py`: each in a copy of the tracked tree at f3ac81aa,
+one exact-once mutation whose bytes were put back from memory after its run, the copy then compared with the tree and
+removed), every one red:
+
+| Control | Red |
+|---|---|
+| C1 make test's empty-listing refusal removed | the empty selection alone |
+| C2 the slow go test at `-p 1` beside the others (round 1's rule) | every package at P=4, 8 and 2, flags before the packages |
+| C3 `internal/manifest` out of `SLOW_TEST_PKGS` | the eight cases whose selection holds manifest, and the three failure cases that run go test |
+| C4 `internal/backup` moved to the rest leg | the legs' test on both platforms, by the slow set, its union check green; and both empty-group cases |
+| C5 `internal/admin` dropped from both groups | the legs' test on both platforms: it "runs in no group" |
+| C6 a matrix leg dropped (`group: [slow]`) | the legs' test, by the legs |
+| C7 the job's name without the group | the legs' test |
+| C8 the slow group at `-timeout 30m` | the legs' test on both platforms |
+| C9 the slow group at `-p 1` | the legs' test on both platforms |
+| C10 the script's empty-group refusal removed | the empty-group test's rest case alone |
+
+C4's second red was not predicted, and is right: the empty-group test's stand-in lists the three, so with backup out
+of the slow list the rest group is backup and no longer empty, and the slow group no longer asks for backup. `git
+status` was clean after the runs.
+
+### The dry run and the workflow
+
+`.tmp/_b897/r2/dryrun.py` (`NATIVE_TEST_DRY_RUN=1` under each target's GOOS and GOARCH, go list alone):
+windows/amd64 3 + 102 of 105 packages, darwin/arm64 3 + 103 of 106, linux/amd64 3 + 103 of 106; on each the slow group
+exactly the three import paths, the two disjoint, their union the listing. No workflow linter was at hand, so the job
+was read and its YAML parsed: the name, timeout-minutes, the matrix, the cache key, vet's condition and the test step
+as above, and the gate's `needs` unchanged; the test above decodes the job strictly.
+
+### Gates
+
+In the build slot, 16:38 to 16:44 (`.tmp/_b897/r2/gates_r2.py`), with go1.27.3 and a fresh TMPDIR on disk: `make fmt`
+changed nothing; `go vet` with the tags for linux, darwin and windows, clean; `make check-build-tags`, OK; `make
+docs-check`, ok; `make test` of `TestEveryCitedTestNameExists` over cmd/bridge, internal/manifest and
+internal/sweeptest, the two slow packages in their go test at `-p 2` beside sweeptest's, ok; `make test P=8` of
+scripts/third-party-licenses, ok in 285.7 s under `-race`, the census over the real tree among it; and `make test
+TEST_PKGS=./internal/nonexistent/...`, exit 2 on go list's error.
+
+### Can a 45-minute cap hide a hang?
+
+Reported here and not fixed: a backlog item of its own. In the three 45-minute packages, these waits run until the
+binary's deadline less a reserve, so one that never ends now blocks about 44.5 minutes, not 29.5, before it fails as an
+ordinary assertion:
+
+- `cmd/bridge/serve_wait_test.go:62-68`, `serveDeadlineLess`: `serveGiveUpTime` and `serveGiveUp` (:46-54) give up at
+  the deadline less `serveWaitReserve`, 30 s (:34), and `serveDrainGiveUp` (:58-60) less `serveDrainReserve`, 10 s
+  (:42).
+- `cmd/bridge/output_hotplug_test.go:107-113`, `testDeadline`: the deadline less 5 s (its callers at :82 and :100).
+  Round 1's census found 414 of cmd/bridge's 1,532 top-level tests arming a wait of one of these two.
+- `internal/manifest/watcher_test.go:68-76`, `watchGiveUp`: the deadline less `watchWaitReserve`, 30 s (:55), or
+  `watchDrainReserve`, 10 s (:60), the reserve clamped to half of what is left; 18 call sites, in `watcher_test.go`,
+  `watcher_late_mount_test.go`, `watcher_kqueue_test.go`, `watcher_mount_test.go` and
+  `nested_roots_case_watch_test.go`.
+
+Bounded on their own, so a longer cap does not stretch them: `internal/manifest/scanner_dupes_defer_test.go:176-190`,
+`waitUntilSubtreeScanIsInFlight` (5 s, shortened only by the deadline), and `internal/backup/restore_mark_test.go:37-46`,
+`waitWithin` (its caller's limit, capped at the deadline less `waitReserve`, 10 s, :31). `internal/backup` has no wait
+that spends the rest of its binary's time.
+
+Pre-existing, and why a cap hit is read from times and stacks: `serveDeadlineLess` gives a wait up before the binary's
+own alarm, so a package that runs out of time can fail as an assertion ("the analysis pool never settled", B567's two
+and round 1's competitor) rather than as "test timed out". A failure late in a package's run is read from the package's
+time against its timeout and from the goroutine stacks, never from the failing test's words.
+
+### Follow-ups
+
+Round 1's first (manifest under make test) is this round's. Its second and third stand: `make test-fast` passes no
+`-timeout`, and `holdLoopbackPort` takes a port another process holds as held. And the waits above, which a longer cap
+lets block longer.
+
+The rules patch (`rules-b897-r2.patch`, which replaces round 1's: that one cited the test this round renamed) applies at
+f3ac81aa and at this record's commit. On a copy of the tracked tree with it and this record applied,
+`check-doc-budgets.py` is ok (`build-ci-tests.md` 60,858 bytes), the doc tools' self-tests pass, `verify_moves.py
+--base HEAD --edit '- **A timeout is not a failure, and the difference is one flag.**'` passes, and cmd/bridge's
+`TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration` pass there, the first failing on a citation
+planted in that copy's History file.
