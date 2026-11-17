@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestDropInflightRemovesMatchingEntries pins the predicate-based
@@ -17,17 +18,19 @@ func TestDropInflightRemovesMatchingEntries(t *testing.T) {
 	store := openTempStoreForPool(t)
 
 	p := NewPool(store, 1, 16)
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { stopPoolWithin(t, p, 30*time.Second) })
 
 	// Block worker forever so jobs stay in the inflight map and
-	// are observable. defer cancel() ensures we release the
-	// runner block on test cleanup.
-	runnerStarted := make(chan struct{}, 2)
+	// are observable. The cleanup's cancel releases the runner block
+	// before Stop runs (cleanups run last-registered first). The stub
+	// sends to no channel: once released, the single worker runs up to
+	// three jobs (A, B and the re-enqueued A) before Stop lands, and a
+	// send nothing reads blocks the third for good, with Stop waiting
+	// on it (B924).
 	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	t.Cleanup(runnerCancel)
 	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, _ JobSpec) (RunResult, error) {
-		runnerStarted <- struct{}{}
 		<-runnerCtx.Done()
 		return RunResult{SizeBytes: 0}, ctx.Err()
 	}
@@ -84,7 +87,7 @@ func TestDropInflightPredicateReceivesSourcePathOnly(t *testing.T) {
 	store := openTempStoreForPool(t)
 
 	p := NewPool(store, 1, 16)
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { stopPoolWithin(t, p, 30*time.Second) })
 
 	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	t.Cleanup(runnerCancel)
@@ -128,7 +131,7 @@ func TestDropInflightNilPredicateNoOps(t *testing.T) {
 	store := openTempStoreForPool(t)
 
 	p := NewPool(store, 1, 4)
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { stopPoolWithin(t, p, 30*time.Second) })
 
 	dropped := p.DropInflight(nil)
 	if dropped != 0 {
@@ -143,7 +146,7 @@ func TestDropInflightEmptyMapReturnsZero(t *testing.T) {
 	store := openTempStoreForPool(t)
 
 	p := NewPool(store, 1, 4)
-	t.Cleanup(p.Stop)
+	t.Cleanup(func() { stopPoolWithin(t, p, 30*time.Second) })
 
 	called := false
 	dropped := p.DropInflight(func(string) bool {
@@ -155,5 +158,32 @@ func TestDropInflightEmptyMapReturnsZero(t *testing.T) {
 	}
 	if called {
 		t.Errorf("predicate called on empty inflight map")
+	}
+}
+
+// stopReserve is the time a pool's stop leaves before the test binary's
+// deadline, so the cleanups after it still run (as backup's waitWithin does).
+const stopReserve = 10 * time.Second
+
+// stopPoolWithin is p.Stop with a bound of its own: limit, capped by the test
+// binary's deadline less stopReserve (at most half the time left), so a worker that never exits fails the
+// test by name instead of holding it to the binary's deadline (B924).
+func stopPoolWithin(t *testing.T, p *Pool, limit time.Duration) {
+	t.Helper()
+	bound := limit
+	if deadline, ok := t.Deadline(); ok {
+		// The reserve never takes more than half of what is left, so a run
+		// short of time still gives the stop a positive budget.
+		left := time.Until(deadline)
+		if b := left - min(stopReserve, left/2); b < bound {
+			bound = b
+		}
+	}
+	stopped := make(chan struct{})
+	go func() { p.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(bound):
+		t.Errorf("the pool did not stop within %v: a worker never exited", bound)
 	}
 }
