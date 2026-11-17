@@ -44,6 +44,19 @@ func TestClassifyUpdateError(t *testing.T) {
 		{"wrapped install-in-flight",
 			fmt.Errorf("%w: an install is already in progress", ErrUpdateInstallInFlight),
 			http.StatusConflict, "install-in-flight"},
+		// Backlog B898: the bridge's program file not on disk, the install
+		// marker not put back, and a hold that ended the install or the
+		// rollback, in that precedence, and before every other class.
+		{"recovery-required", ErrUpdateBinaryMissing, http.StatusInternalServerError, "recovery-required"},
+		{"marker-not-restored", ErrUpdateMarkerNotRestored, http.StatusInternalServerError, "marker-not-restored"},
+		{"binary-in-use", ErrUpdateBinaryInUse, http.StatusConflict, "binary-in-use"},
+		{"no binary over a marker not put back and a hold",
+			errors.Join(ErrUpdateBinaryInUse, ErrUpdateMarkerNotRestored, ErrUpdateBinaryMissing),
+			http.StatusInternalServerError, "recovery-required"},
+		{"a marker not put back over a hold", errors.Join(ErrUpdateBinaryInUse, ErrUpdateMarkerNotRestored),
+			http.StatusInternalServerError, "marker-not-restored"},
+		{"a hold over the classes after it", errors.Join(ErrUpdateRollbackRefused, ErrUpdateMarkerLocked, ErrUpdateBinaryInUse),
+			http.StatusConflict, "binary-in-use"},
 		{"unknown", errors.New("boom"), http.StatusBadGateway, "install-failed"},
 	}
 	for _, tc := range cases {

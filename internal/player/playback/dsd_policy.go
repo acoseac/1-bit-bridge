@@ -1117,10 +1117,12 @@ func observedFrames(p *engine.NativePlan) int64 {
 }
 
 // probeSlotSkips are the probe's refusals by the device slot (Probe's
-// reserveProbe), a choice's write's configuration lease among them (B728 B9
-// PR 2): a probe due then stays due, and the supervisor asks it again once
-// the slot is free (ProbeDSD).
-var probeSlotSkips = []ProbeSkip{ProbeSessionHolds, ProbeSessionPaused, ProbeReleasePending, ProbeReleaseUnconfirmed, ProbeRunning, ProbeChoiceWrite}
+// reserveProbe), a choice's write's configuration lease (B728 B9 PR 2) and
+// the console's test tone (B601) among them: a probe due then stays due, and
+// the supervisor asks it again once the slot is free (ProbeDSD). A refusal
+// left out of it is published as a probe made (publishProbe), and the unit
+// is never probed again until a replug, a migration's part or a choice.
+var probeSlotSkips = []ProbeSkip{ProbeSessionHolds, ProbeSessionPaused, ProbeReleasePending, ProbeReleaseUnconfirmed, ProbeRunning, ProbeChoiceWrite, ProbeToneHolds}
 
 // dsdProbe is the probe's bookkeeping: the unit last probed; a probe asked
 // for anew (forced: a migration's part, ForgetDSDProbe, or a choice written,

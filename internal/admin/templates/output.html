@@ -48,6 +48,36 @@
     </dl>
   </div>
 
+  {{- /* The test tone (B601): a quiet 1 kHz sine through the DAC the running
+      player started with, while the player is stopped, through
+      POST /api/output/player/tone, whose request lasts as long as the tone.
+      Stop ends that request and posts nothing; so do a navigation and the
+      page's leaving (app.js wirePlayerOutputTone). Shown while
+      running.tone is in the status (renderPlayerOutputTone). */ -}}
+  <div class="panel" id="player-output-tone-panel" hidden>
+    <div class="panel-head"><h2>Test tone</h2></div>
+    <p class="hint">A 1 kHz sine on both channels through the DAC the player started with, while the player is stopped. A play from the 1-bit app or another controller stops it.</p>
+    <p class="hint warn">The bridge cannot see the DAC's volume or the amplifier's: turn them down before you play it, and keep headphones off your ears for the first one.</p>
+    <div class="player-output-tone">
+      <label for="player-output-tone-level">Level</label>
+      <select id="player-output-tone-level">
+        <option value="-30">-30 dBFS</option>
+        <option value="-40" selected>-40 dBFS</option>
+        <option value="-50">-50 dBFS</option>
+        <option value="-60">-60 dBFS</option>
+      </select>
+      <label for="player-output-tone-seconds">Length</label>
+      <select id="player-output-tone-seconds">
+        <option value="5">5 seconds</option>
+        <option value="10" selected>10 seconds</option>
+        <option value="30">30 seconds</option>
+      </select>
+      <button type="button" id="player-output-tone-play" class="btn">Play</button>
+      <button type="button" id="player-output-tone-stop" class="btn" disabled>Stop</button>
+    </div>
+    <p class="status" id="player-output-tone-msg" aria-live="polite"></p>
+  </div>
+
   <div class="panel" id="player-output-transports-panel" hidden>
     <div class="panel-head"><h2>Transports on this DAC</h2></div>
     <p class="hint">What the player plays on the DAC it started with, and the three facts each answer rests on: what the DAC takes, how the player is set, and what the owner has approved.</p>

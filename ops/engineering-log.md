@@ -100920,6 +100920,1478 @@ tree with it the budgets check is clean (the worst load from 77.4% to 77.5%,
 `player.md` at 98,849 bytes), as are its self-test and those of `rules-for.py`
 and `move_entry.py`.
 
+## 2026-11-15 — B653 PR 2a: every opener of the live database holds its lifetime lock, and both restores take it exclusively, find an unfinished restore before their snapshot, and record themselves in an armed install
+
+Branch `feat/b653p2a-store-exclusion`, from main at `ca4473ff`. The design is
+B653 PR 2's second round (sections 3 H10 and H11, 4.1, 4.2, 6, 7, 11, 12); the
+database-only restore, the journal's writer and its recovery are PR 2b's.
+
+### What was open
+
+`bridge restore` kept a running serve out (`server.lock`, the admin probe) and
+nothing else: `bridge scan`, analyze, upscale, variants, artwork, library add
+and remove, the manifest commands, the doctor's probes and a live `bridge
+backup`'s `VACUUM INTO` open the store without `server.lock`. The full restore
+removed the live `-wal` and `-shm` and renamed a fresh `bridge.db` over the
+database such a process had open; that process went on writing into the
+unlinked files, and its later connections, opened by path, wrote into the
+restored one from a process that had read the old one. The migration ladder's
+lock lasts through the open alone. Three more defects of the full restore: a
+snapshot at this version's ladder top recorded nothing in an armed install
+marker, so the crash rollback could put the previous binary back over a store
+it does not read (a finding of the design review, confirmed by the round's
+premise run); the epoch's
+TRUNCATE checkpoint's answer was ignored and the WAL removed whatever it said;
+and `bridge restore` looked at its snapshot before anything else, so a resume
+that needs no snapshot (PR 2b's) could not run without one (another finding
+of the design review).
+
+### The lifetime lock and its failure policy
+
+`<db>-open.lock` beside the database (`manifest.StoreOpenLockPath`): one
+counted hold per process per database (`internal/manifest/store_open_lock.go`),
+shared for every opener of the live database (`OpenStoreAdmitted`, from right
+after its `MkdirAll` until `Store.Close` and the last connection after it;
+`PendingMigrations`; the live snapshot's capture, from before its first write
+until `vacuumInto` has closed its source), exclusive for a restore
+(`manifest.HoldStoreExclusive`, taken by `bridge restore` before its prompt and
+counted on by `RestoreWithOptions`, which takes it itself for any other
+caller). One descriptor a process, because on a Linux NFS mount flock is
+carried out as a POSIX record lock, which closing any descriptor of the file
+releases (`internal/fsutil/lock.go:23-31`).
+
+The policy (design-r2 §6.3, and the design review's finding on ENOLCK): only the filesystem's definitive answer
+that it keeps no locks (`fsutil.DefinitelyKeepsNoLocks`: EOPNOTSUPP, ENOTSUP,
+`errors.ErrUnsupported`; ERROR_NOT_SUPPORTED, ERROR_INVALID_FUNCTION) lets an
+opener go on without the lock, said once a process at Warn; a restore refuses
+it, since it cannot show that nothing has the database open. ENOLCK refuses
+every opener (`ErrStoreLockUnavailable`): Linux also answers it on a
+filesystem that keeps locks, while another open holds one, when it cannot
+allocate a lock record (`internal/fsutil/lock.go:67-71`), so an opener that
+went on could stand beside a restore's hold. `fsutil.NoLockToGive` is now the
+one reading of ENOLCK, which the config file's lock (`internal/config`'s
+`noLockToGive`) and the store's share. A lock file that cannot be opened, an
+I/O or a descriptor error refuse too. **This changes serve's behaviour**: at
+`ca4473ff` serve and the ladder went on unlocked on every lock failure; now a
+data directory on NFS whose lock manager does not answer refuses every store
+open, serve's start included, until it answers (design-r2 §16 item 1, the
+owner's eye; the config writer already refused there, B506).
+
+The lock file is opened without following a link at its name
+(`fsutil.OpenLockFileNoFollow`: `O_NOFOLLOW` and `O_NONBLOCK` and the
+descriptor's own kind on unix, `FILE_FLAG_OPEN_REPARSE_POINT` and the handle's
+attributes on Windows), for writing and, where that open is refused for want
+of the right to write, for reading (a shared lock takes a read descriptor), so
+a dangling `bridge.db-open.lock` link to `bridge.db` makes nothing (the
+brief's review, finding 2); it is a store sidecar for the link check too.
+`Store.Close` lets the hold go once `database/sql` has closed every
+connection, not at its return: Close closes the idle connections and a
+transaction keeps its own until it ends (the brief's review, finding 1).
+
+### The journal's refusal (inert until PR 2b)
+
+`manifest.RestoreJournalPath` (`<db>-restore.json`): any entry there refuses,
+with `ErrRestoreIncomplete` and nothing made, every opener (asked under the
+shared hold, before the link check and `Precreate`, the design review's
+order), the live
+snapshot (before its first write, the brief's review, finding 3), the full
+restore (right after `holdSource`, before the player seal's completion),
+`bridge restore` (before any snapshot is looked at), and serve's
+crash and early rollbacks (before any marker write or rename).
+
+### The full restore's store-change record and its WAL
+
+`RestoreWithOptions` calls `updater.DisarmBeforeMigrating` before its first
+write to the restored files wherever it replaces the database (the target
+set, the snapshot listing it and holding its file, the brief's review,
+finding 4), whatever the snapshot's version: an armed install records
+`StoreMigratedBy` and `DataDirOpenedBy`, and every rollback refuses after it.
+`restoreMigrationHeld` reads the snapshot's `user_version` through the
+snapshot reader (`openSnapshotReader`, the one-file VFS with `immutable=1`),
+so the lifetime lock never makes a file in a snapshot. `ResetBackupEpoch`
+reads its checkpoint's row and answers `ErrEpochCheckpointBusy` unless busy is
+0 and every frame was checkpointed; the restore then keeps the `-wal` and
+`-shm` and says so (the brief's review, finding 5).
+
+### The rename that never replaces, measured on this host
+
+`fsutil.RenameNoReplace` (renameat2 with `RENAME_NOREPLACE` on Linux,
+renamex_np with `RENAME_EXCL` on macOS, `MoveFileEx` with no flags on Windows,
+`ErrNoReplaceUnsupported` elsewhere) answers an occupied destination with
+EEXIST, which `syscall.Errno` reads as `fs.ErrExist`, on ext4 (the
+worktree's filesystem) and on tmpfs (`/dev/shm`), Linux 7.0: both take the flag. A creator
+racing the call for 1,000 rounds lost nothing on either (landed against
+refused: 204/796, 177/823 and 190/810 on ext4, 255/745, 232/768 and 259/741
+on tmpfs, 494/506 and 491/509 under `-race`). The fallback the design
+review rejected, an `Lstat` then `os.Rename`, put in the call's place, replaced the creator's
+entry in 459, 511 and 478 of 1,000 rounds on ext4 and 376, 360 and 395 on
+tmpfs. The Windows rows (a source held without delete sharing, retried on
+`atomicwrite.RenameWithRetry`'s schedule) and the macOS rows are CI's legs to
+run; here they are vetted and built only.
+
+### Reds at the base, and the controls
+
+Each new test was run alone over `ca4473ff`'s production code: a copy of the
+tree with every changed production file put back to the base's blob, the
+added ones removed, and a shim of names only (the base's behaviour: no hold,
+no journal, the checkpoint's answer unread, `os.Rename` for the rename;
+T36's reader taken through a seam joined onto the base's own line,
+`.tmp/_b653p2a/redcopy.py` in the worktree). Every one failed but
+`TestARestoreLeavesItsSnapshotAsItWas`, which the brief allowed: the base's
+`mode=ro` open of a snapshot's database through `PendingMigrations` makes
+nothing in the snapshot, so its red is its control's. Among the reds:
+`TestAnOpenStoreKeepsARestoreOut` (an exclusive hold beside another process's
+open store answered nil), `TestAnOpenOverAnUnfinishedRestoreRefusesAndMakesNothing`
+(the open went on over a journal), `TestARestoreOverAnArmedInstallKeepsEveryRollbackOff`
+(the marker recorded nothing, the armed-install finding's premise),
+`TestTheFullRestoreKeepsAWALWhoseEpochDidNotCheckpoint` (the WAL removed),
+`TestRestoreFindsAnUnfinishedRestoreBeforeItsSnapshot` (exit 2, the snapshot
+looked at first) and `TestTheRollbacksRefuseWhileADatabaseRestoreIsUnfinished`
+(exit 75: the backup put back over an unfinished restore).
+
+Twenty-five negative controls, each in a copy of the tree, its mutation
+computed before the file was opened and its bytes put back from memory
+(`.tmp/_b653p2a/controls.py`, predictions written first), all red as
+predicted: no hold in `OpenStoreAdmitted`; the journal before the hold; the
+journal after `Precreate`; ENOLCK read through `KeepsNoLocks`; a lock file's
+open failure going on unlocked; no read-only fallback; `PendingMigrations`
+without the hold; the capture without its hold; one descriptor per opener,
+uncounted (through tries that answer as POSIX record locks do, the NFS case);
+the rename as `os.Rename`, and as `Lstat` then `os.Rename`; no journal check
+in the full restore, in the crash rollback, in the early rollback; the
+restore's `DisarmBeforeMigrating` removed, and asked only where a step is
+pending; the checkpoint's answer unread; `restoreCmd`'s look at the snapshot
+first; `restoreMigrationHeld` through `PendingMigrations`; and, for the
+brief's two reviews, `Close` letting the hold go at once, the lock file opened
+following links, the capture's hold after the seal's completion, the record
+made wherever the database is a target, `RestoreWithOptions` without its own
+hold, and the registry keyed by spelling. The journal-after-`Precreate`
+control stayed green at first: `Precreate` makes nothing unless the process
+is root, so T3 gained a row opened as root (`fsutil.SimulateRootForTest`),
+which it turns red ("bridge.db was made").
+
+### Rules
+
+`rules-b653p2a.patch` (the worktree's `.tmp/_b653p2a/`, and the job folder),
+applied and committed as `24203d7b` (a session on this host cannot write
+the rules directory, so the rules travel as a patch): in
+`scanner.md`, the lifetime lock's line and the rename's, their long forms in
+`ops/History-rules-scanner.md`, the B613 bullet's clause that a restore of
+either kind records the store change, and the globs of the files this PR adds;
+in `cli-serve.md`, the restore line and the B826 bullet, each with its long
+form; in `config-lifecycle.md`, the B660 bullet and its long form. First, to
+keep both files under their 100 KB, `move_entry.py` moved `cli-serve.md`'s
+`bridge update` entry (its line 62, 1,828 bytes, with a shorter `--text`
+title) and `config-lifecycle.md`'s `tokens.json` re-read entry (its line 591,
+2,222 bytes) to their History files: `cli-serve.md` 98,886 to 98,048 bytes,
+`config-lifecycle.md` 99,932 to 98,090, `scanner.md` 45,550 to 48,040.
+`verify_moves.py --base HEAD` passes over the moves alone, and over the whole
+patch names as missing exactly the seven edited copies, each successor
+present; the budgets check is clean; cmd/bridge's citation and docblock
+guards pass over a copy with the patch applied, and fail on a ghost citation
+planted there.
+
+The runs made on this commit (the packages under `-race`, the lock and rename
+tests 20 times, the cross builds, `make test` and `make build-all` in the
+build slot) are in the PR's report, since a record cannot hold the runs of
+the commit that carries it.
+
+### Round 2: the review's findings
+
+Each finding was checked against the code first; numbers are the round's
+brief's.
+
+1. **A capture could open the live database with no hold.** `holdLiveStore`
+   answered success, holding nothing, where the database's directory was not
+   there, and the capture went on: a restore that made the directory and its
+   database meanwhile, holding the store exclusively, had them copied by
+   `VACUUM INTO`. It now makes the directory as the store's own open does
+   (`fsutil.MkdirAll`, 0755) and takes the shared hold, with no way through
+   without it, and `captureInto` refuses an empty data dir before it, so a
+   refused capture makes nothing. `PendingMigrations` keeps its own
+   absent-directory answer: it opens nothing there, and the doctor, which may
+   run as a user who cannot make the directory, makes nothing but the lock
+   file, in a directory that is there. The red holds the other process's
+   exclusive hold, with the directory and the database made, in the window
+   after the capture began and before its hold
+   (`backup.SetBeforeLiveStoreHoldForTest`, joined onto the base's own
+   absent-directory branch for the red run): at the base the capture
+   published a snapshot of the restore's database.
+2. **Two spellings of one lock file were two holds.** `filepath.EvalSymlinks`
+   keeps each component as written, so on a volume that folds case two
+   spellings of the data directory, or of the database, keyed apart, and a
+   shared hold through the second met this process's own exclusive lock:
+   an opener under `bridge restore`'s hold refused itself. Each entry now keeps
+   its lock file's identity, and where the key finds no entry the registry
+   matches the file at the lock's path (`os.Lstat`, so a link matches nothing)
+   by `os.SameFile` under its mutex, before another descriptor is opened; a
+   match is counted on and released by its own key. This host's ext4 does not
+   fold case, so the red is a hard link to the lock file from another
+   directory, the same pair of spellings on any volume: at the base the second
+   hold answered `ErrStoreRestoring`. The case-fold rows skip where the volume
+   is case-sensitive and run on macOS's APFS; a Windows 8.3 short name is a
+   preservation row (`EvalSymlinks` names each component as the directory
+   lists it).
+3. **A restore run by the version an armed install replaces recorded
+   nothing.** `DisarmBeforeMigrating` rightly skips both records for that
+   version's own migrations, and a rollback runs as it; but a restore may put a
+   newer store in place, over which a rollback of the install would put that
+   version back. `updater.AdmitStoreRestore` (asked before the player seal's
+   completion, writing nothing) and `updater.DisarmBeforeRestoring` (the
+   record) refuse it, `ErrRestoreByPreviousVersion`, under the marker's lock
+   and without it (held past the wait, ENOLCK, an I/O error, and a filesystem
+   that keeps none); `DisarmBeforeMigrating` still admits that version's
+   opens. The record asks again under the lock, for an install armed between
+   the two asks. The backup red is a destination whose player seal is
+   incomplete: at the base the restore completed it and restored.
+4. **The library restore asked the journal after its snapshot's admission.**
+   `holdRestoredStore` asks it under the exclusive hold, so every caller of
+   `RestoreWithOptions` finds an unfinished restore before `holdSource`; the
+   red goes through the library entry point, where `bridge restore`'s own
+   earlier check does not hide it: at the base a missing snapshot answered
+   `ErrSnapshotGone`, and a present one had its source admission run twice
+   and its backups folder changed.
+5. **A hold let go before its connections close: refuted.** In Go 1.27.3's
+   `database/sql`, `DB.Close` closes every idle connection before it returns
+   (`sql.go:931`), each through `finalClose`, which decrements `numOpen`
+   (`sql.go:682`, 705); `execDC` returns its connection in a deferred
+   `release` before the call returns (`sql.go:1701-1703`), and `Row.Scan`
+   closes its rows in a defer (`sql.go:3535`, 3553), whose `close` releases the
+   connection under the rows' lock (`sql.go:3491`, 3517), so a context's own
+   close of the rows has finished by then. The one release made after a call
+   returns is a transaction's rollback once its context ends (`Tx.awaitDone`,
+   `sql.go:2214`, started for every transaction at `sql.go:1930`), and none of
+   the three paths begins one on a context that can end: `PendingMigrations`
+   runs one `QueryRow`, `vacuumInto` one `ExecContext` and no transaction, and
+   `OpenStoreAdmitted`'s `migrate` runs on `context.Background()`
+   (`store.go:3027`), its FTS probe's `Conn` closed by a defer. No production
+   code sets `SetConnMaxLifetime` or `SetConnMaxIdleTime`, so the pool's
+   cleaner (`sql.go:1100`), which closes idle connections on a goroutine of its
+   own, never runs. Only a `Store` shared across goroutines can hold a
+   transaction open past `Close`, which `letGoOfTheHold` covers.
+6. **Windows: a directory or a directory link at `<db>-open.lock` opened as
+   access denied.** `CreateFile` opens no directory without
+   `FILE_FLAG_BACKUP_SEMANTICS`, and `ERROR_ACCESS_DENIED` read as a lock file
+   this user may not write. The open takes it beside
+   `FILE_FLAG_OPEN_REPARSE_POINT`, as the backup's `VACUUM INTO` opens did in
+   B653 PR 1's round 14, so the attribute check refuses both as no file. The
+   test (a directory, and a junction made by `mklink /J`) runs on CI's
+   windows-latest leg alone; here it is vetted and built.
+7. **The prompt test.** Its premise was false at the base (the prompt's
+   `Type 'yes'` is on stderr, where it looked), so it has no red there. It now
+   also requires no `Restore from` line on stdout and the restore's source
+   worker never run. That hook runs on `RestoreWithOptions`' own admission
+   alone, never on `bridge restore`'s look before its prompt
+   (`CheckRestoreSource`), so a directory that is no snapshot shows the order:
+   beside an open store it is refused for the lock, exit 1, where a hold moved
+   after the look, still before the prompt, answers exit 2.
+8. **Rules that said more than the code:** the B826 bullet now says what
+   comes before the source's lock (the store's lock, its file, and the data
+   dir where missing), and the lifetime lock's lines say the database-only
+   restore is PR 2b's.
+9. **Finding tags in added text** are gone: each finding is named by what it
+   found.
+10. **This record** says the rules are committed, and uses the brief's review's
+    numbers alone.
+
+Negative controls, each a mutation laid over the tree through
+`go test -overlay`, its test run alone (`.tmp/_b653p2a/controls2.py`,
+predictions written first): the capture without its hold; the data dir's check
+moved back after the capture's hold (the first form of that control deleted
+the check, which made the capture write `backups` in the package's directory
+with an empty data dir; it was removed, and the control rerun as the move); no
+lookup by identity; the lookup through `Stat`, which follows a link; a match
+released by the caller's key; no refusal under the marker's lock, and none
+without it; the admission writing what the record writes; the refusal for
+every disarm, ordinary opens included; the restore's admission removed, the
+record alone left to refuse after the seal's completion; no journal under the
+restore's hold; and the store's hold moved after the snapshot's look: every one
+red.
+## 2026-11-15 — B601: the console's quiet PCM test tone, through the player's backend
+
+Branch `feat/b601-pcm-tone` from main ca4473ff. Commits: 86a6043d (the
+backend's tone), 8d3bcd71 (the bounds outside internal/player, the builder
+inside), 7b4d05e7 (serve's gate, the console's view and route, the page's
+panel), f4b02ff7 (the tones close as serve's stop begins; the serve and
+console tests), c48597e9 (the tests fail at the base by what they assert),
+b4096d7e (a refused open's answer pinned in alsapcm; qualificationVersion 52),
+c1a3d24b (CLAUDE.md), c91dcdba and f7683bd2 (two tests the controls found
+blind), b2a7433b (the fence names its error), 01dfa550 (the tone's status
+apart from the protocol's census), c4b104d8 (this record) and 40059a0f (the
+rules and their long forms). Every run: Go 1.27.3, TMPDIR on a disk-backed
+directory: the player's durable writer refuses tmpfs, so a serve test of the
+player whose temporary directory is on tmpfs waits for an engine that never
+starts, to its deadline.
+
+### The tone, and why the device slot
+
+A console click plays a 1 kHz sine through the DAC while serve runs its own
+player on that DAC. An open that passes says nothing of the player: a pause
+that let the device go would fail the player's next resume, Start or probe,
+and on a DAC with a second free substream (an onboard codec) the tone would
+play beside the music. So the tone is the backend's third holder of its device
+slot (`playback.Backend.Tone`, `toning`), beside a session (`holder`) and the
+silent probe (`probing`). It is counted among the backend's goroutines before
+it takes the slot (`toneEnter`, under `gmu` alone), because serve's stop joins
+only what the backend counts (`Wait`): a tone that took the slot uncounted
+could open the DAC after `Wait` returned. The slot is taken in one step under
+`b.mu` alone (`reserveTone`) that refuses by word and never waits: the gate
+shut, a release never confirmed, a probe, a choice's lease, a Start waiting, a
+session's record or the device's holder, another tone, the request ended. The
+two locks are never taken one under the other, the order `publishProbe`'s doc
+gives. `CloseTones` sets its flag under `gmu`, then shuts the gate for good and
+ends the tone in the slot under `b.mu`: a tone counted before the flag is
+refused at its slot or ended, and joined either way
+(`TestAToneBesideServesStopIsJoinedOrRefused` holds a tone before its count,
+after it and in the slot, and runs `CloseTones` and `Wait` at each). A Start
+preempts it (`hold`: ended `preempted` on the record found under the lock,
+waited for at most `ToneYield`, 1 s, then the device busy, holding nothing); a
+probe it holds the slot from is skipped `tone_holds`, one of `probeSlotSkips`,
+so it stays owed (a refusal left out of that list is published as a probe made,
+and the unit was not probed again until a replug, a migration's part or a
+choice); a choice's lease and a tone refuse each other. Every end is a cause on
+the tone's own context (`context.WithCancelCause` of the request's), set on the
+record found under the lock, the first standing, so a late end of an earlier
+tone's request ends nothing of the next.
+
+### The gate
+
+The supervisor keeps the tone's gate (`toneGate`): `avail`, the last report the
+engine took was available; `fresh`, the latest snapshot was; `open`, as it last
+set it. The watch loop reads a snapshot's freshness first (`toneSnapshot`: a
+stale one shuts an open gate, `snapshot_stale`, and never takes another shut's
+word), then reports it (`send`: a report that takes the output away shuts the
+gate before the engine hears it, `withheld` for the live config's reason and
+`output_unavailable` otherwise, and so does an available report that names a
+unit change, `output_changed`; a report the engine refused shuts an open gate,
+`output_unknown`), then asks whether to open it (`toneOpenIfDue`), so a
+snapshot fresh again and unavailable or re-enumerated opens nothing before its
+report's shut. A stale snapshot makes no report (the watcher republishes its
+last at its generation), which is why the gate reads every one the
+subscription delivers. `CloseTones` runs as serve's stop begins
+(`context.AfterFunc` on serve's context), so a tone answers its request while
+the console still serves, and again first in each teardown, the player's stop
+and the supervisor's shutdown.
+
+### The cleanup's failure, and close(2)
+
+The slot is given back only once the node's close has answered. Completion is
+nothing opened, or `Close` answering nil. Failure is a close that answered an
+error, a cleanup that panicked before it answered, or an open whose own close
+answered an error or that panicked: until B601 alsapcm's open dropped the error
+of the close it made of a node whose setup it refused, and it now carries
+`ErrReleaseUnconfirmed` and that error beside its refusal, its Reason still
+the refusal's (`TestARefusedOpenWhoseCloseFailsSaysItsReleaseIsUnconfirmed`).
+A PCM session's open goes on to its next packing by the Reason as before; the
+native sink's reopen, which takes `ErrReleaseUnconfirmed` for its cleanup's
+failure, hears it in that case too where it heard the refusal alone; the tone
+stops there and asks no other pair. Failure sets `terminalUnconfirmed`, which
+fences tones, Starts, probes and choices' leases until serve restarts, and
+says it at Warn with the error the cleanup answered. What close(2) leaves held
+could not be checked: the kernel's sources were not available, its headers
+alone. Upstream, unverified, the descriptor is gone whatever close answers
+and the driver's release runs at the last reference, so a close's error
+rarely leaves the node held; the bridge
+cannot tell, and fences rather than guess, the design's default for its open
+question 7. A close the kernel holds keeps the slot: a Start answers busy at
+`ToneYield`, and `Tone` answers `stop_unconfirmed` at `ToneStopWait` (2 s), the
+status saying so until the close answers.
+
+### The format sequence and the level
+
+The kernel is asked a rate and a format alone (`alsapcm.Config`), so the tone
+asks eight pairs, each once: at 48 kHz, then 44.1 kHz, S24_3LE, S24_LE and
+S32_LE at 24 valid bits, then S16_LE at 16; a refine refused or a mismatch
+tries the next, a busy or denied open ends `open_refused` with its cause
+(`device_busy`, `permission_denied`). The node is checked after open before a
+frame. The bounds are `internal/tonebounds`'s (the standard library alone,
+outside `internal/player`, so the console checks them importing no player
+package): 1 kHz, -90 to -30 dBFS, 1 to 30 seconds. `testtone.Build`, pcm-test's
+builder moved unchanged, asks `tonebounds.Check` before it computes anything.
+At -30 dBFS no frame's top byte is 0x05 or 0xFA at any rate and packing
+pcm-test allows. Nothing is written to the DSD state or the packing memory, no
+observation is published, and no serial is logged.
+
+### The console
+
+`POST /api/output/player/tone` checks its body, then its fields (pointers, so a
+field left out is told from 0), then `playerRefusal` on the config it loads
+once, which `PlayerOutput.Tone` takes, so the view judges the withholding on
+that same config; it answers 409 with the word of a tone refused before the
+slot, and 200 with the result alone of one that took it. The view
+(`consolePlayer.Tone`) asks the backend only for a running player stopped with
+nothing pending, its output known and available, nothing withheld and no stream
+open, each refusal its word; `Sounding` and `Withholds` are unchanged.
+`running.tone` is the backend's `ToneStatus`, its `lastError` apart from the
+engine's `running.lastError`. The page's Stop aborts the tone's request and
+posts nothing; the page's scope and `pagehide` abort it too; and after a Stop
+the page reads the status at once and every 250 ms while the tone reads
+`playing` or `stopping`, three seconds at most, saying past them that the stop
+is not confirmed.
+
+### The brief's review
+
+Its twelve findings were taken: the open's cleanup uncertainty exposed in
+alsapcm and fenced on (the refused-open cases of the cleanup test); the gate's
+open asked after the report, against the snapshot processed; `pagehide`; the
+stop's confirmation read through `playing` and `stopping`, unconfirmed at
+expiry; the route's one config handed to the view; the bounds outside
+`internal/player`; the route's refusals in `playerRefusal`'s own order; the
+length an int, refused `length_refused`, the body's fields pointers;
+`PlayerOutput`'s doc and `running.tone`'s shape (none for a player that does
+not run, `idle` with nothing playing); the gate's state, so a stale snapshot
+never takes another word and nothing reopens before the report; and a cancel
+in the drain answering the tone's cause, with `stop_unconfirmed` marked by the
+timer and cleared by the close. Deviations from the brief: the builder is
+`internal/player/testtone`, the bounds `internal/tonebounds`; two words the
+brief did not list, `length_refused` and `not_located`; `ToneResult.Admitted`,
+which tells the route a refusal from a tone that ran; `qualificationVersion`
+52, since `internal/alsapcm` is a guarded prefix.
+
+### Tests, reds and controls
+
+Each new test was shown red at the base by its assertion, through a copy of
+the base's tree with the branch's test files and a names-only shim of each new
+identifier: every one but the builder's two pins
+(`TestTheToneNeverCarriesADoPMarker`, `TestTheToneIsTheSineItsLevelNames`: the
+builder moved unchanged) and `TestAnOpenHomeStopLeavesTheToneToItsEnd`, which
+pins a residual as it is. 23 negative controls, the brief's 18 and five for
+what the review added and the Warn's error, each predicted in a file before it
+ran and run by a script that puts the bytes back: all 23 red as predicted, after two tests the controls found blind were
+fixed. The ceiling raised to -20 made the backend's bounds test wait out the
+package's ten minutes: it asked each tone on the test's own goroutine, and the
+tone the mutation admitted played on a DAC the test never lets play. It now
+asks each on a goroutine of its own and fails at the first open (c91dcdba). And
+`Sounding` counting a tone stayed green: the serve tests' stand-in answered
+only a status the test set, so a tone it held read as none; it now says its
+own tone's status where a test sets none, and the withhold test reads the tone
+`playing` before its writes (f7683bd2).
+
+### Review of the diff
+
+One finding refuted: a 30-second tone's request ended by the console server's
+`ReadTimeout` (30 s). net/http clears the read deadline before its background
+read starts (`startBackgroundRead`, `server.go` line 741 at go1.27.3), so the
+deadline ends nothing once the body is read; a scratch server with a 1 s
+`ReadTimeout` ran a 3 s handler to its end. One Low fixed (b2a7433b): the
+fence's Warn named no cause; it names the cleanup's error, and the cleanup test
+requires it (a 23rd control red).
+
+### The first gate
+
+The gate's first run (`make test`, every package) failed one test, in a
+package the branch does not touch: internal/api's
+`TestDSDOutputProtocolTokens` reads every assignment to a `State` or a
+`state` in the player backend's source as an observation state the protocol
+names, and `ToneStatus` assigned its own state four times, from constants the
+census cannot read as strings. The single-package runs had not run
+internal/api, so they could not see it (`build-ci-tests.md`, a package-local
+run and a tree-wide guard). `ToneStatus` now picks its state in a local of
+its own and is built in one literal (01dfa550), and the census passes; the
+gate was run again on that head.
+
+### Runs
+
+Single packages under `-race -count=1`, in parallel lanes at b2a7433b:
+testtone 1.0 s, playback 3.4 s, alsapcm 87.6 s, engine 31.3 s, hotplug 2.5
+s, qualification 4.4 s, admin 1,233.3 s, cmd/bridge 1,674.7 s; at 01dfa550,
+internal/api 155.5 s, playback 3.1 s and alsapcm's tone tests. The ordering
+tests 50 times each under `-race` (alsapcm's six, playback's three,
+cmd/bridge's three, a lane a package): every run green, no race (36.4 s,
+1.1 s, 166.3 s). The test binaries of tonebounds, testtone, playback,
+alsapcm, admin and cmd/bridge build for darwin and windows. go1.27.3's gofmt
+lists none of the changed files. `scripts/qualification-version` is red at
+c48597e9 (51 to 51) and OK once the version is 52. At 01dfa550, one run at a
+time: `GOOS=linux GOARCH=386 make vet` clean, and `make fmt vet test
+build-all` passed, its fmt rewriting nothing (cmd/bridge 1,706.8 s of make
+test's 30 minutes, admin 1,259.4 s, api 163.7 s; `check-build-tags: OK`; the
+six builds). `make docs-check` is clean on the tree.
+
+### The rules
+
+The rules land in 40059a0f: in `output.md` a section, "The
+console's test tone in the player's backend (B601)", of five bullets, and the
+glob `internal/tonebounds/**`; in `cli-serve.md` one line beside the console
+view's bullet, after `bridge update`'s entry's long form moved to
+`ops/History-rules-cli-serve.md` with a hand-written pointer (the largest entry
+cannot move whole: its own Don't needs more than a pointer holds); in
+`admin-console.md` one bullet after the Player page's; and their long forms in
+`ops/History-rules-output.md` and `ops/History-rules-cli-serve.md`. On the
+tree with them the budgets check is clean (`output.md` 89,402,
+`cli-serve.md` 98,781, `admin-console.md` 96,395 bytes; the worst load 83.3%),
+`verify_moves.py --base HEAD` passes (one block moved), the self-tests of
+`check-doc-budgets.py`, `rules-for.py` and `move_entry.py` pass, and
+cmd/bridge's `TestEveryCitedTestNameExists` passes over it and fails on a ghost
+planted in its History.
+
+## 2026-11-15 — B601's round 2: the review's findings
+
+Branch `feat/b601-pcm-tone` from 40059a0f. Commits: 1fb3470b (a player
+write's body that cannot be read names no address), 57dea394 (the Player
+page ends its tone as a navigation begins, and speaks again only from the
+status), 0f00f340 (`no_format`), 66891f42 (the first record names no worker,
+host or scratch path, and says where the rules landed), 096d5563 (the
+rules), then this record. Every run: Go 1.27.3, TMPDIR on a disk-backed
+directory.
+
+### A body its reader could not read
+
+`decodePlayerBody`, the decoder of the Player page's four writes, wrote the
+decoder's error into the response, and the decoder hands back a body
+reader's error as it is (under Go 1.27's JSON too, whose syntax errors
+unwrap an I/O error to it): a client that stops sending until the read times
+out, or resets the connection, gives a `*net.OpError` whose words name both
+ends of the socket, `read tcp <local>-><remote>: i/o timeout`. The body is
+now read through `bodyReader`, which keeps the first error its reader
+answered other than the body's end, beneath the bound, so the bound's
+`*http.MaxBytesError` is never one; where it holds one, in either decode, the
+write answers 400 `bad_json` in fixed words and logs one Info line with the
+route and the cause: a socket error's words with its two ends left out, and
+any dotted IPv4 or bracketed IPv6 address left in them replaced, loopback's
+too (the console's login security log is the one place a client's address
+is kept). A fault of the JSON inside the object (a syntax error, a value of
+another type, a key the write does not take, a body cut short), or of its
+size inside it or after it, keeps the decoder's words, a body past the bound
+after its object saying so where it said "one JSON object, and nothing after
+it"; trailing JSON or content after the object (a second value, a stray
+character) still answers those fixed words. Before the fix
+`TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress` failed all 40 of its
+cases (five errors, four routes, the read failing inside the object and after
+it), the response carrying `read tcp 192.0.2.10:47789->198.51.100.23:54321:
+read: connection reset by peer`, and `TestAPlayerWritesJSONFaultKeepsItsWords`
+its four cases of a body past the bound after its object.
+
+### A navigation's start
+
+`boostSwap` tore the page's scope down only once the next page's fetch and
+body were in, so a boosted navigation that stalled left the tone playing,
+its whole length where it never answered. `boostSwap` now dispatches `leave`
+on `pageLeaving` before its fetch, and the Player page ends its tone there
+as Stop does (`stopPlayerTone`: the request aborted, the stop confirmed from
+the status). The scope still ends at the swap: tearing it down at the
+start would leave a page that stays mounted, while the navigation stalls,
+with none of its listeners. The router's refusals (a modified click, another
+target, a download, another origin, an anchor on the page, the page's own
+address, a popstate within it) call no `boostSwap`, so they end nothing. A
+full navigation the router does not take is still ended by `pagehide`.
+
+### A page the back/forward cache shows again
+
+`renderPlayerOutputTone` writes the tone's line over an idle tone only where
+the line is empty or it last showed a tone that was not idle (`busyShown`),
+so a line the page wrote itself, "Playing…", stood over an idle tone once
+`pagehide` had aborted the request: the abort's catch says nothing, and the
+five-second paint left the line as it was. Hidden, the page now ends its
+tone and a Stop's confirmation and marks the line for the status
+(`hidePlayerTone`); shown again (`pageshow`, persisted), on the DOM and the
+listeners it had, it empties the line, sets Play and Stop as for no tone out,
+ends a confirmation still out, and reads the status at once
+(`showPlayerToneAgain`), whose tone `renderPlayerOutputTone` then says, idle
+included.
+
+### The Stop's confirmation, bounded
+
+A Stop's confirmation asked its three-second deadline only after a read of
+the status nothing bounded. Each read now carries a signal (`API.get` takes
+one) that ends at what is left of the three seconds and with the page's
+scope, and no read starts past them, so a read that never answers is said
+not confirmed at three seconds.
+
+### `no_format`
+
+A tone none of whose eight (rate, format) pairs the kernel takes ended
+`open_refused`, the word of a DAC that refused to open (busy, denied, gone),
+so the page could not tell the two apart. It ends `no_format` now, a word of
+`ToneWords`' list with its sentence on the page.
+
+### Refuted: the hold's one timer
+
+`hold` arms one timer for its wait, the first time it waits, with the bound
+of the holder it found. A second holder after the first could only be a
+probe or a tone that took the slot between the first's end and the Start's
+taking it, and neither can: `hold` counts itself among `waiters` under
+`b.mu` before it lets the lock go to wait (`backend.go` lines 941 to 944),
+and `reserveProbe` (`probe.go` line 201) and `reserveTone` (`tone.go` line
+329) refuse while `waiters` is not zero; a session in the slot is
+`ErrOverlap`, which waits for nothing. So a Start waits for one holder at
+most, under that holder's bound, `ProbeWait` or `ToneYield`, both one
+second. The tests' held timers are keyed by duration, which a probe's wait
+and a tone's share, and no tone test arms a probe's wait.
+
+### Reds, controls and runs
+
+Each fix was shown red before it was made: the body tests through a
+names-only shim of the two new names; the page's three tests on the app.js
+before the change, the structural parts failing (`stopPlayerTone`,
+`pageLeaving`'s dispatch before the fetch, the `pageshow` listener, the
+bounded read); `no_format` through a shim of its name. The page's scripts
+run under node where node is installed, and none was installed here: each
+assembled script was read through and checked for balance, and
+`requireCarried` passes on it. Their harness's clock now moves only as a run
+advances it, and the status is painted by the shipped `renderPlayerOutput`,
+its other panels stubbed.
+
+Nineteen negative controls, each predicted in a file before it ran and none
+touching a tracked file (a Go mutation handed to the compiler through
+`-overlay`, an app.js one written into a scratch tree that prebuilt test
+binaries read as their working directory's): all 19 red as predicted, among
+them the log keeping the socket's ports where its addresses were scrubbed and
+its ends not left out, a body's end taken for a read failure, the dispatch
+moved after the fetch, the router ending the tone at every click, `pagehide`
+leaving a Stop's confirmation running, a confirmation's read unbounded,
+`API.get` dropping its signal, and `no_format` with no sentence on the page.
+At 096d5563: `GOOS=linux GOARCH=386 make vet` clean, and `make fmt vet test
+build-all` passed with a 45-minute package timeout, its fmt rewriting nothing
+(cmd/bridge 1,703.4 s, manifest 1,659.9 s, admin 1,321.6 s; `check-build-tags:
+OK`; the six builds). Under `-race`, 50 times each: the body test (1,798.1 s),
+the JSON-fault test and the page's three (1,369.9 s; their node parts skip
+without node), alsapcm's two (6.3 s) and cmd/bridge's word test (1.3 s), every
+run green; the first try of the admin ones met go test's ten-minute default
+with no failure and was run again at sixty minutes. go1.27.3's gofmt lists
+none of the changed files, and `make docs-check` is clean (`admin-console.md`
+97,892 bytes).
+
+## 2026-11-16 — B601's round 3: a stale status read, and four Lows
+
+Branch `feat/b601-pcm-tone` from e4bcdece. Commits: aca5038e (the tests
+ahead of their fix), fa0e89ef (the fix), df474469 (the bare IPv6 scrub),
+c782e655 and 2c2c9120 (wording), then this record; the rules' change is
+commit 9fe39f93 on the branch.
+
+A status read that answered after the page had moved on painted over it.
+Play moved `stopSeq` and not the paints' sequence, so a Stop's
+confirmation's read, or the five-second paint's, held across a newer tone
+that played to its end wrote "A test tone is playing" over "The tone played
+to its end". Play now moves `playerOutputSeq` as it starts the tone and as
+it says the tone's result, and a confirmation's read paints only while the
+confirmation stands, the one guard for a page its pagehide left, where no
+sequence moves. A confirmation now says its stop not confirmed by the last
+tone a read answered (`if (st) tone = t`): a read that failed or was cut off
+at the three seconds keeps it, where a slow bridge's last read had been
+said unreadable after earlier reads read playing; one that answered
+replaces it, a status with no tone in words of its own. Every stop said not
+confirmed leaves its line for the next status (`busyShown`), so an ordinary
+idle status replaces the warning.
+
+`bodyReadFault` left an IPv6 address written bare in an error that is not a
+socket error's; it now replaces every run `net.ParseIP` takes for one
+(`scrubBareIPv6`), a zone with it and a colon after it kept, a time of day
+and a hardware address left as they are, and the body test hides `::1`, which
+every `[::1]` holds. `decodePlayerBody`'s claim (a fault of the JSON inside
+the object, or of its size inside it or after it, keeps the decoder's words;
+trailing JSON or content after it is "one JSON object, and nothing after
+it") is corrected in its comment, the fault test (trailing content now
+asserted word for word), round 2's record and the rules; the History file
+says the kernel's headers alone.
+
+The page's new cases run under node, which is not installed here:
+`TestNoStaleStatusReadPaintsOverANewerTone` (a confirmation's read and a
+poll's, each held across a newer tone, and a confirmation's read held past
+the page's pagehide) and `TestAStopsConfirmationKeepsTheLastToneItRead`;
+their structural parts failed at aca5038e and pass at fa0e89ef. Their
+control removes only the predicate (`if (current() && seq ===
+playerOutputSeq)` to `if (seq === playerOutputSeq)`): its structural check
+fails here, and the pagehide case is the one its node cases catch, the
+sequence covering the other two. The bare IPv6 case failed on all eight
+routes and positions before its fix.
+
+## 2026-11-16 — B601's round 4: a warning that gives way, and a body-read line that carries no input
+
+Branch `feat/b601-pcm-tone` from 9fe39f93. Commits: c68a3782 (the page's
+test ahead of its fix), 8bf8a7bc (the fix), a2c3a004 (the body-read class),
+6b25579b (round 3's record names its rules' commit), then this record; the
+rules' change is the round's patch, which goes in as a commit after this
+record and drops the citation of the scrub's test this round deletes.
+
+A stop not confirmed is the next status's to say again (`busyShown`), and two
+paths left it with nobody to say it: a Stop's confirmation that read
+`stop_unconfirmed` cleared the flag, and the tone's own answer
+`stop_unconfirmed` never set it, so once the DAC closed every idle status kept
+the warning. The confirmation's branch now sets it unless the tone it read is
+idle, the tone's answer sets it when it is `stop_unconfirmed`, and Play takes
+it back as it starts, so an idle status after a newer Play the bridge refused
+keeps the refusal. `TestAStopNotConfirmedGivesWayOnceTheDACCloses` runs the
+three sequences under node; its first two cases fail at c68a3782, the third
+pins the reset, and each of the three edits taken back alone fails its case.
+
+The body-read line carried the reader's error with its socket's ends left out
+and its addresses scrubbed by patterns, and each round's review found a shape
+the patterns missed: an address after a word and a colon, one with a zone, a
+full form with a port, a dotted IPv6 address with a zone, an IPv4-mapped one.
+The line now carries the write's route constant, which `decodePlayerBody`
+takes from its caller, and one class decided by the error's type through its
+chain (`bodyReadClass`: `timeout`, `reset`, `closed`, `eof` or `other`), never
+its text; a reset Windows reports is its own errno there, and reads `other`.
+Nothing else in the record comes from the request or the error: the admin
+logger (`logging.Component("admin")`) adds `component=admin` alone, the
+handler it resolves (`logging.Init`'s text or JSON handler, level alone) adds
+the time and the level, a plain `Info` hands no request context to it, and
+`writeJSON` drops a failed write's error. `TestAPlayerWriteWhoseBodyCannotBeReadNamesNoAddress`
+now requires one record per request, its message the fixed line and its
+attributes exactly the component, the route and the expected class, over
+twelve errors of every shape and class on four routes in two positions;
+against the scrubbing code all 96 cases failed, and logging the error's
+words as the class fails all 96 too, those whose words say a class word
+among them. The scrub (`bodyReadFault`, `bareIPv6Run`, `scrubBareIPv6`) and
+its own test are gone; `ipv4Re` and `ipv6Re` stay for the log export.
+
+At 6b25579b: `go vet ./internal/admin/` clean; `go test -race -timeout 30m
+./internal/admin/` passed in 1,242 s (the page's node cases skip without
+node); the round's changed Go tests 50 times each under `-race` (`-timeout
+60m`) passed in 349 s; go1.27.3's gofmt lists none of the changed files; and
+`make docs-check` is clean, on the tree and on a copy with the rules' patch
+applied, where cmd/bridge's `TestEveryCitedTestNameExists` passes too.
+
+## 2026-11-15 — B898 PR 1: the updater waits out a held binary where it is in place
+
+Branch `fix/b898-updater-held-binary` from main 3f4843e1, every run on the
+Linux test host. Commits: fbe92a26 (the tests first, over main's behaviour: a
+names-only shim per package, `b898_shim.go`, and `cmd/bridge/main.go` under
+the new signatures alone, so that the commit's own run shows each red at
+main, Windows' real-hold cases on windows-latest among them), 667c4277 (the
+fix, the shims removed), 93fb303f (the lock-wait pin names its exception by
+its id alone), then this record. The rules files, their History and the
+three entries moved out of `config-lifecycle.md` are round 2's commit
+8f79e202 (the round 2 section below). Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus` where a make target sets them,
+TMPDIR on the worktree's disk.
+
+### At main
+
+Every one of the updater's renames of the binary had one attempt:
+`replaceRunningBinary` (`internal/updater/rollback_replace.go` 36-59 at
+3f4843e1) vacated, placed and put back through `renameFunc` once each, and
+Windows' swap (`swap_windows.go` 55-160) armed, staged the checked candidate
+again, vacated and placed with `os.Rename`, its put-back one attempt that
+could leave no binary on disk. `RollbackBinary` stopped the SCM service
+(284-304). Install logged a marker it could not put back after a failed swap
+and answered the swap's error alone. The boot rollback put back the
+`.bak` beside the binary without asking its version, and cleared the install
+after any failed restore. The console answered every swap failure 502 `install-failed` with
+the error's text, paths included.
+
+### What changed
+
+`internal/updater`: `held.go` (one step's attempts on a schedule and a wait
+budget, `try`; `once`; the seams `renameInUse`, `probeMovable`, `renameWait`;
+the observer `SetRenameObserverForTest`), `held_windows.go` and
+`held_other.go` (`inUse`: 32 and 33 on Windows, nothing elsewhere; `movable`,
+the probe), `swapbound.go` (`forwardWaits`, `recoveryWaits`),
+`swaperror.go` (`SwapError` and its outcomes, `MarkerNotRestoredError`,
+`ErrBinaryInUse`, `ErrBinaryMissing`, `ErrMarkerNotRestored`, `binaryLatch`),
+`swap_byvacate.go` (Windows' filesystem part, untagged), `swap_unix.go` (the
+staging, the checked copy's mode and the capabilities before `armSwap`),
+`swap_copy.go`, `rollback_replace.go`, `swap_windows.go` (`RollbackBinary`
+without the SCM stop), `install.go` (the latch, twice in Install and once in
+Rollback, a marker not put back as the answer, a rollback's record kept),
+`state.go` (`RollbackRefusalAt`, the marker-write observer), `updater.go` (the
+deferred restart's latch). `cmd/bridge`: the early, crash and boot rollbacks'
+answers to a missing binary, the boot's ask of the backup's version
+(`backupNotPrevious`), `maybeRollbackOnBoot`'s error and runServe's exit 1,
+`mapUpdaterError`'s three classes and their words (`updaterWords`), the
+Error line (`logUpdaterFailure`), the adapter's restore and
+`RollbackRefusalAt`, `bridge update`'s lines. `internal/admin`: the three
+sentinels and `classifyUpdateError`'s three classes, first.
+
+### Reds at main
+
+Each new test first ran over main's code through `go test -overlay`: the
+production files at 3f4843e1, a names-only shim per package (each name with
+main's behaviour behind it; the updater's `swapByVacate` main's Windows swap
+after its stop, its two renames through `renameFunc` so that a test's
+refusals reach it) and `cmd/bridge/main.go` under the new signatures alone,
+on Linux; each prediction written before its run. Every prediction held.
+
+- `internal/updater`, red: `TestEachHeldRenameIsWaitedForWhereTheBinaryIsInPlace`
+  (24 rows of 24; main probes nothing and waits nothing: "calls =
+  "dst>aside bak>dst", want "?dst ?dst ?bak dst>aside bak>dst""),
+  `TestEachSwapOutcomeSaysWhatItLeft` (16 of 16),
+  `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed`,
+  `TestTheBackupIsWaitedForBeforeTheBinaryIsVacated`,
+  `TestAMissingBinaryRefusesEveryInstallAndRollback`,
+  `TestARollbackThatLeavesNoBinaryKeepsItsRecord`,
+  `TestAnInstallWhoseMarkerCannotBePutBackSaysSo` (both: "err = swap: Access
+  is denied. (*fmt.wrapError)"), `TestASwapInterruptedBeforeItsArmingLeavesTheStaleBackupAlone`
+  (both), `TestAVacateRefusedOnceArmedDisarmsTheInstall`,
+  `TestADeferredRestartIsNotRequestedWhileTheBinaryIsMissing` (both) and
+  `TestEveryProtectedOperationFitsInsideTheMarkersLockWait`;
+  `TestTheRollbackStopsNoService`, which reads `swap_windows.go` from disk,
+  red on a copy of fbe92a26 ("calls: map[RollbackBinary:[stopServiceIfRunning
+  replaceRunningBinary] …]"). Green as predicted:
+  `TestNothingWaitsWithNoBinaryButThePutBack` and
+  `TestNoWaitFollowsTheSwapsArming` (main waits nothing; they guard the fix's
+  waits), `TestNoRenameFailureIsAFileInUseOffWindows`,
+  `TestSwapBinaryFallsBackToCopyOnCrossDeviceRename` and
+  `TestASwapOfTheCheckedCandidateGivesItTheBinarysMode` (main always stages),
+  and every other updater test.
+- `internal/admin`: `TestClassifyUpdateError` red on its six B898 rows (502
+  `install-failed`; the join with `marker-locked` answered that), green on
+  the other thirteen.
+- `cmd/bridge`, red: `TestTheEarlyRollbackWaitsOutABackupHeldForAMoment`
+  (both: "serve = 2, want 75"; and no line of the wait),
+  `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (both: "the start = 0
+  (served true), want 75"), `TestAStartWhoseCrashRollbackLeavesNoBinaryEndsBeforeItsAdmission`,
+  `TestAnEarlyRollbackThatLeavesNoBinaryKeepsItsRecord`,
+  `TestABootRollbackThatLeavesNoBinaryEndsTheStart`,
+  `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse` (two of three;
+  "refused otherwise" green), `TestTheBootRollbackLeavesABackupThatIsNotThePreviousVersion`,
+  `TestTheConsoleAnswersEachUpdaterOutcomeInWords`,
+  `TestTheUpdatesPanelHidesRollBackWhileTheBinaryIsMissing`,
+  `TestBridgeUpdateSaysTheRenameThatPutsTheBinaryBack`,
+  `TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait` and
+  `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall`'s new row. Green as
+  predicted: `TestAServeWithoutItsDataDirsLockRollsBackAtItsBoot` (it pins
+  the unlocked start's path) and every test changed for its signatures alone.
+  The stand-in restore holds the backup file, a probe or a rename of it alike,
+  so main meets the hold at its place, as the CI runs did.
+- Windows, not run on the Linux test host: at fbe92a26 windows-latest should show red
+  `TestOnlyWindowsSharingAndLockViolationsAreAFileInUse`,
+  `TestAnAccessDeniedRenameIsAnsweredAtOnceThroughThePredicate`,
+  `TestARollbackWaitsOutAHandleThatSharesNoDeletion`,
+  `TestARollbackHeldThroughItsWaitMovesNothing`,
+  `TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre`,
+  `TestARenameOntoTheRunningImageIsAnsweredAtOnce`,
+  `TestAnInstallWaitsForItsCheckedCandidateBeforeItArms` and
+  `TestRollbackBinaryReplacesARunningExe`'s held case, and green the swap
+  tests moved onto `swapByVacate` and `TestRollbackBinary_Windows`.
+
+### Negative controls
+
+Each an uncommitted mutation of the committed fix, applied by a runner that
+reads each file's bytes first and writes them back after the run, `git
+status` empty after every batch; each prediction written before the run;
+every mutation built. Each went red exactly where predicted, and the cases
+predicted green stayed green:
+
+- N1, one attempt per step: the stage table, the backup's window, and the
+  serve tests' "for a moment" cases ("serve = 2, want 75").
+- N2, the whole rollback retried: the stage table's call order (nine rows).
+- N3, every refusal taken for a hold: "a refusal no wait ends" in both tables.
+- N4, no probe and the place retried: "a refusal heard with no binary in
+  place: {Stage:place …}".
+- N5, the put-back drawn from the forward deadline: "the put-back made 1
+  attempts after the forward deadline was spent, want 7".
+- N6, `PutBack` where the put-back failed, the rollback's and the swap's
+  each: their rows in both tables, the record case, the latch case.
+- N7, the boot clearing its marker after a hold: two of its three cases.
+- N8, the swap armed before its probes: waits after arming on four rows, and
+  the interruption case's marker armed at the probe's wait.
+- N10, the place retried, the rollback's and the swap's each: their rows of
+  `TestNothingWaitsWithNoBinaryButThePutBack`.
+- N11, the latch removed: from Install (both asks; and the ask before the
+  download alone, which then downloads before it refuses), from Rollback
+  (the console's latch case too), from the deferred restart ("the restart
+  was requested 1 time(s) with no binary on disk"), from the panel's
+  predicate.
+- N12, a marker put back as read after a missing binary: the operator's,
+  the early and the crash rollback each.
+- N13, the binary-in-use class first, in `mapUpdaterError` and in
+  `classifyUpdateError` each.
+- N14, the crash rollback going on to its admission; the boot's missing
+  binary answered nil; runServe going on past it.
+- N15, the backup's version not asked at boot: both of its tests.
+- N16, Install's and Rollback's failed marker logged alone, each.
+- The rest: the checked candidate without the binary's mode; every candidate
+  taken as beside the binary (the cross-device copy never runs); no boot
+  rollback without the data dir's lock; Rollback's latch wrapped in a refusal
+  of the rollback (the updater's case red, the console's green, its
+  precedence answering first); the console's failure logged at Warn; a hold's
+  words the error's text.
+
+Not run on the Linux test host: N1's real-hold cases 1 and 6, N3's Windows
+half (`ERROR_ACCESS_DENIED` in Windows' predicate, which builds for Windows),
+N6's case 3 and N8's case 6, all windows-latest's.
+
+N9 was withdrawn: the code it would mutate is backlog B898's PR 3's, not this
+PR's, and the other controls keep their numbers.
+
+### The runs
+
+- The x50, 16:28 to 16:48: every test the PR adds or changes that runs on
+  the Linux test host, 51 in three packages, `-race -count=50` each alone,
+  from race test binaries built once (make test's tags), four lanes at
+  GOMAXPROCS 4, the host's load 3 to 6 (another build beside it): all passed, the longest
+  `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (381 s) and
+  `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (362 s).
+- The gate, in the build slot, 17:06 to 17:39, at 93fb303f: `go vet ./...`
+  for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64 (cgo off for
+  the cross targets) and `GOOS=linux GOARCH=386 make vet`, clean; the three
+  packages' tests built for Windows; `make test P=8` with
+  `TEST_PKGS='-count=1 -timeout 45m ./...'`, 89 packages ok in 1,929 s
+  (cmd/bridge 1,856 s, past the Makefile's 30 m, hence the 45 m; manifest
+  1,792 s; admin 1,281 s; updater 43 s); `make build-all` clean; the pinned
+  gofmt over every Go file the PR touches listed nothing; `make docs-check`
+  clean.
+- The rules patch, on a copy of 93fb303f: the three moves alone proven by
+  `verify_moves.py --base HEAD` (PASS), and the whole patch PASS once its
+  four edited blocks (the B613 and B707 lines and their History twins) are
+  put back to the base's words; the copy's `make docs-check` clean
+  (`config-lifecycle.md` at 99.7 % of its budget); cmd/bridge's
+  `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`
+  and `TestNoBlankKeepers` green over it, and a citation of a test nothing
+  declares, planted in its History file, failed the first, so it read the
+  copy. Applied with git to a fresh copy of HEAD, the patch gives the same
+  bytes.
+- Not run on the Linux test host: windows-latest (the real-hold cases, and
+  the serve tests whose Windows reds this PR answers) and the loaded
+  experiment.
+
+### The Windows tests at fbe92a26
+
+fbe92a26's Windows tests are for a CI runner only, never a host with a
+registered bridge service: at that commit `RollbackBinary` is still main's,
+which asks the service manager to stop a registered bridge service once it has
+found the backup (`swap_windows.go` 284-290 there), and
+`TestRollbackBinary_Windows` and `TestRollbackBinaryReplacesARunningExe` call
+it without the `skipIfBridgeServiceRegistered` main gave them (the swap tests
+fbe92a26 moved onto `swapByVacate` reach no service manager). From 667c4277 on
+no rollback reaches the service manager (`TestTheRollbackStopsNoService`), and
+the one test that can reach an SCM wrapper, `TestSwapWindows_Composition` in
+`internal/updater/swap_windows_test.go` (`swapBinary` whole, through
+`stopServiceIfRunning`), keeps the fail-closed guard, which runs it only where
+the service manager answers that no bridge service exists.
+
+### Size
+
+Against 3f4843e1: production +1,203 −185 lines (code +641 −94), tests +2,243
+−121 (code +1,821 −98), past the brief's 500 and 1,600.
+
+### What stays open
+
+Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
+
+## 2026-11-15 — B898 PR 1, round 2: each step tried by its operation's deadline
+
+Branch `fix/b898-updater-held-binary` from round 1's head 046cd677, every run
+on the Linux test host, Go 1.27.3, TMPDIR outside the worktree. Commits:
+a2ba28ab (the deadlines and their tests), 2f9c9f81 (the Windows hold tests),
+8f79e202 (the rules, their History twins and the moves), 64b1e977 (round 1's
+record reworded, N9, fbe92a26's Windows tests), then this record.
+
+### The findings and what changed
+
+1. The forward and recovery bounds were budgets of nominal waits: a step's
+   own time (a slow probe, a slow staging copy, a rename that takes time, a
+   wait the host overran) cost nothing, so an operation could go on with its
+   whole schedule after its time had run out. Each is now a deadline on a
+   monotonic clock (`deadline` in `held.go`): the forward one set as the swap
+   or the rollback begins, shared by its staging, its probes and the
+   rollback's vacate; the recovery one set as the put-back begins; both read
+   on the moves' clock (`moves.now`; `renameNow`, `time.Now` in production,
+   whose monotonic reading `time.Time`'s comparisons use). A wait is made only
+   where it ends at or before its deadline, and an attempt begun only at or
+   before it, so where the steps take no time the schedules are as before:
+   eight attempts, the last at 4.75 s, and seven, the last at 3.15 s, and
+   `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed` keeps its
+   expectations, the steps after the spent deadline tried at the deadline
+   itself. Once the deadline is seen to have passed, no further step, attempt
+   or wait of the operation's is begun: a step not tried answers
+   `ErrDeadlinePassed`, a `*SwapError` that is `NothingMoved` (or
+   `BinaryMissing` on the rollback's missing-binary path) and never `InUse`,
+   since no hold was seen; a wait the host overran past the deadline is
+   followed by no attempt; a swap whose last probe landed past it arms
+   nothing. Two transitions complete whatever the time: the place after a
+   vacate that landed (`once` asks no deadline), and the put-back, whose
+   deadline is set as it begins and whose late landing is its success. A
+   step under way is not cut short, so a deadline bounds what is begun, and
+   `inUseError` counts its waits at their lengths in the schedule. The boot's
+   rollback keeps its vetoed marker for `ErrDeadlinePassed` as for a hold.
+   `RestoreSeams.Now` gives a test's put-back a clock its waits move
+   (`time.Now` where nil), and the rigs' clocks move only by their waits and
+   by a step a case says takes time (`heldRig`'s `took` and `over`,
+   `heldRestore`'s `took`, Windows' `realHolds`).
+2. Two of Windows' hold tests read files they still held:
+   `TestARollbackHeldThroughItsWaitMovesNothing` read the backup through its
+   share-mode-0 handle, and `TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre`
+   the aside and the backup through theirs (the backup held at the place, the
+   aside at its first put-back attempt). `readBytes` answered a read that
+   failed with "", so each failed on a byte comparison, as if a file had
+   moved. Each now keeps its let-go and calls it once the rollback has
+   returned, before any read, as does the held-throughout case of
+   `TestAnInstallWaitsForItsCheckedCandidateBeforeItArms`, and `readBytes`
+   fails the test on a read that fails ("read <path>: <error>"). The PR's
+   other Windows tests let a hold go at its first refusal (`letGoAtRefusalOf`)
+   before they read, or hold nothing.
+3. The rules were not on the branch: 8f79e202 is the patch, committed. Its
+   moves were made by `move_entry.py` and proven by `verify_moves.py --base
+   HEAD` with its four edited blocks (the B613 and B707 lines and their
+   History twins) put back to the base's words (PASS); the B898 line is
+   condensed in `config-lifecycle.md` (99,436 bytes of its 100,000), its long
+   form in the History file's B898 section. At 8f79e202 `make docs-check` is
+   clean, and cmd/bridge's `TestEveryCitedTestNameExists`,
+   `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` pass; a
+   citation of a test nothing declares, planted in the History file of a copy,
+   failed the first.
+4. Round 1's record named who ran it and where; it now says the Linux test
+   host.
+5. `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse`'s "refused
+   otherwise" case passed with the restore skipped, since a cleared install
+   is what it asserted: each case now asserts every call its put-back made and
+   what each answered (exactly off Windows; on Windows, where a scanner of the
+   host's may hold a file too, its last calls), so that case needs the place
+   denied and the put-back landed. Its new "out of time" case is a slow probe
+   of the backup.
+6. `defaultStateLockWait`'s list names the boot's backup version and the
+   crash rollback (backlog B898's F1), and says how a rename's waits are
+   bounded: the schedules' waits, no attempt begun past a deadline, a step
+   under way taking what its filesystem takes.
+7. N9's withdrawal is said under round 1's controls.
+8. `TestAnInstallWaitsForItsCheckedCandidateBeforeItArms` runs each case
+   under `t.Run`; `holdShareNone` puts a file whose premise rename landed
+   back, its handle closed first, before the case fails.
+9. The statement on fbe92a26's Windows tests is under round 1's record.
+
+### Reds at round 1's head
+
+Each new or changed test ran over 046cd677's code through `go test
+-overlay`: the production files at 046cd677, a names-only shim
+(`renameNow` and `ErrDeadlinePassed` declared and unused) and 046cd677's
+`RestoreSeams` with a `Now` field declared; each prediction written before
+its run. Every prediction held.
+
+- `internal/updater`: `TestEveryStepIsTriedByItsOperationsDeadline` red on
+  nine rows of twelve (a slow probe of the binary, of the backup, and of the
+  backup on the missing-binary path; a held probe whose attempts each take a
+  second, eight attempts where five fit; a wait overrun inside the deadline
+  and one past it, eight attempts where six and seven fit; the candidate's
+  slow probe; a final probe that lands late, after which it armed; a slow
+  staging), green on the three boundaries the old code keeps too (a vacate
+  that lands late, then its place; a put-back that lands late, the
+  rollback's and the swap's); `TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried`
+  red (the swap landed); every row of the unchanged schedule table and
+  `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed` green.
+- `cmd/bridge`: `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse`'s
+  "out of time" red ("the put-back's calls: ?bin ok, ?bak ok, bin>aside ok,
+  bak>bin ok", the install cleared); its other three cases green.
+- Windows, not run on the Linux test host: at 046cd677 windows-latest should
+  show `TestARollbackHeldThroughItsWaitMovesNothing` red ("a file moved") and
+  `TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre` red ("asides … want
+  the binary aside and the backup where it was"), each from a read of a file
+  the case still held, and both green at 2f9c9f81.
+
+### Negative controls
+
+Each an uncommitted mutation of the committed round, applied by a runner that
+reads each file's bytes first and writes them back after the run, `git
+status` empty after the batch; each prediction written before the run; every
+mutation built. Nine of ten went red exactly where predicted, the cases
+predicted green staying green; R3 went red where predicted and once more:
+
+- R1, the deadline subtracting only the schedule again (round 1's budget):
+  every row of the deadline table a step's time decides, the slow copy and
+  the boot's "out of time"; the boundaries, the schedule table, the put-back
+  case and "refused otherwise" green.
+- R2, the swap armed whatever its probes' time: the final probe's row alone.
+- R3, the rollback's place tried by the forward deadline: the late vacate's
+  row (the place untried, the aside put back), and, not predicted, the
+  rollback's late put-back row, whose message gains the in-use words `try`
+  gives the place's refusal.
+- R4, a put-back that lands past its deadline taken for a failure: both late
+  put-back rows.
+- R5, a step left untried read as one that landed: the rollback's two
+  slow-probe rows (the place then renames the backup over the binary), the
+  missing-binary row (answered nil), the slow staging's row (answered by the
+  arming check, in other words) and the boot's "out of time".
+- R6, the boot clearing its marker for `ErrDeadlinePassed`: "out of time"
+  alone.
+- R7, finding 5's: the boot skipping its restore and still clearing the
+  install: all four cases, "refused otherwise" by its calls, none made.
+- R8, an attempt after a wait the host overran past the deadline: that row
+  alone.
+- R9, a wait that ends exactly at the deadline not made: every
+  held-throughout row (seven attempts) and the put-back case.
+- R10, an attempt exactly at the deadline not made: the put-back case and
+  the shared-deadline row.
+- W1, `TestARollbackHeldThroughItsWaitMovesNothing` reading the backup before
+  its hold is let go, and W2, `readBytes` ignoring a read that fails: both
+  build for Windows (vet); W1's red is windows-latest's ("read …bridge.exe.bak:
+  The process cannot access the file because it is being used by another
+  process."), and W2 turns nothing red at 2f9c9f81, where no read meets a
+  hold.
+
+### The runs
+
+- The x50, 19:12 to 19:32, at 64b1e977: every test the PR adds or changes
+  that runs on the Linux test host, 53 in three packages (round 1's 51 and
+  round 2's two), `-race -count=50` each alone, from race test binaries built
+  once (make test's tags), four lanes at GOMAXPROCS 4, another build in the
+  slot beside them: all passed, the longest
+  `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (371 s) and
+  `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (363 s).
+- The gate, in the build slot, 20:00 to 20:32, at 64b1e977: `go vet ./...`
+  for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64 (cgo off for
+  the cross targets) and `GOOS=linux GOARCH=386 make vet`, clean; the three
+  packages' tests built for Windows; `make test P=8` with
+  `TEST_PKGS='-count=1 -timeout 45m ./...'`, 89 packages ok in 1,812 s
+  (cmd/bridge 1,760 s, manifest 1,697 s, admin 1,176 s, updater 42 s);
+  `make build-all` clean; the pinned gofmt over every Go file the PR touches
+  listed nothing; `make docs-check` clean.
+- Not run on the Linux test host: windows-latest (the hold tests, and W1's
+  red).
+
+### Size
+
+Round 2 against 046cd677: production +145 −75 lines, tests +308 −70.
+
+### What stays open
+
+Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
+
+## 2026-11-15 — B898 PR 1, round 3: the deadline keeps every attempt it promises
+
+Branch `fix/b898-updater-held-binary` from round 2's head bae55650, every run
+on the Linux test host, Go 1.27.3, TMPDIR outside the worktree. Commits:
+5c32976e (the deadline's waits shortened to what remains, the put-back's
+first attempt, their tests), 635de172 (the rules, their History twins and
+the moves), then this record.
+
+### The findings and what changed
+
+1. High: on a real clock the last attempt of each schedule never happened.
+   Round 2's deadline was the schedule's total from the operation's start,
+   and a wait was made only where it ended at or before it; every call takes
+   time and every sleep overruns, so the last wait always ended past the
+   deadline: the forward schedule made seven attempts, the put-back six over
+   about 1.55 s. Now a wait is admitted only while some of its deadline
+   remains, shortened to what remains, and the attempt after an admitted
+   wait is made however long the wait took (round 2's check after the wait
+   is gone), so each schedule keeps its count, its last attempt at the
+   deadline, past it by no more than the last sleep overran. A step's
+   waits, `RenameRefusal.Wait` and `SwapError.Waited` are the waits as asked
+   of the clock, the last one shortened; on a rig whose steps take no time
+   they are the schedules', so the exact totals the serve tests assert (4.75
+   s, 3.15 s, their sum) stand. Round 2's two overrun rows change on
+   purpose: a wait the host overran inside the deadline shortens the ones
+   after it to what remains (seven attempts over 1.75 s, where round 2 made
+   six), and one that overran past the deadline is still followed by its
+   attempt (eight, where round 2 made seven).
+2. P2: the deadline could skip the first put-back. `putBack` set its
+   deadline and then asked it before its first attempt, so a stall of more
+   than 3.15 s between the two reads, after a landed vacate and a refused
+   place, left the binary missing with a put-back possible. The put-back's
+   first attempt is now made whatever its deadline says (`retry`, which
+   `try` calls once it has asked the deadline); only its later attempts are
+   bounded by it.
+3. Low: the Windows check of the boot rollback's record failed on a
+   scanner's refusal of the real put-back. `heldRestore` does wait out
+   Windows' own holds (`ReplaceRunningBinaryForTest` takes Windows' `inUse`
+   beside the test's, and calls `movable` after the test's probe), but it
+   recorded such a refusal as its error's text. On Windows the record is now
+   compared once each run of one call's answers stands as its last
+   (`answered(true)`; `TestTheHeldRestoresCollapsedRecordKeepsEachCallsLastAnswer`).
+4. Low: the three new rules bullets. `cli-serve.md` and `build-ci-tests.md`
+   are condensed files ("Each long entry here is one line … ending
+   → History-rules-<name>.md"), so their B898 bullets moved verbatim to
+   their History files (`move_entry.py`), each line a shorter title and
+   every Don't; `admin-console.md` keeps its entries whole and has no
+   History file, so its bullet stays. The B898 line and its long form say
+   the shortened wait and the put-back's first attempt.
+
+The brief's own reviews decided what changed with them: round 2's check
+after the wait went, with its row; the waits recorded are those asked; the
+clock rows assert each shortened wait and total, so that the unclamped
+control fails on a duration and not on a count; outcome rows cover a hold
+that clears on a last attempt at the final probe (nothing proceeds, nothing
+arms), at the vacate (its place follows, and the put-back where the place is
+refused) and at the put-back (`PutBack`, the binary in its place); finding
+2's test drives `putBack` on a clock that moves 4 s at every read after the
+first.
+
+### Reds at round 2's head
+
+Each new or changed test ran over bae55650's `held.go`, `swapbound.go` and
+`statelock.go` through `go test -overlay`, with no shim (every name the tests
+use is bae55650's); each prediction written before its run. Every prediction
+held.
+
+- `internal/updater`: `TestEveryAttemptIsMadeOnAClockTheStepsMove` red on
+  all eight rows (seven forward attempts, six put-back attempts, and the
+  holds that clear on a last attempt answered as holds);
+  `TestThePutBacksFirstAttemptIsMadeHoweverLateItComes` red both ways ("the
+  operation's deadline passed before this step was tried", no attempt);
+  `TestEveryStepIsTriedByItsOperationsDeadline` red on its two changed rows
+  alone; the schedule tables and
+  `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed` green.
+- `cmd/bridge`: `TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt` red both
+  ways (waits ending at 1.6 s with no 1.586 s; no 1.589 s); the collapse's
+  test and the boot rollback's green.
+- Windows, not run on the Linux test host: at bae55650 windows-latest should
+  show `TestARollbackHeldThroughItsWaitMovesNothing` red on `realHolds`'
+  clock, which now overruns every sleep (seven attempts).
+
+### Negative controls
+
+Each an uncommitted mutation of the committed round, applied by a runner that
+reads each file's bytes first and writes them back after the run, `git
+status` empty after the batch; each prediction written before the run; every
+mutation built; each went red exactly where predicted, the cases predicted
+green staying green.
+
+- Q1, the unclamped wait, an admitted wait at its whole length: every clock
+  row on its waits and words, the counts unchanged ("50 100 200 400 800 1600
+  1600" ms, want "… 1587"), the deadline table's shortened-wait row, and both
+  cmd/bridge cases on their waits; the schedule tables green.
+- Q2, the put-back's first attempt asking its deadline: both cases of the
+  first-attempt test; the clock rows green.
+- Q3, round 2's rule back, no attempt after a wait that ended past the
+  deadline: every clock row and the overrun-past row.
+- Q4, a wait admitted once the deadline has passed: the row whose attempts
+  each take a second (eight attempts, not five).
+- W3, `realHolds` without its overrun, builds for Windows; its red is
+  windows-latest's.
+
+### The runs
+
+- The x50, 21:09 to 21:28, at 635de172: every test the PR adds or changes
+  that runs on the Linux test host, 57 in three packages (round 2's 53 and
+  round 3's four), `-race -count=50` each alone, from race test binaries
+  built once (make test's tags), four lanes at GOMAXPROCS 4: all passed, the
+  longest `TestTheCrashRollbackWaitsOutABackupHeldForAMoment` (359 s) and
+  `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (350 s).
+- The gate, in the build slot, 21:28 to 22:00, at 635de172: `go vet ./...`
+  for linux/amd64, linux/arm64, darwin/arm64 and windows/amd64 (cgo off for
+  the cross targets) and `GOOS=linux GOARCH=386 make vet`, clean; the three
+  packages' tests built for Windows; `make test P=8` with
+  `TEST_PKGS='-count=1 -timeout 45m ./...'`, 89 packages ok in 1,837 s
+  (cmd/bridge 1,771 s, manifest 1,724 s, admin 1,194 s, updater 42 s);
+  `make build-all` clean; the pinned gofmt over every Go file the PR touches
+  listed nothing; `make docs-check` clean.
+- The rules, on a copy of 5c32976e: `verify_moves.py --base HEAD` PASS with
+  round 3's edited blocks put back to the base's words (two blocks moved,
+  1,976 bytes), the copy's docs-check clean, and the three sweeps green over
+  it, a citation of a test nothing declares failing the first; applied with
+  git to a fresh copy, the patch gives the same bytes.
+- Not run on the Linux test host: windows-latest (the hold tests, and W3's
+  red).
+
+### Size
+
+Round 3 against bae55650: production +60 −50 lines, tests +274 −79.
+
+### What stays open
+
+Backlog B898's F1, F2, F3, F4, F7, F8 and F9, and its PRs 2 to 4.
+## 2026-11-15 — B728 B9 PR 3a: the engine reserves the player's configuration while a choice is written
+
+Branch `feat/b728-b9-pr3a-reservation`, from main at ca4473ff (3f4843e1,
+the brief's main, and B872U, which touches `internal/updater` alone).
+Commits: 2fd8ba6f (the reservation, its tests, `CLAUDE.md`'s two rows and
+the two History files), 25986504 (the lost-grant test goes on past a wrong
+refusal, so a control shows both of its findings), then this record. The
+rules lines of `output.md` and `openhome.md` are in this branch's rules
+patch. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, TMPDIR on disk.
+
+### The hazard
+
+The player's backend writes a DAC's DSD choice only while it holds no
+session's record (B9 PR 2's configuration lease). Between a release the
+engine has acknowledged and the Start that follows it, the backend holds
+none: a seek, a Next or a Previous, a PlayID while playing, a skip past an
+entry refused at its start, a Play during a release to play. A write let in
+there would run in the middle of a transition, so the check must be the
+engine owner's, in the one step that finds the transport stopped. Nothing
+calls the reservation yet: the DSD choice's route (B9 PR 3b) will.
+
+### What was built
+
+- `Engine.ReserveConfiguration(ctx) (ConfigLease, error)` and
+  `Engine.ReleaseConfiguration(ConfigLease)`, two commands of no lane;
+  `owner.configs`, the set of leases held; `Snapshot.ConfigurationReserved`;
+  the reasons `not_stopped` and `configuring`.
+- The grant (`reserveConfiguration`, owner.go) is refused `not_stopped`
+  unless the state is Stopped, `o.sess` is nil, `o.sessions` is empty and no
+  release is unconfirmed; maintenance and the shutdown refuse it in
+  `dispatch` before it. It moves no generation (`touched`), and draws a lease
+  from the engine's randomness that is neither zero nor held already.
+- The release is dispatched before `case o.closing`, in every state; a lease
+  not held changes nothing and publishes nothing.
+- `configRefusal` (transport.go), asked right after `outputRefusal` at its
+  three sites: `transport()` before the move and `selectEntry`; `seek()`; and
+  `afterRelease`'s play.
+- `ReserveConfiguration` asks the owner on `context.WithoutCancel(ctx)` and
+  lets go a grant `ctx` outlived, answering `ReasonCancelled` wrapping
+  `ErrNotAdmitted` and the context's error. `ReasonCancelled`'s,
+  `ErrNotAdmitted`'s and `WithAdmission`'s docs and doc.go's say so.
+- OpenHome's fault table answers both reasons 501.
+- `EnterMaintenance` is not refused while a lease is held, a residual its
+  doc, doc.go and the rule name: only the harness's `bridge output play`
+  enters maintenance (`cmd/bridge/output_play.go`), and it holds none.
+
+### The brief's reviews
+
+- **First review, 1: C6 could not go red.** Confirmed: past `ReleaseTimeout`,
+  `releaseDeadline` clears `o.sess` and keeps the session in `o.sessions`,
+  so the unconfirmed-release term alone is covered by the sessions term.
+  C6 removes both; each alone (C6a, C6b) is the other's defence in depth.
+- **First review, 2: the overlay could not reach `o.configs` or the errors.go a test
+  reads.** The red runs overlaid main's owner.go with the field and its make
+  (nothing reads it) and main's errors.go with the two reasons in the file
+  itself; T8 and T9 ran in a disposable copy of the tree with main's files on
+  disk and the two reasons in its errors.go.
+- **First review, 3: T6 passed against the no-op shim.** T6 now requires the
+  reservation shown and a Play refused `configuring` before the release.
+- **First review, 4: the cancellation exception.** Documented where the rule it
+  breaks is written (above), and T4 requires WithAdmission's channel closed
+  while the method answers `ErrNotAdmitted`.
+- **Second review, 1: maintenance beside a held reservation.** The finding's second
+  option: the brief keeps it a named residual (design 5.5), so the rule,
+  doc.go and `EnterMaintenance`'s doc say a maintenance entered while one is
+  held is not refused. The shutdown keeps the leases on purpose: nothing
+  starts once it has begun, and the release, dispatched first, still clears
+  one (T7).
+- **Second review, 2: the brief's unbound `err`.** `if err := ctx.Err(); err != nil`,
+  the chain notAdmitted's (`fmt.Errorf("%w: %w", ErrNotAdmitted, err)`).
+- **Second review, 3: a release of a lease not held.** Deletes and touches only a
+  lease held; T5 requires a second release to publish no snapshot.
+- **Second review, 4: `o.starting` and `r.output`.** `o.starting` is set only in
+  `startSession`, with `o.sess` and state Playing, and cleared in
+  `releaseSession` and `onAudible`; `o.sess` is cleared only by
+  `releaseDeadline` and `acked`, after `releaseSession`. So the grant's
+  Stopped term excludes a start under way. Every rule that starts a session
+  or will has `output` set (Play, Next, Previous, PlayID and PlayIndex that
+  start, resume or carry a play; a seek that plays); `startSession`'s two
+  callers are `transport()`'s start and `afterRelease`; `do` answers closed
+  at `e.done` before and while it waits, so a release after Run returns.
+- **Second review, 5: T6 tested no path of its own.** T6 holds the owner as it
+  admits the release (the `admitted` seam): the release has not returned and
+  the lease is shown; once it returns, at once none is shown and a Play is
+  admitted. A posted release fails it at once, every time (C11).
+
+### Red first
+
+At main, each new test failed by its own assertion, never a missing name.
+The engine's seven ran through `go test -overlay` from the worktree: main's
+seven touched files, owner.go and errors.go structural as above, and a shim
+of the remaining names with main's behaviour (`ReserveConfiguration`
+answers the zero lease and nil, `ReleaseConfiguration` does nothing,
+`ConfigurationReserved` is false). The lines are this branch's
+configuration_test.go and writes_test.go.
+
+| Test | Line | Failure at main |
+|---|---|---|
+| T1 `TestAConfigurationReservationIsGrantedOnlyWhileStopped`, stopped with entries | :143 | granted, and the snapshot shows no reservation held |
+| T1, a start the backend holds; playing; paused with its session; paused with no session | :173, :180, :186, :194 | `<nil>`, want a refusal `not_stopped` |
+| T1, releasing to stop, to pause, to play; a release left unconfirmed | :204, :217, :229, :253 | `<nil>`, want `not_stopped` |
+| T1, maintenance; the shutdown | :260, :271 | `<nil>`, want `maintenance`; `<nil>`, want `closed` |
+| T2 `TestWhateverWouldStartASessionIsRefusedWhileAReservationIsHeld` | :307 | play while a reservation is held: `<nil>`, want configuring |
+| T3 `TestTheReservationIsAskedWhereverASessionWouldStart`, the seek; the release's play | :393, :418 | got `<nil>`, want `configuring` |
+| T4 `TestAReservationGrantedAsItsCallerLeavesIsLetGo` | :483 | the reservation answered `<nil>` before the owner sent its reply |
+| T5 `TestTwoReservationsHoldUntilBothAreLetGo` | :535 | two grants share one lease |
+| T6 `TestAReleasedReservationIsGoneWhenItsReleaseReturns` | :590 | granted, and the snapshot shows no reservation held |
+| T7 `TestAReservationAfterRunIsClosedAndItsReleaseReturns` | :662 | a reservation once the shutdown began: `<nil>`, want closed |
+| T8 `TestEveryEngineReasonHasItsFault` | writes_test.go:554 | `engine.ReasonNotStopped` and `engine.ReasonConfiguring` have no row |
+| T9 `TestATransportWriteWhileTheConfigurationIsReservedIsRefused` | writes_test.go:620 | Playlist#Play: 200, want a fault |
+
+The engine's run took 0.73 s and OpenHome's 0.06 s. Every failure was the
+one written down before the run.
+
+### Controls
+
+Each control was an exact-once edit of the committed files (25986504), made
+in memory, its test binaries built without `-race`, the nine tests run by
+name, and the bytes written back from memory; `git status` was clean after
+every batch. The predictions were written before the runs. Each control took
+3.2-5.1 s.
+
+| # | Mutation | Predicted | Result |
+|---|---|---|---|
+| C1 | `configRefusal` not asked in `transport()` | T2, T5, T6 and T9 red | as predicted |
+| C2 | asked after `selectEntry` | T2's next, previous, play id and play index rows; T9 at Id | T2's four rows, the play row green; T9 red one write earlier, at Next (see below) |
+| C3 | not asked in `seek()` | T3's seek | as predicted |
+| C4 | not asked in `afterRelease` | T3's release | as predicted |
+| C5 | `do` handed the caller's ctx | T4: the refusal without `ErrNotAdmitted`, the lease held | as predicted, both lines |
+| C6 | the grant without the sessions and unconfirmed terms | T1's unconfirmed release | as predicted |
+| C6a, C6b | each of those terms alone removed | all green | as predicted |
+| C7 | `visible()` for `touched()` in the grant | T1's generation | as predicted |
+| C8 | OpenHome's two rows removed | T8; T9 green | as predicted |
+| C9 | the release dispatched after `case o.closing` | T7 | as predicted |
+| C10 | a release deletes and touches whatever the lease | T5 | as predicted |
+| C11 | the release posted as a message | T6 at once; others racy, not predicted | T6 red 20 of 20 at its first select; T1, T4, T5 and T7 red too |
+| C12 | a grant ctx outlived kept | T4 | as predicted |
+| C13 | the grant without the Stopped term | T1's paused with no session | as predicted |
+| C14 | the grant without the `o.sess` term | all green | as predicted |
+
+- **C2.** The prediction placed T9's failure at Id. SeekId moved the
+  selection to the last entry before its refusal, which made the Next after
+  it a Next past the end, which no rule refuses. So T9 failed at Next.
+- **C11.** The prediction listed T1, T2, T3, T5, T7 and T9 as possibly red
+  by the race. T4 went red as well: the release inside
+  `ReserveConfiguration` is the same posted message.
+- **Defence in depth.** C6a, C6b and C14 are the terms each covered by
+  another in every state the engine reaches. The seek's and afterRelease's
+  sites are unreachable while a grant holds, which T3 reaches through a lease
+  a hook on the owner's goroutine puts in.
+
+### Runs
+
+- **gofmt.** The pinned gofmt (`go run cmd/gofmt -l`) listed none of the
+  ten changed Go files, and `make fmt` rewrote nothing.
+- **The new tests.** Under `-race`, the engine's seven took 1.75 s and
+  OpenHome's two 1.08 s. Each package alone under `-race`: the engine 25.1 s,
+  OpenHome 37.5 s. At `-race -count=50`, the engine's seven took 37.3 s and
+  OpenHome's two 3.8 s, every run a PASS. OpenHome's player skips on tmpfs,
+  so TMPDIR was on disk and the PASS lines were counted.
+- **The gate**, at 25986504, in one slot session (15:57-16:36).
+  - `make fmt`: 1 s. `make vet`: 6 s. `GOOS=linux GOARCH=arm make vet`: 8 s.
+    `GOOS=linux GOARCH=386 make vet`: 10 s.
+  - `GOOS=windows` and `GOOS=darwin` `go vet` of the two packages: 3 s each.
+  - The qualification version gate (`scripts/qualification-version`): OK
+    against 3f4843e1 and against ca4473ff.
+  - `make test`: 2,292 s, 88 packages ok. Among them: the engine 41.6 s,
+    OpenHome 40.9 s, `internal/manifest` 1,777 s, `internal/admin` 1,197 s.
+  - `make test`'s cmd/bridge: FAIL at 1,793.97 s of its 30-minute cap. The
+    failures were `TestMixedCaseConcurrentLookupsEnqueueOnce` and four cases
+    of `TestTransientRepairFailuresEarnNoStrikeThroughTheLookup`, each "the
+    analysis pool never settled", at 16:27:42-56. That is the binary's last
+    30 s, where `regenFixture.settle` waits until `serveGiveUpTime` (the
+    deadline less 30 s) and so gives up at once: the cap, not the change.
+    cmd/bridge alone, as B897's split runs it (`-race -p 1 -timeout 45m`, in
+    the slot): ok, 1,741.5 s.
+  - `make build-all`: 52 s.
+- **Docs.** `make docs-check` passed on the commit. On a copy of HEAD with
+  the rules patch applied, each file was byte-equal to what was built, and:
+  - the budgets passed;
+  - `verify_moves.py` passed against HEAD and against 3f4843e1, with the
+    edited blocks declared (openhome.md's write bullet, its History long
+    form, CLAUDE.md's two tables);
+  - cmd/bridge's `TestEveryCitedTestNameExists`,
+    `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` passed.
+    A ghost citation planted in the copy's output.md failed the first
+    ("cited by .claude/rules/output.md"), so it read the copy.
+- **After this record.** The three sweeps ran over this record before its
+  commit, on the worktree and on the patched copy, and passed.
+
+### Budgets
+
+- `output.md`: 84,132 to 86,108 bytes (the rules patch).
+- `openhome.md`: 44,178 to 44,318 bytes (the patch).
+- `CLAUDE.md`: 53,440 to 53,664 bytes, 83.8%.
+- The worst load, `output_dac_bind_test.go`: 82.4% with the patch.
+- The History files: output 88,895 to 96,775 bytes; openhome 110,909 to
+  111,316 bytes.
+
+### Addendum: the branch as it merges
+
+After this record the branch took four more commits, none of them code:
+- bf80b8d4 names this record's review findings by number, and a test
+  comment's, where it named who found them;
+- a2124345 commits the rules lines of `output.md` and `openhome.md`, so the
+  patch the record names is no longer separate;
+- b381015b corrects the `output.md` bullet and its long form: a grant that
+  outlived its caller's context, answered as a cancellation wrapping
+  `ErrNotAdmitted`; the stalled owner's delay of the release, a residual;
+  the holder's half stated as what a holder must do, none running in
+  production until B728 B9 PR 3b;
+- 8a2c3b4d turns the last reversed phrase of that long form.
+
+Run again on the tree as it merges, this addendum included: `make
+docs-check` (the budgets and both self-tests) and cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers` passed. `verify_moves.py` was not run again: the later
+commits move nothing, they edit one bullet and its long form in place. The
+sizes as merged: `output.md` 86,328 bytes, `openhome.md` 44,318 bytes, the
+History files 97,039 (output) and 111,316 (openhome) bytes.
 ## 2026-11-15 — B898 PR 2: the harvest state's open and bridge restore's look before its prompt wait out a read Windows refuses for a moment
 
 **The hazard.** Two production reads met Windows' refusal of an open once and
@@ -101777,3 +103249,291 @@ inside the slot from 00:44.
 | gofmt (`go run cmd/gofmt -l`) on the changed files | nothing listed |
 | `TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` | pass, at f3d7f7d9 and with this table |
 | `make docs-check` | exit 0, at f3d7f7d9 and with this table |
+
+## 2026-11-16 — B653 PR 2a round 3: the restore holds the install marker's lock through the database's replacement
+
+Main (`adadd7b3`, B869A) was merged first, as one merge commit (`81ff6ff5`):
+every file main alone changed is main's blob, and this log, the one file both
+sides changed, keeps both appended entries in date order.
+
+**Round 2's Windows leg.** Four of this PR's tests failed there, each reading
+a lock file another handle held: `treeState` (internal/backup) and
+`dirState` (internal/manifest) hashed every regular file,
+`bridge.db-open.lock` and `update-state.lock` among them, and Windows refuses
+a read of a byte range another handle has locked. No production path reads
+either lock file. Both helpers now compare a lock file by its size, mode and
+modification time. `TestARestoreLeavesItsSnapshotAsItWas` wanted its
+snapshot's record VERIFIED after a check again, which where no directory can
+be synced records nothing (`ErrRecheckNotRecorded`): it takes that answer
+there, and runs both here, the second through `SetSyncsParentDirForTest`.
+Only the windows-latest leg proves these four.
+
+**An install armed during the restore.** The admission and the record each
+took the install marker's lock and let it go, so `bridge update`, which takes
+neither `server.lock` nor the store's lock, could arm an install with this
+version as its previous one between them, and the record refused after the
+player seal's completion had written, or between the record and the
+database's copy, which then replaced the store with nothing recorded. A
+record that could not take the lock also went on where it had nothing to
+write, an absent marker among them, while the lock's holder could still arm.
+`updater.HoldMarkerForRestore` now takes the lock and refuses where it is not
+held (another holder past the wait, ENOLCK, a failure, a filesystem that keeps
+none), whatever the marker holds, and makes the admission under it;
+`RestoreHold.Record` records under the same hold (`disarmHeld`, never
+`LockState` again); `Release` is idempotent. `RestoreWithOptions` takes the
+hold before its turn of the config file's lock, the order `checksoff.go`
+(its lines 30 to 38) documents, the marker's lock before the config's,
+defers its release, records once the config's and the snapshot's checks have
+passed, and lets the lock go right after the database's copy, before
+`manifest.ResetBackupEpoch` (`backup.go`'s lines 619-622, 714, 870 at
+`48cf9354`).
+
+The contract after that release: the epoch's open asks the marker only where
+a migration step is pending (`store.go:3032`, `if current <
+migrations[len(migrations)-1].version`), and where one is, this version's
+own steps need no record when it is the install's previous version
+(`armsStoreRecord`, `disarm.go:433`): an install armed in that window finds
+this version's store in place, and what it records from then on is its own.
+`TestAnInstallArmedOnceTheDatabaseIsInPlaceIsLeftToItsOwnRecords` is the
+case at the ladder's top: the install arms at once, the marker after the
+restore records nothing of the restore's.
+
+**The seal.** It is completed only after the record, wherever the restore has
+a player target, whether or not it replaces the database or restores an
+identity; its failure refuses only a restore of an identity, as before. The
+admission and the record are one lock window, so no install can be armed
+between them.
+
+**The Lows.** On Windows `os.SameFile` reads a path's file ID through a
+handle opened with no access asked and closed at once (Go 1.27.3's
+`os/types_windows.go:321`, in `loadFileId`), which holds no lock and lets none
+go: the lookup's comment says so. A hold whose lock file's identity cannot be
+read is refused (`ErrStoreLockUnavailable`), so a live entry's identity is
+never nil. The Windows helper takes a short name only where it was written
+whole (`int(n) >= len(buf)` refuses), and `RestoreWithOptions`' doc says what a
+refusal before the first write leaves: the database's directory and the
+store's lock file where it made them, and the install marker's lock file.
+
+**Reds and controls.** Over `d43a0b15`'s production code, a copy with a
+names-only shim of the hold over round 2's two asks and the copy seams joined
+onto its own lines (`.tmp/_b653p2a/red3.py`, predictions written first):
+`TestAnInstallArmedBeforeTheDatabaseIsReplacedWaitsForTheReplacement` (the
+install armed before the replacement), `TestAnInstallArmedBetweenTheRestoresChecksWaitsForThem`
+(refused by the previous version after the seal was written),
+`TestARecordThatFailsLeavesThePlayerSealOwed` (the seal written),
+`TestARestoreByTheVersionAnInstallReplacesIsRefusedWithoutTheLock` (an absent
+marker admitted without the lock) and
+`TestARestoreHoldsTheMarkersLockUntilItLetsItGo` (another taker took it) all
+failed as predicted; the contract case passed there, as predicted. Seven
+controls by overlay (`.tmp/_b653p2a/controls3.py`), all red: the lock let go
+right after the record; the seal completed first again; no release after the
+copy; a lock that cannot be taken gone on unheld; a filesystem that keeps none
+admitted; the record taking the lock again; and an identity that cannot be
+read kept as none.
+
+## 2026-11-16 — B653 PR 2a round 4: the epoch is minted once bridge.yaml's lock is let go
+
+**The cycle.** Since round 3 the restore takes the install marker's lock
+before bridge.yaml's (`backup.go`'s lines 617-631 at `a6bbe935`) and lets
+the marker go once the database is copied (line 870), and it minted the
+epoch right there (line 881, `manifest.ResetBackupEpoch`), inside the copy
+loop, bridge.yaml's lock still held. Where the restored store has a
+migration step pending, that open takes the marker's lock again
+(`disarmBeforeMigrating`, `migration_disarm.go:38`), so the order became
+bridge.yaml's, then the marker's, and a writer that takes the marker's lock
+and then bridge.yaml's waited on the restore while the restore waited on it,
+until the writer's config wait (`config.LockWait`, 5 s) refused it, the
+database already replaced.
+
+**The change.** The mint (`mintRestoredEpoch`, after `RestoreWithOptions` in
+backup.go: its WAL and SHM removal and its busy-checkpoint warning word for
+word) runs from a defer `RestoreWithOptions` registers before bridge.yaml's
+unlock (`backup.go:634-642` at `6ff6ddc7`; the unlock's defer is at 649), so
+it runs after that unlock and before the defers registered earlier: the
+marker's release (625, a no-op by then), the snapshot folder's let-go (599)
+and the store's hold (592). It runs on every return once the database is
+replaced (`dbReplaced`, set at 890 after the copy at 878): a later file's
+failure, the late refusal at bridge.yaml's own write (`partialRestoreError`,
+820), and a return with nothing after it. Its error is joined to the
+restore's (`errors.Join`, only where the mint failed). The files after
+bridge.db in a snapshot (the token store, the TLS pair, bridge.yaml, the
+console account and the harvest state, in `captureInto`'s order,
+`backup.go:330-358`) are written in the loop as before, bridge.yaml through
+the turn (817), all of them before the unlock.
+
+**The window after the unlock.** Nothing opens the store between
+bridge.yaml's unlock and the mint. Every opener of the live database takes
+the store's lifetime lock shared and is refused beside the restore's
+exclusive hold, which `RestoreWithOptions` takes at 588 and lets go in 592's
+defer, after the mint. Bridge restore, the one production caller
+(`cmd/bridge/backup.go:566`), holds that lock from 486 to its return (496),
+inside the data dir's lock (465-466), which serve and every command that
+takes it are refused beside. In this process the deferred calls run in
+sequence on the restore's goroutine.
+
+**Writers of bridge.yaml after the unlock.** Those that take the data dir's
+lock (serve, the bind, reset-player and clear-missing) wait for bridge
+restore to end. Those that take bridge.yaml's lock alone can write in the
+window: library add and remove (`config.Edit`, `library.go:120` and `:213`;
+a third root is saved without opening the store, and a transition opens it
+and is refused by the hold), init (`saveInitConfig`, which compares the file
+with the one it read first) and serve's seed (only where no file is). None
+of them changes what the mint does. Its target was captured before the
+unlock (`dbReplaced`, from `dst.ManifestDB`, which bridge restore worked out
+from the config it read before its prompt, and which the restore compared
+with what its turn found, `configStillAsRead`), and the mint reads nothing
+of bridge.yaml (`ResetBackupEpoch`, `sync_epoch.go:119-149`: `OpenStore` of
+that path, the epoch's replacement and a checkpoint; `disarmBeforeMigrating`
+takes the data dir from the database's own directory).
+
+**A crash in that window** leaves the restored database on the snapshot's
+epoch. So did a crash at `a6bbe935` between the copy (859) and the mint
+(881); the window is now longer by the files after bridge.db and the
+unlock. The next open neither mints nor notices (the store opens on the
+snapshot's epoch, and serve serves it), the next backup carries it, and
+running the restore again mints a new one. A full restore writes no journal
+(`restore_journal.go:13`); PR 2b's database-only restore keeps one.
+
+**Main.** `2e02d905` has the same reversal in the restore: bridge.yaml's
+lock (`backup.go:562`) held across `ResetBackupEpoch` (781), fixed here.
+Library add and remove open the store inside `config.Edit`
+(`library.go:120` and `:213`, through `openManifestStore` at 410 and 271),
+so where a migration step is pending that open takes the marker's lock
+under bridge.yaml's: left to an item of its own. The other turns open no
+store and take no marker lock: init's (`init.go:1013`), the seed's
+(`main.go:3439`), the bind's (`output_dac_bind.go:641`) and the console's
+(the holder's turn; its save of update checks off takes the marker's lock
+before it, `handlers_api.go:2667-2730`).
+
+**Windows identity.** `raceAnInstall` took the live database's identity
+before and after the replacement by `os.Lstat`. Go 1.27.3's Lstat of a
+regular file answers from `GetFileAttributesEx` and keeps the path alone
+(`os/stat_windows.go:37-48`), and `os.SameFile` reads the file ID through
+that path when it compares (`os/types_windows.go:287-336`, `loadFileId`,
+called from `sameFile` at 353), so after the replacement both sides named
+the new file, and both round-3 race tests refused the correct code on
+windows-latest. A handle's `Stat` reads the ID at once
+(`os/stat_windows.go:17-22` and 108-123, `statHandle`;
+`os/types_windows.go:46-79`, the path left empty so that SameFile does not
+read it again). The handle cannot stay open across the replacement:
+`os.Open` is `syscall.Open` (`os/file_windows.go:157-162`), whose share mode
+is `FILE_SHARE_READ|FILE_SHARE_WRITE` (`syscall/syscall_windows.go:395`), no
+delete, which refuses the rename that replaces the file. So `liveFile` reads
+the identity and the bytes through one handle, closed before the restore
+runs, and an install counts the database replaced when its ID or its bytes
+differ from the old file's: an ID the old file freed cannot read as no
+replacement.
+
+**The busy test.** `TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy` passed
+no `--config`. In this branch's order the look comes after the config, the
+data dir's lock, the store's lock and the journal, so it failed (`config
+load failed: no config found`) on every runner without a config (run
+43858844891), and passed on a Mac only by loading the Mac's own bridge.yaml
+and taking that data dir's locks. It now restores into an install of its
+own (`seedRestorableInstall`) under `isolateConfigEnv`: the
+`defaultConfigDirFn` seam and a working directory of its own, both put back
+by its cleanup, never a variable cleared and never the package's working
+directory, which its tests read sources relative to. It was the one call of
+`restoreCmd` in cmd/bridge's tests without `--config`.
+
+**Reds and controls.** Before the change,
+`TestAWriterOfTheMarkerThenTheConfigMeetsNoLockCycleBesideARestore` failed
+in 8.97 s, naming the cycle (the writer refused after 5 s). It is driven by
+handshakes on the locks (the restore's `afterDatabaseCopy` hook,
+`config.LockWaitedForTest` and `updater.SetStateLockWaitingForTest`) over
+bounded channels, and its cleanup lets go of both callers and joins them.
+`TestARestoreRefusedAtBridgeYAMLStillMintsItsEpoch` passed there, the mint
+then being inside the loop. Five controls by overlay
+(`.tmp/_b653p2a/controls4.py`), all red: the change reverted (the cycle, in
+8.92 s); the epoch minted only where the restore succeeded (the late
+refusal keeps the snapshot's epoch); the marker's lock let go once the
+record is made, with a pause before the copy (both race tests,
+`replaced:false` read through the handles); the lock let go right after the
+admission (the first test by `replaced`, the second by the previous
+version's refusal); and the busy test's cases without `--config` (exit 2,
+no config found under the isolation).
+
+**The gate.** At `af1958b3`, `go vet` with the release tags for linux,
+darwin and windows was clean, and the race run of internal/backup,
+internal/manifest and cmd/bridge passed the first two (830 s and 1,670 s)
+and failed cmd/bridge's `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`.
+Its excusal of the restore's `ResetBackupEpoch` is keyed by the calling
+file, and the helper then made that call from restore_store.go: a tree-wide
+guard no run of internal/backup alone could see. The helper moved to
+backup.go unchanged (`6ff6ddc7`), and there the vets were clean again and
+the race run of the three packages passed: internal/backup in 830 s,
+internal/manifest in 1,669 s and cmd/bridge in 1,729 s. The x50 runs under
+-race beside 16 CPU hogs, killed by their captured PIDs, passed at both
+heads: the lock-cycle test, the late refusal's and the two race tests in
+1,178 s at `af1958b3` and 1,170 s at `6ff6ddc7`, the busy test in 115 s and
+113 s. The Windows experiment is `.tmp/_b653p2a/b653p2a-r4-windows.yml`: the
+two race tests, the lock-cycle test and the busy test, `-v -count=20` on
+windows-latest, each to show 20 `--- PASS` lines and no `--- FAIL`.
+## 2026-11-16 — B601's round 5: a refused Play's words, and the tone before it
+
+Branch `feat/b601-pcm-tone`. e772fa5d merges main 30ae88f6 (B911 and B912, the
+two load-sensitive tests this branch's CI failed, with B898 PR 1 and B728 B9
+PR 3a): four documents conflicted where both sides wrote, CLAUDE.md's three
+player rows taking each side's words, and `ops/History-rules-cli-serve.md`,
+`ops/History-rules-output.md` and this log both sides' entries, this
+branch's first. e81bb2c1 is the page's test ahead of its fix, b5b26217 the
+fix, then this record; the rules' change is the round's patch, which goes in
+as a commit after this record.
+
+A tone that ends `stop_unconfirmed` holds the device slot until its node's
+close answers, so a newer Play is refused meanwhile (409 `tone_playing`, or
+`player_sounding` where the engine plays), its words on the tone's line. The
+next status still read the earlier tone `stop_unconfirmed`, and
+`renderPlayerOutputTone` painted its warning over the refusal and set
+`busyShown`, so the idle status once the DAC closed said how the earlier
+tone had ended, on the line where the operator's Play had been refused. The
+page now marks the line as a refusal's (`playerTone.refusalShown`) where the
+bridge answered the Play 409, and while the mark stands a status neither
+repaints the line nor sets `busyShown`; a status that reads the tone idle, a
+later tone `playing` (another page's included) or `release_unconfirmed`
+(whose restart warning replaces the refusal) takes the mark back, and the
+status speaks as before from that reading on. `stopping` holds the mark as
+`stop_unconfirmed` does: either is a tone still letting go of the DAC. Only
+a refusal sets it: a Play that ran keeps the warning it answered for the next
+status (`busyShown`, round 4), and a failure the bridge did not answer 409,
+where the tone may have run, sets nothing. Play's start, the page's wiring, a
+Stop's confirmation, and the page's hiding and its showing again from the
+cache take it back. The fix is 18 lines of `app.js` (15 added, 3 removed).
+
+`TestTheToneBeforeARefusedPlayDoesNotPaintOverIt` runs four cases under
+node, each after a tone that answered `stop_unconfirmed` and a newer Play
+refused 409 `tone_playing`: `stop_unconfirmed` then idle, the refusal
+standing through both with `busyShown` false, then a later `playing` and
+idle, each painted; `stop_unconfirmed` then `release_unconfirmed`, painted;
+`stop_unconfirmed` then `playing`, painted; and the page hidden and shown
+again from the cache while the status reads `stop_unconfirmed`, painted. Its
+structural half (the guard, its setting in the 409 branch, the four paths
+that take it back) fails at e81bb2c1 and passes at b5b26217; the test host
+has no node, so the node half of every page case skipped there. Three
+controls, each an edit of b5b26217's `app.js`, the case run, then the
+committed bytes written back: A, the guard's two lines taken out; B, the line
+that takes the mark back taken out, so the mark holds every status once set;
+C, `"release_unconfirmed"` taken out of the statuses that end it. Each failed
+by the structural half; under node, A fails the first case's
+`stop_unconfirmed` step, B its later `playing` and idle and the second step
+of the next two cases, C the second case's `release_unconfirmed` step.
+
+The merge left `.claude/rules/admin-console.md` at 100,377 bytes, over its
+100,000: main's 741 bytes beside this branch's 5,473. The round's patch moves
+the B177 entry's long form, verbatim, into a new
+`ops/History-rules-admin-console.md` (`scripts/doc-split/move_entry.py
+--line 329`, which leaves its pointer in place), which
+`scripts/doc-split/verify_moves.py --base b5b26217` passes with the move
+alone and again with the test tone's bullet named as edited, and adds the
+round's clause and case to that bullet: 96,998 bytes. On a copy with the
+patch applied, `make docs-check`'s four commands and cmd/bridge's
+`TestEveryCitedTestNameExists` pass.
+
+At b5b26217, in the build slot: `go test ./internal/admin/` passed in 258 s,
+none of its 51 node halves running (the seven tone page cases' structural
+halves passed); `go test -race -count=1 -timeout 45m ./internal/admin/
+./internal/api/ ./internal/backup/` passed (admin 1,221 s, api 157 s, backup
+754 s); and `go vet ./...` with the tags for linux/amd64, darwin/arm64 and
+windows/amd64 (`CGO_ENABLED=0` for the two) exited 0 each. go1.27.3's gofmt
+lists none of the changed Go files, and the names check over the branch's
+commit messages and added lines since main finds nothing in this round's.

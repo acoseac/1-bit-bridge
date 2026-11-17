@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -103,7 +104,9 @@ type State struct {
 	// LOAD-BEARING for the boot-time restore. The marker is armed
 	// BEFORE swapBinary (see Install's method doc), and on Windows
 	// swapBinary's FIRST action is an SCM stop that can take up to
-	// scmStopWait (15 s) before any rename happens. A kill in that
+	// scmStopWait (15 s) before any rename happens, then the staging and
+	// the probes, which wait out another process's hold on a file of the
+	// swap for up to forwardWaits' 4.75 s (backlog B898). A kill in that
 	// window — a Ctrl-C on `bridge update`, a power loss — leaves a
 	// marker claiming an install that never touched the filesystem,
 	// while .bak still holds the version BEFORE the one now running
@@ -310,10 +313,36 @@ func LoadState(dataDir string) (State, error) {
 	return st, nil
 }
 
+// markerWritten, nil in production, hears each write of the install marker,
+// with its data dir (SetMarkerWriteObserverForTest).
+var markerWritten atomic.Pointer[func(dataDir string)]
+
+// SetMarkerWriteObserverForTest makes fn hear each write and each removal of
+// the install marker, with its data dir, as it begins, and returns what puts
+// the observer before it back: a test counts the writes an operation makes
+// while it holds the install marker's lock (backlog B898's pins). Production
+// code MUST NOT call it. Process-global: a test that sets it MUST NOT call
+// t.Parallel(), and restores it once every operation it started has returned.
+func SetMarkerWriteObserverForTest(fn func(dataDir string)) (restore func()) {
+	var p *func(string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := markerWritten.Swap(p)
+	return func() { markerWritten.Store(prev) }
+}
+
+func observeMarkerWrite(dataDir string) {
+	if fn := markerWritten.Load(); fn != nil {
+		(*fn)(dataDir)
+	}
+}
+
 // SaveState atomically writes State to dataDir/update-state.json
 // (temp + rename). Caller is expected to validate the State before
 // calling.
 func SaveState(dataDir string, st State) error {
+	observeMarkerWrite(dataDir)
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir dataDir: %w", err)
 	}
@@ -387,6 +416,7 @@ func SaveState(dataDir string, st State) error {
 
 // ClearState removes the marker. No-op when the file doesn't exist.
 func ClearState(dataDir string) error {
+	observeMarkerWrite(dataDir)
 	err := os.Remove(StatePath(dataDir))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -677,6 +707,19 @@ func RollbackRefusalOn(st State, readErr error) string {
 			"since the install marker cannot be read"
 	}
 	return RollbackRefusal(st)
+}
+
+// RollbackRefusalAt is the one predicate the operator's rollback and the
+// Updates panel share (backlog B707, B898): first the recovery latch
+// (binaryLatch), on which Rollback refuses before it reads the marker, in its
+// words where the binary is not at binaryPath or whether it is cannot be told;
+// then RollbackRefusalOn's on the marker read. "" where the rollback would go
+// on. Its words name no path and no error's text.
+func RollbackRefusalAt(st State, readErr error, binaryPath string) string {
+	if err := binaryLatch(binaryPath); err != nil {
+		return latchWords(err)
+	}
+	return RollbackRefusalOn(st, readErr)
 }
 
 // OperatorRollbackRecord is the marker an operator's rollback writes,

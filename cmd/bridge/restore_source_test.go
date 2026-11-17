@@ -263,8 +263,14 @@ func TestBridgeRestoreRefusesASnapshotPrunedWhileItAsked(t *testing.T) {
 // never that the path holds no snapshot, and asks nothing; one whose look its
 // stop ended says the stop, exit 1, asking nothing (backlog B898). The look's
 // own answers are internal/backup's TestTheLookBeforeThePromptReadsABusyManifestAgain.
+// It restores into an install of its own (B653 PR 2a's fourth round), whose
+// config, data dir lock, store lock and journal come before the look, and
+// resolves no config outside its temp dirs (isolateConfigEnv): run without
+// --config, it finds none on any platform and fails, where it once loaded the
+// host's own bridge.yaml and took that data dir's locks.
 func TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy(t *testing.T) {
-	snap := filepath.Join(t.TempDir(), "20261115T000000Z")
+	isolateConfigEnv(t)
+	cfg, _, snap := seedRestorableInstall(t, closedAdminAddr(t))
 	for _, tc := range []struct {
 		name   string
 		answer error
@@ -279,7 +285,7 @@ func TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy(t *testing.T) {
 			checkRestoreSource = func(context.Context, string, time.Duration) error { return tc.answer }
 			t.Cleanup(func() { checkRestoreSource = prev })
 			var stdout, stderr strings.Builder
-			code := restoreCmd(context.Background(), []string{snap}, strings.NewReader("yes\n"), &stdout, &stderr)
+			code := restoreCmd(context.Background(), []string{"--config", cfg, snap}, strings.NewReader("yes\n"), &stdout, &stderr)
 			if code != 1 || !strings.Contains(stderr.String(), tc.want) || strings.Contains(stderr.String(), "not a recognized snapshot") ||
 				strings.Contains(stderr.String(), "Type 'yes'") || stdout.Len() != 0 {
 				t.Errorf("bridge restore whose look answered %v = %d\nstdout:\n%s\nstderr:\n%s", tc.answer, code, stdout.String(), stderr.String())

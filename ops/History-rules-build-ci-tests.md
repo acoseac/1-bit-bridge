@@ -1450,6 +1450,8 @@ for a root `os.OpenRoot` opens, as the repair's is (`Root.OpenRoot`'s
 sub-roots share delete).
 Records: `ops/engineering-log.md`, 2026-11-09, B652 rounds 4 and 5.
 
+- **A Windows test of a rename another process's handle refuses holds the file itself, through a handle it opens with share mode 0 (`holdShareNone`), requires a rename of the held file to answer `ERROR_SHARING_VIOLATION` before anything else (a rename that lands is put back, the handle closed first, and the case fails), lets the hold go from the updater's observer after a refusal it heard (`SetRenameObserverForTest`), or, where the case holds the file throughout, once the operation has returned and before it reads any file, fails the case on a read that fails (`readBytes`), and sleeps the code's waits for real only once it has let go, its deadlines read on a clock those waits move, each sleep overrunning by a millisecond as a host's does (`realHolds`)** (2026-11-15, backlog B898). **Don't hold a file by anything but a handle the test opened, take a case whose hold was never refused for proof, let a hold go on a timer, read a file the case still holds, or take a read that failed for the file's bytes.** `held_windows_test.go`'s `TestARollbackWaitsOutAHandleThatSharesNoDeletion`, `TestARollbackHeldThroughItsWaitMovesNothing`, `TestAPutBackHeldThroughItsWaitSaysWhereBothFilesAre` and `TestAnInstallWaitsForItsCheckedCandidateBeforeItArms` hold to it.
+
 ## B514 — deterministic medium evidence and controls (2026-10-23)
 
 Mount tables, device identities and statfs sequences are explicit fixtures.

@@ -68,9 +68,34 @@ func TryLockShared(f *os.File) error {
 // the rest: Linux also answers it when the kernel cannot allocate a lock
 // record, on a filesystem that keeps locks and while another open holds one,
 // so a caller that must never go on beside a holder asks for it apart before
-// it asks this (the config file's lock, internal/config's noLockToGive).
+// it asks this (NoLockToGive: the config file's lock, internal/config's
+// noLockToGive), or asks DefinitelyKeepsNoLocks instead (the store's lifetime
+// lock).
 func KeepsNoLocks(err error) bool {
 	return err != nil && keepsNoLocks(err)
+}
+
+// NoLockToGive reports whether err, what TryLock or TryLockShared answered,
+// is flock's ENOLCK: no lock to give. An NFS mount whose lock manager is not
+// running answers it, and so does a Linux kernel that cannot allocate a lock
+// record, on any filesystem, while another open holds the lock. So it never
+// says the filesystem keeps no locks. False on Windows, whose LockFileEx has
+// no such answer. The one reading of it: the config file's lock asks it
+// (internal/config's noLockToGive), and DefinitelyKeepsNoLocks leaves it out.
+func NoLockToGive(err error) bool {
+	return err != nil && noLockToGive(err)
+}
+
+// DefinitelyKeepsNoLocks reports whether err, what TryLock or TryLockShared
+// answered, is a definitive answer that no lock can be taken on that file:
+// KeepsNoLocks' answers less ENOLCK (NoLockToGive), which Linux also gives
+// beside a holder. That is the filesystem's answer for the mount, the same
+// for every process, so a caller that goes on without a lock on it can never
+// stand beside another process's hold, where one that went on after ENOLCK
+// could (backlog B653 PR 2a: the store's lifetime lock goes on only on this
+// answer, and refuses on every other failure).
+func DefinitelyKeepsNoLocks(err error) bool {
+	return KeepsNoLocks(err) && !NoLockToGive(err)
 }
 
 // Unlock releases the lock TryLock took on f. Closing f releases it too,

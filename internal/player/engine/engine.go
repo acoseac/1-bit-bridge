@@ -537,7 +537,10 @@ func (e *Engine) ReportOutput(ctx context.Context, r OutputReport) error {
 // within ReleaseTimeout, and drops all pending backend work. It answers
 // once the release is confirmed, or its deadline has passed
 // (Hold.ReleaseConfirmed false: entered, release unconfirmed). The lease is
-// the caller's alone. A second enter is refused with ReasonMaintenance.
+// the caller's alone. A second enter is refused with ReasonMaintenance. A
+// configuration reservation held does not refuse it (ReserveConfiguration),
+// which is a residual: only the harness's bridge output play enters
+// maintenance, and it holds no reservation.
 func (e *Engine) EnterMaintenance(ctx context.Context, want Generation, reason string) (Hold, error) {
 	r := e.do(&command{op: opEnterMaint, ctx: ctx, want: want, reason: reason})
 	return r.hold, r.err
@@ -554,6 +557,56 @@ func (e *Engine) RenewMaintenance(ctx context.Context, lease Lease) (time.Time, 
 // A wrong or stale lease is refused with ReasonLease.
 func (e *Engine) ExitMaintenance(ctx context.Context, lease Lease) error {
 	return e.do(&command{op: opExitMaint, ctx: ctx, lease: lease}).err
+}
+
+// ReserveConfiguration reserves the player's configuration for a write that
+// must not run beside playback, a DAC's DSD choice (B728 B9 PR 3): the owner
+// grants it in the one step that finds the transport stopped with nothing
+// under way (no session starting, playing, paused or releasing, and no
+// release unconfirmed), and refuses it ReasonNotStopped otherwise; under
+// maintenance and once the shutdown has begun it refuses it as it refuses
+// every command (ReasonMaintenance, ReasonClosed). While a reservation is
+// held, whatever would start a session is refused ReasonConfiguring,
+// changing nothing; no other command is. The grant moves no generation. The
+// lease is the caller's alone, in no snapshot (Snapshot.ConfigurationReserved
+// says whether one is held); its caller lets it go with ReleaseConfiguration
+// once its write has returned, however the request that asked for it ended,
+// and nothing else does: it has no expiry.
+//
+// The grant is never lost to its caller. A ctx that has ended already is
+// refused as it is for every command; otherwise the owner is asked on a
+// context that does not end (context.WithoutCancel, which keeps ctx's values,
+// so WithAdmission's channel still closes as the owner admits it), and a grant
+// ctx outlived is let go before the method returns, which answers
+// ReasonCancelled wrapping ErrNotAdmitted: the one refusal of a command the
+// owner admitted that wraps it, since the caller holds nothing.
+func (e *Engine) ReserveConfiguration(ctx context.Context) (ConfigLease, error) {
+	name := opReserveConfig.String()
+	if err := ctx.Err(); err != nil {
+		return ConfigLease{}, notAdmitted(name, err)
+	}
+	r := e.do(&command{op: opReserveConfig, ctx: context.WithoutCancel(ctx)})
+	if r.err != nil {
+		return ConfigLease{}, r.err
+	}
+	if err := ctx.Err(); err != nil {
+		e.ReleaseConfiguration(r.config)
+		return ConfigLease{}, &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended as the reservation was granted: it was let go",
+			Err: fmt.Errorf("%w: %w", ErrNotAdmitted, err)}
+	}
+	return r.config, nil
+}
+
+// ReleaseConfiguration lets go the configuration reservation l holds. It is a
+// command, never a message: it returns once the owner has taken it, and the
+// snapshot then published shows the lease gone, so a command sent after it, a
+// Play among them, finds it gone, where a posted message could be taken after
+// that command. It lets a lease go whatever the engine's state, under
+// maintenance and once the shutdown has begun included, and after Run it
+// returns at once. A lease not held, let go already or never granted, changes
+// nothing. A stalled owner delays it, as it delays every command.
+func (e *Engine) ReleaseConfiguration(l ConfigLease) {
+	e.do(&command{op: opReleaseConfig, ctx: context.Background(), config: l})
 }
 
 // op is a command's kind.
@@ -578,11 +631,13 @@ const (
 	opExitMaint
 	opSeekAbsolute
 	opSeekRelative
+	opReserveConfig
+	opReleaseConfig
 )
 
 var opNames = [...]string{"play", "pause", "stop", "next", "previous", "play id", "play index", "insert", "delete", "delete all",
 	"set repeat", "set shuffle", "report output", "enter maintenance", "renew maintenance", "exit maintenance",
-	"seek absolute", "seek relative"}
+	"seek absolute", "seek relative", "reserve configuration", "release configuration"}
 
 func (o op) String() string { return opNames[o] }
 
@@ -606,6 +661,8 @@ type command struct {
 	// seconds is a seek's value: from the track's start, or signed, from its
 	// position.
 	seconds int64
+	// config is the lease a configuration reservation's release lets go.
+	config ConfigLease
 
 	reply   chan reply
 	replied bool
@@ -630,6 +687,7 @@ type reply struct {
 	id      uint32
 	hold    Hold
 	expires time.Time
+	config  ConfigLease
 }
 
 // do hands c to the owner and waits for its reply. A context that has
@@ -690,11 +748,14 @@ func (e *Engine) do(c *command) reply {
 // 5a4, round 2): from then on the command's caller no longer decides whether
 // it runs (a context that ends after it is answered ReasonCancelled without
 // ErrNotAdmitted), and its answer comes once it has run, which for a Stop is
-// once its release is confirmed or past its deadline. A command the owner
-// never admits (its context ended first, its caller abandoned it, the engine
-// had shut down) never closes it. The OpenHome surface gives a Stop's request
-// slot back there, so the Stops that wait for a release hold no slot. A
-// context so made is for one command: another passed it closes nothing more.
+// once its release is confirmed or past its deadline. ReserveConfiguration is
+// the exception: a grant its context outlived is let go and answered with
+// ErrNotAdmitted, the channel closed all the same, since the owner admitted
+// it. A command the owner never admits (its context ended first, its caller
+// abandoned it, the engine had shut down) never closes it. The OpenHome
+// surface gives a Stop's request slot back there, so the Stops that wait for
+// a release hold no slot. A context so made is for one command: another
+// passed it closes nothing more.
 func WithAdmission(ctx context.Context) (context.Context, <-chan struct{}) {
 	n := &admissionNote{ch: make(chan struct{})}
 	return context.WithValue(ctx, admissionKey{}, n), n.ch

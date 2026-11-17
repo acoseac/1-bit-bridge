@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"sync"
 )
 
 // newEpoch draws the 32-hex backup epoch. Sixteen random bytes: the value
@@ -48,11 +50,72 @@ func ReplaceBackupEpoch(ctx context.Context, db *sql.DB) (string, error) {
 	return epoch, nil
 }
 
+// ErrEpochCheckpointBusy is ResetBackupEpoch's answer where the new epoch was
+// committed and its TRUNCATE checkpoint did not complete: SQLite answered
+// busy, or checkpointed fewer frames than the WAL holds. The epoch, and any
+// migration step the open ran, is then in the WAL, which the next open
+// replays, so the WAL and its -shm must stay (backlog B653 PR 2a: the full
+// restore removed them whatever the checkpoint answered).
+var ErrEpochCheckpointBusy = errors.New("the new backup epoch is committed, but its checkpoint did not complete, so it is still in the database's WAL")
+
+// The checkpoint's seams, nil in production: epochCheckpointAnswer stands in
+// for the checkpoint's row (busy, log, checkpointed), so a test can decode an
+// answer SQLite gives only under contention; beforeEpochMint runs once the
+// store is open and before the epoch is written, with the database's path, so
+// a test can take a real reader there that keeps the checkpoint from
+// completing.
+var (
+	epochSeamMu           sync.Mutex
+	epochCheckpointAnswer func() (busy, log, checkpointed int, err error)
+	beforeEpochMint       func(dbPath string)
+)
+
+// SetEpochCheckpointAnswerForTest makes ResetBackupEpoch take fn's answer for
+// its checkpoint's row instead of SQLite's (the checkpoint still runs), and
+// SetBeforeEpochMintForTest runs fn once its store is open and before the
+// epoch is written. Each returns what puts the seam before it back. Process
+// globals: a test that uses one MUST NOT call t.Parallel(), and restores it
+// in a t.Cleanup.
+func SetEpochCheckpointAnswerForTest(fn func() (busy, log, checkpointed int, err error)) (restore func()) {
+	epochSeamMu.Lock()
+	prev := epochCheckpointAnswer
+	epochCheckpointAnswer = fn
+	epochSeamMu.Unlock()
+	return func() {
+		epochSeamMu.Lock()
+		epochCheckpointAnswer = prev
+		epochSeamMu.Unlock()
+	}
+}
+
+// SetBeforeEpochMintForTest: see SetEpochCheckpointAnswerForTest.
+func SetBeforeEpochMintForTest(fn func(dbPath string)) (restore func()) {
+	epochSeamMu.Lock()
+	prev := beforeEpochMint
+	beforeEpochMint = fn
+	epochSeamMu.Unlock()
+	return func() {
+		epochSeamMu.Lock()
+		beforeEpochMint = prev
+		epochSeamMu.Unlock()
+	}
+}
+
+func epochSeams() (answer func() (int, int, int, error), before func(string)) {
+	epochSeamMu.Lock()
+	defer epochSeamMu.Unlock()
+	return epochCheckpointAnswer, beforeEpochMint
+}
+
 // ResetBackupEpoch opens the database (running migrations), writes a new
 // epoch, and checkpoints before it returns. The checkpoint is load-bearing:
 // the caller removes the WAL afterwards, and a commit that was still in the
 // WAL would leave the restored file without the new epoch and without the
-// migration that created the table.
+// migration that created the table. So its answer is read (backlog B653 PR
+// 2a): where it did not complete, busy or with fewer frames checkpointed than
+// the WAL holds, it answers ErrEpochCheckpointBusy, and the caller keeps the
+// WAL; any other error means the epoch may not be committed at all, and the
+// WAL is kept too.
 func ResetBackupEpoch(dbPath string) (err error) {
 	s, err := OpenStore(dbPath)
 	if err != nil {
@@ -63,11 +126,24 @@ func ResetBackupEpoch(dbPath string) (err error) {
 			err = cerr
 		}
 	}()
+	answer, before := epochSeams()
+	if before != nil {
+		before(dbPath)
+	}
 	if _, err = ReplaceBackupEpoch(context.Background(), s.db); err != nil {
 		return err
 	}
-	if _, err = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+	var busy, log, checkpointed int
+	if err = s.db.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &log, &checkpointed); err != nil {
 		return err
+	}
+	if answer != nil {
+		if busy, log, checkpointed, err = answer(); err != nil {
+			return err
+		}
+	}
+	if busy != 0 || log != checkpointed {
+		return fmt.Errorf("%w (busy %d, %d frames in the WAL, %d checkpointed)", ErrEpochCheckpointBusy, busy, log, checkpointed)
 	}
 	return nil
 }

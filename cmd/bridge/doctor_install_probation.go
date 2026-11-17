@@ -113,6 +113,11 @@ func storeMigrationsLine(dbPath, why string) (doctor.Check, bool) {
 // store-migrations line saying the rest (backlog B660's second round). The
 // store's own open would refuse too, and run no step; asked here, the probes
 // say it in a few words.
+//
+// An open the store's admission refuses, its lifetime lock's or the
+// restore journal's (manifest.AdmissionRefused: a restore holds the
+// database, a lock that cannot be taken, an unfinished restore), opens
+// nothing, and the probe's line says it was not checked (backlog B653 PR 2a).
 func doctorOpenStore(dbPath string) (*manifest.Store, error) {
 	dataDir := filepath.Dir(dbPath)
 	if st, err := updater.LoadState(dataDir); err == nil {
@@ -123,5 +128,9 @@ func doctorOpenStore(dbPath string) (*manifest.Store, error) {
 			}
 		}
 	}
-	return manifest.OpenStore(dbPath)
+	st, err := manifest.OpenStore(dbPath)
+	if err != nil && manifest.AdmissionRefused(err) {
+		return nil, fmt.Errorf("not checked: %w", err)
+	}
+	return st, err
 }

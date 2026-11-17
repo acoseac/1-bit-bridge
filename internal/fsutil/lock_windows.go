@@ -53,6 +53,10 @@ func keepsNoLocks(err error) bool {
 		errors.Is(err, errors.ErrUnsupported)
 }
 
+// noLockToGive is NoLockToGive on Windows: LockFileEx has no "no lock to
+// give" answer of flock's ENOLCK kind.
+func noLockToGive(error) bool { return false }
+
 func unlock(f *os.File) error {
 	return controlFD(f, "UnlockFileEx", func(fd uintptr) error {
 		return windows.UnlockFileEx(windows.Handle(fd), 0, lockAllBytes, lockAllBytes, new(windows.Overlapped))

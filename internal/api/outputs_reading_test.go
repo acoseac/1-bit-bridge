@@ -353,6 +353,10 @@ type readingRig struct {
 	reads    atomic.Int32
 	cards    func() (alsa.Snapshot, error)
 	cfg      LocalOutputsConfig
+	// limits are the reading's deadlines serve installs, each wider than any
+	// step takes on a loaded host: a test of a deadline builds its server with
+	// newReadingServer and sets its own.
+	limits readingLimits
 }
 
 // writeRigFile writes one file under dir, by a slash-separated path.
@@ -401,7 +405,6 @@ func newReadingRig(t *testing.T, capture, file string, track OutputTrack, status
 	r.cards = func() (alsa.Snapshot, error) { return (alsa.Reader{ProcRoot: r.procRoot}).Read() }
 	r.cfg = LocalOutputsConfig{
 		GOOS: "linux",
-		Now:  time.Now,
 		Output: func() config.OutputConfig {
 			return config.OutputConfig{MPD: "on"}
 		},
@@ -449,6 +452,11 @@ func newReadingRig(t *testing.T, capture, file string, track OutputTrack, status
 		},
 		LoopbackBaseURL: func() string { return "http://127.0.0.1:7791" },
 	}
+	// The time between the reading's two status reads is the manual clock's,
+	// never the scheduler's, which a still elapsed would read as a seek.
+	manualClockOn(r)
+	r.limits = readingLimits{build: time.Minute, dial: 30 * time.Second, command: 30 * time.Second, proc: 30 * time.Second,
+		conf: 30 * time.Second, hint: 30 * time.Second, alsa: 30 * time.Second, file: 30 * time.Second}
 	return r
 }
 
@@ -466,11 +474,13 @@ func (r *readingRig) writeConf(text string) {
 	}
 }
 
-// serve starts the route over the rig and returns the server, a token and
-// the output's id as GET /v1/outputs lists it.
+// serve starts the route over the rig, with its limits from the first
+// request on, and returns the server, a token and the output's id as GET
+// /v1/outputs lists it.
 func (r *readingRig) serve() (*httptest.Server, string, string) {
 	r.t.Helper()
-	hs, token := newOutputsHTTP(r.t, "fp", r.cfg)
+	srv, hs, token := newReadingServer(r.t, r.cfg)
+	srv.localOutputs.limits = r.limits
 	return hs, token, firstOutputID(r.t, hs, token)
 }
 

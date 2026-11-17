@@ -107,7 +107,7 @@ func TestAManualRollbackStoppedAfterItsRenameIsFinishedByThePreviousVersionsBoot
 		t.Fatalf("the binary reports %q, want %s put back", got, previousVersion)
 	}
 	var stderr bytes.Buffer
-	if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, nil); err != nil {
+	if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, nil, testBackupProbeTimeout); err != nil {
 		t.Fatalf("the previous version's housekeeping = %v; stderr=%s", err, stderr.String())
 	}
 	st, err := updater.LoadState(r.dataDir)

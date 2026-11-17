@@ -190,6 +190,22 @@ func WithSourceHeldForTest(opts RestoreOptions, fn func()) RestoreOptions {
 	return opts
 }
 
+// WithBeforeDatabaseCopyForTest returns opts with fn as what a restore runs
+// just before it replaces the live database with the snapshot's, its record
+// in the install marker made.
+func WithBeforeDatabaseCopyForTest(opts RestoreOptions, fn func()) RestoreOptions {
+	opts.beforeDatabaseCopy = fn
+	return opts
+}
+
+// WithAfterDatabaseCopyForTest returns opts with fn as what a restore runs
+// once the snapshot's database is in place and the install marker's lock let
+// go, before the epoch's open.
+func WithAfterDatabaseCopyForTest(opts RestoreOptions, fn func()) RestoreOptions {
+	opts.afterDatabaseCopy = fn
+	return opts
+}
+
 // SetReadStuckMarkerForTest replaces the read of the marker a check that did
 // not end leaves beside the backups folder's lock, and returns the restore.
 func SetReadStuckMarkerForTest(fn func(path string) ([]byte, error)) (restore func()) {
@@ -235,21 +251,6 @@ func SetOnSourceStepForTest(fn func(dir, step string)) (restore func()) {
 	}
 	prev := onSourceStep.Swap(p)
 	return func() { onSourceStep.Store(prev) }
-}
-
-// SetOnSourceWorkerEndForTest installs the hook a restore's source worker
-// runs last, given the snapshot as the restore was given it, once it has
-// handed its hold over or let go of what it took, and bridge restore's look
-// before its prompt (CheckRestoreSource) once its look has answered, and
-// returns the restore. Its callback must return, and ignore every snapshot
-// but its test's.
-func SetOnSourceWorkerEndForTest(fn func(dir string)) (restore func()) {
-	var p *func(string)
-	if fn != nil {
-		p = &fn
-	}
-	prev := onSourceWorkerEnd.Swap(p)
-	return func() { onSourceWorkerEnd.Store(prev) }
 }
 
 // SetReadSourceManifestForTest replaces the read of the manifest that bridge

@@ -293,6 +293,8 @@ var reasonFaults = map[engine.Reason]faultReply{
 	engine.ReasonOutputUnknown:      {code: errActionFailed},
 	engine.ReasonOutputUnavailable:  {code: errActionFailed},
 	engine.ReasonReleaseUnconfirmed: {code: errActionFailed},
+	engine.ReasonNotStopped:         {code: errActionFailed},
+	engine.ReasonConfiguring:        {code: errActionFailed},
 	engine.ReasonBackend:            {code: errActionFailed},
 	engine.ReasonTimeout:            {code: errActionFailed},
 	engine.ReasonSuperseded:         {code: errActionFailed},

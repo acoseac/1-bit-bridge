@@ -633,7 +633,9 @@ func TestAStartsCrashRollbackRunsWithUpdateChecksOff(t *testing.T) {
 // makes, its boot's (maybeRollbackOnBoot, once the store has opened), puts the
 // backup back where a version other than the install's target came up, with
 // update checks off in the settings: the start that is the previous version
-// finds the install's target never ran, restores the backup and serves.
+// finds the install's target never ran, restores the backup and serves. The
+// backup reports the version the install replaced, as the boot asks of it
+// before it puts it back (backlog B898).
 func TestAStartsBootRollbackRunsWithUpdateChecksOff(t *testing.T) {
 	persistentMedium(t)
 	r := newRefusedInstall(t, "update:\n  checkEnabled: false\n")
@@ -641,6 +643,7 @@ func TestAStartsBootRollbackRunsWithUpdateChecksOff(t *testing.T) {
 	// came up: this version starts again.
 	r.marker.TargetVersion, r.marker.PreviousVersion = "9.9.9", version.ServerVersion
 	r.saveMarker(t, r.dataDir)
+	t.Setenv(runAsBridgeVersionEnv, version.ServerVersion)
 	code, stderr, served := serveToItsEnd(t, serveOpts{configPath: r.cfg, binaryPath: r.bin})
 	if !served || code != 0 {
 		t.Fatalf("the start after an install whose target never came up = %d (served %v), want it served; stderr=%s", code, served, stderr)
@@ -648,8 +651,8 @@ func TestAStartsBootRollbackRunsWithUpdateChecksOff(t *testing.T) {
 	if !strings.Contains(stderr, "rolling back to .bak") {
 		t.Errorf("the start did not say it rolled the install back; stderr=%s", stderr)
 	}
-	if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
-		t.Errorf("the binary reports %q after the boot's rollback, want the backup's %s", got, previousVersion)
+	if got := reportedVersion(t, r.bin); !strings.Contains(got, version.ServerVersion) {
+		t.Errorf("the binary reports %q after the boot's rollback, want the backup's %s", got, version.ServerVersion)
 	}
 }
 
