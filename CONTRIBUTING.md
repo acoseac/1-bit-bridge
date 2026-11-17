@@ -54,7 +54,11 @@ their own 45-minute group apart, `cmd/bridge`, `internal/backup` and
 (`.github/scripts/native-test.sh`). A `TEST_PKGS` that matches no package
 fails. The words of `TEST_PKGS` that do not begin with `./`, `../` or `/` go to
 both as flags, after the packages, so write a flag whose value is a path as
-`-flag=path`. `.tmp/` is ignored by Git and excluded from Docker builds.
+`-flag=path`. When both run, a flag that writes one file you name
+(`-coverprofile`, the other profiles, `-trace`, `-o`), in `TEST_PKGS` or in
+`go env GOFLAGS`, is refused before either starts, since both would write that
+file: select one group's packages, or run `go test` yourself. `.tmp/` is
+ignored by Git and excluded from Docker builds.
 Unix-socket fixtures keep short `/tmp/mpd*` paths or bind by basename from
 inside their directory, since deep checkout paths exceed the OS socket
 address limit (104 bytes on macOS, 108 on Linux).

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,39 +98,71 @@ func nativeDryRun(t *testing.T, target []string, group string) nativeCommand {
 	return c
 }
 
-// nativeWorkflowLegs reads the cross-platform job of gate.yml: its legs, as
-// os/group, and the job's name, timeout, cache key and test step.
-func nativeWorkflowLegs(t *testing.T) (legs []string, name string, minutes int, cacheKey, testRun string) {
-	t.Helper()
-	b, err := readRepoBytes("../../.github/workflows/gate.yml")
-	if err != nil {
-		t.Fatal(err)
+// nativeJob is gate.yml's cross-platform job as these checks read it: its
+// legs, as os/group, its name, timeout, cache key and test step, and what in
+// the workflow could let a leg pass without running its tests.
+type nativeJob struct {
+	legs              []string
+	name              string
+	minutes           int
+	cacheKey, testRun string
+	// skips are the job's and its test step's if and continue-on-error (the
+	// step named test, and any that runs native-test.sh), and the dry-run
+	// switch (NATIVE_TEST_DRY_RUN) anywhere in the workflow: an if can skip a
+	// leg's tests, which on the step leaves the leg green, and a
+	// continue-on-error that is not false keeps a failure from failing it.
+	skips []string
+}
+
+// leeway says what a job's or a step's if or continue-on-error lets a leg
+// do, or "" for nothing: a node that is not there, or a continue-on-error
+// that is the boolean false. Both keys are YAML nodes here, so a boolean, a
+// string and an expression all read as they are written.
+func leeway(where, key string, n yaml.Node) string {
+	if n.Kind == 0 {
+		return ""
 	}
+	if key == "continue-on-error" && n.Kind == yaml.ScalarNode && n.Tag == "!!bool" {
+		if v, err := strconv.ParseBool(n.Value); err == nil && !v {
+			return ""
+		}
+	}
+	return fmt.Sprintf("%s has %s: %s", where, key, n.Value)
+}
+
+// readNativeJob reads the cross-platform job of a workflow's bytes, as
+// gate.yml has it.
+func readNativeJob(workflow []byte) (nativeJob, error) {
+	var nj nativeJob
 	var wf struct {
 		Jobs map[string]yaml.Node `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal(b, &wf); err != nil {
-		t.Fatalf("gate.yml: %v", err)
+	if err := yaml.Unmarshal(workflow, &wf); err != nil {
+		return nj, err
 	}
 	node, ok := wf.Jobs["cross-platform"]
 	if !ok {
-		t.Fatal("gate.yml has no cross-platform job")
+		return nj, fmt.Errorf("no cross-platform job")
 	}
 	var job struct {
-		Name     string `yaml:"name"`
-		Timeout  int    `yaml:"timeout-minutes"`
-		Strategy struct {
+		Name            string    `yaml:"name"`
+		If              yaml.Node `yaml:"if"`
+		ContinueOnError yaml.Node `yaml:"continue-on-error"`
+		Timeout         int       `yaml:"timeout-minutes"`
+		Strategy        struct {
 			Matrix map[string][]string `yaml:"matrix"`
 		} `yaml:"strategy"`
 		Steps []struct {
-			Name string         `yaml:"name"`
-			Uses string         `yaml:"uses"`
-			Run  string         `yaml:"run"`
-			With map[string]any `yaml:"with"`
+			Name            string         `yaml:"name"`
+			If              yaml.Node      `yaml:"if"`
+			ContinueOnError yaml.Node      `yaml:"continue-on-error"`
+			Uses            string         `yaml:"uses"`
+			Run             string         `yaml:"run"`
+			With            map[string]any `yaml:"with"`
 		} `yaml:"steps"`
 	}
 	if err := node.Decode(&job); err != nil {
-		t.Fatalf("gate.yml's cross-platform job: %v (a matrix key that is no list of names, an include or an exclude, does not read here)", err)
+		return nj, fmt.Errorf("the cross-platform job: %w (a matrix key that is no list of names, an include or an exclude, does not read here)", err)
 	}
 	keys := make([]string, 0, len(job.Strategy.Matrix))
 	for k := range job.Strategy.Matrix {
@@ -136,23 +170,49 @@ func nativeWorkflowLegs(t *testing.T) (legs []string, name string, minutes int, 
 	}
 	slices.Sort(keys)
 	if !reflect.DeepEqual(keys, []string{"group", "os"}) {
-		t.Fatalf("the cross-platform job's matrix has the keys %q, want exactly os and group: the legs are their product", keys)
+		return nj, fmt.Errorf("the cross-platform job's matrix has the keys %q, want exactly os and group: the legs are their product", keys)
 	}
 	for _, platform := range job.Strategy.Matrix["os"] {
 		for _, group := range job.Strategy.Matrix["group"] {
-			legs = append(legs, platform+"/"+group)
+			nj.legs = append(nj.legs, platform+"/"+group)
 		}
 	}
-	slices.Sort(legs)
+	slices.Sort(nj.legs)
+	nj.name, nj.minutes = job.Name, job.Timeout
+	for _, s := range []string{leeway("the job", "if", job.If), leeway("the job", "continue-on-error", job.ContinueOnError)} {
+		if s != "" {
+			nj.skips = append(nj.skips, s)
+		}
+	}
 	for _, st := range job.Steps {
 		if strings.HasPrefix(st.Uses, "actions/cache@") {
-			cacheKey, _ = st.With["key"].(string)
+			nj.cacheKey, _ = st.With["key"].(string)
 		}
 		if st.Name == "test" {
-			testRun = strings.TrimSpace(st.Run)
+			nj.testRun = strings.TrimSpace(st.Run)
+		}
+		if st.Name == "test" || strings.Contains(st.Run, ".github/scripts/native-test.sh") {
+			for _, s := range []string{leeway("its test step", "if", st.If), leeway("its test step", "continue-on-error", st.ContinueOnError)} {
+				if s != "" {
+					nj.skips = append(nj.skips, s)
+				}
+			}
 		}
 	}
-	return legs, job.Name, job.Timeout, cacheKey, testRun
+	if strings.Contains(string(workflow), "NATIVE_TEST_DRY_RUN") {
+		nj.skips = append(nj.skips, "the workflow names NATIVE_TEST_DRY_RUN, which makes a leg print its go test and run none")
+	}
+	return nj, nil
+}
+
+// gateWorkflow returns gate.yml's bytes.
+func gateWorkflow(t *testing.T) []byte {
+	t.Helper()
+	b, err := readRepoBytes("../../.github/workflows/gate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestTheNativeLegsRunEveryPackageOnceAndTheSlowOnesAt45m: the cross-platform
@@ -161,28 +221,35 @@ func nativeWorkflowLegs(t *testing.T) (legs []string, name string, minutes int, 
 // slow group is exactly the oracle's three packages, at -timeout 45m and at
 // least -p 3, the rest group every other package at 30m: the two together
 // are the listing, no package in both, neither empty, no -race (B897). The
-// legs are four jobs, named and cached apart.
+// legs are four jobs, named and cached apart, and nothing in the workflow
+// lets one pass without running its tests (readNativeJob's skips).
 func TestTheNativeLegsRunEveryPackageOnceAndTheSlowOnesAt45m(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the check runs the script's bash, as CI's Linux and macOS legs do for both platforms' listings; a Windows host's first bash may be WSL's")
 	}
-	legs, name, minutes, cacheKey, testRun := nativeWorkflowLegs(t)
-	if !reflect.DeepEqual(legs, nativeLegs) {
-		t.Errorf("the cross-platform job runs the legs %q, want %q", legs, nativeLegs)
+	job, err := readNativeJob(gateWorkflow(t))
+	if err != nil {
+		t.Fatalf("gate.yml: %v", err)
 	}
-	for what, s := range map[string]string{"name": name, "cache key": cacheKey} {
+	if !reflect.DeepEqual(job.legs, nativeLegs) {
+		t.Errorf("the cross-platform job runs the legs %q, want %q", job.legs, nativeLegs)
+	}
+	for what, s := range map[string]string{"name": job.name, "cache key": job.cacheKey} {
 		if !strings.Contains(s, "${{ matrix.group }}") {
 			t.Errorf("the cross-platform job's %s %q does not tell its groups apart", what, s)
 		}
 	}
-	if !strings.Contains(name, "${{ matrix.os }}") {
-		t.Errorf("the cross-platform job's name %q does not tell its platforms apart", name)
+	if !strings.Contains(job.name, "${{ matrix.os }}") {
+		t.Errorf("the cross-platform job's name %q does not tell its platforms apart", job.name)
 	}
-	if want := "bash .github/scripts/native-test.sh ${{ matrix.group }}"; testRun != want {
-		t.Errorf("the cross-platform job's test step runs %q, want %q", testRun, want)
+	if want := "bash .github/scripts/native-test.sh ${{ matrix.group }}"; job.testRun != want {
+		t.Errorf("the cross-platform job's test step runs %q, want %q", job.testRun, want)
 	}
-	if minutes < 75 {
-		t.Errorf("the cross-platform job's timeout-minutes is %d: a 45-minute binary's timeout and its setup need 75", minutes)
+	if job.minutes < 75 {
+		t.Errorf("the cross-platform job's timeout-minutes is %d: a 45-minute binary's timeout and its setup need 75", job.minutes)
+	}
+	for _, s := range job.skips {
+		t.Errorf("the cross-platform job could pass without its tests: %s", s)
 	}
 	tags := releaseTags(t)
 	goTool := filepath.Join(runtime.GOROOT(), "bin", "go")
@@ -279,6 +346,88 @@ func TestTheNativeScriptRefusesAnEmptyGroup(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(dir, "ran-go-test")); err == nil {
 				t.Error("native-test.sh ran go test")
+			}
+		})
+	}
+}
+
+// TestTheNativeScriptFailsAsItsGoTestFails: a leg's step fails with its go
+// test's status, so a failing test fails the leg's job, and the gate after it
+// (B897): the script runs go test last, under set -euo pipefail.
+func TestTheNativeScriptFailsAsItsGoTestFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in go is a POSIX sh script")
+	}
+	for _, group := range []string{"slow", "rest"} {
+		t.Run(group, func(t *testing.T) {
+			dir := t.TempDir()
+			put(t, dir, "go", "#!/bin/sh\nif [ \"$1\" = test ]; then exit 3; fi\nprintf '%s\\n' "+strings.Join(nativeSlowPackages, " ")+" "+makeTestConfig+"\n")
+			if err := os.Chmod(filepath.Join(dir, "go"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			err, out := runNativeScript(t, []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}, group)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+				t.Errorf("native-test.sh %s ended with %v, want its go test's exit status 3:\n%s", group, err, out)
+			}
+		})
+	}
+}
+
+// TestTheNativeJobCheckRefusesALegThatCanPassWithoutItsTests: readNativeJob,
+// which TestTheNativeLegsRunEveryPackageOnceAndTheSlowOnesAt45m runs on
+// gate.yml, finds what would let a leg pass without its tests in gate.yml
+// with one key added: an if on the job or on its test step (an if there can
+// skip the tests, and on the step leaves the leg green), a continue-on-error
+// on either that is not the boolean false (a boolean true and an expression
+// alike), and the dry-run switch in a step's environment (B897). gate.yml as
+// it is, and with continue-on-error: false, has none.
+func TestTheNativeJobCheckRefusesALegThatCanPassWithoutItsTests(t *testing.T) {
+	gate := string(gateWorkflow(t))
+	const jobAnchor, stepAnchor = "    runs-on: ${{ matrix.os }}\n", "      - name: test\n"
+	with := func(t *testing.T, anchor, added string) []byte {
+		t.Helper()
+		if n := strings.Count(gate, anchor); n != 1 {
+			t.Fatalf("gate.yml holds %q %d times, want once", anchor, n)
+		}
+		return []byte(strings.Replace(gate, anchor, anchor+added, 1))
+	}
+	for _, tc := range []struct {
+		name, anchor, added, says string
+	}{
+		{"an if on the job", jobAnchor, "    if: github.event_name == 'push'\n", "the job has if: github.event_name == 'push'"},
+		{"an if false on the job", jobAnchor, "    if: false\n", "the job has if: false"},
+		{"continue-on-error true on the job", jobAnchor, "    continue-on-error: true\n", "the job has continue-on-error: true"},
+		{"continue-on-error as an expression on the job", jobAnchor, "    continue-on-error: ${{ matrix.os == 'macos-latest' }}\n", "the job has continue-on-error: ${{ matrix.os == 'macos-latest' }}"},
+		{"an if on the test step", stepAnchor, "        if: matrix.group == 'rest'\n", "its test step has if: matrix.group == 'rest'"},
+		{"an if false on the test step", stepAnchor, "        if: ${{ false }}\n", "its test step has if: ${{ false }}"},
+		{"continue-on-error true on the test step", stepAnchor, "        continue-on-error: true\n", "its test step has continue-on-error: true"},
+		{"the dry-run switch in the test step's environment", stepAnchor, "        env:\n          NATIVE_TEST_DRY_RUN: 1\n", "names NATIVE_TEST_DRY_RUN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job, err := readNativeJob(with(t, tc.anchor, tc.added))
+			if err != nil {
+				t.Fatalf("readNativeJob: %v", err)
+			}
+			if len(job.skips) != 1 || !strings.Contains(job.skips[0], tc.says) {
+				t.Errorf("readNativeJob found %q, want one finding saying %q", job.skips, tc.says)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name     string
+		workflow []byte
+	}{
+		{"gate.yml as it is", []byte(gate)},
+		{"continue-on-error false on the job", with(t, jobAnchor, "    continue-on-error: false\n")},
+	} {
+		t.Run("none: "+tc.name, func(t *testing.T) {
+			job, err := readNativeJob(tc.workflow)
+			if err != nil {
+				t.Fatalf("readNativeJob: %v", err)
+			}
+			if len(job.skips) != 0 {
+				t.Errorf("readNativeJob found %q, want nothing", job.skips)
 			}
 		})
 	}

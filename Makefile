@@ -78,8 +78,13 @@ test test-fast: override TMPDIR := $(if $(strip $(TMPDIR)),$(TMPDIR),$(CURDIR)/.
 # ./, ../ or /, or name the module, are its packages, which go list expands;
 # every other word, a flag or a flag's value, goes to each go test as it
 # stands, after the packages, so a flag whose value is a path is written
-# -flag=path.
+# -flag=path. When both go tests run, a flag that writes one file the caller
+# names (ONE_FILE_TEST_FLAGS, with one dash or two, with or without test.,
+# from TEST_PKGS or go env GOFLAGS) is refused before either starts: both
+# would write that file at once, and a -coverprofile would hold one group's
+# coverage at best. One go test alone takes such a flag as go test does.
 SLOW_TEST_PKGS := github.com/acoseac/1-bit-bridge/cmd/bridge github.com/acoseac/1-bit-bridge/internal/manifest
+ONE_FILE_TEST_FLAGS := coverprofile cpuprofile memprofile blockprofile mutexprofile trace o
 TEST_PATTERNS  := . .. ./% ../% /% github.com/acoseac/1-bit-bridge github.com/acoseac/1-bit-bridge/%
 test_packages   = $(filter $(TEST_PATTERNS),$(TEST_PKGS))
 test_flags      = $(filter-out $(TEST_PATTERNS),$(TEST_PKGS))
@@ -89,6 +94,11 @@ test:
 	@set -e; pkgs=$$(go list -tags "$(GO_TAGS)" -race $(test_packages)); slow=; rest=; n=0; \
 	for p in $$pkgs; do case " $(SLOW_TEST_PKGS) " in *" $$p "*) slow="$$slow $$p"; n=$$((n + 1));; *) rest="$$rest $$p";; esac; done; \
 	if [ -z "$$slow$$rest" ]; then echo "make test: no package matches $(test_packages)" >&2; exit 1; fi; \
+	if [ -n "$$slow" ] && [ -n "$$rest" ]; then \
+		one_file() { from=$$1; shift; for w in "$$@"; do f=$${w#[\"\']}; case "$$f" in -*) f=$${f#-}; f=$${f#-}; f=$${f#test.}; \
+			case " $(ONE_FILE_TEST_FLAGS) " in *" $${f%%=*} "*) echo "make test: $$w, from $$from, names one file, which make test's two go tests, run at once, would both write: select the packages of one of them, or run go test yourself" >&2; exit 1;; esac;; esac; done; }; \
+		goflags=$$(go env GOFLAGS); one_file GOFLAGS $$goflags; one_file TEST_PKGS $(test_flags); \
+	fi; \
 	if [ -z "$$rest" ]; then sp=$(P); elif [ $(P) -le 1 ]; then sp=1; rp=1; elif [ $$n -ge 2 ]; then sp=2; rp=$$(($(P) - 1)); else sp=1; rp=$(P); fi; \
 	status=0; \
 	if [ -n "$$slow" ]; then \

@@ -148,6 +148,11 @@ var reviewedBuildSites = map[string][]string{
 		`@set -e; pkgs=$$(go list -tags "$(GO_TAGS)" -race $(test_packages)); slow=; rest=; n=0; ` +
 			`for p in $$pkgs; do case " $(SLOW_TEST_PKGS) " in *" $$p "*) slow="$$slow $$p"; n=$$((n + 1));; *) rest="$$rest $$p";; esac; done; ` +
 			`if [ -z "$$slow$$rest" ]; then echo "make test: no package matches $(test_packages)" >&2; exit 1; fi; ` +
+			`if [ -n "$$slow" ] && [ -n "$$rest" ]; then ` +
+			`one_file() { from=$$1; shift; for w in "$$@"; do f=$${w#[\"\']}; case "$$f" in -*) f=$${f#-}; f=$${f#-}; f=$${f#test.}; ` +
+			`case " $(ONE_FILE_TEST_FLAGS) " in *" $${f%%=*} "*) echo "make test: $$w, from $$from, names one file, which make test's two go tests, run at once, would both write: select the packages of one of them, or run go test yourself" >&2; exit 1;; esac;; esac; done; }; ` +
+			`goflags=$$(go env GOFLAGS); one_file GOFLAGS $$goflags; one_file TEST_PKGS $(test_flags); ` +
+			`fi; ` +
 			`if [ -z "$$rest" ]; then sp=$(P); elif [ $(P) -le 1 ]; then sp=1; rp=1; elif [ $$n -ge 2 ]; then sp=2; rp=$$(($(P) - 1)); else sp=1; rp=$(P); fi; ` +
 			`status=0; ` +
 			`if [ -n "$$slow" ]; then ` +

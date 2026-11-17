@@ -21,14 +21,17 @@ const (
 // goStandIn is the go that make test's recipe runs in these tests. Each call
 // writes its TMPDIR and its arguments, NUL-separated, to a file of its own;
 // go list answers a few patterns as the module's go would (one that matches
-// nothing lists nothing and succeeds, with go's warning), and go test exits
-// as the case asks, writing a mark of its role (the slow packages', cmd/bridge
-// and internal/manifest, or the other packages') as it starts and as it ends.
-// With STUB_OVERLAP set, each go test waits, bounded, for the other to start,
-// and marks that it ran alone when the other never did, so a recipe that ran
-// them one after the other fails whatever it makes of their status; with
-// STUB_SLOW_LATE set, the slow packages' ends a second late, so a recipe that
-// did not wait for it ends first.
+// nothing lists nothing and succeeds, with go's warning), and fails before
+// listing with STUB_LIST_FAIL set or after it with STUB_LIST_FAIL_AFTER; go
+// env GOFLAGS answers GOFLAGS, else the value go env would keep
+// (STUB_GOENV_GOFLAGS); and go test exits as the case asks, writing a mark of
+// its role (the slow packages', cmd/bridge and internal/manifest, or the
+// other packages') as it starts and as it ends. With STUB_OVERLAP set, each
+// go test waits, bounded, for the other to start, and marks that it ran alone
+// when the other never did, so a recipe that ran them one after the other
+// fails whatever it makes of their status; with STUB_SLOW_LATE set, the slow
+// packages' ends a second late, so a recipe that did not wait for it ends
+// first.
 const goStandIn = `#!/bin/sh
 { printf 'TMPDIR=%s\0' "$TMPDIR"; printf '%s\0' "$@"; } > "$STUB_DIR/call.$$"
 case "$1" in
@@ -49,7 +52,10 @@ list)
 		./internal/nonexistent/...) echo "go: warning: \"$a\" matched no packages" >&2 ;;
 		*) echo "stand-in: no package $a" >&2; exit 1 ;;
 		esac
-	done ;;
+	done
+	[ -z "$STUB_LIST_FAIL_AFTER" ] || { echo "stand-in: go list fails after listing what it could" >&2; exit 1; } ;;
+env)
+	if [ "$2" = GOFLAGS ]; then printf '%s\n' "${GOFLAGS:-$STUB_GOENV_GOFLAGS}"; fi ;;
 test)
 	role=rest other=slow code=${STUB_REST_EXIT:-0}
 	for a in "$@"; do
@@ -362,8 +368,10 @@ func TestMakeTestRunsTheSlowPackagesInAGoTestOfTheirOwn(t *testing.T) {
 
 // TestMakeTestFailsWhenEitherGoTestFails: make test answers for both its go
 // tests, each waited for whatever the other answers; a go list that fails
-// runs no go test, and so does a selection go list answers with no package,
-// which make test refuses in words of its own (B897).
+// runs no go test, whether it listed nothing or some packages first (the
+// recipe's listing is a plain assignment, which stops a set -e shell, dash and
+// bash alike, at its failure), and so does a selection go list answers with no
+// package, which make test refuses in words of its own (B897).
 func TestMakeTestFailsWhenEitherGoTestFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("make test's recipe is POSIX sh, run by make on macOS and Linux; CI's Windows legs run go test directly")
@@ -379,6 +387,11 @@ func TestMakeTestFailsWhenEitherGoTestFails(t *testing.T) {
 		{name: "the other packages' fails", env: []string{"STUB_REST_EXIT=1", "STUB_SLOW_LATE=1"}, tests: 2},
 		{name: "both fail", env: []string{"STUB_SLOW_EXIT=1", "STUB_REST_EXIT=1"}, tests: 2},
 		{name: "go list fails", env: []string{"STUB_LIST_FAIL=1"}},
+		{
+			name: "go list fails after listing packages",
+			env:  []string{"STUB_LIST_FAIL_AFTER=1"},
+			says: "stand-in: go list fails after listing what it could",
+		},
 		{
 			name: "a selection that matches nothing",
 			vars: []string{"TEST_PKGS=./internal/nonexistent/..."},
@@ -400,6 +413,88 @@ func TestMakeTestFailsWhenEitherGoTestFails(t *testing.T) {
 			}
 			if tc.says != "" && !strings.Contains(r.out, tc.says) {
 				t.Errorf("make test said:\n%s\nwant a line saying %q", r.out, tc.says)
+			}
+		})
+	}
+}
+
+// TestMakeTestRefusesAFlagThatWritesOneFileWhenBothGoTestsRun: where make test
+// would run both its go tests, a flag that writes one file the caller names
+// (-coverprofile, the profiles, -trace, -o) is refused before either starts,
+// in TEST_PKGS or in what go env says GOFLAGS is (the environment's or the one
+// go env keeps), in every spelling go test takes: one dash or two, with or
+// without test., its value after = or as the next word. The two would write
+// that file at once, and a -coverprofile would hold one group's coverage at
+// best (B897). One go test alone takes the flag as go test does, and a flag
+// whose value merely names such a flag is no such flag.
+func TestMakeTestRefusesAFlagThatWritesOneFileWhenBothGoTestsRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("make test's recipe is POSIX sh, run by make on macOS and Linux; CI's Windows legs run go test directly")
+	}
+	type refusal struct {
+		name      string
+		env, vars []string
+		says      string
+	}
+	refused := []refusal{
+		{name: "-coverprofile=", vars: []string{"TEST_PKGS=./... -coverprofile=coverage.out"}, says: "make test: -coverprofile=coverage.out, from TEST_PKGS, names one file"},
+		{name: "-coverprofile and its value apart", vars: []string{"TEST_PKGS=./... -coverprofile coverage.out"}, says: "make test: -coverprofile, from TEST_PKGS, names one file"},
+		{name: "two dashes", vars: []string{"TEST_PKGS=./... --coverprofile=coverage.out"}, says: "make test: --coverprofile=coverage.out, from TEST_PKGS, names one file"},
+		{name: "test.", vars: []string{"TEST_PKGS=-test.coverprofile=coverage.out ./..."}, says: "make test: -test.coverprofile=coverage.out, from TEST_PKGS, names one file"},
+		{name: "GOFLAGS in the environment", env: []string{"GOFLAGS=-count=1 -coverprofile=coverage.out"}, says: "make test: -coverprofile=coverage.out, from GOFLAGS, names one file"},
+		{name: "GOFLAGS that go env keeps", env: []string{"STUB_GOENV_GOFLAGS=--coverprofile=coverage.out"}, says: "make test: --coverprofile=coverage.out, from GOFLAGS, names one file"},
+		{name: "a quoted GOFLAGS entry", env: []string{"STUB_GOENV_GOFLAGS='-coverprofile=my coverage.out'"}, says: "make test: '-coverprofile=my, from GOFLAGS, names one file"},
+	}
+	for _, flag := range []string{"cpuprofile", "memprofile", "blockprofile", "mutexprofile", "trace", "o"} {
+		refused = append(refused, refusal{
+			name: "-" + flag,
+			vars: []string{"TEST_PKGS=./internal/manifest ./internal/config -" + flag + "=out"},
+			says: "make test: -" + flag + "=out, from TEST_PKGS, names one file",
+		})
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runMakeTest(t, tc.env, tc.vars...)
+			if r.err == nil {
+				t.Fatalf("make test succeeded:\n%s", r.out)
+			}
+			if n := len(r.verb("test")); n != 0 {
+				t.Errorf("%d go test calls ran, want none; make said:\n%s", n, r.out)
+			}
+			if !strings.Contains(r.out, tc.says) {
+				t.Errorf("make test said:\n%s\nwant a line saying %q", r.out, tc.says)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		env   []string
+		vars  []string
+		tests int
+		flags []string
+	}{
+		{name: "the other packages' go test alone", vars: []string{"TEST_PKGS=./internal/config -coverprofile=coverage.out"}, tests: 1, flags: []string{"-coverprofile=coverage.out"}},
+		{name: "the slow packages' go test alone", vars: []string{"TEST_PKGS=./cmd/bridge/ ./internal/manifest -coverprofile=coverage.out"}, tests: 1, flags: []string{"-coverprofile=coverage.out"}},
+		{name: "flags that write no file, or name one in their value", vars: []string{"TEST_PKGS=./... -cover -coverpkg=./... -run=coverprofile -outputdir=out"}, tests: 2, flags: []string{"-cover", "-coverpkg=./...", "-run=coverprofile", "-outputdir=out"}},
+		{name: "GOFLAGS that writes no file", env: []string{"GOFLAGS=-count=1 -mod=mod"}, tests: 2},
+	} {
+		t.Run("taken: "+tc.name, func(t *testing.T) {
+			r := runMakeTest(t, tc.env, tc.vars...)
+			if r.err != nil {
+				t.Fatalf("make test: %v\n%s", r.err, r.out)
+			}
+			calls := r.verb("test")
+			if len(calls) != tc.tests {
+				t.Fatalf("%d go test calls ran, want %d; make said:\n%s", len(calls), tc.tests, r.out)
+			}
+			for _, c := range calls {
+				if len(tc.flags) == 0 {
+					continue
+				}
+				if n := len(c.args) - len(tc.flags); n < 0 || !reflect.DeepEqual(c.args[n:], tc.flags) {
+					t.Errorf("a go test ran with %q, want it to end with %q", c.args, tc.flags)
+				}
 			}
 		})
 	}
