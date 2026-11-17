@@ -97413,8 +97413,8 @@ regression cases (before `layout.go` changed; the order case came with its
 seam, and its red is control D2):
 
 ```
-$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run '^(TestTheLayoutsWordsNameWhatLiesInsideWhichRoot|TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning)$' ./internal/config/
---- FAIL: TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (both subtests)
+$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run '^(TestTheLayoutsWordsNameWhatLiesInsideWhichRoot|…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning)$' ./internal/config/
+--- FAIL: …TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (both subtests)
     layout_test.go:490: the advice to move bridge.yaml does not say "set each of libraryRoots, dataDir, tlsCertPath, tlsKeyPath, autocert.cacheDir, upscale.variantsDir and upscale.tempDir that is relative in it to an absolute path, since each resolves beside bridge.yaml"
     layout_test.go:493: the advice to move bridge.yaml does not say what a BRIDGE_* variable that gives one does
     layout_test.go:500: the advice pins dataDir where the data directory is: false, want true   (the config file alone)
@@ -97442,7 +97442,7 @@ the files put back with `git checkout --` and checked against HEAD's bytes,
 `git status` clean after. Every one as predicted:
 
 - D1, the brief's: the sentence removed from both branches that move
-  bridge.yaml. Red: `TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning`
+  bridge.yaml. Red: `…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning`
   (both subtests, layout_test.go:490, :493, :497, :500), the words test's
   three subtests that move bridge.yaml, both doctors' config and both
   subtests, and init's six that move bridge.yaml; green: the kept config's
@@ -97577,7 +97577,7 @@ rules (7f389016). Nothing new touches the filesystem and nothing refuses.
    `TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns` now pins
    the hint.
 5. Round 2's advice tests are rewritten, their names kept, since the dated
-   records cite them: `TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning`
+   records cite them: `…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning`
    pins the fixed sentence for the config file alone, the data directory
    alone, the data directory that is the root, both and the default
    `dataDir`, refuses a period at its end, and holds README.md's section to
@@ -97606,11 +97606,11 @@ a shim of names that maps `Hint`, `Warning` and `JournalLine` onto round 2's
 `Advice` and `Line` (an untracked test file, removed after):
 
 ```
-$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run '^(TestTheLayoutsWordsNameWhatLiesInsideWhichRoot|TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning)$' ./internal/config/
+$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -v -run '^(TestTheLayoutsWordsNameWhatLiesInsideWhichRoot|…TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning)$' ./internal/config/
 --- FAIL: TestTheLayoutsWordsNameWhatLiesInsideWhichRoot (all five layouts)
     layout_test.go:414: Hint() = "... move the data directory outside every library root, and set dataDir ..."
     layout_test.go:417: Warning() = "the data directory /m/.bridge is inside library root /m (libraryRoots[0]): ..."
---- FAIL: TestTheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (all five subtests)
+--- FAIL: …TheAdviceToMoveBridgeYAMLKeepsEveryRelativePathsMeaning (all five subtests)
     layout_test.go:462: the advice is "... move bridge.yaml outside every library root; before you move it, ..."
     layout_test.go:472: README.md has 0 sections titled "Moving the bridge's files out of a library root", want one
 $ go test ... -run '<the thirteen B884 tests>' ./cmd/bridge/
@@ -103537,3 +103537,158 @@ halves passed); `go test -race -count=1 -timeout 45m ./internal/admin/
 windows/amd64 (`CGO_ENABLED=0` for the two) exited 0 each. go1.27.3's gofmt
 lists none of the changed Go files, and the names check over the branch's
 commit messages and added lines since main finds nothing in this round's.
+
+## 2026-11-17 — B884 round 4: the warning states the fact and the hazard, and nothing else
+
+The rule is `cli-serve.md`'s B884 line, and its long form is in
+`ops/History-rules-cli-serve.md` (*The words* and *Round 4*); this is the
+evidence. Linux amd64, Go 1.27.3, the Makefile's tags, TMPDIR on disk. A
+scope cut after the review of round 3, whose findings held five times, each
+in the advice to move the files (round 3's README procedure: a written-out
+TLS pair under a moved data directory, a relative path's meaning, a folder
+that is or holds a root, a custom TLS pair and `autocert.cacheDir`; and the
+journal's round 1 advice, `journalFix`), while B884's job is to make the
+layout visible. The code is 8097690e, on round 3 and its rules (3f766599)
+merged with main (9d6896f7) and 94cd0e5b. Nothing new touches the
+filesystem and nothing refuses.
+
+### What changed
+
+- `internal/config/layout.go`: `Hint` is `layoutRisk` alone, `Warning`
+  `Summary(true) + ": " + layoutRisk`, `JournalLine`
+  `Summary(false) + ": " + layoutRisk`; `layoutFix`, `layoutDoc`,
+  `layoutDocSection` and `journalFix` are gone. Init's line keeps the one
+  period `warnInstallLayout` adds. Round 1's per-layout journal words never
+  reached main (`git grep` at 711e3cbf finds none of B884's code), so
+  nothing that shipped changes.
+- The equality: `layoutOn` records, with the first root that holds each
+  file, whether the file is that root (`configIs`, `dataIs`, `within` asked
+  both ways: no new import, and `TestTheLayoutCheckRunsOnStringsAlone`
+  passes), and `Summary` says "is" of such a file and "is inside" of one
+  inside it (`relation`), the two in one clause only where one root holds
+  both inside it. A root can name the config file itself: Load takes it
+  (`Validate` asks only that a root is not empty, `config.go` 3855-3873,
+  and leaves its being a directory to `CheckLibraryRootsAccessible`,
+  4844-4860, which serve runs after its line), so it is said, "the config
+  file X is library root X (libraryRoots[0])", and a loopback serve then
+  refuses the root at its roots' check (`config: `, exit 2; a public one
+  warns and goes on); the words table and the matrix pin it.
+- What each surface says, `bridge init --dir /cfg --library /cfg/data`
+  (the data directory is the root): init, `warning: the data directory
+  /cfg/data is library root /cfg/data (libraryRoots[0]): <hazard>.`; both
+  doctors, an `install-layout` warn whose line is that fact and whose hint
+  is the hazard; serve's journal, `the data directory (dataDir) is library
+  root libraryRoots[0]: <hazard>`. And `--dir /Music --library /Music`
+  (both inside the one root): `the config file /Music/bridge.yaml and the
+  data directory /Music/data are inside library root /Music
+  (libraryRoots[0])` in init's line and the doctors', and `the config file
+  and the data directory (dataDir) are inside library root libraryRoots[0]`
+  in the journal, each followed by the hazard alone.
+- README.md: round 3's procedure and its sub-section are gone. A note,
+  "The bridge's files inside a library root", says what the warning means
+  and that it changes nothing, lists the settings in bridge.yaml that name
+  paths, and says how a relative one resolves and what a `BRIDGE_*`
+  variable does (`applyEnvOverrides` runs before `resolvePaths`,
+  `config.go` 3188-3193). Its test, round 2's advice test renamed
+  `TestTheReadmeNamesEveryPathSettingLoadResolves` (its old name promised
+  advice), still reads resolvePaths' assignments, so an eighth path setting
+  turns it red, and requires `BRIDGE_`, no numbered step and round 3's
+  title gone from the file.
+- The console: `doctorInstallLayout` gives `Summary(true)`, with the
+  configured paths, in GET /api/doctor's success body, which
+  `auth-tls.md`'s rule allows (never in an error body); unchanged, and a
+  managed bridge has no line.
+- The collectors: `requireOneLayoutWarning` counts init's warnings by the
+  hazard and `layoutLines` takes the journal's records by it, whatever
+  their fact says, before any exact pin. A guard,
+  `TestNoSurfaceSaysWhatToDo`, holds every layout's words free of round 3's
+  sentence, the README section's title, the journal's three sentences and
+  any verb of a remedy, and `TestEverySurfaceSaysALayoutsFactAndHazardAlone`
+  scans every stream init, both doctors and serve write for the first three.
+
+### Red first
+
+On round 3's code (94cd0e5b) with round 4's tests, which need no shim:
+
+```
+$ go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -run '<the eight config tests>' ./internal/config/
+--- FAIL: TestTheLayoutsWordsNameWhatLiesInsideWhichRoot (the 12 rows with words: the remedy after the hazard; in 6, "is inside" of a file that is its root)
+--- FAIL: TestNoSurfaceSaysWhatToDo
+--- FAIL: TestTheReadmeNamesEveryPathSettingLoadResolves   README.md has 0 sections titled "The bridge's files inside a library root"
+$ go test ... -run '<the fourteen cmd tests>' ./cmd/bridge/
+--- FAIL: TestBothDoctorsWarnOfTheBridgesFilesInsideALibraryRoot (all four: the hint; "is inside" of the data directory that is a root)
+--- FAIL: TestBridgeInitWarnsOnceOfTheLayoutItWritesOrKeeps (all eight)
+--- FAIL: TestServeSaysOnceAtItsStartThatItsDataDirectoryIsInsideALibraryRoot, TestServeSaysEachLayoutAtItsStart (three),
+          TestTheConsolesDoctorSaysTheLayoutOfARootAddedWhileServeRuns, TestServeWithARelativeConfigInsideARootWarnsOnce,
+          TestBridgeInitWarnsOfAKeptConfigsDefaultDataDirectory, TestServeSaysItsLayoutBeforeItTouchesARoot (both)
+--- FAIL: TestEverySurfaceSaysALayoutsFactAndHazardAlone (five of six layouts)
+--- PASS: the sibling, the data directory that is a file, the managed case, the healthy report, init's healthy runs,
+          and the matrix's data directory that holds the root with the config apart, said nowhere in round 3 too
+```
+
+Each collector counted one warning in every red case, and the exact pin
+failed after it. After the change every B884 test passes.
+
+### Controls
+
+Each an uncommitted mutation of 8097690e's `layout.go`, predicted in
+writing first (`controls4.predictions.txt`), both packages' B884 tests run,
+the file put back with `git checkout --` and checked against HEAD's bytes,
+`git status` clean after:
+
+- C1, `journalFix()` back into `JournalLine()`: red, the words test (its 12
+  rows with words), the guard, and every journal pin (serve's once, each
+  (three), relative, order (both), and the matrix's five layouts with a
+  line); green, every CLI and doctor pin. As predicted.
+- C2, `layoutFix` back into `Warning()`: red, the words test, the guard,
+  init (all eight), the kept default and the matrix's five; green, the
+  doctors, the console and the journal. As predicted.
+- C3, "is inside" of a data directory that is its root (`dataIs` never
+  set): red, the words test's four equality rows of the data directory,
+  init's `--dir C --library C/data`, the doctors' and serve's data
+  directory that is a root, the console's root added while serve runs, and
+  the matrix's `--dir C --library C/data` and config inside the root the
+  data directory is; green, the guard and every other layout. As predicted.
+- C4, the config check dropped: red, the counterexample (the matrix's data
+  directory holding the root with the config inside it, said nowhere, and
+  the words row), and every case with the config inside a root, among them
+  `TestTheLayoutResolvesRelativePathsAsLoadDoes`; green, the layouts of the
+  data directory alone. One prediction missed:
+  `TestThePredicateComparesEachOSsFormsByTheirNames` stayed green, since it
+  asks `pathForms.within` alone, which C4 does not change.
+
+### The gates
+
+On 8097690e. Under `-race -count=50`, one package at a time outside the
+build lock (a single package needs none), with `-p` and `-parallel` at 8:
+internal/config's four tests round 4 touched (the words, the guard, the
+README test and the check's own source test) ok in 5 s, and cmd/bridge's
+twelve ok in 184 s (158 s of tests). In one hold of the build lock (10:38 to
+11:05), over a `git archive` copy of 8097690e with this patch laid on (the
+copy is what lands, and cmd/bridge's `TestEveryCitedTestNameExists` reads
+the docs the patch changes): `go test -race -count=1 -timeout 120m` of
+`./cmd/bridge/` (1,600 s), `./internal/doctor/` (11 s) and
+`./internal/config/` (15 s), all ok; `go run
+./scripts/third-party-licenses -check-build-tags`, OK; and, in the worktree,
+`go vet ./...` with the Makefile's tags as GOOS linux, darwin and windows,
+clean, as was each touched package's vet before it. go1.27.3's gofmt lists
+none of the Go files B884 touches. 8097690e alone fails
+`TestEveryCitedTestNameExists` on the old README test's name, which the
+dated records cite until this patch elides it; on the patched copy it
+passes, and it fails on a ghost citation planted in the copy's History
+file, so it read the copy. The patch applies at 8097690e (`git apply
+--check`), and on the copy `scripts/check-doc-budgets.py` is clean:
+`cli-serve.md` 99,914 bytes, against 100,946 at 94cd0e5b, after three
+entries that had no History pointer moved out with `move_entry.py --line`
+and `--text`, each pointer keeping the entry's binding sentences verbatim
+(line 95, `flag.Parse` and an unguarded subcommand's scope; 65, the feature
+gates before path resolution; 56, a sweeper's `enabled` predicate), since
+`--largest`'s one candidate, line 77, cannot move (its own Don't sentence
+needs a 766-byte pointer), and the B884 line cut from 1,344 to 774 bytes.
+`verify_moves.py --base 94cd0e5b`, the line and four History paragraphs
+named as edits, fails on one block alone, the line's verbatim History twin:
+an edit accounts for one copy and the base held two. With the twin put back
+it passes, the three moved entries found verbatim in the History file, and
+the twin in the patch is the new line byte for byte. `rules-for.py` names
+`cli-serve.md` for `internal/config/layout.go`. `make test` and `make
+build-all` were not run: the brief asked for the packages.
