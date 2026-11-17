@@ -1377,7 +1377,7 @@ and `TestARemovalRemovesWhatTheWalkReaches` pin it. Record:
 
 ### B897 — make test and the native legs run their slow packages in a go test of their own (2026-11-14, 2026-11-17)
 
-- **`make test` runs cmd/bridge and internal/manifest in a `go test` of their own with `-timeout 45m`, beside the one for every other package, which keeps `30m`; CI's native Windows and macOS legs run cmd/bridge, internal/backup and internal/manifest as a matrix leg of their own (`.github/scripts/native-test.sh slow`: `-p 3 -timeout 45m`, no `-race`) and every other package as another (`rest`, `30m`), in a job of 75 minutes; a make test selection that lists no package fails, and so does a native group that lists none** (2026-11-14 and 2026-11-17, backlog B897). **Don't put a slow package back in the others' go test or give them its 45m, run a slow group's packages one after another (`-p 1`, which on the native leg outlasts the job), run the two native groups in one step on one runner, or take a wait derived from the binary's deadline that gave up in its last 30 s for the test's assertion: check the package's time against its timeout, and its stacks, first.**
+- **`make test` runs cmd/bridge and internal/manifest in a `go test` of their own with `-timeout 45m`, beside the one for every other package, which keeps `30m`, and where it would run both, refuses before either a flag that writes one file the caller names (`-coverprofile`, the profiles, `-trace`, `-o`, from TEST_PKGS or `go env GOFLAGS`); CI's native Windows and macOS legs, `test (windows-latest, slow)`, `test (windows-latest, rest)`, `test (macos-latest, slow)` and `test (macos-latest, rest)`, run cmd/bridge, internal/backup and internal/manifest as a matrix leg of their own (`.github/scripts/native-test.sh slow`: `-p 3 -timeout 45m`, no `-race`) and every other package as another (`rest`, `30m`), in a job of 75 minutes with no `if` or `continue-on-error` on it or its test step; a make test selection that lists no package fails, and so does a native group that lists none** (2026-11-14 and 2026-11-17, backlog B897). **Don't put a slow package back in the others' go test or give them its 45m (one job at 45m would delay every package's hang by 15 minutes), run a slow group's packages one after another (`-p 1`, which on the native leg outlasts the job), run the two native groups in one step on one runner, let a flag that writes one file reach both go tests, give a leg or its test step an `if` or a `continue-on-error`, make the recipe's listing anything but a plain assignment in a statement of its own (`local` or `export` before it would hide go list's status from `set -e`), or take a wait derived from the binary's deadline that gave up in its last 30 s for the test's assertion: check the package's time against its timeout, and its stacks, first.**
 
 cmd/bridge's 1,532 top-level tests run one after another but two (1,530
 sequential, 1,626 s summed, the two parallel ones 6 s), so the package takes
@@ -1506,6 +1506,48 @@ packages one that never ends blocks about 44.5 minutes before it fails
 `watchGiveUp` in internal/manifest), a backlog item of its own; waits
 bounded on their own (`waitUntilSubtreeScanIsInFlight`, internal/backup's
 `waitWithin`) are not stretched.
+
+Why the split, and not one native go test at 45 minutes: raising the
+single native go test to 45m for every package would delay every package's
+hang by 15 minutes; the split keeps 30m for all but the three slow packages,
+and gives those a runner's cores of their own. The four legs report as
+`test (windows-latest, slow)`, `test (windows-latest, rest)`,
+`test (macos-latest, slow)` and `test (macos-latest, rest)`. `gate` needs
+`cross-platform` by the job's id, whose result is the whole matrix's, runs on
+`if: always()`, and fails on any result but success: run as written with each
+result for cross-platform, its script exited 1 for failure, cancelled and
+skipped alike. A skip of a leg's test step alone would leave its job green,
+which is why the leg check (below) refuses any `if` there.
+
+Where make test would run both go tests, a flag that writes one file the
+caller names (`ONE_FILE_TEST_FLAGS`: `-coverprofile`, `-cpuprofile`,
+`-memprofile`, `-blockprofile`, `-mutexprofile`, `-trace`, `-o`; one dash or
+two, with or without `test.`, its value after = or as the next word) is
+refused before either starts, from TEST_PKGS or from what `go env GOFLAGS`
+says (the environment's or the one go env keeps, a quoted entry included),
+the message naming the word and where it came from: both go tests would write
+that file at once, and a `-coverprofile` would hold one group's coverage at
+best. One go test alone takes such a flag as go test does. Refusing keeps the
+recipe a few lines of shell; a merge would have to strip both spellings from
+every source, wait for both groups, and write one profile with one `mode`
+line, whatever a failing group left. The recipe's listing stays a plain
+assignment in a statement of its own, `pkgs=$$(go list …)`: `set -e` stops
+there when go list fails, whatever it printed first, in dash, bash 5.3.9 and
+macOS's bash 3.2.57 alike, while `local` or `export` before it would hand on
+their own status. `TestMakeTestRefusesAFlagThatWritesOneFileWhenBothGoTestsRun`
+holds the refusal, every spelling and both sources, and the flags one go test
+alone takes; `TestMakeTestFailsWhenEitherGoTestFails` a go list that lists
+packages and then fails.
+
+The leg check reads the cross-platform job's and its test step's `if` and
+`continue-on-error` as YAML nodes, so a boolean, a string and an expression
+read as written, and fails on any `if` there and on a `continue-on-error`
+that is not the boolean false; and on `NATIVE_TEST_DRY_RUN` anywhere in
+gate.yml, which makes a leg print its go test and run none.
+`TestTheNativeJobCheckRefusesALegThatCanPassWithoutItsTests` runs it on gate.yml
+with each such key added, round 3's check having passed every one of them,
+and `TestTheNativeScriptFailsAsItsGoTestFails` holds a leg's step to its go
+test's exit status.
 
 Record: `ops/engineering-log.md`, B897 (2026-11-14 and 2026-11-17).
 
