@@ -20,14 +20,16 @@ func TestDropInflightRemovesMatchingEntries(t *testing.T) {
 	t.Cleanup(p.Stop)
 
 	// Block worker forever so jobs stay in the inflight map and
-	// are observable. defer cancel() ensures we release the
-	// runner block on test cleanup.
-	runnerStarted := make(chan struct{}, 2)
+	// are observable. The cleanup's cancel releases the runner block
+	// before Stop runs (cleanups run last-registered first). The stub
+	// sends to no channel: once released, the single worker runs up to
+	// three jobs (A, B and the re-enqueued A) before Stop lands, and a
+	// send nothing reads blocks the third for good, with Stop waiting
+	// on it (B924).
 	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	t.Cleanup(runnerCancel)
 	p.fsyncFn = noopFsync
 	p.runner = func(ctx context.Context, _ JobSpec) (RunResult, error) {
-		runnerStarted <- struct{}{}
 		<-runnerCtx.Done()
 		return RunResult{SizeBytes: 0}, ctx.Err()
 	}
