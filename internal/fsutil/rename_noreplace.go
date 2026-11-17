@@ -147,6 +147,22 @@ func noReplaceWait(try int) time.Duration {
 // detector.
 var beforeNoReplaceRename atomic.Pointer[func(from, to string)]
 
+// SetBeforeNoReplaceRenameForTest installs fn as beforeNoReplaceRename and
+// returns what puts the one before it back: exported from a production file
+// so that another package's test can make an entry at a rename's target just
+// before the call (backlog B653 PR 2b1: the database-only restore never
+// renames over one). Production code never calls it. Process-global: a test
+// that uses it must not call t.Parallel(), and puts it back once every
+// rename it watches has ended.
+func SetBeforeNoReplaceRenameForTest(fn func(from, to string)) (restore func()) {
+	var p *func(from, to string)
+	if fn != nil {
+		p = &fn
+	}
+	prev := beforeNoReplaceRename.Swap(p)
+	return func() { beforeNoReplaceRename.Store(prev) }
+}
+
 // noReplaceRenameSys answers, where a test has set it, in place of the call:
 // nil, or the errno the call would answer, so that answers one host cannot
 // give (a filesystem without the flag, a second filesystem, a sharing

@@ -11,13 +11,12 @@ import (
 )
 
 // restoreJournalSuffix names the journal of a restore of the database, beside
-// it: written by B653 PR 2b's database-only restore before its first rename
-// and removed once the restore has finished, and refused, while any entry
-// stands at its name, by every opener of the live database before it makes
-// anything, by the live snapshot, by the full restore before its first write,
-// and by serve's crash and early rollbacks before any marker write or rename
-// (B653 PR 2a, which writes none: until 2b these checks are inert, each
-// tested with a journal its test writes).
+// it: written by the database-only restore (backup.RestoreDatabase, B653 PR
+// 2b1) before its first rename and removed once the restore has finished or
+// been put back, and refused, while any entry stands at its name, by every
+// opener of the live database before it makes anything, by the live
+// snapshot, by the full restore before its first write, and by serve's crash
+// and early rollbacks before any marker write or rename (B653 PR 2a).
 const restoreJournalSuffix = "-restore.json"
 
 // RestoreJournalPath is where a restore of the database at dbPath keeps its
@@ -26,7 +25,8 @@ func RestoreJournalPath(dbPath string) string { return dbPath + restoreJournalSu
 
 // ErrRestoreIncomplete is the refusal while a restore's journal stands: an
 // unfinished restore of the library database. Its words name the journal by
-// its base name; PR 2b changes them to name the command that finishes it.
+// its base name and the command that finishes it; a caller that knows the
+// config it read adds that command's --config (cmd/bridge's restoreRemedy).
 var ErrRestoreIncomplete = errors.New("an unfinished restore of the library database stands")
 
 // errRestoreJournalUnread is the refusal where whether a journal stands could
@@ -58,7 +58,7 @@ func CheckRestoreJournal(dbPath string) error {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil
 	case err == nil:
-		return fmt.Errorf("%w (%s): finish it with the bridge version that began it", ErrRestoreIncomplete, name)
+		return fmt.Errorf("%w (%s): finish it with `bridge restore --database-only`, run by the bridge version that began it", ErrRestoreIncomplete, name)
 	}
 	return fmt.Errorf("%w (%s): %s", errRestoreJournalUnread, name, fsutil.ErrorWithoutPath(err))
 }

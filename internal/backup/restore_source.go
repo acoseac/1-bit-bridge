@@ -398,31 +398,52 @@ func takeSource(h *hold, snapshotDir string, wait time.Duration) *sourceHold {
 // Windows refuses it for a moment (atomicwrite.ReadWithRetryCtx, backlog
 // B898). It answers ErrCheckStillRunning, ErrNotASnapshot, ErrSnapshotBusy
 // for a refusal past the read's retries, a stop wrapping ctx's error where ctx
-// ends them, sourceExpiryError's refusal, or nil.
+// ends them, sourceExpiryError's refusal, or nil with what it read: the
+// manifest, and its record as every reader reads it (readVerdict, backlog
+// B653 PR 2b1's F9: the two veto lookups, and the owner probed where the
+// record holds a PENDING), on the worker too, so a worker given up holds
+// nothing those reads took either.
 // It writes nothing, and holds nothing past its return: the lock it tries to
 // ask whether another holds it, it lets go at once, and a worker given up
 // holds nothing.
-func CheckRestoreSource(ctx context.Context, snapshotDir string, wait time.Duration) error {
+func CheckRestoreSource(ctx context.Context, snapshotDir string, wait time.Duration) (SourceLook, error) {
 	if err := SourceStillHeld(snapshotDir); err != nil {
-		return err
+		return SourceLook{}, err
 	}
-	out := make(chan error, 1)
-	go func() { defer sourceWorkerEnded(snapshotDir); out <- checkSource(ctx, snapshotDir) }()
-	err, answered := awaitSourceWorker(ctx, wait, out)
+	type answer struct {
+		look SourceLook
+		err  error
+	}
+	out := make(chan answer, 1)
+	go func() {
+		defer sourceWorkerEnded(snapshotDir)
+		look, err := checkSource(ctx, snapshotDir)
+		out <- answer{look, err}
+	}()
+	a, answered := awaitSourceWorker(ctx, wait, out)
 	if !answered {
-		return sourceExpiryError(snapshotDir, ctx.Err())
+		return SourceLook{}, sourceExpiryError(snapshotDir, ctx.Err())
 	}
-	return err
+	return a.look, a.err
 }
 
 // checkSource is CheckRestoreSource's look, on its worker.
-func checkSource(ctx context.Context, snapshotDir string) error {
+func checkSource(ctx context.Context, snapshotDir string) (SourceLook, error) {
+	m, snap, err := lookAtSource(ctx, snapshotDir)
+	if err != nil {
+		return SourceLook{}, err
+	}
+	return SourceLook{Manifest: m, Verdict: snapshotVerdict(snap, m)}, nil
+}
+
+// lookAtSource is checkSource's resolution and its read of the manifest.
+func lookAtSource(ctx context.Context, snapshotDir string) (Manifest, string, error) {
 	snap, root, err := resolveSnapshotIn(snapshotDir, "")
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrNotASnapshot, err)
+		return Manifest{}, "", fmt.Errorf("%w: %w", ErrNotASnapshot, err)
 	}
 	if check, held := StuckCheckOf(root); held {
-		return heldRefusal(snapshotDir, stillRunning(check))
+		return Manifest{}, "", heldRefusal(snapshotDir, stillRunning(check))
 	}
 	var data []byte
 	err = atomicwrite.ReadWithRetryCtx(ctx, func() (err error) {
@@ -432,20 +453,20 @@ func checkSource(ctx context.Context, snapshotDir string) error {
 	var m Manifest
 	switch {
 	case errors.Is(err, atomicwrite.ErrReadBusy):
-		return fmt.Errorf("%w: %w", ErrSnapshotBusy, spelledAsGiven(err, snap, snapshotDir))
+		return Manifest{}, "", fmt.Errorf("%w: %w", ErrSnapshotBusy, spelledAsGiven(err, snap, snapshotDir))
 	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
-		return fmt.Errorf("the restore was stopped while it read the snapshot %s, before its prompt: %w; nothing was restored",
+		return Manifest{}, "", fmt.Errorf("the restore was stopped while it read the snapshot %s, before its prompt: %w; nothing was restored",
 			snapshotDir, err)
 	case err == nil:
 		err = json.Unmarshal(data, &m)
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrNotASnapshot, spelledAsGiven(err, snap, snapshotDir))
+		return Manifest{}, "", fmt.Errorf("%w: %w", ErrNotASnapshot, spelledAsGiven(err, snap, snapshotDir))
 	}
 	if m.SchemaVersion <= 0 {
-		return ErrNotASnapshot
+		return Manifest{}, "", ErrNotASnapshot
 	}
-	return nil
+	return m, snap, nil
 }
 
 // sourceLockRefusal is the restore's refusal for err, what the lock of the

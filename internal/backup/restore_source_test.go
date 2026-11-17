@@ -855,7 +855,7 @@ func lookAt(t *testing.T, ctx context.Context, dir string, read func(string) ([]
 			restore[i]()
 		}
 	})
-	err := backup.CheckRestoreSource(ctx, dir, time.Minute)
+	_, err := backup.CheckRestoreSource(ctx, dir, time.Minute)
 	select {
 	case <-ended:
 		joined = true

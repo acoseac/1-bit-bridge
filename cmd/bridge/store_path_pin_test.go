@@ -17,7 +17,10 @@ import (
 // that every store the bridge opens is its data dir's database, at the path
 // manifest.DefaultDBPath gives it: OpenStore is never given the data dir,
 // and cannot check it (backlog B613's round 3). This sweep pins that
-// boundary in the code that opens a store.
+// boundary in the code that opens a store. Its one other path is the
+// database-only restore's staged copy, manifest.RestoreStagingPath(dataDir)
+// (backlog B653 PR 2b1), which is in the same data dir, so the migration its
+// preparation runs records in the live install marker too.
 
 const (
 	manifestImport = "github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -126,7 +129,7 @@ func storePathProblem(files []storeFile, sf storeFile, fn *ast.FuncDecl, e ast.E
 	}
 	switch x := e.(type) {
 	case *ast.CallExpr:
-		if callsIn(sf, x, manifestImport, "DefaultDBPath") {
+		if callsIn(sf, x, manifestImport, "DefaultDBPath") || callsIn(sf, x, manifestImport, "RestoreStagingPath") {
 			return ""
 		}
 		return "a path " + exprString(e) + " builds"

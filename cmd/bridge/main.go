@@ -4062,6 +4062,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	manifestStore, err := manifest.OpenStoreAdmitted(manifest.DefaultDBPath(cfg.DataDir), admission.Permit)
 	if err != nil {
 		fmt.Fprintf(stderr, "open manifest store: %v\n", err)
+		// An unfinished restore of the database refuses every start until it
+		// is finished or put back: the one way out, in the words every
+		// surface says it in (backlog B653 PR 2b1).
+		if errors.Is(err, manifest.ErrRestoreIncomplete) {
+			fmt.Fprintln(stderr, restoreRemedy(*configPath, cfg.DataDir))
+		}
 		return 1
 	}
 	defer manifestStore.Close()

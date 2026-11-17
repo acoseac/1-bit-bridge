@@ -282,7 +282,9 @@ func TestBridgeRestoreSaysASnapshotItFoundBusyIsBusy(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prev := checkRestoreSource
-			checkRestoreSource = func(context.Context, string, time.Duration) error { return tc.answer }
+			checkRestoreSource = func(context.Context, string, time.Duration) (backup.SourceLook, error) {
+				return backup.SourceLook{}, tc.answer
+			}
 			t.Cleanup(func() { checkRestoreSource = prev })
 			var stdout, stderr strings.Builder
 			code := restoreCmd(context.Background(), []string{"--config", cfg, snap}, strings.NewReader("yes\n"), &stdout, &stderr)

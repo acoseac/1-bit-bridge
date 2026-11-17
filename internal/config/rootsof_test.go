@@ -61,3 +61,39 @@ func TestLibraryRootsOfIsTheRootsLoadGives(t *testing.T) {
 		t.Errorf("LibraryRootsOf = %q of a file Load's decode refuses, want it refused", roots)
 	}
 }
+
+// TestFileLibraryRootsIsWhatTheFileSays: the roots a database-only restore
+// compares (backlog B653 PR 2b) are the ones the file names, each resolved as
+// LibraryRootsOf resolves it, whatever BRIDGE_LIBRARY_ROOTS holds: the
+// variable changes LibraryRootsOf's answer and never this one's, and a file
+// Load's decode refuses is refused here too.
+func TestFileLibraryRootsIsWhatTheFileSays(t *testing.T) {
+	base := t.TempDir()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bridge.yaml")
+	data := []byte("libraryRoots:\n  - " + filepath.Join(base, "Music") + "\n  - nas\n")
+	want := []string{filepath.Join(base, "Music"), filepath.Join(dir, "nas")}
+	got, err := FileLibraryRoots(path, data)
+	if err != nil {
+		t.Fatalf("FileLibraryRoots: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("FileLibraryRoots = %q, want %q", got, want)
+	}
+	if of, err := LibraryRootsOf(path, data); err != nil || !slices.Equal(of, want) {
+		t.Errorf("with no variable set LibraryRootsOf = %q, %v, want the file's %q", of, err, want)
+	}
+
+	other := filepath.Join(base, "Other")
+	t.Setenv("BRIDGE_LIBRARY_ROOTS", other)
+	if of, err := LibraryRootsOf(path, data); err != nil || !slices.Equal(of, []string{other}) {
+		t.Errorf("with the variable set LibraryRootsOf = %q, %v, want the variable's %q", of, err, other)
+	}
+	if got, err := FileLibraryRoots(path, data); err != nil || !slices.Equal(got, want) {
+		t.Errorf("with the variable set FileLibraryRoots = %q, %v, want the file's %q", got, err, want)
+	}
+
+	if roots, err := FileLibraryRoots(path, []byte("libraryRoots:\n  - nas\nlibraryRoot: typo\n")); err == nil {
+		t.Errorf("FileLibraryRoots = %q of a file Load's decode refuses, want it refused", roots)
+	}
+}

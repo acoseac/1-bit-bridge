@@ -434,15 +434,27 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	configPath := fs.String("config", "", configFlagUsage)
 	autoYes := fs.Bool("yes", false, "skip the interactive confirmation prompt")
 	fs.BoolVar(autoYes, "y", *autoYes, "alias for --yes")
+	databaseOnly := fs.Bool("database-only", false, "restore the library database alone, keeping the files it replaces in restore-originals/; "+
+		"with no snapshot, finish or put back an unfinished one")
+	fullCheck := fs.Bool("full", false, "with --database-only: check the prepared database with integrity_check and foreign_key_check")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() < 1 {
-		fmt.Fprintln(stderr, "restore: missing snapshot directory argument")
-		fmt.Fprintln(stderr, "Usage: bridge restore [--config bridge.yaml] [--yes] <snapshot-dir>")
+	if *fullCheck && !*databaseOnly {
+		fmt.Fprintln(stderr, "restore: --full is the check of the database a --database-only restore prepares; give it with --database-only")
 		return 2
 	}
-	snapshotDir := backup.CleanSnapshotPath(fs.Arg(0))
+	// The database-only restore's missing snapshot waits for the journal: with
+	// one standing, `bridge restore --database-only` alone finishes it.
+	if fs.NArg() < 1 && !*databaseOnly {
+		fmt.Fprintln(stderr, "restore: missing snapshot directory argument")
+		fmt.Fprintln(stderr, "Usage: bridge restore [--config bridge.yaml] [--yes] [--database-only [--full]] <snapshot-dir>")
+		return 2
+	}
+	var snapshotDir string
+	if fs.NArg() >= 1 {
+		snapshotDir = backup.CleanSnapshotPath(fs.Arg(0))
+	}
 
 	// The bytes the config is read from go to the restore (ConfigAsRead):
 	// the targets below come from this read, its data dir and its TLS pair,
@@ -497,10 +509,27 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 
 	// An unfinished restore of the database is found before any snapshot is
 	// looked at (backlog B653 PR 2a): finishing it needs no snapshot,
-	// and one that is gone must not stand in its way.
+	// and one that is gone must not stand in its way. `bridge restore
+	// --database-only` alone finishes it (the bounded path, B653 PR 2b1);
+	// every other restore refuses while it stands.
 	if err := manifest.CheckRestoreJournal(dbPath); err != nil {
+		if *databaseOnly && errors.Is(err, manifest.ErrRestoreIncomplete) {
+			if fs.NArg() > 0 || *fullCheck {
+				fmt.Fprintf(stderr, "restore: %v; it is finished by `bridge restore --database-only` alone, with no snapshot and no --full; nothing was read or moved\n", err)
+				return 2
+			}
+			return finishDatabaseRestoreCmd(ctx, cfg, resolvedCfgPath, *autoYes, fallback, stdin, stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "restore: %v; nothing was restored\n", err)
+		if errors.Is(err, manifest.ErrRestoreIncomplete) {
+			fmt.Fprintln(stderr, restoreRemedy(resolvedCfgPath, cfg.DataDir))
+		}
 		return 1
+	}
+	if snapshotDir == "" {
+		fmt.Fprintln(stderr, "restore: missing snapshot directory argument (no unfinished restore of the library database stands)")
+		fmt.Fprintln(stderr, "Usage: bridge restore [--config bridge.yaml] [--yes] [--database-only [--full]] <snapshot-dir>")
+		return 2
 	}
 
 	// The snapshot is looked at now, bounded as the restore's admission is
@@ -513,7 +542,8 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	// exit 1, never as no snapshot (backlog B898). The restore asks again,
 	// under the folder's lock, once confirmed. It follows the config, the
 	// data dir's lock and the store's (backlog B653 PR 2a).
-	switch err := checkRestoreSource(ctx, snapshotDir, verifyCmdLockWait); {
+	look, err := checkRestoreSource(ctx, snapshotDir, verifyCmdLockWait)
+	switch {
 	case errors.Is(err, backup.ErrNotASnapshot):
 		fmt.Fprintf(stderr, "restore: %q is not a recognized snapshot directory (no readable manifest.json with a supported schema)\n", snapshotDir)
 		return 2
@@ -525,6 +555,9 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 			fmt.Fprintf(stderr, "restore: %v\n", err)
 		}
 		return 1
+	}
+	if *databaseOnly {
+		return databaseOnlyRestoreCmd(ctx, cfg, resolvedCfgPath, cfgRead, snapshotDir, look, *fullCheck, *autoYes, fallback, stdin, stdout, stderr)
 	}
 
 	if !*autoYes {

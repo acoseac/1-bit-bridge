@@ -359,6 +359,38 @@ func (s *StateStore) SettlePendingCovers(resolved, missed []string, maxAttempts 
 	return s.persistLocked()
 }
 
+// ResetSyncPosition rewinds the harvest's sync position for a restore of the
+// library database alone (backlog B653 PR 2b1): the results cursor, the last
+// full submit and the last booklet check go to zero, so the next tick submits
+// the restored library and fetches its results from the start, while the
+// credential, its expiry, its base and the pending covers stay. SetCursor
+// never rewinds, so this is the one way back. Where nothing stands at the
+// store's path (Lstat answers not-exist) it writes nothing and makes no file:
+// there is no position to rewind. Where a file stands it writes the state as
+// it now is, unless the file holds those very bytes already, so a second call
+// changes no byte, and a file OpenStateStore could not decode, which it holds
+// as empty, is replaced by the clean state rather than kept. It answers
+// whether a file stands, for its caller's barrier: the write tolerates a
+// directory sync that fails once its rename has landed (atomicwrite.WriteBytes).
+func (s *StateStore) ResetSyncPosition() (present bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.st.ResultCursor, s.st.LastSubmitAt, s.st.LastBookletCheckAt = 0, time.Time{}, time.Time{}
+	if _, err := os.Lstat(s.path); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	b, err := json.Marshal(s.st)
+	if err != nil {
+		return true, err
+	}
+	if held, err := readStateFile(s.path); err == nil && string(held) == string(b) {
+		return true, nil
+	}
+	return true, atomicwrite.WriteBytes(s.path, b, ".atlas-harvest-*.json.tmp")
+}
+
 func (s *StateStore) persistLocked() error {
 	b, err := json.Marshal(s.st)
 	if err != nil {

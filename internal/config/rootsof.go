@@ -22,16 +22,35 @@ import (
 // of path as filepath.Abs gives it (resolvePaths). Normalize and Validate
 // change no root, so these are the roots a load that answers gives.
 func LibraryRootsOf(path string, data []byte) ([]string, error) {
+	return libraryRootsIn(path, data, true)
+}
+
+// FileLibraryRoots is the library roots the config at path, whose bytes are
+// data, names itself: LibraryRootsOf's steps without its environment's,
+// BRIDGE_LIBRARY_ROOTS set or not, so what the file says is read whoever runs
+// the reader and from whatever shell. The database-only restore compares the
+// library form of a snapshot's settings with this bridge's by it (backlog
+// B653 PR 2b), each side resolved against the directory of this bridge's
+// config, so an override in the restoring shell decides neither side.
+func FileLibraryRoots(path string, data []byte) ([]string, error) {
+	return libraryRootsIn(path, data, false)
+}
+
+// libraryRootsIn is LibraryRootsOf's work, and FileLibraryRoots' without
+// the environment's step (env false).
+func libraryRootsIn(path string, data []byte, env bool) ([]string, error) {
 	var c Config
 	if err := DecodeFile(data, &c); err != nil {
 		return nil, fmt.Errorf("read libraryRoots from config %q: %w", path, ValueFreeYAMLError(err))
 	}
-	for _, b := range envBindings() {
-		if b.YAMLPath != "libraryRoots" {
-			continue
-		}
-		if v, ok := os.LookupEnv(b.EnvVar); ok && v != "" {
-			c.applyEnvValue(b, b.EnvVar, v)
+	if env {
+		for _, b := range envBindings() {
+			if b.YAMLPath != "libraryRoots" {
+				continue
+			}
+			if v, ok := os.LookupEnv(b.EnvVar); ok && v != "" {
+				c.applyEnvValue(b, b.EnvVar, v)
+			}
 		}
 	}
 	abs, err := filepath.Abs(path)

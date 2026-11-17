@@ -126,18 +126,29 @@ func ResetBackupEpoch(dbPath string) (err error) {
 			err = cerr
 		}
 	}()
-	answer, before := epochSeams()
+	_, before := epochSeams()
 	if before != nil {
 		before(dbPath)
 	}
 	if _, err = ReplaceBackupEpoch(context.Background(), s.db); err != nil {
 		return err
 	}
+	return checkpointTruncate(s.db)
+}
+
+// checkpointTruncate checkpoints db with TRUNCATE and reads the checkpoint's
+// row (or the answer a test put in its place, SetEpochCheckpointAnswerForTest):
+// one that answered busy, or checkpointed fewer frames than the WAL holds, is
+// ErrEpochCheckpointBusy. ResetBackupEpoch's and PrepareRestoredDatabase's
+// one reading of it (backlog B653 PR 2b1).
+func checkpointTruncate(db *sql.DB) error {
+	answer, _ := epochSeams()
 	var busy, log, checkpointed int
-	if err = s.db.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &log, &checkpointed); err != nil {
+	if err := db.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &log, &checkpointed); err != nil {
 		return err
 	}
 	if answer != nil {
+		var err error
 		if busy, log, checkpointed, err = answer(); err != nil {
 			return err
 		}
