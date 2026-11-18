@@ -343,12 +343,15 @@ func TestARecheckThatDidNotEndLeavesTheVetoItMade(t *testing.T) {
 			unlock.letGoAndAwaitEnd(t)
 			if gate != nil {
 				// The worker has ended, and it reads the record back after
-				// its check, whatever that found (verifyHeld): a gate that
-				// matched no hold held none of the steps after the check.
+				// its check, whatever that found (verifyHeld), so its
+				// read-back came to its gate. Each step has an entry of its
+				// own (StepGate.Entered), and this asks the read-back's
+				// alone: it says nothing of the verdict's write or of
+				// INCOMPLETE's.
 				select {
 				case <-gate.Entered("its read of the record after it"):
 				default:
-					t.Fatal("the read-back came to no gate: the gate held none of the steps after the check")
+					t.Fatal("the read-back never came to its gate")
 				}
 			}
 			if !vetoed(t, dir) {

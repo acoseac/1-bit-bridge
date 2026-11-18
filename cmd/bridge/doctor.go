@@ -282,8 +282,9 @@ var cliRootProbes = doctor.NewRootProbes()
 // serving process (servingDACHost, adminDoctorRunnerFor); and logs, which log
 // the log-file-size line grades (doctorLogs, backlog B618): bridge doctor's,
 // run from a shell, the installed bridge's as `bridge logs` reads it, or the
-// console's doctor's, its own process's. It is a run of the CLI's works on
-// the library roots (cliRootProbes) that no caller stops.
+// console's doctor's, the file the console's export offers its process
+// (consoleLogPath). It is a run of the CLI's works on the library roots
+// (cliRootProbes) that no caller stops.
 func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost, logs doctorLogs) doctor.Deps {
 	return buildDoctorDepsRun(context.Background(), cfgPath, absentIsPreSetup, dacHost, logs, cliRootProbes.BeginRun())
 }
@@ -306,8 +307,9 @@ func buildDoctorDepsRun(ctx context.Context, cfgPath string, absentIsPreSetup bo
 		AdminPort: 7789,
 		// The log-file-size line's file (doctorLogs): for bridge doctor the
 		// one `bridge logs` reads, its install check, "cannot tell" rule and
-		// fallbacks included, and for the console's doctor the one its
-		// bridge writes, which the console's export offers too.
+		// fallbacks included, and for the console's doctor the file the
+		// console's export offers its process (consoleLogPath), which a
+		// process run in the foreground does not write.
 		LogPath:       lf.path,
 		LogNote:       lf.note,
 		LogUnresolved: lf.unresolved,

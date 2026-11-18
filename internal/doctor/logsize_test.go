@@ -24,10 +24,12 @@ func writeSized(t *testing.T, size int64) string {
 	return p
 }
 
-// TestCheckLogSizeQuietWhenAbsent pins the no-op states. A foreground
-// `bridge serve` has no log file at all, and reporting on a file that does not
-// exist would be reporting on nothing — it belongs in the OK column, not as a
-// warning an operator has to learn to ignore.
+// TestCheckLogSizeQuietWhenAbsent pins the no-op states: no path, one that
+// could not be made, and a path with no file yet, a service's before its
+// first start or that of a bridge only ever run in the foreground, which
+// writes none. Reporting on a file that does not exist would be reporting on
+// nothing — it belongs in the OK column, not as a warning an operator has to
+// learn to ignore.
 func TestCheckLogSizeQuietWhenAbsent(t *testing.T) {
 	for _, tc := range []struct {
 		name string

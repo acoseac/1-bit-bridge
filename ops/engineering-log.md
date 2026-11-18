@@ -105862,6 +105862,247 @@ last commit (`make fmt`, `make vet`, `make docs-check`, the two tests under
 darwin and windows) is in the branch's report: a record cannot hold the runs
 made on its own commit.
 
+## 2026-11-18 — B618FU's pin: an unnamed func type written is no type of its own
+
+Branch `fix/bridge-lows3-1118`, from e7e41bdc (main with B618FU). Two commits:
+3fff8a1c adds two rows to the pin's table, red; this one exempts the type they
+write, corrects the pin's docs, its message and the long form, and appends
+this record. Test code and docs alone; no production code.
+
+### What was true (at e7e41bdc)
+
+`seamFindingsIn` (`cmd/bridge/logs_test.go` 511) reported
+`seamDeclaredWithAType` for every declaration of the seam whose
+`ValueSpec.Type` is not nil (527-529), and the pin's message (455-458) and the
+kind's doc (496-498) gave one reason: a method of that type with a pointer
+receiver changes the seam, its call taking the address with no `&`. That holds
+for a type name, which may name a defined type, and not for a func type written
+out: a method's receiver is a defined type, so an unnamed func type has no
+methods, as the seam's own type, `packaging.CheckWindowsInstall`'s signature,
+has none (the message said so of a declaration with no type). So
+`var logsInstallCheck func() packaging.WindowsInstall = packaging.CheckWindowsInstall`,
+which changes nothing, was a finding for a reason it cannot have, and so was
+the same type in parentheses. `ops/History-rules-cli-serve.md` (6413) said the
+pin finds a declaration that gives the seam a type, any type.
+
+### As built
+
+- `isUnnamedFuncType` (`logs_test.go` 574) answers whether a declaration's
+  written type, its parentheses taken off (`ast.Unparen`), is an
+  `*ast.FuncType`, and the `ValueSpec` arm reports `seamDeclaredWithAType`
+  only for a written type it does not answer for (533). What stays a finding
+  is a written type other than an unnamed func type: a named type, a selector
+  `pkg.Type`, a generic instantiation.
+- Two read-only rows of `TestTheLogsInstallCheckPinSeesEachWayToChangeIt`
+  declare the seam with `func() packaging.WindowsInstall`, bare and in
+  parentheses, call it and compare it with nil, and want no finding. The named
+  type's row stays a finding, and every other row's verdict is as it was.
+- The kind's value names what stays flagged ("declares it with a written type
+  other than an unnamed func type"), and its doc, the pin's message and the
+  docs of the two tests say so; the long form's B618FU paragraph names the
+  exception in place.
+
+### Red first and the controls
+
+Each was predicted in writing before it ran. The controls are `go test
+-overlay` builds of `logs_test.go` mutated in memory by exact-once
+replacements, so the tree was never edited (its status and the file's hash,
+compared before and after, unchanged), run with the release tags, `-count=1
+-v` and `-run` over the pin and its table, on this commit's code.
+
+| | code | predicted red | seen |
+|---|---|---|---|
+| red first | 3fff8a1c: the rows, no exemption | the two new rows, one finding each of kind `seamDeclaredWithAType` | those two, each "a file that only reads the seam has findings ["planted.go:9:5 declares it with a type of its own"], want none"; the nine other rows and the pin green |
+| K0 | no mutation | none | none |
+| K1 | the exemption reverted (`n.Type != nil` alone) | the two new rows | those two, the finding printed with the kind's new value |
+| K2 | `ast.Unparen` dropped from `isUnnamedFuncType` | the parenthesized row alone | that row alone |
+
+### Runs
+
+The gate after the last commit, the two tests under `-race -count=20` and the
+controls run again after this commit among it, is in the branch's report: a
+record cannot hold the runs made on its own commit.
+
+## 2026-11-18 — B901FU and B933, corrected: a timed control, one step's entry, a default endpoint
+
+Branch `fix/bridge-lows3-1118`. This commit appends this record, a correction
+of B901FU's and B933's (2026-11-18, above), which stay as written, and changes
+two test comments and one test message; no code changes, so no control.
+
+### B901FU's second control was a timed observation
+
+B901FU's controls lead (`ops/engineering-log.md` 105727-105729) says the
+read-back's goroutine starts before the worker's select takes the stop and
+shortens its bound, "so a delayed worker arms that bound late, and neither
+control lets a timer decide its verdict"; its C2 (105740-105743) held the park
+"for twice `StopWriteBound`" and found every park "let go by the time, no
+answer having come, so no give-up came".
+
+C1's verdict was the worker's answer, which alone let its read-back go, its
+watchdog only able to call the control invalid. C2's was its park's timer's.
+Once the stop has come, a step's bound is `StopWriteBound` from the moment the
+worker's select takes the stop (`internal/backup/hold.go` 521-525), after the
+step's goroutine has started (478): a worker delayed there past
+`StopWriteBound` arms that bound so late that a read-back with no gate would be
+given up only after a park of twice `StopWriteBound` had ended. So no answer
+within the park does not show that the gate suppressed the give-up: C2 is a
+timed observation, in which no worker answer, and so no give-up, came within
+the park in ten runs. What shows that the gate held the read-back is its
+entry, which C2 asserted at the park, and the code: a step its gate holds has
+neither the stop nor the bound (489-494). The lead's claim holds for C1 alone.
+
+### B901FU's assertion asks one step's entry
+
+`TestARecheckThatDidNotEndLeavesTheVetoItMade`'s gated cases require, once the
+worker has ended, that the read-back came to its gate
+(`internal/backup/verify_round5_test.go` 344-353 at e7e41bdc). Its comment
+said that "a gate that matched no hold held none of the steps after the
+check", and its `t.Fatal` that "the gate held none of the steps after the
+check". Each gated step has an entry of its own (`StepGate.Entered`,
+`internal/backup/seams.go` 493-503), and the assertion reads the read-back's
+alone, which says nothing of the verdict's write or of INCOMPLETE's. The
+comment says the read-back came to its gate and that the other steps' entries
+are not asked; the message is "the read-back never came to its gate".
+
+### B933's default endpoint
+
+`TestPlainMPDWhenNothingElseIsInstalled`'s comment
+(`internal/mpd/inspect_test.go` 253 at e7e41bdc) said "The file names
+127.0.0.1:6600", where the fixture's `mpd.conf` holds `music_directory` alone.
+Without an explicit `Endpoint`, `Inspect` dials the endpoint the config gives
+(`internal/mpd/inspect.go` 174-177), here its default, `127.0.0.1:6600`, for a
+file that sets neither `bind_to_address` nor `port` (`conf/conf.go` 551-555,
+`DefaultPort` at 75), which the host's own MPD may answer. The comment says
+so; B933's record (105486) says "dials the one the file names" of the same
+default.
+
+### Checks
+
+go1.27.3's gofmt lists the two test files clean, and cmd/bridge's doc guards
+pass over this record; the two tests' runs are in the branch's report.
+
+## 2026-11-18 — B898FU2, corrected: the rename holds rest on holdShareNone's premise, and a read's hold has two shapes
+
+Branch `fix/bridge-lows3-1118`. This commit appends this record, a correction
+of B898FU2's (2026-11-17, above), which stays as written, and changes the
+read-hold rule's line (`.claude/rules/build-ci-tests.md` 165) and its long form
+(`ops/History-rules-build-ci-tests.md`, the entry of that title) together; no
+code changes, so no control.
+
+### What was said
+
+B898FU2's sweep (ii) (`ops/engineering-log.md` 105425-105430) left
+`holdShareNone`'s holds as they are because "the open for deleting beside (a)
+was refused", and the rule's long form said a rename's hold still asks only to
+read because "the open for deleting beside the probe's was refused". And the
+rule said a Windows test of a read holds the file through a handle that asks
+for reading and writing and shares nothing, and requires a read beside it to
+answer `ERROR_SHARING_VIOLATION` before anything else, which two holds the
+same record names (105438-105439) do not: `internal/backup/sharing_windows_test.go`
+89-91 and 170-172 ask only to write and share writing and deleting.
+
+### What holds
+
+The probe's (a) shows a delete open refused beside a hold that asks only to
+read, on one run; it says nothing of a rename of the file a case holds. What
+keeps `holdShareNone`'s rename holds sound is their own premise: each requires
+a rename of the held file to answer `ERROR_SHARING_VIOLATION` before the case
+goes on, puts a rename that landed back, and fails the case otherwise
+(`internal/updater/held_windows_test.go` 94-103), so a hold a runner let a
+rename past fails its case, never passes it.
+
+The backup holds share deletion so that a rename of the held file lands, share
+no reading, and show the read refused in the case itself:
+`TestSnapshotRetriesAHandleHeldAcrossRename` by a premise, a read of the file
+it renamed under the hold answering `ERROR_SHARING_VIOLATION` as soon as the
+rename lands (104-112), and `TestSnapshotRefusesAReservationStillHeldOrCancelled`
+by its assertion on the snapshot's error and its retry's waits (185-197). A
+run where such a hold let the read through fails its case.
+
+### The change
+
+The rule's bold title, in its line and its long form alike, names the shape
+both kinds of hold conform to: a handle that asks to write and shares no
+reading, one that asks for reading and writing and shares nothing or, to let a
+rename of the held file land, one that asks only to write and shares writing
+and deleting; and a read's refusal shown as a premise before anything else or
+by an assertion of the case. Its bolded "Don't…" sentence is word for word as
+it was. The long form names the two backup cases and justifies
+`holdShareNone`'s holds by its premise. And `.claude/rules/cli-serve.md` 120's
+provenance, with its long form's title, keeps the date and backlog B676 and
+names no reviewer.
+
+### Checks
+
+`make docs-check` passes (`build-ci-tests.md` from 60,798 bytes to 60,995,
+`cli-serve.md` from 99,336 to 99,296), and cmd/bridge's doc guards pass over
+the rules, the History files and this record.
+
+## 2026-11-18 — The foreground hints: bridge logs' hint and the console's empty-path reason
+
+Branch `fix/bridge-lows3-1118`. This commit changes two user-facing sentences
+and nothing else of the code, the tests that pin them, B618's rule in its line
+and its long form, and appends this record. No logic changes.
+
+### What was said
+
+Off Windows, where DefaultLogPath is not there, `bridge logs` printed "the
+file is created on first service start; run `bridge start` (or `bridge serve`
+in the foreground) and retry." (`cmd/bridge/logs.go` 148 at e7e41bdc), which
+`TestBridgeLogsOffWindowsIsAsItWas` pinned (`cmd/bridge/logs_test.go` 363). A
+`bridge serve` run in the foreground logs to its terminal and writes no log
+file, so the parenthesis named a way that never makes the file: the launchd
+and systemd units are what point the bridge's output at it.
+
+The console's log routes answered an empty log path "this bridge has no log
+file configured — it logs to the terminal it was started from"
+(`internal/admin/handlers_logs.go` 77-78 at e7e41bdc). The path is empty off
+Windows wherever `packaging.DefaultLogPath` fails (`consoleLogPath`,
+`cmd/bridge/logs.go` 490-493 at e7e41bdc), which it does only where
+`os.UserHomeDir` does (`internal/packaging/packaging.go` 509-513), that is
+where `$HOME` is not set (go1.27.3 `src/os/file.go` 605-624); and on Windows
+outside the service where neither `%LOCALAPPDATA%` nor the home directory can
+be read (`internal/packaging/logpath.go` 85-97). A terminal can start a process
+with no home directory (`env -u HOME bridge serve`), and so can a service
+manager: systemd sets `$HOME` only for a unit with `User=` (systemd.exec(5) of
+systemd 259.5, this host's, lines 4925-4938 of its source), and a system unit
+without it sends the bridge's stdout to the journal by default (4147-4151),
+its stderr with it, or to a file the unit names. There the reason sent the
+operator to a terminal that holds nothing.
+
+### The change
+
+- `bridge logs` off Windows says "the service manager creates the file when
+  it starts the bridge's service; run `bridge start` and retry.", which
+  `TestBridgeLogsOffWindowsIsAsItWas` wants; its doc and `openDefaultLog`'s
+  say this hint is the one line changed off Windows.
+- The console's empty-path reason says "this bridge has no log file
+  configured — its log's path could not be made, since this process has no
+  home directory, and its output goes wherever what started it sends it: the
+  terminal it was started from, or a service manager's journal or the file its
+  unit names". `TestLogStatusUnavailableExplainsWhy` requires it to name the
+  home directory, the terminal and the service manager;
+  `TestLogBundleWorksWithoutALogFile` still finds "no log file".
+- B618's rule kept macOS's and Linux's words whole ("Don't … change macOS's and
+  Linux's words"): its bolded sentence, in `.claude/rules/cli-serve.md` and its
+  long form alike, now excepts this hint, which names no foreground `bridge
+  serve` since this change, and the long form's B618 section says why in a
+  dated paragraph. That paragraph also splits a line B618FU's pin correction
+  left long in the section's B618FU paragraph.
+
+The doctor's line for an empty path, "no log file configured (logs go to the
+terminal)" (`internal/doctor/logsize.go` 61), makes the same claim for the same
+ways the path comes out empty, and is left as it is: this change is the two
+sentences above alone.
+
+### Checks
+
+Each predicted in writing first, by `go test -overlay` with the release tags,
+the tree never edited: the new `TestLogStatusUnavailableExplainsWhy` over the
+old reason failed twice, "does not say "home directory"" and "does not say
+"service manager"", and `TestBridgeLogsOffWindowsIsAsItWas` over the old hint
+failed in both its subtests on the hint's line; both pass with this change.
+The gate's runs are in the branch's report.
 ## 2026-11-18 — B903AUD: a successor's fault before it is heard moves the selection on
 
 The owner's decision of 2026-11-18: after a fault, Play from Stopped moves on
