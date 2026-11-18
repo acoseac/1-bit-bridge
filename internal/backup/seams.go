@@ -438,10 +438,13 @@ type stepGateFixture struct {
 	gates          map[string]*stepGate
 }
 
-// stepGate is one step's gate, closed once, when the test fires it.
+// stepGate is one step's gate: fired, closed once, when the test fires it,
+// and entered, closed once, when a hold first comes to the step (gateOf).
 type stepGate struct {
-	fired chan struct{}
-	once  sync.Once
+	fired     chan struct{}
+	once      sync.Once
+	entered   chan struct{}
+	enterOnce sync.Once
 }
 
 var stepGateForTest atomic.Pointer[stepGateFixture]
@@ -458,11 +461,12 @@ type StepGate struct{ f *stepGateFixture }
 // which fires every gate and puts the seam back. Other folders, snapshots
 // and steps keep their production bounds. A test fires every gate (FireAll)
 // before it joins the callers whose steps it may hold, and restores the seam
-// once they and their holds have ended.
+// once they and their holds have ended; it asks whether a hold came to a step
+// (Entered), since a gate that matches no hold holds nothing.
 func SetStepGateForTest(root, snapshot string, steps ...string) (*StepGate, func()) {
 	f := &stepGateFixture{root: root, snapshot: snapshot, gates: make(map[string]*stepGate, len(steps))}
 	for _, step := range steps {
-		f.gates[step] = &stepGate{fired: make(chan struct{})}
+		f.gates[step] = &stepGate{fired: make(chan struct{}), entered: make(chan struct{})}
 	}
 	g := &StepGate{f: f}
 	prev := stepGateForTest.Swap(f)
@@ -486,15 +490,28 @@ func (g *StepGate) FireAll() {
 	}
 }
 
+// Entered answers a channel closed once a hold has come to the step named and
+// been handed its gate (gateOf), before that step runs; a gate that matches no
+// hold, by its folder or its snapshot, leaves it open. A step the gate does
+// not hold is the test's error.
+func (g *StepGate) Entered(step string) <-chan struct{} {
+	s := g.f.gates[step]
+	if s == nil {
+		panic(fmt.Sprintf("backup: no gate holds the step %q", step))
+	}
+	return s.entered
+}
+
 // gateOf is the gate a test holds the step named words of h by
-// (SetStepGateForTest): nil in production, and for every other step. With
-// h.mu held.
+// (SetStepGateForTest): nil in production, and for every other step. Handing
+// a hold its gate marks the step entered (StepGate.Entered). With h.mu held.
 func gateOf(h *hold, words string) <-chan struct{} {
 	f := stepGateForTest.Load()
 	if f == nil || f.root != h.root || (f.snapshot != "" && f.snapshot != h.snapshot) {
 		return nil
 	}
 	if s := f.gates[words]; s != nil {
+		s.enterOnce.Do(func() { close(s.entered) })
 		return s.fired
 	}
 	return nil

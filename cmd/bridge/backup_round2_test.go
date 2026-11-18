@@ -433,10 +433,13 @@ func TestABackupsFolderGrantingNoLockGrowsByOneSnapshotAndTheDoctorSaysWhy(t *te
 // choice (backlog B895). So the read is held at its gate (SetStepGateForTest,
 // by the backups folder, for whichever snapshot the ticker makes), which
 // nothing fires before the test's joins: neither its bound nor the stop gives
-// it up, and only the caller's expiry ends the ticker's wait for it. A step
-// given up first is said as a give-up, B895's production defect, which this
-// test does not reach. The lock's open comes before the hold's first step
-// (verifyHeld), so only the caller's expiry ends it already.
+// it up, and only the caller's expiry ends the ticker's wait for it; and the
+// test fails at once where the read that hangs came to no gate
+// (StepGate.Entered): a read no gate holds keeps its own bound, which races
+// that expiry again. A step given up first is said as a give-up, B895's
+// production defect, which this test does not reach. The lock's open comes
+// before the hold's first step (verifyHeld), so only the caller's expiry ends
+// it already.
 func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *testing.T) {
 	for _, step := range []string{"its manifest's read", "its lock's open"} {
 		t.Run(step, func(t *testing.T) {
@@ -454,9 +457,11 @@ func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *test
 			// The cleanups run last-registered first, whatever the test
 			// found: the hang let go (never the gate), the stop, the ticker
 			// and then every worker joined, and the seams put back last.
+			var gate *backup.StepGate
 			if step == "its manifest's read" {
 				t.Cleanup(backup.SetOnManifestReadForTest(func(string) { hang() }))
-				_, restoreGate := backup.SetStepGateForTest(root, "", "its read of the snapshot's record")
+				var restoreGate func()
+				gate, restoreGate = backup.SetStepGateForTest(root, "", "its read of the snapshot's record")
 				t.Cleanup(restoreGate)
 			} else {
 				t.Cleanup(backup.SetOpenBackupsLockForTest(func(dir, name string) (*os.File, error) {
@@ -478,6 +483,13 @@ func TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound(t *test
 			case <-entered:
 			case <-time.After(60 * time.Second):
 				t.Fatalf("the verification never reached %s\nstdout %s\nstderr %s", step, stdout.String(), stderr.String())
+			}
+			if gate != nil {
+				select {
+				case <-gate.Entered("its read of the snapshot's record"):
+				default:
+					t.Fatal("the gate held no step: the read that hangs never came to it, so its own bound still races the caller's expiry")
+				}
 			}
 			stoppedAt := time.Now()
 			cancel()

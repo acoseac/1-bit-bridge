@@ -105472,3 +105472,281 @@ runs are the PR's. Round 1's probe was vetted and compiled for windows/amd64
 and windows/arm64 here, and cmd/bridge's doc guards were shown to read its
 Windows-only file: a ghost citation, and a doc opening with a name nothing
 declares, each red.
+
+## 2026-11-18 — B933: the plain-MPD test dials a fake it owns, never the host's MPD
+
+Branch `fix/bridge-lows-1118`, from main 589ba334. This commit changes two
+test files of `internal/mpd` and appends this record; no production code.
+
+### The hazard
+
+`TestPlainMPDWhenNothingElseIsInstalled` (`internal/mpd/inspect_test.go`
+250-260 at 589ba334) inspected a tree whose `mpd.conf` sets
+`music_directory` alone, with no `Endpoint` (253), and required no daemon
+version (254). With no endpoint, `Inspect` dials the one the file names
+(`inspect.go` 174-177): with no `bind_to_address` and no `port`,
+`127.0.0.1:6600` (`conf/conf.go` 551-555, `DefaultPort` at 75), which
+`resolveDial` keeps as TCP (`inspect.go` 599-602), and `askDaemon` dials it
+and records the greeting's version (259-268). So the verdict was the host's:
+an MPD listening on 6600 turned the test red. `Dial` builds a bare
+`net.Dialer` (`client.go` 60-61), so no dial seam stands in for the network;
+`Options.Endpoint` is the seam the package has, "dialled instead of the
+address the file names" (`inspect.go` 95).
+
+### The change
+
+- `client_test.go`: the fake's `serve` gains a mode, `"hangup"`, which
+  returns at once, so its deferred close hangs up before any greeting.
+- The test starts that fake and inspects with `Endpoint: srv.addr`. It now
+  also requires `rep.MPD.Endpoint == srv.addr`, and that `rep.Problems` is
+  the hang-up's problem alone, `mpd: connection closed`: with no greeting
+  `Dial` reads EOF (`wrapIO`'s words, `client.go` 413-414), `askDaemon`
+  records that problem and the endpoint and nothing else (`inspect.go`
+  259-264), and neither the tree's detection nor the file adds one. One
+  comment line says why.
+- The file's fallback to the endpoint it names stays covered:
+  `TestRuntimeDirSocketIsDialled` dials the socket a file names, and
+  `conf/conf_test.go` 54-57 pins the default endpoint, `127.0.0.1:6600`.
+
+### Controls
+
+Predicted in writing first, each a `go test -overlay` build with the tags:
+the tree was never edited, and `git status` listed only this change's two
+files before the commit. The overlay added a test file to the package whose
+one test started the package's fake, with the fixture's greeting and
+replies, at `127.0.0.1:6600`, a listener the control owned (`ss -ltnp 'sport
+= :6600'` found nothing listening there first; a listen that failed would
+have made the control unavailable, never a result), logged in a cleanup what
+that fake recorded (`lines()`, which holds only what a client sends once
+greeted: a dial of it records `outputs`, `replay_gain_status` and `config`,
+the commands `askDaemon` sends, `inspect.go` 270-298), and ran
+`TestPlainMPDWhenNothingElseIsInstalled` beside it.
+
+- C1, 589ba334's `inspect_test.go` and `client_test.go` overlaid: red at
+  `inspect_test.go:255`, the Fatalf of 254's condition, the report's daemon
+  `{Version:"0.24.0", Endpoint:"127.0.0.1:6600"}`; the fake at 6600 recorded
+  `outputs`, `replay_gain_status` and `config`.
+- C2, the new test: green, and the fake at 6600 recorded nothing.
+
+### Runs
+
+Go 1.27.3 on Linux, the tags `ts_omit_webclient,ts_omit_debugeventbus`:
+`go test -race -count=20 -run '^TestPlainMPDWhenNothingElseIsInstalled$'
+./internal/mpd/`, ok, no data race. The gate's runs on this branch are in the
+report.
+
+## 2026-11-18 — B895TFU: the stopped tickers' tests require that their gate held the step
+
+Branch `fix/bridge-lows-1118`, after B933's commit. This commit changes the
+step gate's test seam in `internal/backup/seams.go` (its fixture is nil in
+production, so no production path changes) and two tests of `cmd/bridge`,
+and appends this record.
+
+### The hazard
+
+B895-TEST (2026-11-14, above) holds the hung step of each stopped ticker's
+test at its gate: the manifest-read case of
+`TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound` holds
+"its read of the snapshot's record" (`cmd/bridge/backup_round2_test.go` 459 at
+589ba334), and `TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound`
+holds "its verdict's write" (`backup_verify_test.go` 424). Each dropped the
+gate's handle, and nothing asserted that the gate matched. `gateOf`
+(`internal/backup/seams.go` 492-501) matches the hold's root, its snapshot and
+the step's words, which the tests pass as literals (the step constants are
+unexported, `hold.go` 78-94). A gate that matches nothing leaves the step its
+own stop bound (`hold.go` 487-494, 521-525), which races the caller's expiry as
+it did before B895: green in most runs, as C2 below shows.
+
+### The change
+
+- `seams.go`: `stepGate` gains `entered`, which `SetStepGateForTest` makes and
+  `gateOf` closes where it hands a hold that gate, once, through a
+  `sync.Once` of its own (`enterOnce`), since a gate can be handed more than
+  once (to every hold of the folder where its snapshot is ""). The new
+  `StepGate.Entered(step)` answers that channel, and panics for a step no
+  gate holds, as `Fire` does. `runStep` calls `gateOf` as it registers the
+  step (`hold.go` 474), under the hold's lock and before the step's goroutine
+  starts (478), so the channel is closed before anything the step runs, a
+  hang inside it included.
+- The two tests: right after the wait for the hang
+  (`backup_round2_test.go` 482-486, the gated case only;
+  `backup_verify_test.go` 437-441), each receives from `gate.Entered` for its
+  step without blocking, and fails at once if it is not closed, saying the
+  gate held no step. Each hang runs inside the step its gate names: the
+  manifest-read hook runs in `readRecord` (`finish.go` 220-226), whose first
+  call in a verification is the step "its read of the snapshot's record"
+  (527-531), and the verdict's sync (`syncVerdictDir`, `verify_record.go`
+  357) runs only in `publishVerdict`, inside a write's step, of which a fresh
+  snapshot's verification makes "its verdict's write" first (`finish.go`
+  621-624). One clause in each test's doc says so.
+- No rule text: a rule that every gate be asserted entered is not this
+  change's, since some gates hold steps that may not run (the write of
+  INCOMPLETE).
+
+### Controls
+
+Predicted in writing first; `go test -overlay` builds with the tags, no
+`-race`, `-count=20 -v`, the two tests alone. The mutation, one exact-once
+replacement in each test file that keeps its lines, scopes the gate to the
+snapshot "x", which no ticker makes (a snapshot is named by its time). The
+tree was never edited.
+
+- C1, this commit's test files so mutated: red 20 of 20 in each, at the new
+  assertion, and nothing else failed: `backup_round2_test.go:491` (the
+  manifest-read case, about 0.4 s a run; the lock-open case, which holds no
+  gate, green 20 of 20) and `backup_verify_test.go:445` (about 0.45 s).
+- C2, 589ba334's test files so mutated: the manifest-read case green 19 of
+  20 and red once, at `backup_round2_test.go:493` (589ba334's line), "a
+  stopped verification was reported: backup (startup): the verification of
+  <dir> was given up, ... its read of the snapshot's record did not end
+  within its bound (context canceled)", the step's own bound first; the
+  sync case green 20 of 20. That is the silent pass: a gate that held
+  nothing went unnoticed in 39 of 40 runs.
+
+### Runs
+
+Go 1.27.3 on Linux, the tags `ts_omit_webclient,ts_omit_debugeventbus`:
+`go test -race -count=20 -v -run
+'^(TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound|TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound)$'
+./cmd/bridge/`, ok in 196 s: 80 `--- PASS` lines (each test, and each of
+the first's two cases, 20 times), no FAIL and no data race. The gate's runs
+on this branch are in the report.
+
+## 2026-11-18 — B904FU: the stall's join ends at the drain's give-up
+
+Branch `fix/bridge-lows-1118`, after B895TFU's commit. This commit changes
+one doc comment, `playerStall.end`'s in `cmd/bridge/serve_player_test.go`,
+and appends this record, a correction of B904's (2026-11-15, above), which
+stays as written. No code changes, so no control; #1477 left this as a
+follow-up.
+
+### What was said
+
+`end`'s doc said it joins the player "until a drain's give-up
+(serveDrainGiveUp): nothing waits for a player nobody has stopped, and the
+start has ended before its directories go and the medium's seam is
+restored" (`cmd/bridge/serve_player_test.go` 506-509 at 589ba334). B904's
+record said of `end`: "All of that happens before the directories and the
+medium seam go." (`ops/engineering-log.md` 100478-100479), and "So the player
+is joined before `persistentMedium`'s restore." (100487).
+
+### What the code does
+
+Both of `end`'s waits are bounded, so neither claim holds without a
+condition:
+
+- a serve that has not decided its player is waited for until
+  `serveDrainGiveUp`, and `end` then returns with no join
+  (`serve_player_test.go` 518-522 at 589ba334), leaving the drain, next, to
+  report the serve that did not return;
+- the wait for the player's `settled` ends there with `t.Errorf` (531-535).
+
+`serveDrainGiveUp` fires `serveDrainReserve`, 10 s, before the test binary's
+deadline, and never in a binary with no deadline (`serve_wait_test.go` 56-60,
+70-77). `end` is registered once serve's drain is (`launchServe`,
+`main_test.go` 282-285), so the cleanups after it, the drain, the removal of
+the case's directories and `persistentMedium`'s restore, run either way. A
+start that ends before the give-up has ended before its directories go and
+the medium's seam is restored, as in every run that passes; one that ignores
+its stop, or a serve that does not return, ends the wait at the give-up with
+the test failed, and those cleanups then run beside it; with no deadline the
+wait has no bound.
+
+### The change
+
+The doc's text after "(serveDrainGiveUp):" now reads: "nothing waits for a
+player nobody has stopped, and a start that ends before that give-up has
+ended before its directories go and the medium's seam is restored. A start
+that ignores its stop, or a serve that does not return, ends the wait at the
+give-up with the test failed, here or by the drain next, and the cleanups
+after this one still run beside it; with no test deadline the wait has no
+bound." Its last sentence, on a serve that has not decided its player, is
+kept.
+
+### Checks
+
+go1.27.3's gofmt lists the file clean. The doc scanners in cmd/bridge
+(`TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`,
+`TestNoBlankKeepers`) pass over the comment and this record; the full
+`./cmd/bridge` run is in the report.
+
+## 2026-11-18 — B901FU: the stopped recheck holds its later steps at their gates
+
+Branch `fix/bridge-lows-1118`, after B904FU's commit. This commit changes one
+test of `internal/backup` and appends this record; no production code. The
+rule and its long form then hold as written.
+
+### The hazard
+
+B901's rule says of a check that must answer once its caller has stopped it
+that "the read-back after it is held at its gate"
+(`.claude/rules/build-ci-tests.md` 242), and its long form
+(`ops/History-rules-build-ci-tests.md` 1873-1875) says
+`TestARecheckThatDidNotEndLeavesTheVetoItMade` holds to it. Its "stopped by
+its caller" case (`internal/backup/verify_round5_test.go` 269-284 at
+589ba334) held only the check's grace (`checkGraceOf`): B901 (#1474,
+a7167add) added that alone, while "past its deadline" gates the read-back
+with four other steps (264-265). After the check this case runs the verdict's
+write (`finish.go` 621-630) and the read-back (637, its step at 480); once the
+stop has come, `runStep` bounds each by `StopWriteBound` from its start
+(`hold.go` 521-525) unless it is gated, so a host slow to finish either gave
+the recheck up, and the case failed as "the recheck was given up".
+
+### The change
+
+- The case sets a gate on "its verdict's write", "its write of INCOMPLETE"
+  and "its read of the record after it" for its own snapshot, puts the seam
+  back in a cleanup, and appends `gate.FireAll` to `letGo`, which the
+  callers' release runs before they are joined, as "past its deadline" does;
+  one variable, `gate`, is set in each gated case.
+- With B895TFU's seam, both gated cases then require that the read-back came
+  to its gate (`StepGate.Entered`), asked once the worker has ended
+  (`unlock.letGoAndAwaitEnd`): the worker reads the record back after its
+  check, whatever that found (`finish.go` 583-637), and asked after its end
+  the assertion races nothing.
+- The gate's root is `filepath.Dir(dir)`, and `dir` is what
+  `verifiedSnapshot` answers, resolved by `fsutil.ResolveLinks`
+  (`backup_test.go` 1348, `verify_test.go` 1187-1194), as the hold resolves
+  its own root (`resolveSnapshotIn`, `verify_paths.go` 40-58, through
+  `resolveLinks`, 28-31): a temp root reached through a link, as macOS's
+  `/var` is, does not leave the gate unmatched, and the new assertion would
+  say so if it did. So the root needed no change.
+- The doc gains one clause: the steps after the check are held at their gates
+  (B901).
+
+### Controls
+
+Predicted in writing first; `go test -overlay` builds with the tags, no
+`-race`, `-count=10 -v -run
+'^TestARecheckThatDidNotEndLeavesTheVetoItMade$/^stopped_by_its_caller$'`;
+the tree was never edited. Both forms overlay `finish.go` with
+`verifyAndThen`'s stop arm arming no `expire` (351-355; the watchdog, past
+half an hour, stays), as B895-TEST's controls did, and park the case's own
+read-back in `SetReadBackFailureForTest`'s hook (its snapshot, first call),
+the park's code joined onto one line of the case so every other line keeps
+its number. The read-back's goroutine starts before the worker's select takes
+the stop and shortens its bound (`hold.go` 478-494), so a delayed worker arms
+that bound late, and neither control lets a timer decide its verdict:
+
+- C1, 589ba334's test: the read-back let go only by the worker's answer
+  (`SetVerifyHandoffForTest`'s answer hook), with a separate 30 s watchdog
+  that would have reported the control invalid: red 10 of 10 at
+  `verify_round5_test.go:326`, "the recheck was given up (a step of the
+  verification did not end and was given up, and holds the snapshots until
+  it does: its read of the record after it did not end within its bound
+  (context canceled); the snapshot's record could not be read back: the
+  read-back did not end within its bound and was given up): the test did not
+  reach the case", every run let go by the answer, none invalid.
+- C2, this commit's test: at the park the read-back's gate must have been
+  entered, and the park holds for twice `StopWriteBound`, failing on a worker
+  answer meanwhile: green 10 of 10, every park with its gate entered and let
+  go by the time, no answer having come, so no give-up came.
+
+### Runs
+
+Go 1.27.3 on Linux, the tags `ts_omit_webclient,ts_omit_debugeventbus`:
+`go test -race -count=20 -v -run
+'^TestARecheckThatDidNotEndLeavesTheVetoItMade$' ./internal/backup/`, ok in
+203 s: 80 `--- PASS` lines (the test and each of its three cases, 20 times),
+no FAIL, SKIP or data race. The gate's runs on this branch are in the
+report.
