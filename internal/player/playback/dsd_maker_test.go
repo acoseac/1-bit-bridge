@@ -1,11 +1,13 @@
 package playback_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
@@ -143,8 +145,8 @@ func TestAnotherMakersUnitOfTheModelReadsNoneOfTheFirstsEntry(t *testing.T) {
 		t.Errorf("A's entry once B was read is %+v, want it as it was, %+v", now, entryA)
 	}
 
-	// B's own write.
-	res := be.ChooseDSD(context.Background(), playback.ChoiceRequest{DACKey: d.Key, ObservedStamp: dsdstate.StampOf(b.Manufacturer),
+	// B's own write, from the read side published while B is bound.
+	res := be.ChooseDSD(context.Background(), playback.ChoiceRequest{DACKey: d.Key, DACToken: d.Token,
 		Choice: policy.Choice{BaseRevision: 0, Mode: dsdstate.ModeNative, FirstUseAcknowledged: true, By: dsdstate.ByApp}})
 	if res.Outcome != playback.ChoiceWritten {
 		t.Fatalf("B's write answered %s", res.Outcome)
@@ -160,82 +162,241 @@ func TestAnotherMakersUnitOfTheModelReadsNoneOfTheFirstsEntry(t *testing.T) {
 	}
 }
 
-// TestAWriteMadeFromAnotherMakersReadSideIsRefused: a choice's write carries
-// the stamp of the maker whose read side it was made from. One that is no
-// stamp is bad_request before the configuration lease and anything after it,
-// the journal naming no mode; one of another maker's unit than the one bound,
-// on the same key, is dac_changed before the state's fence and its
-// compare-and-set, at revision 0, where neither unit has a choice, and at
-// equal revisions, nothing written; the bound unit's own is written.
-func TestAWriteMadeFromAnotherMakersReadSideIsRefused(t *testing.T) {
+// keyedBackend is a backend whose DSD is the effective policy over box and
+// store, the test DAC bound at card 5 unless edit binds another, its DAC's
+// tokens minted under key (Seams.DACTokenKey), its set published once.
+func keyedBackend(t *testing.T, box *playbacktest.Box, store playback.DSDStore, key []byte, edit ...func(*playback.DSDPolicy)) *playback.Backend {
+	t.Helper()
+	p := playbacktest.Policy(5, box, store)
+	p.Log = &choiceLog{}
+	for _, e := range edit {
+		e(p)
+	}
+	b, err := playback.New(playback.Config{Resolver: noContent{}, Locator: cardFive{}, DSD: p, Seams: &playback.Seams{DACTokenKey: key}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.RefreshDSD(true)
+	return b
+}
+
+// tokenKey is a token key of 32 bytes, each b.
+func tokenKey(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
+
+// TestTheTokenIsTheReadingsOwn (B728 B9 PR 3): the token the read side
+// publishes is the one the reading the set was made from minted, which the
+// backend's own function makes of the reading's model key, maker and firmware
+// (dacToken): two readings of one unit, by one backend or by two under one
+// key, give one token; another model key, another maker's stamp, another
+// firmware or another backend's key gives another; a firmware that is empty,
+// or does not read, gives one token of a token's form, alike published and
+// checked, a write carrying it written; and so does a unit with no
+// manufacturer string (its stamp StampNone). New refuses a key that is not 32
+// bytes.
+func TestTheTokenIsTheReadingsOwn(t *testing.T) {
+	type read struct {
+		token playback.DACToken
+		be    *playback.Backend
+	}
+	readOf := func(t *testing.T, m alsa.UnitModel, key []byte) read {
+		t.Helper()
+		box := playbacktest.NewBox(5)
+		box.SetUnit(5, m)
+		be := keyedBackend(t, box, playbacktest.NewMemStore(dsdstate.Defaults()), key)
+		tok := tokenOf(t, be)
+		if !tok.Valid() {
+			t.Fatalf("the token %q is not of a token's form", tok)
+		}
+		k, err := dsdstate.KeyOf(m.USB, m.Product)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := be.DACTokenForTest(policy.Identity{Key: k, Stamp: dsdstate.StampOf(m.Manufacturer), BCDDevice: m.BCDDevice}); tok != want {
+			t.Fatalf("the read side publishes the token %s, want the reading's own %s", tok, want)
+		}
+		return read{token: tok, be: be}
+	}
+	base := playbacktest.DACUnit()
+	first := readOf(t, base, tokenKey(1))
+	first.be.RefreshDSD(true)
+	if again := tokenOf(t, first.be); again != first.token {
+		t.Errorf("a second reading of the unit publishes %s, want %s", again, first.token)
+	}
+	if again := readOf(t, base, tokenKey(1)).token; again != first.token {
+		t.Errorf("a second backend under the key publishes %s for the unit, want %s", again, first.token)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*alsa.UnitModel)
+		key  []byte
+	}{
+		{"another model key", func(m *alsa.UnitModel) { m.Product = "Another DAC" }, tokenKey(1)},
+		{"another maker", func(m *alsa.UnitModel) { m.Manufacturer = "Other Labs" }, tokenKey(1)},
+		{"another firmware", func(m *alsa.UnitModel) { m.BCDDevice = "0200" }, tokenKey(1)},
+		{"another backend's key", func(*alsa.UnitModel) {}, tokenKey(2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := playbacktest.DACUnit()
+			tc.edit(&m)
+			if other := readOf(t, m, tc.key).token; other == first.token {
+				t.Errorf("%s gives the token %s, the test DAC's own", tc.name, other)
+			}
+		})
+	}
+	var noFirmware playback.DACToken
+	for _, tc := range []struct {
+		name string
+		edit func(*alsa.UnitModel)
+	}{
+		{"an empty firmware", func(m *alsa.UnitModel) { m.BCDDevice = "" }},
+		{"a firmware that does not read", func(m *alsa.UnitModel) { m.BCDDevice = "zz" }},
+		{"no manufacturer string", func(m *alsa.UnitModel) { m.Manufacturer = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := playbacktest.DACUnit()
+			tc.edit(&m)
+			r := readOf(t, m, tokenKey(1))
+			if m.BCDDevice != playbacktest.DACBCD {
+				if noFirmware == "" {
+					noFirmware = r.token
+				} else if r.token != noFirmware {
+					t.Errorf("a firmware that does not read gives %s, an empty one %s: both are no firmware", r.token, noFirmware)
+				}
+			}
+			wantChoice(t, r.be.ChooseDSD(bg, choiceOf(t, r.be, dsdstate.ModeConvert, 0)), playback.ChoiceWritten)
+		})
+	}
+	t.Run("a key that is not 32 bytes", func(t *testing.T) {
+		p := playbacktest.Policy(5, playbacktest.NewBox(5), playbacktest.NewMemStore(dsdstate.Defaults()))
+		for _, k := range [][]byte{bytes.Repeat([]byte{1}, 31), bytes.Repeat([]byte{1}, 33), {}} {
+			if _, err := playback.New(playback.Config{Resolver: noContent{}, Locator: cardFive{}, DSD: p, Seams: &playback.Seams{DACTokenKey: k}}); err == nil {
+				t.Errorf("New took a token key of %d bytes", len(k))
+			}
+		}
+	})
+}
+
+// TestAWriteCarriesTheTokenItsReadSidePublished (B728 B9 PR 3): a choice's
+// write carries the token GET /v1/outputs published with the read side it was
+// made from, and is written only where that token is its own reading's. The
+// token the backend publishes is written. One not of a token's form is
+// bad_request before the writes' turn, a write holding the turn: the write
+// never queues for it, and its journal names no mode. The token of another
+// unit than the one the write reads is dac_changed before the state's fence and
+// its compare-and-set, nothing written, the answer carrying the token of the
+// unit bound: a unit of another maker on the key, at revision 0 where neither
+// unit has a choice, and at equal revisions; the bound unit on another
+// firmware; another unit of the key the wire names, whose product string holds
+// its serial, which the state keys apart and the wire does not; and the token
+// of another boot of the backend, from a second backend over the same state,
+// whose own token is then written.
+func TestAWriteCarriesTheTokenItsReadSidePublished(t *testing.T) {
 	a, b := makerUnit("Audio 1 Labs", "1", 2), makerUnit("Audio 2 Labs", "2", 3)
 	stampA, stampB := dsdstate.StampOf(a.Manufacturer), dsdstate.StampOf(b.Manufacturer)
-	backendOf := func(t *testing.T, st dsdstate.State) (*playback.Backend, *playbacktest.MemStore, *choiceLog) {
+	// rig is a backend over st with first bound, and bind, which binds another
+	// unit in its place and publishes its set.
+	rig := func(t *testing.T, st dsdstate.State, first alsa.UnitModel) (*playback.Backend, *playbacktest.MemStore, *choiceLog, func(alsa.UnitModel)) {
+		t.Helper()
 		at := &boundUnit{}
+		var box *playbacktest.Box
 		be, store, log := choiceBackend(t, st, func(p *playback.DSDPolicy) {
-			at.put(p.Box.(*playbacktest.Box), b)
+			box = p.Box.(*playbacktest.Box)
+			at.put(box, first)
 			p.Bound = at.get
 		})
-		return be, store, log
+		return be, store, log, func(m alsa.UnitModel) {
+			at.put(box, m)
+			be.RefreshDSD(true)
+		}
 	}
-	write := func(t *testing.T, be *playback.Backend, stamp dsdstate.Stamp, base uint64, mode string) playback.ChoiceOutcome {
+	write := func(be *playback.Backend, key string, token playback.DACToken, base uint64, mode string) playback.ChoiceResult {
+		return be.ChooseDSD(bg, playback.ChoiceRequest{DACKey: key, DACToken: token, Choice: policy.Choice{BaseRevision: base, Mode: mode, By: dsdstate.ByApp}})
+	}
+	// refused fails t unless res is dac_changed, nothing written, its answer
+	// the epoch published, its DAC the bound unit's.
+	refused := func(t *testing.T, be *playback.Backend, store *playbacktest.MemStore, res playback.ChoiceResult, st dsdstate.State, writes int) {
 		t.Helper()
-		return be.ChooseDSD(context.Background(), playback.ChoiceRequest{DACKey: keyOf(t, be), ObservedStamp: stamp,
-			Choice: policy.Choice{BaseRevision: base, Mode: mode, By: dsdstate.ByApp}}).Outcome
+		wantChoice(t, res, playback.ChoiceDACChanged)
+		if n := store.Writes(); n != writes || !reflect.DeepEqual(store.State(), st) {
+			t.Errorf("the refused write wrote the state (%d writes, was %d): %+v", n, writes, store.State())
+		}
+		if !res.Epoch || !reflect.DeepEqual(res.Policy, be.Policy()) {
+			t.Errorf("the answer's epoch %+v (epoch %v), want the one published %+v", res.Policy.DSD, res.Epoch, be.Policy().DSD)
+		}
+		if got := dacOf(t, res.Policy).Token; got != tokenOf(t, be) {
+			t.Errorf("the answer carries the token %s, want the bound unit's %s", got, tokenOf(t, be))
+		}
 	}
-	t.Run("a stamp that is no stamp, before the lease", func(t *testing.T) {
-		for _, stamp := range []dsdstate.Stamp{"", "s1-zz", dsdstate.Stamp(b.Manufacturer)} {
-			be, store, log := backendOf(t, dsdstate.Defaults())
-			if err := be.Release(bg, 7); err != nil {
-				t.Fatal(err)
+
+	t.Run("the token published is written", func(t *testing.T) {
+		be, store, _, _ := rig(t, dsdstate.Defaults(), a)
+		wantChoice(t, write(be, keyOf(t, be), tokenOf(t, be), 0, dsdstate.ModeConvert), playback.ChoiceWritten)
+		if d, _ := store.State().DAC(playbacktest.DACKey(), stampA); d.Choice == nil || d.Choice.Mode != dsdstate.ModeConvert {
+			t.Errorf("the bound unit's entry is %+v, want its write", d)
+		}
+	})
+
+	t.Run("a token not of a token's form, before the turn", func(t *testing.T) {
+		store := newHeldStore(dsdstate.Defaults())
+		log := &choiceLog{}
+		var queued atomic.Int32
+		be, err := playback.New(playback.Config{Resolver: noContent{}, Locator: cardFive{}, DSD: func() *playback.DSDPolicy {
+			p := playbacktest.Policy(5, playbacktest.NewBox(5), store)
+			p.Log = log
+			return p
+		}(), Seams: &playback.Seams{ChoiceQueued: func() { queued.Add(1) }}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		be.RefreshDSD(true)
+		key := keyOf(t, be)
+		held := make(chan playback.ChoiceResult, 1)
+		store.armed.Store(true)
+		t.Cleanup(store.let)
+		go func() { held <- write(be, key, tokenOf(t, be), 0, dsdstate.ModeConvert) }()
+		within(t, store.came, "the write holding the turn, inside the state's write")
+		for _, token := range []playback.DACToken{"", "t1-", "t1-zz", playback.DACToken("t1-" + strings.Repeat("A", 32)), playback.DACToken("t1-" + strings.Repeat("a", 31)),
+			playback.DACToken("t1-" + strings.Repeat("a", 33)), playback.DACToken("t2-" + strings.Repeat("a", 32)), playback.DACToken(stampA)} {
+			answered := make(chan playback.ChoiceResult, 1)
+			go func() { answered <- write(be, key, token, 0, dsdstate.ModeConvert) }()
+			res := withinFor(t, answered, askWithin, "the answer of a write of no token's form, the turn held")
+			wantChoice(t, res, playback.ChoiceBadRequest)
+			if res.Epoch {
+				t.Errorf("bad_request for %q carries an epoch: it is no write", token)
 			}
-			if got := write(t, be, stamp, 0, dsdstate.ModeOff); got != playback.ChoiceBadRequest {
-				t.Errorf("a write observed as %q, the player not stopped, answered %s; want bad_request", stamp, got)
-			}
-			if lines := log.writes(); len(lines) != 1 || lines[0].attrs["to"] != "" || lines[0].attrs["outcome"] != string(playback.ChoiceBadRequest) {
-				t.Errorf("the write's journal %+v, want one bad_request line naming no mode", lines)
-			}
-			if n := store.Writes(); n != 0 {
-				t.Errorf("a bad_request wrote the state %d times", n)
+		}
+		if n := queued.Load(); n != 0 {
+			t.Errorf("a write of no token's form queued for the turn %d times: its check comes before it", n)
+		}
+		store.let()
+		wantChoice(t, within(t, held, "the held write's answer"), playback.ChoiceWritten)
+		for _, line := range log.writes() {
+			if line.attrs["outcome"] == string(playback.ChoiceBadRequest) && line.attrs["to"] != "" {
+				t.Errorf("a bad_request's journal names the mode %q", line.attrs["to"])
 			}
 		}
 	})
-	t.Run("another maker's stamp, before the fence", func(t *testing.T) {
-		be, store, _ := backendOf(t, dsdstate.Defaults())
-		store.Land(fmt.Errorf("the directory's barrier failed: %w", atomicwrite.ErrLanded))
-		if got := write(t, be, stampB, 0, dsdstate.ModeConvert); got != playback.ChoicePersistUncertain {
-			t.Fatalf("the write that landed answered %s; the case needs the fence", got)
-		}
-		before := store.State()
-		if got := write(t, be, stampA, 0, dsdstate.ModeOff); got != playback.ChoiceDACChanged {
-			t.Errorf("a write from A's read side with B bound, behind the fence, answered %s; want dac_changed", got)
-		}
-		if after := store.State(); !reflect.DeepEqual(after, before) {
-			t.Errorf("the refused write changed the state: %+v", after)
-		}
-	})
+
 	for _, tc := range []struct {
 		name string
 		st   dsdstate.State
 		base uint64
 	}{
-		{"another maker's stamp at revision 0", dsdstate.Defaults(), 0},
-		{"another maker's stamp at equal revisions", dsdstate.State{DefaultMode: dsdstate.ModeAuto, DACs: []dsdstate.DAC{
+		{"a unit of another maker on the key, at revision 0", dsdstate.Defaults(), 0},
+		{"a unit of another maker on the key, at equal revisions", dsdstate.State{DefaultMode: dsdstate.ModeAuto, DACs: []dsdstate.DAC{
 			{Key: playbacktest.DACKey(), Stamp: stampA, Choice: &dsdstate.Choice{Mode: dsdstate.ModeConvert, Revision: 1, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp}},
 			{Key: playbacktest.DACKey(), Stamp: stampB, Choice: &dsdstate.Choice{Mode: dsdstate.ModeOff, Revision: 1, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp}},
 		}}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			be, store, _ := backendOf(t, tc.st)
-			if got := write(t, be, stampA, tc.base, dsdstate.ModeConvert); got != playback.ChoiceDACChanged {
-				t.Errorf("a write from A's read side with B bound answered %s; want dac_changed", got)
+			be, store, _, bind := rig(t, tc.st, a)
+			key, tokenA := keyOf(t, be), tokenOf(t, be)
+			bind(b)
+			if keyOf(t, be) != key || tokenOf(t, be) == tokenA {
+				t.Fatalf("B bound publishes the key %s and the token %s: the case needs A's key and another token", keyOf(t, be), tokenOf(t, be))
 			}
-			if n := store.Writes(); n != 0 || !reflect.DeepEqual(store.State(), tc.st) {
-				t.Errorf("the refused write wrote %d times: %+v", n, store.State())
-			}
-			if got := write(t, be, stampB, tc.base, dsdstate.ModeConvert); got != playback.ChoiceWritten {
-				t.Fatalf("B's own write answered %s; want written", got)
-			}
+			refused(t, be, store, write(be, key, tokenA, tc.base, dsdstate.ModeConvert), tc.st, 0)
+			wantChoice(t, write(be, key, tokenOf(t, be), tc.base, dsdstate.ModeConvert), playback.ChoiceWritten)
 			if d, _ := store.State().DAC(playbacktest.DACKey(), stampB); d.Choice == nil || d.Choice.Mode != dsdstate.ModeConvert || d.Choice.Revision != tc.base+1 {
 				t.Errorf("B's entry is %+v, want its write at revision %d", d, tc.base+1)
 			}
@@ -246,6 +407,52 @@ func TestAWriteMadeFromAnotherMakersReadSideIsRefused(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("the bound unit on another firmware", func(t *testing.T) {
+		be, store, _, bind := rig(t, dsdstate.Defaults(), a)
+		key, token := keyOf(t, be), tokenOf(t, be)
+		updated := a
+		updated.BCDDevice = "0200"
+		bind(updated)
+		refused(t, be, store, write(be, key, token, 0, dsdstate.ModeConvert), dsdstate.Defaults(), 0)
+	})
+
+	t.Run("another unit of the key the wire names", func(t *testing.T) {
+		withSerial := func(serial string) alsa.UnitModel {
+			m := playbacktest.DACUnit()
+			m.USB.Serial, m.Product = usbid.New(serial), "Test DAC "+serial
+			return m
+		}
+		be, store, _, bind := rig(t, dsdstate.Defaults(), withSerial("SN-0001"))
+		key, token := keyOf(t, be), tokenOf(t, be)
+		bind(withSerial("SN-0002"))
+		if keyOf(t, be) != key {
+			t.Fatalf("the second unit publishes the key %s, the first %s: the case needs one key on the wire", keyOf(t, be), key)
+		}
+		refused(t, be, store, write(be, key, token, 0, dsdstate.ModeConvert), dsdstate.Defaults(), 0)
+	})
+
+	t.Run("a unit of another maker's token, before the fence", func(t *testing.T) {
+		be, store, _, bind := rig(t, dsdstate.Defaults(), a)
+		key, tokenA := keyOf(t, be), tokenOf(t, be)
+		bind(b)
+		store.Land(fmt.Errorf("the directory's barrier failed: %w", atomicwrite.ErrLanded))
+		wantChoice(t, write(be, key, tokenOf(t, be), 0, dsdstate.ModeConvert), playback.ChoicePersistUncertain)
+		was := store.State()
+		refused(t, be, store, write(be, key, tokenA, 0, dsdstate.ModeOff), was, 0)
+	})
+
+	t.Run("a token of another boot of the backend", func(t *testing.T) {
+		box, store := playbacktest.NewBox(5), playbacktest.NewMemStore(dsdstate.Defaults())
+		first := keyedBackend(t, box, store, tokenKey(1))
+		key, earlier := keyOf(t, first), tokenOf(t, first)
+		second := keyedBackend(t, box, store, tokenKey(2))
+		if tokenOf(t, second) == earlier {
+			t.Fatal("two boots publish one token: the case needs another")
+		}
+		refused(t, second, store, write(second, key, earlier, 0, dsdstate.ModeConvert), dsdstate.Defaults(), 0)
+		wantChoice(t, write(second, key, tokenOf(t, second), 0, dsdstate.ModeConvert), playback.ChoiceWritten)
+	})
 }
 
 // TestAMakerChangeAtTheSameKeyAndFirmwareIsProbedAgain: the probe's answers

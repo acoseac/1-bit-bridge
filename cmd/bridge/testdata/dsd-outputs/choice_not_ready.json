@@ -1,0 +1,8 @@
+{
+  "case": "not_ready",
+  "status": 409,
+  "body": {
+    "error": "dac_unavailable",
+    "message": "no DAC is available to the bridge's player"
+  }
+}

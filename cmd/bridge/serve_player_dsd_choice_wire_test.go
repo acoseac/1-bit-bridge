@@ -1,71 +1,59 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 	"testing"
-	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
-	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
-	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
 	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
-// TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames (B728 B9 PR 2): a
-// choice's write that lands and is not known to be durable holds the set to
-// what the two states play alike, the rate they play apart refused in the
-// backend as dsd_choice_uncertain (policy.ReasonChoiceUncertain), a word
-// PROTOCOL.md's table does not name until B9 PR 3. GET /v1/outputs'
-// serialized body sends no such word, dsd_state_unreadable in its place
-// (wireDSDReason), after the write and again after the supervisor's refresh,
-// which keeps the intersection.
+// TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames (B728 B9 PR 3): a
+// choice's write that reaches the state's file and is not known to be kept
+// is 500 persist_uncertain, its answer's refused naming dsd_choice_uncertain
+// for the rate the two states play apart, as GET does after it and after a
+// refresh; every later write answers persist_uncertain, a stale one too; and
+// a write of the state other than a choice's (an evidence write) that lands
+// fences the next choice the same way.
 func TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames(t *testing.T) {
+	uncertain := api.OutputDSDRefused{BitRate: playbacktest.DSD256, Reason: string(policy.ReasonChoiceUncertain)}
 	store := playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeNative))
-	b := readSideBackend(t, playbacktest.NewBox(5), store, func(p *playback.DSDPolicy) { p.Profiles = playbacktest.KnownProfiles(nil) })
+	b := readSideBackend(t, playbacktest.NewBox(5), store, withKnownDAC)
+	r := newChoiceRig(t, b)
+	d := r.dac(t)
 	store.Land(fmt.Errorf("the directory's barrier failed: %w", atomicwrite.ErrLanded))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	res := b.ChooseDSD(ctx, playback.ChoiceRequest{DACKey: b.Policy().DSD.DAC.Key, ObservedStamp: playbacktest.DACStamp(),
-		Choice: policy.Choice{BaseRevision: 1, Mode: dsdstate.ModeNative, MaxBitRate: playbacktest.DSD128, By: dsdstate.ByApp}})
-	if res.Outcome != playback.ChoicePersistUncertain {
-		t.Fatalf("the write that landed answered %s; want persist_uncertain", res.Outcome)
+	body := choiceBody(t, d, dsdstate.ModeNative, fmt.Sprintf(`"maxBitRate":%d`, playbacktest.DSD128))
+	obj := wantAnswer(t, "the write that landed", r.put(t, body), http.StatusInternalServerError, "persist_uncertain", 4)
+	if p := dsdPlaybackOf(t, obj); !slices.Contains(p.Refused, uncertain) {
+		t.Fatalf("the answer refuses %+v; want DSD256 refused as dsd_choice_uncertain", p.Refused)
 	}
-	uncertain := playback.DSDRefusal{BitRate: playbacktest.DSD256, Reason: string(policy.ReasonChoiceUncertain)}
-	check := func(when string) {
-		t.Helper()
-		if v := b.Policy().DSD; v == nil || !slices.Contains(v.Refused, uncertain) {
-			t.Fatalf("%s the backend refuses %+v; the case needs DSD256 refused as dsd_choice_uncertain there", when, v)
+	for _, when := range []string{"after the write", "after a refresh"} {
+		if when == "after a refresh" {
+			b.RefreshDSD(true)
 		}
-		body := outputsBodyOf(t, readSideFacts(t, b, config.PlayerDevice{}))
-		if bytes.Contains(body, []byte(policy.ReasonChoiceUncertain)) {
-			t.Errorf("%s GET /v1/outputs sends dsd_choice_uncertain, which PROTOCOL.md's table does not name:\n%s", when, body)
-		}
-		var dsd struct {
-			Refused []struct {
-				BitRate int    `json:"bitRate"`
-				Reason  string `json:"reason"`
-			} `json:"refused"`
-		}
-		if err := json.Unmarshal(bridgeObjectOf(t, body)["dsdPlayback"], &dsd); err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, r := range dsd.Refused {
-			if r.BitRate == playbacktest.DSD256 {
-				found = r.Reason == string(policy.ReasonStateUnreadable)
-			}
-		}
-		if !found {
-			t.Errorf("%s DSD256's refusal goes out as %+v; want dsd_state_unreadable", when, dsd.Refused)
+		if p := dsdPlaybackOf(t, r.bridge(t)); !slices.Contains(p.Refused, uncertain) {
+			t.Errorf("GET %s refuses %+v; want DSD256 refused as dsd_choice_uncertain", when, p.Refused)
 		}
 	}
-	check("after the write,")
-	b.RefreshDSD(true)
-	check("after the supervisor's refresh,")
+	wantAnswer(t, "a later write, its base stale", r.put(t, body), http.StatusInternalServerError, "persist_uncertain", 4)
+
+	t.Run("an evidence write that landed", func(t *testing.T) {
+		store := playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeNative))
+		r := newChoiceRig(t, readSideBackend(t, playbacktest.NewBox(5), store, withKnownDAC))
+		d := r.dac(t)
+		store.Land(fmt.Errorf("the directory's barrier failed: %w", atomicwrite.ErrLanded))
+		if err := store.Update(func(st *dsdstate.State) error {
+			st.DACs[0].Evidence = append(st.DACs[0].Evidence, dsdstate.Evidence{Transport: dsdstate.TransportNative, Format: "DSD_U32_BE",
+				BitRate: playbacktest.DSD64, BCDDevice: playbacktest.DACBCD, DriverAcceptedAt: playbacktest.T0, Kernel: playbacktest.Kernel})
+			return nil
+		}); err == nil {
+			t.Fatal("the evidence write did not land")
+		}
+		wantAnswer(t, "a choice after it", r.put(t, choiceBody(t, d, dsdstate.ModeOff)), http.StatusInternalServerError, "persist_uncertain", 4)
+	})
 }

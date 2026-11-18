@@ -295,6 +295,13 @@ func (s *Server) routeRegistry() []route {
 		// and MPD command its own deadline, the whole under a few seconds;
 		// the route's 10 s is a ceiling the reading never reaches.
 		{pattern: "GET /v1/outputs/{id}/reading", kind: boundedRoute, rateClass: rateNone, handler: withCtxTimeout(10*time.Second, s.authed(s.outputReading))},
+		// The write of the bridge's player's DAC's DSD choice (B728 B9 PR 3):
+		// a small body, one write of the player's DSD state at a time, made
+		// only while the player is stopped. Its budget bounds the waits for
+		// the writes' turn, the box's reading and a probe; the state's write,
+		// once begun, is not interrupted, and the handler answers every way
+		// out, the budget's end included.
+		{pattern: "PUT /v1/outputs/{id}/dsd", kind: boundedRoute, rateClass: rateWrite, handler: withCtxTimeout(s.dsdChoiceBudget(), s.authed(s.rateLimitWrite(s.putOutputDSD)))},
 
 		// Playlists — user-wide backup safe (any paired device can
 		// list / restore / update / delete). Small JSON on list /

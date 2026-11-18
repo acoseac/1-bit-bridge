@@ -39,15 +39,16 @@ var memberRows = []struct{ label, path string }{
 // populatedDSD is a player's element facts with every optional DSD member
 // set, B728 B8's among them: a DoP tuple and its evidence, a converted rate
 // and a refused one, two warnings, a converted occurrence's observation with
-// every member an observation can carry, and the bound DAC with its profile,
-// its choice, one option of each mode and both first uses.
+// every member an observation can carry, and the bound DAC with its token
+// and its profile, its choice, one option of each mode and both first uses,
+// published at a publication of its own (B728 B9 PR 3).
 func populatedDSD() BridgeOutputFacts {
 	f := listedPlayer()
 	observed := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	yes := true
 	native := []OutputDSDOptionRate{{BitRate: 2822400, Evidence: "listener_confirmed", EvidenceOn: "2026-11-05"}, {BitRate: 5644800}}
 	dop := []OutputDSDOptionRate{{BitRate: 2822400, Evidence: "driver_accepted"}}
-	f.DSDPlayback = &OutputDSDPlayback{BootID: "boot", PolicyGeneration: ^uint64(0), Reason: "reason", Model: "iFi GO bar", BCDDevice: "0123",
+	f.DSDPlayback = &OutputDSDPlayback{BootID: "boot", PolicyGeneration: ^uint64(0), Publication: 7, Reason: "reason", Model: "iFi GO bar", BCDDevice: "0123",
 		Tuples:    []OutputDSDTuple{{Format: "S32_LE", BitRate: 2822400, Channels: 2, PolicyID: "dop64", Pause: "kernel", TailMS: 10, PrefillMS: 20, Transport: "dop", Evidence: "streaming_observed", EvidenceOn: "2026-11-05"}},
 		Converted: []OutputDSDConverted{{BitRate: 11289600, RateHz: 176400, ValidBits: 24, PassbandHz: 30000, Dither: "none", Filter: "dsdconv-1"}},
 		Refused:   []OutputDSDRefused{{BitRate: 5644800, Reason: "first_use_pending"}},
@@ -55,7 +56,7 @@ func populatedDSD() BridgeOutputFacts {
 	f.Playback = &OutputPlayback{BootID: "boot", PolicyGeneration: ^uint64(0), Session: ^uint64(0), Occurrence: ^uint64(0), State: "open", Format: "S32_LE", RateHz: 176400, LogicalRate: 2822400, Channels: 2, ValidBits: 1, PolicyID: "dop64",
 		Transport: "dop", PackingVersion: 1, ObservedAt: &observed, Evidence: "streaming_observed", EvidenceOn: "2026-11-05",
 		Converted: &OutputPlaybackConverted{FromBitRate: 2822400, Filter: "dsdconv-1", PassbandHz: 30000, Dither: "none", GainDB: 0, ClippedSamples: 3}}
-	f.DSDDAC = &OutputDSDDAC{DACKey: "d1-0123456789abcdef",
+	f.DSDDAC = &OutputDSDDAC{DACKey: "d1-0123456789abcdef", DACToken: "t1-0123456789abcdef0123456789abcdef",
 		Profile: &OutputDSDProfile{ID: "test.dac", Name: "Test DAC", Caveats: []OutputDSDCaveat{{Code: "transition_clicks", Transport: "dop", Note: "It clicks into DSD128."}}},
 		Choice:  OutputDSDChoice{Mode: "auto", MaxBitRate: 5644800, Revision: 4, DoPConfirmed: true},
 		Options: []OutputDSDOption{{Mode: "native", Offered: true, Rates: &native}, {Mode: "dop", Offered: true, Rates: &dop, NeedsConfirmation: &yes, Blocked: "dop_gain_not_unity"},

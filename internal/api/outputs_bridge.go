@@ -163,6 +163,11 @@ func (s *Server) WithBridgeOutput(b BridgeOutput) *Server {
 	return s
 }
 
+// BridgeOutputID is the id of the player's element, kind bridge, whose
+// identity is uuid: the id GET /v1/outputs lists and PUT
+// /v1/outputs/{id}/dsd names.
+func BridgeOutputID(uuid string) string { return bridgeOutputIDPrefix + uuid }
+
 // bridgeOutputOn is the player's gate: serve wired its player, and decided
 // at boot that it is enabled and its data directory's lock is held.
 func (s *Server) bridgeOutputOn() bool {
@@ -204,7 +209,7 @@ func (s *Server) bridgeElement(ctx context.Context) (OutputInfo, bool) {
 		b.TimeSeek = &OutputTimeSeek{PCM: f.TimeSeekPCM, DSD: f.TimeSeekDSD}
 	}
 	return OutputInfo{
-		ID:        bridgeOutputIDPrefix + f.UUID,
+		ID:        BridgeOutputID(f.UUID),
 		Kind:      OutputKindBridge,
 		Player:    OutputPlayer{Software: bridgePlayerSoftware, Version: version.ServerVersion},
 		PathRules: []OutputPathRule{},
@@ -318,10 +323,15 @@ type OutputDSDWarning struct {
 }
 
 // OutputDSDDAC is the bound DAC's DSD as the set published now says it
-// (B728 B8): its key, its profile, the choice that applies and its
+// (B728 B8): its key, its token, its profile, the choice that applies and its
 // revision, what each mode offers, and each transport's first use.
 type OutputDSDDAC struct {
-	DACKey   string              `json:"dacKey"`
+	DACKey string `json:"dacKey"`
+	// DACToken names the DAC the set was computed for, as this boot of the
+	// bridge's player names it (B728 B9 PR 3): "t1-" and 32 lowercase
+	// hexadecimal digits, opaque, which a write of the DAC's choice carries
+	// back (PUT /v1/outputs/{id}/dsd).
+	DACToken string              `json:"dacToken"`
 	Profile  *OutputDSDProfile   `json:"profile,omitempty"`
 	Choice   OutputDSDChoice     `json:"choice"`
 	Options  []OutputDSDOption   `json:"options"`
@@ -391,10 +401,14 @@ type OutputDSDFirstUse struct {
 // backend admits by. An owner record's qualificationRevision and
 // qualifiedOn are no members since B8: no record stands behind them.
 type OutputDSDPlayback struct {
-	BootID           string           `json:"bootId"`
-	PolicyGeneration uint64           `json:"policyGeneration"`
-	Reason           string           `json:"reason,omitempty"`
-	Tuples           []OutputDSDTuple `json:"tuples"`
+	BootID           string `json:"bootId"`
+	PolicyGeneration uint64 `json:"policyGeneration"`
+	// Publication counts this boot's publications of the player's DSD, a new
+	// set or a change of dsdDAC alone (B728 B9 PR 3): within one bootId a
+	// larger one is later. It orders two answers and grants nothing.
+	Publication uint64           `json:"publication,omitempty"`
+	Reason      string           `json:"reason,omitempty"`
+	Tuples      []OutputDSDTuple `json:"tuples"`
 	// Converted, Refused and Warnings are the set's rates converted to PCM,
 	// its rates refused and what a client must be able to explain (B728
 	// B8): each an array, [] when empty, which an older bridge omits.

@@ -1,0 +1,33 @@
+{
+  "case": "dac_unavailable",
+  "status": 409,
+  "body": {
+    "error": "dac_unavailable",
+    "message": "no DAC is available to the bridge's player",
+    "dsdPlayback": {
+      "bootId": "golden-boot",
+      "policyGeneration": 2,
+      "publication": 2,
+      "reason": "dsd_dac_unread",
+      "tuples": [],
+      "converted": [],
+      "refused": [
+        {
+          "bitRate": 2822400,
+          "reason": "dsd_dac_unread"
+        },
+        {
+          "bitRate": 5644800,
+          "reason": "dsd_dac_unread"
+        },
+        {
+          "bitRate": 11289600,
+          "reason": "dsd_dac_unread"
+        }
+      ],
+      "warnings": []
+    },
+    "dsdMode": "off",
+    "allowDoP": false
+  }
+}

@@ -169,7 +169,14 @@ type Server struct {
 	// bridgeOutput is serve's player as GET /v1/outputs lists it (B470 PR
 	// 5b, WithBridgeOutput); nil lists none. Set before serving.
 	bridgeOutput BridgeOutput
-	startedAt    time.Time
+	// bridgeDSDChoice is serve's player as PUT /v1/outputs/{id}/dsd writes
+	// its DAC's DSD choice through it (B728 B9 PR 3, WithBridgeDSDChoice); nil
+	// serves no write. dsdChoiceTimeout, when set, is that route's budget in
+	// place of dsdChoiceBudget's ten seconds: a test's, on this server alone.
+	// Both set before serving.
+	bridgeDSDChoice  BridgeDSDChoice
+	dsdChoiceTimeout time.Duration
+	startedAt        time.Time
 
 	// clockNow is the clock GET /v1/smart-playlists reads (now): the
 	// Christmas family's window and the time-of-day hour are both taken
@@ -1991,8 +1998,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 40 covers the current maximum
-	// (atlasEnrichment + booklets + bridgeOutput + carPlayOptimize + deleteVariants +
+	// appends in lex order. Capacity 41 covers the current maximum
+	// (atlasEnrichment + booklets + bridgeDSDChoice + bridgeOutput + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
 	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + localOutputs +
@@ -2008,7 +2015,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 40)
+	feats := make([]string, 0, 41)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -2030,8 +2037,15 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// enabled and serve holds its data directory's lock (bridgeOutputOn),
 	// which probes, dials and starts nothing. A client tells a bridge older
 	// than the element from one whose player has no identity yet by it.
-	// Alpha-sorted between `booklets` and `carPlayOptimize` (bo < br < c).
+	// Alpha-sorted between `bridgeDSDChoice` and `carPlayOptimize` (br < c).
+	// `bridgeDSDChoice` advertises PUT /v1/outputs/{id}/dsd, the write of the
+	// player's DAC's DSD choice (B728 B9 PR 3): exactly while the player's
+	// gate holds and serve wired the write (WithBridgeDSDChoice). It sorts
+	// between `booklets` and `bridgeOutput` (bo < bridgeD < bridgeO).
 	bridgeOn := s.bridgeOutputOn()
+	if bridgeOn && s.bridgeDSDChoice != nil {
+		feats = append(feats, "bridgeDSDChoice")
+	}
 	if bridgeOn {
 		feats = append(feats, "bridgeOutput")
 	}

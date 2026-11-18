@@ -232,7 +232,12 @@ func dsdReadSideTokens(t *testing.T, root string) dsdReadTokens {
 	}
 	// The policy decides DSD64 to DSD256 in Effective and decide; At's own
 	// refusal is of a rate it does not decide, which no refused entry is.
+	// Intersect refuses a rate that a write of the DAC's choice not known to
+	// be kept would play another way (B728 B9 PR 3).
 	out.refusals = r.refusalsOf(t, "policy", "policy.go", "Effective", "decide")
+	for v := range r.refusalsOf(t, "policy", "choice.go", "Intersect") {
+		out.refusals[v] = true
+	}
 	for v := range r.keyed(t, "policy", "policy.go", "Plan", "Reason", "Effective", "decide") {
 		out.refusals[v] = true
 	}
