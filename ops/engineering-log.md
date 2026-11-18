@@ -105980,3 +105980,60 @@ default.
 
 go1.27.3's gofmt lists the two test files clean, and cmd/bridge's doc guards
 pass over this record; the two tests' runs are in the branch's report.
+
+## 2026-11-18 — B898FU2, corrected: the rename holds rest on holdShareNone's premise, and a read's hold has two shapes
+
+Branch `fix/bridge-lows3-1118`. This commit appends this record, a correction
+of B898FU2's (2026-11-17, above), which stays as written, and changes the
+read-hold rule's line (`.claude/rules/build-ci-tests.md` 165) and its long form
+(`ops/History-rules-build-ci-tests.md`, the entry of that title) together; no
+code changes, so no control.
+
+### What was said
+
+B898FU2's sweep (ii) (`ops/engineering-log.md` 105425-105430) left
+`holdShareNone`'s holds as they are because "the open for deleting beside (a)
+was refused", and the rule's long form said a rename's hold still asks only to
+read because "the open for deleting beside the probe's was refused". And the
+rule said a Windows test of a read holds the file through a handle that asks
+for reading and writing and shares nothing, and requires a read beside it to
+answer `ERROR_SHARING_VIOLATION` before anything else, which two holds the
+same record names (105438-105439) do not: `internal/backup/sharing_windows_test.go`
+89-91 and 170-172 ask only to write and share writing and deleting.
+
+### What holds
+
+The probe's (a) shows a delete open refused beside a hold that asks only to
+read, on one run; it says nothing of a rename of the file a case holds. What
+keeps `holdShareNone`'s rename holds sound is their own premise: each requires
+a rename of the held file to answer `ERROR_SHARING_VIOLATION` before the case
+goes on, puts a rename that landed back, and fails the case otherwise
+(`internal/updater/held_windows_test.go` 94-103), so a hold a runner let a
+rename past fails its case, never passes it.
+
+The backup holds share deletion so that a rename of the held file lands, share
+no reading, and show the read refused in the case itself:
+`TestSnapshotRetriesAHandleHeldAcrossRename` by a premise, a read of the file
+it renamed under the hold answering `ERROR_SHARING_VIOLATION` as soon as the
+rename lands (104-112), and `TestSnapshotRefusesAReservationStillHeldOrCancelled`
+by its assertion on the snapshot's error and its retry's waits (185-197). A
+run where such a hold let the read through fails its case.
+
+### The change
+
+The rule's bold title, in its line and its long form alike, names the shape
+both kinds of hold conform to: a handle that asks to write and shares no
+reading, one that asks for reading and writing and shares nothing or, to let a
+rename of the held file land, one that asks only to write and shares writing
+and deleting; and a read's refusal shown as a premise before anything else or
+by an assertion of the case. Its bolded "Don't…" sentence is word for word as
+it was. The long form names the two backup cases and justifies
+`holdShareNone`'s holds by its premise. And `.claude/rules/cli-serve.md` 120's
+provenance, with its long form's title, keeps the date and backlog B676 and
+names no reviewer.
+
+### Checks
+
+`make docs-check` passes (`build-ci-tests.md` from 60,798 bytes to 60,995,
+`cli-serve.md` from 99,336 to 99,296), and cmd/bridge's doc guards pass over
+the rules, the History files and this record.
