@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,8 +17,9 @@ import (
 // TestAParkedWriteIsStoppedByItsCancel pins what the package promises: an
 // UPDATE that moves a key in an index under the collation, an INSERT into
 // it, and a DELETE from it each park inside the statement, and a cancel
-// while parked comes back from the statement as context.Canceled. Unparked,
-// the same statement completes (the control that the park is not the cause).
+// while parked, made through Cancel, comes back from the statement as
+// context.Canceled. Unparked, the same statement completes (the control that
+// the park is not the cause).
 func TestAParkedWriteIsStoppedByItsCancel(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -29,7 +31,7 @@ func TestAParkedWriteIsStoppedByItsCancel(t *testing.T) {
 		{"a delete", `DELETE FROM t WHERE id = ?`, []any{3}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := openParkTable(t)
+			db, path := openParkTable(t)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			park := Arm(t)
@@ -40,7 +42,7 @@ func TestAParkedWriteIsStoppedByItsCancel(t *testing.T) {
 				_, err = db.ExecContext(ctx, tc.stmt, tc.args...)
 			}()
 			park.Wait(t)
-			cancel()
+			park.Cancel(t, path, cancel)
 			park.ReleaseUntil(t, done)
 			<-done
 			if !errors.Is(err, context.Canceled) {
@@ -48,7 +50,7 @@ func TestAParkedWriteIsStoppedByItsCancel(t *testing.T) {
 			}
 		})
 		t.Run(tc.name+", not cancelled", func(t *testing.T) {
-			db := openParkTable(t)
+			db, _ := openParkTable(t)
 			park := Arm(t)
 			done := make(chan struct{})
 			var err error
@@ -68,13 +70,17 @@ func TestAParkedWriteIsStoppedByItsCancel(t *testing.T) {
 
 // openParkTable opens a WAL database holding a table whose index orders an
 // integer column's text under the collation, with rows already in it, so a
-// write that touches the index has keys to compare against.
-func openParkTable(t *testing.T) *sql.DB {
+// write that touches the index has keys to compare against, and answers it
+// and its path. Its pool keeps one connection, so the connection a parked
+// statement runs on is the one Cancel finds.
+func openParkTable(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", dsn.File(filepath.Join(t.TempDir(), "park.db"), "_pragma=journal_mode(WAL)"))
+	path := filepath.Join(t.TempDir(), "park.db")
+	db, err := sql.Open("sqlite", dsn.File(path, "_pragma=journal_mode(WAL)"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	for _, stmt := range []string{
 		`CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)`,
@@ -89,7 +95,130 @@ func openParkTable(t *testing.T) *sql.DB {
 			t.Fatal(fmt.Errorf("insert %d: %w", i, err))
 		}
 	}
-	return db
+	return db, path
+}
+
+// TestACancelThatReachesTheDriverLateIsWaitedFor delays the driver's
+// interrupt on purpose: the parked UPDATE's context is cancelled only once
+// Cancel has looked for the interrupt and found none, so the driver's
+// goroutine runs no sooner than that, an order a loaded host can give it. A
+// park that let the statement go without waiting for the interrupt let it
+// end with no error, as CI's -race job saw (backlog B909); Cancel holds the
+// comparison until the interrupt has come, and the statement comes back as
+// the cancellation.
+func TestACancelThatReachesTheDriverLateIsWaitedFor(t *testing.T) {
+	db, path := openParkTable(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	park := Arm(t)
+	waiting := make(chan struct{})
+	park.awaiting = sync.OnceFunc(func() { close(waiting) })
+	// Registered after Arm, so it runs first: the cancel is delivered, and
+	// its goroutine ends, whatever the test found.
+	t.Cleanup(park.awaiting)
+	late := func() {
+		go func() {
+			<-waiting
+			cancel()
+		}()
+	}
+	done := make(chan struct{})
+	var err error
+	go func() {
+		defer close(done)
+		_, err = db.ExecContext(ctx, `UPDATE t SET n = n + 1 WHERE id = ?`, 3)
+	}()
+	park.Wait(t)
+	park.Cancel(t, path, late)
+	park.ReleaseUntil(t, done)
+	<-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the parked statement returned %v, want context.Canceled", err)
+	}
+}
+
+// TestCancelsWaitEnds pins how Cancel's wait ends but by the interrupt: where
+// none comes, it fails the test when the Park's waits give up, rather than
+// let the statement go as if one had; once the Park is disarmed it returns,
+// failing nothing; and where more than one connection to the database is
+// open, so that none is singled out as the statement's, it fails the test
+// before it cancels anything.
+func TestCancelsWaitEnds(t *testing.T) {
+	const update = `UPDATE t SET n = n + 1 WHERE id = ?`
+	for _, tc := range []struct {
+		name string
+		// open opens what else the case needs on the database at path.
+		open func(t *testing.T, path string)
+		// waiting is Cancel's awaiting hook, given the Park; nil is none.
+		waiting func(p *Park) func()
+		// fatal is what Cancel fails the test with, given the database's
+		// path; nil for nothing.
+		fatal func(path string) string
+	}{
+		{"no interrupt comes", nil, func(p *Park) func() {
+			giveUp := make(chan time.Time)
+			p.giveUp, p.bound = func() <-chan time.Time { return giveUp }, "at the test's give-up"
+			return sync.OnceFunc(func() { close(giveUp) })
+		}, func(string) string {
+			return "sqlitetest: the cancel did not interrupt the parked statement at the test's give-up"
+		}},
+		{"the Park is disarmed", nil, func(p *Park) func() { return p.Disarm }, nil},
+		{"another connection to the database is open", func(t *testing.T, path string) {
+			if err := openWAL(t, path).Ping(); err != nil {
+				t.Fatal(err)
+			}
+		}, nil, func(path string) string {
+			return "sqlitetest: Cancel waits for the interrupt of the one connection to " + path +
+				" that is open and not interrupted, and 2 are"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, path := openParkTable(t)
+			if tc.open != nil {
+				tc.open(t, path)
+			}
+			park := Arm(t)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _ = db.ExecContext(context.Background(), update, 3)
+			}()
+			park.Wait(t)
+			if tc.waiting != nil {
+				park.awaiting = tc.waiting(park)
+			}
+			rec := &fatalRecorder{TB: t}
+			cancelled := false
+			ended := make(chan struct{})
+			go func() { // rec's Fatalf ends the goroutine calling it
+				defer close(ended)
+				park.Cancel(rec, path, func() { cancelled = true })
+			}()
+			endsWithin(t, ended, "Cancel")
+			want := ""
+			if tc.fatal != nil {
+				want = tc.fatal(path)
+			}
+			if rec.fatal != want {
+				t.Errorf("Cancel failed the test with %q, want %q", rec.fatal, want)
+			}
+			if tc.open != nil && cancelled {
+				t.Error("Cancel cancelled a statement whose connection it could not single out")
+			}
+			park.Disarm()
+			endsWithin(t, done, "the statement the Park let go")
+		})
+	}
+}
+
+// endsWithin fails the test unless ch closes within 10 s.
+func endsWithin(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s did not end within 10s", what)
+	}
 }
 
 // TestArmUntilGivesUpAtItsInstant pins what a serve test arms a Park with:
@@ -159,7 +288,7 @@ func TestWaitUnlessAnswersTheWorksEnd(t *testing.T) {
 		}
 	})
 	t.Run("a statement parked", func(t *testing.T) {
-		db := openParkTable(t)
+		db, _ := openParkTable(t)
 		p := ArmUntil(t, time.Now().Add(time.Minute))
 		done := make(chan struct{})
 		var err error
