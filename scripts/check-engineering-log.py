@@ -85,7 +85,12 @@ SHAPED_ANYWHERE = ":(glob,icase)**/*--*.md"
 WAY = ("a record goes in a file of its own, ops/engineering-log/<YYYY-MM>/<YYYY-MM-DD>-<entry>--<branch>.md "
        "(ops/engineering-log/README.md; `python3 scripts/check-engineering-log.py --slug <branch>` "
        "prints a branch's slug)")
-RESTORE = "restore the archive with `git checkout origin/main -- ops/engineering-log.md`"
+# Never a bare checkout of main's archive: a branch from before the cut-over may have appended its
+# record to it, and a redaction's bytes belong with its pins.
+RESTORE = ("move any record this branch added to it into an entry file of its own, named by its heading's "
+           "date, then restore it with `git checkout origin/main -- ops/engineering-log.md`; a redaction the "
+           "owner approved changes its bytes and this checker's FROZEN_BYTES and FROZEN_SHA256 in one commit, "
+           "so take neither from a side without the other")
 
 
 def slug(text):
@@ -615,6 +620,10 @@ def self_test():
         expect("the fixture archive passes", archive_problems(root, size, digest), [])
         expect("a message says how the archive grew", "grew by 5 bytes" in " ".join(archive_problems(root, size - 5, digest)), True)
         expect("and how it shrank", "shrank by 5 bytes" in " ".join(archive_problems(root, size + 5, digest)), True)
+        said = " ".join(archive_problems(root, size - 5, digest))
+        expect("and to move a branch's record out before restoring it, a redaction's bytes kept with the pins",
+               (0 <= said.find("into an entry file of its own") < said.find("git checkout origin/main"),
+                "FROZEN_BYTES and FROZEN_SHA256" in said), (True, True))
         for name, data in archives.items():
             put(root, ARCHIVE, data)
             expect("the archive refuses %s" % name, len(archive_problems(root, size, digest)), 1)

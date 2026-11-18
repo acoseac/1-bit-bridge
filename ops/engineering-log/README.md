@@ -45,7 +45,11 @@ auto-loaded.
   form, "(2026-11-18, backlog B888)", which `ls ops/engineering-log/*/2026-11-18-b888*` finds.
   The archive is cited as before: `ops/engineering-log.md:<line>`, or by its date and item.
 - In a merge, take main's archive (`git checkout origin/main -- ops/engineering-log.md`) and
-  keep your record in its own file.
+  keep your record in its own file. A branch started before the cut-over that appended a
+  record to the archive first moves that record into an entry file of its own, named by its
+  heading's date, and only then takes main's archive, or the record is lost. A redaction the
+  owner approved changes the archive's bytes and the checker's two pins in one commit: keep
+  them together, and take neither from main, or from a branch, without the other.
 
 No index is kept: a committed one conflicts as the single log did. To find a record:
 
