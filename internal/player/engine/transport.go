@@ -520,9 +520,13 @@ func (e *Engine) playBegan(s *session) {
 	}
 }
 
-// stopped records why playback stopped.
+// stopped records why playback stopped, and where: the entry why names (a
+// fault's, B903AUD), or else the selection.
 func (e *Engine) stopped(why StopInfo) {
-	why.Entry, why.At = e.o.selected, e.clk.Now()
+	if why.Entry == 0 {
+		why.Entry = e.o.selected
+	}
+	why.At = e.clk.Now()
 	e.o.lastStop = why
 	e.visible()
 }
@@ -995,7 +999,9 @@ func (e *Engine) prepare(s *session, after *occ) {
 	if entry != 0 {
 		next = e.newOcc(entry)
 		if next == nil {
-			e.onFault(s.id, Fault{Reason: Reason("occurrence_budget_exceeded"), Detail: "outstanding occurrence bound"})
+			// The successor found and never handed off, so never heard: the
+			// fault is its own (B903AUD).
+			e.fault(s, Fault{Reason: Reason("occurrence_budget_exceeded"), Detail: "outstanding occurrence bound", Entry: entry}, true)
 			return
 		}
 		next.skipped = passed
@@ -1551,18 +1557,38 @@ func (e *Engine) onFinished(id SessionID) {
 	e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonEndOfQueue, Detail: "the last entry played out"})
 }
 
-// onFault is a failure after content played: recorded, playback stopped,
-// never restarted.
+// onFault is a failure after content played that the backend reports
+// (fault). Its entry is its occurrence's, or the selection's for an
+// occurrence the session does not hold; an occurrence after the first is a
+// successor never heard, since the one heard is the first (onAudible).
 func (e *Engine) onFault(id SessionID, f Fault) {
-	o := &e.o
 	s := e.current(id)
 	if s == nil {
 		return
 	}
-	f.Entry = o.selected
-	if i := s.index(f.Occurrence); i >= 0 {
+	f.Entry = e.o.selected
+	i := s.index(f.Occurrence)
+	if i >= 0 {
 		f.Entry = s.chain[i].entry
 	}
+	e.fault(s, f, i > 0 && s.chain[i].stage < stageAudible)
+}
+
+// fault is a failure after content played in s: recorded, playback stopped
+// for it, never restarted, its stop naming the entry that faulted. A fault of
+// a successor never heard (successor) moves the selection on past the entry
+// heard, to the queue's next after it as the queue stands (following), so a
+// Play from Stopped goes on, never replaying the track that played (B903AUD):
+// the successor itself while it is still next, which a Play then tries again,
+// the entry that took its place once it was deleted or bypassed, the first
+// with repeat on. With nothing after the entry heard the selection stays on
+// it, as the end of the queue leaves it, and with nothing heard yet on the
+// first entry, which never played. The entry heard is the first occurrence,
+// heard in the session or, for a seek's session, before it (o.audible names
+// it). The selection, the stop and the fault are one step's, so one
+// snapshot's.
+func (e *Engine) fault(s *session, f Fault, successor bool) {
+	o := &e.o
 	if f.At.IsZero() {
 		f.At = e.clk.Now()
 	}
@@ -1572,7 +1598,12 @@ func (e *Engine) onFault(id SessionID, f Fault) {
 	}
 	o.faults = faults
 	e.playFailed(refuse("play", ReasonFault, string(f.Reason)))
-	e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonFault, Detail: string(f.Reason) + ": " + f.Detail})
+	if heard := o.audible; successor && heard.Occurrence == s.chain[0].id {
+		if next := e.following(heard.Entry); next != 0 {
+			e.selectEntry(next)
+		}
+	}
+	e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonFault, Detail: string(f.Reason) + ": " + f.Detail, Entry: f.Entry})
 }
 
 // onRefused is a successor refused before any of its content played: it

@@ -132,10 +132,10 @@
 //
 // The selection is what a controller reads as the current ID. During
 // playback it moves on the backend's audible report, never on a hand-off;
-// a command, a deletion or a skip sets it as the owner applies it, with
-// nothing audible until the new session reports. At the end of the last
-// entry with repeat off playback stops on it (Play replays it); with
-// repeat on the first follows. Deleting the selection selects the entry
+// a command, a deletion, a skip or a successor's fault sets it as the owner
+// applies it, with nothing audible until the new session reports. At the end
+// of the last entry with repeat off playback stops on it (Play replays it);
+// with repeat on the first follows. Deleting the selection selects the entry
 // that followed it: while playing it plays, while paused the transport
 // stays paused there with the paused content dropped, while stopped it is
 // only selected; with nothing after it, playback stops and nothing is
@@ -152,7 +152,12 @@
 // queue change starts a new pass: an edit that leaves the entries between
 // it and the occurrence before it as they were neither cuts it nor stops
 // it. A failure after content played is a fault: recorded
-// (Snapshot.Faults), playback stopped, never restarted.
+// (Snapshot.Faults), playback stopped, never restarted, its stop naming the
+// entry that faulted. A fault of a successor never heard moves the
+// selection on past the entry heard, to the queue's next after it as the
+// queue stands (that successor while it is still next), so a Play goes on
+// rather than replaying the track that played; with nothing after it, or
+// nothing heard yet, the selection stays (B903AUD).
 //
 // A backend may ask that an occurrence it holds be handed off again
 // (ReplanEvents, B728 B7: the player's effective DSD set no longer plays
