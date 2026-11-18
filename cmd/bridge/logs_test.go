@@ -638,6 +638,18 @@ func plant(f installCheck) bool {
 	return inst.Startup && logsInstallCheck != nil
 }
 `},
+		{name: "a declaration with an unnamed func type written", src: `var logsInstallCheck func() packaging.WindowsInstall = packaging.CheckWindowsInstall
+
+func plant() bool {
+	return logsInstallCheck().Startup && logsInstallCheck != nil
+}
+`},
+		{name: "a declaration with an unnamed func type written in parentheses", src: `var logsInstallCheck (func() packaging.WindowsInstall) = packaging.CheckWindowsInstall
+
+func plant() bool {
+	return logsInstallCheck().Startup && logsInstallCheck != nil
+}
+`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src := header + c.src
