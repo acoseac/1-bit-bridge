@@ -637,6 +637,12 @@ def self_test():
                    found(problems, "ops/engineering-log/2026-11/.DS_Store", "is not named"), True)
             expect("nothing else is refused", len(problems), 5)
 
+            shaped = "docs/2026-11-20-b888--feat-x.md"
+            root, env = checkout(tmp, "docs-tracked", {".gitignore": ignore, ARCHIVE: base, README: "# Log\n",
+                                                       entry: entry_text, shaped: entry_text})
+            expect("a tracked file named like an entry in another folder is misfiled, and nothing else",
+                   check(root, size, digest, env)[0], [misfiled_problem(shaped)])
+
             root, env = checkout(tmp, "other-case", {"Ops/engineering-log/2026-11/2026-11-20-a--b.md": entry_text},
                                  add=False)
             problems, _ = check(root, size, digest, env)
