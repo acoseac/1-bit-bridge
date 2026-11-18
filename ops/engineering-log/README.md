@@ -55,7 +55,8 @@ auto-loaded.
 
 No index is kept: a committed one conflicts as the single log did. To find a record:
 
-- everything about an item, in both halves: `git grep -n -i b653 -- 'ops/engineering-log*'`
+- everything about an item, in both halves: `grep -rn -i b653 ops/engineering-log.md ops/engineering-log/`
+  (the files on disk, so an entry not yet staged is read; `git grep` reads what git tracks)
 - one day: `ls ops/engineering-log/2026-11/2026-11-18-*`
 - one PR: `ls ops/engineering-log/*/*--<branch slug>.md`
 - every title in order: `grep -h -m1 '^## ' ops/engineering-log/*/*.md`

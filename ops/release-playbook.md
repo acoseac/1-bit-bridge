@@ -374,9 +374,9 @@ The operator is fixing every relevant bug before tagging the release, so correct
 Repo and tree
 - CLAUDE.md is ALREADY in your context (loaded automatically) and is the spec, with the rules
   files Claude Code loads beside the files you Read.
-  Do NOT Read it again; grep it for line numbers. Grep the engineering log (git grep -n <term> --
-  'ops/engineering-log*') by symbol / file / PR before changing anything a rule names, and
-  read only what you need.
+  Do NOT Read it again; grep it for line numbers. Grep the engineering log (grep -rn <term>
+  ops/engineering-log.md ops/engineering-log/, which reads an entry not yet staged) by symbol /
+  file / PR before changing anything a rule names, and read only what you need.
 - Keep your context small: ranged reads, capped output (| tail -40, grep -c), never cat a big log.
 - You run in your OWN git worktree; work only there. Start: git fetch origin && git switch -c
   fix/<topic> origin/main. Before merging, git merge origin/main; never rebase or force-push once

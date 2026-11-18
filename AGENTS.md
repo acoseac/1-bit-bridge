@@ -10,8 +10,9 @@ below. The evidence behind each invariant (the measurement, the rejected
 alternative, the test that pins it, the PR) lives in the engineering log:
 [`ops/engineering-log.md`](ops/engineering-log.md), frozen on 2026-11-18, and a
 file per entry under [`ops/engineering-log/`](ops/engineering-log/) since; grep
-both (`git grep -n <term> -- 'ops/engineering-log*'`) by symbol or PR number
-when a rule looks arbitrary.
+both (`grep -rn <term> ops/engineering-log.md ops/engineering-log/`, which,
+unlike `git grep`, reads an entry not yet staged) by symbol or PR number when a
+rule looks arbitrary.
 
 **Agent-doc maintenance.** `CLAUDE.md` and the rules files are the authority,
 and they are living documents. A new invariant, the entry a fix produces,
