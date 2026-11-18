@@ -250,9 +250,14 @@ func TestTildeFlagExpandsBeforeDial(t *testing.T) {
 func TestPlainMPDWhenNothingElseIsInstalled(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "etc", "mpd.conf"), "music_directory \"/music\"\n")
-	rep := Inspect(context.Background(), Options{Root: root})
-	if rep.Software.Name != "MPD" || rep.MusicDirectory != "/music" || rep.MPD.Version != "" {
+	// The file names 127.0.0.1:6600, which the host's own MPD may answer (B933).
+	srv := startFake(t, fakeOpts{mode: "hangup"})
+	rep := Inspect(context.Background(), Options{Root: root, Endpoint: srv.addr})
+	if rep.Software.Name != "MPD" || rep.MusicDirectory != "/music" || rep.MPD.Version != "" || rep.MPD.Endpoint != srv.addr {
 		t.Fatalf("%#v", rep)
+	}
+	if len(rep.Problems) != 1 || rep.Problems[0] != "mpd: connection closed" {
+		t.Fatalf("problems %q, want the hang-up's alone", rep.Problems)
 	}
 	if !rep.Found() {
 		t.Fatal("a configuration is a player")

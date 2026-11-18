@@ -405,7 +405,8 @@ func TestVerifyBesideTheTickersVerificationOfOneSnapshot(t *testing.T) {
 // before the test's joins, as
 // TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound holds
 // its read, so only the caller's expiry ends the ticker's wait for it, never
-// the write's own bound (backlog B895).
+// the write's own bound (backlog B895); and the test fails at once where the
+// write whose sync hangs came to no gate (StepGate.Entered).
 func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing.T) {
 	_, dataDir, root := backupInstall(t)
 	src := backup.Sources{DataDir: dataDir, ManifestDB: manifest.DefaultDBPath(dataDir)}
@@ -421,7 +422,7 @@ func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing
 		<-release
 		return nil
 	}))
-	_, restoreGate := backup.SetStepGateForTest(root, "", "its verdict's write")
+	gate, restoreGate := backup.SetStepGateForTest(root, "", "its verdict's write")
 	t.Cleanup(restoreGate)
 	t.Cleanup(func() { awaitHoldsLetGo(t, root) })
 	ctx, cancel := context.WithCancel(context.Background())
@@ -437,6 +438,11 @@ func TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound(t *testing
 	case <-entered:
 	case <-time.After(30 * time.Second):
 		t.Fatal("the verdict's write never reached its sync")
+	}
+	select {
+	case <-gate.Entered("its verdict's write"):
+	default:
+		t.Fatal("the gate held no step: the write whose sync hangs never came to it, so its own bound still races the caller's expiry")
 	}
 	stoppedAt := time.Now()
 	cancel()

@@ -561,10 +561,14 @@ func (s *playerStall) await(t *testing.T, ps *playerServe) {
 // serve, and the player as serve's stop does first, before it lets the stall
 // go, so the start it held sees its stop and runs no engine; only then does it
 // join the player, until a drain's give-up (serveDrainGiveUp): nothing waits
-// for a player nobody has stopped, and the start has ended before its
-// directories go and the medium's seam is restored. A serve that has not
-// decided its player may still decide it as it returns: the stall is let go
-// first, and the player is taken once serve has returned.
+// for a player nobody has stopped, and a start that ends before that give-up
+// has ended before its directories go and the medium's seam is restored. A
+// start that ignores its stop, or a serve that does not return, ends the wait
+// at the give-up with the test failed, here or by the drain next, and the
+// cleanups after this one still run beside it; with no test deadline the wait
+// has no bound. A serve that has not decided its player may still decide it as
+// it returns: the stall is let go first, and the player is taken once serve
+// has returned.
 func (s *playerStall) end(t *testing.T, stop context.CancelFunc, exited <-chan struct{}, decided func() *bridgePlayer) {
 	t.Helper()
 	stop()
