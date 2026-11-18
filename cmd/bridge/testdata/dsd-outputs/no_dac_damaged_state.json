@@ -13,6 +13,7 @@
         "dsdPlayback": {
           "bootId": "golden-boot",
           "policyGeneration": 2,
+          "publication": 2,
           "reason": "dsd_dac_unread",
           "tuples": [],
           "converted": [],

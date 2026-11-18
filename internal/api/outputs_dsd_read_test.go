@@ -7,50 +7,59 @@ import (
 	"testing"
 )
 
-// TestNoHealthFlagBeforeItsRoute (B728 B8; the design's section 7.1): the
-// read side arrives alone, its members additive and its routes none, so no
-// health flag names a DSD route that is not mounted, whichever gate holds
-// and whatever the element carries: bridgeDSDChoice arrives with the
-// choice's PUT (B9) and bridgeDSDCheck with the check's routes (B12). No
-// route of the choice or the check is registered, and a client that asks
-// one anyway is answered as for any path the bridge does not serve.
-func TestNoHealthFlagBeforeItsRoute(t *testing.T) {
-	flags := []string{"bridgeDSDChoice", "bridgeDSDCheck"}
+// TestTheChoiceFlagArrivesWithItsRoute (B728 B9 PR 3): bridgeDSDChoice is
+// advertised exactly while the player's gate holds and serve wired the
+// write, whichever MPD's gate says; PUT /v1/outputs/{id}/dsd is the one DSD
+// route registered, and the check's routes (B12) are not, nor is its flag, a
+// client that asks one anyway being answered as for any path the bridge does
+// not serve.
+func TestTheChoiceFlagArrivesWithItsRoute(t *testing.T) {
 	for _, player := range []bool{true, false} {
-		for _, mpd := range []string{"on", "off"} {
-			b := &fakeBridgeOutput{enabled: player}
-			b.set(populatedDSD())
-			hs, token, srv := newBridgeOutputsHTTP(t, quietOutputs("linux", mpd), b)
-			feats := healthFeatures(t, hs)
-			for _, flag := range flags {
-				if slices.Contains(feats, flag) {
-					t.Errorf("player %v, MPD %s: /v1/health advertises %s before its route: %v", player, mpd, flag, feats)
+		for _, wired := range []bool{true, false} {
+			for _, mpd := range []string{"on", "off"} {
+				var c BridgeDSDChoice
+				if wired {
+					c = &fakeDSDChoice{answer: BridgeDSDChoiceResult{Outcome: DSDChoiceWritten}}
 				}
-			}
-			for _, rt := range srv.routeRegistry() {
-				if strings.Contains(rt.pattern, "/dsd") {
-					t.Errorf("a DSD route is registered before its PR: %s", rt.pattern)
+				h := newChoiceHTTP(t, quietOutputs("linux", mpd), player, c, 0)
+				feats := healthFeatures(t, h.hs)
+				if got, want := slices.Contains(feats, "bridgeDSDChoice"), player && wired; got != want {
+					t.Errorf("player %v, wired %v, MPD %s: bridgeDSDChoice advertised %v, want %v: %v", player, wired, mpd, got, want, feats)
 				}
-			}
-			for _, r := range []struct{ method, path string }{
-				{http.MethodPut, "/v1/outputs/bridge:" + testPlayerUUID + "/dsd"},
-				{http.MethodPost, "/v1/outputs/bridge:" + testPlayerUUID + "/dsd/check"},
-				{http.MethodDelete, "/v1/outputs/bridge:" + testPlayerUUID + "/dsd/check"},
-				{http.MethodPost, "/v1/outputs/bridge:" + testPlayerUUID + "/dsd/check/answer"},
-			} {
-				req, err := http.NewRequest(r.method, hs.URL+r.path, strings.NewReader(`{}`))
-				if err != nil {
-					t.Fatal(err)
+				if slices.Contains(feats, "bridgeDSDCheck") {
+					t.Errorf("bridgeDSDCheck advertised before its route: %v", feats)
 				}
-				req.Header.Set("Authorization", "Bearer "+token)
-				req.Header.Set("Content-Type", "application/json")
-				resp, err := hs.Client().Do(req)
-				if err != nil {
-					t.Fatal(err)
+				var dsd []string
+				for _, rt := range h.srv.routeRegistry() {
+					if strings.Contains(rt.pattern, "/dsd") {
+						dsd = append(dsd, rt.pattern)
+					}
 				}
-				resp.Body.Close()
-				if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
-					t.Errorf("player %v, MPD %s: %s %s answered %d, want the bridge's answer to a route it does not serve", player, mpd, r.method, r.path, resp.StatusCode)
+				if !slices.Equal(dsd, []string{"PUT /v1/outputs/{id}/dsd"}) {
+					t.Errorf("the DSD routes registered: %q, want the choice's alone", dsd)
+				}
+				a := h.putOK(t, bridgeID, aChoice)
+				if want := player && wired; (a.status == http.StatusOK) != want {
+					t.Errorf("player %v, wired %v, MPD %s: the PUT answered %d %s", player, wired, mpd, a.status, a.body)
+				}
+				for _, r := range []struct{ method, path string }{
+					{http.MethodPost, "/v1/outputs/" + bridgeID + "/dsd/check"},
+					{http.MethodDelete, "/v1/outputs/" + bridgeID + "/dsd/check"},
+					{http.MethodPost, "/v1/outputs/" + bridgeID + "/dsd/check/answer"},
+				} {
+					req, err := http.NewRequest(r.method, h.hs.URL+r.path, strings.NewReader(`{}`))
+					if err != nil {
+						t.Fatal(err)
+					}
+					req.Header.Set("Authorization", "Bearer "+h.token)
+					resp, err := h.hs.Client().Do(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					resp.Body.Close()
+					if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
+						t.Errorf("%s %s answered %d, want the bridge's answer to a route it does not serve", r.method, r.path, resp.StatusCode)
+					}
 				}
 			}
 		}

@@ -22,9 +22,9 @@ import (
 // unconfirmed, and lets it land once a Stop is confirmed; and a Start that
 // comes while a write holds the lease waits, and plays by the choice it wrote.
 
-// choiceOf is a write of mode for the bound DAC, from the revision the
-// backend publishes once it has read the policy, as serve's supervisor has
-// before any request comes.
+// choiceOf is a write of mode for the bound DAC, from the key, the token and
+// the revision the backend publishes once it has read the policy, as serve's
+// supervisor has before any request comes.
 func (d *dsdRig) choiceOf(mode string) playback.ChoiceRequest {
 	d.t.Helper()
 	d.be.RefreshDSD(true)
@@ -32,7 +32,7 @@ func (d *dsdRig) choiceOf(mode string) playback.ChoiceRequest {
 	if p.DSD == nil || p.DSD.DAC == nil {
 		d.t.Fatalf("the backend publishes no DAC: %+v", p.DSD)
 	}
-	return playback.ChoiceRequest{DACKey: p.DSD.DAC.Key, ObservedStamp: playbacktest.DACStamp(), Choice: policy.Choice{BaseRevision: p.DSD.DAC.Choice.Revision, Mode: mode, By: dsdstate.ByApp}}
+	return playback.ChoiceRequest{DACKey: p.DSD.DAC.Key, DACToken: p.DSD.DAC.Token, Choice: policy.Choice{BaseRevision: p.DSD.DAC.Choice.Revision, Mode: mode, By: dsdstate.ByApp}}
 }
 
 // write asks a write of mode, bounded by the watchdog.

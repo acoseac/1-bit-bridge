@@ -165,6 +165,10 @@ type dsdSet struct {
 	// profile is the profile that matched the unit, nil for an unknown DAC:
 	// the gain check at an open reads its exemptions.
 	profile *dacprofile.Profile
+	// token is the token of the unit the set was computed for, minted once
+	// with the reading it was made from (readBox), "" for no set: its read side
+	// publishes it (dsdDAC.dacToken), and a choice's write compares it.
+	token DACToken
 }
 
 // dsdPublished is what GET /v1/outputs reads of the player's DSD (B728 B8):
@@ -176,10 +180,14 @@ type dsdSet struct {
 // repoints one; the view moves with every refresh that says another thing of
 // the DAC, the pair then holding the set as it was (round 2: a view-only
 // change stored a new set and stranded each occurrence admitted under the
-// old one).
+// old one). seq is its publication (B728 B9 PR 3): one more than the pair's
+// before it, New's first being 1, so within one boot a larger one was
+// published later, whatever its set's generation or the choice's revision
+// says (PlayerPolicy.Publication).
 type dsdPublished struct {
 	set  *dsdSet
 	view DSDView
+	seq  uint64
 }
 
 // rateWords are the rates' names in a log line.
@@ -453,14 +461,15 @@ func (b *Backend) readDSD() (*dsdSet, DSDView) {
 
 // dsdReading is what one reading of the box establishes of the bound DAC
 // (readBox): the effective policy's inputs but the state, and what a set
-// made from them is computed for, the unit's model's key and its maker's
-// stamp among them. A refresh makes its set from it and the state; a choice's
-// write checks its choice against it, on the state its write is made from
-// (B728 B9).
+// made from them is computed for, the unit's model's key, its maker's stamp
+// and its token among them. A refresh makes its set from it and the state; a
+// choice's write checks its choice against it, on the state its write is made
+// from (B728 B9), and publishes it.
 type dsdReading struct {
 	m     alsa.UnitModel
 	key   dacprofile.Key
 	stamp dsdstate.Stamp
+	token DACToken
 	in    policy.Inputs
 	tmpl  dsdSet
 }
@@ -471,8 +480,10 @@ type dsdReading struct {
 // (dsdstate.StampOf: a string that did not read leaves no reading), its PCM
 // device's playback altsets, the DoP gain check's mixer, the probe's
 // answers, the profiles and the kernel; then the unit read again, so a card
-// renumbered while its files were read is never taken. It answers why not
-// where nothing could be read.
+// renumbered while its files were read is never taken. The reading's token
+// (dacToken: its key, its stamp and its firmware as read) is minted once, here,
+// and every set made from the reading carries it. It answers why not where
+// nothing could be read.
 func (b *Backend) readBox() (*dsdReading, string) {
 	p := b.cfg.DSD
 	if p.Bound == nil || p.Box == nil {
@@ -506,6 +517,7 @@ func (b *Backend) readBox() (*dsdReading, string) {
 	}
 	unit := dacprofile.Unit{Key: key, BCDDevice: m.BCDDevice}
 	stamp := dsdstate.StampOf(m.Manufacturer)
+	token := b.dacToken(policy.Identity{Key: key, Stamp: stamp, BCDDevice: m.BCDDevice})
 	var answers []alsapcm.ProbeResult
 	if p.Probes != nil {
 		pu := b.probeUnit(key, stamp, m.BCDDevice, bd)
@@ -513,9 +525,9 @@ func (b *Backend) readBox() (*dsdReading, string) {
 			answers = append(answers, p.Probes.Answer(pu, c))
 		}
 	}
-	r := &dsdReading{m: m, key: key, stamp: stamp, in: policy.Inputs{Unit: unit, Stamp: stamp, Profiles: p.Profiles, Kernel: p.Kernel, Altsets: alts, Probe: answers, Mixer: mixer},
+	r := &dsdReading{m: m, key: key, stamp: stamp, token: token, in: policy.Inputs{Unit: unit, Stamp: stamp, Profiles: p.Profiles, Kernel: p.Kernel, Altsets: alts, Probe: answers, Mixer: mixer},
 		tmpl: dsdSet{computed: true, card: bd.Card, device: bd.Device, subdevice: bd.Subdevice, enumeration: bd.Enumeration,
-			model: unitText(strings.TrimSpace(strings.TrimSpace(m.Manufacturer)+" "+strings.TrimSpace(m.Product)), m.USB)}}
+			model: unitText(strings.TrimSpace(strings.TrimSpace(m.Manufacturer)+" "+strings.TrimSpace(m.Product)), m.USB), token: token}}
 	if p.Profiles != nil {
 		if prof, ok := p.Profiles.Match(unit); ok {
 			r.tmpl.profile = &prof

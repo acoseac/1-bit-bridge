@@ -193,6 +193,21 @@ type Seams struct {
 	// ChoiceQueued runs in a choice's write that finds another write's turn
 	// under way, before it waits for it. It must not block.
 	ChoiceQueued func()
+	// ChoicePublished runs in a choice's write once it has published its
+	// reading and captured its answer, under the refreshes' lock and before
+	// the write's hold of its reading ends (B728 B9 PR 3): it must not call
+	// the backend, and may only ask (RequestRefreshDSD).
+	ChoicePublished func()
+	// ChoiceAnswered runs in a choice's write once its hold of its reading has
+	// ended and its answer is captured, with no lock of the refreshes' held,
+	// before the write lets go of its lease and its turn (B728 B9 PR 3): a
+	// test holds the write there while a refresh publishes. It may block.
+	ChoiceAnswered func()
+	// DACTokenKey, when set, is the key the backend mints the DAC's token
+	// under (dacToken), read once by New, in place of the 32 random bytes it
+	// draws (B728 B9 PR 3): 32 bytes, else New refuses it. The read side's
+	// goldens and the iOS fixtures set it, so their tokens are real ones.
+	DACTokenKey []byte
 	// ReconcilingPermission runs as session s's authorization is reconciled
 	// (reconcilePermission, the harness's path), before it reads anything: a
 	// test makes the reconciliation panic there (B853 round 2). It must not
@@ -464,6 +479,14 @@ type Backend struct {
 	dsdJudged    *dsdSet
 	dsdFenceOnce sync.Once
 	probeState   dsdProbe
+	// choiceReading says a choice's write holds its reading (takeChoiceReading)
+	// until it has published it (publishChoice), and refreshOwed that a
+	// refresh came meanwhile, read nothing and is owed (refreshDSD): both
+	// under dsdMu (B728 B9 PR 3).
+	choiceReading, refreshOwed bool
+	// tokenKey is the key the DAC's token is minted under (dacToken), drawn by
+	// New, never sent or logged: a token holds for one boot of the backend.
+	tokenKey [32]byte
 	// choiceTurn is the writes' turn: one choice write at a time (ChooseDSD,
 	// B728 B9); landedChoice is the state a choice's write left in the state's
 	// file, landed and not known to be durable, which every reading holds the
@@ -599,14 +622,21 @@ func New(cfg Config) (*Backend, error) {
 		reason = string(ReasonDSD)
 	}
 	b := &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: reason}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero, wzero: zero,
-		choiceTurn: make(chan struct{}, 1), toneShut: ToneOutputUnknown}
+		choiceTurn: make(chan struct{}, 1), toneShut: ToneOutputUnknown, tokenKey: randomTokenKey()}
+	if sm := cfg.Seams; sm != nil && sm.DACTokenKey != nil {
+		if len(sm.DACTokenKey) != len(b.tokenKey) {
+			return nil, fmt.Errorf("player backend: a DAC token key is %d bytes, not %d", len(sm.DACTokenKey), len(b.tokenKey))
+		}
+		copy(b.tokenKey[:], sm.DACTokenKey)
+	}
 	if cfg.DSD != nil {
 		// Its read side the state's warnings of the bridge's already, a state
-		// that did not read among them, before the first refresh reads the box.
+		// that did not read among them, before the first refresh reads the box:
+		// the first publication.
 		set, view := noSet("the effective DSD set has not been computed yet", b.dsdState())
 		set.gen = 1
 		b.dsd.Store(set)
-		b.dsdPub.Store(&dsdPublished{set: set, view: view})
+		b.dsdPub.Store(&dsdPublished{set: set, view: view, seq: 1})
 		// No session yet, so nothing for a reconciliation to judge by it.
 		b.dsdJudged = set
 	}

@@ -5224,6 +5224,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// stay on the MPD gate above.
 	playerView := newBridgeOutput(playerPlan, player, cfg)
 	apiSrv.WithBridgeOutput(playerView)
+	// PUT /v1/outputs/{id}/dsd writes the bound DAC's DSD choice through the
+	// same view (B728 B9 PR 3), under the engine's configuration reservation:
+	// /v1/health advertises bridgeDSDChoice beside bridgeOutput.
+	apiSrv.WithBridgeDSDChoice(playerView)
 	// The console's Player page (B601) reads the same player through the
 	// same view, and the live config the console hands it: its status, the
 	// box's DACs, and what the next start decides.

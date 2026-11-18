@@ -7,6 +7,7 @@ paths:
   - "cmd/bridge/serve_player_openhome*.go"
   - "cmd/bridge/serve_player.go"
   - "cmd/bridge/main.go"
+  - "cmd/bridge/hashcost_test.go"
   - "internal/config/player.go"
   - "internal/config/player_openhome*.go"
 ---
@@ -33,6 +34,7 @@ What an OpenHome controller talks to: the opt-in, the player's own LAN listener,
 - **The surface's tests run it on `lantest`'s loopback box and serve's hand it a box (`serveOpts.playerOpenHome`); in cmd/bridge's suite `hostLAN` is a box with no interface.** **Don't bind a host's LAN address in a test, list the host's interfaces there for anything but its loopback, or order a stop or a retirement with a sleep.** The "no box of the test's" case of `TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer` pins it. → History-rules-openhome.md
 
 - **Serve validates `--addr` with `config.ValidateBindAddress` before planning or taking the data-directory lock: service names, empty ports and ports outside the TCP range are refused, without quoting the override. A numeric override that creates an OpenHome clash turns the player off and logs its new reason once, naming `listenAddress, set by --addr` without quoting a value; a refusal unchanged from Load stays already reported (the plans compare reason strings).** `TestServeRefusesANonnumericAddressOverrideBeforePlanning`, `TestServeSaysOnceWhenAnAddressOverrideClashesWithOpenHome` and `TestServeDoesNotRepeatAnUnchangedRefusalUnderAnAddressOverride` pin it. **Don't assume that Load reported a refusal created by an override, repeat an unchanged refusal under an override, or blame the file alone for an address set by --addr.** → History-rules-openhome.md
+- **Serve's player starts its OpenHome surface after launching its engine, when the boot snapshot's `output.player.openhome` is on, and its shutdown stops the surface first, before the engine and the backend** (B470 PR 5a2a) → History-rules-openhome.md
 
 ### The SOAP table (`soap.go`)
 
