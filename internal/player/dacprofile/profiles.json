@@ -60,7 +60,9 @@
     "AudioQuest DragonFly v1.2",
     "iFi GO link 2",
     "iFi GO link Max",
-    "iFi GO link 2 Max"
+    "iFi GO link 2 Max",
+    "ONIX XI1",
+    "Onix Alpha XI1"
   ],
   "profiles": [
     {
@@ -2386,6 +2388,68 @@
       "provenance": [
         "dop: stated no DSD: pcm ceiling (the row's note, iOS 6a1241eb: a 48 kHz ceiling carries no DoP carrier)",
         "ios: DACProfile.swift apple.usbc.adapter at iOS 6a1241eb"
+      ]
+    },
+    {
+      "id": "onix.betaxi2",
+      "name": "Onix Beta XI2",
+      "match": [],
+      "native": null,
+      "dop": {
+        "heardBitRates": [
+          2822400,
+          5644800,
+          11289600
+        ],
+        "statedMaxBitRate": 0,
+        "statedWithoutDoP": {
+          "kind": "dsd",
+          "maxBitRate": 22579200
+        },
+        "refusedBitRates": [
+          22579200
+        ],
+        "analogVolumeControls": [],
+        "unityAtRawMax": [],
+        "source": {
+          "kind": "ios-registry",
+          "ref": "DACProfile.swift onix.betaxi2 at iOS 3145606a"
+        }
+      },
+      "timing": null,
+      "caveats": [],
+      "ios": {
+        "order": 21,
+        "maker": "Onix",
+        "legacyPatterns": [
+          "ONIX XI2"
+        ],
+        "legacyCeilingBitRate": 11289600,
+        "portNames": [
+          "ONIX XI2"
+        ],
+        "nameTokens": [
+          "ONIX XI2"
+        ],
+        "excludedTokens": [],
+        "nameScope": "model",
+        "siblingNote": null,
+        "pcm": {
+          "maxRateHz": 768000,
+          "bitDepth": 32
+        },
+        "volumeTopology": "hostSyncedDACGain",
+        "timing": {
+          "ioBufferMs": null,
+          "dsdResyncMs": null,
+          "pcmEntryResyncMs": null,
+          "coldStartExtraMs": null,
+          "transitionCushionMs": null
+        }
+      },
+      "provenance": [
+        "dop: heard DSD64, DSD128, DSD256: submission 2026-11-17; refused DSD512: submission 2026-11-17 (its carrier refused); stated DSD to DSD512: maker (iOS 3145606a: the maker's DSD512 is native USB DSD, a figure that names no DoP)",
+        "ios: DACProfile.swift onix.betaxi2 at iOS 3145606a"
       ]
     }
   ]

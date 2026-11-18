@@ -73,7 +73,7 @@ func TestInitPublicReinitKeepsTheAdminCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Verify("admin", password); err != nil {
+	if _, err := store.Verify("admin", password); err != nil {
 		t.Errorf("the password the first init printed no longer verifies after the re-init: %v", err)
 	}
 	for _, want := range []string{"Admin credentials — kept", "Username:  admin"} {
@@ -224,7 +224,7 @@ func TestInitPublicReinitMintsIntoAStoreWithNoAccount(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := store.Verify("admin", password); err != nil {
+			if _, err := store.Verify("admin", password); err != nil {
 				t.Errorf("the password the re-init printed does not verify: %v", err)
 			}
 			if strings.Contains(out, "Admin credentials — kept") {

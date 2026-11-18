@@ -127,10 +127,10 @@ func TestResetPasswordRollsBackOnPersistFailure(t *testing.T) {
 			t.Fatal("expected a write failure (directory not writable), got nil")
 		}
 		requireUnchanged(t, s, before)
-		if err := s.Verify("admin", rotated); err == nil {
+		if _, err := s.Verify("admin", rotated); err == nil {
 			t.Error("the new password verifies after a rotation that never reached the file")
 		}
-		if err := s.Verify("admin", original); err != nil {
+		if _, err := s.Verify("admin", original); err != nil {
 			t.Errorf("the original password no longer verifies: %v", err)
 		}
 	})
@@ -236,7 +236,7 @@ func TestResetPasswordBuildsNewPointer(t *testing.T) {
 				// Either result is legitimate — the race
 				// detector cares about the read, not the
 				// outcome.
-				_ = s.Verify("admin", pw)
+				_, _ = s.Verify("admin", pw)
 			}
 		}()
 	}
@@ -280,13 +280,11 @@ func TestResetPasswordEndsSessionsUnlessKept(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.MintInitial("admin"); err != nil {
-				t.Fatal(err)
-			}
-			raw, err := s.CreateSession("admin")
+			password, err := s.MintInitial("admin")
 			if err != nil {
 				t.Fatal(err)
 			}
+			raw := signIn(t, s, "admin", password)
 			if err := s.ResetPassword("admin", "fresh-password-1234", tc.action); err != nil {
 				t.Fatal(err)
 			}
