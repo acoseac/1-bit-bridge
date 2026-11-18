@@ -28,6 +28,10 @@ auto-loaded.
 - A new record is a new file: never append to a file another PR wrote. If the name is taken,
   add a word. A round of an open PR may be a file of its own or a `### Round N` section in its
   PR's own file.
+- An entry is filed here alone. A file named like one in any other folder fails the check,
+  tracked or not, and so does one git ignores by its own name; a folder git ignores whole, as
+  `.tmp/` where scratch goes, is not looked in. The edit hook refuses such a file as it is
+  written, but below a folder whose name begins with `.`.
 - An entry is edited only to correct it. The citation guard (`TestEveryCitedTestNameExists`)
   reads every entry, never the archive, so a PR that renames or retires a test an entry cites
   corrects that citation in the entry.

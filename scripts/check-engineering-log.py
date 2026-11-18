@@ -71,6 +71,9 @@ FENCE_CLOSE = re.compile(r"(`{3,}|~{3,})[ \t]*")
 # ignores *review*, *audit* and *findings*), or a file named like an entry in any folder.
 DATED_IN_OPS = re.compile(r"ops/\d{4}-\d{2}-\d{2}[^/]*\.md", re.IGNORECASE)
 ENTRY_SHAPED = re.compile(r"\d{4}-\d{2}-\d{2}-[^/]*--[^/]*\.md", re.IGNORECASE)
+# The untracked files git is asked for outside ops/: a name holding "--" that ends in .md, in any
+# folder and any case, which ENTRY_SHAPED then judges.
+SHAPED_ANYWHERE = ":(glob,icase)**/*--*.md"
 
 WAY = ("a record goes in a file of its own, ops/engineering-log/<YYYY-MM>/<YYYY-MM-DD>-<entry>--<branch>.md "
        "(ops/engineering-log/README.md; `python3 scripts/check-engineering-log.py --slug <branch>` "
@@ -303,18 +306,29 @@ def git_paths(root, args, env=None):
 
 def listing(root, env=None):
     """(every path git tracks, repository-wide; {path: whether git ignores it} for every untracked
-    Markdown file below a top-level folder named like ops in any case, ignored ones included).
-    Untracked paths are judged by their names alone, what an ignored file holds being nobody's to
-    read here, and only a name that could be a record's: one ending in .md that does not begin
-    with "." (an editor's lock, the OS's .DS_Store and a backup's ~ are no records; committed,
-    git lists them as tracked, and they are refused)."""
+    Markdown file below a top-level folder named like ops in any case, ignored ones included, and
+    for every untracked file in any other folder whose name holds "--", as an entry's does, that
+    git does not ignore or ignores by its own name: a folder git ignores whole, as .tmp/ where
+    scratch goes, is not entered there). Untracked paths are judged by their names alone, what an
+    ignored file holds being nobody's to read here, and only a name that could be a record's: one
+    ending in .md that does not begin with "." (an editor's lock, the OS's .DS_Store and a
+    backup's ~ are no records; committed, git lists them as tracked, and they are refused)."""
     tracked = git_paths(root, ["--cached"], env)
+
+    def record(p):
+        return p.lower().endswith(".md") and not p.rsplit("/", 1)[-1].startswith(".")
     tops = sorted(n for n in os.listdir(root) if n.lower() == "ops" and os.path.isdir(os.path.join(root, n)))
     untracked = {}
     if tops:
         ignored = set(git_paths(root, ["--others", "--ignored", "--exclude-standard", "--"] + tops, env))
-        untracked = {p: p in ignored for p in git_paths(root, ["--others", "--"] + tops, env)
-                     if p.lower().endswith(".md") and not p.rsplit("/", 1)[-1].startswith(".")}
+        untracked = {p: p in ignored for p in git_paths(root, ["--others", "--"] + tops, env) if record(p)}
+    for p in git_paths(root, ["--others", "--exclude-standard", "--", SHAPED_ANYWHERE], env):
+        if record(p):
+            untracked.setdefault(p, False)
+    # --directory: a folder ignored whole is printed as itself, "<folder>/", and not entered.
+    for p in git_paths(root, ["--others", "--ignored", "--exclude-standard", "--directory", "--", SHAPED_ANYWHERE], env):
+        if record(p):
+            untracked.setdefault(p, True)
     return tracked, untracked
 
 
@@ -573,7 +587,7 @@ def self_test():
     def text_for(rel):
         return "## %s — fixture\n\nText.\n" % rel.rsplit("/", 1)[-1][:10]
 
-    ignore = "ops/*review*.md\n*hidden*\n"
+    ignore = "ops/*review*.md\n*hidden*\nscratch/\n"
 
     def checkout(tmp, name, files=None, add=True):
         root = os.path.join(tmp, name)
@@ -643,6 +657,15 @@ def self_test():
             expect("a tracked file named like an entry in another folder is misfiled, and nothing else",
                    check(root, size, digest, env)[0], [misfiled_problem(shaped)])
 
+            root, env = checkout(tmp, "docs-untracked")
+            hidden, top = "docs/sub/2026-11-20-hidden--feat-x.md", "2026-11-20-b888--feat-x.md"
+            for rel in (shaped, hidden, top, "scratch/2026-11-20-b888--feat-x.md", "docs/a--b.md"):
+                put(root, rel, entry_text)
+            expect("an untracked name like an entry is found in any folder, one git ignores by its own name too, "
+                   "and a folder git ignores whole is not entered",
+                   check(root, size, digest, env)[0], [misfiled_problem(top), misfiled_problem(shaped),
+                                                       misfiled_problem(hidden) + ", and git ignores it there"])
+
             root, env = checkout(tmp, "other-case", {"Ops/engineering-log/2026-11/2026-11-20-a--b.md": entry_text},
                                  add=False)
             problems, _ = check(root, size, digest, env)
@@ -677,6 +700,9 @@ def self_test():
         expect("the hook refuses a misnamed entry", hook_for(root, "ops/engineering-log/2026-11/2026-11-20-B--x.md")[0], 2)
         expect("the hook refuses a missing archive", hook_for(root, ARCHIVE)[0], 2)
         expect("the hook says nothing of another path", hook_for(root, "ops/README.md"), (0, ""))
+        put(root, "docs/2026-11-20-b888--feat-x.md", entry_text)
+        expect("the hook refuses a name like an entry in another folder",
+               hook_for(root, "docs/2026-11-20-b888--feat-x.md")[0], 2)
 
     print("self-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
