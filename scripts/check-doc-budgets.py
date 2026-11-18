@@ -29,14 +29,10 @@ the file or adds to an existing one:
   scripts/doc-split/move_entry.py FILE --largest     the candidates, each with its command
   scripts/doc-split/move_entry.py FILE --line N      move one (--dry-run shows it first)
 """
-import builtins
 import glob
-import hashlib
-import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -290,7 +286,10 @@ _log_checker = []
 
 
 def engineering_log():
-    """scripts/check-engineering-log.py as a module, loaded once (its name holds a "-")."""
+    """scripts/check-engineering-log.py as a module, loaded once (its name holds a "-"). Imported
+    here, as the self-test's own modules are in self_test, so an edit of any other path pays none
+    of it."""
+    import importlib.util
     if not _log_checker:
         spec = importlib.util.spec_from_file_location("check_engineering_log",
                                                       os.path.join(REPO, "scripts", "check-engineering-log.py"))
@@ -346,6 +345,9 @@ def hook(root, stdin, budgets=BUDGETS):
 
 
 def self_test():
+    import builtins
+    import hashlib
+    import shutil
     ok = True
 
     def expect(name, got, want):
