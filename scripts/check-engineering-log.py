@@ -67,8 +67,10 @@ H2 = re.compile(r"##(?:[ \t]|$)")
 QUOTE = re.compile(r" {0,3}> ?")
 FENCE_OPEN = re.compile(r"(`{3,}|~{3,})(.*)")
 FENCE_CLOSE = re.compile(r"(`{3,}|~{3,})[ \t]*")
-# An entry filed anywhere else, by its name alone: a dated Markdown file directly in ops/ (where git
-# ignores *review*, *audit* and *findings*), or a file named like an entry in any folder.
+# An entry filed anywhere else, by its name alone: a file named like an entry in any folder, and
+# any dated Markdown file directly in ops/ that git tracks. Untracked, a dated note there that is
+# not named like an entry is no record: git ignores *review*, *audit* and *findings* names in ops/
+# for the private notes kept there.
 DATED_IN_OPS = re.compile(r"ops/\d{4}-\d{2}-\d{2}[^/]*\.md", re.IGNORECASE)
 ENTRY_SHAPED = re.compile(r"\d{4}-\d{2}-\d{2}-[^/]*--[^/]*\.md", re.IGNORECASE)
 # The untracked files git is asked for outside ops/: a name holding "--" that ends in .md, in any
@@ -255,7 +257,8 @@ def archive_problems(root, size=None, digest=None):
 def classify(rel):
     """What REL, a repository path spelled with "/", is to the log: "archive", "readme", "entry"
     (anything below the folder, by its exact path), "misfiled" (the log's paths in another case,
-    or a name shaped like an entry outside the folder), or None."""
+    or a name shaped like an entry outside the folder), "dated" (another dated Markdown file
+    directly in ops/: misfiled where git tracks it, a private note where it does not), or None."""
     if rel == ARCHIVE:
         return "archive"
     if rel == README:
@@ -263,9 +266,10 @@ def classify(rel):
     if rel.startswith(FOLDER):
         return "entry"
     low = rel.lower()
-    if low == ARCHIVE or low.startswith(FOLDER) or DATED_IN_OPS.fullmatch(rel) or \
-            ENTRY_SHAPED.fullmatch(rel.rsplit("/", 1)[-1]):
+    if low == ARCHIVE or low.startswith(FOLDER) or ENTRY_SHAPED.fullmatch(rel.rsplit("/", 1)[-1]):
         return "misfiled"
+    if DATED_IN_OPS.fullmatch(rel):
+        return "dated"
     return None
 
 
@@ -335,7 +339,8 @@ def listing(root, env=None):
 def check(root, size=None, digest=None, env=None):
     """(problems, entries) for the tree at ROOT: the archive frozen and tracked, the README tracked,
     every tracked path below the folder an entry by name and content (or the README), git listing
-    something there, every untracked one's name, no misfiled name anywhere, and no two of the log's
+    something there, every untracked one's name, no misfiled name anywhere (a dated note directly in
+    ops/ that is not named like an entry is one only where git tracks it), and no two of the log's
     paths that one volume folding case would take for one file."""
     try:
         tracked, untracked = listing(root, env)
@@ -355,14 +360,14 @@ def check(root, size=None, digest=None, env=None):
         kind = classify(rel)
         if kind:
             folded.setdefault(rel.casefold(), set()).add(rel)
-        if kind == "misfiled":
+        if kind in ("misfiled", "dated"):
             problems.append(misfiled_problem(rel))
         elif kind in ("entry", "readme"):
             problems += ["%s %s" % (rel, p) for p in file_problems(root, rel)]
             entries += kind == "entry"
     for rel, ignored in sorted(untracked.items()):
         kind = classify(rel)
-        if not kind:
+        if kind in (None, "dated"):
             continue
         folded.setdefault(rel.casefold(), set()).add(rel)
         if kind == "misfiled":
@@ -381,10 +386,11 @@ def hook_for(root, rel):
     """The PostToolUse hook's check of REL, one edited path of the log's, repository-relative as the
     editor named it and in any case (check-doc-budgets.py resolves no link inside the repository,
     so an edited link keeps its own name here). (2, what is wrong and the way through), or (0, "")
-    to say nothing. A deleted entry is let be, a deleted archive is not. Nothing is listed and no
-    git is asked: an edit costs one lstat per component and the read of the one file."""
+    to say nothing. A deleted entry is let be, and so is a dated note in ops/ not named like an
+    entry, which may be a private one git ignores; a deleted archive is not. Nothing is listed and
+    no git is asked: an edit costs one lstat per component and the read of the one file."""
     kind = classify(rel)
-    if kind is None:
+    if kind in (None, "dated"):
         return 0, ""
     problems = []
     state, at, _ = path_state(root, rel)
@@ -587,7 +593,7 @@ def self_test():
     def text_for(rel):
         return "## %s — fixture\n\nText.\n" % rel.rsplit("/", 1)[-1][:10]
 
-    ignore = "ops/*review*.md\n*hidden*\nscratch/\n"
+    ignore = "ops/*review*.md\nops/*audit*.md\n*hidden*\nscratch/\n"
 
     def checkout(tmp, name, files=None, add=True):
         root = os.path.join(tmp, name)
@@ -665,6 +671,18 @@ def self_test():
                    "and a folder git ignores whole is not entered",
                    check(root, size, digest, env)[0], [misfiled_problem(top), misfiled_problem(shaped),
                                                        misfiled_problem(hidden) + ", and git ignores it there"])
+
+            root, env = checkout(tmp, "dated-notes")
+            note, plain_note, named = "ops/2026-11-20-loupe-audit.md", "ops/2026-11-20-notes.md", "ops/2026-11-20-x-audit--feat-x.md"
+            for rel in (note, plain_note, named):
+                put(root, rel, "a private note\n")
+            expect("an untracked dated note in ops/, ignored or not, is let be, and one named like an entry is not",
+                   check(root, size, digest, env)[0], [misfiled_problem(named) + ", and git ignores it there"])
+            expect("the hook lets the two notes be", [hook_for(root, note), hook_for(root, plain_note)], [(0, ""), (0, "")])
+            git(root, env, "add", "--", plain_note)
+            expect("a dated note in ops/ that git tracks is misfiled",
+                   check(root, size, digest, env)[0], [misfiled_problem(plain_note),
+                                                       misfiled_problem(named) + ", and git ignores it there"])
 
             root, env = checkout(tmp, "other-case", {"Ops/engineering-log/2026-11/2026-11-20-a--b.md": entry_text},
                                  add=False)

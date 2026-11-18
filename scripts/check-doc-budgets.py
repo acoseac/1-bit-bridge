@@ -40,12 +40,13 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUDGETS = {"claude": 64_000, "rules": 100_000, "load": 480_000}
 NEAR = 0.97  # at or above this share of a budget the full check says so, and still passes
-# The engineering log's paths, in any case: its frozen archive, anything below its folder, a dated
-# Markdown file directly in ops/ (an entry filed where git may ignore it), and a file named like an
-# entry, <date>-<entry>--<branch>.md, in any folder but one whose name begins with "." (.tmp/, where
-# scratch goes). The hook hands an edit of one to scripts/check-engineering-log.py; any other path
-# pays this one match.
-LOG_PATH = re.compile(r"ops/(?:engineering-log\.md|engineering-log/.+|\d{4}-\d{2}-\d{2}[^/]*\.md)"
+# The engineering log's paths, in any case: its frozen archive, anything below its folder, and a
+# file named like an entry, <date>-<entry>--<branch>.md, in any folder but one whose name begins
+# with "." (.tmp/, where scratch goes), ops/ among them (an entry filed where git may ignore it). A
+# dated note directly in ops/ named otherwise is none of them: a private one git ignores may stand
+# there. The hook hands an edit of one to scripts/check-engineering-log.py; any other path pays
+# this one match.
+LOG_PATH = re.compile(r"ops/(?:engineering-log\.md|engineering-log/.+)"
                       r"|(?:[^./][^/]*/)*\d{4}-\d{2}-\d{2}-[^/]*--[^/]*\.md", re.IGNORECASE | re.DOTALL)
 
 
@@ -509,6 +510,10 @@ def self_test():
         expect("a dated file directly in ops/ is refused", edit("ops/2026-11-20-b888--feat-x.md")[0], 2)
         os.remove(dated)
         expect("and let be once it is gone", edit("ops/2026-11-20-b888--feat-x.md"), (0, ""))
+        note = put("ops/2026-11-20-loupe-audit.md", "a private note\n")
+        expect("a dated note directly in ops/ not named like an entry is let be", edit("ops/2026-11-20-loupe-audit.md"),
+               (0, ""))
+        os.remove(note)
         expect("a deleted entry is let be", edit("ops/engineering-log/2026-11/2026-11-20-gone--x.md"), (0, ""))
         shaped = put("docs/2026-11-20-b888--feat-x.md", entry_text)
         expect("a file named like an entry in another folder is refused", edit("docs/2026-11-20-b888--feat-x.md")[0], 2)

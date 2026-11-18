@@ -31,7 +31,10 @@ auto-loaded.
 - An entry is filed here alone. A file named like one in any other folder fails the check,
   tracked or not, and so does one git ignores by its own name; a folder git ignores whole, as
   `.tmp/` where scratch goes, is not looked in. The edit hook refuses such a file as it is
-  written, but below a folder whose name begins with `.`.
+  written, but below a folder whose name begins with `.`. A dated note directly in `ops/` not
+  named like an entry (no `--<branch>`) may stand there untracked, as the private notes git
+  ignores there do (`*audit*`, `*review*`, `*findings*`); committed, any dated file directly in
+  `ops/` fails the check.
 - An entry is edited only to correct it. The citation guard (`TestEveryCitedTestNameExists`)
   reads every entry, never the archive, so a PR that renames or retires a test an entry cites
   corrects that citation in the entry.
