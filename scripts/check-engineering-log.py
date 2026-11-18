@@ -313,10 +313,11 @@ def listing(root, env=None):
     Markdown file below a top-level folder named like ops in any case, ignored ones included, and
     for every untracked file in any other folder whose name holds "--", as an entry's does, that
     git does not ignore or ignores by its own name: a folder git ignores whole, as .tmp/ where
-    scratch goes, is not entered there). Untracked paths are judged by their names alone, what an
-    ignored file holds being nobody's to read here, and only a name that could be a record's: one
-    ending in .md that does not begin with "." (an editor's lock, the OS's .DS_Store and a
-    backup's ~ are no records; committed, git lists them as tracked, and they are refused)."""
+    scratch goes, is not entered there). Only a name that could be a record's is listed: one ending
+    in .md that does not begin with "." (an editor's lock, the OS's .DS_Store and a backup's ~ are
+    no records; committed, git lists them as tracked, and they are refused). check() reads an
+    untracked entry git does not ignore as it reads a tracked one; one git ignores it judges by its
+    name alone, what an ignored file holds being nobody's to read here."""
     tracked = git_paths(root, ["--cached"], env)
 
     def record(p):
@@ -338,10 +339,11 @@ def listing(root, env=None):
 
 def check(root, size=None, digest=None, env=None):
     """(problems, entries) for the tree at ROOT: the archive frozen and tracked, the README tracked,
-    every tracked path below the folder an entry by name and content (or the README), git listing
-    something there, every untracked one's name, no misfiled name anywhere (a dated note directly in
-    ops/ that is not named like an entry is one only where git tracks it), and no two of the log's
-    paths that one volume folding case would take for one file."""
+    every tracked path below the folder an entry by name and content (or the README), and every
+    untracked one git does not ignore, git listing something there, no ignored one, no misfiled
+    name anywhere (a dated note directly in ops/ that is not named like an entry is one only where
+    git tracks it), and no two of the log's paths that one volume folding case would take for one
+    file."""
     try:
         tracked, untracked = listing(root, env)
     except OSError as e:
@@ -374,8 +376,8 @@ def check(root, size=None, digest=None, env=None):
             problems.append(misfiled_problem(rel) + (", and git ignores it there" if ignored else ""))
         elif ignored:
             problems.append("%s is ignored by git, so it would never be committed: rename it" % rel)
-        elif kind == "entry":
-            problems += ["%s %s" % (rel, p) for p in name_problems(rel[len(FOLDER):])]
+        elif kind in ("entry", "readme"):  # read as a tracked one is: git add would commit it as it stands
+            problems += ["%s %s" % (rel, p) for p in file_problems(root, rel)]
     for rels in folded.values():
         if len(rels) > 1:
             problems.append("%s name one file on a volume that folds case" % " and ".join(sorted(rels)))
@@ -620,11 +622,11 @@ def self_test():
     if have_git:
         with tempfile.TemporaryDirectory() as tmp:
             root, env = checkout(tmp, "good")
-            put(root, "ops/engineering-log/2026-11/2026-11-20-c--b.md", (head + "x").replace("\n", "\r\n"))
+            put(root, "ops/engineering-log/2026-11/2026-11-20-c--b.md", text_for("2026-11-20-c--b.md"))
             put(root, "ops/notes-review.md", "a review\n")
             for junk in (".DS_Store", ".#2026-11-20-c--b.md", "2026-11-20-c--b.md~", "2026-11-20-hidden.swp"):
                 put(root, "ops/engineering-log/2026-11/" + junk, "junk\n")
-            expect("a good checkout passes, an untracked entry judged by its name alone, no lock or backup read",
+            expect("a good checkout passes, a good untracked entry read and counted with none, no lock or backup read",
                    check(root, size, digest, env), ([], 1))
             put(root, "ops/engineering-log/2026-11/2026-11-20-B--x.md", entry_text)
             put(root, "ops/engineering-log/2026-11/2026-11-20-hidden--x.md", entry_text)
@@ -636,7 +638,26 @@ def self_test():
                    found(problems, "ops/engineering-log/2026-11/2026-11-20-hidden--x.md", "ignored"), True)
             expect("an ignored entry directly in ops/ is found and refused",
                    found(problems, "ops/2026-11-20-b888-review--feat-x.md", "git ignores it there"), True)
-            expect("nothing else is refused", len(problems), 3)
+            expect("the misnamed one is read too, its heading judged against no date, and nothing else is refused",
+                   (len(problems), found(problems, "ops/engineering-log/2026-11/2026-11-20-B--x.md",
+                                         "does not begin with its heading, `## <YYYY-MM-DD>")), (4, True))
+
+            root, env = checkout(tmp, "untracked-read")
+            month = "ops/engineering-log/2026-11/"
+            put(root, month + "2026-11-20-crlf--b.md", text_for("2026-11-20-crlf--b.md").replace("\n", "\r\n"))
+            put(root, month + "2026-11-20-body--b.md", "Notes, no heading.\n")
+            put(root, month + "2026-11-20-hidden--b.md", "junk\r\n")
+            linked = link(os.path.join(root, *entry.split("/")), os.path.join(root, *(month + "2026-11-20-link--b.md").split("/")))
+            problems, _ = check(root, size, digest, env)
+            expect("an untracked entry is read as a tracked one is: its CR is refused, and a body that is no entry's",
+                   [found(problems, month + "2026-11-20-crlf--b.md", "carriage return"),
+                    found(problems, month + "2026-11-20-body--b.md", "does not begin with its heading")], [True, True])
+            expect("an untracked entry git ignores is judged by its name alone, its bytes unread",
+                   [p for p in problems if "hidden" in p],
+                   ["%s2026-11-20-hidden--b.md is ignored by git, so it would never be committed: rename it" % month])
+            if linked:
+                expect("an untracked entry that is a link is refused", found(problems, month + "2026-11-20-link--b.md", "is a link"), True)
+            expect("and nothing else is refused", len(problems), 5 if linked else 4)
 
             root, env = checkout(tmp, "tracked")
             crlf = "ops/engineering-log/2026-11/2026-11-20-crlf--b.md"
