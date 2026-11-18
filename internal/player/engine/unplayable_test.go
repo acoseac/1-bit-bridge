@@ -103,13 +103,18 @@ func TestOnePlayableAmongUnplayablePlaysWithoutSpinning(t *testing.T) {
 
 // TestAFailureAfterContentPlayedIsAFault pins a failure after content: a
 // fault with its position, playback stopped, nothing skipped, nothing
-// restarted.
+// restarted. The fault is the occurrence heard's, the session's first, so it
+// is no successor's (B903AUD): the step that records it leaves the selection
+// on a, though b follows a, and its stop names a, and a Play from Stopped
+// starts a again.
 func TestAFailureAfterContentPlayedIsAFault(t *testing.T) {
-	h := startHarness(t)
+	h := newHarness(t)
+	steps := recordSteps(h)
+	h.boot()
 	ids, s := h.playing(0, "a", "b")
 	s.position(s.first.ID, 4410)
-	s.fault(Fault{Reason: ReasonDecodeFailed, Detail: "a bad frame", Occurrence: s.first.ID, Frames: 4410})
-	sn := h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
+	faultStops(t, h, steps, s, Fault{Reason: ReasonDecodeFailed, Detail: "a bad frame", Occurrence: s.first.ID, Frames: 4410}, ids[0], ids[0])
+	sn := h.snap()
 	fs := sn.Faults()
 	if len(fs) != 1 || fs[0].Reason != ReasonDecodeFailed || fs[0].Entry != ids[0] || fs[0].Frames != 4410 {
 		t.Fatalf("faults %+v", fs)
@@ -117,6 +122,7 @@ func TestAFailureAfterContentPlayedIsAFault(t *testing.T) {
 	if sn.LastStop().Reason != ReasonFault || len(sn.Skips()) != 0 || h.be.starts() != 1 || sn.Selected() != ids[0] {
 		t.Fatalf("last stop %+v, skips %v, %d sessions, selected %d", sn.LastStop(), sn.Skips(), h.be.starts(), sn.Selected())
 	}
+	playsFrom(t, h, ids[0])
 }
 
 // TestFaultsAreBounded pins the record's bound.

@@ -91,24 +91,28 @@ func playsFrom(t *testing.T, h *harness, want uint32) *fakeSession {
 }
 
 // holdCalls holds the prepare-th Prepare that names a successor (counted
-// from 1, none for 0) until the test ends, and every Cut while cut is set:
-// a call under way, which keeps its occurrence in the chain.
+// from 1) until the test ends, and every Cut while cut is set: a call under
+// way, which keeps its occurrence in the chain. For prepare 0 it holds no
+// Prepare and leaves each to the fake's own answer, which refuses a
+// reference scripted unplayable.
 func holdCalls(h *harness, prepare int, cut bool) {
 	held := newGate()
 	h.t.Cleanup(held.open)
 	h.be.script(func() {
-		named := 0
-		h.be.onPrepare = func(ctx context.Context, _ *fakeSession, _ OccurrenceID, next *Occurrence) error {
-			h.be.mu.Lock()
-			if next != nil {
-				named++
+		if prepare > 0 {
+			named := 0
+			h.be.onPrepare = func(ctx context.Context, _ *fakeSession, _ OccurrenceID, next *Occurrence) error {
+				h.be.mu.Lock()
+				if next != nil {
+					named++
+				}
+				hold := next != nil && named == prepare
+				h.be.mu.Unlock()
+				if hold {
+					return held.wait(ctx, h.be, false)
+				}
+				return nil
 			}
-			hold := next != nil && named == prepare
-			h.be.mu.Unlock()
-			if hold {
-				return held.wait(ctx, h.be, false)
-			}
-			return nil
 		}
 		if cut {
 			h.be.onCut = func(ctx context.Context, _ *fakeSession, _ OccurrenceID) (bool, error) {
@@ -208,14 +212,18 @@ func TestASuccessorsFaultBeforeItIsHeardMovesTheSelectionOn(t *testing.T) {
 // by an insert, with its occurrence kept in the chain by a Cut under way or
 // one that came too late (deleting b, which is not the selection, moves no
 // selection of itself), and the first entry with repeat on. With nothing
-// after a (a last, repeat off) the selection stays on a, as the end of the
-// queue leaves it. The entry heard is the session's first occurrence once
-// it is heard, or the occurrence a seek's session continues, heard before
-// it: a fault two successors past it selects the first, never heard, which
-// is skipped no more than any entry a fault follows; and with nothing heard
-// yet the selection stays on the first entry, which never played. Whatever
-// the selection becomes, the fault and its stop name the entry that
-// faulted.
+// playable after a in the pass the selection stays on a, as the end of the
+// queue leaves it: a is last with repeat off, or b, all that follows it, was
+// refused in the pass (b's next lap refused at its hand-off with repeat on,
+// which leaves b's occurrence no longer next, its Cut held, before repeat
+// goes off). The entry heard is the session's first occurrence once it is
+// heard, or the occurrence a seek's session continues, heard before it: a
+// fault two successors past it selects the first, never heard, which is
+// skipped no more than any entry a fault follows; and with nothing heard yet
+// the selection stays on the session's first entry, which never played,
+// wherever that entry stands in the queue (never the queue's first, which
+// following from no entry gives). Whatever the selection becomes, the fault
+// and its stop name the entry that faulted.
 func TestASuccessorsFaultSelectsTheQueuesNextAfterTheEntryHeard(t *testing.T) {
 	// cuts holds every Cut, or answers each that it came too late.
 	cuts := func(h *harness, held bool) {
@@ -296,6 +304,28 @@ func TestASuccessorsFaultSelectsTheQueuesNextAfterTheEntryHeard(t *testing.T) {
 			h.be.waitFor("the cut of the wrap-around", func() bool { return h.be.countLocked("cut") == 1 })
 			return s, wrap.ID, ids[0], ids[1]
 		}},
+		{"every entry after it refused in the pass", func(t *testing.T, h *harness) (*fakeSession, OccurrenceID, uint32, uint32) {
+			cuts(h, true)
+			h.must("repeat", h.eng.SetRepeat(bg, true))
+			ids, s := h.playing(0, "a", "b")
+			b := s.successor(s.first.ID)
+			s.submitted(b.ID)
+			wrap := s.successor(b.ID)
+			if b.Entry != ids[1] || wrap.Entry != ids[0] {
+				t.Fatalf("the successors named are %+v and %+v, b and a wanted", b, wrap)
+			}
+			// b's next lap, named once a's (wrap) is submitted, is refused:
+			// b is then refused in the pass, so its occurrence here no longer
+			// follows a, and the Cut that asks is held.
+			unplayable(h, "b")
+			s.submitted(wrap.ID)
+			h.be.waitFor("the cut of b", func() bool { return h.be.countLocked("cut") == 1 })
+			if _, ok := h.snap().Skipped(ids[1]); !ok {
+				t.Fatal("b's next lap was not refused")
+			}
+			h.must("repeat off", h.eng.SetRepeat(bg, false))
+			return s, b.ID, ids[1], ids[0]
+		}},
 		{"two successors past the entry heard", func(t *testing.T, h *harness) (*fakeSession, OccurrenceID, uint32, uint32) {
 			ids, s := h.playing(0, "a", "b", "c")
 			b := s.prepared(s.first.ID, 1)
@@ -319,6 +349,18 @@ func TestASuccessorsFaultSelectsTheQueuesNextAfterTheEntryHeard(t *testing.T) {
 			b := s.prepared(s.first.ID, 1)
 			h.waitAppliedTimes("handled call prepare", 0, 1)
 			return s, b.ID, ids[1], ids[0]
+		}},
+		{"nothing heard yet, the session started past the queue's first entry", func(t *testing.T, h *harness) (*fakeSession, OccurrenceID, uint32, uint32) {
+			ids := h.insert("a", "b", "c")
+			h.available()
+			h.must("play b", h.eng.PlayID(bg, ids[1]))
+			s := h.be.nth(1)
+			c := s.prepared(s.first.ID, 1)
+			if c == nil || c.Entry != ids[2] {
+				t.Fatalf("the successor named after b is %+v, c wanted", c)
+			}
+			h.waitAppliedTimes("handled call prepare", 0, 1)
+			return s, c.ID, ids[2], ids[1]
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -474,5 +516,47 @@ func TestAPlayAfterASuccessorsFaultTakesTheStartPath(t *testing.T) {
 			}
 			tc.then(t, h, ids)
 		})
+	}
+}
+
+// TestASuccessorsFaultAfterTheEntryHeardWasDeletedIsNotTaken pins a
+// successor's fault once the entry heard, a, the selection, was deleted
+// (B903AUD): it is not taken. The deletion selects b, the entry after a, at
+// once and releases a's session to play b (selectionDeleted), so a fault
+// that session reports of b, never heard, while its release is held, comes
+// from a session no longer current (current): no fault is recorded, the
+// transport, the pending play, the last stop and the selection stay as the
+// deletion left them, and b starts once the release is acknowledged.
+func TestASuccessorsFaultAfterTheEntryHeardWasDeletedIsNotTaken(t *testing.T) {
+	h := startHarness(t)
+	ids, s := h.playing(0, "a", "b", "c")
+	b := s.prepared(s.first.ID, 1)
+	if b == nil || b.Entry != ids[1] {
+		t.Fatalf("the successor named after a is %+v, b wanted", b)
+	}
+	h.waitAppliedTimes("handled call prepare", 0, 1)
+	held := holdReleases(h)
+	h.must("delete a", h.eng.Delete(bg, ids[0]))
+	deleted := h.snap()
+	if deleted.State() != Releasing || deleted.Pending() != IntentPlay || deleted.Selected() != ids[1] {
+		t.Fatalf("a deleted: %s, pending %s, selected %d; releasing to play b wanted", deleted.State(), deleted.Pending(), deleted.Selected())
+	}
+	mark := h.appliedMark()
+	s.fault(Fault{Reason: ReasonDecodeFailed, Detail: "b's first chunk", Occurrence: b.ID})
+	h.waitApplied("handled fault", mark)
+	sn := h.snap()
+	if fs := sn.Faults(); len(fs) != 0 {
+		t.Errorf("the released session's fault was recorded: %+v", fs)
+	}
+	if sn.State() != Releasing || sn.Pending() != IntentPlay || sn.LastStop() != deleted.LastStop() || sn.Selected() != ids[1] {
+		t.Fatalf("after the released session's fault: %s, pending %s, last stop %+v, selected %d; as the deletion left them wanted",
+			sn.State(), sn.Pending(), sn.LastStop(), sn.Selected())
+	}
+	held.open()
+	if s2 := h.be.nth(2); s2.first.Entry != ids[1] {
+		t.Errorf("once the release was acknowledged entry %d started, b wanted", s2.first.Entry)
+	}
+	if sn := h.snap(); len(sn.Faults()) != 0 || sn.Selected() != ids[1] {
+		t.Errorf("b started: faults %+v, selected %d; none and b wanted", sn.Faults(), sn.Selected())
 	}
 }
