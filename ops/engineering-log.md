@@ -105215,3 +105215,84 @@ go1.27.3's gofmt lists the file clean. The doc scanners in cmd/bridge
 (`TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`,
 `TestNoBlankKeepers`) pass over the comment and this record; the full
 `./cmd/bridge` run is in the report.
+
+## 2026-11-18 — B901FU: the stopped recheck holds its later steps at their gates
+
+Branch `fix/bridge-lows-1118`, after B904FU's commit. This commit changes one
+test of `internal/backup` and appends this record; no production code. The
+rule and its long form then hold as written.
+
+### The hazard
+
+B901's rule says of a check that must answer once its caller has stopped it
+that "the read-back after it is held at its gate"
+(`.claude/rules/build-ci-tests.md` 242), and its long form
+(`ops/History-rules-build-ci-tests.md` 1873-1875) says
+`TestARecheckThatDidNotEndLeavesTheVetoItMade` holds to it. Its "stopped by
+its caller" case (`internal/backup/verify_round5_test.go` 269-284 at
+589ba334) held only the check's grace (`checkGraceOf`): B901 (#1474,
+a7167add) added that alone, while "past its deadline" gates the read-back
+with four other steps (264-265). After the check this case runs the verdict's
+write (`finish.go` 621-630) and the read-back (637, its step at 480); once the
+stop has come, `runStep` bounds each by `StopWriteBound` from its start
+(`hold.go` 521-525) unless it is gated, so a host slow to finish either gave
+the recheck up, and the case failed as "the recheck was given up".
+
+### The change
+
+- The case sets a gate on "its verdict's write", "its write of INCOMPLETE"
+  and "its read of the record after it" for its own snapshot, puts the seam
+  back in a cleanup, and appends `gate.FireAll` to `letGo`, which the
+  callers' release runs before they are joined, as "past its deadline" does;
+  one variable, `gate`, is set in each gated case.
+- With B895TFU's seam, both gated cases then require that the read-back came
+  to its gate (`StepGate.Entered`), asked once the worker has ended
+  (`unlock.letGoAndAwaitEnd`): the worker reads the record back after its
+  check, whatever that found (`finish.go` 583-637), and asked after its end
+  the assertion races nothing.
+- The gate's root is `filepath.Dir(dir)`, and `dir` is what
+  `verifiedSnapshot` answers, resolved by `fsutil.ResolveLinks`
+  (`backup_test.go` 1348, `verify_test.go` 1187-1194), as the hold resolves
+  its own root (`resolveSnapshotIn`, `verify_paths.go` 40-58, through
+  `resolveLinks`, 28-31): a temp root reached through a link, as macOS's
+  `/var` is, does not leave the gate unmatched, and the new assertion would
+  say so if it did. So the root needed no change.
+- The doc gains one clause: the steps after the check are held at their gates
+  (B901).
+
+### Controls
+
+Predicted in writing first; `go test -overlay` builds with the tags, no
+`-race`, `-count=10 -v -run
+'^TestARecheckThatDidNotEndLeavesTheVetoItMade$/^stopped_by_its_caller$'`;
+the tree was never edited. Both forms overlay `finish.go` with
+`verifyAndThen`'s stop arm arming no `expire` (351-355; the watchdog, past
+half an hour, stays), as B895-TEST's controls did, and park the case's own
+read-back in `SetReadBackFailureForTest`'s hook (its snapshot, first call),
+the park's code joined onto one line of the case so every other line keeps
+its number. The read-back's goroutine starts before the worker's select takes
+the stop and shortens its bound (`hold.go` 478-494), so a delayed worker arms
+that bound late, and neither control lets a timer decide its verdict:
+
+- C1, 589ba334's test: the read-back let go only by the worker's answer
+  (`SetVerifyHandoffForTest`'s answer hook), with a separate 30 s watchdog
+  that would have reported the control invalid: red 10 of 10 at
+  `verify_round5_test.go:326`, "the recheck was given up (a step of the
+  verification did not end and was given up, and holds the snapshots until
+  it does: its read of the record after it did not end within its bound
+  (context canceled); the snapshot's record could not be read back: the
+  read-back did not end within its bound and was given up): the test did not
+  reach the case", every run let go by the answer, none invalid.
+- C2, this commit's test: at the park the read-back's gate must have been
+  entered, and the park holds for twice `StopWriteBound`, failing on a worker
+  answer meanwhile: green 10 of 10, every park with its gate entered and let
+  go by the time, no answer having come, so no give-up came.
+
+### Runs
+
+Go 1.27.3 on Linux, the tags `ts_omit_webclient,ts_omit_debugeventbus`:
+`go test -race -count=20 -v -run
+'^TestARecheckThatDidNotEndLeavesTheVetoItMade$' ./internal/backup/`, ok in
+203 s: 80 `--- PASS` lines (the test and each of its three cases, 20 times),
+no FAIL, SKIP or data race. The gate's runs on this branch are in the
+report.

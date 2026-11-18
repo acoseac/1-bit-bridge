@@ -232,12 +232,13 @@ func TestAWriteGivenUpLandsNothingOnceItResumes(t *testing.T) {
 // second's grace past the deadline, and the recheck was given up). Stopped by
 // its caller, the check's grace past the stop is held the same way, ended
 // only once the verification has answered (backlog B901: a check's thread
-// slower than half of StopWriteBound to answer the stop gave the recheck up);
-// the caller's own expiry, StopWriteBound from the stop (verifyAndThen), is no
-// grace, and a host slower than that still ends the recheck there. In every
-// case the prune runs once the verification's worker has ended, its unlock
-// held from the answer until the test waits for that end (unlockHold,
-// backlog B849), and must run.
+// slower than half of StopWriteBound to answer the stop gave the recheck up),
+// and the steps after the check are held at their gates (B901); the caller's
+// own expiry, StopWriteBound from the stop (verifyAndThen), is no grace, and a
+// host slower than that still ends the recheck there. In every case the prune
+// runs once the verification's worker has ended, its unlock held from the
+// answer until the test waits for that end (unlockHold, backlog B849), and
+// must run.
 func TestARecheckThatDidNotEndLeavesTheVetoItMade(t *testing.T) {
 	for _, tc := range []string{"past its deadline", "stopped by its caller", "on a panic of its check"} {
 		t.Run(tc, func(t *testing.T) {
@@ -255,13 +256,16 @@ func TestARecheckThatDidNotEndLeavesTheVetoItMade(t *testing.T) {
 			var letGo []func()
 			var parked, graceBegun <-chan struct{}
 			letCheckGo, endGrace := func() {}, func() {}
+			// The gate the case holds its steps at, where it sets one.
+			var gate *backup.StepGate
+			var restoreGate func()
 			switch tc {
 			case "past its deadline":
 				entered, release := parkCheckOf(t, dir)
 				aCheckOfAnotherSnapshotGoesBy(t, entered, release)
 				t.Cleanup(backup.SetVerifyDeadlineForTest(150 * time.Millisecond))
 				begun, pass := checkGraceOf(t, dir)
-				gate, restoreGate := backup.SetStepGateForTest(root, filepath.Base(dir), "its read of the snapshot's record",
+				gate, restoreGate = backup.SetStepGateForTest(root, filepath.Base(dir), "its read of the snapshot's record",
 					"putting its veto in place", "its verdict's write", "its write of INCOMPLETE", "its read of the record after it")
 				t.Cleanup(restoreGate)
 				parked, graceBegun, letCheckGo, endGrace = entered, begun, release, pass
@@ -282,6 +286,13 @@ func TestARecheckThatDidNotEndLeavesTheVetoItMade(t *testing.T) {
 				_, pass := checkGraceOf(t, dir)
 				endGrace = pass
 				letGo = append(letGo, pass)
+				// Once the stop has come, each step after the check is
+				// bounded by StopWriteBound from its start (runStep), so it is
+				// held at its gate (backlog B901).
+				gate, restoreGate = backup.SetStepGateForTest(root, filepath.Base(dir), "its verdict's write",
+					"its write of INCOMPLETE", "its read of the record after it")
+				t.Cleanup(restoreGate)
+				letGo = append(letGo, gate.FireAll)
 			case "on a panic of its check":
 				var panicked atomic.Bool
 				t.Cleanup(backup.SetOnDatabaseOpenForTest(func() {
@@ -330,6 +341,16 @@ func TestARecheckThatDidNotEndLeavesTheVetoItMade(t *testing.T) {
 			}
 			unlock.requireHeld(t)
 			unlock.letGoAndAwaitEnd(t)
+			if gate != nil {
+				// The worker has ended, and it reads the record back after
+				// its check, whatever that found (verifyHeld): a gate that
+				// matched no hold held none of the steps after the check.
+				select {
+				case <-gate.Entered("its read of the record after it"):
+				default:
+					t.Fatal("the read-back came to no gate: the gate held none of the steps after the check")
+				}
+			}
 			if !vetoed(t, dir) {
 				t.Error("the veto the recheck made before its check was removed, though its check did not end")
 			}
