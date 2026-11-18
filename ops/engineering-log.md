@@ -105018,3 +105018,65 @@ predicted:
    there.
 
 The gate's runs on this branch are in the report.
+
+## 2026-11-18 — B933: the plain-MPD test dials a fake it owns, never the host's MPD
+
+Branch `fix/bridge-lows-1118`, from main 589ba334. This commit changes two
+test files of `internal/mpd` and appends this record; no production code.
+
+### The hazard
+
+`TestPlainMPDWhenNothingElseIsInstalled` (`internal/mpd/inspect_test.go`
+250-260 at 589ba334) inspected a tree whose `mpd.conf` sets
+`music_directory` alone, with no `Endpoint` (253), and required no daemon
+version (254). With no endpoint, `Inspect` dials the one the file names
+(`inspect.go` 174-177): with no `bind_to_address` and no `port`,
+`127.0.0.1:6600` (`conf/conf.go` 551-555, `DefaultPort` at 75), which
+`resolveDial` keeps as TCP (`inspect.go` 599-602), and `askDaemon` dials it
+and records the greeting's version (259-268). So the verdict was the host's:
+an MPD listening on 6600 turned the test red. `Dial` builds a bare
+`net.Dialer` (`client.go` 60-61), so no dial seam stands in for the network;
+`Options.Endpoint` is the seam the package has, "dialled instead of the
+address the file names" (`inspect.go` 95).
+
+### The change
+
+- `client_test.go`: the fake's `serve` gains a mode, `"hangup"`, which
+  returns at once, so its deferred close hangs up before any greeting.
+- The test starts that fake and inspects with `Endpoint: srv.addr`. It now
+  also requires `rep.MPD.Endpoint == srv.addr`, and that `rep.Problems` is
+  the hang-up's problem alone, `mpd: connection closed`: with no greeting
+  `Dial` reads EOF (`wrapIO`'s words, `client.go` 413-414), `askDaemon`
+  records that problem and the endpoint and nothing else (`inspect.go`
+  259-264), and neither the tree's detection nor the file adds one. One
+  comment line says why.
+- The file's fallback to the endpoint it names stays covered:
+  `TestRuntimeDirSocketIsDialled` dials the socket a file names, and
+  `conf/conf_test.go` 54-57 pins the default endpoint, `127.0.0.1:6600`.
+
+### Controls
+
+Predicted in writing first, each a `go test -overlay` build with the tags:
+the tree was never edited, and `git status` listed only this change's two
+files before the commit. The overlay added a test file to the package whose
+one test started the package's fake, with the fixture's greeting and
+replies, at `127.0.0.1:6600`, a listener the control owned (`ss -ltnp 'sport
+= :6600'` found nothing listening there first; a listen that failed would
+have made the control unavailable, never a result), logged in a cleanup what
+that fake recorded (`lines()`, which holds only what a client sends once
+greeted: a dial of it records `outputs`, `replay_gain_status` and `config`,
+the commands `askDaemon` sends, `inspect.go` 270-298), and ran
+`TestPlainMPDWhenNothingElseIsInstalled` beside it.
+
+- C1, 589ba334's `inspect_test.go` and `client_test.go` overlaid: red at
+  `inspect_test.go:255`, the Fatalf of 254's condition, the report's daemon
+  `{Version:"0.24.0", Endpoint:"127.0.0.1:6600"}`; the fake at 6600 recorded
+  `outputs`, `replay_gain_status` and `config`.
+- C2, the new test: green, and the fake at 6600 recorded nothing.
+
+### Runs
+
+Go 1.27.3 on Linux, the tags `ts_omit_webclient,ts_omit_debugeventbus`:
+`go test -race -count=20 -run '^TestPlainMPDWhenNothingElseIsInstalled$'
+./internal/mpd/`, ok, no data race. The gate's runs on this branch are in the
+report.

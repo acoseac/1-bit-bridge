@@ -555,6 +555,8 @@ func (s *fakeMPD) serve(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 	switch s.opt.mode {
+	case "hangup":
+		return
 	case "slow":
 		select {
 		case <-time.After(2 * time.Second):
