@@ -2,13 +2,13 @@
 
 Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app/1-bit/id6762529497) iOS music player. Replaces SMB as the transport over high-latency links (Tailscale / DERP relay) — HTTP/2 + bearer-token auth, TLS fingerprint pinning, pre-built library manifest that skips the iOS scanner's two-phase walk. Target platforms: macOS / Linux / Windows × amd64 / arm64. Tested primarily on macOS.
 
-**How this file is organised (since 2026-10-18).** It loads on every request, so it holds only what every session needs: build and test rules, the cross-repo contract with the iOS app, project-wide workflow rules, and where everything else lives. The invariants of particular code live in `.claude/rules/*.md`, which Claude Code loads when a file their `paths:` globs match is **Read** (a Bash `cat` or `grep` does not load them, so Read a file before changing it); procedures live in skills. A long entry is one line: its bold title plus its own bolded "Don't…/Never…" sentences, ending `→ History-X.md`, which is `ops/History-X.md` (for a condensed rules file, `ops/History-rules-<name>.md`), where the entry sits verbatim under a heading naming its section. **Those files are still binding.** When you change an entry, change its line and its long form in the same commit; new long-form detail goes to the History file, never back into this one. The record behind a rule still goes to `ops/engineering-log.md`. To resolve a citation such as "CLAUDE.md, the X bullet" or "under **Scanner**", grep this file, `.claude/rules/*.md` and `ops/History-*.md` for the title, the symbol or the PR number: the entries of "Things that have bitten before" moved to the rules files on 2026-10-18, each under its original section title.
+**How this file is organised (since 2026-10-18).** It loads on every request, so it holds only what every session needs: build and test rules, the cross-repo contract with the iOS app, project-wide workflow rules, and where everything else lives. The invariants of particular code live in `.claude/rules/*.md`, which Claude Code loads when a file their `paths:` globs match is **Read** (a Bash `cat` or `grep` does not load them, so Read a file before changing it); procedures live in skills. A long entry is one line: its bold title plus its own bolded "Don't…/Never…" sentences, ending `→ History-X.md`, which is `ops/History-X.md` (for a condensed rules file, `ops/History-rules-<name>.md`), where the entry sits verbatim under a heading naming its section. **Those files are still binding.** When you change an entry, change its line and its long form in the same commit; new long-form detail goes to the History file, never back into this one. The record behind a rule goes to a new file under `ops/engineering-log/`; `ops/engineering-log.md` is the frozen archive before it. To resolve a citation such as "CLAUDE.md, the X bullet" or "under **Scanner**", grep this file, `.claude/rules/*.md` and `ops/History-*.md` for the title, the symbol or the PR number: the entries of "Things that have bitten before" moved to the rules files on 2026-10-18, each under its original section title.
 
 **Procedures are skills (since 2026-10-18).** The local test fixture, production deploys, release day, Gemini consults, LOUPE and the DeepSeek sweep, and multi-PR batches are project skills in `.claude/skills/`: only their descriptions load at startup, and a skill's body loads when it is invoked. See "Procedures live in skills" at the end.
 
 ## Where things live
 
-**Where does a new entry go?** A rule for every session: one line here. A rule about particular code: the rules file whose `paths:` globs match that code, adding a glob when none does. A procedure: a skill. Reasoning, measurements and history: the History file its line points to; the dated record: `ops/engineering-log.md`. The budgets under "Build" keep each of these in bounds, and `python3 scripts/rules-for.py <path>` prints the rules files that govern a path.
+**Where does a new entry go?** A rule for every session: one line here. A rule about particular code: the rules file whose `paths:` globs match that code, adding a glob when none does. A procedure: a skill. Reasoning, measurements and history: the History file its line points to; the dated record: a new file under `ops/engineering-log/`. The budgets under "Build" keep each of these in bounds, and `python3 scripts/rules-for.py <path>` prints the rules files that govern a path.
 
 | Topic | Rules file |
 |---|---|
@@ -127,7 +127,7 @@ The user works across **multiple Claude accounts and machines**. Per-account pri
 | What | Where |
 |---|---|
 | Invariants, "don't undo this", rejected-and-why decisions | the rules file whose `paths:` globs match the code, `.claude/rules/<name>.md` ("Where things live" above), or `CLAUDE.md` for a rule every session needs; a long entry is one line there and its long form goes to `ops/History-*.md` |
-| The record behind an invariant — the measurement, the rejected alternative, the test, the PR | **`ops/engineering-log.md`** — appended in date order. **Not auto-loaded**, so the *rule* must still land in `CLAUDE.md` or a rules file |
+| The record behind an invariant — the measurement, the rejected alternative, the test, the PR | **A new file under `ops/engineering-log/`, one entry each**: `<YYYY-MM>/<YYYY-MM-DD>-<entry>--<branch>.md`, `<entry>` the backlog item (`b888`, `b728-b9-pr-3b`) or a topic, with a word for a later entry of one PR (`b601-round-2`), `<branch>` your PR's branch, both lowercased, each other run of characters one `-` (`python3 scripts/check-engineering-log.py --slug <branch>` prints its slug, cut and hashed past 56 characters); its first line the entry's `## <date> — <title>` (`ops/engineering-log/README.md`). Never append to an entry another PR wrote: an entry is edited only to correct it, as a PR that renames a test an entry cites does. **Never edit `ops/engineering-log.md`, the archive frozen on 2026-11-18** (the hook and `make docs-check` refuse it): in a merge, take main's copy and keep your entry in its file. Grep both: `git grep -n <term> -- 'ops/engineering-log*'`. **Not auto-loaded**, so the *rule* must still land in `CLAUDE.md` or a rules file |
 | Wire-protocol / cross-repo contracts | `PROTOCOL.md` (repo root — **not** `docs/`) + the iOS repo's mirror entry, bumped in lockstep |
 | Deploy procedures, journal diagnostics, host-specific ops | **`ops/deployment-runbook.md`** — `## Production deployments` above already tells every agent to read it before a deploy, so it reaches sessions that never open `CLAUDE.md` |
 | Build/test commands and their gotchas | `## Build` above |
@@ -142,7 +142,7 @@ The user works across **multiple Claude accounts and machines**. Per-account pri
 1. **Don't commit the memory *files*** into a `.claude/memory/` folder — the harness doesn't auto-load them from there, so they'd be inert paper. Fold the **content** into files that do auto-load.
 2. **Never cite a private memory from a repo file** — it's a dangling reference for every other account. If a repo file needs the fact, put the **fact** in the repo.
 3. **Repo first, then the pointer.** When something is both shareable and worth a personal reminder, write the repo entry first and leave the private memory as a one-line pointer.
-4. **Only `CLAUDE.md` and the rules files are auto-loaded** (a rules file when a file its `paths:` globs match is Read). `ops/engineering-log.md` exists so a rule can stay short without losing its evidence — but a finding written *only* there is the same inert paper as rule 1. Every batch writes the **rule** here or in the rules file that loads with its code, and the **record** there.
+4. **Only `CLAUDE.md` and the rules files are auto-loaded** (a rules file when a file its `paths:` globs match is Read). The engineering log (`ops/engineering-log*`) exists so a rule can stay short without losing its evidence — but a finding written *only* there is the same inert paper as rule 1. Every batch writes the **rule** here or in the rules file that loads with its code, and the **record** there.
 
 ## Follow-ups go in the backlog, not in task chips
 
@@ -168,7 +168,7 @@ weaknesses that are not fixed yet and name private hosts, which is the content
 `ops/README.md` keeps untracked. `~/Desktop` is iCloud-synced, so the file reaches
 every Mac, and every account on a Mac reads the same file. A backlog entry holds
 WORK, not rules: a rule a follow-up teaches still goes in this file, and its record
-in `ops/engineering-log.md`.
+in a new file under `ops/engineering-log/`.
 
 **When the follow-up is an unfixed weakness, the public record names the entry
 and nothing more**: not this file, the log, a PR body, a PR comment or a commit
@@ -182,13 +182,14 @@ Every rule here was paid for by a real defect, most of them silent. They are
 grouped by subsystem rather than by date, because the question you arrive with is
 "what must I not break in the scanner", never "what happened in June".
 
-**The full record behind each rule lives in
-[`ops/engineering-log.md`](ops/engineering-log.md)** — the measurement that
-settled it, the alternative that was tried and rejected, the test that pins it,
-and the PR. That file is not auto-loaded and does not need to be: act on the rule
-here, and **grep the log by symbol, file or PR number before changing anything a
-rule names.** A rule that looks arbitrary almost always has a measurement behind
-it.
+**The full record behind each rule lives in the engineering log:
+[`ops/engineering-log.md`](ops/engineering-log.md) up to 2026-11-18, frozen, and a
+file per entry under [`ops/engineering-log/`](ops/engineering-log/) since** — the
+measurement that settled it, the alternative that was tried and rejected, the
+test that pins it, and the PR. Neither is auto-loaded, nor needs to be: act on
+the rule here, and **grep both (`git grep -n <term> -- 'ops/engineering-log*'`)
+by symbol, file or PR number before changing anything a rule names.** A rule
+that looks arbitrary almost always has a measurement behind it.
 
 **When you fix something here, put the rule in this file or the rules file that
 loads with its code, and the record in the log** — never only in the log, because

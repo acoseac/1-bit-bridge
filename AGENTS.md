@@ -7,9 +7,11 @@ subsystem, are in the `.claude/rules/*.md` files whose `paths:` globs match
 the code (`python3 scripts/rules-for.py <path>` names them). Consult them
 before touching concurrency, the wire protocol, or any subsystem flagged
 below. The evidence behind each invariant (the measurement, the rejected
-alternative, the test that pins it, the PR) lives in
-[`ops/engineering-log.md`](ops/engineering-log.md); grep it by symbol or PR
-number when a rule looks arbitrary.
+alternative, the test that pins it, the PR) lives in the engineering log:
+[`ops/engineering-log.md`](ops/engineering-log.md), frozen on 2026-11-18, and a
+file per entry under [`ops/engineering-log/`](ops/engineering-log/) since; grep
+both (`git grep -n <term> -- 'ops/engineering-log*'`) by symbol or PR number
+when a rule looks arbitrary.
 
 **Agent-doc maintenance.** `CLAUDE.md` and the rules files are the authority,
 and they are living documents. A new invariant, the entry a fix produces,
@@ -17,8 +19,8 @@ goes in the same PR as the fix it describes: in the `.claude/rules/*.md`
 file whose `paths:` globs match the code it binds (CLAUDE.md's "Where things
 live"), or in `CLAUDE.md` when every session needs it. A long entry is one
 line there, and its long form goes to the `ops/History-*.md` file the line
-points to. The supporting record is appended to `ops/engineering-log.md` in
-that PR too, so a review reads the rule beside the code it is about. For corrections to agent-instruction files, including this file, follow
+points to. The supporting record is a new file under `ops/engineering-log/`
+(its `README.md` names it; `ops/engineering-log.md` is frozen) in that PR too, so a review reads the rule beside the code it is about. For corrections to agent-instruction files, including this file, follow
 [CLAUDE.md's Development workflow, step 1](CLAUDE.md#development-workflow):
 a correction (a stale fact or count, or a broken pointer) may go straight to `main` once `make docs-check` passes; a new or changed rule, a move between files, `PROTOCOL.md`, the other docs and runbooks, and anything touching code take a PR. Claude Code loads `CLAUDE.md` into every
 session and a rules file whenever it reads a file the globs match, and a
@@ -72,7 +74,7 @@ it).
 | `make fmt` / `make vet` | `go fmt ./...` / `go vet ./...`. |
 | `make run` | `go run ./cmd/bridge serve --config config/bridge.yaml.example`. |
 | `make check-go-version` | Guards that `Dockerfile`'s `ARG GO_VERSION` matches `go.mod`'s major.minor (alpine sets `GOTOOLCHAIN=local`, so a stale ARG fails the image build). |
-| `make docs-check` | Holds `CLAUDE.md`, the rules files and the skills to their byte budgets (`scripts/check-doc-budgets.py`; Python stdlib only), and runs the doc tools' self-tests. CI runs it too. |
+| `make docs-check` | Holds `CLAUDE.md`, the rules files and the skills to their byte budgets (`scripts/check-doc-budgets.py`), the engineering log's archive (`ops/engineering-log.md`) to its frozen size and SHA-256 and each entry under `ops/engineering-log/` to its name and form (`scripts/check-engineering-log.py`), and runs the doc tools' self-tests; Python stdlib only. CI runs it too. |
 | `make installer-test` / `make installer-check` | The one-line installer, `scripts/install.sh`: its tests (`scripts/install-test`) under every POSIX shell of their list this host has (`INSTALLER_SHELLS` names others); `installer-check` runs shellcheck over it first and requires shellcheck. CI's `installer` job runs `installer-check`. |
 | `make docker` | Builds the container image (runs `check-go-version` first). |
 | `make clean` | Removes `bin/` and `dist/`. |
@@ -381,7 +383,7 @@ in place.
 | `.claude/rules/*.md` | The invariants by subsystem, each file loading with the code its `paths:` globs match (`scripts/rules-for.py`) |
 | `.claude/skills/*/SKILL.md` | Procedures: the local fixture, deploys, release day, consults, LOUPE and DeepSeek, multi-PR batches |
 | `ops/History-*.md` | The long form of every condensed entry in CLAUDE.md and the rules files (binding, not auto-loaded) |
-| `ops/engineering-log.md` | The record behind each invariant — measurement, rejected alternatives, tests, PRs (not auto-loaded) |
+| `ops/engineering-log/`, `ops/engineering-log.md` | The record behind each invariant — measurement, rejected alternatives, tests, PRs: a file per entry, and the archive frozen on 2026-11-18 (not auto-loaded) |
 | `SECURITY.md` | Vulnerability reporting, scope |
 | `docs/release-process.md` | Per-release doc/publish checklist |
 | `docs/docker.md`, `docs/deployment/public-vps.md` | Public operator guides |

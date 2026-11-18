@@ -1208,13 +1208,19 @@
   and the guard scans its own file, so its examples cannot name one either.
   (#921)
 
-- **…and the TRACKED `.md` docs, with three exemptions and one hard
+- **…and the TRACKED `.md` docs, with four exemptions and one hard
   constraint.** It read Go only, which is how #945's rename left three stale
   citations in `CLAUDE.md` and the log — the auto-loaded file being the most
   expensive place for a stale guard name. Exempt: `ops/plan-*.md` (a plan
   names coverage it INTENDS — thirty of the forty stale names were in one,
-  all correct as written), three metasyntactic `-run` placeholders, and one
-  test owned by the private conductor repo. **TRACKED is load-bearing**:
+  all correct as written), three metasyntactic `-run` placeholders, one
+  test owned by the private conductor repo, and, since B888 (2026-11-18), the
+  engineering log's frozen archive, `ops/engineering-log.md`, by that exact
+  path: a record written before the freeze names the tests of its day and can
+  no longer be reworded, so a test only it cites may be renamed or retired, and
+  the scan never opens it. Every file under `ops/engineering-log/` is a doc
+  like any other, and the PR that renames a test an entry cites corrects the
+  entry. **TRACKED is load-bearing**:
   `ops/*audit*.md` and friends are gitignored and differ per machine, so the
   first draft failed on this one and would have passed on CI and a fresh
   clone — a verdict that depends on untracked local files is not a guard. The
@@ -1492,7 +1498,7 @@ Windows skips only this test's privileged symlink creation.
 
 ## B500 — third-party licences in release archives (2026-10-24)
 
-**Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags, over every operational file and every non-record Markdown file the walk reaches (records by basename: engineering-log.md, History-*, plan-* and release-notes-*). Scan all fence labels except text, plain, plaintext, txt, output, log, diff, patch, json, jsonc, yaml, yml, toml, ini, xml, html, css, sql, go, golang, swift and mermaid; recognize blockquote/list containers and end fences when their containers end, reject backtick openers with backticks in their info, and strip console/session/terminal prompts before comments. The census is the union of build/install/run/test/vet followed after optional flags by a package pattern regardless of executable spelling, unless the verb is in command position (line start; after ;, &, |, ( or !, a VAR=value assignment, or if, then, else, elif, do, while, until, sudo, exec, command, env, time, nohup, nice), where it is the command itself (coreutils install, the shell's test); the executable rule (a case-insensitive Go path or variable before a verb even without a package; includes go.exe, go1.27.3 and gotip); and the tool list (gotestsum, staticcheck and golangci-lint wherever named, its GitHub action included; dlv debug/test/exec after any flags). Match with quotes, backticks, commas and brackets as separators only on the matching copy. Keep original logical lines and multiplicities; review ambiguous matches. Static analysis cannot see a verb computed at run time, a package argument and a verb on different unjoined lines, or a tool not on the list that drives go. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
+**Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags, over every operational file and every non-record Markdown file the walk reaches (records: engineering-log.md, History-*, plan-* and release-notes-* by basename, and every file under ops/engineering-log/). Scan all fence labels except text, plain, plaintext, txt, output, log, diff, patch, json, jsonc, yaml, yml, toml, ini, xml, html, css, sql, go, golang, swift and mermaid; recognize blockquote/list containers and end fences when their containers end, reject backtick openers with backticks in their info, and strip console/session/terminal prompts before comments. The census is the union of build/install/run/test/vet followed after optional flags by a package pattern regardless of executable spelling, unless the verb is in command position (line start; after ;, &, |, ( or !, a VAR=value assignment, or if, then, else, elif, do, while, until, sudo, exec, command, env, time, nohup, nice), where it is the command itself (coreutils install, the shell's test); the executable rule (a case-insensitive Go path or variable before a verb even without a package; includes go.exe, go1.27.3 and gotip); and the tool list (gotestsum, staticcheck and golangci-lint wherever named, its GitHub action included; dlv debug/test/exec after any flags). Match with quotes, backticks, commas and brackets as separators only on the matching copy. Keep original logical lines and multiplicities; review ambiguous matches. Static analysis cannot see a verb computed at run time, a package argument and a verb on different unjoined lines, or a tool not on the list that drives go. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
 
 `go run ./scripts/third-party-licenses` reads the explicit matrix in
 `.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json -tags=<release-tags> ./cmd/bridge`
@@ -1541,7 +1547,8 @@ same fail-closed reader. It scans operational files across the repository
 (shell, PowerShell, Python, batch, workflow YAML, Makefiles, Dockerfiles and
 extensionless scripts). Markdown scope is every .md file the walk reaches.
 Records are excluded by basename wherever they live: engineering-log.md,
-History-*, plan-* and release-notes-*.
+History-*, plan-* and release-notes-*; and so is every file under ops/engineering-log/, the
+engineering log's entries, by its path (B888, 2026-11-18).
 Generated output trees (.git, bin, dist, vendor, node_modules, underscore-prefixed
 directories) and nested checkouts are excluded, as before.
 
