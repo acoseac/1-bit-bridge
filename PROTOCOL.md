@@ -1085,6 +1085,9 @@ units that share a `dacKey` and whose USB strings differ. A client compares it
 only for equality and sends it back with a write of the DAC's choice
 (`PUT /v1/outputs/{id}/dsd`, below); a write carrying another token, one from
 before the bridge's player restarted included, is refused `dac_changed`.
+Older bridges that emit `dsdDAC`, from before the DSD choice route
+(`bridgeDSDChoice` absent), send it without `dacToken`, and a client sends no
+`PUT /v1/outputs/{id}/dsd` without one.
 `profile` is the model's
 entry in the bridge's database of DAC models, `id`, `name` and `caveats`, absent
 for a DAC the database does not know. A caveat says what the bridge cannot see:
