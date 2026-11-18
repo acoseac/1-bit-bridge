@@ -46,6 +46,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -386,16 +387,19 @@ func trackConnection(conn sqlite.ExecQuerierContext, name string) error {
 
 // liveConns is the connections conns records for the database at path, by
 // the name dsn.File gives it or by the path itself, that are open and not
-// interrupted now.
+// interrupted now. It asks each under that connection's lock, waiting for it,
+// which a close holds across SQLite's close, so it asks them once it has let
+// the registry's lock go, which every open takes (trackConnection); and it
+// asks a copy of what the registry holds, a slice of its own, since an open
+// compacts a list in place.
 func liveConns(path string) []*tracked {
 	conns.mu.Lock()
-	defer conns.mu.Unlock()
+	candidates := slices.Concat(conns.byFile[dsn.File(path, "")], conns.byFile[path])
+	conns.mu.Unlock()
 	var live []*tracked
-	for _, file := range []string{dsn.File(path, ""), path} {
-		for _, c := range conns.byFile[file] {
-			if c.live() {
-				live = append(live, c)
-			}
+	for _, c := range candidates {
+		if c.live() {
+			live = append(live, c)
 		}
 	}
 	return live

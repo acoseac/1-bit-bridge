@@ -280,6 +280,93 @@ func TestOpeningAConnectionWaitsOnNoOtherConnectionsLock(t *testing.T) {
 	}
 }
 
+// TestCancelsLookWaitsOnAConnectionAndHoldsUpNoOpen: Cancel's look for the
+// statement's connection (liveConns) waits for each connection's lock, as a
+// close holds it across SQLite's close, rather than pass a connection over;
+// it holds the registry's lock across none of those waits, so a connection
+// opened meanwhile opens; and it asks a copy of the registry's list, which
+// that open compacts in place as it drops the connection closed before the
+// look, so the look counts each connection once: of three to the database,
+// the first's lock held and the second closed, two.
+func TestCancelsLookWaitsOnAConnectionAndHoldsUpNoOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "looked.db")
+	var dbs []*sql.DB
+	for range 3 {
+		db := openWAL(t, path)
+		if err := db.Ping(); err != nil {
+			t.Fatal(err)
+		}
+		dbs = append(dbs, db)
+	}
+	if err := dbs[1].Close(); err != nil {
+		t.Fatal(err)
+	}
+	conns.mu.Lock()
+	recorded := append([]*tracked(nil), conns.byFile[path]...)
+	var held *enteredLock
+	if len(recorded) == 3 {
+		held = &enteredLock{connLock: recorded[0].lock, entered: make(chan struct{})}
+		recorded[0].lock = held
+	}
+	conns.mu.Unlock()
+	if held == nil {
+		t.Fatalf("%d connections recorded for %s, want 3", len(recorded), path)
+	}
+	t.Cleanup(func() {
+		conns.mu.Lock()
+		recorded[0].lock = held.connLock
+		conns.mu.Unlock()
+	})
+	held.connLock.Lock()
+	// Registered after the closes, so it runs first: a close takes the lock.
+	unlock := sync.OnceFunc(held.connLock.Unlock)
+	t.Cleanup(unlock)
+	answered := make(chan []*tracked, 1)
+	go func() { answered <- liveConns(path) }()
+	select {
+	case <-held.entered:
+	case live := <-answered:
+		t.Fatalf("Cancel's look answered %d connections and waited for none whose lock is held", len(live))
+	case <-time.After(10 * time.Second):
+		t.Fatal("Cancel's look did not ask for the held lock within 10s")
+	}
+	other := openWAL(t, filepath.Join(dir, "other.db"))
+	opened := make(chan struct{})
+	go func() {
+		defer close(opened)
+		_ = other.Ping()
+	}()
+	endsWithin(t, opened, "an open while Cancel's look waits on a connection's held lock")
+	select {
+	case live := <-answered:
+		t.Fatalf("Cancel's look answered %d connections while one's lock was held", len(live))
+	default:
+	}
+	unlock()
+	select {
+	case live := <-answered:
+		if len(live) != 2 {
+			t.Errorf("Cancel's look found %d connections open and not interrupted, want 2", len(live))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Cancel's look did not answer within 10s of the lock's release")
+	}
+}
+
+// enteredLock is a connection's lock that says when a Lock begins: it closes
+// entered, once, then waits for the lock.
+type enteredLock struct {
+	connLock
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (l *enteredLock) Lock() {
+	l.once.Do(func() { close(l.entered) })
+	l.connLock.Lock()
+}
+
 // TestArmUntilGivesUpAtItsInstant pins what a serve test arms a Park with:
 // a wait gives up at the instant it was given, not Arm's 10 s after the
 // wait began, and says when that was.
