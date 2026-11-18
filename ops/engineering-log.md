@@ -105080,3 +105080,80 @@ Go 1.27.3 on Linux, the tags `ts_omit_webclient,ts_omit_debugeventbus`:
 `go test -race -count=20 -run '^TestPlainMPDWhenNothingElseIsInstalled$'
 ./internal/mpd/`, ok, no data race. The gate's runs on this branch are in the
 report.
+
+## 2026-11-18 — B895TFU: the stopped tickers' tests require that their gate held the step
+
+Branch `fix/bridge-lows-1118`, after B933's commit. This commit changes the
+step gate's test seam in `internal/backup/seams.go` (its fixture is nil in
+production, so no production path changes) and two tests of `cmd/bridge`,
+and appends this record.
+
+### The hazard
+
+B895-TEST (2026-11-14, above) holds the hung step of each stopped ticker's
+test at its gate: the manifest-read case of
+`TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound` holds
+"its read of the snapshot's record" (`cmd/bridge/backup_round2_test.go` 459 at
+589ba334), and `TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound`
+holds "its verdict's write" (`backup_verify_test.go` 424). Each dropped the
+gate's handle, and nothing asserted that the gate matched. `gateOf`
+(`internal/backup/seams.go` 492-501) matches the hold's root, its snapshot and
+the step's words, which the tests pass as literals (the step constants are
+unexported, `hold.go` 78-94). A gate that matches nothing leaves the step its
+own stop bound (`hold.go` 487-494, 521-525), which races the caller's expiry as
+it did before B895: green in most runs, as C2 below shows.
+
+### The change
+
+- `seams.go`: `stepGate` gains `entered`, which `SetStepGateForTest` makes and
+  `gateOf` closes where it hands a hold that gate, once, through a
+  `sync.Once` of its own (`enterOnce`), since a gate can be handed more than
+  once (to every hold of the folder where its snapshot is ""). The new
+  `StepGate.Entered(step)` answers that channel, and panics for a step no
+  gate holds, as `Fire` does. `runStep` calls `gateOf` as it registers the
+  step (`hold.go` 474), under the hold's lock and before the step's goroutine
+  starts (478), so the channel is closed before anything the step runs, a
+  hang inside it included.
+- The two tests: right after the wait for the hang
+  (`backup_round2_test.go` 482-486, the gated case only;
+  `backup_verify_test.go` 437-441), each receives from `gate.Entered` for its
+  step without blocking, and fails at once if it is not closed, saying the
+  gate held no step. Each hang runs inside the step its gate names: the
+  manifest-read hook runs in `readRecord` (`finish.go` 220-226), whose first
+  call in a verification is the step "its read of the snapshot's record"
+  (527-531), and the verdict's sync (`syncVerdictDir`, `verify_record.go`
+  357) runs only in `publishVerdict`, inside a write's step, of which a fresh
+  snapshot's verification makes "its verdict's write" first (`finish.go`
+  621-624). One clause in each test's doc says so.
+- No rule text: a rule that every gate be asserted entered is not this
+  change's, since some gates hold steps that may not run (the write of
+  INCOMPLETE).
+
+### Controls
+
+Predicted in writing first; `go test -overlay` builds with the tags, no
+`-race`, `-count=20 -v`, the two tests alone. The mutation, one exact-once
+replacement in each test file that keeps its lines, scopes the gate to the
+snapshot "x", which no ticker makes (a snapshot is named by its time). The
+tree was never edited.
+
+- C1, this commit's test files so mutated: red 20 of 20 in each, at the new
+  assertion, and nothing else failed: `backup_round2_test.go:491` (the
+  manifest-read case, about 0.4 s a run; the lock-open case, which holds no
+  gate, green 20 of 20) and `backup_verify_test.go:445` (about 0.45 s).
+- C2, 589ba334's test files so mutated: the manifest-read case green 19 of
+  20 and red once, at `backup_round2_test.go:493` (589ba334's line), "a
+  stopped verification was reported: backup (startup): the verification of
+  <dir> was given up, ... its read of the snapshot's record did not end
+  within its bound (context canceled)", the step's own bound first; the
+  sync case green 20 of 20. That is the silent pass: a gate that held
+  nothing went unnoticed in 39 of 40 runs.
+
+### Runs
+
+Go 1.27.3 on Linux, the tags `ts_omit_webclient,ts_omit_debugeventbus`:
+`go test -race -count=20 -v -run
+'^(TestATickerStoppedWhileAVerificationsStepHangsReturnsWithinItsBound|TestATickerStoppedWhileItsVerdictsSyncHangsReturnsWithinItsBound)$'
+./cmd/bridge/`, ok in 196 s: 80 `--- PASS` lines (each test, and each of
+the first's two cases, 20 times), no FAIL and no data race. The gate's runs
+on this branch are in the report.
