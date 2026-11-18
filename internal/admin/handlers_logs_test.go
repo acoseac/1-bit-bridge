@@ -63,7 +63,10 @@ func doGet(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
 // TestLogStatusUnavailableExplainsWhy pins the honest-degradation contract.
 // With no log path wired, the state where cmd/bridge could not make one,
 // there is no file to offer, a routine state, and the console has to say
-// why — a bare failure would read as a broken bridge.
+// why — a bare failure would read as a broken bridge. The path is not made
+// wherever the process has no home directory, which a terminal can give it
+// and a service manager too (systemd starts a system unit without User=
+// with no $HOME), so the reason names both and claims neither alone.
 func TestLogStatusUnavailableExplainsWhy(t *testing.T) {
 	rec := doGet(t, logTestServer(t, ""), "/api/logs/status")
 	if rec.Code != http.StatusOK {
@@ -78,6 +81,11 @@ func TestLogStatusUnavailableExplainsWhy(t *testing.T) {
 	}
 	if got.Reason == "" {
 		t.Error("no reason given; the UI would show a dead button with no explanation")
+	}
+	for _, want := range []string{"home directory", "terminal", "service manager"} {
+		if !strings.Contains(got.Reason, want) {
+			t.Errorf("reason %q does not say %q", got.Reason, want)
+		}
 	}
 }
 

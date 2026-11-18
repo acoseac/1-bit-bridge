@@ -6218,7 +6218,7 @@ without `Oversized` (the row past it). The record is in
 
 ## B618 — on Windows, bridge logs reads the file the installed bridge writes (2026-11-13)
 
-- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok from a shell on Windows, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words.** → History-rules-cli-serve.md
+- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok from a shell on Windows, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words, but for their hint where the file is not there, which names no foreground `bridge serve` since 2026-11-18.** → History-rules-cli-serve.md
 
 *What was true.* A bridge run as the Windows service writes
 `%PROGRAMDATA%\1-bit-bridge\bridge.log`: `main` calls `redirectServiceIO` once
@@ -6424,7 +6424,8 @@ pin caught (an assignment, an address taken, a declaration of another value),
 is one finding of its kind on the line planted, and a file that only reads the
 seam (a call, a copy, a comparison with nil, a named type's pointer method used
 on another variable) has none, nor, since 2026-11-18, has one that declares it
-with an unnamed function type written, bare or in parentheses. Two claims were corrected with it. This entry's
+with an unnamed function type written, bare or in parentheses. Two claims were
+corrected with it. This entry's
 rule forbade grading a log no path names as the terminal's ok from a shell,
 where round 3 gives that ok off Windows on purpose: it says from a shell on
 Windows now, in `cli-serve.md` and above. And *The console* and round 2 said a
@@ -6433,3 +6434,17 @@ it writes, where a bridge run in the foreground writes none: it grades the
 user's log, which may be an earlier launch's, and the docs of `consoleLogPath`,
 `doctorLogs` and `adminDoctorRunnerFor` say so. The record is in
 `ops/engineering-log.md`, 2026-11-18, B618FU.
+
+*The hints (2026-11-18).* Off Windows, where DefaultLogPath is not there,
+`bridge logs` said "the file is created on first service start; run `bridge
+start` (or `bridge serve` in the foreground) and retry.", though a bridge run
+in the foreground logs to its terminal and writes no file: it says now that
+the service manager creates the file when it starts the bridge's service, and
+to run `bridge start` and retry, and the rule keeps macOS's and Linux's other
+words. The console's reason for an empty log path said the bridge "logs to the
+terminal it was started from", where the path is empty wherever the process
+has no home directory, as a system unit without `User=` has none (systemd sets
+`$HOME` only where `User=` is set, systemd.exec(5)) while its output goes to
+the journal or a file its unit names: the reason says that the path could not
+be made, and where the output goes. The record is in `ops/engineering-log.md`,
+2026-11-18, the foreground hints.

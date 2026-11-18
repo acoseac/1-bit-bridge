@@ -342,9 +342,12 @@ func TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt(t *testing.T) {
 	requireLogsRun(t, code, stdout, stderr, 0, more, "")
 }
 
-// TestBridgeLogsOffWindowsIsAsItWas is a guard, green at main: on macOS and
-// Linux bridge logs reads DefaultLogPath and says what it always said, word
-// for word, and asks nothing of a Windows install.
+// TestBridgeLogsOffWindowsIsAsItWas is a guard: on macOS and Linux bridge
+// logs reads DefaultLogPath and says what it always said, word for word, but
+// for the hint where that file is not there, which since 2026-11-18 says the
+// service manager creates it and names no `bridge serve` run in the
+// foreground, which writes no log file; and it asks nothing of a Windows
+// install.
 func TestBridgeLogsOffWindowsIsAsItWas(t *testing.T) {
 	for _, goos := range []string{"darwin", "linux"} {
 		t.Run(goos, func(t *testing.T) {
@@ -360,7 +363,7 @@ func TestBridgeLogsOffWindowsIsAsItWas(t *testing.T) {
 			code, stdout, stderr := runBridgeLogs(t, host)
 			requireLogsRun(t, code, stdout, stderr, 1, "",
 				"logs: "+path+" does not exist (yet)\n"+
-					"  the file is created on first service start; run `bridge start` (or `bridge serve` in the foreground) and retry.\n")
+					"  the service manager creates the file when it starts the bridge's service; run `bridge start` and retry.\n")
 
 			writeLogFile(t, path, "one\ntwo\nthree\n")
 			code, stdout, stderr = runBridgeLogs(t, host, "-n", "2")

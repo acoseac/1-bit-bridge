@@ -106037,3 +106037,69 @@ names no reviewer.
 `make docs-check` passes (`build-ci-tests.md` from 60,798 bytes to 60,995,
 `cli-serve.md` from 99,336 to 99,296), and cmd/bridge's doc guards pass over
 the rules, the History files and this record.
+
+## 2026-11-18 — The foreground hints: bridge logs' hint and the console's empty-path reason
+
+Branch `fix/bridge-lows3-1118`. This commit changes two user-facing sentences
+and nothing else of the code, the tests that pin them, B618's rule in its line
+and its long form, and appends this record. No logic changes.
+
+### What was said
+
+Off Windows, where DefaultLogPath is not there, `bridge logs` printed "the
+file is created on first service start; run `bridge start` (or `bridge serve`
+in the foreground) and retry." (`cmd/bridge/logs.go` 148 at e7e41bdc), which
+`TestBridgeLogsOffWindowsIsAsItWas` pinned (`cmd/bridge/logs_test.go` 363). A
+`bridge serve` run in the foreground logs to its terminal and writes no log
+file, so the parenthesis named a way that never makes the file: the launchd
+and systemd units are what point the bridge's output at it.
+
+The console's log routes answered an empty log path "this bridge has no log
+file configured — it logs to the terminal it was started from"
+(`internal/admin/handlers_logs.go` 77-78 at e7e41bdc). The path is empty off
+Windows wherever `packaging.DefaultLogPath` fails (`consoleLogPath`,
+`cmd/bridge/logs.go` 490-493 at e7e41bdc), which it does only where
+`os.UserHomeDir` does (`internal/packaging/packaging.go` 509-513), that is
+where `$HOME` is not set (go1.27.3 `src/os/file.go` 605-624); and on Windows
+outside the service where neither `%LOCALAPPDATA%` nor the home directory can
+be read (`internal/packaging/logpath.go` 85-97). A terminal can start a process
+with no home directory (`env -u HOME bridge serve`), and so can a service
+manager: systemd sets `$HOME` only for a unit with `User=` (systemd.exec(5) of
+systemd 259.5, this host's, lines 4925-4938 of its source), and a system unit
+without it sends the bridge's stdout to the journal by default (4147-4151),
+its stderr with it, or to a file the unit names. There the reason sent the
+operator to a terminal that holds nothing.
+
+### The change
+
+- `bridge logs` off Windows says "the service manager creates the file when
+  it starts the bridge's service; run `bridge start` and retry.", which
+  `TestBridgeLogsOffWindowsIsAsItWas` wants; its doc and `openDefaultLog`'s
+  say this hint is the one line changed off Windows.
+- The console's empty-path reason says "this bridge has no log file
+  configured — its log's path could not be made, since this process has no
+  home directory, and its output goes wherever what started it sends it: the
+  terminal it was started from, or a service manager's journal or the file its
+  unit names". `TestLogStatusUnavailableExplainsWhy` requires it to name the
+  home directory, the terminal and the service manager;
+  `TestLogBundleWorksWithoutALogFile` still finds "no log file".
+- B618's rule kept macOS's and Linux's words whole ("Don't … change macOS's and
+  Linux's words"): its bolded sentence, in `.claude/rules/cli-serve.md` and its
+  long form alike, now excepts this hint, which names no foreground `bridge
+  serve` since this change, and the long form's B618 section says why in a
+  dated paragraph. That paragraph also splits a line B618FU's pin correction
+  left long in the section's B618FU paragraph.
+
+The doctor's line for an empty path, "no log file configured (logs go to the
+terminal)" (`internal/doctor/logsize.go` 61), makes the same claim for the same
+ways the path comes out empty, and is left as it is: this change is the two
+sentences above alone.
+
+### Checks
+
+Each predicted in writing first, by `go test -overlay` with the release tags,
+the tree never edited: the new `TestLogStatusUnavailableExplainsWhy` over the
+old reason failed twice, "does not say "home directory"" and "does not say
+"service manager"", and `TestBridgeLogsOffWindowsIsAsItWas` over the old hint
+failed in both its subtests on the hint's line; both pass with this change.
+The gate's runs are in the branch's report.

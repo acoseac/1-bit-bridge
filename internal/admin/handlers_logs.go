@@ -76,7 +76,7 @@ func (s *Server) resolveLogFile() (string, os.FileInfo, string) {
 	}
 	path := strings.TrimSpace(s.deps.LogPath)
 	if path == "" {
-		return "", nil, "this bridge has no log file configured — it logs to the terminal it was started from"
+		return "", nil, "this bridge has no log file configured — its log's path could not be made, since this process has no home directory, and its output goes wherever what started it sends it: the terminal it was started from, or a service manager's journal or the file its unit names"
 	}
 	info, err := os.Stat(path)
 	if err != nil {
