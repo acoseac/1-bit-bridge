@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -159,9 +160,109 @@ func TestEachKindOfDACsWholeResponseIsItsGolden(t *testing.T) {
 	}
 }
 
+// dsdChoiceAnswerCase is one shape of PUT /v1/outputs/{id}/dsd's answer (B728
+// B9 PR 3): its name, its status and its body as the handler wrote it.
+type dsdChoiceAnswerCase struct {
+	name   string
+	status int
+	body   []byte
+}
+
+// dsdChoiceAnswerCases are the answer's shapes, each from the real route over
+// serve's adapter: a choice written, its four members; a refusal, the four
+// beside the envelope; a refusal with no DAC available, three; and none, on
+// 409 (a player not ready), 500 (a write that panicked) and 200 (a write whose
+// publication failed). A backend's boot ID is random and stands as
+// golden-boot; nothing else is normalized.
+func dsdChoiceAnswerCases(t *testing.T) []dsdChoiceAnswerCase {
+	t.Helper()
+	var out []dsdChoiceAnswerCase
+	add := func(name string, a choiceAnswer, boot string) {
+		body := a.body
+		if boot != "" {
+			body = bytes.ReplaceAll(body, []byte(boot), []byte("golden-boot"))
+		}
+		out = append(out, dsdChoiceAnswerCase{name: name, status: a.status, body: body})
+	}
+
+	b := readSideBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(dsdstate.Defaults()), withKnownDAC)
+	r := newChoiceRig(t, b)
+	d := r.dac(t)
+	body := choiceBody(t, d, dsdstate.ModeConvert)
+	add("written", r.put(t, body), b.Policy().BootID)
+	add("stale", r.put(t, body), b.Policy().BootID)
+
+	noDAC := readSideBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(dsdstate.Defaults()), withKnownDAC, func(p *playback.DSDPolicy) {
+		p.Bound = func() (playback.BoundDAC, bool) { return playback.BoundDAC{}, false }
+	})
+	add("dac_unavailable", newChoiceRig(t, noDAC).put(t, body), noDAC.Policy().BootID)
+
+	cfg := playerOutputConfig(t.TempDir(), nil)
+	seedPlayerUUID(t, cfg.DataDir, thePlayerUUID)
+	notReady := serveChoiceRoute(t, nil, newBridgeOutput(servePlayerPlan{lists: true, start: true}, &bridgePlayer{ready: make(chan struct{})}, cfg))
+	add("not_ready", notReady.put(t, body), "")
+
+	panics := newPlayerStandIn()
+	panics.policy = b.Policy()
+	panics.choose = func(context.Context, playback.ChoiceRequest) playback.ChoiceResult {
+		panic("the fixture's write panics")
+	}
+	add("internal", newChoiceRig(t, panics).put(t, body), "")
+
+	unpublished := newPlayerStandIn()
+	unpublished.policy = b.Policy()
+	unpublished.choose = func(context.Context, playback.ChoiceRequest) playback.ChoiceResult {
+		return playback.ChoiceResult{Outcome: playback.ChoiceWritten}
+	}
+	add("written_unpublished", newChoiceRig(t, unpublished).put(t, body), "")
+	return out
+}
+
+// choiceAnswerDocument is a case as its golden and the iOS fixture hold it:
+// its status, and its body as the handler wrote it.
+func choiceAnswerDocument(t *testing.T, c dsdChoiceAnswerCase) []byte {
+	t.Helper()
+	return indentedJSON(t, fmt.Appendf(nil, `{"case":%q,"status":%d,"body":%s}`, c.name, c.status, bytes.TrimSpace(c.body)))
+}
+
+// TestEachChoiceAnswerShapeIsItsGolden pins each shape of the PUT's answer
+// (B728 B9 PR 3): the same bytes as its golden, built twice alike, with no
+// host, no serial, no port and no stamp in it.
+func TestEachChoiceAnswerShapeIsItsGolden(t *testing.T) {
+	first, second := dsdChoiceAnswerCases(t), dsdChoiceAnswerCases(t)
+	for i, c := range first {
+		t.Run(c.name, func(t *testing.T) {
+			doc := choiceAnswerDocument(t, c)
+			if again := choiceAnswerDocument(t, second[i]); !bytes.Equal(doc, again) {
+				t.Fatalf("the answer differs between two builds:\n%s\n%s", doc, again)
+			}
+			for _, s := range stringsIn(t, doc) {
+				if strings.Contains(s, "TESTDAC-0001") || strings.Contains(s, "usb2-1") || hostLike.MatchString(s) || stampForm.MatchString(s) {
+					t.Errorf("the answer holds %q: no serial, port, host or stamp goes in a fixture", s)
+				}
+			}
+			path := filepath.Join(dsdGoldenDir, "choice_"+c.name+".json")
+			if os.Getenv(writeDSDGoldens) != "" {
+				if err := os.WriteFile(path, doc, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			want, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("the golden: %v (set %s=1 to write it)", err, writeDSDGoldens)
+			}
+			if !bytes.Equal(doc, want) {
+				t.Errorf("PUT /v1/outputs/{id}/dsd for %s is not its golden %s:\n got %s\nwant %s", c.name, path, doc, want)
+			}
+		})
+	}
+}
+
 // TestExportIOSBridgeDSDFixtures collects the kinds into one OutputsResponse
 // fixture for the iOS mirror, each element from the real route, and records
-// each kind's facts beside it. Publication alone waits on
+// each kind's facts beside it; and the shapes of the PUT's answer into a
+// fixture of their own (B728 B9 PR 3). Publication alone waits on
 // BRIDGE_EXPORT_IOS_FIXTURES, after the manifest's and the API's exporters
 // (-p=1), whose fixtures-info.json it adds its records to.
 func TestExportIOSBridgeDSDFixtures(t *testing.T) {
@@ -190,6 +291,24 @@ func TestExportIOSBridgeDSDFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The PUT's answers, one a shape, as their goldens hold them.
+	var answers bytes.Buffer
+	choiceRecords := []map[string]any{}
+	answers.WriteString("[")
+	for i, c := range dsdChoiceAnswerCases(t) {
+		if i > 0 {
+			answers.WriteString(",")
+		}
+		answers.Write(bytes.TrimSpace(choiceAnswerDocument(t, c)))
+		choiceRecords = append(choiceRecords, map[string]any{"case": c.name, "document": "dsd_choice_answers.json", "answerIndex": i, "status": c.status,
+			"golden": "cmd/bridge/" + dsdGoldenDir + "/choice_" + c.name + ".json"})
+	}
+	answers.WriteString("]")
+	choiceDocument := indentedJSON(t, answers.Bytes())
+	choiceMetadata, err := json.Marshal(choiceRecords)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := os.Getenv("BRIDGE_EXPORT_IOS_FIXTURES")
 	if dir == "" {
 		return
@@ -204,11 +323,15 @@ func TestExportIOSBridgeDSDFixtures(t *testing.T) {
 		t.Fatal(err)
 	}
 	info["dacRecords"] = metadata
+	info["choiceRecords"] = choiceMetadata
 	data, err = json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "dsd_dac_outputs.json"), append(b, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dsd_choice_answers.json"), choiceDocument, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {

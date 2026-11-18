@@ -638,31 +638,17 @@ func readsPastOneRefusal(t *testing.T, platform func(error) bool, then error, re
 	}
 }
 
-// TestTheHarvestHelperReadsPastAStandInHold: the harvest helper's read waits
-// out a hold on the state file, stood in for by a read answering
-// errBusyForTest until it is let go, which retryStandIn has atomicwrite ask
-// again on through a process-global seam, so it does not call t.Parallel. Let
-// go by the read at a refusal it heard, the covers come back; held
-// throughout, the read is busy; in eventually's form a poll refused
-// throughout answers not yet, and a later one, whose read lets go, the covers.
-func TestTheHarvestHelperReadsPastAStandInHold(t *testing.T) {
-	busy := retryStandIn(t)
+// readPastAHold runs the harvest helper's read past a hold on the state file,
+// let go by the read at a refusal it heard, held throughout, and in
+// eventually's form; hold returns the read and the let go, refused its refusal.
+func readPastAHold(t *testing.T, hold func(t *testing.T, path string) (read func(string) ([]byte, error), letGo func()), refused func(error) bool) {
 	dataDir := pendingCoverState(t)
-	hold := func() (read func(string) ([]byte, error), letGo func()) {
-		held := true
-		return func(p string) ([]byte, error) {
-			if held {
-				return nil, &os.PathError{Op: "open", Path: p, Err: errBusyForTest}
-			}
-			return os.ReadFile(p)
-		}, func() { held = false }
-	}
 	t.Run("let go at a refusal its read heard", func(t *testing.T) {
-		read, letGo := hold()
+		read, letGo := hold(t, harvestStatePath(dataDir))
 		refusals := 0
 		covers, err := readPendingCovers(t.Context(), dataDir, func(p string) ([]byte, error) {
 			b, err := read(p)
-			if busy(err) {
+			if refused(err) {
 				refusals++
 				letGo()
 			}
@@ -673,13 +659,13 @@ func TestTheHarvestHelperReadsPastAStandInHold(t *testing.T) {
 		}
 	})
 	t.Run("held throughout", func(t *testing.T) {
-		read, _ := hold()
-		if _, err := readPendingCovers(t.Context(), dataDir, read); !errors.Is(err, atomicwrite.ErrReadBusy) || !busy(err) {
+		read, _ := hold(t, harvestStatePath(dataDir))
+		if _, err := readPendingCovers(t.Context(), dataDir, read); !errors.Is(err, atomicwrite.ErrReadBusy) || !refused(err) {
 			t.Errorf("the read held throughout = %v, want busy with the hold's refusal", err)
 		}
 	})
 	t.Run("in eventually's form", func(t *testing.T) {
-		read, letGo := hold()
+		read, letGo := hold(t, harvestStatePath(dataDir))
 		answers, covers := []bool(nil), map[string]int(nil)
 		eventually(t, func() bool {
 			poll := len(answers)
@@ -696,6 +682,22 @@ func TestTheHarvestHelperReadsPastAStandInHold(t *testing.T) {
 			t.Errorf("the polls answered %v, then %v; want not yet, then %s at 0 attempts", answers, covers, heldCover)
 		}
 	})
+}
+
+// TestTheHarvestHelperReadsPastAStandInHold runs readPastAHold on every host,
+// its hold a read answering errBusyForTest until let go, which retryStandIn
+// has atomicwrite ask again on through a process-global seam: no t.Parallel.
+func TestTheHarvestHelperReadsPastAStandInHold(t *testing.T) {
+	busy := retryStandIn(t)
+	readPastAHold(t, func(t *testing.T, path string) (func(string) ([]byte, error), func()) {
+		held := true
+		return func(p string) ([]byte, error) {
+			if held {
+				return nil, &os.PathError{Op: "open", Path: p, Err: errBusyForTest}
+			}
+			return os.ReadFile(p)
+		}, func() { held = false }
+	}, busy)
 }
 
 // TestTheHarvestRunsWithEnrichmentOff: enrich.enabled stops the enricher's

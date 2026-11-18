@@ -11,7 +11,7 @@ import (
 )
 
 // A choice write (B728 B9; the design's sections 2.5 and 7.2): the checks of
-// PUT /v1/outputs/{id}/dsd that read the state, 4 to 7 of section 7.2's
+// PUT /v1/outputs/{id}/dsd that read the state, 7 to 10 of section 7.2's
 // order, and what the write does to the state. Choose is pure, so the writer
 // runs it inside the store's one write (dsdstate.Store.Update), on the state
 // that write is made from: the compare-and-set and every check that reads the
@@ -23,7 +23,7 @@ import (
 const ReasonChoiceUncertain engine.Reason = "dsd_choice_uncertain"
 
 // ChoiceReason is a word a choice write is refused with for what the state
-// holds (the design's section 7.2, checks 4 to 7).
+// holds (the design's section 7.2, checks 7 to 10).
 type ChoiceReason string
 
 const (

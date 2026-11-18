@@ -84770,7 +84770,7 @@ DAC bound read off already), `TestAConvertedEntryCarriesItsPlan` (both cases),
 `TestNoDACKeyOrModelCarriesASerialOrAPort`, `TestEachKindOfDACsWholeResponseIsItsGolden` (no
 goldens yet), and B11's `TestTheElementListsDSDWhileThePlayerConverts`,
 `TestPlaybackFactsTransport` and `TestOutputsQualificationFacts`, whose expectations B8 changes.
-`TestNoHealthFlagBeforeItsRoute` and the exporters were green before and after: they pin what B8
+`…NoHealthFlagBeforeItsRoute` and the exporters were green before and after: they pin what B8
 must not add, and what it must keep building.
 
 ### Negative controls
@@ -84784,7 +84784,7 @@ api's health and protocol tests (eight), all green unmutated.
 | | mutation | red |
 |---|---|---|
 | a | `unitText` keeps the unit's serial: the model under a port-only binding | as predicted: `TestThePublishedModelNamesNoSerialOrPort`, `TestNoDACKeyOrModelCarriesASerialOrAPort` and its serve case |
-| b | `/v1/health` advertises `bridgeDSDChoice` beside `bridgeOutput` | as predicted, `TestNoHealthFlagBeforeItsRoute` and `TestHealthFeaturesCompleteSet`; `TestHealthFeatureCapacityCoversEveryKey`, predicted red, stayed green, since it parses `api.go` at run time and the runner had restored it: run with the mutation in place it went red (40 keys, a capacity of 39) |
+| b | `/v1/health` advertises `bridgeDSDChoice` beside `bridgeOutput` | as predicted, `…NoHealthFlagBeforeItsRoute` and `TestHealthFeaturesCompleteSet`; `TestHealthFeatureCapacityCoversEveryKey`, predicted red, stayed green, since it parses `api.go` at run time and the runner had restored it: run with the mutation in place it went red (40 keys, a capacity of 39) |
 | c | the view's DAC rebuilt from a fresh read of the store at every copy | as predicted: `TestTheBridgeElementCarriesTheDACChoice`'s seeded state file (the route read the state), `TestNoDACKeyOrModelCarriesASerialOrAPort`'s in-memory half (no unit to redact by: the key a hash of the serial) |
 | d | `refreshDSD` keeps the published set whenever the next plays the same | as predicted: `TestAChangeThatMovesNoPlanIsPublishedInItsEpoch`'s four steps, `TestTheBridgeElementCarriesTheDACChoice`'s first use observed on a published backend |
 | e | a converted occurrence's observation takes the native option's evidence at its source rate | as predicted: `TestAConvertedEntryCarriesItsPlan`'s 176.4 kHz case (`streaming_observed`); its 44.1 kHz case, where native is not offered, and the goldens stayed green |
@@ -100639,7 +100639,7 @@ bridge's default until a choice is made for it."
   with its stale-write tests at revision 0 and at equal revisions; B12 binds
   a check's answer to the check's stamp; B13 writes the console's choice
   through `ChooseDSD`. No DSD write route exists after this change
-  (`internal/api/outputs_dsd_read_test.go`, `TestNoHealthFlagBeforeItsRoute`).
+  (`internal/api/outputs_dsd_read_test.go`, `…NoHealthFlagBeforeItsRoute`).
 - Sequencing: B9 PR 3 depends on this change merged. The two merge back to
   back, this one first, each with its own green gate, with the bridge's
   distribution held between them, so no build carries this one alone.
@@ -100675,7 +100675,7 @@ red there, each at its own assertion:
   `TestAUnitWithNoManufacturerStringReadsOnlyAnEntryOfNone` (A7);
 - playback: `TestAnotherMakersUnitOfTheModelReadsNoneOfTheFirstsEntry` (A
   migrated fresh, serials read, then B bound and B's own write),
-  `TestAWriteMadeFromAnotherMakersReadSideIsRefused`,
+  `…WriteMadeFromAnotherMakersReadSideIsRefused`,
   `TestAMakerChangeAtTheSameKeyAndFirmwareIsProbedAgain`,
   `TestWhatPlaybackObservedIsWrittenForTheMakerItWasObservedUnder` (the three
   writers, each held until another maker's set is published) and
@@ -104267,6 +104267,310 @@ windows/amd64 (`CGO_ENABLED=0` for the two) exited 0 each. go1.27.3's gofmt
 lists none of the changed Go files, and the names check over the branch's
 commit messages and added lines since main finds nothing in this round's.
 
+## 2026-11-16 — B728 B9 PR 3b: the DSD choice's route, the DAC's token and the publication count
+
+`PUT /v1/outputs/{id}/dsd` writes the DSD choice of the DAC the bridge's own
+player is bound to, the write B9 PR 2 built in the player's backend, under the
+engine's configuration reservation PR 3a built. The rules are `output.md`'s
+bullets under "The player's DSD choice: its write (B728 B9)" (the write's, and
+the route's), `wire.md`'s bullet on the route, and `cli-serve.md`'s on serve's
+view; their long forms are in `ops/History-rules-output.md`, the route's under
+"B728 B9 PR 3b".
+
+### What it builds
+
+- **The token** (`internal/player/playback/dsd_choice.go`, `dsd_policy.go`,
+  `dsd_view.go`). `DACToken`, `t1-` and 32 hexadecimal digits: the first 16
+  bytes of HMAC-SHA-256 under a key of 32 random bytes the backend draws in
+  `New`, over a domain string, the state's key, the maker's stamp and the
+  canonical firmware. `readBox` mints it once a reading; the reading's sets
+  carry it, `viewOf` publishes it on `DSDDAC.Token`, and serve projects it as
+  `dsdDAC.dacToken`. `ChoiceRequest{DACKey, DACToken, Choice}` and its
+  `Check()` (the choice's words and the token's form, before the turn); the
+  write compares the token with its own reading's right after the key.
+  `Seams.DACTokenKey` gives a test a key of its own: the goldens and the iOS
+  fixtures carry real tokens.
+- **The publication count** (`dsd_contain.go`, `authorization.go`).
+  `publishLocked`, the one step the refresh and the write publish through:
+  it stores a new set at the next generation, or the set as it was beside a
+  view that changed, each at the next `dsdPublished.seq`, and stores nothing
+  for a reading that changes neither. `PlayerPolicy.Publication`,
+  `dsdPlayback.publication`.
+- **The write's reading and its publication** (`dsd_choice.go`,
+  `dsd_contain.go`, `backend.go`). The write reads the clock, the DAC and the
+  state under `dsdMu`, checks its context there and once the DAC is read,
+  holds its reading (`choiceReading`) until it publishes, a refresh meanwhile
+  owed (`refreshOwed`), and publishes that reading from the state its
+  decision read (`publishChoice`), whatever the outcome after the reading;
+  the answer is the pair the publication stored (`ChoiceResult.Epoch`),
+  captured in its step. A publication that panics is contained as a
+  refresh's reading is (`containDSD`). The cause of each failure is kept
+  where it occurs (`ChoiceResult.Err`, `ErrDSDWritesClosed`). Two seams beside
+  the write's: `ChoicePublished` (under `dsdMu`, after the store) and
+  `ChoiceAnswered` (outside it, before the lease and the turn are let go).
+- **Serve's adapter** (`cmd/bridge/serve_player_output_dsd.go`), a method set
+  of `bridgeOutput`: `Lists(id)`, and `ChooseDSD`: the words, the player
+  read ready and only then its engine and its backend, the engine's
+  reservation, held until the backend's write returns, and the backend's
+  write projected as GET projects its facts. `main.go` wires it beside
+  `WithBridgeOutput` (`WithBridgeDSDChoice`). `bridgeDSDFacts` sends every
+  refusal's word as it is and the publication; `bridgeDSDDAC` the token.
+- **The route** (`internal/api/outputs_dsd_choice.go`): the gate, the id, the
+  body (4 KiB, pointers for the required members), the adapter, and one
+  answer a way out, through `answerDSDChoice` (the members by the presence
+  rule) or the plain envelope; a client gone is `writeErrorLog`'s 499, the
+  route's deadline (`dsdChoiceBudget`, ten seconds) the server's 500 with the
+  members. `/v1/health` advertises `bridgeDSDChoice` while `bridgeOutput` is
+  and the write is wired (the feature capacity 41).
+- **PROTOCOL.md**: the route's section after the bridge object (the gate, the
+  body, the checks in order, the answers' members and the presence rule, the
+  ordering by `bootId` and `publication`, the client's rules, `persist_uncertain`),
+  `dsdDAC.dacToken` and `dsdPlayback.publication` with their prose,
+  `dsd_choice_uncertain` among the refused words, eight error rows and five
+  wider cells, the write rate list, and `bridgeOutput`'s place among the
+  flags.
+- **The token guard** reads `policy.Intersect`'s refusals beside `Effective`
+  and `decide` (`dsdReadSideTokens`), so `dsd_choice_uncertain` is a word the
+  table must name.
+- **`qualificationVersion` 53**: `internal/alsapcm`'s lease test makes its
+  writes with the token, a guarded file; the runbook's five places and a
+  version paragraph follow.
+
+### Tests
+
+The backend (`internal/player/playback`): `TestTheTokenIsTheReadingsOwn`,
+`TestAWriteCarriesTheTokenItsReadSidePublished`,
+`TestEveryOutcomeAfterTheReadingPublishesThatReading`,
+`TestARefusalCarriesTheOptionsItWasDecidedOn`,
+`TestNoRefreshPublishesBetweenAWritesReadingAndItsPublication`,
+`TestTheAnswerIsThePairTheWritePublished`,
+`TestAWritesReadingWaitsForARefreshUnderWay`,
+`TestAWriteWhoseTimeRunsOutAtItsReadingWritesNothing`,
+`TestAStateWrittenBetweenTheDecisionAndThePublicationIsPublishedAfterIt`,
+`TestAPublicationThatPanicsAnswersWithNoEpoch`,
+`TestTheCauseIsKeptWhereItOccurs`,
+`TestEveryPublicationMovesThePublicationCount` and
+`TestNoSessionMeetsAChoicesReading`, and the choice's other tests, which make
+their writes with the token. The route (`internal/api`): `TestThePUTsChecksBeforeTheWrite`,
+`TestEveryChoiceOutcomeHasItsAnswer` (with a source-derived check that the
+backend's outcomes are the API's and the handler's switch names each),
+`TestAServerDeadlineAndAClientGoneAreAnsweredApart` and
+`TestTheChoiceFlagArrivesWithItsRoute`, with the guards (the error table,
+the routed and documented endpoints, the route registry, the health set, the
+member table and the token table). Serve (`cmd/bridge`), the real engine over
+serve's stand-in or the real backend, through the real route:
+`TestAPlayParkedBeforeItsBackendRegistrationRefusesTheWrite`,
+`TestEachTransitionRefusesTheWriteAtTheEngine` (a seek's, Next's,
+Previous's, PlayID's and PlayIndex's release, the release after a refused
+start and the next Start parked, a Play during a release, paused with the
+device held and let go, a release unconfirmed, and the backend's own refusal),
+`TestAWriteHoldsEveryStartUntilItReturns`,
+`TestTheReservationIsHeldUntilTheWriteReturnsWhateverTheRequestDoes` (a
+request cancelled while the write runs, two writes of one revision, a write
+that panics, and serve's stop while a write runs),
+`TestTheDACTokenRoundTrips`,
+`TestAWriteFromAnotherUnitsReadSideIsRefusedThroughTheRoute`,
+`TestAFirmwareChangeBetweenTheReadAndTheWriteIsDACChanged`,
+`TestAMakerChangeBetweenPublicationAndGETIsOneObservation`,
+`TestNoStampReachesTheWire`, `TestTheWritesFailedPathsThroughTheRoute`,
+`TestTheAnswerIsTheEffectiveChoice`,
+`TestAGETAcquiredBeforeAWritesPublicationOrdersBeforeItsAnswer`,
+`TestTheChoiceAnswerShapes`, `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames`
+and `TestEachChoiceAnswerShapeIsItsGolden`; the read side's tests carry the
+token and the publication, and its goldens (`cmd/bridge/testdata/dsd-outputs`)
+are written by `BRIDGE_WRITE_DSD_GOLDENS` under the test's key, beside a
+golden for each shape of the PUT's answer, which the iOS exporter writes to
+`dsd_choice_answers.json`.
+
+### Red first
+
+Each test above but `TestNoSessionMeetsAChoicesReading` failed, before this
+change's code was in place, for its own reason, run through `go test
+-overlay` with a shim that gives the new names none of their behaviour; that
+one pins a premise the configuration lease holds already, and its red is
+control 20. A guard that reads the source from disk reads this change's under
+an overlay, so its red is a control too. The failure lines are the batch's
+report's.
+
+### Controls
+
+Each a mutation of this change's code, predicted in writing before it ran,
+through `go test -overlay` (no file changed) or, for a guard that reads the
+source, an edit put back byte for byte; control 17 a commit no ref names.
+
+1. The adapter without the engine's reservation: the parked Start's and each
+   transition's write answered 200, a write ran holding no reservation, and
+   Play was admitted beside it.
+2. The reservation let go as the request's context ends: green at first, the
+   case asking Play before the server had seen its client go. The case now
+   waits for the context the write was asked under to end, and looks again as
+   the backend's write returns: red, 20 runs of 20.
+3. The token's check dropped, the key alone: red in the backend's token test,
+   the outcome table's `dac_changed` row, the route's other unit and firmware
+   cases, and the token's round trip across two boots.
+4. The token the stamp itself: red in `TestNoStampReachesTheWire` and in the
+   token's form.
+5. The token minted at GET from a reading of its own: red in
+   `TestAMakerChangeBetweenPublicationAndGETIsOneObservation`.
+6. `dsd_choice_uncertain` sent as `dsd_state_unreadable`: red in
+   `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames`.
+7. A new word in `Intersect`: with the guard's read of `Intersect` dropped and
+   the refused words' row without `dsd_choice_uncertain`, the guard is green,
+   blind to the word; with the read, red. The guard holds the row equal to the
+   words the code emits both ways, so the read dropped with the row as it
+   stands is red as well.
+8. The write publishing a fresh reading: red in the outcome table's cases
+   whose box changes after the reading. The refusal's own test, whose box
+   changed before the reading, was green; it now offers native again once the
+   write has decided: red.
+9. Refreshes not owed while the write holds its reading: red.
+10. The answer read once the lease and the turn are let go: red.
+11. `Err` left nil: red in `TestTheCauseIsKeptWhereItOccurs`, and in the
+    route's failed paths, where a client gone is recorded 499 through its
+    cause alone; the API's own test, whose stand-in gives its cause, is green.
+12. The publication count not moved for a change of the read side alone: red,
+    and red in the ordering of a GET before the write's publication.
+13. `dsdMode` and `allowDoP` left out of the PUT's answer: red in the route's
+    and the API's tests.
+14. The player's readiness asked before the words: red, a 409 where 400.
+15. The flag advertised with no write wired: red.
+16. MPD's gate probed by the PUT: green at first, every case having asked
+    `/v1/health` before it; a case whose gate was never asked is red.
+17. `qualificationVersion` left at 52: the version gate refuses that head
+    ("guarded code changed without qualificationVersion increase") and passes
+    HEAD.
+18. The handler returning no answer at the deadline: red, an empty 200.
+19. To 26, the reviews' own: serve's wiring of the write, a Start not waiting
+    for a write's lease, a reading that changes nothing published all the
+    same, a 400 with the members, `dsdMode` and `allowDoP` omitted at "" and
+    false, the context not asked after the reading and after the lock (each red
+    in its own case, the other green), the publication made from the state
+    read again, and a code the error table does not name: each red.
+
+### Runs
+
+On this host (Linux, 16 cores), the change at its fourth commit, stacked on
+its base:
+
+- The pinned toolchain's gofmt over the changed Go files: nothing listed.
+- `make fmt vet test build-all` on an archive of the commit with the rules
+  patch applied, `P=8` and `TEST_PKGS='-count=1 -timeout 45m ./...'`: fmt 1 s
+  (nothing rewritten), vet 8 s, test 1,830 s (89 packages ok, none failed;
+  `cmd/bridge` 1,765 s, `internal/manifest` 1,697 s, `internal/alsapcm` 97 s,
+  `internal/alsa` 1.8 s), build-all 42 s.
+- `GOOS=linux GOARCH=386 make vet`: ok. `GOOS=windows` and `GOOS=darwin`:
+  `go vet` of the six changed packages ok, and `go test -c` of each ok.
+- `make docs-check`: ok.
+- The version gate (`scripts/qualification-version`) against the base: ok;
+  both native-integration overlays as `gate.yml` runs them: `cmd/bridge` 46 s
+  and `internal/player/playback` 6 s, every named test passed.
+- Under `-race -count=50`, by name, one package at a time: the backend's 41
+  choice tests (15 s), the lease's two in `internal/alsapcm` (26 s), the
+  route's 15 in `internal/api` with its guards (136 s), and serve's 20 in
+  `cmd/bridge` (404 s, `TestEachTransitionRefusesTheWriteAtTheEngine` 129 s of
+  it, `TestTheReservationIsHeldUntilTheWriteReturnsWhateverTheRequestDoes`
+  72 s): every run passed. `TestServeListsItsPlayerOnAGateOfItsOwn` under
+  `-race -count=10`: passed.
+- The iOS fixtures exported twice (`-p=1`): `dsd_dac_outputs.json`,
+  `dsd_choice_answers.json` and `dsd_outputs.json` byte for byte; the
+  manifest's documents and `fixtures-info.json`'s `deltaSince` carry the
+  export's own clock, and are byte for byte with its readings masked.
+
+### Budgets
+
+`output.md` 90,793 bytes, `wire.md` 65,911, `cli-serve.md` 99,486 (each of
+100,000), CLAUDE.md 53,936 (of 64,000).
+
+### Round 2
+
+- **The write's wait for the refreshes' lock ends at its request's context**
+  (`lockReading`, `dsd_choice.go`). A refresh holds the lock across its reading
+  of the DAC, which a USB control request the kernel holds can stall for as
+  long as USB's own timeouts allow. A `sync.Mutex` takes no context, so the
+  write hands its wait to a waiter on a goroutine of the backend's (`spawn`,
+  which `Wait` joins), and one compare-and-swap decides who owns the lock: the
+  write, which reads on its own goroutine before its lease is let go, or, its
+  wait given up, the waiter, which lets the lock go having read nothing. An
+  uncontended lock is taken at once (`TryLock`). A write whose wait is given up
+  answers `persist_failed` with the epoch standing, and lets go of its turn,
+  its lease and the engine's reservation while the refresh is still held. The
+  lock's later takes, its publication's and its hold's end, follow no context:
+  the write's hold of its reading keeps every refresh from reading the box
+  under the lock. A one-slot channel in place of the mutex was the other way;
+  it changes the mutex's six other sites and the test helpers that try it,
+  where the waiter changes one wait.
+- **The panic test joins the refresh its containment asks** before it clears
+  the seams, in both its cases, whatever that refresh publishes:
+  `Backend.Wait` counts it from the ask on.
+- **An optional member of the PUT's body is never null** (`optInt`,
+  `optBool`): `maxBitRate`, `confirmDoP` or `firstUseAcknowledged` null is
+  `400` `bad_request`, as a member of the wrong type is; absent, each is 0 or
+  false.
+- **One long form each** of the choice's write in
+  `ops/History-rules-output.md` and of the DSD state in
+  `ops/History-rules-player.md`.
+
+Tests: `TestAWriteWhoseTimeRunsOutAtItsReadingWritesNothing` takes the write's
+answer while the refresh is still parked, compares its epoch with the
+publication standing then, has a PCM Start open the DAC meanwhile (past the
+backend's lease), and lets the refresh publish a changed read side after, the
+write having read, written and published nothing;
+`TestAWriteWaitingForARefreshAnswersWithinItsTime` does the same through the
+route, the real engine and the real backend, a Play admitted and its Start come
+past the lease to the content once the PUT has answered;
+`TestThePUTsChecksBeforeTheWrite` refuses the three nulls. Each was red first
+against the round's base, for its own reason.
+
+Controls, each predicted in writing before it ran, through `go test -overlay`:
+- the wait made unbounded again: the timeout test waits its minute for the
+  write's answer, and the route's test for the PUT's;
+- the waiter reading the box once its write gave up: the unit read twice;
+- the panic test's join moved after its write of the seams, the refresh's work
+  5 ms late and a 200 ms pause after that write (the window made wide, the
+  pause ordering nothing): a data race between the write and the refresh's
+  `published`; with the join before the write, clean under the same
+  instrument;
+- the null check removed: the three bodies answered 200.
+
+Runs, on this host: under `-race -count=50`, by name, one package at a time,
+the backend's 41 choice tests (13 s), the route's 15 tests in `internal/api`
+with its guards (140 s), and serve's 21 route tests in `cmd/bridge` (432 s;
+the new one again beside the drain guard, 67 s), every run passing;
+`./internal/player/playback` (3 s), `./internal/api` (147 s) and
+`./cmd/bridge` (1,627 s) under `-race` once, the last on this round's head
+with the rules patch applied; `go vet` with the release tags for linux, darwin
+and windows; `make docs-check`, the citation guard and the version gate.
+
+### Main merged in, through a branch's merge (2026-11-16)
+
+Main at 8847ac27 comes in through a branch's merge of it (26e501f4), with B601's
+console test tone: a third holder of the backend's device slot, which
+`takeLease` refuses beside it (`toning`) and which `reserveTone` refuses while
+the lease is held. `takeLease` keeps this branch's signature, its outcome and
+the cause, with B601's check in its refusal and both sides' words in its doc;
+`New`'s literal keeps B601's `toneShut` beside the token's key and its seam.
+`TestAChoicesWriteBesideAToneIsRefused` writes with a token of a token's form
+(`fixtureToken`), so its write passes its words and is refused by the lease.
+The choice write's rule in `output.md` says the token, as its long form does,
+and both name the tone among what the lease is taken beside. The
+qualification version is 55: 53 on this branch and 54 on that merge.
+
+The route beside the tone: the tone runs outside the engine, so the engine
+grants a write its configuration reservation while the tone sounds, and the
+backend's lease refuses the write. The adapter lets the reservation go on
+every outcome of the backend's write (`serve_player_output_dsd.go`, its
+deferred `ReleaseConfiguration`).
+`TestAWriteBesideTheConsolesToneIsRefusedAndLetsTheReservationGo` drives it
+through the route, the real engine and the real backend: a tone admitted
+while a refresh holds the refreshes' lock, held in the slot having opened
+nothing; GET reads the player stopped (B601: the tone publishes no
+observation), and the refresh's token is the one published before; the PUT
+answers 409 `playback_not_stopped` with the four members, writes nothing and
+leaves no reservation; the tone let go, a Play is admitted. Its controls: the
+tone's check taken out of `takeLease` (the write was answered 200, written),
+and the reservation's release taken out of the adapter (the reservation held
+once the PUT answered).
+
 ## 2026-11-17 — B884 round 4: the warning states the fact and the hazard, and nothing else
 
 The rule is `cli-serve.md`'s B884 line, and its long form is in
@@ -105018,6 +105322,156 @@ predicted:
    there.
 
 The gate's runs on this branch are in the report.
+## 2026-11-17 — B898FU2: the harvest helper's real-hold case is back, its hold asking to read and to write
+
+Branch `test/b898fu2-real-hold`, from main 4f76724a: test files, this log,
+and a rule in `.claude/rules/build-ci-tests.md` with its long form. Commits:
+d0480421 (round 1's probe), d707abb4 (control 1), a369c9e2 (control 2), then
+this commit (the helper's retry back, the rule and this record). Every run
+here: Go 1.27.3, the tags `ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR on
+disk.
+
+### What the runner showed
+
+B898 PR 3's round 5 removed `…HarvestHelperReadsPastAHoldOnTheStateFile`
+(58927057) after its premise failed in every subtest on windows-latest:
+`os.ReadFile` beside a handle that asks for `GENERIC_READ` and shares nothing
+answered nil. Round 1's probe, `…AShareNothingHandleRefusesARead` (d0480421,
+gone with d707abb4), failed by design on PR #1501's first run, its
+windows-latest leg, 2026-11-17, with one message holding every fact. The
+process: go1.27.3 on Windows 10.0.26100, its token elevated, SeBackupPrivilege
+held and enabled. On a file of `t.TempDir()`'s and on the harvest state file
+`pendingCoverState` writes, each written afresh for each hold and each held at
+the hold's first attempt, the held handle and a handle the path opened asking
+no access named the same file (volume serial and file index), on NTFS:
+
+- (a) `GENERIC_READ`, share 0: `os.ReadFile` not refused (19 and 223 bytes
+  read); beside the hold, an open for reading made without
+  `FILE_FLAG_BACKUP_SEMANTICS`, an open for writing and an open for deleting
+  each refused with `ERROR_SHARING_VIOLATION` (32);
+- (b) `GENERIC_READ|GENERIC_WRITE`, share 0: `os.ReadFile` refused at its open
+  with `ERROR_SHARING_VIOLATION`, and the three opens beside it too;
+- (c) `os.OpenFile` read-write, which shares reading and writing, with
+  `LockFileEx`'s exclusive lock over every byte: `os.ReadFile` refused at its
+  read with `ERROR_LOCK_VIOLATION` (33); the opens for reading and for writing
+  made, the open for deleting refused (32).
+
+Go's read-only open sets `FILE_FLAG_BACKUP_SEMANTICS`, for directories
+(go1.27.3 `src/syscall/syscall_windows.go:414-425`). (a)'s results are
+consistent with that open being let past a hold that only reads by the
+enabled privilege, while a hold that also writes refuses it. That is an
+inference, not an established cause: the probe varied neither the privilege
+nor the flag alone, and its open without the flag differed from
+`os.ReadFile`'s otherwise too (it shared deleting, and read nothing). Round
+5's premise failure, the same hold of the same file, fits the same reading;
+that run's process facts were not recorded. (c) is a fact only: the read
+retry (`internal/atomicwrite/read_windows.go:9-11`) asks again on 32 and 5
+alone, and stays as it is.
+
+### The restored case
+
+`TestTheHarvestHelperReadsPastAHoldOnTheStateFile`
+(`cmd/bridge/serve_enrichment_switch_windows_test.go:43-65`) is back as
+58927057 removed it, `readPastAHold` restored to
+`serve_enrichment_switch_test.go` byte for byte as 58927057's parent had it
+(the stand-in test calls it again), with one change in code: the hold asks
+for `GENERIC_READ|GENERIC_WRITE`, sharing nothing (:51). Its premise check
+stays first (:60-62): a read beside the hold not refused with
+`ERROR_SHARING_VIOLATION` fails the case, "the case holds nothing". The
+hold's own open still waits out a scanner's hold of the file the fixture
+wrote. Its doc says why the hold asks to write, as the inference above.
+
+### The controls, for CI
+
+Each control commit is red by design. The orchestrator pushes them in order,
+each run completed before the next push, then this commit:
+
+1. d707abb4: the probe gone, the case restored with its hold sharing reading
+   and writing (`FILE_SHARE_READ|FILE_SHARE_WRITE`), nothing else. Predicted
+   on windows-latest: the case's three subtests fail at
+   `serve_enrichment_switch_windows_test.go:61`, "a read beside a handle that
+   shares nothing = <nil>, want ERROR_SHARING_VIOLATION: the case holds
+   nothing", and nothing else fails: the Linux and macOS legs do not build
+   the case, and its Linux half passed here.
+2. a369c9e2: the hold shares nothing again, and `readPendingCovers` reads
+   once, without `atomicwrite.ReadWithRetryCtx`. Predicted on windows-latest:
+   the case's three subtests fail on the read under the hold, the sharing
+   violation unretried, at `serve_enrichment_switch_test.go:658` (no covers
+   after one refusal), :664 (the violation, not `ErrReadBusy`) and :672
+   (`pendingCoversNow`'s `t.Fatal`). The helper is shared, so on every leg
+   `TestTheHarvestHelperReadsPastAStandInHold` fails at the same three
+   lines, and the composition cases fail for each refusal:
+   `TestTheStandInRetryKeepsWindowsOwnRetry` at
+   `serve_enrichment_switch_windows_test.go:26` and :27 on Windows,
+   `TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` at
+   `serve_enrichment_switch_other_test.go:29` and :30 elsewhere. On this host
+   a369c9e2's Linux half failed so, and `TestTheHarvestRunsWithEnrichmentOff`
+   passed; the composition case's lines had first been predicted at the
+   helper's :636, wrongly, since `readsPastOneRefusal` calls `t.Helper()`.
+
+This commit restores the retry, and the case is to pass on windows-latest.
+The three runs are the PR's.
+
+### The sweep, by operation
+
+Every open with `GENERIC_READ` and share 0 in a Windows test, multi-line
+calls included (each `CreateFile(` in the tree read):
+
+- (i) A hold meant to make a READ fail: none left. The removed case's hold
+  (58927057's parent, `serve_enrichment_switch_windows_test.go:42`) and the
+  probe's (a) (d0480421, `serve_enrichment_switch_probe_windows_test.go:117`)
+  were the only ones, and the run above makes such a hold suspect on an
+  elevated runner.
+- (ii) A hold meant to make a RENAME or DELETE fail:
+  `internal/updater/held_windows_test.go:83`, `holdShareNone`, whose own
+  premise requires a rename of the held file to answer
+  `ERROR_SHARING_VIOLATION` (:94-103), used at :167, :195, :229 and :328 and
+  at `rollback_running_windows_test.go:52`. Left as they are: the open for
+  deleting beside (a) was refused.
+- (iii) An exclusive-open check for other handles:
+  `cmd/bridge/snapshot_hold_windows_test.go:20` (`processHoldsFile`, its call
+  over :20-28), called at `serve_backup_shutdown_test.go:132`.
+
+Outside the census: the read holds that ask to write too, (b)'s shape, each
+with a read premise first, `internal/atlasharvest/state_busy_windows_test.go:65`
+and `internal/backup/sharing_windows_test.go:261` (`holdSharingNothing` in
+each); `internal/backup/sharing_windows_test.go:89` and :170, `GENERIC_WRITE`
+sharing writing and deleting but not reading; and
+`internal/fsutil/rename_noreplace_windows_test.go:201`, which shares reading
+and writing. Production's opens are not in the census.
+
+### The rule
+
+`.claude/rules/build-ci-tests.md:165` follows B898's line (:164) with one for
+a read, and its long form follows B898's entry in
+`ops/History-rules-build-ci-tests.md` (under "Build, CI, and test
+discipline"): a Windows test of a read another process's handle refuses holds
+the file through a handle that asks for reading and writing and shares
+nothing, and requires a read beside it to answer `ERROR_SHARING_VIOLATION`
+before anything else.
+
+### Runs
+
+On this commit's tree, in one build-slot session, the host otherwise idle:
+`make fmt` changed nothing; `make vet` (linux/amd64) and `go vet ./...` with
+the tags for darwin/arm64 and windows/amd64 (`CGO_ENABLED=0`), clean; `go test
+-c` of `./cmd/bridge` for windows/amd64 builds; `go test -race -count=50` at
+GOMAXPROCS 8 of the stand-in test, whose code changed (`readPastAHold` back),
+and of the file's two other harvest tests, 50 of 50 each, no data race
+(`TestTheHarvestHelperReadsPastAStandInHold` 1.58 to 1.59 s a run,
+`TestTheHarvestRunsWithEnrichmentOff` 1.43 to 1.48 s,
+`TestTheStandInRetryKeepsWhatWasAskedAgainOnBefore` 0.43 to 0.44 s; the
+package 175.8 s); `make docs-check`, ok (the worst load 84.7% before, 84.9%
+after; `build-ci-tests.md` 60,158 bytes before, 60,798 after); cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestNoBlankKeepers`, ok; and `scripts/doc-split/verify_moves.py --base
+a369c9e2`, PASS, nothing lost and two new blocks, the rule and its long form.
+`TestTheHarvestHelperReadsPastAHoldOnTheStateFile` and
+`TestTheStandInRetryKeepsWindowsOwnRetry` build on Windows alone, and their
+runs are the PR's. Round 1's probe was vetted and compiled for windows/amd64
+and windows/arm64 here, and cmd/bridge's doc guards were shown to read its
+Windows-only file: a ghost citation, and a doc opening with a name nothing
+declares, each red.
 
 ## 2026-11-18 — B933: the plain-MPD test dials a fake it owns, never the host's MPD
 

@@ -1,0 +1,8 @@
+{
+  "case": "internal",
+  "status": 500,
+  "body": {
+    "error": "internal",
+    "message": "the bridge encountered an internal error"
+  }
+}

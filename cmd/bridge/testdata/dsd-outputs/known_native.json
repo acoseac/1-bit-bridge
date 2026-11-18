@@ -13,6 +13,7 @@
         "dsdPlayback": {
           "bootId": "golden-boot",
           "policyGeneration": 2,
+          "publication": 2,
           "tuples": [
             {
               "format": "DSD_U32_BE",
@@ -55,6 +56,7 @@
         },
         "dsdDAC": {
           "dacKey": "d1-29e725b72bbce9ac",
+          "dacToken": "t1-a2ca2a32aa499dbe7e01e2fe17c7fd2a",
           "profile": {
             "id": "test.dac",
             "name": "Test DAC",

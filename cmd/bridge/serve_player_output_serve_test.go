@@ -166,7 +166,9 @@ func TestServeListsItsPlayerOnAGateOfItsOwn(t *testing.T) {
 
 	var health api.HealthResponse
 	serveJSON(t, ps.addr, "", "/v1/health", &health)
-	for key, want := range map[string]bool{"localOutputs": true, "bridgeOutput": true, "outputReading": false} {
+	// bridgeDSDChoice: main.go wires the write of the DAC's choice through the
+	// same view (B728 B9 PR 3).
+	for key, want := range map[string]bool{"localOutputs": true, "bridgeOutput": true, "bridgeDSDChoice": true, "outputReading": false} {
 		if slices.Contains(health.Features, key) != want {
 			t.Errorf("%s advertised %v: %v", key, !want, health.Features)
 		}

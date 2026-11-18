@@ -51,6 +51,21 @@ type playerStandIn struct {
 	// details, when set, is reported for a session's first occurrence just
 	// before it is heard, as the backend reports the decoder's (B470 PR 5a3).
 	details *engine.Details
+	// holdStart, when set, holds a Start whose first occurrence's reference
+	// it names at its entry, before the stand-in records anything, until its
+	// channel is closed: a Start parked before its backend registration
+	// (B728 B9 PR 3b); parked counts the Starts it holds. refuse answers a
+	// Start of a reference it names with its error, before anything opens.
+	// Both are set before the engine runs.
+	holdStart map[string]chan struct{}
+	refuse    map[string]error
+	parked    int
+	// policy is what Policy answers, the player's DSD the stand-in
+	// publishes; choose, when set, answers ChooseDSD, which chooses counts,
+	// and otherwise a write answers written with policy (B728 B9 PR 3b).
+	policy  playback.PlayerPolicy
+	choose  func(context.Context, playback.ChoiceRequest) playback.ChoiceResult
+	chooses int
 
 	mu      sync.Mutex
 	cfg     playback.Config
@@ -121,6 +136,17 @@ func (b *playerStandIn) await(t *testing.T, what string, cond func(b *playerStan
 func (b *playerStandIn) Start(ctx context.Context, req engine.StartRequest) error {
 	b.enter()
 	defer b.leave()
+	name := req.First.Ref.String()
+	if hold, ok := b.holdStart[name]; ok {
+		b.mu.Lock()
+		b.parked++
+		b.signal()
+		b.mu.Unlock()
+		<-hold
+	}
+	if err := b.refuse[name]; err != nil {
+		return err
+	}
 	b.mu.Lock()
 	b.starts = append(b.starts, req)
 	res := b.cfg.Resolver
@@ -247,6 +273,36 @@ func (b *playerStandIn) Wait(ctx context.Context) error {
 			return fmt.Errorf("the stand-in backend: %d calls still run: %w", n, ctx.Err())
 		}
 	}
+}
+
+// ChooseDSD counts the write and answers choose's outcome, or written with
+// the policy the stand-in publishes, as the backend answers a write that
+// landed.
+func (b *playerStandIn) ChooseDSD(ctx context.Context, req playback.ChoiceRequest) playback.ChoiceResult {
+	b.mu.Lock()
+	b.chooses++
+	choose, pol := b.choose, b.policy
+	b.signal()
+	b.mu.Unlock()
+	if choose != nil {
+		return choose(ctx, req)
+	}
+	return playback.ChoiceResult{Outcome: playback.ChoiceWritten, Policy: pol, Epoch: true}
+}
+
+// Policy is the player's DSD the stand-in publishes.
+func (b *playerStandIn) Policy() playback.PlayerPolicy {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.policy
+}
+
+// session is the session last started and its events, false while none was.
+func (b *playerStandIn) session() (engine.SessionID, engine.Events, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ev, ok := b.evs[b.last]
+	return b.last, ev, ok
 }
 
 // fault reports a fault on the session last started.

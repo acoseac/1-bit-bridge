@@ -80,13 +80,17 @@ type DSDWarning struct {
 	Code, Reason string
 }
 
-// DSDDAC is the bound DAC: its key on the wire, its profile, the choice
-// that applies, each mode's option and each transport's first use.
+// DSDDAC is the bound DAC: its key and its token on the wire, its profile,
+// the choice that applies, each mode's option and each transport's first use.
 type DSDDAC struct {
 	// Key is the DAC's dacKey: the model key's (dacprofile.Key.DACKey), its
 	// product string with the unit's own serial and port taken out first, so
 	// the key is no function of either.
-	Key      string
+	Key string
+	// Token is the DAC's dacToken (B728 B9 PR 3): the token of the reading the
+	// set was computed from, minted with it (dacToken), which a choice's write
+	// carries back.
+	Token    DACToken
 	Profile  *DSDProfile
 	Choice   DSDChoice
 	Options  []DSDOption
@@ -160,7 +164,8 @@ func noView(st dsdstate.State) DSDView {
 // viewOf is the read side of d, a set computed for the unit usb from the
 // state st: what each rate's plan and facts (policy.Rate) say, the choice st
 // holds for the set's model of its maker (its key and stamp: never another
-// maker's entry for the key), and its first use under the set's firmware.
+// maker's entry for the key), its first use under the set's firmware, and the
+// token of the reading d was made from (dsdSet.token).
 // The warnings it shows are the key's, whichever maker's unit of it the
 // migration's part went to: they explain, and permit nothing.
 // Its free text (the profile's name, its caveats' notes) goes out with the
@@ -230,7 +235,7 @@ func viewOf(d *dsdSet, st dsdstate.State, usb alsa.USBIdentity) DSDView {
 		p := convPlanOf(*t)
 		options[dsdstate.ModeConvert] = DSDOption{Mode: dsdstate.ModeConvert, Offered: true, Plan: &p}
 	}
-	out := &DSDDAC{Key: wireKey(key, usb), Choice: choice}
+	out := &DSDDAC{Key: wireKey(key, usb), Token: d.token, Choice: choice}
 	for _, m := range optionModes {
 		out.Options = append(out.Options, options[m])
 	}
