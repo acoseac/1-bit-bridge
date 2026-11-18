@@ -271,7 +271,7 @@ func TestCensusOriginalLinesAndMultiplicity(t *testing.T) {
 }
 
 func TestCensusExcludedTreesAndRecords(t *testing.T) {
-	for _, name := range []string{"engineering-log.md", "internal/example/engineering-log.md", "History-old.md", "plan-old.md", "release-notes-old.md", "ops/nested/History-old.md", "deploy/nested/plan-old.md", "docs/nested/release-notes-old.md", "vendor/tool/README.md", "node_modules/tool/README.md", "dist/README.md", "bin/README.md", "_scratch/README.md", "nested/README.md"} {
+	for _, name := range []string{"engineering-log.md", "internal/example/engineering-log.md", "ops/engineering-log/2026-11/2026-11-20-b888--feat-b888-log-per-entry.md", "ops/engineering-log/README.md", "History-old.md", "plan-old.md", "release-notes-old.md", "ops/nested/History-old.md", "deploy/nested/plan-old.md", "docs/nested/release-notes-old.md", "vendor/tool/README.md", "node_modules/tool/README.md", "dist/README.md", "bin/README.md", "_scratch/README.md", "nested/README.md"} {
 		t.Run(name, func(t *testing.T) {
 			root := buildSiteFixture(t)
 			put(t, root, name, "```sh\ngo build ./cmd/bridge\n```\n")

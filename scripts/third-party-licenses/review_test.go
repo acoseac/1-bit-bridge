@@ -114,13 +114,16 @@ func TestMarkdownBuildSites(t *testing.T) {
 	}
 }
 
-// TestMarkdownRecordsAreNotBuildSites: the engineering log, the History
-// files, plans and release-note drafts quote commands as they were run, so
-// their fences stay outside the census; the same fences in any other ops
-// document are build sites.
+// TestMarkdownRecordsAreNotBuildSites: the engineering log (its archive and
+// every entry under ops/engineering-log/), the History files, plans and
+// release-note drafts quote commands as they were run, so their fences stay
+// outside the census; the same fences in any other ops document are build
+// sites, and so are a sibling named like the log's folder and a folder of its
+// name elsewhere.
 func TestMarkdownRecordsAreNotBuildSites(t *testing.T) {
 	const fences = "```sh\ngo build ./cmd/bridge\n```\n```\ngo test ./...\n```\n"
-	for _, name := range []string{"ops/engineering-log.md", "ops/History-new.md", "ops/plan-new.md", "ops/release-notes-new.md"} {
+	const entry = "ops/engineering-log/2026-11/2026-11-20-b888--feat-b888-log-per-entry.md"
+	for _, name := range []string{"ops/engineering-log.md", entry, "ops/History-new.md", "ops/plan-new.md", "ops/release-notes-new.md"} {
 		t.Run(name, func(t *testing.T) {
 			root := buildSiteFixture(t)
 			put(t, root, name, fences)
@@ -129,13 +132,18 @@ func TestMarkdownRecordsAreNotBuildSites(t *testing.T) {
 			}
 		})
 	}
-	t.Run("ops/new-runbook.md", func(t *testing.T) {
-		root := buildSiteFixture(t)
-		put(t, root, "ops/new-runbook.md", fences)
-		if err := checkBuildTags(root); err == nil {
-			t.Fatal("a runbook's build stayed outside the census")
-		}
-	})
+	for _, name := range []string{"ops/new-runbook.md", "ops/engineering-log-notes.md", "docs/engineering-log/2026-11/x.md"} {
+		t.Run(name, func(t *testing.T) {
+			root := buildSiteFixture(t)
+			put(t, root, name, fences)
+			if err := checkBuildTags(root); err == nil {
+				t.Fatal("a document's build stayed outside the census")
+			}
+		})
+	}
+	if buildSiteMarkdown(filepath.FromSlash(entry)) {
+		t.Errorf("an entry spelled with the OS's separator is a build site")
+	}
 }
 
 func TestYAMLTypedTagsRefused(t *testing.T) {
