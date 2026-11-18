@@ -6,11 +6,11 @@
 //
 // # Why a status endpoint exists at all
 //
-// The bridge logs to STDERR (logging.Init), and only a SERVICE install
-// redirects that to a file — the unit templates set StandardOutput/
-// StandardError to packaging.DefaultLogPath(), the Windows sign-in
-// launcher redirects to it, and the Windows service opens its own under
-// %PROGRAMDATA% (Deps.LogPath). A `bridge serve` run in a terminal writes
+// The bridge logs to STDERR (logging.Init), and only a service install or
+// the Windows sign-in launcher redirects that to a file — the unit templates
+// set StandardOutput/StandardError to packaging.DefaultLogPath(), the
+// sign-in launcher redirects to it, and the Windows service opens its own
+// under %PROGRAMDATA% (Deps.LogPath). A `bridge serve` run in a terminal writes
 // no log file whatsoever, and a Download button that 404s with no
 // explanation would read as a bug. The status call lets the UI say, before
 // the operator clicks, whether the file Deps.LogPath names is there, and why
