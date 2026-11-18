@@ -57,7 +57,7 @@ func refusedWith(t *testing.T, in Inputs, c Choice, reason ChoiceReason) {
 // dacOfState is what st holds for the test DAC.
 func dacOfState(t *testing.T, st dsdstate.State) dsdstate.DAC {
 	t.Helper()
-	d, ok := st.DAC(dacKey(t))
+	d, ok := st.DAC(dacKey(t), testStamp)
 	if !ok {
 		t.Fatalf("the state holds nothing for the test DAC: %+v", st)
 	}
@@ -104,20 +104,20 @@ func TestTheChecksThatReadTheStateRunInTheirOrder(t *testing.T) {
 func TestTheStoredRevisionIsWhatTheReadSidePublishes(t *testing.T) {
 	r := newRig(t)
 	key := dacKey(t)
-	if got := StoredRevision(r.inputs().State, key); got != 0 {
+	if got := StoredRevision(r.inputs().State, key, testStamp); got != 0 {
 		t.Errorf("no choice of its own: revision %d, want 0", got)
 	}
 	r.mode = dsdstate.ModeConvert
 	st := r.inputs().State
 	st.DACs[0].Choice.Revision = 4
-	if got := StoredRevision(st, key); got != 4 {
+	if got := StoredRevision(st, key, testStamp); got != 4 {
 		t.Errorf("its own choice at revision 4: revision %d, want 4", got)
 	}
 	st.Warnings = append(st.Warnings, dsdstate.Warning{Code: dsdstate.WarningStateUnreadable, At: t0})
-	if got := StoredRevision(st, key); got != 0 {
+	if got := StoredRevision(st, key, testStamp); got != 0 {
 		t.Errorf("a state that does not read: revision %d, want 0, the one its read side publishes", got)
 	}
-	if got := StoredRevision(st, otherModel(t)); got != 0 {
+	if got := StoredRevision(st, otherModel(t), testStamp); got != 0 {
 		t.Errorf("another DAC: revision %d, want 0", got)
 	}
 }

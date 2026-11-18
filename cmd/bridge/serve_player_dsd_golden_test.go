@@ -64,7 +64,7 @@ func dsdGoldenCases(t *testing.T) []dsdGoldenCase {
 		Answer: dsdstate.AnswerClean, On: "2026-11-05"}}
 
 	dopState := dsdstate.Defaults()
-	dopState.DACs = []dsdstate.DAC{{Key: playbacktest.DACKey(), Choice: &dsdstate.Choice{Mode: dsdstate.ModeDoP, Revision: 2, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp}}}
+	dopState.DACs = []dsdstate.DAC{{Key: playbacktest.DACKey(), Stamp: playbacktest.DACStamp(), Choice: &dsdstate.Choice{Mode: dsdstate.ModeDoP, Revision: 2, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp}}}
 
 	off, _, err := dsdstate.Migrate(dsdstate.Defaults(), dsdstate.Input{Legacy: dsdstate.Legacy{DSDMode: dsdstate.ModeOff}, Now: playbacktest.T0})
 	if err != nil {

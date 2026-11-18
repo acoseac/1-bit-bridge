@@ -28,6 +28,9 @@ const (
 
 func ptr[T any](v T) *T { return &v }
 
+// testStamp is the test DAC's maker, as the state keys its entry.
+var testStamp = dsdstate.StampOf("Test")
+
 // dacKey is the test DAC's model.
 func dacKey(t *testing.T) dacprofile.Key {
 	t.Helper()
@@ -184,7 +187,7 @@ func (r *rig) withoutCarrier() *rig {
 
 func (r *rig) inputs() Inputs {
 	key := dacKey(r.t)
-	in := Inputs{Unit: dacprofile.Unit{Key: key, BCDDevice: r.unitBCD}, Kernel: kernel, Altsets: r.altsets, Mixer: r.mixer}
+	in := Inputs{Unit: dacprofile.Unit{Key: key, BCDDevice: r.unitBCD}, Stamp: testStamp, Kernel: kernel, Altsets: r.altsets, Mixer: r.mixer}
 	for _, res := range r.probe {
 		in.Probe = append(in.Probe, res)
 	}
@@ -198,7 +201,7 @@ func (r *rig) inputs() Inputs {
 		}}}
 	}
 	in.State = dsdstate.State{DefaultMode: r.defaultMode}
-	d := dsdstate.DAC{Key: key, DoPConfirmed: r.confirmed, FirstUse: r.firstUse, Listener: r.listener, Evidence: r.evidence}
+	d := dsdstate.DAC{Key: key, Stamp: testStamp, DoPConfirmed: r.confirmed, FirstUse: r.firstUse, Listener: r.listener, Evidence: r.evidence}
 	if r.mode != "" {
 		by := r.by
 		if by == "" {

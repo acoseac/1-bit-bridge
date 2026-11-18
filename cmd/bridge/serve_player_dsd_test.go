@@ -59,6 +59,10 @@ func goBarKey(t *testing.T) dacprofile.Key {
 	return k
 }
 
+// goBarStamp is the GO bar's maker as the player's DSD state keys its entry:
+// the stamp of the manufacturer string its trees hold (goBarIdentityFiles).
+func goBarStamp() dsdstate.Stamp { return dsdstate.StampOf("iFi") }
+
 // goBarLiveIdentity is the GO bar in trees as the legacy reader compares it,
 // production's every field and the migration's model alike: the identity a
 // record made on this unit, at this port, holds.
@@ -254,7 +258,7 @@ func TestAMigratedApprovalCoversOnlyItsRates(t *testing.T) {
 	if st.DefaultMode != dsdstate.ModeAuto || len(st.Warnings) != 0 {
 		t.Errorf("defaultMode %q, warnings %+v; want auto and none", st.DefaultMode, st.Warnings)
 	}
-	d, ok := st.DAC(goBarKey(t))
+	d, ok := st.DAC(goBarKey(t), goBarStamp())
 	if !ok {
 		t.Fatalf("the state holds nothing for the GO bar's model: %+v", st.DACs)
 	}

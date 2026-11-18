@@ -22,11 +22,18 @@ import (
 // them.
 
 // choiceWrite is a write of mode over base for b's bound DAC, as GET publishes
-// its key, within 30 s; its outcome and its line's why.
+// its key, by a writer that read the fixture's unit (its maker's stamp),
+// within 30 s; its outcome and its line's why.
 func choiceWrite(b *Backend, key, mode string, base uint64) ChoiceOutcome {
+	return choiceWriteOf(b, key, fixtureStamp, mode, base)
+}
+
+// choiceWriteOf is choiceWrite by a writer that read the unit of stamp's
+// maker.
+func choiceWriteOf(b *Backend, key string, stamp dsdstate.Stamp, mode string, base uint64) ChoiceOutcome {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return b.ChooseDSD(ctx, ChoiceRequest{DACKey: key, Choice: policy.Choice{BaseRevision: base, Mode: mode, By: dsdstate.ByApp}}).Outcome
+	return b.ChooseDSD(ctx, ChoiceRequest{DACKey: key, ObservedStamp: stamp, Choice: policy.Choice{BaseRevision: base, Mode: mode, By: dsdstate.ByApp}}).Outcome
 }
 
 // boundKey is the bound DAC's key as b publishes it.
@@ -56,7 +63,10 @@ func (refusingContent) Open(context.Context, engine.Reference) (Content, error) 
 // before the DAC is read, the reading being that policy's; a DAC not
 // available before another DAC's key, and that before a state that did not
 // open; and the fence of an earlier write that landed (persist_uncertain)
-// before the state's own checks, a stale base among them.
+// before the state's own checks, a stale base among them. An observed stamp
+// that is no stamp is the choice's words' bad_request, and another maker's
+// unit on the key is another DAC's dac_changed, before a state that did not
+// open and before the fence (B883).
 func TestTheWritesChecksAreAnsweredInTheirOrder(t *testing.T) {
 	busy := func(t *testing.T, b *Backend) {
 		t.Helper()
@@ -82,65 +92,90 @@ func TestTheWritesChecksAreAnsweredInTheirOrder(t *testing.T) {
 		}
 		return b
 	}
+	other := dsdstate.StampOf("Other Labs")
 	for _, tc := range []struct {
 		name  string
 		setup func(t *testing.T) (*Backend, string)
 		mode  string
 		base  uint64
 		want  ChoiceOutcome
+		// stamp is the maker the write observed: "" is the fixture's.
+		stamp dsdstate.Stamp
 	}{
 		{"a word the write does not know, every other check failing too", func(t *testing.T) (*Backend, string) {
 			b := noDSD(t)
 			busy(t, b)
 			closed(t, b)
 			return b, "d1-0000000000000000"
-		}, "loud", 0, ChoiceBadRequest},
+		}, "loud", 0, ChoiceBadRequest, ""},
+		{"a stamp that is no stamp, every other check failing too", func(t *testing.T) (*Backend, string) {
+			b := noDSD(t)
+			busy(t, b)
+			closed(t, b)
+			return b, "d1-0000000000000000"
+		}, dsdstate.ModeOff, 0, ChoiceBadRequest, "s1-0"},
 		{"the writes closed, the player not stopped and no DSD policy", func(t *testing.T) (*Backend, string) {
 			b := noDSD(t)
 			busy(t, b)
 			closed(t, b)
 			return b, "d1-0000000000000000"
-		}, dsdstate.ModeOff, 0, ChoicePersistFailed},
+		}, dsdstate.ModeOff, 0, ChoicePersistFailed, ""},
 		{"the player not stopped, with no DSD policy", func(t *testing.T) (*Backend, string) {
 			b := noDSD(t)
 			busy(t, b)
 			return b, "d1-0000000000000000"
-		}, dsdstate.ModeOff, 0, ChoicePlaybackNotStopped},
+		}, dsdstate.ModeOff, 0, ChoicePlaybackNotStopped, ""},
 		{"no DSD policy, answered before the DAC is read", func(t *testing.T) (*Backend, string) {
 			return noDSD(t), "d1-0000000000000000"
-		}, dsdstate.ModeOff, 0, ChoiceStateUnreadable},
+		}, dsdstate.ModeOff, 0, ChoiceStateUnreadable, ""},
 		{"no DAC available, another DAC's key and no state", func(t *testing.T) (*Backend, string) {
 			b, _ := fixtureSessionBackend(t, func(p *DSDPolicy) {
 				p.Bound = func() (BoundDAC, bool) { return BoundDAC{}, false }
 				p.Store = nil
 			})
 			return b, "d1-0000000000000000"
-		}, dsdstate.ModeOff, 1, ChoiceDACUnavailable},
+		}, dsdstate.ModeOff, 1, ChoiceDACUnavailable, ""},
 		{"another DAC's key and no state", func(t *testing.T) (*Backend, string) {
 			b, _ := fixtureSessionBackend(t)
 			b.cfg.DSD.Store = nil
 			return b, "d1-0000000000000000"
-		}, dsdstate.ModeOff, 1, ChoiceDACChanged},
+		}, dsdstate.ModeOff, 1, ChoiceDACChanged, ""},
+		{"another maker's unit and no state", func(t *testing.T) (*Backend, string) {
+			b, _ := fixtureSessionBackend(t)
+			key := boundKey(t, b)
+			b.cfg.DSD.Store = nil
+			return b, key
+		}, dsdstate.ModeOff, 1, ChoiceDACChanged, other},
+		{"another maker's unit, an earlier write landed", func(t *testing.T) (*Backend, string) {
+			b, store := fixtureSessionBackend(t)
+			st := store.State()
+			b.landedChoice.Store(&st)
+			return b, boundKey(t, b)
+		}, dsdstate.ModeOff, 7, ChoiceDACChanged, other},
 		{"no state", func(t *testing.T) (*Backend, string) {
 			b, _ := fixtureSessionBackend(t)
 			key := boundKey(t, b)
 			b.cfg.DSD.Store = nil
 			return b, key
-		}, dsdstate.ModeOff, 1, ChoiceStateUnreadable},
+		}, dsdstate.ModeOff, 1, ChoiceStateUnreadable, ""},
 		{"an earlier write landed, the base stale", func(t *testing.T) (*Backend, string) {
 			b, store := fixtureSessionBackend(t)
 			st := store.State()
 			b.landedChoice.Store(&st)
 			return b, boundKey(t, b)
-		}, dsdstate.ModeOff, 7, ChoicePersistUncertain},
+		}, dsdstate.ModeOff, 7, ChoicePersistUncertain, ""},
 		{"the base stale", func(t *testing.T) (*Backend, string) {
 			b, _ := fixtureSessionBackend(t)
 			return b, boundKey(t, b)
-		}, dsdstate.ModeOff, 7, ChoiceStale},
+		}, dsdstate.ModeOff, 7, ChoiceStale, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, key := tc.setup(t)
-			if got := choiceWrite(b, key, tc.mode, tc.base); got != tc.want {
+			stamp := tc.stamp
+			if stamp == "" {
+				stamp = fixtureStamp
+			}
+			if got := choiceWriteOf(b, key, stamp, tc.mode, tc.base); got != tc.want {
 				t.Errorf("the write answered %s; want %s", got, tc.want)
 			}
 			// The first acquisition after the write let go of its lease
@@ -251,7 +286,7 @@ func TestAWriteThatPanicsLetsGoOfItsLeaseAndItsTurn(t *testing.T) {
 			} else {
 				b.endProbe(p)
 			}
-			if mode, _, _ := store.State().ChoiceFor(b.dsd.Load().set.Key); mode != tc.wrote {
+			if mode, _, _ := store.State().ChoiceFor(b.dsd.Load().set.Key, b.dsd.Load().set.Stamp); mode != tc.wrote {
 				t.Errorf("the state holds %s after the panic; want %s", mode, tc.wrote)
 			}
 			b.RefreshDSD(true)
@@ -308,7 +343,7 @@ func TestTheChoiceWritesLockOrderHolds(t *testing.T) {
 			modes := []string{dsdstate.ModeNative, dsdstate.ModeConvert, dsdstate.ModeAuto}
 			for j := range 25 {
 				rev := b.dsdPub.Load().view.DAC.Choice.Revision
-				b.ChooseDSD(context.Background(), ChoiceRequest{DACKey: key,
+				b.ChooseDSD(context.Background(), ChoiceRequest{DACKey: key, ObservedStamp: fixtureStamp,
 					Choice: policy.Choice{BaseRevision: rev, Mode: modes[(i+j)%3], FirstUseAcknowledged: true, By: dsdstate.ByApp}})
 			}
 		}()

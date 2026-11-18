@@ -77,21 +77,23 @@ func (c Choice) Check() error {
 }
 
 // StoredRevision is the revision a choice write's base is compared with: the
-// one the read side publishes for key's model (viewOf): its own choice's,
-// and 0 for a model with none or over a state that does not read, where no
-// choice applies. A write back of what GET published therefore matches.
-func StoredRevision(st dsdstate.State, key dacprofile.Key) uint64 {
+// one the read side publishes for key's model of stamp's maker (viewOf): its
+// own choice's, and 0 for one with none or over a state that does not read,
+// where no choice applies. A write back of what GET published therefore
+// matches.
+func StoredRevision(st dsdstate.State, key dacprofile.Key, stamp dsdstate.Stamp) uint64 {
 	if st.Unreadable() {
 		return 0
 	}
-	if d, ok := st.DAC(key); ok && d.Choice != nil {
+	if d, ok := st.DAC(key, stamp); ok && d.Choice != nil {
 		return d.Choice.Revision
 	}
 	return 0
 }
 
 // Choose is what a write of c, at now, does to in.State for the bound DAC
-// (in.Unit), or the check that refuses it (a *ChoiceRefusal, the state
+// (in.Unit, of in.Stamp's maker: its own entry, never another maker's for
+// the key), or the check that refuses it (a *ChoiceRefusal, the state
 // untouched). Its other errors are a choice that is no write at all: a mode,
 // a cap or a writer the state does not hold.
 //
@@ -129,8 +131,8 @@ func Choose(in Inputs, c Choice, now time.Time) (dsdstate.State, error) {
 	if err := c.Check(); err != nil {
 		return in.State, err
 	}
-	key := in.Unit.Key
-	if got := StoredRevision(in.State, key); c.BaseRevision != got {
+	key, stamp := in.Unit.Key, in.Stamp
+	if got := StoredRevision(in.State, key, stamp); c.BaseRevision != got {
 		return in.State, &ChoiceRefusal{Reason: ChoiceStale, Detail: "the choice was written since the revision the write was made from"}
 	}
 	st := in.State.Clone()
@@ -160,12 +162,7 @@ func Choose(in Inputs, c Choice, now time.Time) (dsdstate.State, error) {
 		return in.State, &ChoiceRefusal{Reason: ChoiceFirstUseUnacknowledged, Detail: "the transport's first use is not acknowledged at every rate on this firmware, or a listener rejected it"}
 	}
 
-	i := slices.IndexFunc(st.DACs, func(d dsdstate.DAC) bool { return d.Key.Equal(key) })
-	if i < 0 {
-		st.DACs = append(st.DACs, dsdstate.DAC{Key: key})
-		i = len(st.DACs) - 1
-	}
-	d := &st.DACs[i]
+	d := st.Entry(key, stamp)
 	var rev uint64
 	if d.Choice != nil {
 		rev = d.Choice.Revision
@@ -186,7 +183,7 @@ func Choose(in Inputs, c Choice, now time.Time) (dsdstate.State, error) {
 	case dsdstate.ModeNative, dsdstate.ModeDoP:
 		transports = []string{explicit}
 	case dsdstate.ModeAuto:
-		transports = autoTransports(read, st, key, rd.bcd, at)
+		transports = autoTransports(read, st, key, stamp, rd.bcd, at)
 	}
 	for _, t := range transports {
 		whole := rd.wholeAcknowledgement(t) || c.Mode == dsdstate.ModeAuto && rd.wholeEntry(t)
@@ -243,13 +240,12 @@ func (rd *reading) wholeAcknowledgement(transport string) bool {
 }
 
 // autoTransports are the transports an auto write's set plays at some rate
-// once acknowledged: st, the state the write leaves so far, with both
-// transports acknowledged at every rate under bcd and every rejection kept,
-// read as in reads.
-func autoTransports(in Inputs, st dsdstate.State, key dacprofile.Key, bcd string, at time.Time) []string {
+// once acknowledged: st, the state the write leaves so far, with the entry of
+// key's model of stamp's maker holding both transports acknowledged at every
+// rate under bcd and every rejection kept, read as in reads.
+func autoTransports(in Inputs, st dsdstate.State, key dacprofile.Key, stamp dsdstate.Stamp, bcd string, at time.Time) []string {
 	probe := st.Clone()
-	i := slices.IndexFunc(probe.DACs, func(d dsdstate.DAC) bool { return d.Key.Equal(key) })
-	d := &probe.DACs[i]
+	d := probe.Entry(key, stamp)
 	d.FirstUse = []dsdstate.FirstUse{
 		{Transport: dsdstate.TransportNative, BCDDevice: bcd, AcknowledgedAt: at},
 		{Transport: dsdstate.TransportDoP, BCDDevice: bcd, AcknowledgedAt: at},

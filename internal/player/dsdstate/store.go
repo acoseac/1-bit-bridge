@@ -284,8 +284,11 @@ func (s *Store) State() State {
 // fails may still leave its bytes in the file, which a restart reads, as the
 // writer says: it is not counted made, never counted undone. A change that
 // leaves the state as it was writes nothing, so a fresh install with nothing
-// to write has no file. Writes are serialized on the lock, each on the state
-// the last one left: a compare-and-set (B9's revision) compares inside fn.
+// to write has no file, and a schema-1 file read (Decode) keeps its bytes
+// until a write changes the state its conversion holds, which every start
+// converts those bytes to alike. Writes are serialized on the lock, each on
+// the state the last one left: a compare-and-set (B9's revision) compares
+// inside fn.
 // Once a write has landed and is not known to be durable, the file holds a
 // state the store does not, and every write after it is refused
 // (ErrLandedNotHeld) until the next Open reads the file: no write is made

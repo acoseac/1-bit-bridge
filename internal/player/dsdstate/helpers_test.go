@@ -40,6 +40,15 @@ func brooklyn(t *testing.T) dacprofile.Key {
 }
 func hugo(t *testing.T) dacprofile.Key { return newKey(t, 0x262a, 0x9302, nil, nil) }
 
+// The makers of the tests' DACs, as the state keys their entries (StampOf
+// of each one's manufacturer string): the GO bar's, the Brooklyn's and the
+// Hugo's.
+var (
+	iFi   = StampOf("iFi")
+	mytek = StampOf("Mytek")
+	chord = StampOf("Chord")
+)
+
 // goBarIdentity is the GO bar as the legacy reader compares it, at a port
 // and on a firmware.
 func goBarIdentity(port, bcd string) qualification.Identity {
@@ -49,7 +58,7 @@ func goBarIdentity(port, bcd string) qualification.Identity {
 // bound is the GO bar bound now: at another port than any record names, on
 // the firmware the records were made on.
 func bound(t *testing.T) *Bound {
-	return &Bound{Key: goBar(t), Identity: goBarIdentity("platform-xhci-hcd.1.auto-usb2-2", "0123")}
+	return &Bound{Key: goBar(t), Stamp: iFi, Identity: goBarIdentity("platform-xhci-hcd.1.auto-usb2-2", "0123")}
 }
 
 // durable gives a test the real durable writer over a directory barrier and

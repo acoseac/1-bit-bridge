@@ -93,6 +93,11 @@ type Inputs struct {
 	// Unit is the bound DAC's model identity and firmware (bcdDevice), as
 	// the sysfs reader reads them.
 	Unit dacprofile.Unit
+	// Stamp is the bound DAC's maker (dsdstate.StampOf of the manufacturer
+	// string the reading read), which with Unit's key names the entry of the
+	// state's that is the unit's own: another maker's entry for the key is no
+	// part of its set.
+	Stamp dsdstate.Stamp
 	// Profiles is the profile database (dacprofile.Default's). The DAC is
 	// known when exactly one profile matches Unit; nil knows none.
 	Profiles *dacprofile.Database
@@ -246,9 +251,11 @@ type Rate struct {
 // and publication both take (R10, R11), so what the epoch advertises is
 // what plays.
 type Set struct {
-	// Key and BCDDevice are the model and the firmware the set was computed
-	// for, what the check after open compares the opened node with.
+	// Key, Stamp and BCDDevice are the model, the maker and the firmware the
+	// set was computed for, what the check after open compares the opened
+	// node with.
 	Key       dacprofile.Key
+	Stamp     dsdstate.Stamp
 	BCDDevice string
 	// Known reports that exactly one profile matched the unit, Profile its
 	// ID.
@@ -268,22 +275,23 @@ type Set struct {
 }
 
 // Identity is a unit's identity as a set is computed for it and as a sink
-// opens it: the DAC model's key and its firmware (bcdDevice), never a serial
-// or a port.
+// opens it: the DAC model's key, its maker's stamp and its firmware
+// (bcdDevice), never a serial or a port.
 type Identity struct {
 	Key       dacprofile.Key
+	Stamp     dsdstate.Stamp
 	BCDDevice string
 }
 
 // Same reports whether i and o are one identity: the keys by their canonical
-// forms, the firmware by its value, an unread one ("") the same only as
-// another unread one.
+// forms, the stamps and the firmware by their values, an unread firmware ("")
+// the same only as another unread one.
 func (i Identity) Same(o Identity) bool {
-	return i.Key.Equal(o.Key) && canonicalBCD(i.BCDDevice) == canonicalBCD(o.BCDDevice)
+	return i.Key.Equal(o.Key) && i.Stamp == o.Stamp && canonicalBCD(i.BCDDevice) == canonicalBCD(o.BCDDevice)
 }
 
 // Identity is the identity s was computed for.
-func (s Set) Identity() Identity { return Identity{Key: s.Key, BCDDevice: s.BCDDevice} }
+func (s Set) Identity() Identity { return Identity{Key: s.Key, Stamp: s.Stamp, BCDDevice: s.BCDDevice} }
 
 // canonicalBCD is a firmware in the state's form, four lowercase
 // hexadecimal digits, or "" for one that does not read.
@@ -314,7 +322,7 @@ func (s Set) At(bitRate int) Rate {
 // the design's section 3.2). It reads nothing but in.
 func Effective(in Inputs) Set {
 	rd := newReading(in)
-	s := Set{Key: in.Unit.Key, BCDDevice: rd.bcd}
+	s := Set{Key: in.Unit.Key, Stamp: in.Stamp, BCDDevice: rd.bcd}
 	if rd.profile != nil {
 		s.Known, s.Profile = true, rd.profile.ID
 	}
@@ -326,7 +334,7 @@ func Effective(in Inputs) Set {
 		}
 		return s
 	}
-	s.Mode, s.MaxBitRate, s.Own = in.State.ChoiceFor(in.Unit.Key)
+	s.Mode, s.MaxBitRate, s.Own = in.State.ChoiceFor(in.Unit.Key, in.Stamp)
 	s.Conversion = rd.conversion()
 	for _, r := range dsdRates {
 		rate := Rate{Native: rd.native(r), DoP: rd.dop(r)}
@@ -355,7 +363,7 @@ func newReading(in Inputs) *reading {
 			rd.profile = &p
 		}
 	}
-	rd.dac, _ = in.State.DAC(in.Unit.Key)
+	rd.dac, _ = in.State.DAC(in.Unit.Key, in.Stamp)
 	rd.gain = newGainCheck(in.Mixer, rd.profile, rd.bcd)
 	return rd
 }

@@ -31,7 +31,7 @@ func TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames(t *testing.T) {
 	store.Land(fmt.Errorf("the directory's barrier failed: %w", atomicwrite.ErrLanded))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	res := b.ChooseDSD(ctx, playback.ChoiceRequest{DACKey: b.Policy().DSD.DAC.Key,
+	res := b.ChooseDSD(ctx, playback.ChoiceRequest{DACKey: b.Policy().DSD.DAC.Key, ObservedStamp: playbacktest.DACStamp(),
 		Choice: policy.Choice{BaseRevision: 1, Mode: dsdstate.ModeNative, MaxBitRate: playbacktest.DSD128, By: dsdstate.ByApp}})
 	if res.Outcome != playback.ChoicePersistUncertain {
 		t.Fatalf("the write that landed answered %s; want persist_uncertain", res.Outcome)

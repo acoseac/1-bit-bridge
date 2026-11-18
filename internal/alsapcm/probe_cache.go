@@ -2,17 +2,23 @@ package alsapcm
 
 import "sync"
 
-// ProbeUnit is what a probe's answers hold for: the DAC model, its firmware,
-// the kernel and the unit's enumeration. An answer is kept under exactly the
-// unit it was given for, and a lookup under any other finds none, so a
-// change of any of the four lapses it (B728's design, sections 1.2 and 5): a
-// bcdDevice change, a new kernel, a replug or a reset is probed again.
+// ProbeUnit is what a probe's answers hold for: the DAC model, its maker,
+// its firmware, the kernel and the unit's enumeration. An answer is kept
+// under exactly the unit it was given for, and a lookup under any other finds
+// none, so a change of any of the five lapses it (B728's design, sections 1.2
+// and 5): another maker's unit on the model's key, a bcdDevice change, a new
+// kernel, a replug or a reset is probed again.
 type ProbeUnit struct {
 	// Model is the DAC model's identity, the canonical form of its key
 	// (dacprofile.Key.Canonical: the vendor and product IDs, the interface
 	// and the product string), never a serial, a port, a card number or a
 	// device number.
 	Model string
+	// Stamp is the unit's maker, the stamp of its manufacturer string the
+	// player's DSD state keys an entry by beside the model's key
+	// (dsdstate.StampOf), which the key does not hold: a unit of another
+	// maker on the model's key is another model's here.
+	Stamp string
 	// Firmware is the unit's bcdDevice, four lowercase hexadecimal digits.
 	Firmware string
 	// Kernel is the running kernel's release (uname -r).
@@ -46,8 +52,12 @@ type ProbeUnit struct {
 // altsets. It is safe for concurrent use.
 type ProbeCache struct {
 	mu     sync.Mutex
-	models map[string]*probeModel
+	models map[probeModelKey]*probeModel
 }
+
+// probeModelKey is a DAC model of one maker, as the cache keeps its answers:
+// a unit's Model and Stamp.
+type probeModelKey struct{ model, stamp string }
 
 // probeModel is what the cache keeps for one DAC model: the unit its answers
 // are for, the answers, and the model's epoch.
@@ -59,7 +69,7 @@ type probeModel struct {
 
 // NewProbeCache is an empty cache.
 func NewProbeCache() *ProbeCache {
-	return &ProbeCache{models: map[string]*probeModel{}}
+	return &ProbeCache{models: map[probeModelKey]*probeModel{}}
 }
 
 // ProbeEpoch is a probe's place in its model's history: the unit the probe
@@ -80,10 +90,10 @@ type ProbeEpoch struct {
 func (c *ProbeCache) Begin(u ProbeUnit) ProbeEpoch {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	m := c.models[u.Model]
+	m := c.models[probeModelKey{u.Model, u.Stamp}]
 	if m == nil {
 		m = &probeModel{}
-		c.models[u.Model] = m
+		c.models[probeModelKey{u.Model, u.Stamp}] = m
 	}
 	if m.epoch == 0 || m.unit != u {
 		m.unit, m.answers = u, nil
@@ -104,7 +114,7 @@ func (c *ProbeCache) Begin(u ProbeUnit) ProbeEpoch {
 func (c *ProbeCache) Record(e ProbeEpoch, rep ProbeReport) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	m := c.models[e.unit.Model]
+	m := c.models[probeModelKey{e.unit.Model, e.unit.Stamp}]
 	if m == nil || m.epoch != e.epoch {
 		return false
 	}
@@ -127,7 +137,7 @@ func (c *ProbeCache) Record(e ProbeEpoch, rep ProbeReport) bool {
 func (c *ProbeCache) Answer(u ProbeUnit, cand ProbeCandidate) ProbeResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if m := c.models[u.Model]; m != nil && m.unit == u {
+	if m := c.models[probeModelKey{u.Model, u.Stamp}]; m != nil && m.unit == u {
 		if r, ok := m.answers[cand]; ok {
 			return r
 		}
@@ -135,16 +145,17 @@ func (c *ProbeCache) Answer(u ProbeUnit, cand ProbeCandidate) ProbeResult {
 	return ProbeResult{Candidate: cand, Answer: ProbeNotProbed}
 }
 
-// Forget drops every answer kept for model and moves its epoch: the
-// migration's part for that DAC (playback.Backend.ForgetDSDProbe), which
-// probes it again where it is free and where it is not leaves it not probed
-// rather than answered from before the part. A probe begun before it keeps
-// nothing when it ends; the one begun after it keeps its answers. A choice
+// Forget drops every answer kept for model of stamp's maker and moves its
+// epoch: the migration's part for that DAC (playback.Backend.ForgetDSDProbe),
+// which probes it again where it is free and where it is not leaves it not
+// probed rather than answered from before the part. A probe begun before it
+// keeps nothing when it ends; the one begun after it keeps its answers.
+// Another maker's answers for the model's key are left as they are. A choice
 // written for the DAC (B728 B9) forgets nothing: it makes a probe due.
-func (c *ProbeCache) Forget(model string) {
+func (c *ProbeCache) Forget(model, stamp string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if m := c.models[model]; m != nil {
+	if m := c.models[probeModelKey{model, stamp}]; m != nil {
 		m.answers = nil
 		m.epoch++
 	}

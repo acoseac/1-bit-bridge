@@ -100514,6 +100514,310 @@ Each control fails on the unfixed test and passes with the fix:
 - **The files:** `git diff --name-only 9acee209..HEAD` names the three
   test files and this log.
 
+## 2026-11-15 — B883: a DAC's DSD state entry is the bound unit's own
+
+Branch `fix/b883-dsd-entry-maker`, from main at bf622968 (B728 B9 PR 2,
+#1453). Commits: 1ee9ce8c (the mechanism, its tests, qualificationVersion
+52 and the runbook), 6317f944 and 4ae7bb58 (the bump's control, committed
+and reverted), b743ebff and e5699d86 (two tests made to fail where their
+controls aim), 95c21342, 7cc1e0b0 and 4675cde4 (three more tests), then
+this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, GOMAXPROCS=8 of 16
+cores.
+
+### What changed
+
+- **The state keys each DAC entry by its model's key and its maker's
+  stamp.** `dsdstate.StampOf` is `s1-` and the SHA-256 of
+  `onebit:dsdstate:manufacturer:v1`, a NUL and the manufacturer string
+  exactly as the readers return it after their own trim
+  (`alsa.SysfsReader.UnitModel` for the policy, `Qualification` for the
+  migration), or `-` for a unit with none. Nothing is redacted, folded or
+  normalized first, and the stamp never comes from `unitText` or the
+  published model: two strings a byte apart are two makers. A manufacturer
+  that does not read is the reader's error, never `-`: the reading, the
+  check after open and the probe's check refuse.
+- **The file is schema 2.** Each entry carries `"stamp"`, and an entry
+  whose stamp is missing, null, empty or of no form `StampOf` makes does not
+  check (the file is damaged, `Refusing`). Two entries of one key and stamp
+  do not check; the entries sort by key, then stamp; the 256-entry cap
+  stays.
+- **Every reader and writer takes the bound unit's stamp.** The accessors
+  take it (`DAC`, `ChoiceFor`, `Entry`), so a caller by key alone does not
+  compile: the effective policy (`policy.Inputs.Stamp`, `Set.Stamp`), the
+  read side, a choice's write (`StoredRevision`, its entry, auto's
+  acknowledgements), the migration's two parts (`Bound.Stamp`, from
+  `BoundOf`), playback's three evidence writers (the stamp of the set or the
+  probe the occurrence belongs to, captured then), the probe cache (keyed by
+  model and stamp; `Forget(model, stamp)`), the check after open and the
+  probe's check (`wrong_device` on another maker), and `policy.Identity`,
+  which `dsdSet.same` and `Reconcile` compare through.
+- **A choice's write carries the stamp it read the DAC for**
+  (`ChoiceRequest.ObservedStamp`, typed `dsdstate.Stamp`). One that is no
+  stamp is `bad_request` with the choice's own words, before the turn and
+  the lease, the journal naming no mode. One of another maker's unit is
+  `dac_changed` right after the key's check, before the journal's `from`,
+  the fence and the compare-and-set. The route that carries it on the wire
+  is B9 PR 3's.
+
+### A schema-1 file
+
+A schema-1 file recorded no maker. `Decode` checks it by schema 1's frozen
+rules first (a stamp member, or a `schema_1` marker, in a schema-1 file is
+refused as damaged), then holds its conversion, read from the file's bytes
+alone:
+
+| Schema 1 holds | Held as | Why native or DoP can never be newly authorized |
+|---|---|---|
+| a DAC's choice, DoP confirmation, first-use acknowledgements, listener answers, evidence | dropped | it removes authorizations and adds none |
+| `defaultMode` (`auto` or `off`) | kept | never native |
+| `state_unreadable`, `migrated_off` | kept | the refusal at every rate stays |
+| per-DAC migration warnings | dropped with their entries | display only, and nothing would clear them |
+| no marker, `keys` waiting or done | `schema_1` | no migration runs over it, so nothing is derived again |
+| `state_unreadable` marker | kept | `Refusing` stays `Refusing` |
+
+A dropped refusal falls to the default kept: the migration's fallback
+`native` or `dop` pending its acknowledgement, and a DAC's own `off`, play
+under `auto` as every DAC the state knows nothing of plays, DSD converted to
+PCM where a conversion is offered and refused (`conversion_not_offered`)
+where none is; under `off`, refused. `Open` writes nothing; the first
+`Update` that changes the state writes schema 2, and one that changes
+nothing keeps the schema-1 bytes, which every start converts alike. A
+restore installs the snapshot's conversion, with its observations dropped,
+in place of whatever the box held; bytes that do not decode go in as they
+are, and the next load refuses them.
+
+### Other changes of behaviour
+
+- **A record of another maker than the bound unit** (the migration's
+  identity mismatch): the bound unit gets the fallback under its own stamp
+  and the record waits for its model; once that maker's unit is bound, the
+  record's rows are its own entry, at its first revision, and the first
+  unit's fallback stays its own. Under schema 1 the rows replaced that
+  fallback at revision 2, in the one entry the key had.
+- **Warnings stay keyed by the model's key**: the migration's rows and a
+  choice's write clear a key's migration warnings for every maker sharing
+  it, and the read side shows them on each. Warnings explain and permit
+  nothing.
+
+### Who meets the conversion
+
+No release tag contains 13a388be, which added the state (as checked before
+this change; this clone holds no tags), so a box upgrading from a release
+holds no state file and migrates fresh, under stamps. A box that
+ran a main build since the state merged may hold a schema-1 file
+(candidates, main builds, images built from main, restores of their
+snapshots). Its DAC entries are dropped at the first start: each DAC asks
+for its first use again and plays by the default it had. A choice can be
+written again once B9 PR 3's route exists. Until then the operator can stop
+the bridge, move `player-dsd.json` aside and start it: the bridge then
+migrates fresh from its config, under the bound unit's stamp. That gives
+native or DoP back only where a qualification record matching the bound
+unit, and the legacy keys that name it, are on the box. A snapshot carries
+no qualification record, but a restore leaves the records already on the
+destination; where they are gone, a fresh migration writes the fallback
+choice alone, and native or DoP waits for the route. We do not claim that
+no box meets this.
+
+Release note, drafted: "The player's DSD settings are now kept for each DAC
+model of each maker. A box that ran a pre-release build of the player's DSD
+support asks for each DAC's first use again, once, and plays DSD by the
+bridge's default until a choice is made for it."
+
+### What stays
+
+- The stamp is a plain digest, not a keyed one: the state file already
+  keeps keys built from product strings, and a serial at rest in the state
+  is backlog B772's. A manufacturer string that holds a short serial can be
+  found from its stamp by trying each, so the stamp is kept in the state's
+  file alone, on no wire and in no log line.
+- Makers whose strings read alike (byte-equal after the trim, or none)
+  share an entry. A string that holds a serial or a port, or changes with
+  the firmware, splits one maker's units: they fail closed, to first use and
+  the default.
+- B9 PR 3 carries the maker on the wire, a token derived from the stamp,
+  with its stale-write tests at revision 0 and at equal revisions; B12 binds
+  a check's answer to the check's stamp; B13 writes the console's choice
+  through `ChooseDSD`. No DSD write route exists after this change
+  (`internal/api/outputs_dsd_read_test.go`, `TestNoHealthFlagBeforeItsRoute`).
+- Sequencing: B9 PR 3 depends on this change merged. The two merge back to
+  back, this one first, each with its own green gate, with the bridge's
+  distribution held between them, so no build carries this one alone.
+
+### Proofs
+
+Red first: each outcome test was written against a stage of the change that
+had every caller moved to the stamped accessors and compared nothing by the
+stamp (schema 1 written, no conversion, `Identity.Same`, the probe cache and
+the write's check blind to it), and run against it through `go test
+-overlay` with a names-only shim for schema 1's file shapes. Every one was
+red there, each at its own assertion:
+
+- dsdstate: `TestAnEntryIsItsModelsOfOneMaker`,
+  `TestASchemaOneStateIsHeldWithNoneOfItsEntries` (every shape of a schema-1
+  state through `Open`), `TestAWriteOverASchemaOneFileIsMadeOnlyWhereItChangesTheState`
+  (the no-op `Update` keeps the bytes; a changing one writes schema 2),
+  `TestAWriteOverASchemaOneFileThatFailsRestartsFromWhatTheFileHolds` (a
+  write refused before it lands, and one that lands, each then reopened),
+  `TestARestoreInstallsTheSnapshotsConversionWhateverTheBoxHeld` (seven
+  snapshots over three box states), `TestAMigrationGoesOnOverASchemaTwoStateAcrossARestart`
+  (both waiting continuations, and a markerless state's migration),
+  `TestNoMigrationRunsOverASchemaOneState`,
+  `TestTheRecordsOwnModelTakesTheRecordOverItsFallback` (A6),
+  `TestTheStateIsSchemaTwoAsWritten`, `TestTheStateIsSchemaOneAsWritten` and
+  `TestTheStateRefusesWhatNoWriterWrites`;
+- policy: `TestNoSchemaOneEntryAuthorizesNativeOrDoP` (the table's rows
+  through `Open`, `Update` and `WriteRestored`, a conversion offered and
+  not), `TestAReconciliationTellsTwoMakersOfOneModelApart` (identical plans,
+  key and firmware alike: a heard occurrence, a released pause and frames
+  buffered in the first unit's sink revoked, a successor with no sink kept),
+  `TestAChoiceIsTheBoundUnitsOwnEntrysAlone` and
+  `TestAUnitWithNoManufacturerStringReadsOnlyAnEntryOfNone` (A7);
+- playback: `TestAnotherMakersUnitOfTheModelReadsNoneOfTheFirstsEntry` (A
+  migrated fresh, serials read, then B bound and B's own write),
+  `TestAWriteMadeFromAnotherMakersReadSideIsRefused`,
+  `TestAMakerChangeAtTheSameKeyAndFirmwareIsProbedAgain`,
+  `TestWhatPlaybackObservedIsWrittenForTheMakerItWasObservedUnder` (the three
+  writers, each held until another maker's set is published) and
+  `TestTheOpenAndTheProbeRefuseANodeOfAnotherMakerOrWhoseStringsDoNotRead`;
+- alsapcm: `TestEachMakerOfAModelHasAnswersOfItsOwn`, and the new cases of
+  `TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor` (red at the
+  rig's 60 s watchdog: the track plays) and
+  `TestAProbeRecordsNothingOfAUnitSwappedInBeforeItsOpen`;
+- cmd/bridge: `TestARecordOfAnotherUnitWaitsForItsOwnModel` (A6 through
+  serve) and `TestAStateMovedAsideMigratesTheBoundUnitAfresh` (the way back
+  above, the record kept and gone).
+
+`TestAnEntryWithoutAStampIsADamagedState` (a missing, null, empty or
+malformed stamp, opened where it lies and restored then opened) holds
+schema 2's strictness, which no stage before it wrote; control 7 is its red.
+
+Two invariants held before and hold after, each passing on main's tree
+(bf622968, the test file copied into it) and here:
+`TestAManufacturerStringThatDoesNotReadRefusesEveryRate` (A8, through the
+box's own readers) and `TestASchemaOneFileHoldingWhatSchemaOneHasNotDoesNotRead`
+(A9).
+
+Controls, each an uncommitted edit of the committed tree, predicted in
+writing first and restored after its run:
+
+1. A redacted manufacturer string stamped, in `BoundOf`
+   (`card.USB.Serial.Redact(q.Manufacturer)`) and in the reading
+   (`unitText`): "Audio 1 Labs" with serial 1 and "Audio 2 Labs" with
+   serial 2 share a stamp, and the cross-maker case is red ("B plays
+   [native …]"). Its first run was red earlier than predicted, at the test's
+   lookup of A's entry by A's raw stamp; e5699d86 finds that entry as the
+   state holds it, and the rerun was red where predicted.
+2. `Identity.Same` without the stamp: the reconcile case red on its
+   verdicts (Keep where Revoke is wanted), the open of another maker's unit
+   taken.
+3. A conversion keeping one schema-1 entry: every authorization row red.
+4. A conversion keeping a waiting marker: the held state, the no-migration
+   case and the restore matrix red on the waiting cells.
+5. A8: a manufacturer that does not read taken for none in `UnitModel`: red.
+6. A9: schema 1 decoded without `DisallowUnknownFields`: red on the stamp
+   member.
+7. `DAC.check` without the stamp's validity: every case of the bad-stamp
+   test and the refusal table's seven stamp cases red.
+8. The bump: 6317f944 put `qualificationVersion` back to 51 and the version
+   gate refused it ("guarded code changed without qualificationVersion
+   increase (51 -> 51)"); 4ae7bb58 reverts it, and the gate passes.
+
+Runs:
+
+- the touched tests `-race -count=50`: dsdstate 92 s, policy 8 s, playback
+  7 s, alsapcm 18 s, backup 340 s, cmd/bridge 274 s, and the three added
+  after (the check order's new cases 1 s, the bad stamp 10 s, the way back
+  121 s), all pass;
+- `-race -timeout 120m`, once each: `./internal/player/...` 46 s,
+  `./internal/alsapcm` 79 s, `./internal/api` 152 s, `./internal/backup`
+  744 s, `./cmd/bridge` 1,577 s: all pass, no race reported;
+- `make vet` clean, and for linux/386 too;
+- the pinned gofmt over every changed file: clean;
+- the version gate, bf622968..HEAD: OK.
+
+## 2026-11-15 — B883 round 2: the maker each evidence write is made for, in every order
+
+Branch `fix/b883-dsd-entry-maker` at 174ba363 (round 1 and its rules), main
+still at bf622968. Test-only, by the owner's decision of the day: no
+production file changed, and `qualificationVersion` stays 52. Commits:
+ffd6eff6 (the tests), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, GOMAXPROCS=8 of 16
+cores.
+
+### What the round adds
+
+- **The two playback writers in each order.**
+  `TestWhatPlaybackObservedIsWrittenForTheMakerItWasObservedUnder` held each
+  write at the store while another maker's unit was bound and its set
+  published. For `noteDriverAccepted` and `noteStreamingObserved` the write is
+  now also made once the other maker's set is published, from the first
+  maker's set as an occurrence admitted under it keeps it: the first maker's
+  entry holds what was observed, and the other maker has no entry. The held
+  cases stay.
+- **The probe as the supervisor asks it.**
+  `TestAProbesAcceptanceIsWrittenForTheMakerItWasBegunFor` runs `ProbeDSD`
+  over a stand-in kernel (`Config.Probe`) that opens the node, asks the
+  probe's check after open and accepts DSD_U32_BE at DSD64: (a) held at the
+  existing `Probed` seam once the probe's call has returned, the other
+  maker's unit bound and its set published there, then let go; (b) the other
+  maker's set published before the probe begins, the box then reading the
+  first maker's unit with no refresh between, `ProbeDSD`'s own refresh after
+  the probe publishing the first's again. In both the first maker's entry
+  holds the acceptance and the other maker has none. No seam was added.
+- **A manufacturer string that does not read, through the box's own
+  readers.** The case in
+  `TestTheOpenAndTheProbeRefuseANodeOfAnotherMakerOrWhoseStringsDoNotRead`
+  was a stand-in box whose whole read failed, which no reader's change could
+  reach. It is now `HostBox` over the GO bar's sysfs tree: the unit with no
+  manufacturer attribute (stamp `-`), its set computed for it, is taken by
+  `checkDSDNode` and by the probe's check (`probedUnit`); a NUL in the
+  attribute, or a directory at its name, is then refused at both. The test's
+  doc claim stands on control 15.
+- The store's hold and the probe's wait outside the Once their release takes
+  (`firstHold`), each release registered as a cleanup after the backend.
+
+### Controls
+
+Each an uncommitted edit of ffd6eff6, predicted in writing first, restored
+after its run, and the same tests run green again on the restored tree:
+
+11. `noteDriverAccepted` recording under the published set's stamp: red in
+    its after-the-switch case alone, both assertions; the held cases green.
+12. `noteStreamingObserved` the same: red in its after-the-switch case alone.
+13. `noteProbed` recording under the published set's stamp: red in both probe
+    schedules, (b) too, since the note is made before `ProbeDSD`'s refresh;
+    the held probe row green.
+14. `probeDSD` taking its stamp from the published set in place of the box's
+    reading: red in schedule (b) alone.
+15. `alsa.SysfsReader.UnitModel` taking a manufacturer string that does not
+    read for none: red in both new cases, the open and the probe's check each
+    taking the unit, and in `TestAManufacturerStringThatDoesNotReadRefusesEveryRate`
+    as in round 1.
+
+### Where the code answers otherwise than the brief
+
+The runbook's sentence in its version 13 entry (PR #1356, "rerun qualification
+with version N") is the one match of `TestQualificationRunbookVersion`'s rerun
+pattern, which wants exactly one such reference, equal to `Version`: #1356
+wrote 13, main has 51, and each bump has rewritten it. Set to 13 (an
+uncommitted edit, restored), the test is red: "runbook rerun =
+[["qualification with version 13" "13"]]; want one reference to version 52";
+and the test lies under the version gate's `internal/player/qualification/`
+prefix. The sentence stays at 52 for the owner to decide: a current rerun
+instruction beside the version 52 paragraph with the pattern held to it, or
+the historical sentence worded so the pattern does not take it.
+
+### Runs
+
+- the three touched tests `-race -count=50`: pass, 2.8 s;
+- `./internal/player/playback/...` once under `-race -timeout 120m`, in the
+  build slot: pass, 3.1 s, no race reported;
+- `make vet` clean, and for linux/386 too;
+- the pinned gofmt over every changed file: clean; the version gate,
+  bf622968..HEAD: OK;
+- with `rules-b883-r2.patch` applied, `make docs-check` and
+  `TestEveryCitedTestNameExists` pass; the patch was then taken back.
 ## 2026-11-15 — B872U: the updater's tick seam takes its hold before it hands an arming over
 
 Branch `diag/b872u-updater-wake`, from main at bf622968. Commits:

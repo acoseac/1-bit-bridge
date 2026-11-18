@@ -16,16 +16,17 @@ import (
 
 // dsdStateBeforeTheBackup is a player-dsd.json as the box holds it when the
 // backup is taken: a migrated explicit off (defaultMode off, its marker and
-// its warning), a DAC the app chose for, with a DoP confirmation, a migrated
+// its warning), a DAC of one maker the app chose for, with a DoP confirmation, a migrated
 // acknowledgement of DSD64 alone that playback then observed, two listener
 // answers and what this box observed of it, and a second DAC of which this
 // box observed something and nothing else.
 const dsdStateBeforeTheBackup = `{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "defaultMode": "off",
   "dacs": [
     {
       "key": {"vendorId": "20b1", "productId": "3009", "interface": 1, "product": "GO bar"},
+      "stamp": "s1-c382419e7cb5a229735d6ed02a2113d164f6eb67ab60c5dcdf6e0ead0c50840d",
       "choice": {"mode": "native", "maxBitRate": 5644800, "revision": 3, "setAt": "2026-11-05T10:00:00Z", "setBy": "app"},
       "dopConfirmed": {"bcdDevice": "0123", "confirmedAt": "2026-11-05T10:01:00Z", "setBy": "app"},
       "firstUse": [{"transport": "native", "bcdDevice": "0123", "bitRates": [2822400], "acknowledgedAt": "2026-11-05T10:02:00Z", "observedAt": "2026-11-05T10:03:00Z"}],
@@ -37,6 +38,7 @@ const dsdStateBeforeTheBackup = `{
     },
     {
       "key": {"vendorId": "262a", "productId": "9302", "interface": null, "product": null},
+      "stamp": "s1-9320b2a37f7de8baed0d59ed555e472cec98e958e92e5570e688b9135ad899c3",
       "choice": null,
       "dopConfirmed": null,
       "firstUse": [],
@@ -81,7 +83,7 @@ func TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence(t *testing.T) {
 	}
 
 	// The box moves on: another state, which the restore replaces whole.
-	const since = `{"schemaVersion": 1, "defaultMode": "auto", "dacs": [{"key": {"vendorId": "152a", "productId": "85de", "interface": 2, "product": "Brooklyn DAC+"}, "choice": {"mode": "convert", "maxBitRate": 0, "revision": 1, "setAt": "2026-11-06T08:00:00Z", "setBy": "console"}, "dopConfirmed": null, "firstUse": [], "listener": [], "evidence": []}], "migratedFrom": null, "warnings": []}`
+	const since = `{"schemaVersion": 2, "defaultMode": "auto", "dacs": [{"key": {"vendorId": "152a", "productId": "85de", "interface": 2, "product": "Brooklyn DAC+"}, "stamp": "s1-a4fb83edce376ebc05ba1e858655de49c6bfcc424616f9c8e671b29f03d1dd03", "choice": {"mode": "convert", "maxBitRate": 0, "revision": 1, "setAt": "2026-11-06T08:00:00Z", "setBy": "console"}, "dopConfirmed": null, "firstUse": [], "listener": [], "evidence": []}], "migratedFrom": null, "warnings": []}`
 	if err := os.WriteFile(live, []byte(since), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +118,7 @@ func TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	kept := before["dacs"].([]any)[0].(map[string]any)
-	for _, field := range []string{"key", "choice", "dopConfirmed", "listener"} {
+	for _, field := range []string{"key", "stamp", "choice", "dopConfirmed", "listener"} {
 		if !reflect.DeepEqual(dacs[0].(map[string]any)[field], kept[field]) {
 			t.Errorf("the restored DAC's %s is %v, want %v as the backup had it", field, dacs[0].(map[string]any)[field], kept[field])
 		}

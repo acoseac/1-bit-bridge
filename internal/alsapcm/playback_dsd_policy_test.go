@@ -315,9 +315,10 @@ func TestStreamingObservedNeedsFiveSecondsWithoutAFault(t *testing.T) {
 // TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor (B728 B7; the
 // design's sections 3.4 and 3.5): the check after open requires the node's
 // unit to be the DAC the set the occurrence was admitted under was computed
-// for, its model and its firmware, never its port: another model, or the
-// same model on another firmware, swapped in between the admission and the
-// open, is refused before a frame, and nothing it did is recorded.
+// for, its model, its maker and its firmware, never its port: another model,
+// another maker's unit of the model, or the same model on another firmware,
+// swapped in between the admission and the open, is refused before a frame,
+// and nothing it did is recorded.
 func TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -331,6 +332,11 @@ func TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor(t *testing.T) {
 		{"another firmware", func() alsa.UnitModel {
 			m := playbacktest.DACUnit()
 			m.BCDDevice = "0200"
+			return m
+		}},
+		{"another maker", func() alsa.UnitModel {
+			m := playbacktest.DACUnit()
+			m.Manufacturer = "Other Labs"
 			return m
 		}},
 	} {
@@ -518,7 +524,7 @@ func TestAGainChangeRevokesDoPWithoutConsent(t *testing.T) {
 	if n := d.store.Writes(); n != writes {
 		t.Errorf("the revocation wrote the state (%d writes, %d before): no consent is asked or recorded", n, writes)
 	}
-	if c, _ := d.store.State().DAC(playbacktest.DACKey()); c.Choice == nil || c.Choice.Mode != dsdstate.ModeDoP {
+	if c, _ := d.store.State().DAC(playbacktest.DACKey(), playbacktest.DACStamp()); c.Choice == nil || c.Choice.Mode != dsdstate.ModeDoP {
 		t.Errorf("the choice after the revocation: %+v, want DoP as the user left it", c.Choice)
 	}
 }
@@ -753,7 +759,7 @@ func TestALandedMigrationFencesWhatPlaybackRecords(t *testing.T) {
 	if err := store.Update(func(st *dsdstate.State) error { *st = chosen.Clone(); return nil }); err != nil {
 		t.Fatalf("the choice's write: %v", err)
 	}
-	bound := dsdstate.Bound{Key: playbacktest.DACKey()}
+	bound := dsdstate.Bound{Key: playbacktest.DACKey(), Stamp: playbacktest.DACStamp()}
 	if _, err := store.Migrate(dir, dsdstate.Legacy{DSDMode: dsdstate.ModeNative}, &bound); !errors.Is(err, atomicwrite.ErrLanded) {
 		t.Fatalf("the migration's write: %v, want it landed and not known to be durable", err)
 	}
