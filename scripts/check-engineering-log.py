@@ -56,6 +56,7 @@ FROZEN_BYTES = 7_162_775
 FROZEN_SHA256 = "8034010bf550376950b3cc1a59c8c8b3e1b0643c9431e98cfa04be9b1935e1ef"
 
 NAME_MAX = 120  # characters in an entry's file name
+NAME_SURROGATE = 0x20000000  # a Windows reparse tag's bit for a point naming another path (a link, a junction)
 BRANCH_MAX = 56  # characters in its branch slug; slug() shortens a longer one
 BRANCH_KEEP = 47  # what a shortened slug keeps of the whole one, before "-" and the hash
 HASH_DIGITS = 8
@@ -240,7 +241,9 @@ def path_state(root, rel):
     """How REL, a path below ROOT spelled with "/", stands, each of its components asked by lstat so
     that no link is followed: ("file", REL, stat) for a regular file reached through folders alone,
     else (why, the component at fault, None), why one of "missing" (it, or a folder on its way, is
-    not there), "a link", "not a folder" (a component on the way) or "not a regular file"."""
+    not there), "a link", "not a folder" (a component on the way) or "not a regular file". A link
+    is a symbolic link, or on Windows any reparse point that names another path: lstat reports a
+    junction as a folder, with its reparse tag (Python 3.8 and later), and the open would follow it."""
     parts = rel.split("/")
     st = None
     for k in range(1, len(parts) + 1):
@@ -249,7 +252,7 @@ def path_state(root, rel):
             st = os.lstat(os.path.join(root, *parts[:k]))
         except (FileNotFoundError, NotADirectoryError):
             return "missing", component, None
-        if stat.S_ISLNK(st.st_mode):
+        if stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) & NAME_SURROGATE:
             return "a link", component, None
         if k < len(parts) and not stat.S_ISDIR(st.st_mode):
             return "not a folder", component, None
@@ -260,18 +263,28 @@ def path_state(root, rel):
 
 def read_bytes(root, rel, st):
     """REL's bytes as they are, no newline translated, from the file path_state saw (ST); None when
-    it cannot be opened, or another file stands there now. O_NONBLOCK, so a named pipe put there
-    since the lstat is opened without waiting for a writer, and then refused as another file."""
+    it cannot be opened or read (an OSError at the open, the fstat or any read), or another file
+    stands there now. O_NONBLOCK, so a named pipe put there since the lstat is opened without
+    waiting for a writer, and then refused as another file."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(os.path.join(root, *rel.split("/")), flags)
     except OSError:
         return None
-    with os.fdopen(fd, "rb") as f:
-        now = os.fstat(f.fileno())
+    try:
+        now = os.fstat(fd)
         if not stat.S_ISREG(now.st_mode) or not os.path.samestat(now, st):  # an inode number is reused
             return None
-        return f.read()
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def archive_problems(root, size=None, digest=None):
@@ -455,7 +468,9 @@ def hook_for(root, rel):
 
 
 def self_test():
+    import errno
     import threading
+    from types import SimpleNamespace
     ok = True
 
     def expect(name, got, want):
@@ -802,6 +817,71 @@ def self_test():
         put(root, "docs/2026-11-20-b888--feat-x.md", entry_text)
         expect("the hook refuses a name like an entry in another folder",
                hook_for(root, "docs/2026-11-20-b888--feat-x.md")[0], 2)
+
+    # An OSError once a file is open, at its fstat or a read: the check and the hook say the file
+    # could not be read, and no traceback reaches their callers. The failure is the file's alone, so
+    # git's pipes read on.
+    def failing_on(name, path, run):
+        real, real_fstat, want = getattr(os, name), os.fstat, os.stat(path)
+
+        def call(fd, *args):
+            if os.path.samestat(real_fstat(fd), want):
+                raise OSError(errno.EIO, "a read that fails (self-test)")
+            return real(fd, *args)
+        setattr(os, name, call)
+        try:
+            return run()
+        except OSError as e:
+            return "raised %s" % e
+        finally:
+            setattr(os, name, real)
+
+    if have_git:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, env = checkout(tmp, "unreadable")
+            pins = FROZEN_BYTES, FROZEN_SHA256
+            for name in ("fstat", "read"):
+                for rel, words in ((ARCHIVE, "(unread)"), (entry, "%s could not be read" % entry)):
+                    path = os.path.join(root, *rel.split("/"))
+                    got = failing_on(name, path, lambda: check(root, size, digest, env)[0])
+                    expect("the check refuses %s when its %s fails once it is open" % (rel, name),
+                           any(words in p for p in got) if isinstance(got, list) else got, True)
+                    globals().update(FROZEN_BYTES=size, FROZEN_SHA256=digest)
+                    try:
+                        got = failing_on(name, path, lambda: hook_for(root, rel))
+                    finally:
+                        globals().update(FROZEN_BYTES=pins[0], FROZEN_SHA256=pins[1])
+                    expect("and so does the hook, by its diagnostic (%s, %s)" % (rel, name),
+                           (got[0], words in got[1]) if isinstance(got, tuple) else got, (2, True))
+
+    # A junction: Windows' lstat reports one as a folder, and its reparse tag names another path.
+    # None can be made off Windows, so a stat stands in for ops/ there; on Windows a real one is made.
+    with tempfile.TemporaryDirectory() as root:
+        put(root, ARCHIVE, base)
+        put(root, entry, entry_text)
+        ops, real_lstat, got = os.path.join(root, "ops"), os.lstat, {}
+        for tag in (0xA0000003, 0x9000001A):  # IO_REPARSE_TAG_MOUNT_POINT; a cloud file's, which names none
+
+            def standing_in(path, *args, **kwargs):
+                if path == ops:
+                    return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_reparse_tag=tag)
+                return real_lstat(path, *args, **kwargs)
+            os.lstat = standing_in
+            try:
+                got[tag] = (len(archive_problems(root, size, digest)), hook_for(root, entry)[0])
+            finally:
+                os.lstat = real_lstat
+        expect("a junction on the way to the archive or an entry is refused as a link is", got[0xA0000003], (1, 2))
+        expect("a reparse point that names no other path is a folder still", got[0x9000001A], (0, 0))
+        if os.name == "nt":  # CI's docs-check runs on Linux: only a Windows run of the self-test gets here
+            import _winapi
+            put(root, "target/engineering-log.md", base)
+            shutil.rmtree(ops)
+            _winapi.CreateJunction(os.path.join(root, "target"), ops)
+            try:
+                expect("a real junction on the way to the archive is refused", len(archive_problems(root, size, digest)), 1)
+            finally:
+                os.unlink(ops)
 
     print("self-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
