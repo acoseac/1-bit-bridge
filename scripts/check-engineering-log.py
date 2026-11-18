@@ -2,9 +2,9 @@
 """The engineering log: its archive frozen, and every record since in a file of its own.
 
 ops/engineering-log.md holds every record up to 2026-11-18 and is frozen: its size and the SHA-256
-of its bytes are pinned below, so no edit of it passes. Every record since is a file of its own, which
-its PR adds, so that no PR appends to a file another wrote (backlog B888: every PR appended to the
-one log, and each merge left every open PR conflicting at its end):
+of its bytes are pinned below, so no edit of it passes. Every record since is a file of its own,
+which its PR adds, so that no PR appends to a file another wrote (backlog B888: every PR appended
+to the one log, and each merge left every open PR conflicting at its end):
 
     ops/engineering-log/<YYYY-MM>/<YYYY-MM-DD>-<entry>--<branch>.md
 
@@ -20,8 +20,10 @@ one log, and each merge left every open PR conflicting at its end):
 Both are slugs: lowercase letters and digits, each other run of characters one "-", none at either
 end, so the first "--" after the date ends <entry>. The name is at most 120 characters. An entry is
 a regular file of UTF-8 with LF line ends and a final newline, its first line `## <date> — <title>`
-with its name's date, and no other `## ` line outside fenced code. The folder's README.md is the
-one other file it holds, and git must track it: it states this layout to every PR.
+with its name's date, and no other `## ` line outside fenced code: a quoted `> ## ` line is none,
+and a fence in a list item or a block quote ends where they end (h2_lines). The folder's
+README.md is the one other file it holds, and git must track it: it states this layout to every
+PR.
 
   check-engineering-log.py              check the archive, every entry, and that nothing shaped
                                         like one sits anywhere else (`make docs-check` and CI's
@@ -65,6 +67,8 @@ ENTRY_PATH = re.compile(r"([0-9]{4}-[0-9]{2})/(\1-[0-9]{2})-(%s)--(%s)\.md" % (S
 HEADING = re.compile(r"## ([0-9]{4}-[0-9]{2}-[0-9]{2}) — (\S.*)")
 H2 = re.compile(r"##(?:[ \t]|$)")
 QUOTE = re.compile(r" {0,3}> ?")
+LIST_ITEM = re.compile(r" {0,3}(?:[-*+]|[0-9]{1,9}[.)])(?= |$)")
+BREAK = re.compile(r" {0,3}([-*_])(?: *\1){2,} *")  # a thematic break, which no list item is
 FENCE_OPEN = re.compile(r"(`{3,}|~{3,})(.*)")
 FENCE_CLOSE = re.compile(r"(`{3,}|~{3,})[ \t]*")
 # An entry filed anywhere else, by its name alone: a file named like an entry in any folder, and
@@ -122,49 +126,88 @@ def name_problems(sub):
     return out
 
 
-def quote_depth(line, limit=None):
-    """(how many block quote markers came off LINE, at most LIMIT of them, and what is left)."""
-    depth = 0
-    while limit is None or depth < limit:
-        m = QUOTE.match(line)
-        if not m:
-            break
-        depth, line = depth + 1, line[m.end():]
-    return depth, line
+def going_on(line, containers):
+    """(how many of CONTAINERS, outermost first, LINE goes on in, and what is left of it): a block
+    quote (None) where its marker stands, a list item (its width) where the line is blank or
+    indented by that width at least."""
+    for k, width in enumerate(containers):
+        if width is None:
+            m = QUOTE.match(line)
+            if not m:
+                return k, line
+            line = line[m.end():]
+        elif line.strip(" "):
+            if len(line) - len(line.lstrip(" ")) < width:
+                return k, line
+            line = line[width:]
+    return len(containers), line
+
+
+def opened(rest):
+    """(the containers REST opens, outermost first, and what is left of it): block quote markers
+    and list item markers, but where the rest is a thematic break (`- - -`). An item's width is
+    its marker's, the up to three spaces before it included, and the spaces after it, one where it
+    is blank or more than four follow."""
+    out = []
+    while True:
+        m = QUOTE.match(rest)
+        if m:
+            out.append(None)
+            rest = rest[m.end():]
+            continue
+        m = LIST_ITEM.match(rest)
+        if not m or BREAK.fullmatch(rest):
+            return out, rest
+        after = rest[m.end():]
+        spaces = len(after) - len(after.lstrip(" "))
+        width = m.end() + (spaces if after.strip(" ") and spaces <= 4 else 1)
+        out.append(width)
+        rest = rest[width:]
 
 
 def h2_lines(text):
-    """The numbers of TEXT's lines that are `## ` headings outside fenced code: after up to three
-    spaces, `##` then a space, a tab or the line's end, in no block quote.
+    """The numbers of TEXT's lines that are `## ` lines outside fenced code: after up to three
+    spaces, `##` then a space, a tab or the line's end. A line in a block quote begins with its
+    `>`, so a quoted `> ## ` is none.
 
-    The fences are markdownShellLines' (scripts/third-party-licenses/tags.go): a line's block quote
-    markers (`>`, up to three spaces before each and one after) come off first, then up to three
-    spaces; a fence opens on three or more backticks or tildes, a backtick fence's info holding no
-    backtick, and closes on a line of the same character, at least as many of them, with nothing
-    after them but white space; a fence opened in a block quote ends where that quote ends, and the
-    line that ends it is read afresh. List items are no containers here: a fence on a list item's
-    own line is not seen."""
-    found, fence = [], None  # fence: (its character, how many, the quote depth it opened at)
+    The fences follow markdownShellLines' containers (scripts/third-party-licenses/tags.go): block
+    quotes and list items. A quote goes on where its marker stands (`>`, up to three spaces before
+    it and one after), a list item where a line is blank or indented by the item's width at least.
+    Inside its containers, after up to three spaces, a fence opens on three or more backticks or
+    tildes, a backtick fence's info holding no backtick, and closes on a line of the same
+    character, at least as many of them, with nothing after them but white space; it ends where a
+    container it opened in ends, and the line that ends it is read afresh. Where it departs from
+    markdownShellLines: code in a fence opens no container, so a line in a fence that begins with a
+    marker (`- ```) closes nothing; more than three spaces before a fence or a marker make code,
+    not one; and a thematic break (`- - -`) opens no list item. As there, no paragraph is followed,
+    so four of CommonMark's list rules are not: a paragraph's lazy line keeps its item open, an
+    empty item and an ordered one not starting at 1 interrupt no paragraph, and an item that
+    begins with a blank line ends at the next. Here a line indented less than an item's width ends
+    it, every marker opens one, and a blank line goes on in it."""
+    found, containers, fence = [], [], None  # fence: (its character, how many, its containers)
     for number, line in enumerate(text.split("\n"), 1):
         line = line.replace("\t", "    ")
         if fence:
-            depth, rest = quote_depth(line, fence[2])
-            if depth == fence[2]:
+            k, rest = going_on(line, fence[2])
+            if k == len(fence[2]):
                 indent = len(rest) - len(rest.lstrip(" "))
                 m = FENCE_CLOSE.fullmatch(rest[indent:]) if indent <= 3 else None
                 if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
                     fence = None
                 continue
-            fence = None  # the block quote it opened in has ended, and the fence with it
-        depth, rest = quote_depth(line)
+            fence, containers = None, fence[2][:k]  # a container it opened in has ended, and the fence with it
+        else:
+            k, rest = going_on(line, containers)
+            containers = containers[:k]
+        more, rest = opened(rest)
+        containers = containers + more
         indent = len(rest) - len(rest.lstrip(" "))
-        if indent > 3:
-            continue
-        rest = rest[indent:]
-        m = FENCE_OPEN.fullmatch(rest)
+        m = FENCE_OPEN.fullmatch(rest[indent:]) if indent <= 3 else None
         if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-            fence = (m.group(1)[0], len(m.group(1)), depth)
-        elif depth == 0 and H2.match(rest):
+            fence = (m.group(1)[0], len(m.group(1)), containers)
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= 3 and H2.match(line[indent:]):
             found.append(number)
     return found
 
@@ -496,6 +539,23 @@ def self_test():
     ]
     for name, text, want in rows:
         expect(name, min(len(content_problems(good, text.encode("utf-8"))), 1), want)
+    # List items are containers: each row names the `## ` lines it holds, the heading its first.
+    lists = [
+        ("a fence under a list item ends with the item", head + "- item\n  ```\n## a\n```\n", [1, 4]),
+        ("a list item's indented closer opens no fence", head + "- ```\n  code\n  ```\n## b\n", [1, 5]),
+        ("a heading inside a list item's fence is none", head + "- ```\n  ## inside\n  ```\n", [1]),
+        ("nor inside an ordered item's", head + "1. ```\n   ## inside\n   ```\n", [1]),
+        ("nor past a blank line in the item", head + "- ```\n  a\n\n  ## inside\n  ```\n", [1]),
+        ("a heading after a list item's fence closes is one", head + "- ```\n  ## inside\n  ```\n## after\n", [1, 5]),
+        ("and one after the item ends, the fence with it", head + "- ```\n  ## inside\n## after\n", [1, 4]),
+        ("a marker in a fence opens nothing, and closes nothing", head + "```\n- ```\n## a\n```\n", [1]),
+        ("a closer short of the item's width ends it and opens a fence", head + "- ```\n  a\n```\n## x\n", [1]),
+        ("a list item in a quote ends with the quote", head + "> - ```\n>   ## inside\n>   ```\n## after\n", [1, 5]),
+        ("a heading in a list item outside a fence is one", head + "- item\n  ## sub\n", [1, 3]),
+        ("a thematic break opens no list item", head + "- - -\n  ```\n## a\n", [1]),
+    ]
+    for name, text, want in lists:
+        expect(name, h2_lines(text), want)
     expect("text that is not UTF-8", content_problems(good, head.encode("utf-8") + b"\xff\n"), ["is not UTF-8"])
     expect("the README needs no heading", content_problems("README.md", b"# The engineering log\n"), [])
 

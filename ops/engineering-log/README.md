@@ -24,7 +24,9 @@ auto-loaded.
     whole slug's SHA-256: `python3 scripts/check-engineering-log.py --slug <branch>` prints
     the slug, for a name and for a lookup alike;
   - its first line `## <YYYY-MM-DD> — <title>`, the date its name's; its sections `###`; no
-    other `## ` line outside fenced code; LF line ends and a final newline.
+    other `## ` line, one that begins `## ` after up to three spaces, outside fenced code (a
+    quoted `> ## ` line is none, and a fence in a list item or a block quote ends where they
+    end); LF line ends and a final newline.
 - A new record is a new file: never append to a file another PR wrote. If the name is taken,
   add a word. A round of an open PR may be a file of its own or a `### Round N` section in its
   PR's own file.
