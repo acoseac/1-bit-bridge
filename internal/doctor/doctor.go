@@ -397,12 +397,17 @@ type Deps struct {
 	// LogPath is the file the log-file-size line grades, cmd/bridge's
 	// doctorLogs: for bridge doctor run from a shell the installed bridge's
 	// log, on Windows the one bridge logs reads by its install check, and
-	// for the console's doctor the serving process's own (backlog B618).
-	// Empty (a foreground `bridge serve`, which logs to its terminal) makes
+	// for the console's doctor the file the console's export offers the
+	// serving process (consoleLogPath; backlog B618). The path names a file
+	// and proves nothing about who writes it: a `bridge serve` run in the
+	// foreground logs to its terminal and writes none, so the file named may
+	// be an earlier launch's, graded as it stands, or not there yet, which
+	// checkLogSize grades as no log file yet. Empty is where the log's path
+	// cannot be made, off Windows and in the console's doctor: no file to
+	// grade, as the console's export has none to offer, which makes
 	// checkLogSize a no-op rather than a complaint about a file that does
-	// not exist. It is empty too where the log's path cannot be made, off
-	// Windows and in the console's doctor: no file to grade, as the
-	// console's export has none to offer.
+	// not exist. On a managed deployment the line is skipped whatever this
+	// holds (Managed).
 	LogPath string
 
 	// LogNote says how LogPath was chosen where its reader needs to know:

@@ -176,21 +176,30 @@ type Deps struct {
 	// with backup wiring.
 	BackupSources backup.Sources
 
-	// LogPath is where this bridge's log file lives — cmd/bridge's
-	// adminLogPath: the `packaging.DefaultLogPath()` the service units
-	// point StandardOutput/StandardError at and the Windows sign-in
-	// launcher redirects to, or, inside the Windows service, the service's
-	// own log under %PROGRAMDATA% (backlog B618). `bridge logs` reads the
-	// same file wherever the console runs inside the installed bridge.
-	// Injected rather than resolved here so internal/admin needs
+	// LogPath is the path of the log file the console's export offers —
+	// cmd/bridge's adminLogPath: the `packaging.DefaultLogPath()` the
+	// service units point StandardOutput/StandardError at and the Windows
+	// sign-in launcher redirects to, or, inside the Windows service, the
+	// service's own log under %PROGRAMDATA% (backlog B618). `bridge logs`
+	// reads the same file wherever the console runs inside the installed
+	// bridge. Injected rather than resolved here so internal/admin needs
 	// no dependency on internal/packaging, matching how BackupSources
 	// carries the other state-file paths.
 	//
-	// Empty is a legitimate state, not a misconfiguration: logging.Init
-	// writes to stderr, and only a SERVICE install redirects that to a
-	// file. A foreground `bridge serve` has no log file at all, and the
-	// Diagnostics page says so instead of offering a download that
-	// cannot work.
+	// The path names a file and proves nothing about who writes it:
+	// logging.Init writes to stderr, which only a service install or the
+	// sign-in launcher redirects to the file, so a `bridge serve` run in
+	// the foreground writes none, and the file named may be an earlier
+	// launch's, or not there. What is offered is decided at each request
+	// (resolveLogFile): a managed deployment is refused whatever this
+	// holds; a file that is not there, or cannot be read, gets a reason
+	// naming the path, which the Diagnostics page shows in place of its
+	// Download log and Bug report bundle buttons; a file that is there is
+	// offered whoever wrote it, the page naming its path and size. Empty is
+	// a legitimate state, not a misconfiguration: the path that cmd/bridge
+	// could not make (consoleLogPath: no home directory to read, and on
+	// Windows outside the service no %LOCALAPPDATA% either), for which the
+	// routes offer no file either.
 	LogPath string
 
 	// Tailscale is the read+refresh side of the Tailscale HTTPS

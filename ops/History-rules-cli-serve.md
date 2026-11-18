@@ -3562,7 +3562,7 @@ player-storage line beside it), `TestTheDataDirLineSaysWhatStandsInTheWayAndItsF
 
 ## B676 — bridge doctor's player-dac line (2026-11-03)
 
-- **`bridge doctor`'s `player-dac` line says, on Linux for a config that asks for the player, whether the process it checks may open the player's DAC node for playback, one source for the CLI and the console's doctor (`doctorPlayerDAC`, `doctor.Deps.PlayerDAC`, placed right after player-storage): the config's binding resolved by the player's own machinery (`playback.BindingLocator` over the box's trees, one bounded reading at a time), the endpoint's own node (`alsapcm.Endpoint.Path`) lstat'ed for its group (named by its gid, `audio` only where the group database names none) and asked with the raw `faccessat2` (R_OK|W_OK, AT_EACCESS), which opens nothing; refused is a fail by its cause (the user not in the group and no ACL: usermod only for a resolved user name (otherwise add the account to the group by name), then the restart of `user@<uid>.service` on systemd, or a new login and bridge start without systemd; in it, in a process older than the membership: the restart; refused despite the group: the mode, the ACL or a security module); allowed is ok, never a word on the DAC being free; bridge doctor checks its own credentials and warns where its login has the group and the running bridge (`server.pid`, `/proc/<pid>/status`'s Groups) does not; the console's doctor checks the serving process, and says when the config names another DAC than its player started with; ENOSYS or EPERM from the check, a DAC not connected or ambiguous, a missing node, and, for `bridge doctor`, root or another user than the running bridge's are not checked, a warn (the console's doctor in a serving process that runs as root reports the access that process has)** (2026-11-03, backlog B676; Codex's and Argon's notes on the brief). **Don't fall back to the mode bits (`unix.Faccessat`), open or hold the node, take the control node for the playback one, call an absent DAC a permission failure, word ok as the player playing, or ask the host's `/dev/snd` from a test (`hostDACNodes`, which the suite's TestMain refuses and records).**
+- **`bridge doctor`'s `player-dac` line says, on Linux for a config that asks for the player, whether the process it checks may open the player's DAC node for playback, one source for the CLI and the console's doctor (`doctorPlayerDAC`, `doctor.Deps.PlayerDAC`, placed right after player-storage): the config's binding resolved by the player's own machinery (`playback.BindingLocator` over the box's trees, one bounded reading at a time), the endpoint's own node (`alsapcm.Endpoint.Path`) lstat'ed for its group (named by its gid, `audio` only where the group database names none) and asked with the raw `faccessat2` (R_OK|W_OK, AT_EACCESS), which opens nothing; refused is a fail by its cause (the user not in the group and no ACL: usermod only for a resolved user name (otherwise add the account to the group by name), then the restart of `user@<uid>.service` on systemd, or a new login and bridge start without systemd; in it, in a process older than the membership: the restart; refused despite the group: the mode, the ACL or a security module); allowed is ok, never a word on the DAC being free; bridge doctor checks its own credentials and warns where its login has the group and the running bridge (`server.pid`, `/proc/<pid>/status`'s Groups) does not; the console's doctor checks the serving process, and says when the config names another DAC than its player started with; ENOSYS or EPERM from the check, a DAC not connected or ambiguous, a missing node, and, for `bridge doctor`, root or another user than the running bridge's are not checked, a warn (the console's doctor in a serving process that runs as root reports the access that process has)** (2026-11-03, backlog B676). **Don't fall back to the mode bits (`unix.Faccessat`), open or hold the node, take the control node for the playback one, call an absent DAC a permission failure, word ok as the player playing, or ask the host's `/dev/snd` from a test (`hostDACNodes`, which the suite's TestMain refuses and records).**
 
 *The gap.* On Linux the player opens its DAC's node under `/dev/snd`, which
 the audio group owns. A desktop login opens it through logind's seat ACL; the
@@ -6218,7 +6218,7 @@ without `Oversized` (the row past it). The record is in
 
 ## B618 — on Windows, bridge logs reads the file the installed bridge writes (2026-11-13)
 
-- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok from a shell on Windows, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words.** → History-rules-cli-serve.md
+- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok from a shell on Windows, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words, but for their hint where the file is not there, which names no foreground `bridge serve` since 2026-11-18.** → History-rules-cli-serve.md
 
 *What was true.* A bridge run as the Windows service writes
 `%PROGRAMDATA%\1-bit-bridge\bridge.log`: `main` calls `redirectServiceIO` once
@@ -6410,15 +6410,22 @@ address with no `&` written. Its walk of a file is one helper now,
 identifier's parentheses off before it compares it (`isSeamIdent`, false for
 the key or the value a range clause leaves out), reads a range clause's key and
 value with either token, as it reads an assignment's `=` and `:=`, and finds a
-declaration that gives the seam a type (`seamDeclaredWithAType`, reported in a
-message of its own); the pin keeps its glob, `goToolIgnores`, its two guards
-and its other messages. `TestTheLogsInstallCheckPinSeesEachWayToChangeIt`
+declaration that writes the seam a type other than an unnamed function type
+(`seamDeclaredWithAType`, reported in a message of its own): a named type, a
+selector or a generic instantiation may be a defined type with a pointer
+method, while an unnamed function type, written bare or in parentheses, has no
+methods and is no finding (`isUnnamedFuncType`, since 2026-11-18; until then
+every written type was one, for a reason an unnamed function type cannot
+give); the pin keeps its glob,
+`goToolIgnores`, its two guards and its other messages. `TestTheLogsInstallCheckPinSeesEachWayToChangeIt`
 parses planted files, each declaring the seam once as `logs.go` does but where
 its row is about the declaration: each of the five forms, and of the three the
 pin caught (an assignment, an address taken, a declaration of another value),
 is one finding of its kind on the line planted, and a file that only reads the
 seam (a call, a copy, a comparison with nil, a named type's pointer method used
-on another variable) has none. Two claims were corrected with it. This entry's
+on another variable) has none, nor, since 2026-11-18, has one that declares it
+with an unnamed function type written, bare or in parentheses. Two claims were
+corrected with it. This entry's
 rule forbade grading a log no path names as the terminal's ok from a shell,
 where round 3 gives that ok off Windows on purpose: it says from a shell on
 Windows now, in `cli-serve.md` and above. And *The console* and round 2 said a
@@ -6427,3 +6434,17 @@ it writes, where a bridge run in the foreground writes none: it grades the
 user's log, which may be an earlier launch's, and the docs of `consoleLogPath`,
 `doctorLogs` and `adminDoctorRunnerFor` say so. The record is in
 `ops/engineering-log.md`, 2026-11-18, B618FU.
+
+*The hints (2026-11-18).* Off Windows, where DefaultLogPath is not there,
+`bridge logs` said "the file is created on first service start; run `bridge
+start` (or `bridge serve` in the foreground) and retry.", though a bridge run
+in the foreground logs to its terminal and writes no file: it says now that
+the service manager creates the file when it starts the bridge's service, and
+to run `bridge start` and retry, and the rule keeps macOS's and Linux's other
+words. The console's reason for an empty log path said the bridge "logs to the
+terminal it was started from", where the path is empty wherever the process
+has no home directory, as a system unit without `User=` has none (systemd sets
+`$HOME` only where `User=` is set, systemd.exec(5)) while its output goes to
+the journal or a file its unit names: the reason says that the path could not
+be made, and where the output goes. The record is in `ops/engineering-log.md`,
+2026-11-18, the foreground hints.

@@ -7584,12 +7584,13 @@ function logExportQuery() {
   return q;
 }
 
-// loadLogStatus asks whether this install has a log file at all.
+// loadLogStatus asks whether the log file the console would offer is there.
 //
-// It often does not: the bridge logs to stderr, and only a SERVICE install
-// redirects that to a file. Rendering the reason beats offering a button
-// that 404s, which would read as a broken console rather than as the truth
-// about how this bridge was started.
+// It often is not: the bridge logs to stderr, and only a SERVICE install
+// redirects that to a file, so a bridge run in the foreground writes none
+// (the file there may then be an earlier launch's, offered as it is).
+// Rendering the reason beats offering a button that 404s, which would read
+// as a broken console.
 async function loadLogStatus() {
   const status = document.getElementById("logs-status");
   const controls = document.getElementById("logs-controls");
