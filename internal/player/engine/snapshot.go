@@ -223,7 +223,9 @@ type Skip struct {
 type StopInfo struct {
 	Reason Reason
 	Detail string
-	// Entry is the selection when it stopped.
+	// Entry is where it stopped: for a fault the entry that faulted
+	// (Fault.Entry), whatever the selection became, otherwise the selection
+	// when it stopped.
 	Entry uint32
 	At    time.Time
 }

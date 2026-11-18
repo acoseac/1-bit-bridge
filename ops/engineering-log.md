@@ -106103,3 +106103,166 @@ old reason failed twice, "does not say "home directory"" and "does not say
 "service manager"", and `TestBridgeLogsOffWindowsIsAsItWas` over the old hint
 failed in both its subtests on the hint's line; both pass with this change.
 The gate's runs are in the branch's report.
+## 2026-11-18 — B903AUD: a successor's fault before it is heard moves the selection on
+
+The owner's decision of 2026-11-18: after a fault, Play from Stopped moves on
+and never replays the track that played.
+
+### The hazard, at 54fd3749
+
+`onFault` (`internal/player/engine/transport.go` 1556-1576) recorded a fault
+against its occurrence's entry (1562-1565) and released the session (1575),
+whose stop took its entry from the selection (`stopped`, 524-528). During
+playback the selection moves only on an audible report (`onAudible`,
+1466-1507, `selectEntry` at 1504), so a successor that faulted before it was
+heard left it on the entry heard, and Play from Stopped (`policy`'s
+`actStart`, 197-198; `transport`, 307 and 337-339) started a session there:
+the track that had played, from its start. The engine's own
+`occurrence_budget_exceeded` (`prepare`, 996-999) carried no occurrence, so
+it was recorded against the selection, the entry heard, as well.
+
+### The production trace
+
+The player's backend records a decode that failed after content played as
+the session's fault, naming its occurrence (`failDecode`,
+`internal/player/playback/producer.go` 329-339, `Occurrence: o.id`), from a
+packing that failed (298-301, 361-364) or a read that failed (323, 400;
+`native.go` 400-401). When that occurrence's first Write took no frame, the
+producer's next step is `stepFinish` (146-148): `finish` drains the sink, so
+the content before the occurrence plays out, and only then publishes the
+fault (707-709). The reporter's boundary loop stops at an occurrence that gave
+the sink nothing (`reporter.go` 115-116), so that one is never crossed and no
+Audible is sent for it, and its fault keeps the occurrence it names (198-201).
+The engine then sees `Fault(b)` after a played out, with no `Audible(b)`: the
+fault recorded against b, the selection left on a. When some of b's frames did
+reach the sink, the drain plays them, the reporter crosses b (115-118) and
+sends its Audible ahead of the fault (a step's boundaries, 105-136, go out
+before its fault, 198-216), so the selection is on b already. A fault of the
+sink's own (an xrun or an end, 164-173; the next transport's open,
+`producer.go` 680-681; a revocation; a panic) carries no occurrence and is
+given the occurrence last heard (202-203) or the session's first (204-205),
+never a successor unheard.
+
+### The rule as built (e8687f2b)
+
+`onFault` (1564) resolves the fault's entry as before and hands it to `fault`
+(1590) with whether it is a successor's: an occurrence after the session's
+first, never heard, since `onAudible` makes the occurrence heard the first.
+`fault` records it as before (`MaxFaults`); for a successor's, while the
+session's first occurrence is the one heard (`o.audible` names it: heard in
+the session, or before it in a seek's session), it selects the entry
+`following` the entry heard as the queue stands (1601-1605); then it releases
+the session with the stop naming the entry that faulted (1606; `stopped`, 525,
+keeps an entry its caller names). The three are one step's, so one snapshot
+shows them together. `prepare`'s budget fault names the successor it found and
+could not hand off, and goes through `fault` as a successor's (1004). Nothing
+else about a fault changes: it is recorded, stops playback and never restarts
+it, and nothing is skipped for it.
+
+Two readings the brief left open are decided here:
+
+- It names the entry the selection moves past both as `s.chain[i-1]` and as
+  "the entry heard or last heard". The two differ only for a fault two
+  successors past the entry heard (the third occurrence of the chain, the
+  second submitted and unheard), which the production backend does not send:
+  its reporter crosses the second before the third's fault can be published.
+  The entry heard is taken. `following(s.chain[i-1])` would pass over the
+  second, which nothing played, a skip on a fault; and once the second was
+  deleted it is 0, leaving the selection on the entry heard, the hazard itself
+  (control C6 below).
+- With nothing heard yet in the session (its first occurrence started and no
+  Audible came) there is no entry heard to move past, so the selection stays
+  on the first entry, which never played. In production the engine's budget
+  fault, raised as the first successor is named right after a Start, is that
+  case.
+
+### Tests (9974baef)
+
+`internal/player/engine/successor_fault_test.go`. Every case asserts the
+fault's entry, the stop's entry and the selection apart (`stoppedBy`), first
+in the snapshot the fault's own step published, read at the step's note
+(`recordSteps`, `faultStep`), then once the transport has stopped, and then
+what a Play from Stopped starts (`playsFrom`).
+
+- `TestASuccessorsFaultBeforeItIsHeardMovesTheSelectionOn`: a heard, b
+  faulting at each of its stages: named, its Prepare held or answered;
+  prepared; submitted, with a Prepare of c held, or c submitted and cut
+  (held) by an insert after b; and the session paused. b selected, its fault
+  and stop naming b, Play starts at b.
+- `TestASuccessorsFaultSelectsTheQueuesNextAfterTheEntryHeard`: b deleted, or
+  bypassed by x inserted after a, its occurrence kept in the chain by a Cut
+  held or answered too late (deleting b, which is not the selection, moves no
+  selection of itself: `delete` moves it only for the selection, `edits.go`
+  59-77), selects c and x; the wrap-around with repeat on selects b; a last
+  with repeat off (the wrap-around made unwanted, its Cut held) leaves a; a
+  fault of c with b submitted and unheard selects b; in the session a seek
+  started, before the continued occurrence is heard there, b; and with
+  nothing heard yet, a.
+- `TestAnOccurrenceBudgetFaultIsTheSuccessorsItCouldNotHandOff`: under a
+  native budget of one, b takes the slot, its Prepare is held until b is
+  heard, and c, named in that Prepare's answer, cannot be handed off: the
+  fault and its stop name c, c is selected, Play starts at c.
+- `TestAPlayAfterASuccessorsFaultTakesTheStartPath`: the Play that starts at b
+  again: refused there, b is skipped and c plays; faulting as its session's
+  first, or in a native Start that fails (a fault, never a skip:
+  `TestNativeStartFailureDoesNotSkip`), playback stops with b selected and its
+  stop naming b, no session starts until a command, and then a Play starts b,
+  a Next c.
+
+### Red first
+
+At 9974baef, the four tests (`-count=1`) failed as predicted: every case's
+fault step and stopped snapshot had the stop's entry and the selection on a,
+and Play started a; in the last-entry and nothing-heard cases the selection is
+a by the rule too, so only their stop's entry was red; the budget fault was
+recorded against b, b selected, and the Play from b faulted on the budget
+again; the start-path cases stopped at their premise, the selection not on b.
+
+### Controls
+
+Predicted in writing before any ran (`.tmp/_b903aud/controls.predictions.txt`,
+not committed). Each mutated `transport.go` in the working tree by exact-once
+replacements, ran the four tests (`-count=1 -v`, `-watchdog 20s`) and was
+restored with `git checkout --`, the tree clean after each; all ran in one
+build-slot session (slot1 free at 11:02), 0.9 s each. Every one was as
+predicted.
+
+| | mutation | red | green |
+|---|---|---|---|
+| C1 | `fault`'s `selectEntry` removed | every case whose selection moves: the selection on a at the fault's step, once stopped, and Play starting a; the budget case; the start-path cases at their premise | the last-entry and nothing-heard cases |
+| C2 | the entry that faulted selected in place of the queue's next after the entry heard | b deleted (b selected, which the queue no longer holds; c wanted) and bypassed (x wanted), both Cut variants; the last entry (b, a wanted); two successors (c, b wanted) | b still next, the wrap-around, the seek, nothing heard, the budget, the start path |
+| C3 | the stop's explicit entry removed (it names the selection) | the cases whose selection is not the entry that faulted: deleted, bypassed, the last entry, two successors, nothing heard | the rest |
+| C4 | the budget fault through `onFault` with no entry, as before | the budget case alone | the rest |
+| C5 | the nothing-heard condition removed | nothing heard (b selected, a wanted) | the rest |
+| C6 | `following(s.chain[i-1])` for a fault past the first successor | two successors (c selected, b wanted) | the rest |
+| C7 | the selection moved at the release's acknowledgement, a later step | every case whose selection moves, at the fault's step alone (the stopped snapshot and Play green); the start-path cases there too | the last-entry and nothing-heard cases |
+
+C2 stands for the brief's control of its first rule's branch for a successor
+the queue no longer holds: under the one rule from the queue as it stands
+there is no such branch, and selecting the entry that faulted is what it
+guarded against.
+
+### The record
+
+`.claude/rules/player.md`'s fault entry (122, 588 bytes) moved whole to
+`ops/History-rules-player.md`, under its section, by
+`scripts/doc-split/move_entry.py --line 122`, leaving its pointer; then the
+pointer and the long form both gained the rule (the title, a new bolded Don't
+beside the old one kept verbatim, the long form's detail and tests), and the
+selection line and its long form name a successor's fault. In archive copies
+of HEAD: the move alone passed `verify_moves.py --base HEAD`; the whole change
+lists as missing exactly the three base blocks it rewrites (the fault entry
+whole, the selection line, its long form), their four successors present; the
+pointer is what `move_entry.plan` leaves for the new whole entry given as
+`--text`; and `check-doc-budgets.py` passed. `player.md` went from 99,929
+bytes to 99,865.
+
+### The runs
+
+Before the record's commit, on its tree, Go 1.27.3: `go vet` and go1.27.3's
+gofmt over the engine package clean; the engine package under `-race` once,
+green; cmd/bridge's doc guards over the tree with the new test file, green.
+The gate after the last commit (`make fmt vet docs-check`, the four tests
+under `-race -count=20`, `./internal/player/...` under `-race`, and `go vet`
+of the engine package for windows and darwin) is in the branch's report: a
+record cannot hold the runs made on its own commit.

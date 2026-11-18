@@ -186,7 +186,10 @@ type Fault struct {
 	Occurrence OccurrenceID
 	Frames     int64
 	At         time.Time
-	// Entry is the occurrence's entry; the engine fills it in.
+	// Entry is the entry that faulted, which the engine fills in: its
+	// occurrence's, the successor's it could not hand off (its own
+	// occurrence_budget_exceeded), or the selection's for an occurrence the
+	// session does not hold.
 	Entry uint32
 }
 
