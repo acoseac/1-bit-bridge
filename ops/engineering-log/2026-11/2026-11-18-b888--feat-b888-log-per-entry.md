@@ -23,11 +23,13 @@ conflict, so every record since this entry is a file of its own, and the archive
 - **The freeze.** `scripts/check-engineering-log.py` pins the archive's size and SHA-256
   (`FROZEN_BYTES`, `FROZEN_SHA256`; the branch's last commit appends the pointer line and sets
   them, and the check's ok line prints both). The archive is read through `lstat` for every
-  component, opened with `O_NOFOLLOW` where the OS has it, and hashed as bytes, so a link, a
-  folder, a missing file and a newline translated by a text read all fail. `.gitattributes`
-  pins both halves to LF.
+  component, opened with `O_NOFOLLOW` where the OS has it and `O_NONBLOCK` (a named pipe put
+  there since the `lstat` is never waited on), required by `fstat` to be that regular file
+  still, and hashed as bytes, so a link, a folder, a pipe, a missing file and a newline
+  translated by a text read all fail. `.gitattributes` pins both halves to LF.
 - **The names and contents.** Every tracked file below the folder is the README or an entry
-  by name (the month folder of a real date, lowercase slugs, one `--`, the length bounds) and
+  by name (the month folder of a real date in ASCII digits, since Python's `\d` takes every
+  script's and `int()` reads them, lowercase slugs, one `--`, the length bounds) and
   by content (a regular file, UTF-8, LF, a final newline, its first line `## <its date> —
   <title>`, no other `## ` line outside fenced code). The fences follow `markdownShellLines`
   in `scripts/third-party-licenses/tags.go`: block quote markers and up to three spaces come
@@ -89,9 +91,10 @@ tracked file was edited and nothing needed restoring; each went red on the rows 
 
 - The freeze: comparing the size alone (the same-size rows), the line count alone (the
   same-count rows and the grew/shrank messages), reading in text mode (each LF a lone CR),
-  following links (the link rows).
+  following links (the link rows), an open that waits for a named pipe's writer (the pipe
+  put in place since the `lstat`, failed at its 5 s bound).
 - The names: no month backreference, a capital letter allowed, a single `-` accepted, no
-  shortening of a long branch slug.
+  shortening of a long branch slug, `\d` for the digits (a date in Arabic-Indic digits).
 - The fences: a closer with text after it, a fence outliving its block quote, a backtick info
   holding a backtick opening a fence.
 - The listing: a literal `ops/` pathspec for the tracked paths, the literal `ops` alone for

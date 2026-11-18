@@ -57,9 +57,10 @@ BRANCH_KEEP = 47  # what a shortened slug keeps of the whole one, before "-" and
 HASH_DIGITS = 8
 
 SLUG = r"[a-z0-9]+(?:-[a-z0-9]+)*"
-# An entry's path below the folder: the month, a date in that month, <entry>, "--", <branch>.
-ENTRY_PATH = re.compile(r"(\d{4}-\d{2})/(\1-\d{2})-(%s)--(%s)\.md" % (SLUG, SLUG))
-HEADING = re.compile(r"## (\d{4}-\d{2}-\d{2}) — (\S.*)")
+# An entry's path below the folder: the month, a date in that month, <entry>, "--", <branch>. Its
+# digits are ASCII's: Python's \d also takes every other script's, which int() reads as a date.
+ENTRY_PATH = re.compile(r"([0-9]{4}-[0-9]{2})/(\1-[0-9]{2})-(%s)--(%s)\.md" % (SLUG, SLUG))
+HEADING = re.compile(r"## ([0-9]{4}-[0-9]{2}-[0-9]{2}) — (\S.*)")
 H2 = re.compile(r"##(?:[ \t]|$)")
 QUOTE = re.compile(r" {0,3}> ?")
 FENCE_OPEN = re.compile(r"(`{3,}|~{3,})(.*)")
@@ -95,7 +96,7 @@ def name_problems(sub):
             hint = " (it has a capital letter)"
         elif "/" not in sub:
             hint = " (it sits outside a month folder)"
-        elif re.fullmatch(r"(\d{4}-\d{2})/(\d{4}-\d{2})-\d{2}-.*", sub) and sub[:7] != sub[8:15]:
+        elif re.fullmatch(r"([0-9]{4}-[0-9]{2})/([0-9]{4}-[0-9]{2})-[0-9]{2}-.*", sub) and sub[:7] != sub[8:15]:
             hint = " (its folder is not its date's month)"
         return ["is not named <YYYY-MM>/<YYYY-MM-DD>-<entry>--<branch>.md: the month folder of its "
                 "date, then <entry> and <branch> in lowercase letters and digits, words joined by "
@@ -209,14 +210,16 @@ def path_state(root, rel):
 
 def read_bytes(root, rel, st):
     """REL's bytes as they are, no newline translated, from the file path_state saw (ST); None when
-    it cannot be opened, or another file stands there now."""
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    it cannot be opened, or another file stands there now. O_NONBLOCK, so a named pipe put there
+    since the lstat is opened without waiting for a writer, and then refused as another file."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(os.path.join(root, *rel.split("/")), flags)
     except OSError:
         return None
     with os.fdopen(fd, "rb") as f:
-        if not os.path.samestat(os.fstat(f.fileno()), st):
+        now = os.fstat(f.fileno())
+        if not stat.S_ISREG(now.st_mode) or not os.path.samestat(now, st):  # an inode number is reused
             return None
         return f.read()
 
@@ -382,6 +385,7 @@ def hook_for(root, rel):
 
 
 def self_test():
+    import threading
     ok = True
 
     def expect(name, got, want):
@@ -432,6 +436,8 @@ def self_test():
     }
     for why, sub in refused.items():
         expect("%s is refused" % why, bool(name_problems(sub)), True)
+    other_digits = "".join(chr(0x660 + int(c)) if c.isdigit() else c for c in "2026-11/2026-11-18") + "-b888--feat-x.md"
+    expect("a date in another script's digits is refused", bool(name_problems(other_digits)), True)
 
     # The contents.
     head = "## 2026-11-18 — B888: the log\n"
@@ -516,6 +522,23 @@ def self_test():
         os.mkdir(archive)
         expect("the archive refuses a folder in its place", len(archive_problems(root, size, digest)), 1)
         os.rmdir(archive)
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(archive)
+            expect("the archive refuses a named pipe in its place", len(archive_problems(root, size, digest)), 1)
+            os.remove(archive)
+            put(root, ARCHIVE, base)
+            st = os.lstat(archive)
+            os.remove(archive)
+            os.mkfifo(archive)
+            got = []
+            reader = threading.Thread(target=lambda: got.append(read_bytes(root, ARCHIVE, st)), daemon=True)
+            reader.start()
+            reader.join(5)
+            expect("a named pipe put in place since the lstat is not waited on", got, [None])
+            if reader.is_alive():  # a writer's open lets the waiting open go
+                os.close(os.open(archive, os.O_WRONLY | os.O_NONBLOCK))
+                reader.join(5)
+            os.remove(archive)
         put(tmp, "copy/engineering-log.md", base)
         if link(os.path.join(tmp, "copy", "engineering-log.md"), archive):
             expect("the archive refuses a link to an identical copy", len(archive_problems(root, size, digest)), 1)
