@@ -33,6 +33,11 @@ PR.
 
 The PostToolUse hook (check-doc-budgets.py --hook) hands hook_for each edited path of the log's,
 which checks that one path: it lists nothing and asks no git.
+
+It needs Python 3.8 or later (OLDEST) and the standard library alone: the self-test parses this
+file as ast does for 3.8, which refuses most later syntax (not all of it), and on Windows a
+junction is told by the reparse tag lstat reports from 3.8 on. CI's docs-check job runs it on
+the Python it pins, 3.12 (.github/workflows/gate.yml), not on 3.8.
 """
 import datetime
 import hashlib
@@ -45,6 +50,7 @@ import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OLDEST = (3, 8)  # the oldest Python this file supports, as whose grammar the self-test parses it
 ARCHIVE = "ops/engineering-log.md"
 FOLDER = "ops/engineering-log/"
 README = FOLDER + "README.md"
@@ -473,6 +479,7 @@ def hook_for(root, rel):
 
 
 def self_test():
+    import ast
     import errno
     import threading
     from types import SimpleNamespace
@@ -483,6 +490,18 @@ def self_test():
         if got != want:
             ok = False
             print("FAIL %s: got %r, want %r" % (name, got, want))
+
+    # The oldest Python the docstring states, as ast parses for it: CPython refuses there what it
+    # marks as later (a match statement), not all of it (a parenthesized `with` item passes), and
+    # the library calls are 3.8's by reading alone. A check, not a run on 3.8.
+    with open(os.path.abspath(__file__), "rb") as f:
+        source = f.read()
+    try:
+        ast.parse(source, feature_version=OLDEST)
+        floor = None
+    except SyntaxError as e:
+        floor = "line %s: %s" % (e.lineno, e.msg)
+    expect("this file parses as Python %d.%d's grammar" % OLDEST, floor, None)
 
     # The slug and its bound.
     expect("a branch's slug", slug("fix/b898-updater-held-binary"), "fix-b898-updater-held-binary")

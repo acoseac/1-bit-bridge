@@ -68,11 +68,12 @@ name: gate
 # codeql.yml. Version comments are what Dependabot reads to bump the SHAs.
 #
 # A seventh, `docs-check`, is a text check like `go-version` (Python 3
-# stdlib, no Go toolchain): `make docs-check` holds the instruction files
-# Claude Code loads on its own to their byte budgets (CLAUDE.md, each
-# .claude/rules/*.md, the worst single-file load), holds the engineering
-# log's archive to its frozen bytes and its entries to their names
-# (scripts/check-engineering-log.py), and runs the doc tools' self-tests.
+# stdlib on the Python the job pins, no Go toolchain): `make docs-check`
+# holds the instruction files Claude Code loads on its own to their byte
+# budgets (CLAUDE.md, each .claude/rules/*.md, the worst single-file
+# load), holds the engineering log's archive to its frozen bytes and its
+# entries to their names (scripts/check-engineering-log.py), and runs the
+# doc tools' self-tests.
 # The repo has no git hooks, so this job is where an over-budget CLAUDE.md,
 # or an edit of the log's archive, goes red. See scripts/doc-split/README.md.
 #
@@ -337,9 +338,19 @@ jobs:
   # header). Python 3 stdlib only, which the runner image ships; the scripts
   # read the tree through git, so the checkout's .git is all they need: the
   # archive's digest is committed in its checker, and no history is read.
+  #
+  # The job pins its Python. ubuntu-latest moves to a newer image, and its
+  # python3 with it, so the job runs on ubuntu-24.04 and puts that image's
+  # own python3.12 first on PATH as python3, asserting the version before
+  # make runs: a missing python3.12 fails the job rather than letting
+  # another Python stand in. No setup action: it would have to be
+  # commit-pinned (see the header), and the image's interpreter needs none.
+  # The checker states the oldest Python it supports
+  # (scripts/check-engineering-log.py), and its self-test parses its own
+  # source as that version's; this job runs 3.12, not that one.
   docs-check:
     name: docs-check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -347,8 +358,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Python 3.12, the image's own, first on PATH
+        run: |
+          python=$(command -v python3.12)
+          mkdir -p "$RUNNER_TEMP/python"
+          ln -s "$python" "$RUNNER_TEMP/python/python3"
+          echo "$RUNNER_TEMP/python" >> "$GITHUB_PATH"
       - name: Instruction-file budgets and the doc tools' self-tests
-        run: make docs-check
+        run: |
+          python3 -c 'import sys; print(sys.version); sys.exit(sys.version_info[:2] != (3, 12))'
+          make docs-check
 
   # internal/alsapcm drives the kernel's ALSA PCM interface with ioctls and
   # Go definitions of include/uapi/sound/asound.h written by hand, so the
