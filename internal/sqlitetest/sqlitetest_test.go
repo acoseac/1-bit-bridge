@@ -221,6 +221,51 @@ func endsWithin(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
+// TestOpeningAConnectionWaitsOnNoOtherConnectionsLock: the connection hook
+// drops a connection recorded only where its lock is free at once, so an open
+// completes while another connection's lock is held, as a close holds it
+// while SQLite checkpoints the file; and the next open after that close drops
+// the connection it closed.
+func TestOpeningAConnectionWaitsOnNoOtherConnectionsLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "held.db")
+	held := openWAL(t, path)
+	if err := held.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	conns.mu.Lock()
+	recorded := append([]*tracked(nil), conns.byFile[path]...)
+	conns.mu.Unlock()
+	if len(recorded) != 1 {
+		t.Fatalf("%d connections recorded for %s, want 1", len(recorded), path)
+	}
+	other := openWAL(t, filepath.Join(dir, "other.db"))
+	held0 := recorded[0]
+	held0.lock.Lock()
+	// Registered after both closes, so it runs first: a close takes the lock.
+	unlock := sync.OnceFunc(held0.lock.Unlock)
+	t.Cleanup(unlock)
+	opened := make(chan struct{})
+	go func() {
+		defer close(opened)
+		_ = other.Ping()
+	}()
+	endsWithin(t, opened, "an open beside another connection's held lock")
+	unlock()
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := openWAL(t, filepath.Join(dir, "third.db")).Ping(); err != nil {
+		t.Fatal(err)
+	}
+	conns.mu.Lock()
+	n := len(conns.byFile[path])
+	conns.mu.Unlock()
+	if n != 0 {
+		t.Errorf("%d connections recorded for %s once its one was closed, want 0", n, path)
+	}
+}
+
 // TestArmUntilGivesUpAtItsInstant pins what a serve test arms a Park with:
 // a wait gives up at the instant it was given, not Arm's 10 s after the
 // wait began, and says when that was.

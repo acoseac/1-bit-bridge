@@ -316,10 +316,17 @@ var conns struct {
 // tracked is a connection the driver opened, as Cancel asks it.
 type tracked struct {
 	// lock is the lock the driver's connection takes to close and to
-	// interrupt, held across IsValid so that its read of the connection's
-	// handle never races a close.
-	lock  sync.Locker
+	// interrupt (its embedded sync.Mutex), held across IsValid so that its
+	// read of the connection's handle never races a close.
+	lock  connLock
 	valid driver.Validator
+}
+
+// connLock is what a connection's lock answers: sync.Mutex's methods.
+type connLock interface {
+	Lock()
+	Unlock()
+	TryLock() bool
 }
 
 // live reports whether the connection is open and not interrupted.
@@ -329,14 +336,27 @@ func (c *tracked) live() bool {
 	return c.valid.IsValid()
 }
 
+// gone reports whether the connection has closed or been interrupted, asking
+// only where its lock is free at once: one a close or an interrupt holds now
+// is kept, and asked again at the next open.
+func (c *tracked) gone() bool {
+	if !c.lock.TryLock() {
+		return false
+	}
+	defer c.lock.Unlock()
+	return !c.valid.IsValid()
+}
+
 // trackConnection records in conns a connection the driver has just opened,
 // under the file its DSN names (name up to any query), and drops every
-// connection recorded that has closed or been interrupted since, so that
-// conns keeps no more than the connections open. A connection that does not
-// take the lock its close takes, or does not report whether it is valid, is
-// not recorded, and Cancel finds none to wait for.
+// connection recorded that has closed or been interrupted since (gone), so
+// that conns keeps little more than the connections open; it waits on no
+// other connection's lock, which a close holds across SQLite's close, a WAL
+// database's checkpoint among it. A connection that does not take the lock
+// its close takes, or does not report whether it is valid, is not recorded,
+// and Cancel finds none to wait for.
 func trackConnection(conn sqlite.ExecQuerierContext, name string) error {
-	lock, locks := conn.(sync.Locker)
+	lock, locks := conn.(connLock)
 	valid, reports := conn.(driver.Validator)
 	if !locks || !reports {
 		return nil
@@ -350,7 +370,7 @@ func trackConnection(conn sqlite.ExecQuerierContext, name string) error {
 	for f, list := range conns.byFile {
 		kept := list[:0]
 		for _, c := range list {
-			if c.live() {
+			if !c.gone() {
 				kept = append(kept, c)
 			}
 		}
