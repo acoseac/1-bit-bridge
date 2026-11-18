@@ -421,9 +421,12 @@ func TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint(t *testing.T) {
 // (TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint,
 // TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint), and production asks
 // the check its one declaration names, packaging.CheckWindowsInstall: no Go
-// file of this package but a test assigns it or takes its address. The walk
-// reads every file the go tool builds here, whatever its platform, and must
-// find that declaration.
+// file of this package but a test assigns it or takes its address, and that
+// declaration gives it no type of its own, whose pointer methods would change
+// it with no & written. The walk reads every file the go tool builds here,
+// whatever its platform, and must find that declaration. It reads each file
+// through seamFindingsIn, which
+// TestTheLogsInstallCheckPinSeesEachWayToChangeIt holds to planted sources.
 func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
 	const seam = "logsInstallCheck"
 	matches, err := filepath.Glob("*.go")
@@ -431,7 +434,8 @@ func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	fset := token.NewFileSet()
-	var declared, changed []string
+	var declared []token.Position
+	var changed []string
 	parsed := 0
 	for _, name := range matches {
 		if strings.HasSuffix(name, "_test.go") || goToolIgnores(name) {
@@ -442,33 +446,20 @@ func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
 			t.Fatalf("parse %s: %v", name, err)
 		}
 		parsed++
-		pkg := importNameOf(f, "github.com/acoseac/1-bit-bridge/internal/packaging")
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.ValueSpec:
-				for i, id := range n.Names {
-					if id.Name != seam {
-						continue
-					}
-					declared = append(declared, fset.Position(id.Pos()).String())
-					if pkg == "" || len(n.Values) != len(n.Names) || !isSelector(n.Values[i], pkg, "CheckWindowsInstall") {
-						t.Errorf("%s declares %s as something other than packaging.CheckWindowsInstall",
-							fset.Position(id.Pos()), seam)
-					}
-				}
-			case *ast.AssignStmt:
-				for _, lhs := range n.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && id.Name == seam {
-						changed = append(changed, fset.Position(id.Pos()).String()+" assigns it")
-					}
-				}
-			case *ast.UnaryExpr:
-				if id, ok := n.X.(*ast.Ident); ok && n.Op == token.AND && id.Name == seam {
-					changed = append(changed, fset.Position(id.Pos()).String()+" takes its address")
-				}
+		decls, findings := seamFindingsIn(fset, f, seam)
+		declared = append(declared, decls...)
+		for _, c := range findings {
+			switch c.kind {
+			case seamDeclaredAsAnother:
+				t.Errorf("%s declares %s as something other than packaging.CheckWindowsInstall", c.pos, seam)
+			case seamDeclaredWithAType:
+				t.Errorf("%s declares %s with a type of its own: a method of that type with a pointer receiver "+
+					"changes it, its call taking the address with no &; declared with no type, it has "+
+					"packaging.CheckWindowsInstall's, which has no methods", c.pos, seam)
+			default:
+				changed = append(changed, c.String())
 			}
-			return true
-		})
+		}
 	}
 	if parsed < 20 || len(declared) != 1 {
 		t.Fatalf("parsed %d files and found %s declared at %q, want once: the walk no longer reads the "+
@@ -477,6 +468,203 @@ func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
 	for _, c := range changed {
 		t.Errorf("%s: production code changes %s, which only a test of an entry point may set; production "+
 			"asks packaging.CheckWindowsInstall, its declaration's", c, seam)
+	}
+}
+
+// seamFinding is one place where a file declares the logs install check's
+// seam otherwise than logs.go declares it, or changes it.
+type seamFinding struct {
+	pos  token.Position
+	kind seamFindingKind
+}
+
+// String is the finding as the pin reports a change: its position, then what
+// the file does there.
+func (f seamFinding) String() string {
+	return f.pos.String() + " " + string(f.kind)
+}
+
+// seamFindingKind is what a seamFinding found, in the words the pin reports a
+// change in.
+type seamFindingKind string
+
+// The kinds of seamFinding.
+const (
+	// seamDeclaredAsAnother is a declaration of the seam whose value is not
+	// packaging.CheckWindowsInstall, or that gives it none.
+	seamDeclaredAsAnother seamFindingKind = "declares it as something other than packaging.CheckWindowsInstall"
+	// seamDeclaredWithAType is a declaration that gives the seam a type of its
+	// own: a named type's method with a pointer receiver can change it, and a
+	// call of that method takes its address with no & written.
+	seamDeclaredWithAType seamFindingKind = "declares it with a type of its own"
+	// seamAssigned is the seam on the left of an assignment, or as a range
+	// clause's key or value, with either token.
+	seamAssigned seamFindingKind = "assigns it"
+	// seamAddressTaken is the seam as the operand of &.
+	seamAddressTaken seamFindingKind = "takes its address"
+)
+
+// seamFindingsIn reads one parsed file for the logs install check's seam, the
+// package variable named seam: where the file declares it, and each finding,
+// in the file's order. An identifier is read with its parentheses taken off
+// (isSeamIdent), so `(seam) = f` and `&(seam)` are `seam = f` and `&seam`.
+func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []token.Position, findings []seamFinding) {
+	pkg := importNameOf(f, "github.com/acoseac/1-bit-bridge/internal/packaging")
+	found := func(at ast.Node, kind seamFindingKind) {
+		findings = append(findings, seamFinding{pos: fset.Position(at.Pos()), kind: kind})
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.ValueSpec:
+			for i, id := range n.Names {
+				if id.Name != seam {
+					continue
+				}
+				declared = append(declared, fset.Position(id.Pos()))
+				if pkg == "" || len(n.Values) != len(n.Names) || !isSelector(n.Values[i], pkg, "CheckWindowsInstall") {
+					found(id, seamDeclaredAsAnother)
+				}
+				if n.Type != nil {
+					found(id, seamDeclaredWithAType)
+				}
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if isSeamIdent(lhs, seam) {
+					found(lhs, seamAssigned)
+				}
+			}
+		case *ast.RangeStmt:
+			for _, target := range []ast.Expr{n.Key, n.Value} {
+				if isSeamIdent(target, seam) {
+					found(target, seamAssigned)
+				}
+			}
+		case *ast.UnaryExpr:
+			if n.Op == token.AND && isSeamIdent(n.X, seam) {
+				found(n.X, seamAddressTaken)
+			}
+		}
+		return true
+	})
+	return declared, findings
+}
+
+// isSeamIdent reports whether e, its parentheses taken off, is the identifier
+// named seam. A nil e, the key or the value a range clause leaves out, is not.
+func isSeamIdent(e ast.Expr, seam string) bool {
+	if e == nil {
+		return false
+	}
+	id, ok := ast.Unparen(e).(*ast.Ident)
+	return ok && id.Name == seam
+}
+
+// TestTheLogsInstallCheckPinSeesEachWayToChangeIt holds seamFindingsIn, the
+// reading TestNoProductionCodeReassignsTheLogsInstallCheck gives each file of
+// the package, to planted files (backlog B618FU), each declaring the seam once,
+// as logs.go does, but where its row is about the declaration. Each way a file
+// can change the seam is one finding of its kind on the line planted: the five
+// the pin read past before B618FU (an assignment and an address taken through
+// parentheses, a range clause's value over a slice and its key over an
+// iter.Seq, and a declaration of a named type whose pointer method sets it,
+// called with no & written) and the three it caught (an assignment, an address
+// taken, a declaration of another value). A file that only reads the seam,
+// beside a named type whose pointer method sets another variable, has none.
+func TestTheLogsInstallCheckPinSeesEachWayToChangeIt(t *testing.T) {
+	const header = `package main
+
+import (
+	"iter"
+
+	"github.com/acoseac/1-bit-bridge/internal/packaging"
+)
+
+`
+	const asLogsGo = "var logsInstallCheck = packaging.CheckWindowsInstall\n\n"
+	for _, c := range []struct {
+		name string
+		src  string          // the file after its imports
+		want seamFindingKind // the one finding's, on the line marked "// planted"; "" is none
+	}{
+		{name: "an assignment through parentheses", want: seamAssigned, src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
+	(logsInstallCheck) = f // planted
+}
+`},
+		{name: "an address taken through parentheses", want: seamAddressTaken, src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
+	p := &(logsInstallCheck) // planted
+	*p = f
+}
+`},
+		{name: "a range clause's value over a slice", want: seamAssigned, src: asLogsGo + `func plant(fs []func() packaging.WindowsInstall) {
+	for _, logsInstallCheck = range fs { // planted
+	}
+}
+`},
+		{name: "a range clause's key over an iter.Seq", want: seamAssigned, src: asLogsGo + `func plant(seq iter.Seq[func() packaging.WindowsInstall]) {
+	for logsInstallCheck = range seq { // planted
+	}
+}
+`},
+		{name: "a declaration of a named type whose pointer method sets it", want: seamDeclaredWithAType, src: `type installCheck func() packaging.WindowsInstall
+
+func (c *installCheck) set(f installCheck) { *c = f }
+
+var logsInstallCheck installCheck = packaging.CheckWindowsInstall // planted
+
+func plant(f installCheck) {
+	logsInstallCheck.set(f)
+}
+`},
+		{name: "an assignment", want: seamAssigned, src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
+	logsInstallCheck = f // planted
+}
+`},
+		{name: "an address taken", want: seamAddressTaken, src: asLogsGo + `func plant() *func() packaging.WindowsInstall {
+	return &logsInstallCheck // planted
+}
+`},
+		{name: "a declaration of another value", want: seamDeclaredAsAnother, src: `var logsInstallCheck = func() packaging.WindowsInstall { return packaging.WindowsInstall{} } // planted
+`},
+		{name: "reads alone", src: asLogsGo + `type installCheck func() packaging.WindowsInstall
+
+func (c *installCheck) set(f installCheck) { *c = f }
+
+func plant(f installCheck) bool {
+	inst := logsInstallCheck()
+	check := logsInstallCheck
+	var other installCheck = check
+	other.set(f)
+	return inst.Startup && logsInstallCheck != nil
+}
+`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src := header + c.src
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "planted.go", src, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatal(err)
+			}
+			declared, findings := seamFindingsIn(fset, f, "logsInstallCheck")
+			if len(declared) != 1 {
+				t.Errorf("found logsInstallCheck declared at %q, want once", declared)
+			}
+			if c.want == "" {
+				if len(findings) != 0 {
+					t.Errorf("a file that only reads the seam has findings %q, want none", findings)
+				}
+				return
+			}
+			marker := strings.Index(src, "// planted")
+			if marker < 0 {
+				t.Fatal("the row marks no line planted")
+			}
+			line := 1 + strings.Count(src[:marker], "\n")
+			if len(findings) != 1 || findings[0].kind != c.want || findings[0].pos.Line != line {
+				t.Errorf("findings %q, want one that %s, on line %d", findings, c.want, line)
+			}
+		})
 	}
 }
 

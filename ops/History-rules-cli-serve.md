@@ -6218,7 +6218,7 @@ without `Oversized` (the row past it). The record is in
 
 ## B618 — on Windows, bridge logs reads the file the installed bridge writes (2026-11-13)
 
-- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok from a shell, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words.** → History-rules-cli-serve.md
+- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok from a shell on Windows, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words.** → History-rules-cli-serve.md
 
 *What was true.* A bridge run as the Windows service writes
 `%PROGRAMDATA%\1-bit-bridge\bridge.log`: `main` calls `redirectServiceIO` once
@@ -6280,7 +6280,9 @@ process runs as the service (`isWindowsService`) for the check: the service's
 log inside the service, the user's otherwise, DefaultLogPath off Windows. The
 console's doctor builds its report in the serving process and grades that same
 file, asking no install check, so a console of a bridge run another way beside
-a registered service grades the log it writes; bridge doctor run from a shell
+a registered service grades the user's log, the one a bridge its sign-in
+launcher started writes (a bridge run in the foreground logs to its terminal,
+so that file may be an earlier launch's); bridge doctor run from a shell
 grades the log `bridge logs` reads (round 2, below).
 
 *The tests.* cmd/bridge's
@@ -6335,9 +6337,10 @@ logs` and the console inside the service read the service's. The builder takes
 directories and the install check) and whether the console's doctor asks.
 Bridge doctor's line grades the log `bridge logs` reads (`shellDoctorLog`: the
 install check, its "cannot tell" rule and its fallbacks); the console's
-doctor's (`adminDoctorRunnerFor`) its own process's, asking no check, so a
-console of a bridge run another way beside a registered service grades the file
-it writes. Where the check cannot tell, the line says so after its summary
+doctor's (`adminDoctorRunnerFor`) the one its own process's export offers,
+asking no check, so a console of a bridge run another way beside a registered
+service grades the user's log, the one a bridge its sign-in launcher started
+writes. Where the check cannot tell, the line says so after its summary
 (`doctor.Deps.LogNote`), ok or not: the table prints a hint under a warn or a
 fail alone, and `--json` and the console carry the summary too. With neither
 log there, and where a log's path cannot be made, the line is a warn saying why
@@ -6390,3 +6393,37 @@ the terminal)"", and the guards were green. Eight controls, each predicted
 before it ran, were red where predicted and nowhere else, among them the
 brief's: `console: true` dropped from `adminDoctorRunnerFor`. The record is in
 `ops/engineering-log.md`, 2026-11-14, B618 round 3.
+
+*B618FU (2026-11-18): the pin sees every way to change the seam, and two
+corrections.* `TestNoProductionCodeReassignsTheLogsInstallCheck` tested bare
+identifiers alone and no declaration's type, so five ways to change
+`logsInstallCheck` passed it: an assignment through parentheses
+(`(logsInstallCheck) = f`), an address taken through them
+(`p := &(logsInstallCheck)`), a range clause's value over a slice
+(`for _, logsInstallCheck = range fs`), its key over an `iter.Seq`
+(`for logsInstallCheck = range seq`), and a declaration that gives the seam a
+named type
+(`var logsInstallCheck installCheck = packaging.CheckWindowsInstall`), whose
+method with a pointer receiver, called as `logsInstallCheck.set(f)`, takes its
+address with no `&` written. Its walk of a file is one helper now,
+`seamFindingsIn`, which the pin and the table test both call: it takes an
+identifier's parentheses off before it compares it (`isSeamIdent`, false for
+the key or the value a range clause leaves out), reads a range clause's key and
+value with either token, as it reads an assignment's `=` and `:=`, and finds a
+declaration that gives the seam a type (`seamDeclaredWithAType`, reported in a
+message of its own); the pin keeps its glob, `goToolIgnores`, its two guards
+and its other messages. `TestTheLogsInstallCheckPinSeesEachWayToChangeIt`
+parses planted files, each declaring the seam once as `logs.go` does but where
+its row is about the declaration: each of the five forms, and of the three the
+pin caught (an assignment, an address taken, a declaration of another value),
+is one finding of its kind on the line planted, and a file that only reads the
+seam (a call, a copy, a comparison with nil, a named type's pointer method used
+on another variable) has none. Two claims were corrected with it. This entry's
+rule forbade grading a log no path names as the terminal's ok from a shell,
+where round 3 gives that ok off Windows on purpose: it says from a shell on
+Windows now, in `cli-serve.md` and above. And *The console* and round 2 said a
+console of a bridge run another way beside a registered service grades the log
+it writes, where a bridge run in the foreground writes none: it grades the
+user's log, which may be an earlier launch's, and the docs of `consoleLogPath`,
+`doctorLogs` and `adminDoctorRunnerFor` say so. The record is in
+`ops/engineering-log.md`, 2026-11-18, B618FU.

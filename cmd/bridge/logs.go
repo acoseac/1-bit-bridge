@@ -459,18 +459,22 @@ func adminLogPath() string {
 	return consoleLogPath(hostLogs())
 }
 
-// consoleLogPath is the file the process asking writes its log to, as far as
-// it can know, "" where its path cannot be made. On Windows that is `bridge
-// logs`' own choice (chooseWindowsLog) with whether this process runs as the
-// service in place of the install check, since the console asks of the bridge
-// it is part of: the service's log inside the service, where DefaultLogPath is
+// consoleLogPath is the log file the console's export offers the process
+// asking, "" where its path cannot be made: the file that process writes
+// where it runs as the installed bridge. On Windows that is `bridge logs`' own
+// choice (chooseWindowsLog) with whether this process runs as the service in
+// place of the install check, since the console asks of the bridge it is part
+// of: the service's log inside the service, where DefaultLogPath is
 // LocalSystem's under C:\Windows\System32\config\systemprofile while the
-// service writes %PROGRAMDATA% (backlog B618), and the user's otherwise.
-// Elsewhere it is DefaultLogPath, which the launchd and systemd units point the
-// bridge's output at. So the console and `bridge logs` read one file wherever
-// the console runs inside the installed bridge; they part only where they ask
-// of two bridges, a console of a bridge run another way beside a registered
-// service, which is that bridge's own log.
+// service writes %PROGRAMDATA% (backlog B618), and the user's otherwise, the
+// one a bridge its sign-in launcher started writes. Elsewhere it is
+// DefaultLogPath, which the launchd and systemd units point the bridge's
+// output at. A process run in the foreground writes no log file: it logs to
+// its terminal, so the file named may be an earlier launch's, or not there.
+// So the console and `bridge logs` read one file wherever the console runs
+// inside the installed bridge; they part only where they ask of two bridges,
+// a console of a bridge run another way beside a registered service, which
+// offers the user's log, not the service's.
 func consoleLogPath(host logsHost) string {
 	if host.goos == "windows" {
 		service := packaging.ServiceNotRegistered
@@ -503,10 +507,11 @@ type doctorLog struct {
 // install check included, runs on any host (hostLogs in production). bridge
 // doctor, run from a shell, grades the installed bridge's log as `bridge logs`
 // reads it (shellDoctorLog). The console's doctor (console, which
-// adminDoctorRunnerFor sets) grades its own process's log, the file the
-// console's export offers (consoleLogPath), and asks no install check: a
-// console of a bridge run another way beside a registered service grades the
-// file it writes, not the service's. Where that file's path cannot be made it
+// adminDoctorRunnerFor sets) grades the file the console's export offers its
+// process (consoleLogPath), and asks no install check: a console of a bridge
+// run another way beside a registered service grades the user's log, not the
+// service's; a process run in the foreground writes no log file, so the one
+// graded may be an earlier launch's. Where that file's path cannot be made it
 // names none, the terminal's ok, as the export offers none.
 type doctorLogs struct {
 	host    logsHost
