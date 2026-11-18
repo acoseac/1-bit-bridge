@@ -62,9 +62,9 @@ type logStatusResponse struct {
 
 // resolveLogFile returns the log path and its stat, or a reason it cannot.
 func (s *Server) resolveLogFile() (string, os.FileInfo, string) {
-	// A managed bridge is somebody else's process. Every wording below
-	// this line tells the reader where to look for the log — a terminal,
-	// a journal, `docker logs` — and all three assume a shell on the
+	// A managed bridge is somebody else's process. The hints below this
+	// line tell the reader where to look for the log — a terminal, a
+	// journal, `docker logs` — and all three assume a shell on the
 	// host, which is the one thing a hosted tenant does not have. This
 	// is the same failure the branches below exist to avoid: a hint that
 	// is plausible, specific, and about a machine the reader cannot
@@ -76,7 +76,10 @@ func (s *Server) resolveLogFile() (string, os.FileInfo, string) {
 	}
 	path := strings.TrimSpace(s.deps.LogPath)
 	if path == "" {
-		return "", nil, "this bridge has no log file configured — its log's path could not be made, since this process has no home directory, and its output goes wherever what started it sends it: the terminal it was started from, or a service manager's journal or the file its unit names"
+		// The path cmd/bridge could not make (Deps.LogPath), which hands no
+		// cause, so the reason states none, nor where the process's output
+		// goes, which only what started the process decides.
+		return "", nil, "no log file path could be made for this process"
 	}
 	info, err := os.Stat(path)
 	if err != nil {

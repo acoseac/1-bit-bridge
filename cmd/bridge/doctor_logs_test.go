@@ -46,23 +46,25 @@ func gradedAs(body, path string) string {
 	return fmt.Sprintf("%d B (%s)", len(body), path)
 }
 
-// terminalsOK is the log-file-size line's summary where no log is named, in
-// the words of a bridge that logs to its terminal. It is the line's still, as
+// noPathOK is the log-file-size line's summary where no log is named, word
+// for word: it says only that no path was made, since 2026-11-18, where it
+// said "no log file configured (logs go to the terminal)", which a process
+// whose path could not be made need not do. It is the line's still, as
 // before round 2, where a log's path cannot be made off Windows or in the
 // console's doctor.
-const terminalsOK = "no log file configured (logs go to the terminal)"
+const noPathOK = "no log file path was made for this process, so there is no file to check"
 
 // requireLogLine fails the test unless the log-file-size line is status
 // summary, with hint under it. Where the line wanted names a log or says why
-// none could be named, the terminal's ok fails it in words of its own too.
+// none could be named, the empty path's ok fails it in words of its own too.
 func requireLogLine(t *testing.T, got doctor.Check, status doctor.Status, summary, hint string) {
 	t.Helper()
 	if got.Status != status || got.Summary != summary || got.Hint != hint {
 		t.Errorf("the log-file-size line is %s %q (hint %q),\nwant %s %q (hint %q)", got.Status, got.Summary, got.Hint,
 			status, summary, hint)
 	}
-	if summary != terminalsOK && got.Summary == terminalsOK {
-		t.Errorf("the line reads as a bridge that logs to its terminal")
+	if summary != noPathOK && got.Summary == noPathOK {
+		t.Errorf("the line reads as one for which no log path was made")
 	}
 }
 
@@ -176,12 +178,12 @@ func homelessLogs(goos string) logsHost {
 }
 
 // TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade: on Windows, bridge doctor
-// from a shell says why a log's path cannot be made, a warn, never the ok of a
-// bridge that logs to its terminal, which the empty path it left once read
-// as. That warn is the Windows shell's alone (round 3): off Windows, from a
-// shell or in the console, and in the console's doctor on Windows, run as
-// serve runs it (adminDoctorRunnerFor), a path that cannot be made names no
-// file, the terminal's ok, as before round 2.
+// from a shell says why a log's path cannot be made, a warn, never the ok of
+// an empty path, which the empty path it left once read as. That warn is the
+// Windows shell's alone (round 3): off Windows, from a shell or in the
+// console, and in the console's doctor on Windows, run as serve runs it
+// (adminDoctorRunnerFor), a path that cannot be made names no file, the empty
+// path's ok, as before round 2.
 func TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade(t *testing.T) {
 	errHome := errors.New("%USERPROFILE% is not defined")
 	cannotBeMade := "not checked: the log's path cannot be made (" + errHome.Error() + ")"
@@ -199,12 +201,12 @@ func TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade(t *testing.T) {
 	t.Run("the console's doctor outside the service", func(t *testing.T) {
 		host := homelessWindowsLogs(t, errHome, serviceRegistered)
 		host.isService = func() bool { return false }
-		requireLogLine(t, consolesLogLine(t, host), doctor.OK, terminalsOK, "")
+		requireLogLine(t, consolesLogLine(t, host), doctor.OK, noPathOK, "")
 	})
 	for _, goos := range []string{"darwin", "linux"} {
 		t.Run("off Windows on "+goos, func(t *testing.T) {
-			requireLogLine(t, doctorsLogLine(t, doctorLogs{host: homelessLogs(goos)}), doctor.OK, terminalsOK, "")
-			requireLogLine(t, consolesLogLine(t, homelessLogs(goos)), doctor.OK, terminalsOK, "")
+			requireLogLine(t, doctorsLogLine(t, doctorLogs{host: homelessLogs(goos)}), doctor.OK, noPathOK, "")
+			requireLogLine(t, consolesLogLine(t, homelessLogs(goos)), doctor.OK, noPathOK, "")
 		})
 	}
 }
@@ -243,8 +245,8 @@ func TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService(t *testing.T) 
 // in its --json: on an ok line, after the summary, which the table prints
 // (it prints a hint under a warn or a fail alone); with neither log there, as
 // a warn whose hint the table prints too. On Windows a path that cannot be
-// made is a warn in both, never the terminal's ok. Off Windows it is that ok
-// in both, and in the report the console's doctor hands the console
+// made is a warn in both, never the empty path's ok. Off Windows it is that
+// ok in both, and in the report the console's doctor hands the console
 // (adminDoctorRunnerFor) it is that ok on Windows too, as before round 2.
 func TestTheDoctorsLogNoteSurvivesItsRendering(t *testing.T) {
 	errCheck := errors.New("connect to the service manager: The RPC server is unavailable.")
@@ -307,18 +309,18 @@ func TestTheDoctorsLogNoteSurvivesItsRendering(t *testing.T) {
 			r.json.Summary != summary {
 			t.Errorf("the table's line is %q and --json's %+v, want the warn %q", r.line, r.json, summary)
 		}
-		if strings.Contains(r.line+r.json.Summary, "logs go to the terminal") {
-			t.Errorf("a path that cannot be made reads as a bridge that logs to its terminal")
+		if strings.Contains(r.line+r.json.Summary, noPathOK) {
+			t.Errorf("a path that cannot be made reads as the empty path's ok")
 		}
 	})
 	for _, goos := range []string{"darwin", "linux"} {
 		t.Run("a path that cannot be made off Windows on "+goos, func(t *testing.T) {
 			r := render(t, homelessLogs(goos))
-			if !strings.HasPrefix(r.line, "[ok]") || !strings.HasSuffix(r.line, terminalsOK) || r.hint != "" {
-				t.Errorf("the table's line is %q, hint %q; want the ok %q and no hint", r.line, r.hint, terminalsOK)
+			if !strings.HasPrefix(r.line, "[ok]") || !strings.HasSuffix(r.line, noPathOK) || r.hint != "" {
+				t.Errorf("the table's line is %q, hint %q; want the ok %q and no hint", r.line, r.hint, noPathOK)
 			}
-			if r.json.Status != "ok" || r.json.Summary != terminalsOK || r.json.Hint != "" {
-				t.Errorf("--json's line is %+v, want the ok %q", r.json, terminalsOK)
+			if r.json.Status != "ok" || r.json.Summary != noPathOK || r.json.Hint != "" {
+				t.Errorf("--json's line is %+v, want the ok %q", r.json, noPathOK)
 			}
 		})
 	}
@@ -333,7 +335,7 @@ func TestTheDoctorsLogNoteSurvivesItsRendering(t *testing.T) {
 			{"on linux", homelessLogs("linux")},
 		} {
 			t.Run(c.name, func(t *testing.T) {
-				requireLogLine(t, consolesLogLine(t, c.host), doctor.OK, terminalsOK, "")
+				requireLogLine(t, consolesLogLine(t, c.host), doctor.OK, noPathOK, "")
 			})
 		}
 	})

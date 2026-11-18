@@ -138,9 +138,12 @@ func openLog(host logsHost, stderr io.Writer) (*os.File, int) {
 
 // openDefaultLog opens DefaultLogPath, in the words `bridge logs` said on
 // every platform before backlog B618, and still says off Windows but for the
-// hint where the file is not there, which names what creates it and, since
-// 2026-11-18, no `bridge serve` run in the foreground, which logs to its
-// terminal and writes no file.
+// hint where the file is not there, which since 2026-11-18 names no `bridge
+// serve` run in the foreground, which logs to its terminal and writes no file:
+// where the bridge's service writes the file, as the units `bridge init`
+// installs do, the service manager makes it when it starts the service, and
+// where a systemd unit sends the bridge's output to the journal instead, the
+// file never comes and journalctl reads that output.
 func openDefaultLog(host logsHost, stderr io.Writer) (*os.File, int) {
 	logPath, err := host.defaultLogPath()
 	if err != nil {
@@ -151,7 +154,7 @@ func openDefaultLog(host logsHost, stderr io.Writer) (*os.File, int) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(stderr, "logs: %s does not exist (yet)\n", logPath)
-			fmt.Fprintln(stderr, "  the service manager creates the file when it starts the bridge's service; run `bridge start` and retry.")
+			fmt.Fprintln(stderr, "  where the bridge's service writes this file, the service manager creates it when it starts the service, so run `bridge start` and retry; where a systemd unit sends the bridge's output to the journal instead, read it with journalctl.")
 			return nil, 1
 		}
 		fmt.Fprintf(stderr, "logs: open %s: %v\n", logPath, err)

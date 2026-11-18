@@ -344,10 +344,12 @@ func TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt(t *testing.T) {
 
 // TestBridgeLogsOffWindowsIsAsItWas is a guard: on macOS and Linux bridge
 // logs reads DefaultLogPath and says what it always said, word for word, but
-// for the hint where that file is not there, which since 2026-11-18 says the
-// service manager creates it and names no `bridge serve` run in the
-// foreground, which writes no log file; and it asks nothing of a Windows
-// install.
+// for the hint where that file is not there, which since 2026-11-18 names no
+// `bridge serve` run in the foreground, which writes no log file: it says the
+// service manager creates the file where the bridge's service writes it, and
+// that a systemd unit sending the bridge's output to the journal is read with
+// journalctl, in one sentence on both systems; and it asks nothing of a
+// Windows install.
 func TestBridgeLogsOffWindowsIsAsItWas(t *testing.T) {
 	for _, goos := range []string{"darwin", "linux"} {
 		t.Run(goos, func(t *testing.T) {
@@ -363,7 +365,9 @@ func TestBridgeLogsOffWindowsIsAsItWas(t *testing.T) {
 			code, stdout, stderr := runBridgeLogs(t, host)
 			requireLogsRun(t, code, stdout, stderr, 1, "",
 				"logs: "+path+" does not exist (yet)\n"+
-					"  the service manager creates the file when it starts the bridge's service; run `bridge start` and retry.\n")
+					"  where the bridge's service writes this file, the service manager creates it when it starts the service, "+
+					"so run `bridge start` and retry; where a systemd unit sends the bridge's output to the journal instead, "+
+					"read it with journalctl.\n")
 
 			writeLogFile(t, path, "one\ntwo\nthree\n")
 			code, stdout, stderr = runBridgeLogs(t, host, "-n", "2")

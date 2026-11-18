@@ -24,24 +24,27 @@ func writeSized(t *testing.T, size int64) string {
 	return p
 }
 
-// TestCheckLogSizeQuietWhenAbsent pins the no-op states: no path, one that
-// could not be made, and a path with no file yet, a service's before its
-// first start or that of a bridge only ever run in the foreground, which
-// writes none. Reporting on a file that does not exist would be reporting on
+// TestCheckLogSizeQuietWhenAbsent pins the no-op states and their words: no
+// path, one that could not be made (or, in `bridge init`'s preflight, that
+// names no log), and a path with no file yet, a service's before its first
+// start or that of a bridge only ever run in the foreground, which writes
+// none. Reporting on a file that does not exist would be reporting on
 // nothing — it belongs in the OK column, not as a warning an operator has to
-// learn to ignore.
+// learn to ignore. The empty path's ok says only that no path was made, since
+// 2026-11-18, where it said the bridge logs to its terminal, which nothing
+// that leaves the path empty knows.
 func TestCheckLogSizeQuietWhenAbsent(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		deps Deps
+		name, summary string
+		deps          Deps
 	}{
-		{"no path configured", Deps{}},
-		{"path set but no file yet", Deps{LogPath: filepath.Join(t.TempDir(), "nope.log")}},
+		{"no path made", "no log file path was made for this process, so there is no file to check", Deps{}},
+		{"path set but no file yet", "no log file yet", Deps{LogPath: filepath.Join(t.TempDir(), "nope.log")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := checkLogSize(context.Background(), tc.deps)
-			if got.Status != OK {
-				t.Errorf("status = %v, want OK (%s)", got.Status, got.Summary)
+			if got.Status != OK || got.Summary != tc.summary {
+				t.Errorf("got %v %q, want OK %q", got.Status, got.Summary, tc.summary)
 			}
 		})
 	}
@@ -134,10 +137,12 @@ func TestALogNoteIsCarriedWhateverTheLineFinds(t *testing.T) {
 
 // TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK (backlog B618): a log whose
 // path could not be made, or that the install check could not place, is a
-// warn saying why, its note the hint, never the ok "no log file configured
-// (logs go to the terminal)" that an empty path alone reads as.
+// warn saying why, its note the hint, never the ok an empty path alone gets.
+// That ok said "no log file configured (logs go to the terminal)" until
+// 2026-11-18, which gave the test its name; it says now that no path was made
+// (TestCheckLogSizeQuietWhenAbsent).
 func TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK(t *testing.T) {
-	terminal := checkLogSize(context.Background(), Deps{}).Summary
+	emptyPathsOK := checkLogSize(context.Background(), Deps{}).Summary
 	for _, tc := range []struct{ name, unresolved, note string }{
 		{"a path that cannot be made", "the log's path cannot be made (the test's home is not set)", ""},
 		{"neither log there", `neither C:\a\bridge.log nor C:\b\bridge.log exists`,
@@ -149,8 +154,8 @@ func TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK(t *testing.T) {
 				t.Errorf("got %s %q (hint %q), want warn %q, its note the hint", got.Status, got.Summary, got.Hint,
 					"not checked: "+tc.unresolved)
 			}
-			if got.Summary == terminal {
-				t.Errorf("a log that could not be named reads as a bridge that logs to its terminal: %q", got.Summary)
+			if got.Summary == emptyPathsOK {
+				t.Errorf("a log that could not be named reads as the empty path's ok: %q", got.Summary)
 			}
 		})
 	}

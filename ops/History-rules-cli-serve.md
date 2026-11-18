@@ -6218,7 +6218,7 @@ without `Oversized` (the row past it). The record is in
 
 ## B618 — on Windows, bridge logs reads the file the installed bridge writes (2026-11-13)
 
-- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as the terminal's ok from a shell on Windows, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words, but for their hint where the file is not there, which names no foreground `bridge serve` since 2026-11-18.** → History-rules-cli-serve.md
+- **On Windows `bridge logs` and bridge doctor from a shell read the file the installed bridge writes: the service's log (`WindowsLogDirs.ServiceLog`, which `redirectServiceIO` opens) while `packaging.CheckWindowsInstall` finds the service registered, running or not, the user's (DefaultLogPath's) otherwise, one line on stderr naming the one read where both are there; where the check cannot tell, the service's log where it is there, else the user's, either said; the console and its doctor take that choice with "this process is the service" for the check** (2026-11-13, backlog B618; rounds 2 and 3, 2026-11-14). **Don't ask the service manager for more than `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS`, read any failure but `ERROR_SERVICE_DOES_NOT_EXIST` as no service, choose by modification time, take the user's log in silence where the check cannot tell, let the console's doctor ask it, grade a log no path names as an empty path's ok from a shell on Windows, make the service log's path but through `WindowsLogDirs`, name `bridge serve`, `start` or `status` as what writes or checks it, or change macOS's and Linux's words but for two, each pinned here word for word since 2026-11-18: `bridge logs`' hint where the file is not there, "where the bridge's service writes this file, the service manager creates it when it starts the service, so run `bridge start` and retry; where a systemd unit sends the bridge's output to the journal instead, read it with journalctl.", and the doctor's line where no log path was made, "no log file path was made for this process, so there is no file to check".** → History-rules-cli-serve.md
 
 *What was true.* A bridge run as the Windows service writes
 `%PROGRAMDATA%\1-bit-bridge\bridge.log`: `main` calls `redirectServiceIO` once
@@ -6449,7 +6449,8 @@ has no home directory, as a system unit without `User=` has none (systemd sets
 `$HOME` only where `User=` is set, systemd.exec(5)) while its output goes to
 the journal or a file its unit names: the reason says that the path could not
 be made, and where the output goes. The record is in `ops/engineering-log.md`,
-2026-11-18, the foreground hints.
+2026-11-18, the foreground hints. (*The three sentences again*, below, rewords
+the hint and the reason, and the doctor's line beside them.)
 
 *The pin reads the seam by lexical scope (2026-11-18).* `seamFindingsIn`
 compared names alone, so a local of the seam's name was a finding: a `:=`, a
@@ -6470,3 +6471,26 @@ tool: the pin reads every platform's files, which do not type-check as one
 package, and the table's planted files import what they do not use. Twelve rows
 hold it, red over the old pin. The record is in `ops/engineering-log.md`,
 2026-11-18, bridge lows 4.
+
+*The three sentences again (2026-11-18).* The hints above still said more than
+the code. Off Windows, `bridge logs`' hint told every reader that the service
+manager creates the file and to run `bridge start` and retry, which holds only
+where the bridge's service writes that file, as the units `bridge init` installs
+do: a systemd unit that sends the bridge's output to the journal leaves it
+absent for good, and that output is read with journalctl. The hint says both,
+in one sentence printed on both systems, with no branch by system. The doctor's
+line for an empty path said "no log file configured (logs go to the terminal)",
+and the path is empty where it could not be made, in a process with no home
+directory that a terminal or a service manager may have started, and in `bridge
+init`'s preflight, which names no log: the line says "no log file path was made
+for this process, so there is no file to check", which holds in both. The
+console's reason for an empty path named a cause and where the output goes,
+which the console, handed an empty path and no cause, does not know: it says
+"no log file path could be made for this process". The rule's bolded sentence
+pins both of macOS's and Linux's changed sentences word for word, so a later
+rewording is no change the rule excuses, and calls the doctor's ok for an empty
+path by that name. `TestBridgeLogsOffWindowsIsAsItWas`,
+`TestCheckLogSizeQuietWhenAbsent` and cmd/bridge's doctor log tests hold the
+two, and `TestLogStatusUnavailableExplainsWhy` and
+`TestLogBundleWorksWithoutALogFile` the console's reason. The record is in
+`ops/engineering-log.md`, 2026-11-18, bridge lows 4.

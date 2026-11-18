@@ -64,7 +64,7 @@ func checkLogSize(_ context.Context, d Deps) Check {
 		return warn(checkNameLogSize, "not checked: "+d.LogUnresolved, d.LogNote)
 	}
 	if d.LogPath == "" {
-		return ok(checkNameLogSize, "no log file configured (logs go to the terminal)")
+		return ok(checkNameLogSize, "no log file path was made for this process, so there is no file to check")
 	}
 	c := gradeLogFile(d.LogPath)
 	// How the file was chosen goes on the summary, which every surface
