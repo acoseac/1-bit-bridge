@@ -233,8 +233,9 @@ def archive_problems(root, size=None, digest=None):
         return ["%s, and %s is %s: %s; %s." % (frozen, at, "not there" if state == "missing" else state, WAY, RESTORE)]
     if st.st_size != size:
         moved = st.st_size - size
-        return ["%s and is now %s: it %s by %s bytes. Never edit it: %s; %s." % (
-            frozen, format(st.st_size, ","), "grew" if moved > 0 else "shrank", format(abs(moved), ","), WAY, RESTORE)]
+        return ["%s and is now %s: it %s by %s byte%s. Never edit it: %s; %s." % (
+            frozen, format(st.st_size, ","), "grew" if moved > 0 else "shrank", format(abs(moved), ","),
+            "" if abs(moved) == 1 else "s", WAY, RESTORE)]
     data = read_bytes(root, ARCHIVE, st)
     got = hashlib.sha256(data).hexdigest() if data is not None else "(unread)"
     if got != digest:
@@ -497,8 +498,8 @@ def self_test():
         root = os.path.join(tmp, "root")
         put(root, ARCHIVE, base)
         expect("the fixture archive passes", archive_problems(root, size, digest), [])
-        expect("a message says how the archive grew", "grew by 5 bytes" in archive_problems(root, size - 5, digest)[0], True)
-        expect("and how it shrank", "shrank by 5 bytes" in archive_problems(root, size + 5, digest)[0], True)
+        expect("a message says how the archive grew", "grew by 5 bytes" in " ".join(archive_problems(root, size - 5, digest)), True)
+        expect("and how it shrank", "shrank by 5 bytes" in " ".join(archive_problems(root, size + 5, digest)), True)
         for name, data in archives.items():
             put(root, ARCHIVE, data)
             expect("the archive refuses %s" % name, len(archive_problems(root, size, digest)), 1)
@@ -643,8 +644,8 @@ def main():
         for p in problems:
             print("  " + p)
         return 1
-    print("check-engineering-log: ok — the archive frozen at %s bytes (sha256 %s), %d entries since." % (
-        format(FROZEN_BYTES, ","), FROZEN_SHA256, entries))
+    print("check-engineering-log: ok — the archive frozen at %s bytes (sha256 %s), %d %s since." % (
+        format(FROZEN_BYTES, ","), FROZEN_SHA256, entries, "entry" if entries == 1 else "entries"))
     return 0
 
 
