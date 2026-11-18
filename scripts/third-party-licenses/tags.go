@@ -202,10 +202,14 @@ var reviewedBuildSites = map[string][]string{
 }
 
 // buildSiteMarkdown includes every Markdown file except records that quote
-// commands as they were run, wherever the repository walk reaches them.
+// commands as they were run, wherever the repository walk reaches them: the
+// engineering log's archive, History files, plans and release-note drafts by
+// basename, and every file under the engineering log's folder by its path
+// (spelled with "/" here whatever the OS's separator).
 func buildSiteMarkdown(name string) bool {
 	base := filepath.Base(name)
 	return strings.EqualFold(filepath.Ext(name), ".md") && base != "engineering-log.md" &&
+		!strings.HasPrefix(filepath.ToSlash(name), "ops/engineering-log/") &&
 		!strings.HasPrefix(base, "History-") && !strings.HasPrefix(base, "plan-") && !strings.HasPrefix(base, "release-notes-")
 }
 

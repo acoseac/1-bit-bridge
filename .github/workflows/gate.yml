@@ -70,9 +70,11 @@ name: gate
 # A seventh, `docs-check`, is a text check like `go-version` (Python 3
 # stdlib, no Go toolchain): `make docs-check` holds the instruction files
 # Claude Code loads on its own to their byte budgets (CLAUDE.md, each
-# .claude/rules/*.md, the worst single-file load) and runs the doc tools'
-# self-tests. The repo has no git hooks, so this job is where an
-# over-budget CLAUDE.md goes red. See scripts/doc-split/README.md.
+# .claude/rules/*.md, the worst single-file load), holds the engineering
+# log's archive to its frozen bytes and its entries to their names
+# (scripts/check-engineering-log.py), and runs the doc tools' self-tests.
+# The repo has no git hooks, so this job is where an over-budget CLAUDE.md,
+# or an edit of the log's archive, goes red. See scripts/doc-split/README.md.
 #
 # An eighth, `alsa-abi`, holds internal/alsapcm's hand-written Go
 # definitions of the kernel's ALSA PCM interface to the kernel's own
@@ -331,9 +333,10 @@ jobs:
       - name: Release build tags and Dockerfile GO_VERSION agree
         run: make check-go-version
 
-  # The instruction-file budgets (see the header). Python 3 stdlib only, which
-  # the runner image ships; the scripts read the tree through git, so the
-  # checkout's .git is all they need.
+  # The instruction-file budgets and the engineering log's checks (see the
+  # header). Python 3 stdlib only, which the runner image ships; the scripts
+  # read the tree through git, so the checkout's .git is all they need: the
+  # archive's digest is committed in its checker, and no history is read.
   docs-check:
     name: docs-check
     runs-on: ubuntu-latest

@@ -2,6 +2,7 @@
 """Prove a rules-file condensation lost nothing.
 
   verify_rules.py --base REV [--root DIR] NAME...
+  verify_rules.py --self-test
 
 REV holds the uncondensed rules file; DIR (default: the repository) holds the condensed
 .claude/rules/NAME.md and ops/History-rules-NAME.md. The check fails unless:
@@ -15,17 +16,22 @@ REV holds the uncondensed rules file; DIR (default: the repository) holds the co
     ("PHRASE")) that resolved in the original still resolves in the rules file or its long
     form. Citations that did not resolve in the original either are listed, not counted.
 
-The citing files are CLAUDE.md, AGENTS.md, docs/*.md, ops/*.md, .claude/rules/*.md, the skills
-and scripts/* (DIR's copy where it has one, the repository's otherwise) plus every tracked source
-file that can carry a comment: Go, JavaScript, HTML, CSS, shell, PowerShell, YAML and the Makefile.
+The citing files are CLAUDE.md, AGENTS.md, docs/*.md, ops/*.md, the engineering log's entries
+(ops/engineering-log/*/*.md, each pattern anchored to the folder it is read in), .claude/rules/*.md,
+the skills and scripts/* (DIR's copy where it has one, the repository's otherwise) plus every
+tracked source file that can carry a comment: Go, JavaScript, HTML, CSS, shell, PowerShell, YAML
+and the Makefile. --self-test pins, on a fixture, that a citation only an entry makes is verified.
 """
 import argparse
 import collections
+import contextlib
 import glob
+import io
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -34,7 +40,7 @@ from mdblocks import (parse, split_frontmatter, read_text, rules_names, safe_rev
 
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 CLAIM = load_claim_regex(REPO)
-DOC_SOURCES = ("CLAUDE.md", "AGENTS.md", "docs/*.md", "ops/*.md", ".claude/rules/*.md",
+DOC_SOURCES = ("CLAUDE.md", "AGENTS.md", "docs/*.md", "ops/*.md", "ops/engineering-log/*/*.md", ".claude/rules/*.md",
                ".claude/skills/*/SKILL.md", "scripts/*")
 # Tracked files whose comments may cite a rules file (git pathspecs).
 SOURCE_SPECS = ("*.go", "*.js", "*.mjs", "*.html", "*.css", "*.sh", "*.ps1", "*.yml", "*.yaml", "Makefile",
@@ -58,19 +64,20 @@ def split_items(text):
             [it["text"] for it in items if it["type"] == "heading"])
 
 
-def source_texts(root):
-    """{relative path: text} for every file that may cite a rules file."""
+def source_texts(root, repo=REPO):
+    """{relative path: text} for every file that may cite a rules file: REPO's and ROOT's docs, and
+    REPO's tracked sources (none when REPO is None, as the self-test's fixture asks)."""
     paths = {}
-    for folder in (REPO, root):  # ROOT last, so its copy of a file wins
+    for folder in (f for f in (repo, root) if f):  # ROOT last, so its copy of a file wins
         for pattern in DOC_SOURCES:
             for path in glob.glob(os.path.join(folder, pattern)):
                 if os.path.isfile(path):
                     paths[os.path.relpath(path, folder)] = path
-    tracked = subprocess.run(["git", "-C", REPO, "ls-files", "-z", "--", *SOURCE_SPECS],
-                             capture_output=True, text=True, check=True).stdout
+    tracked = subprocess.run(["git", "-C", repo, "ls-files", "-z", "--", *SOURCE_SPECS],
+                             capture_output=True, text=True, check=True).stdout if repo else ""
     for rel in filter(None, tracked.split("\0")):
-        if os.path.isfile(os.path.join(REPO, rel)):
-            paths.setdefault(rel, os.path.join(REPO, rel))
+        if os.path.isfile(os.path.join(repo, rel)):
+            paths.setdefault(rel, os.path.join(repo, rel))
     texts = {}
     for rel, path in paths.items():
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -126,7 +133,11 @@ def citation_status(name, texts, base, new, hist):
 
 
 def verify(name, sha, root, texts):
-    base = git_show(REPO, sha, ".claude/rules/%s.md" % name)
+    return verify_text(name, git_show(REPO, sha, ".claude/rules/%s.md" % name), root, texts)
+
+
+def verify_text(name, base, root, texts):
+    """verify's checks of ROOT's condensed NAME against BASE, the uncondensed rules file's text."""
     new = read_text(os.path.join(root, ".claude", "rules", name + ".md"))
     hist = read_text(os.path.join(root, HISTORY_DIR, "History-rules-%s.md" % name))
     fm_base, body_base = split_frontmatter(base)
@@ -161,7 +172,53 @@ def verify(name, sha, root, texts):
     return ok
 
 
+def self_test():
+    """A citation only an engineering-log entry makes is read, and its target's loss fails: the
+    fixture moves a rules file's two blocks past each other, which keeps every block and breaks
+    the one phrase the entry cites across them. Nothing else cites it, so only the entries' glob
+    can find it; a copy of the entry where the glob is not anchored is not read."""
+    ok = True
+
+    def expect(what, got, want):
+        nonlocal ok
+        if got != want:
+            ok = False
+            print("FAIL %s: got %r, want %r" % (what, got, want))
+
+    name = "selftest-fixture"
+    front = '---\npaths:\n  - "**/fixture.go"\n---\n# Fixture rules\n\n'
+    first, second = "The first rule ends with alpha", "beta begins the second rule."
+    base = front + first + "\n\n" + second + "\n"
+    entry = "ops/engineering-log/2026-11/2026-11-20-fixture--feat-fixture.md"
+    cites = "## 2026-11-20 — Fixture\n\nThe rule is `rules/%s.md` § alpha beta.\n" % name
+    with tempfile.TemporaryDirectory() as root:
+        def put(rel, text):
+            path = os.path.join(root, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+
+        put(".claude/rules/%s.md" % name, front + second + "\n\n" + first + "\n")
+        put("ops/History-rules-%s.md" % name, "# Long forms\n")
+        put(entry, cites)
+        put("sub/" + entry, cites.replace("alpha beta", "the second rule. The first"))
+        texts = source_texts(root, repo=None)
+        expect("the entry is a citing source", sorted(rel.replace(os.sep, "/") for rel in texts if "engineering-log" in rel),
+               [entry])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            got = verify_text(name, base, root, texts)
+        expect("a citation only an entry makes, whose target is gone, fails", (got, "BROKEN CITATION: alpha beta" in
+                                                                              out.getvalue()), (False, True))
+        put(".claude/rules/%s.md" % name, base)
+        with contextlib.redirect_stdout(io.StringIO()):
+            expect("and passes while its target stands", verify_text(name, base, root, texts), True)
+    print("self-test:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def main():
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", required=True, help="commit holding the uncondensed rules files")
     ap.add_argument("--root", default=REPO, help="directory holding the condensed files (default: the repository)")

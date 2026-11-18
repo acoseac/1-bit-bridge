@@ -12,7 +12,7 @@ paths:
 
 Embedded and sidecar lyrics at extraction, the `track_lyrics` rows, `/v1/lyrics`, and the network tier that fetches documents from Atlas.
 
-Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in `ops/engineering-log.md`: grep it by symbol, file or PR number before changing anything a rule names.
+Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in the engineering log, `ops/engineering-log.md` and `ops/engineering-log/`: grep both by symbol, file or PR number before changing anything a rule names.
 
 ## Lyrics — the one document per track
 

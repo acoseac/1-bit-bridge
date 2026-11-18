@@ -199,6 +199,84 @@ func TestScanTestCitationsAppliesTheMarkdownPolicy(t *testing.T) {
 	}
 }
 
+// TestScanTestCitationsTakesTheFrozenArchiveAsHistory pins the fourth `.md`
+// exemption on a fixture: the engineering log's archive, ops/engineering-log.md,
+// frozen since backlog B888's cut-over, is history. A record written before the
+// freeze names the tests of its day and can no longer be edited, so a test only
+// it cites may be renamed or retired. Its two guards are held apart: the walk's
+// reads are recorded, and the archive is never one of them; the collector,
+// handed the archive as the walk never does, collects nothing from it.
+//
+// Every other doc is read as before, and each of three cites a test nothing
+// defines: an entry under ops/engineering-log/ (the PR that renames a test an
+// entry cites corrects the entry), CLAUDE.md, and a file named like the archive
+// in another folder, which is no archive. The four names are spelled in string
+// literals, which this guard does not read, and elided here, where it does:
+// …GhostInTheArchive, …GhostInAnEntry, …GhostInTheInstructions and
+// …GhostBesideTheArchive.
+func TestScanTestCitationsTakesTheFrozenArchiveAsHistory(t *testing.T) {
+	const archive = "ops/engineering-log.md"
+	const entry = "ops/engineering-log/2026-11/2026-11-20-b888--feat-b888-log-per-entry.md"
+	files := map[string]string{
+		archive:                   "Pinned by TestGhostInTheArchive.\n",
+		entry:                     "## 2026-11-20 — B888\n\nPinned by TestGhostInAnEntry.\n",
+		"CLAUDE.md":               "Pinned by TestGhostInTheInstructions.\n",
+		"docs/engineering-log.md": "Pinned by TestGhostBesideTheArchive.\n",
+		"x_test.go":               "package x\n\nimport \"testing\"\n\nfunc TestReal(t *testing.T) { _ = t }\n",
+	}
+	root := t.TempDir()
+	for rel, body := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var read []string
+	citationReadFile = func(path string) ([]byte, error) {
+		if rel, err := filepath.Rel(root, path); err == nil {
+			read = append(read, filepath.ToSlash(rel))
+		}
+		return os.ReadFile(path)
+	}
+	t.Cleanup(func() { citationReadFile = os.ReadFile })
+
+	cited, defined, mdCited := scanTestCitations(t, root)
+
+	if slices.Contains(read, archive) {
+		t.Errorf("the scan opened the frozen archive: it read %q", read)
+	}
+	for _, rel := range []string{entry, "CLAUDE.md", "docs/engineering-log.md"} {
+		if !slices.Contains(read, rel) {
+			t.Errorf("the scan did not read %s, so this case shows nothing: it read %q", rel, read)
+		}
+	}
+	want := []string{
+		"TestGhostBesideTheArchive  (cited by " + filepath.FromSlash("docs/engineering-log.md") + ")",
+		"TestGhostInAnEntry  (cited by " + filepath.FromSlash(entry) + ")",
+		"TestGhostInTheInstructions  (cited by CLAUDE.md)",
+	}
+	if got := missingCitations(cited, defined); !slices.Equal(got, want) {
+		t.Errorf("missingCitations = %q, want %q", got, want)
+	}
+	if mdCited != 3 {
+		t.Errorf("mdCited = %d, want 3: the entry's, the instructions' and the look-alike's", mdCited)
+	}
+
+	for _, doc := range []struct {
+		rel  string
+		want int
+	}{{archive, 0}, {entry, 1}} {
+		cited, mdCitations := map[string][]string{}, map[string]bool{}
+		collectMarkdownCitations(filepath.FromSlash(doc.rel), files[doc.rel], cited, mdCitations)
+		if len(cited) != doc.want || len(mdCitations) != doc.want {
+			t.Errorf("the collector took %v from %s, want %d citations", cited, doc.rel, doc.want)
+		}
+	}
+}
+
 // TestScanTestCitationsOpensOnlyWhatGoBuildsOrGitTracks plants, one per row,
 // a file an editor, an operator or a checkout leaves beside the ones this
 // guard scans, and requires the scan to finish as if it were not there.
@@ -556,7 +634,7 @@ func TestDefinesWithPrefixEndsAnUnderscoreNameOnASegment(t *testing.T) {
 // eighty-eight, eighteen and fifteen unrelated tests.
 var citedRe = regexp.MustCompile(`\bTest(?:[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{Nd}]|_+[\p{L}\p{Nd}])[\p{L}\p{Nd}_]*`)
 
-// The markdown docs are scanned too, and they need three exemptions that Go
+// The markdown docs are scanned too, and they need four exemptions that Go
 // source does not. Each is a real category, not a convenience:
 //
 //   - **Plan documents** (`ops/plan-*.md`) enumerate tests still TO BE
@@ -578,6 +656,15 @@ var citedRe = regexp.MustCompile(`\bTest(?:[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{Nd}]|_+[\
 //     conductor repo's guard on its haproxy config. It is a true citation
 //     and unverifiable from here, so the name carries the repo that owns it
 //     rather than being quietly dropped.
+//   - **The engineering log's archive** (`ops/engineering-log.md`, by that
+//     exact path: isFrozenArchive), frozen since backlog B888's cut-over and
+//     held to its bytes by scripts/check-engineering-log.py. A record written
+//     before the freeze names the tests of its day and can no longer be
+//     reworded, so a test only it cites may be renamed or retired. It is
+//     never opened: at the freeze it cited 4,715 names, 332 of them in no
+//     other file this guard reads. Every file under `ops/engineering-log/`
+//     is a doc like any other, and the PR that renames a test an entry
+//     cites corrects the entry.
 //
 // Everything else in a `.md` file is treated exactly like a docblock, because
 // it is read the same way — and `CLAUDE.md` is the file this harness loads on
@@ -667,6 +754,14 @@ func isPlanDoc(rel string) bool {
 	return strings.HasPrefix(filepath.ToSlash(rel), "ops/plan-")
 }
 
+// isFrozenArchive reports whether rel is the engineering log's frozen archive,
+// whose test names are history: that exact path, never a basename or a prefix,
+// so a file of its name elsewhere and every entry under ops/engineering-log/
+// are read as docs.
+func isFrozenArchive(rel string) bool {
+	return filepath.ToSlash(rel) == "ops/engineering-log.md"
+}
+
 // scanTestCitations is scanTestCitationsIn over the docs git tracks under
 // root: the entry point the whole-tree guard and the fixtures share.
 func scanTestCitations(t *testing.T, root string) (cited map[string][]string, defined map[string]bool, mdCited int) {
@@ -706,7 +801,7 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 		if !opensForCitations(d.Name(), rel, trackedMD) {
 			return nil
 		}
-		raw, err := os.ReadFile(path)
+		raw, err := citationReadFile(path)
 		if err != nil {
 			return err
 		}
@@ -739,6 +834,11 @@ func scanTestCitationsIn(t *testing.T, root string, trackedMD map[string]bool) (
 // which a test replaces with a sweeptest.Removal to stand in for another
 // process removing a directory while the walk is under way.
 var sweepWalkDir = filepath.WalkDir
+
+// citationReadFile is how scanTestCitationsIn reads a file it opens:
+// os.ReadFile, which a test replaces to record what the scan reads (the
+// frozen archive, never).
+var citationReadFile = os.ReadFile
 
 // skipsForCitations reports whether the walk leaves a directory below the
 // root unread: the repository's metadata, and build output or vendored code,
@@ -821,7 +921,9 @@ func skipsForCitations(root, path, name string) bool {
 //     name begins with ".", an editor's or the OS's: a tree with no `.git`
 //     (a fixture, or a source archive) has no tracked set, and a lock
 //     there is still not a doc. Not "_" as well, as the go tool would: a
-//     tracked `_name.md` is a real doc.
+//     tracked `_name.md` is a real doc. Nor the engineering log's frozen
+//     archive (isFrozenArchive), whose names are history: the scan never
+//     reads its 7 MB.
 //   - A Go file is opened unless the go tool ignores it (goToolIgnores): an
 //     editor's lock beside it, or a file no build compiles.
 //
@@ -832,7 +934,7 @@ func skipsForCitations(root, path, name string) bool {
 func opensForCitations(name, rel string, trackedMD map[string]bool) bool {
 	switch {
 	case strings.HasSuffix(name, ".md"):
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") || isFrozenArchive(rel) {
 			return false
 		}
 		return trackedMD == nil || trackedMD[filepath.ToSlash(rel)]
@@ -843,13 +945,14 @@ func opensForCitations(name, rel string, trackedMD map[string]bool) bool {
 }
 
 // collectMarkdownCitations applies the `.md` policy declared above to a
-// document the walk has opened: skip a plan, and skip the two exempt name
-// classes. Whether it is opened at all (git must track it) is
-// opensForCitations's call. Split out of the walk for SonarCloud go:S3776 —
-// the callback had grown to a cognitive complexity of 50 against the 15
-// allowed, most of it nesting rather than logic.
+// document the walk has opened: skip a plan and the frozen archive (which the
+// walk never opens either), and skip the two exempt name classes. Whether it
+// is opened at all (git must track it) is opensForCitations's call. Split out
+// of the walk for SonarCloud go:S3776 — the callback had grown to a cognitive
+// complexity of 50 against the 15 allowed, most of it nesting rather than
+// logic.
 func collectMarkdownCitations(rel, src string, cited map[string][]string, mdCitations map[string]bool) {
-	if isPlanDoc(rel) {
+	if isPlanDoc(rel) || isFrozenArchive(rel) {
 		return
 	}
 	for _, name := range citedRe.FindAllString(src, -1) {

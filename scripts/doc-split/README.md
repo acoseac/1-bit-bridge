@@ -37,8 +37,9 @@ once per file.
   over 600 bytes).
 - **Long form** (reasoning, measurements, rejected alternatives, incident history):
   `ops/History-*.md` for `CLAUDE.md` entries, `ops/History-rules-<name>.md` for a condensed rules
-  file. **Change an entry's line and its long form in the same commit.** The dated evidence still
-  goes to `ops/engineering-log.md`; a History file is the entry's own text, grouped by topic.
+  file. **Change an entry's line and its long form in the same commit.** The dated evidence goes to
+  a new file under `ops/engineering-log/` (the archive, `ops/engineering-log.md`, is frozen); a History
+  file is the entry's own text, grouped by topic.
 - **Procedures** (the local fixture, a deploy, release day, a consult, a named review cycle, a
   multi-PR batch): a skill, `.claude/skills/<name>/SKILL.md`. Its `description` is all Claude sees
   at startup, so it must say when to use the skill; a rule that has to hold even when the skill is
@@ -52,7 +53,7 @@ once per file.
 | Script | What it does |
 |---|---|
 | `mdblocks.py` | The block parser, the one-line condenser, and the argument checks every script shares. |
-| `verify_moves.py` | Lossless proof for any restructure: compared as a whole with a base commit, `CLAUDE.md`, `AGENTS.md`, the rules, the skills, `docs/*.md` and `ops/*.md` (the engineering log excepted) still hold every block (relative links compared by the file they reach) and heading, and every cited phrase still resolves; declared edits print as diffs, and new text is listed for review. |
+| `verify_moves.py` | Lossless proof for any restructure: compared as a whole with a base commit, `CLAUDE.md`, `AGENTS.md`, the rules, the skills, `docs/*.md` and `ops/*.md` (the engineering log excepted: its archive by name, its entries by depth) still hold every block (relative links compared by the file they reach) and heading, and every cited phrase still resolves; declared edits print as diffs, and new text is listed for review. |
 | `measure.py` | Bytes per heading and a block-size histogram for any markdown file (sizes and first-line labels only). |
 | `move_entry.py` | Moves ONE entry out of `CLAUDE.md` or a rules file, verbatim, into a History file it creates or adds to (see below). |
 | `../check-doc-budgets.py` | The budgets (see below); run by `make docs-check`, CI's `docs-check` job and the PostToolUse hook in `.claude/settings.json`. |
