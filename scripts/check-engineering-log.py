@@ -21,7 +21,7 @@ Both are slugs: lowercase letters and digits, each other run of characters one "
 end, so the first "--" after the date ends <entry>. The name is at most 120 characters. An entry is
 a regular file of UTF-8 with LF line ends and a final newline, its first line `## <date> — <title>`
 with its name's date, and no other `## ` line outside fenced code. The folder's README.md is the
-one other file it holds.
+one other file it holds, and git must track it: it states this layout to every PR.
 
   check-engineering-log.py              check the archive, every entry, and that nothing shaped
                                         like one sits anywhere else (`make docs-check` and CI's
@@ -319,10 +319,10 @@ def listing(root, env=None):
 
 
 def check(root, size=None, digest=None, env=None):
-    """(problems, entries) for the tree at ROOT: the archive frozen and tracked, every tracked path
-    below the folder an entry by name and content (or the README), git listing something there,
-    every untracked one's name, no misfiled name anywhere, and no two of the log's paths that one
-    volume folding case would take for one file."""
+    """(problems, entries) for the tree at ROOT: the archive frozen and tracked, the README tracked,
+    every tracked path below the folder an entry by name and content (or the README), git listing
+    something there, every untracked one's name, no misfiled name anywhere, and no two of the log's
+    paths that one volume folding case would take for one file."""
     try:
         tracked, untracked = listing(root, env)
     except OSError as e:
@@ -333,6 +333,9 @@ def check(root, size=None, digest=None, env=None):
     if not any(p.startswith(FOLDER) for p in tracked):
         problems.append("git lists nothing below %s, where the README stands from the cut-over on: "
                         "git failed, or this is no checkout of this tree" % FOLDER)
+    if README not in tracked:
+        problems.append("%s is not tracked by git: the folder keeps its README, which states the layout "
+                        "every entry follows" % README)
     entries, folded = 0, {}
     for rel in tracked:
         kind = classify(rel)
@@ -570,13 +573,14 @@ def self_test():
     def text_for(rel):
         return "## %s — fixture\n\nText.\n" % rel.rsplit("/", 1)[-1][:10]
 
+    ignore = "ops/*review*.md\n*hidden*\n"
+
     def checkout(tmp, name, files=None, add=True):
         root = os.path.join(tmp, name)
         env = git_env(root)
         os.makedirs(root)
         git(root, env, "init", "-q")
-        files = {".gitignore": "ops/*review*.md\n*hidden*\n", ARCHIVE: base, README: "# Log\n",
-                 entry: entry_text} if files is None else files
+        files = {".gitignore": ignore, ARCHIVE: base, README: "# Log\n", entry: entry_text} if files is None else files
         for rel, data in files.items():
             put(root, rel, data)
         if add and files:
@@ -644,6 +648,15 @@ def self_test():
             put(root, ARCHIVE, base)
             expect("an archive git does not track is refused",
                    [p for p in check(root, size, digest, env)[0]], ["%s is not tracked by git" % ARCHIVE])
+
+            root, env = checkout(tmp, "no-readme", {".gitignore": ignore, ARCHIVE: base, entry: entry_text})
+            problems, _ = check(root, size, digest, env)
+            expect("a checkout whose README git does not track is refused for that alone",
+                   (len(problems), found(problems, README, "is not tracked by git")), (1, True))
+            put(root, README, "# Log\n")
+            problems, _ = check(root, size, digest, env)
+            expect("and so is one whose README is on disk and out of git's index",
+                   (len(problems), found(problems, README, "is not tracked by git")), (1, True))
             plain = os.path.join(tmp, "plain")
             put(plain, ARCHIVE, base)
             expect("a tree git cannot list fails closed",
