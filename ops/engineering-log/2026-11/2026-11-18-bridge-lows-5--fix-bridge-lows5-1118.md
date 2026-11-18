@@ -1,9 +1,12 @@
 ## 2026-11-18 — Bridge lows 5: the pin reads a type switch's case lists past its guard, two comments, and the protocol's dacToken sentence
 
-Branch `fix/bridge-lows5-1118`, from `6282e5a6` (main with #1508). Four commits: A, the
+Branch `fix/bridge-lows5-1118`, from `6282e5a6` (main with #1508). Five commits: A, the
 install-check pin (test code alone) and B618's long form; B, two comments; C, one sentence of
-`PROTOCOL.md`; D, this record. No production logic changes. Line numbers are the branch's
-unless a commit is named.
+`PROTOCOL.md`; D, this record; E, after the gate, three phrasings of the long form and this
+record that said more than they showed (the parser's departure from the language's scopes is
+claimed for the identifiers the pin reads alone: it resolves a composite literal's key too,
+which the pin never reads as a write). No production logic changes. Line numbers are the
+branch's unless a commit is named.
 
 ### A. The pin reads a type switch's case lists past its guard (item 1)
 
@@ -42,8 +45,8 @@ builds can reach.
 
 Which and why. The parser's resolution again, given a source in which the guards the language
 does not see in a list declare nothing, rather than a lookup of the test's own: the resolver
-already gives every other construct its scope, and the second parse keeps that one
-implementation for the lookup. go/types is still not the pin's tool: the pin reads every
+already gives the other constructs the pin reads their scopes, and the second parse keeps that
+one implementation for the lookup. go/types is still not the pin's tool: the pin reads every
 platform's files, which do not type-check as one package.
 
 Thirteen rows of `TestTheLogsInstallCheckPinSeesEachWayToChangeIt`, the table's header gaining
@@ -148,7 +151,13 @@ iOS repo's `docs/BridgeProtocol.md` takes in a mirror PR of its own. `internal/a
 
 ### Runs
 
-The gate after the last commit (`make fmt` with `git diff --exit-code`, `make vet`, `make
-docs-check`, the pin's tests under `-race -count=20`, `make test`, `make build-all`, and `go
-vet` for darwin and windows of the touched packages) is in the branch's report: a record cannot
-hold the runs made on its own commit.
+The gate ran on D (`e516fa5c`) in one build-slot session, the slot free at once (16:25-16:57
+UTC): `make fmt`, which rewrote nothing (`git diff --exit-code` clean); `make vet`; `make
+docs-check`; `go vet` of `./cmd/bridge/` and `./internal/doctor/` for windows and for darwin;
+the pin's two tests under `-race -count=20`, each passing 20 times (720 subtest passes, none
+failed or skipped); `./internal/doctor/` under `-race` (11 s); `make test P=8` with `-count=1
+-timeout 45m`, since B897's split of the suite is not on this base: ok, 91 packages, 1,775 s
+(cmd/bridge 1,754 s, internal/manifest 1,651 s, internal/admin 1,279 s, internal/api 171 s,
+internal/doctor 11 s); and `make build-all`, six targets in 34 s. E changes two Markdown files
+alone; the checks run on it are in the branch's report, a record holding no run made on its own
+commit.

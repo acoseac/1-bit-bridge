@@ -6467,9 +6467,9 @@ declare it (its `var` specs alone since *The case lists*, below). A local
 declared by `:=` or `var`, as a parameter, a result or a receiver, or by a
 range, type switch or select clause resolves to itself, and past its scope, or
 on the right of the `:=` that declares it, whose scope has not begun there, the
-name is the package's variable again (but for an identifier in a type switch's
-case type list, which the parser binds to the switch's guard: *The case lists*,
-below). go/types is not the
+name is the package's variable again (the pin read an identifier in a type
+switch's case type list as the guard's local, as the parser binds it, until
+*The case lists*, below). go/types is not the
 tool: the pin reads every platform's files, which do not type-check as one
 package, and the table's planted files import what they do not use. Twelve rows
 hold it, red over the old pin. The record is in `ops/engineering-log.md`,
@@ -6499,8 +6499,8 @@ two, and `TestLogStatusUnavailableExplainsWhy` and
 `ops/engineering-log.md`, 2026-11-18, bridge lows 4.
 
 *The case lists (2026-11-18).* The parser's resolution departs from the
-language's scopes in one place the pin had taken as it was: go/parser's
-resolver walks a type switch's clauses in the scope where it declared the
+language's scopes, for an identifier the pin reads, in a place the pin had
+taken as it was: go/parser's resolver walks a type switch's clauses in the scope where it declared the
 switch's guard, and resolves each clause's type list there (go1.27.3
 `src/go/parser/resolver.go` 344-348, 371-384), while the language declares the
 guard's variable in each clause's body alone, so that in a list the name is
