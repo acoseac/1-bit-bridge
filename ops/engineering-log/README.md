@@ -5,10 +5,12 @@ settled a rule, the alternative tried and rejected, the test that pins it, the P
 auto-loaded.
 
 - `../engineering-log.md` is the archive up to 2026-11-18, frozen: `make docs-check` holds it
-  to the SHA-256 of its bytes (`scripts/check-engineering-log.py`), and the edit hook refuses
-  any change. Never edit it. A correction to it is a new entry here that names its heading
-  and line. Only a redaction the owner approves changes it: a placeholder of the same line
-  count, the checker's two pins updated, and an entry saying why.
+  to the SHA-256 of its bytes (`scripts/check-engineering-log.py`). The edit hook reports an
+  edit of it (exit 2) and does not undo one: the edit stays on disk, and `make docs-check` and
+  CI fail until the archive's bytes and the checker's two pins agree again. Never edit it. A
+  correction to it is a new entry here that names its heading and line. Only a redaction the
+  owner approves changes it: a placeholder of the same line count, the checker's two pins
+  updated, and an entry saying why.
 - Every record since is a file here, one entry each:
   `<YYYY-MM>/<YYYY-MM-DD>-<entry>--<branch>.md`
   - the date the entry is written, and its month;
