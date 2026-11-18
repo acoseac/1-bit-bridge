@@ -63,10 +63,15 @@ func doGet(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
 // TestLogStatusUnavailableExplainsWhy pins the honest-degradation contract.
 // With no log path wired, the state where cmd/bridge could not make one,
 // there is no file to offer, a routine state, and the console has to say
-// why — a bare failure would read as a broken bridge. The path is not made
-// wherever the process has no home directory, which a terminal can give it
-// and a service manager too (systemd starts a system unit without User=
-// with no $HOME), so the reason names both and claims neither alone.
+// why — a bare failure would read as a broken bridge. cmd/bridge fails to
+// make the path only where the process has no home directory and, on Windows
+// outside the service, no %LOCALAPPDATA% either; a terminal can start such a
+// process, and a service manager too (systemd starts a system unit without
+// User= with no $HOME), and cmd/bridge hands the console no cause. So the
+// reason says, word for word, what the console knows, that no log file path
+// could be made for this process, and names no cause and no place the
+// process's output goes, as it did until 2026-11-18 (the home directory, the
+// terminal, a service manager's journal).
 func TestLogStatusUnavailableExplainsWhy(t *testing.T) {
 	rec := doGet(t, logTestServer(t, ""), "/api/logs/status")
 	if rec.Code != http.StatusOK {
@@ -82,12 +87,14 @@ func TestLogStatusUnavailableExplainsWhy(t *testing.T) {
 	if got.Reason == "" {
 		t.Error("no reason given; the UI would show a dead button with no explanation")
 	}
-	for _, want := range []string{"home directory", "terminal", "service manager"} {
-		if !strings.Contains(got.Reason, want) {
-			t.Errorf("reason %q does not say %q", got.Reason, want)
-		}
+	if got.Reason != noLogPathReason {
+		t.Errorf("reason %q, want %q", got.Reason, noLogPathReason)
 	}
 }
+
+// noLogPathReason is the console's reason where no log path is wired, word
+// for word.
+const noLogPathReason = "no log file path could be made for this process"
 
 // TestLogStatusMissingFileDoesNotBlameTheForeground pins the wording for the
 // state bridge.ars.md is actually in: a systemd service install whose unit
@@ -292,7 +299,8 @@ func TestLogBundleRedactionCanBeDisabled(t *testing.T) {
 
 // TestLogBundleWorksWithoutALogFile: the bundle's value is the CONTEXT
 // (version, counters, preflight), so a bridge with no log file must still get
-// a usable report rather than a 404.
+// a usable report rather than a 404, its log section saying why there is
+// none in the status's own reason.
 func TestLogBundleWorksWithoutALogFile(t *testing.T) {
 	rec := doGet(t, logTestServer(t, ""), "/api/logs/bundle")
 	if rec.Code != http.StatusOK {
@@ -302,7 +310,7 @@ func TestLogBundleWorksWithoutALogFile(t *testing.T) {
 	if !strings.Contains(body, "server version:") {
 		t.Error("bundle without a log file lost its context sections")
 	}
-	if !strings.Contains(body, "no log file") && !strings.Contains(body, "logs to the terminal") {
-		t.Errorf("bundle does not explain the missing log:\n%s", body)
+	if !strings.Contains(body, "\n"+noLogPathReason+"\n") {
+		t.Errorf("bundle does not explain the missing log in the status's reason:\n%s", body)
 	}
 }

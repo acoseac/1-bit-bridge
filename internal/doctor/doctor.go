@@ -397,17 +397,19 @@ type Deps struct {
 	// LogPath is the file the log-file-size line grades, cmd/bridge's
 	// doctorLogs: for bridge doctor run from a shell the installed bridge's
 	// log, on Windows the one bridge logs reads by its install check, and
-	// for the console's doctor the file the console's export offers the
-	// serving process (consoleLogPath; backlog B618). The path names a file
-	// and proves nothing about who writes it: a `bridge serve` run in the
-	// foreground logs to its terminal and writes none, so the file named may
-	// be an earlier launch's, graded as it stands, or not there yet, which
+	// for the console's doctor the file whose path the console's export is
+	// wired with, which the export offers the serving process when present
+	// (consoleLogPath; backlog B618). The path names a file and proves
+	// nothing about who writes it: a `bridge serve` run in the foreground
+	// logs to its terminal and writes none, so the file named may be an
+	// earlier launch's, graded as it stands, or not there yet, which
 	// checkLogSize grades as no log file yet. Empty is where the log's path
-	// cannot be made, off Windows and in the console's doctor: no file to
-	// grade, as the console's export has none to offer, which makes
-	// checkLogSize a no-op rather than a complaint about a file that does
-	// not exist. On a managed deployment the line is skipped whatever this
-	// holds (Managed).
+	// cannot be made, off Windows and in the console's doctor, and in
+	// `bridge init`'s preflight, which names no log: no file to grade, as
+	// the console's export has none to offer, which checkLogSize answers
+	// with an ok rather than a complaint about a file that does not exist.
+	// On a managed deployment the line is skipped whatever this holds
+	// (Managed).
 	LogPath string
 
 	// LogNote says how LogPath was chosen where its reader needs to know:
@@ -421,8 +423,7 @@ type Deps struct {
 	// have been, which only bridge doctor from a shell on Windows says: a
 	// path that could not be made, or, where the install check could not
 	// tell, neither of the Windows logs there. The line is then a warn in
-	// those words, never the ok of a bridge that logs to its terminal,
-	// which an empty LogPath alone reads as.
+	// those words, never the ok an empty LogPath alone gets.
 	LogUnresolved string
 
 	// Managed mirrors cfg.Deployment.IsManaged(): a control plane runs

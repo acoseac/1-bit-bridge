@@ -282,9 +282,10 @@ var cliRootProbes = doctor.NewRootProbes()
 // serving process (servingDACHost, adminDoctorRunnerFor); and logs, which log
 // the log-file-size line grades (doctorLogs, backlog B618): bridge doctor's,
 // run from a shell, the installed bridge's as `bridge logs` reads it, or the
-// console's doctor's, the file the console's export offers its process
-// (consoleLogPath). It is a run of the CLI's works on the library roots
-// (cliRootProbes) that no caller stops.
+// console's doctor's, the file whose path the console's export is wired with
+// (consoleLogPath), which the export offers its process when present. It is a
+// run of the CLI's works on the library roots (cliRootProbes) that no caller
+// stops.
 func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost, logs doctorLogs) doctor.Deps {
 	return buildDoctorDepsRun(context.Background(), cfgPath, absentIsPreSetup, dacHost, logs, cliRootProbes.BeginRun())
 }
@@ -307,9 +308,10 @@ func buildDoctorDepsRun(ctx context.Context, cfgPath string, absentIsPreSetup bo
 		AdminPort: 7789,
 		// The log-file-size line's file (doctorLogs): for bridge doctor the
 		// one `bridge logs` reads, its install check, "cannot tell" rule and
-		// fallbacks included, and for the console's doctor the file the
-		// console's export offers its process (consoleLogPath), which a
-		// process run in the foreground does not write.
+		// fallbacks included, and for the console's doctor the file whose
+		// path the console's export is wired with (consoleLogPath), which the
+		// export offers its process when present and which a process run in
+		// the foreground does not write.
 		LogPath:       lf.path,
 		LogNote:       lf.note,
 		LogUnresolved: lf.unresolved,
@@ -1128,11 +1130,12 @@ func adminDoctorRunner(cfgPath string, ownedPorts []int, checklist func(context.
 // read: the player-dac line's (servingDACHost), the serving process's
 // credentials and the binding its player started with, which the line tells
 // the config's apart from; and logs, the log-file-size line's (hostLogs in
-// production, a test's own elsewhere), on which that line grades the file the
-// console's export offers the serving process (consoleLogPath), as the
-// console's doctor, which this sets (doctorLogs' console), and never the
-// install check's: a process run in the foreground writes no log file, so
-// that file may be an earlier launch's.
+// production, a test's own elsewhere), on which that line grades the file
+// whose path the console's export is wired with (consoleLogPath), which the
+// export offers the serving process when present, as the console's doctor,
+// which this sets (doctorLogs' console), and never the install check's: a
+// process run in the foreground writes no log file, so that file may be an
+// earlier launch's.
 func adminDoctorRunnerFor(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost, logs logsHost) func(context.Context) *admin.DoctorReport {
 	return adminDoctorRunnerWith(cfgPath, ownedPorts, checklist, dacHost, logs, doctor.NewRootProbes())
 }

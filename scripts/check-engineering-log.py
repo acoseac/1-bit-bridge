@@ -48,8 +48,8 @@ README = FOLDER + "README.md"
 # The archive as the cut-over left it, its closing pointer included. Only a redaction the owner
 # approves changes these two values: a placeholder of the same line count where the text must go,
 # both values updated in that PR, and an entry saying why. Review refuses any other change to them.
-FROZEN_BYTES = 7_149_029
-FROZEN_SHA256 = "8b987eb81238827acd62c4f90f153e23f5ce86e41d603dbaf30ad1bc1b9a0814"
+FROZEN_BYTES = 7_162_508
+FROZEN_SHA256 = "62b7421bea1a09eb25a5b5d72727b59453eab6946edbfeedcafb7647e59568ac"
 
 NAME_MAX = 120  # characters in an entry's file name
 BRANCH_MAX = 56  # characters in its branch slug; slug() shortens a longer one

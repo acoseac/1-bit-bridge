@@ -7586,9 +7586,10 @@ function logExportQuery() {
 
 // loadLogStatus asks whether the log file the console would offer is there.
 //
-// It often is not: the bridge logs to stderr, and only a SERVICE install
-// redirects that to a file, so a bridge run in the foreground writes none
-// (the file there may then be an earlier launch's, offered as it is).
+// It often is not: the bridge logs to stderr, which only a service install
+// or the sign-in launcher redirects to the file, so a bridge run in the
+// foreground writes none (the file there may then be an earlier launch's,
+// offered as it is).
 // Rendering the reason beats offering a button that 404s, which would read
 // as a broken console.
 async function loadLogStatus() {
