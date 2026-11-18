@@ -98,30 +98,19 @@ func openParkTable(t *testing.T) (*sql.DB, string) {
 	return db, path
 }
 
-// TestACancelThatReachesTheDriverLateIsWaitedFor delays the driver's
-// interrupt on purpose: the parked UPDATE's context is cancelled only once
-// Cancel has looked for the interrupt and found none, so the driver's
-// goroutine runs no sooner than that, an order a loaded host can give it. A
-// park that let the statement go without waiting for the interrupt let it
-// end with no error, as CI's -race job saw (backlog B909); Cancel holds the
-// comparison until the interrupt has come, and the statement comes back as
-// the cancellation.
+// TestACancelThatReachesTheDriverLateIsWaitedFor tells the driver of the
+// parked UPDATE's cancel late, as a loaded host can: the cancel Cancel makes
+// stands at once, before anything lets the statement go, and the driver hears
+// of it a second later (toldLate), while Cancel waits. A park that let the
+// statement go without waiting for the interrupt let it end with no error, as
+// CI's -race job saw (backlog B909); Cancel holds the comparison until the
+// interrupt has come, and the statement comes back as the cancellation.
 func TestACancelThatReachesTheDriverLateIsWaitedFor(t *testing.T) {
 	db, path := openParkTable(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	base, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	ctx := toldLate{Context: base, told: make(chan struct{})}
 	park := Arm(t)
-	waiting := make(chan struct{})
-	park.awaiting = sync.OnceFunc(func() { close(waiting) })
-	// Registered after Arm, so it runs first: the cancel is delivered, and
-	// its goroutine ends, whatever the test found.
-	t.Cleanup(park.awaiting)
-	late := func() {
-		go func() {
-			<-waiting
-			cancel()
-		}()
-	}
 	done := make(chan struct{})
 	var err error
 	go func() {
@@ -129,13 +118,38 @@ func TestACancelThatReachesTheDriverLateIsWaitedFor(t *testing.T) {
 		_, err = db.ExecContext(ctx, `UPDATE t SET n = n + 1 WHERE id = ?`, 3)
 	}()
 	park.Wait(t)
-	park.Cancel(t, path, late)
+	park.Cancel(t, path, func() {
+		cancel()
+		time.AfterFunc(time.Second, func() { close(ctx.told) })
+	})
 	park.ReleaseUntil(t, done)
 	<-done
+	told := false
+	select {
+	case <-ctx.told:
+		told = true
+	default:
+	}
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("the parked statement returned %v, want context.Canceled", err)
+		t.Fatalf("the parked statement returned %v, want context.Canceled (as it ended, its context's Err was %v, and the driver had been told: %t)",
+			err, base.Err(), told)
 	}
 }
+
+// toldLate is a context whose cancel stands as its base is cancelled, its Err
+// context.Canceled from then on, and reaches the driver only once told is
+// closed: Done is told. No context of the standard library answers Err before
+// its Done closes; this one does on purpose. The driver's goroutine that stops
+// a running statement watches Done alone (modernc's interruptOnDone), and the
+// statement asks Err only once that goroutine has marked its call stopped, so
+// until told closes the driver is as one whose goroutine a loaded host keeps
+// off the CPU.
+type toldLate struct {
+	context.Context
+	told chan struct{}
+}
+
+func (c toldLate) Done() <-chan struct{} { return c.told }
 
 // TestCancelsWaitEnds pins how Cancel's wait ends but by the interrupt: where
 // none comes, it fails the test when the Park's waits give up, rather than
