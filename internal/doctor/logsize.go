@@ -92,7 +92,7 @@ func gradeLogFile(path string) Check {
 		// this the check would report OK for a path that can never hold a log
 		// — and the operator would be told their logging is fine while the
 		// service redirect fails. Mirrors resolveLogFile on the admin side.
-		// (Gemini, PR #708.)
+		// (Found in review on PR #708.)
 		return warn(checkNameLogSize, path+" is a directory, not a log file",
 			"point the service's log redirect at a file path")
 	}

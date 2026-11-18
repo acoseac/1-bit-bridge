@@ -169,7 +169,7 @@ func TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK(t *testing.T) {
 // TestCheckLogSizeWarnsOnDirectory: os.Stat succeeds on a directory and
 // reports a small size, so without an explicit IsDir test the check reports OK
 // for a path that can never hold a log — telling the operator logging is fine
-// while the service's redirect fails. Reported by Gemini on PR #708.
+// while the service's redirect fails. Reported in review on PR #708.
 func TestCheckLogSizeWarnsOnDirectory(t *testing.T) {
 	got := checkLogSize(context.Background(), Deps{LogPath: t.TempDir()})
 	if got.Status != Warn {

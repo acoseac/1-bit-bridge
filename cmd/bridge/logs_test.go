@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -434,12 +435,14 @@ func TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint(t *testing.T) {
 // instantiation) may be a defined type, whose pointer methods would change it
 // with no & written. The walk reads every file the go tool builds here,
 // whatever its platform, and must find that declaration. It reads each file
-// through seamFindingsIn, which
+// and its source through seamFindingsIn, which
 // TestTheLogsInstallCheckPinSeesEachWayToChangeIt holds to planted sources,
 // each parsed with its identifiers resolved by the file's lexical scopes, so
-// that a local of the seam's name is told from the package's variable:
-// go/types would need the package type-checked, and every platform's files
-// together do not check as one package.
+// that a local of the seam's name is told from the package's variable (a type
+// switch's case type lists, which the parser resolves where the switch's
+// guard is declared, read past that guard): go/types would need the package
+// type-checked, and every platform's files together do not check as one
+// package.
 func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
 	const seam = "logsInstallCheck"
 	matches, err := filepath.Glob("*.go")
@@ -454,12 +457,16 @@ func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
 		if strings.HasSuffix(name, "_test.go") || goToolIgnores(name) {
 			continue
 		}
-		f, err := parser.ParseFile(fset, name, nil, 0)
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parser.ParseFile(fset, name, src, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
 		parsed++
-		decls, findings := seamFindingsIn(fset, f, seam)
+		decls, findings := seamFindingsIn(fset, f, src, seam)
 		declared = append(declared, decls...)
 		for _, c := range findings {
 			switch c.kind {
@@ -524,18 +531,25 @@ const (
 
 // seamFindingsIn reads one parsed file for the logs install check's seam, the
 // package variable named seam: where the file declares it, and each finding,
-// in the file's order. f must be parsed with its identifiers resolved (no
-// parser.SkipObjectResolution): the parser resolves each one by the file's
+// in the file's order. f must be parsed from src with its identifiers resolved
+// (no parser.SkipObjectResolution): the parser resolves each one by the file's
 // lexical scopes, and an identifier is the seam only where it resolves to the
 // package's variable (isSeamIdent). A local of the seam's name, declared by :=
 // or var, as a parameter, a result or a receiver, or by a range, type switch
 // or select clause, resolves to its own declaration, so its writes and its
 // address are no finding; past its scope, and on the right of the declaration
 // that makes it, where that scope has not begun, the name is the package's
-// variable again. Only the file's top-level value specs declare the seam. An
-// identifier is read with its parentheses taken off, so `(seam) = f` and
-// `&(seam)` are `seam = f` and `&seam`.
-func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []token.Position, findings []seamFinding) {
+// variable again. A type switch's case type lists lie outside the scope of the
+// variable its guard declares, which the language declares in each clause's
+// body alone, while the parser resolves them where it declared that guard:
+// there an identifier is read past the guard (caseListBindings). Only the
+// file's top-level var specs declare the seam: a top-level type, const or func
+// of its name, or an import, is no variable, no write to it or its address
+// compiles, and none of them compiles beside logs.go's declaration, so it is
+// no declaration of the seam and no finding. An identifier is read with its
+// parentheses taken off, so `(seam) = f` and `&(seam)` are `seam = f` and
+// `&seam`.
+func seamFindingsIn(fset *token.FileSet, f *ast.File, src []byte, seam string) (declared []token.Position, findings []seamFinding) {
 	if f.Scope == nil {
 		panic(fset.Position(f.Pos()).Filename + " was parsed with parser.SkipObjectResolution: its identifiers are not resolved to their scopes")
 	}
@@ -543,11 +557,14 @@ func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []t
 	// The package's variable as this file's identifiers resolve to it: the
 	// object of the file's own top-level declaration where it declares the
 	// seam, and nil where another file does, since the parser leaves an
-	// identifier no scope of the file declares unresolved.
+	// identifier no scope of the file declares unresolved. (In a file that
+	// declares a type, const or func of its name at top level instead, which
+	// does not compile beside the seam, it is that declaration's object.)
 	obj := f.Scope.Lookup(seam)
+	rebound := caseListBindings(fset, f, src, seam)
 	topLevel := map[*ast.ValueSpec]bool{}
 	for _, d := range f.Decls {
-		if gen, ok := d.(*ast.GenDecl); ok {
+		if gen, ok := d.(*ast.GenDecl); ok && gen.Tok == token.VAR {
 			for _, spec := range gen.Specs {
 				if vs, ok := spec.(*ast.ValueSpec); ok {
 					topLevel[vs] = true
@@ -561,7 +578,8 @@ func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []t
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.ValueSpec:
-			// A function's var or const declares a local of its own.
+			// A function's var or const declares a local of its own, and a
+			// top-level const no variable.
 			if !topLevel[n] {
 				return true
 			}
@@ -579,18 +597,18 @@ func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []t
 			}
 		case *ast.AssignStmt:
 			for _, lhs := range n.Lhs {
-				if isSeamIdent(lhs, seam, obj) {
+				if isSeamIdent(lhs, seam, obj, rebound) {
 					found(lhs, seamAssigned)
 				}
 			}
 		case *ast.RangeStmt:
 			for _, target := range []ast.Expr{n.Key, n.Value} {
-				if isSeamIdent(target, seam, obj) {
+				if isSeamIdent(target, seam, obj, rebound) {
 					found(target, seamAssigned)
 				}
 			}
 		case *ast.UnaryExpr:
-			if n.Op == token.AND && isSeamIdent(n.X, seam, obj) {
+			if n.Op == token.AND && isSeamIdent(n.X, seam, obj, rebound) {
 				found(n.X, seamAddressTaken)
 			}
 		}
@@ -600,16 +618,114 @@ func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []t
 }
 
 // isSeamIdent reports whether e, its parentheses taken off, is an identifier
-// named seam that the parser resolved to obj, the package's variable as
-// seamFindingsIn finds it in the file. An identifier that a local of that name
-// declares, or that names one, holds the local's object instead. A nil e, the
-// key or the value a range clause leaves out, is not.
-func isSeamIdent(e ast.Expr, seam string, obj *ast.Object) bool {
+// named seam that is the package's variable: as rebound reads it, where the
+// parser bound it to a type switch's guard from that switch's case type lists
+// (caseListBindings), and otherwise where the parser resolved it to obj, the
+// package's variable as seamFindingsIn finds it in the file. An identifier
+// that a local of that name declares, or that names one, holds the local's
+// object instead. A nil e, the key or the value a range clause leaves out, is
+// not.
+func isSeamIdent(e ast.Expr, seam string, obj *ast.Object, rebound map[*ast.Ident]bool) bool {
 	if e == nil {
 		return false
 	}
 	id, ok := ast.Unparen(e).(*ast.Ident)
-	return ok && id.Name == seam && id.Obj == obj
+	if !ok || id.Name != seam {
+		return false
+	}
+	if isSeam, ok := rebound[id]; ok {
+		return isSeam
+	}
+	return id.Obj == obj
+}
+
+// caseListBindings reads each identifier of the seam's name that the parser
+// binds where the language does not: one in a type switch's case type list
+// that the parser bound to the guard of a switch whose lists hold it
+// (caseListGuards). The language declares a guard's variable in each clause's
+// body alone, while go/parser's resolver walks a clause's list in the scope
+// where it declared the guard (resolver.go, TypeSwitchStmt and CaseClause).
+// It maps each such identifier to whether it is the package's variable: the
+// parser's answer for src parsed again with those guards' names blanked, so
+// that they declare nothing and the parser resolves the name in the scopes
+// around their switches, the switch's initializer, an enclosing function's
+// parameters and locals and an outer type switch's case variable among them.
+// An identifier a declaration inside the list binds, a func literal's
+// parameter there, is bound as the language binds it and is left out.
+func caseListBindings(fset *token.FileSet, f *ast.File, src []byte, seam string) map[*ast.Ident]bool {
+	held := map[*ast.Ident][]*ast.Ident{}
+	caseListGuards(f, seam, nil, held)
+	name := fset.File(f.Pos()).Name()
+	rebound := map[*ast.Ident]bool{}
+	for id, guards := range held {
+		if !slices.ContainsFunc(guards, func(g *ast.Ident) bool { return g.Obj == id.Obj }) {
+			continue
+		}
+		blanked := bytes.Clone(src)
+		for _, g := range guards {
+			at := fset.Position(g.Pos()).Offset
+			if at+len(seam) > len(src) || string(src[at:at+len(seam)]) != seam {
+				panic(name + ": the source given is not the one its file was parsed from")
+			}
+			copy(blanked[at:], "_"+strings.Repeat(" ", len(seam)-1))
+		}
+		again := token.NewFileSet()
+		f2, err := parser.ParseFile(again, name, blanked, 0)
+		if err != nil {
+			panic(fmt.Sprintf("%s does not parse with a type switch's guard blanked: %v", name, err))
+		}
+		at := fset.Position(id.Pos()).Offset
+		var same *ast.Ident
+		ast.Inspect(f2, func(n ast.Node) bool {
+			if x, ok := n.(*ast.Ident); ok && again.Position(x.Pos()).Offset == at {
+				same = x
+			}
+			return same == nil
+		})
+		if same == nil || same.Name != seam {
+			panic(fmt.Sprintf("%s parsed again holds no %s at offset %d", name, seam, at))
+		}
+		rebound[id] = same.Obj == f2.Scope.Lookup(seam)
+	}
+	return rebound
+}
+
+// caseListGuards maps in out each identifier named seam below root that lies
+// in the case type list of a type switch whose guard declares that name, to
+// the guards of every such switch whose lists hold it, the innermost last:
+// held is the guards of the lists root lies in. A switch's initializer, its
+// guard and its clauses' bodies lie in none of its lists.
+func caseListGuards(root ast.Node, seam string, held []*ast.Ident, out map[*ast.Ident][]*ast.Ident) {
+	ast.Inspect(root, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.Ident:
+			if n.Name == seam && len(held) > 0 {
+				out[n] = held
+			}
+		case *ast.TypeSwitchStmt:
+			inLists := held
+			if guard, ok := n.Assign.(*ast.AssignStmt); ok && len(guard.Lhs) == 1 {
+				if id, ok := guard.Lhs[0].(*ast.Ident); ok && id.Name == seam {
+					inLists = append(slices.Clip(held), id)
+				}
+			}
+			if n.Init != nil {
+				caseListGuards(n.Init, seam, held, out)
+			}
+			caseListGuards(n.Assign, seam, held, out)
+			for _, s := range n.Body.List {
+				clause := s.(*ast.CaseClause)
+				for _, e := range clause.List {
+					caseListGuards(e, seam, inLists, out)
+				}
+				for _, s := range clause.Body {
+					caseListGuards(s, seam, held, out)
+				}
+			}
+			return false
+		}
+		return true
+	})
 }
 
 // isUnnamedFuncType reports whether a declaration's written type e, its
@@ -642,12 +758,21 @@ func isUnnamedFuncType(e ast.Expr) bool {
 // define), with the seam declared in the file or not; while a write after such
 // a local's scope ends, and a write or the seam's address on the right of the
 // := that declares the local, whose scope has not begun there, are one finding
-// each.
+// each. In a type switch's case type list, which the variable its guard
+// declares does not reach, the seam's address is one finding, the seam
+// declared in the file or not, and so it is in the list of a type switch
+// inside another's; while there the address of a parameter, a local, the
+// switch's initializer's local or an outer type switch's case variable of its
+// name is that local's, and no finding. A top-level type, const or func of its
+// name, or an import, in a file that does not declare the seam, is no
+// declaration of it and no finding, and so is a composite literal's key of its
+// name, while its address in the literal's value is one.
 func TestTheLogsInstallCheckPinSeesEachWayToChangeIt(t *testing.T) {
 	const header = `package main
 
 import (
 	"iter"
+	"unsafe"
 
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
@@ -829,6 +954,97 @@ var plantLiteral = func(logsInstallCheck func() packaging.WindowsInstall) {
 	_ = &logsInstallCheck
 }
 `},
+		{name: "its address in a type switch's case type list", want: seamAddressTaken, src: asLogsGo + `func plant(v any) {
+	switch logsInstallCheck := v.(type) {
+	case [unsafe.Sizeof(&logsInstallCheck)]byte: // planted
+		_ = &logsInstallCheck
+	}
+}
+`},
+		{name: "its address in a type switch's case type list, in a file that does not declare it", want: seamAddressTaken, elsewhere: true, src: `func plant(v any) {
+	switch logsInstallCheck := v.(type) {
+	case [unsafe.Sizeof(&logsInstallCheck)]byte: // planted
+		_ = &logsInstallCheck
+	}
+}
+`},
+		{name: "its address in the case type list of a type switch inside another's", want: seamAddressTaken, src: asLogsGo + `func plant(v, w any) {
+	switch logsInstallCheck := v.(type) {
+	case [unsafe.Sizeof(func() {
+		switch logsInstallCheck := w.(type) {
+		case [unsafe.Sizeof(&logsInstallCheck)]byte: // planted
+			_ = &logsInstallCheck
+		}
+	})]byte:
+		_ = &logsInstallCheck
+	}
+}
+`},
+		{name: "a parameter's address in a type switch's case type list", src: asLogsGo + `func plant(logsInstallCheck func() packaging.WindowsInstall, v any) {
+	switch logsInstallCheck := v.(type) {
+	case [unsafe.Sizeof(&logsInstallCheck)]byte:
+		_ = &logsInstallCheck
+	}
+}
+`},
+		{name: "a local's address in a type switch's case type list", src: asLogsGo + `func plant(f func() packaging.WindowsInstall, v any) {
+	logsInstallCheck := f
+	switch logsInstallCheck := v.(type) {
+	case [unsafe.Sizeof(&logsInstallCheck)]byte:
+		_ = &logsInstallCheck
+	}
+	_ = logsInstallCheck
+}
+`},
+		{name: "the address of the switch's initializer's local in its case type list", src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
+	switch logsInstallCheck := f; logsInstallCheck := any(logsInstallCheck).(type) {
+	case [unsafe.Sizeof(&logsInstallCheck)]byte:
+		_ = &logsInstallCheck
+	}
+}
+`},
+		{name: "the address of an outer type switch's case variable in an inner one's case type list", src: asLogsGo + `func plant(v any) {
+	switch logsInstallCheck := v.(type) {
+	case func() packaging.WindowsInstall:
+		switch logsInstallCheck := any(logsInstallCheck).(type) {
+		case [unsafe.Sizeof(&logsInstallCheck)]byte:
+			_ = &logsInstallCheck
+		}
+	}
+}
+`},
+		{name: "a top-level type of its name, in a file that does not declare it", elsewhere: true, src: `type logsInstallCheck func() packaging.WindowsInstall
+
+var plantCheck logsInstallCheck = packaging.CheckWindowsInstall
+`},
+		{name: "a top-level const of its name, in a file that does not declare it", elsewhere: true, src: `const logsInstallCheck = "the logs install check"
+
+var plantName = logsInstallCheck
+`},
+		{name: "a top-level func of its name, in a file that does not declare it", elsewhere: true, src: `func logsInstallCheck() packaging.WindowsInstall {
+	return packaging.CheckWindowsInstall()
+}
+
+var plantInstall = logsInstallCheck()
+`},
+		{name: "an import of its name, in a file that does not declare it", elsewhere: true, src: `import logsInstallCheck "fmt"
+
+func plant() {
+	logsInstallCheck.Println()
+}
+`},
+		{name: "a composite literal's key of its name", src: asLogsGo + `type plantHolder struct{ logsInstallCheck func() packaging.WindowsInstall }
+
+func plant(f func() packaging.WindowsInstall) plantHolder {
+	return plantHolder{logsInstallCheck: f}
+}
+`},
+		{name: "its address in a composite literal's value", want: seamAddressTaken, src: asLogsGo + `type plantHolder struct{ logsInstallCheck func() packaging.WindowsInstall }
+
+func plant() plantHolder {
+	return plantHolder{logsInstallCheck: *(&logsInstallCheck)} // planted
+}
+`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src := header + c.src
@@ -837,7 +1053,7 @@ var plantLiteral = func(logsInstallCheck func() packaging.WindowsInstall) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			declared, findings := seamFindingsIn(fset, f, "logsInstallCheck")
+			declared, findings := seamFindingsIn(fset, f, []byte(src), "logsInstallCheck")
 			wantDeclared := 1 // once, as logs.go declares it
 			if c.elsewhere {
 				wantDeclared = 0

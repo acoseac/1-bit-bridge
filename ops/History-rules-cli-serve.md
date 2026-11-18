@@ -6463,10 +6463,13 @@ variable: the object of the file's own top-level declaration where the file
 declares the seam, and none where another file does, since the parser leaves an
 identifier no scope of the file declares unresolved (`isSeamIdent` compares
 `Ident.Obj` with `File.Scope.Lookup`); only the file's top-level value specs
-declare it. A local declared by `:=` or `var`, as a parameter, a result or a
-receiver, or by a range, type switch or select clause resolves to itself, and
-past its scope, or on the right of the `:=` that declares it, whose scope has
-not begun there, the name is the package's variable again. go/types is not the
+declare it (its `var` specs alone since *The case lists*, below). A local
+declared by `:=` or `var`, as a parameter, a result or a receiver, or by a
+range, type switch or select clause resolves to itself, and past its scope, or
+on the right of the `:=` that declares it, whose scope has not begun there, the
+name is the package's variable again (the pin read an identifier in a type
+switch's case type list as the guard's local, as the parser binds it, until
+*The case lists*, below). go/types is not the
 tool: the pin reads every platform's files, which do not type-check as one
 package, and the table's planted files import what they do not use. Twelve rows
 hold it, red over the old pin. The record is in `ops/engineering-log.md`,
@@ -6494,3 +6497,36 @@ path by that name. `TestBridgeLogsOffWindowsIsAsItWas`,
 two, and `TestLogStatusUnavailableExplainsWhy` and
 `TestLogBundleWorksWithoutALogFile` the console's reason. The record is in
 `ops/engineering-log.md`, 2026-11-18, bridge lows 4.
+
+*The case lists (2026-11-18).* The parser's resolution departs from the
+language's scopes, for an identifier the pin reads, in a place the pin had
+taken as it was: go/parser's resolver walks a type switch's clauses in the scope where it declared the
+switch's guard, and resolves each clause's type list there (go1.27.3
+`src/go/parser/resolver.go` 344-348, 371-384), while the language declares the
+guard's variable in each clause's body alone, so that in a list the name is
+what it is around the switch. `switch logsInstallCheck := v.(type) { case
+[unsafe.Sizeof(&logsInstallCheck)]byte: … }` takes the package variable's
+address in its list, as go/types resolves it, and the pin read it as the
+guard's local. `seamFindingsIn` takes the file's source now, and
+`caseListBindings` reads each identifier of the seam's name that the parser
+bound to the guard of a type switch whose case lists hold it
+(`caseListGuards`, the guards of a switch inside another's list among them):
+it is the seam where the parser, given the source again with those guards'
+names blanked, which then declare nothing, resolves it to the package's
+variable. So the name is read past those guards alone, and a parameter, a
+local, the switch's initializer or an outer type switch's case variable of its
+name keeps it. And only the file's top-level `var` specs declare the seam: a
+top-level `const` of its name had counted as its declaration and as a finding
+that it declares something other than `packaging.CheckWindowsInstall`, while a
+top-level type, const or func of the name, or an import, is no variable, takes
+no write and no `&`, and compiles beside no declaration of the seam, so none
+is a declaration of it or a finding. Thirteen rows hold it: the seam's address
+in a case list, with the seam declared in the file and in a file that does not
+declare it, and in the list of a type switch inside another's, each red over
+the old pin, and the `const` row red too; nine guards green over both (a
+parameter's, a local's, the initializer's and an outer case variable's address
+in a case list; a top-level type, func and import of the name; a composite
+literal's key of the name, no finding, and the seam's address in a composite
+literal's value, one). The rule's line names no scope rule and is unchanged.
+The record is in
+`ops/engineering-log/2026-11/2026-11-18-bridge-lows-5--fix-bridge-lows5-1118.md`.
