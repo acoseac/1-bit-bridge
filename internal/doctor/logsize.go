@@ -38,10 +38,14 @@ const logSizeWarnBytes int64 = 256 << 20
 // which is the thing already designed to do this and which an operator can
 // apply without a new bridge build.
 //
-// Skipped entirely when the path is unset or absent — a foreground
-// `bridge serve` has no log file at all, and reporting on one would be
-// reporting on something that does not exist. A log that should have been
-// named and could not be is not that: it is a warn saying why (backlog B618).
+// Skipped entirely when the path is unset or its file is absent: there is
+// no file to grade, and reporting on one would be reporting on something
+// that does not exist. An unset path is one that could not be made; an
+// absent file is a service's before its first start, or the file of a bridge
+// only ever run in the foreground, which logs to its terminal and writes
+// none. A file that is there is graded whoever wrote it, an earlier launch's
+// beside a foreground run included. A log that should have been named and
+// could not be is not that: it is a warn saying why (backlog B618).
 func checkLogSize(_ context.Context, d Deps) Check {
 	// A managed bridge's log is the host's, in every sense that matters
 	// here: the remedy this check points at is the platform's rotation

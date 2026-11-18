@@ -10,11 +10,12 @@
 // redirects that to a file — the unit templates set StandardOutput/
 // StandardError to packaging.DefaultLogPath(), the Windows sign-in
 // launcher redirects to it, and the Windows service opens its own under
-// %PROGRAMDATA% (Deps.LogPath). An operator running
-// `bridge serve` in a terminal has no log file whatsoever, and a Download
-// button that 404s with no explanation would read as a bug rather than as the
-// truth about how this bridge was started. The status call lets the UI say
-// which situation it is in before the operator clicks.
+// %PROGRAMDATA% (Deps.LogPath). A `bridge serve` run in a terminal writes
+// no log file whatsoever, and a Download button that 404s with no
+// explanation would read as a bug. The status call lets the UI say, before
+// the operator clicks, whether the file Deps.LogPath names is there, and why
+// not where it is not. It cannot tell how this bridge was started: beside a
+// foreground run, a file an earlier launch wrote is there, and offered.
 package admin
 
 import (

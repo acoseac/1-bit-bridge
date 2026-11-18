@@ -46,9 +46,10 @@ func gradedAs(body, path string) string {
 	return fmt.Sprintf("%d B (%s)", len(body), path)
 }
 
-// terminalsOK is the log-file-size line's summary where no log is named: a
-// bridge that logs to its terminal. It is the line's still, as before round 2,
-// where a log's path cannot be made off Windows or in the console's doctor.
+// terminalsOK is the log-file-size line's summary where no log is named, in
+// the words of a bridge that logs to its terminal. It is the line's still, as
+// before round 2, where a log's path cannot be made off Windows or in the
+// console's doctor.
 const terminalsOK = "no log file configured (logs go to the terminal)"
 
 // requireLogLine fails the test unless the log-file-size line is status
@@ -211,10 +212,11 @@ func TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade(t *testing.T) {
 // TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService is a guard,
 // green before round 2 and kept by it, run since round 3 through the console's
 // doctor as serve wires it (adminDoctorRunnerFor), whose console flag is
-// production's own: the console's doctor grades the log its own process
-// writes, so a console of a bridge run outside the service, beside a
-// registered service, grades the user's log, and inside the service the
-// service's; it asks no install check, which is bridge doctor's alone.
+// production's own: the console's doctor grades the file the console's
+// export offers its process (consoleLogPath), so a console of a bridge run
+// outside the service, beside a registered service, grades the user's log,
+// and inside the service the service's; it asks no install check, which is
+// bridge doctor's alone.
 func TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService(t *testing.T) {
 	for _, inService := range []bool{false, true} {
 		t.Run(fmt.Sprintf("inside the service %v", inService), func(t *testing.T) {
@@ -230,7 +232,7 @@ func TestTheConsolesDoctorGradesItsOwnLogBesideARegisteredService(t *testing.T) 
 			}
 			requireLogLine(t, consolesLogLine(t, w.host), doctor.OK, want, "")
 			if asked != 0 {
-				t.Errorf("the console's doctor asked the install check %d times; it grades its own process's log", asked)
+				t.Errorf("the console's doctor asked the install check %d times; it grades the file the console's export offers its process", asked)
 			}
 		})
 	}

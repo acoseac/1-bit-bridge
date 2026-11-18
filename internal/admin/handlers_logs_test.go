@@ -14,8 +14,9 @@ import (
 )
 
 // logTestServer wires a test admin server whose LogPath points at a file
-// holding `body`. Passing "" wires no log path at all — the foreground
-// `bridge serve` shape, which has no log file to export.
+// holding `body`. Passing "" wires no log path at all — the shape where
+// cmd/bridge could not make the log's path (consoleLogPath), which has no log
+// file to export.
 func logTestServer(t *testing.T, body string) *Server {
 	t.Helper()
 	s, _, _ := newTestServer(t)
@@ -60,9 +61,9 @@ func doGet(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
 }
 
 // TestLogStatusUnavailableExplainsWhy pins the honest-degradation contract.
-// Only a SERVICE install redirects stderr to a file, so "no log file" is a
-// routine state and the console has to say which state it is in — a bare
-// failure would read as a broken bridge.
+// With no log path wired, the state where cmd/bridge could not make one,
+// there is no file to offer, a routine state, and the console has to say
+// why — a bare failure would read as a broken bridge.
 func TestLogStatusUnavailableExplainsWhy(t *testing.T) {
 	rec := doGet(t, logTestServer(t, ""), "/api/logs/status")
 	if rec.Code != http.StatusOK {

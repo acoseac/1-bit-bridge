@@ -668,13 +668,16 @@ func plant(f installCheck) bool {
 	}
 }
 
-// TestTheConsolesLogIsTheFileItsProcessWrites is backlog B618's console half:
-// inside the Windows service the console's export offered DefaultLogPath,
-// LocalSystem's under C:\Windows\System32\config\systemprofile, while the
-// service wrote %PROGRAMDATA%'s. Through bridge logs' own choice, with
-// whether the process runs as the service in place of the install check, it
-// offers the service's log inside the service, the user's otherwise, and
-// DefaultLogPath off Windows, "" where that path cannot be made.
+// TestTheConsolesLogIsTheFileItsProcessWrites is backlog B618's console half,
+// for a console whose process runs as the installed bridge: the file that
+// process writes (one run in the foreground writes none, and the file named
+// may then be an earlier launch's). Inside the Windows service the console's
+// export offered DefaultLogPath, LocalSystem's under
+// C:\Windows\System32\config\systemprofile, while the service wrote
+// %PROGRAMDATA%'s. Through bridge logs' own choice, with whether the process
+// runs as the service in place of the install check, it offers the service's
+// log inside the service, the user's otherwise, and DefaultLogPath off
+// Windows, "" where that path cannot be made.
 func TestTheConsolesLogIsTheFileItsProcessWrites(t *testing.T) {
 	w := newWindowsLogsOnThisHost(t, nothingInstalled)
 	asService := w.host

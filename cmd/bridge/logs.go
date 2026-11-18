@@ -37,7 +37,10 @@ type logsHost struct {
 	// goos is runtime.GOOS, or the platform a test stands in for.
 	goos string
 	// defaultLog is packaging.DefaultLogPath: the log off Windows, and on
-	// Windows the one a bridge its sign-in launcher starts writes.
+	// Windows the one a bridge its sign-in launcher starts writes, since the
+	// launcher's start line appends the bridge's output to the LogPath
+	// finishInit renders it with, DefaultLogPath (packaging's
+	// startup.cmd.tmpl).
 	defaultLog func() (string, error)
 	// dirs are what the Windows logs' paths are made from.
 	dirs packaging.WindowsLogDirs
@@ -445,36 +448,46 @@ func followLog(ctx context.Context, f *os.File, pos int64, stdout, stderr io.Wri
 	}
 }
 
-// adminLogPath resolves the log file the admin console's export offers,
-// wired into admin.Deps.LogPath: consoleLogPath on this process's host, the
-// file the console's doctor grades too (doctorLogs' console).
+// adminLogPath resolves the path of the log file the admin console's export
+// offers, wired into admin.Deps.LogPath: consoleLogPath on this process's
+// host, the path the console's doctor grades too (doctorLogs' console).
+// Whether the file is offered or graded is decided where it is read: neither
+// is on a managed deployment, and a file that is not there is neither.
 //
 // Returns "" rather than an error on failure, and that empty is a real state
 // rather than a swallowed fault: the path fails to resolve only where the
 // user's home directory cannot be, and in that case there is no log file to
-// offer either. admin.Deps documents "" as "this bridge logs to its terminal",
-// which is also the honest answer for a foreground `bridge serve` — the path
-// resolving says nothing about whether anything writes there.
+// offer either. admin.Deps documents "" as the path that could not be made,
+// for which the routes offer no file. A path that resolves says nothing about
+// whether anything writes there: a `bridge serve` run in the foreground
+// writes no log file, so the file named may be an earlier launch's, or not
+// there.
 func adminLogPath() string {
 	return consoleLogPath(hostLogs())
 }
 
-// consoleLogPath is the log file the console's export offers the process
-// asking, "" where its path cannot be made: the file that process writes
+// consoleLogPath is the path of the log file the console's export offers the
+// process asking, "" where it cannot be made: the file that process writes
 // where it runs as the installed bridge. On Windows that is `bridge logs`' own
 // choice (chooseWindowsLog) with whether this process runs as the service in
 // place of the install check, since the console asks of the bridge it is part
 // of: the service's log inside the service, where DefaultLogPath is
 // LocalSystem's under C:\Windows\System32\config\systemprofile while the
 // service writes %PROGRAMDATA% (backlog B618), and the user's otherwise, the
-// one a bridge its sign-in launcher started writes. Elsewhere it is
+// one a bridge its sign-in launcher started writes: the launcher's start line
+// appends the bridge's output to the LogPath finishInit renders it with,
+// DefaultLogPath (packaging's startup.cmd.tmpl). Elsewhere it is
 // DefaultLogPath, which the launchd and systemd units point the bridge's
 // output at. A process run in the foreground writes no log file: it logs to
 // its terminal, so the file named may be an earlier launch's, or not there.
 // So the console and `bridge logs` read one file wherever the console runs
 // inside the installed bridge; they part only where they ask of two bridges,
 // a console of a bridge run another way beside a registered service, which
-// offers the user's log, not the service's.
+// offers the user's log, not the service's. Whether the file is offered, or
+// graded, is decided where it is read: the export refuses it on a managed
+// deployment and offers it only where it is there (internal/admin's
+// resolveLogFile), and the doctor skips its check on a managed deployment
+// (doctor.Deps.Managed).
 func consoleLogPath(host logsHost) string {
 	if host.goos == "windows" {
 		service := packaging.ServiceNotRegistered
