@@ -188,7 +188,7 @@ func TestOutputPlayKeepsItsOwnDSDState(t *testing.T) {
 			if st.MigratedFrom == nil || st.MigratedFrom.RecordSHA256 == "" || st.DefaultMode != dsdstate.ModeAuto {
 				t.Errorf("output play's state %+v (default %q): want its own migration of the keys and the record", st.MigratedFrom, st.DefaultMode)
 			}
-			if d, ok := st.DAC(goBarKey(t)); !ok || d.Choice == nil || d.Choice.Mode != dsdstate.ModeNative {
+			if d, ok := st.DAC(goBarKey(t), goBarStamp()); !ok || d.Choice == nil || d.Choice.Mode != dsdstate.ModeNative {
 				t.Errorf("output play's state for the GO bar %+v, want the record's native choice", d)
 			}
 			got, err := os.ReadFile(servesState)

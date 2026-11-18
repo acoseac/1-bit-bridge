@@ -1,0 +1,119 @@
+{
+  "case": "written",
+  "status": 200,
+  "body": {
+    "dsdPlayback": {
+      "bootId": "golden-boot",
+      "policyGeneration": 2,
+      "publication": 3,
+      "tuples": [],
+      "converted": [
+        {
+          "bitRate": 2822400,
+          "rateHz": 176400,
+          "validBits": 24,
+          "passbandHz": 30000,
+          "dither": "none",
+          "filter": "dsdconv-1"
+        },
+        {
+          "bitRate": 5644800,
+          "rateHz": 176400,
+          "validBits": 24,
+          "passbandHz": 30000,
+          "dither": "none",
+          "filter": "dsdconv-1"
+        },
+        {
+          "bitRate": 11289600,
+          "rateHz": 176400,
+          "validBits": 24,
+          "passbandHz": 30000,
+          "dither": "none",
+          "filter": "dsdconv-1"
+        }
+      ],
+      "refused": [],
+      "warnings": [],
+      "model": "Test Test DAC",
+      "bcdDevice": "0100"
+    },
+    "dsdDAC": {
+      "dacKey": "d1-29e725b72bbce9ac",
+      "dacToken": "t1-a2ca2a32aa499dbe7e01e2fe17c7fd2a",
+      "profile": {
+        "id": "test.dac",
+        "name": "Test DAC",
+        "caveats": []
+      },
+      "choice": {
+        "mode": "convert",
+        "maxBitRate": 0,
+        "revision": 1,
+        "dopConfirmed": false
+      },
+      "options": [
+        {
+          "mode": "native",
+          "offered": true,
+          "rates": [
+            {
+              "bitRate": 2822400,
+              "evidence": "reported"
+            },
+            {
+              "bitRate": 5644800,
+              "evidence": "reported"
+            },
+            {
+              "bitRate": 11289600,
+              "evidence": "reported"
+            }
+          ]
+        },
+        {
+          "mode": "dop",
+          "offered": true,
+          "rates": [
+            {
+              "bitRate": 2822400,
+              "evidence": "reported"
+            },
+            {
+              "bitRate": 5644800,
+              "evidence": "reported"
+            },
+            {
+              "bitRate": 11289600
+            }
+          ],
+          "needsConfirmation": true
+        },
+        {
+          "mode": "convert",
+          "offered": true,
+          "rateHz": 176400,
+          "validBits": 24,
+          "passbandHz": 30000,
+          "dither": "none"
+        },
+        {
+          "mode": "off",
+          "offered": true
+        }
+      ],
+      "firstUse": [
+        {
+          "transport": "native",
+          "state": "pending"
+        },
+        {
+          "transport": "dop",
+          "state": "pending"
+        }
+      ]
+    },
+    "dsdMode": "convert",
+    "allowDoP": true
+  }
+}

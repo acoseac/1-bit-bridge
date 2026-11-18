@@ -84770,7 +84770,7 @@ DAC bound read off already), `TestAConvertedEntryCarriesItsPlan` (both cases),
 `TestNoDACKeyOrModelCarriesASerialOrAPort`, `TestEachKindOfDACsWholeResponseIsItsGolden` (no
 goldens yet), and B11's `TestTheElementListsDSDWhileThePlayerConverts`,
 `TestPlaybackFactsTransport` and `TestOutputsQualificationFacts`, whose expectations B8 changes.
-`TestNoHealthFlagBeforeItsRoute` and the exporters were green before and after: they pin what B8
+`…NoHealthFlagBeforeItsRoute` and the exporters were green before and after: they pin what B8
 must not add, and what it must keep building.
 
 ### Negative controls
@@ -84784,7 +84784,7 @@ api's health and protocol tests (eight), all green unmutated.
 | | mutation | red |
 |---|---|---|
 | a | `unitText` keeps the unit's serial: the model under a port-only binding | as predicted: `TestThePublishedModelNamesNoSerialOrPort`, `TestNoDACKeyOrModelCarriesASerialOrAPort` and its serve case |
-| b | `/v1/health` advertises `bridgeDSDChoice` beside `bridgeOutput` | as predicted, `TestNoHealthFlagBeforeItsRoute` and `TestHealthFeaturesCompleteSet`; `TestHealthFeatureCapacityCoversEveryKey`, predicted red, stayed green, since it parses `api.go` at run time and the runner had restored it: run with the mutation in place it went red (40 keys, a capacity of 39) |
+| b | `/v1/health` advertises `bridgeDSDChoice` beside `bridgeOutput` | as predicted, `…NoHealthFlagBeforeItsRoute` and `TestHealthFeaturesCompleteSet`; `TestHealthFeatureCapacityCoversEveryKey`, predicted red, stayed green, since it parses `api.go` at run time and the runner had restored it: run with the mutation in place it went red (40 keys, a capacity of 39) |
 | c | the view's DAC rebuilt from a fresh read of the store at every copy | as predicted: `TestTheBridgeElementCarriesTheDACChoice`'s seeded state file (the route read the state), `TestNoDACKeyOrModelCarriesASerialOrAPort`'s in-memory half (no unit to redact by: the key a hash of the serial) |
 | d | `refreshDSD` keeps the published set whenever the next plays the same | as predicted: `TestAChangeThatMovesNoPlanIsPublishedInItsEpoch`'s four steps, `TestTheBridgeElementCarriesTheDACChoice`'s first use observed on a published backend |
 | e | a converted occurrence's observation takes the native option's evidence at its source rate | as predicted: `TestAConvertedEntryCarriesItsPlan`'s 176.4 kHz case (`streaming_observed`); its 44.1 kHz case, where native is not offered, and the goldens stayed green |
@@ -100514,6 +100514,310 @@ Each control fails on the unfixed test and passes with the fix:
 - **The files:** `git diff --name-only 9acee209..HEAD` names the three
   test files and this log.
 
+## 2026-11-15 — B883: a DAC's DSD state entry is the bound unit's own
+
+Branch `fix/b883-dsd-entry-maker`, from main at bf622968 (B728 B9 PR 2,
+#1453). Commits: 1ee9ce8c (the mechanism, its tests, qualificationVersion
+52 and the runbook), 6317f944 and 4ae7bb58 (the bump's control, committed
+and reverted), b743ebff and e5699d86 (two tests made to fail where their
+controls aim), 95c21342, 7cc1e0b0 and 4675cde4 (three more tests), then
+this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, GOMAXPROCS=8 of 16
+cores.
+
+### What changed
+
+- **The state keys each DAC entry by its model's key and its maker's
+  stamp.** `dsdstate.StampOf` is `s1-` and the SHA-256 of
+  `onebit:dsdstate:manufacturer:v1`, a NUL and the manufacturer string
+  exactly as the readers return it after their own trim
+  (`alsa.SysfsReader.UnitModel` for the policy, `Qualification` for the
+  migration), or `-` for a unit with none. Nothing is redacted, folded or
+  normalized first, and the stamp never comes from `unitText` or the
+  published model: two strings a byte apart are two makers. A manufacturer
+  that does not read is the reader's error, never `-`: the reading, the
+  check after open and the probe's check refuse.
+- **The file is schema 2.** Each entry carries `"stamp"`, and an entry
+  whose stamp is missing, null, empty or of no form `StampOf` makes does not
+  check (the file is damaged, `Refusing`). Two entries of one key and stamp
+  do not check; the entries sort by key, then stamp; the 256-entry cap
+  stays.
+- **Every reader and writer takes the bound unit's stamp.** The accessors
+  take it (`DAC`, `ChoiceFor`, `Entry`), so a caller by key alone does not
+  compile: the effective policy (`policy.Inputs.Stamp`, `Set.Stamp`), the
+  read side, a choice's write (`StoredRevision`, its entry, auto's
+  acknowledgements), the migration's two parts (`Bound.Stamp`, from
+  `BoundOf`), playback's three evidence writers (the stamp of the set or the
+  probe the occurrence belongs to, captured then), the probe cache (keyed by
+  model and stamp; `Forget(model, stamp)`), the check after open and the
+  probe's check (`wrong_device` on another maker), and `policy.Identity`,
+  which `dsdSet.same` and `Reconcile` compare through.
+- **A choice's write carries the stamp it read the DAC for**
+  (`ChoiceRequest.ObservedStamp`, typed `dsdstate.Stamp`). One that is no
+  stamp is `bad_request` with the choice's own words, before the turn and
+  the lease, the journal naming no mode. One of another maker's unit is
+  `dac_changed` right after the key's check, before the journal's `from`,
+  the fence and the compare-and-set. The route that carries it on the wire
+  is B9 PR 3's.
+
+### A schema-1 file
+
+A schema-1 file recorded no maker. `Decode` checks it by schema 1's frozen
+rules first (a stamp member, or a `schema_1` marker, in a schema-1 file is
+refused as damaged), then holds its conversion, read from the file's bytes
+alone:
+
+| Schema 1 holds | Held as | Why native or DoP can never be newly authorized |
+|---|---|---|
+| a DAC's choice, DoP confirmation, first-use acknowledgements, listener answers, evidence | dropped | it removes authorizations and adds none |
+| `defaultMode` (`auto` or `off`) | kept | never native |
+| `state_unreadable`, `migrated_off` | kept | the refusal at every rate stays |
+| per-DAC migration warnings | dropped with their entries | display only, and nothing would clear them |
+| no marker, `keys` waiting or done | `schema_1` | no migration runs over it, so nothing is derived again |
+| `state_unreadable` marker | kept | `Refusing` stays `Refusing` |
+
+A dropped refusal falls to the default kept: the migration's fallback
+`native` or `dop` pending its acknowledgement, and a DAC's own `off`, play
+under `auto` as every DAC the state knows nothing of plays, DSD converted to
+PCM where a conversion is offered and refused (`conversion_not_offered`)
+where none is; under `off`, refused. `Open` writes nothing; the first
+`Update` that changes the state writes schema 2, and one that changes
+nothing keeps the schema-1 bytes, which every start converts alike. A
+restore installs the snapshot's conversion, with its observations dropped,
+in place of whatever the box held; bytes that do not decode go in as they
+are, and the next load refuses them.
+
+### Other changes of behaviour
+
+- **A record of another maker than the bound unit** (the migration's
+  identity mismatch): the bound unit gets the fallback under its own stamp
+  and the record waits for its model; once that maker's unit is bound, the
+  record's rows are its own entry, at its first revision, and the first
+  unit's fallback stays its own. Under schema 1 the rows replaced that
+  fallback at revision 2, in the one entry the key had.
+- **Warnings stay keyed by the model's key**: the migration's rows and a
+  choice's write clear a key's migration warnings for every maker sharing
+  it, and the read side shows them on each. Warnings explain and permit
+  nothing.
+
+### Who meets the conversion
+
+No release tag contains 13a388be, which added the state (as checked before
+this change; this clone holds no tags), so a box upgrading from a release
+holds no state file and migrates fresh, under stamps. A box that
+ran a main build since the state merged may hold a schema-1 file
+(candidates, main builds, images built from main, restores of their
+snapshots). Its DAC entries are dropped at the first start: each DAC asks
+for its first use again and plays by the default it had. A choice can be
+written again once B9 PR 3's route exists. Until then the operator can stop
+the bridge, move `player-dsd.json` aside and start it: the bridge then
+migrates fresh from its config, under the bound unit's stamp. That gives
+native or DoP back only where a qualification record matching the bound
+unit, and the legacy keys that name it, are on the box. A snapshot carries
+no qualification record, but a restore leaves the records already on the
+destination; where they are gone, a fresh migration writes the fallback
+choice alone, and native or DoP waits for the route. We do not claim that
+no box meets this.
+
+Release note, drafted: "The player's DSD settings are now kept for each DAC
+model of each maker. A box that ran a pre-release build of the player's DSD
+support asks for each DAC's first use again, once, and plays DSD by the
+bridge's default until a choice is made for it."
+
+### What stays
+
+- The stamp is a plain digest, not a keyed one: the state file already
+  keeps keys built from product strings, and a serial at rest in the state
+  is backlog B772's. A manufacturer string that holds a short serial can be
+  found from its stamp by trying each, so the stamp is kept in the state's
+  file alone, on no wire and in no log line.
+- Makers whose strings read alike (byte-equal after the trim, or none)
+  share an entry. A string that holds a serial or a port, or changes with
+  the firmware, splits one maker's units: they fail closed, to first use and
+  the default.
+- B9 PR 3 carries the maker on the wire, a token derived from the stamp,
+  with its stale-write tests at revision 0 and at equal revisions; B12 binds
+  a check's answer to the check's stamp; B13 writes the console's choice
+  through `ChooseDSD`. No DSD write route exists after this change
+  (`internal/api/outputs_dsd_read_test.go`, `…NoHealthFlagBeforeItsRoute`).
+- Sequencing: B9 PR 3 depends on this change merged. The two merge back to
+  back, this one first, each with its own green gate, with the bridge's
+  distribution held between them, so no build carries this one alone.
+
+### Proofs
+
+Red first: each outcome test was written against a stage of the change that
+had every caller moved to the stamped accessors and compared nothing by the
+stamp (schema 1 written, no conversion, `Identity.Same`, the probe cache and
+the write's check blind to it), and run against it through `go test
+-overlay` with a names-only shim for schema 1's file shapes. Every one was
+red there, each at its own assertion:
+
+- dsdstate: `TestAnEntryIsItsModelsOfOneMaker`,
+  `TestASchemaOneStateIsHeldWithNoneOfItsEntries` (every shape of a schema-1
+  state through `Open`), `TestAWriteOverASchemaOneFileIsMadeOnlyWhereItChangesTheState`
+  (the no-op `Update` keeps the bytes; a changing one writes schema 2),
+  `TestAWriteOverASchemaOneFileThatFailsRestartsFromWhatTheFileHolds` (a
+  write refused before it lands, and one that lands, each then reopened),
+  `TestARestoreInstallsTheSnapshotsConversionWhateverTheBoxHeld` (seven
+  snapshots over three box states), `TestAMigrationGoesOnOverASchemaTwoStateAcrossARestart`
+  (both waiting continuations, and a markerless state's migration),
+  `TestNoMigrationRunsOverASchemaOneState`,
+  `TestTheRecordsOwnModelTakesTheRecordOverItsFallback` (A6),
+  `TestTheStateIsSchemaTwoAsWritten`, `TestTheStateIsSchemaOneAsWritten` and
+  `TestTheStateRefusesWhatNoWriterWrites`;
+- policy: `TestNoSchemaOneEntryAuthorizesNativeOrDoP` (the table's rows
+  through `Open`, `Update` and `WriteRestored`, a conversion offered and
+  not), `TestAReconciliationTellsTwoMakersOfOneModelApart` (identical plans,
+  key and firmware alike: a heard occurrence, a released pause and frames
+  buffered in the first unit's sink revoked, a successor with no sink kept),
+  `TestAChoiceIsTheBoundUnitsOwnEntrysAlone` and
+  `TestAUnitWithNoManufacturerStringReadsOnlyAnEntryOfNone` (A7);
+- playback: `TestAnotherMakersUnitOfTheModelReadsNoneOfTheFirstsEntry` (A
+  migrated fresh, serials read, then B bound and B's own write),
+  `…WriteMadeFromAnotherMakersReadSideIsRefused`,
+  `TestAMakerChangeAtTheSameKeyAndFirmwareIsProbedAgain`,
+  `TestWhatPlaybackObservedIsWrittenForTheMakerItWasObservedUnder` (the three
+  writers, each held until another maker's set is published) and
+  `TestTheOpenAndTheProbeRefuseANodeOfAnotherMakerOrWhoseStringsDoNotRead`;
+- alsapcm: `TestEachMakerOfAModelHasAnswersOfItsOwn`, and the new cases of
+  `TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor` (red at the
+  rig's 60 s watchdog: the track plays) and
+  `TestAProbeRecordsNothingOfAUnitSwappedInBeforeItsOpen`;
+- cmd/bridge: `TestARecordOfAnotherUnitWaitsForItsOwnModel` (A6 through
+  serve) and `TestAStateMovedAsideMigratesTheBoundUnitAfresh` (the way back
+  above, the record kept and gone).
+
+`TestAnEntryWithoutAStampIsADamagedState` (a missing, null, empty or
+malformed stamp, opened where it lies and restored then opened) holds
+schema 2's strictness, which no stage before it wrote; control 7 is its red.
+
+Two invariants held before and hold after, each passing on main's tree
+(bf622968, the test file copied into it) and here:
+`TestAManufacturerStringThatDoesNotReadRefusesEveryRate` (A8, through the
+box's own readers) and `TestASchemaOneFileHoldingWhatSchemaOneHasNotDoesNotRead`
+(A9).
+
+Controls, each an uncommitted edit of the committed tree, predicted in
+writing first and restored after its run:
+
+1. A redacted manufacturer string stamped, in `BoundOf`
+   (`card.USB.Serial.Redact(q.Manufacturer)`) and in the reading
+   (`unitText`): "Audio 1 Labs" with serial 1 and "Audio 2 Labs" with
+   serial 2 share a stamp, and the cross-maker case is red ("B plays
+   [native …]"). Its first run was red earlier than predicted, at the test's
+   lookup of A's entry by A's raw stamp; e5699d86 finds that entry as the
+   state holds it, and the rerun was red where predicted.
+2. `Identity.Same` without the stamp: the reconcile case red on its
+   verdicts (Keep where Revoke is wanted), the open of another maker's unit
+   taken.
+3. A conversion keeping one schema-1 entry: every authorization row red.
+4. A conversion keeping a waiting marker: the held state, the no-migration
+   case and the restore matrix red on the waiting cells.
+5. A8: a manufacturer that does not read taken for none in `UnitModel`: red.
+6. A9: schema 1 decoded without `DisallowUnknownFields`: red on the stamp
+   member.
+7. `DAC.check` without the stamp's validity: every case of the bad-stamp
+   test and the refusal table's seven stamp cases red.
+8. The bump: 6317f944 put `qualificationVersion` back to 51 and the version
+   gate refused it ("guarded code changed without qualificationVersion
+   increase (51 -> 51)"); 4ae7bb58 reverts it, and the gate passes.
+
+Runs:
+
+- the touched tests `-race -count=50`: dsdstate 92 s, policy 8 s, playback
+  7 s, alsapcm 18 s, backup 340 s, cmd/bridge 274 s, and the three added
+  after (the check order's new cases 1 s, the bad stamp 10 s, the way back
+  121 s), all pass;
+- `-race -timeout 120m`, once each: `./internal/player/...` 46 s,
+  `./internal/alsapcm` 79 s, `./internal/api` 152 s, `./internal/backup`
+  744 s, `./cmd/bridge` 1,577 s: all pass, no race reported;
+- `make vet` clean, and for linux/386 too;
+- the pinned gofmt over every changed file: clean;
+- the version gate, bf622968..HEAD: OK.
+
+## 2026-11-15 — B883 round 2: the maker each evidence write is made for, in every order
+
+Branch `fix/b883-dsd-entry-maker` at 174ba363 (round 1 and its rules), main
+still at bf622968. Test-only, by the owner's decision of the day: no
+production file changed, and `qualificationVersion` stays 52. Commits:
+ffd6eff6 (the tests), then this record. Every run: Go 1.27.3, the tags
+`ts_omit_webclient,ts_omit_debugeventbus`, linux/amd64, GOMAXPROCS=8 of 16
+cores.
+
+### What the round adds
+
+- **The two playback writers in each order.**
+  `TestWhatPlaybackObservedIsWrittenForTheMakerItWasObservedUnder` held each
+  write at the store while another maker's unit was bound and its set
+  published. For `noteDriverAccepted` and `noteStreamingObserved` the write is
+  now also made once the other maker's set is published, from the first
+  maker's set as an occurrence admitted under it keeps it: the first maker's
+  entry holds what was observed, and the other maker has no entry. The held
+  cases stay.
+- **The probe as the supervisor asks it.**
+  `TestAProbesAcceptanceIsWrittenForTheMakerItWasBegunFor` runs `ProbeDSD`
+  over a stand-in kernel (`Config.Probe`) that opens the node, asks the
+  probe's check after open and accepts DSD_U32_BE at DSD64: (a) held at the
+  existing `Probed` seam once the probe's call has returned, the other
+  maker's unit bound and its set published there, then let go; (b) the other
+  maker's set published before the probe begins, the box then reading the
+  first maker's unit with no refresh between, `ProbeDSD`'s own refresh after
+  the probe publishing the first's again. In both the first maker's entry
+  holds the acceptance and the other maker has none. No seam was added.
+- **A manufacturer string that does not read, through the box's own
+  readers.** The case in
+  `TestTheOpenAndTheProbeRefuseANodeOfAnotherMakerOrWhoseStringsDoNotRead`
+  was a stand-in box whose whole read failed, which no reader's change could
+  reach. It is now `HostBox` over the GO bar's sysfs tree: the unit with no
+  manufacturer attribute (stamp `-`), its set computed for it, is taken by
+  `checkDSDNode` and by the probe's check (`probedUnit`); a NUL in the
+  attribute, or a directory at its name, is then refused at both. The test's
+  doc claim stands on control 15.
+- The store's hold and the probe's wait outside the Once their release takes
+  (`firstHold`), each release registered as a cleanup after the backend.
+
+### Controls
+
+Each an uncommitted edit of ffd6eff6, predicted in writing first, restored
+after its run, and the same tests run green again on the restored tree:
+
+11. `noteDriverAccepted` recording under the published set's stamp: red in
+    its after-the-switch case alone, both assertions; the held cases green.
+12. `noteStreamingObserved` the same: red in its after-the-switch case alone.
+13. `noteProbed` recording under the published set's stamp: red in both probe
+    schedules, (b) too, since the note is made before `ProbeDSD`'s refresh;
+    the held probe row green.
+14. `probeDSD` taking its stamp from the published set in place of the box's
+    reading: red in schedule (b) alone.
+15. `alsa.SysfsReader.UnitModel` taking a manufacturer string that does not
+    read for none: red in both new cases, the open and the probe's check each
+    taking the unit, and in `TestAManufacturerStringThatDoesNotReadRefusesEveryRate`
+    as in round 1.
+
+### Where the code answers otherwise than the brief
+
+The runbook's sentence in its version 13 entry (PR #1356, "rerun qualification
+with version N") is the one match of `TestQualificationRunbookVersion`'s rerun
+pattern, which wants exactly one such reference, equal to `Version`: #1356
+wrote 13, main has 51, and each bump has rewritten it. Set to 13 (an
+uncommitted edit, restored), the test is red: "runbook rerun =
+[["qualification with version 13" "13"]]; want one reference to version 52";
+and the test lies under the version gate's `internal/player/qualification/`
+prefix. The sentence stays at 52 for the owner to decide: a current rerun
+instruction beside the version 52 paragraph with the pattern held to it, or
+the historical sentence worded so the pattern does not take it.
+
+### Runs
+
+- the three touched tests `-race -count=50`: pass, 2.8 s;
+- `./internal/player/playback/...` once under `-race -timeout 120m`, in the
+  build slot: pass, 3.1 s, no race reported;
+- `make vet` clean, and for linux/386 too;
+- the pinned gofmt over every changed file: clean; the version gate,
+  bf622968..HEAD: OK;
+- with `rules-b883-r2.patch` applied, `make docs-check` and
+  `TestEveryCitedTestNameExists` pass; the patch was then taken back.
 ## 2026-11-15 — B872U: the updater's tick seam takes its hold before it hands an arming over
 
 Branch `diag/b872u-updater-wake`, from main at bf622968. Commits:
@@ -103962,6 +104266,310 @@ halves passed); `go test -race -count=1 -timeout 45m ./internal/admin/
 windows/amd64 (`CGO_ENABLED=0` for the two) exited 0 each. go1.27.3's gofmt
 lists none of the changed Go files, and the names check over the branch's
 commit messages and added lines since main finds nothing in this round's.
+
+## 2026-11-16 — B728 B9 PR 3b: the DSD choice's route, the DAC's token and the publication count
+
+`PUT /v1/outputs/{id}/dsd` writes the DSD choice of the DAC the bridge's own
+player is bound to, the write B9 PR 2 built in the player's backend, under the
+engine's configuration reservation PR 3a built. The rules are `output.md`'s
+bullets under "The player's DSD choice: its write (B728 B9)" (the write's, and
+the route's), `wire.md`'s bullet on the route, and `cli-serve.md`'s on serve's
+view; their long forms are in `ops/History-rules-output.md`, the route's under
+"B728 B9 PR 3b".
+
+### What it builds
+
+- **The token** (`internal/player/playback/dsd_choice.go`, `dsd_policy.go`,
+  `dsd_view.go`). `DACToken`, `t1-` and 32 hexadecimal digits: the first 16
+  bytes of HMAC-SHA-256 under a key of 32 random bytes the backend draws in
+  `New`, over a domain string, the state's key, the maker's stamp and the
+  canonical firmware. `readBox` mints it once a reading; the reading's sets
+  carry it, `viewOf` publishes it on `DSDDAC.Token`, and serve projects it as
+  `dsdDAC.dacToken`. `ChoiceRequest{DACKey, DACToken, Choice}` and its
+  `Check()` (the choice's words and the token's form, before the turn); the
+  write compares the token with its own reading's right after the key.
+  `Seams.DACTokenKey` gives a test a key of its own: the goldens and the iOS
+  fixtures carry real tokens.
+- **The publication count** (`dsd_contain.go`, `authorization.go`).
+  `publishLocked`, the one step the refresh and the write publish through:
+  it stores a new set at the next generation, or the set as it was beside a
+  view that changed, each at the next `dsdPublished.seq`, and stores nothing
+  for a reading that changes neither. `PlayerPolicy.Publication`,
+  `dsdPlayback.publication`.
+- **The write's reading and its publication** (`dsd_choice.go`,
+  `dsd_contain.go`, `backend.go`). The write reads the clock, the DAC and the
+  state under `dsdMu`, checks its context there and once the DAC is read,
+  holds its reading (`choiceReading`) until it publishes, a refresh meanwhile
+  owed (`refreshOwed`), and publishes that reading from the state its
+  decision read (`publishChoice`), whatever the outcome after the reading;
+  the answer is the pair the publication stored (`ChoiceResult.Epoch`),
+  captured in its step. A publication that panics is contained as a
+  refresh's reading is (`containDSD`). The cause of each failure is kept
+  where it occurs (`ChoiceResult.Err`, `ErrDSDWritesClosed`). Two seams beside
+  the write's: `ChoicePublished` (under `dsdMu`, after the store) and
+  `ChoiceAnswered` (outside it, before the lease and the turn are let go).
+- **Serve's adapter** (`cmd/bridge/serve_player_output_dsd.go`), a method set
+  of `bridgeOutput`: `Lists(id)`, and `ChooseDSD`: the words, the player
+  read ready and only then its engine and its backend, the engine's
+  reservation, held until the backend's write returns, and the backend's
+  write projected as GET projects its facts. `main.go` wires it beside
+  `WithBridgeOutput` (`WithBridgeDSDChoice`). `bridgeDSDFacts` sends every
+  refusal's word as it is and the publication; `bridgeDSDDAC` the token.
+- **The route** (`internal/api/outputs_dsd_choice.go`): the gate, the id, the
+  body (4 KiB, pointers for the required members), the adapter, and one
+  answer a way out, through `answerDSDChoice` (the members by the presence
+  rule) or the plain envelope; a client gone is `writeErrorLog`'s 499, the
+  route's deadline (`dsdChoiceBudget`, ten seconds) the server's 500 with the
+  members. `/v1/health` advertises `bridgeDSDChoice` while `bridgeOutput` is
+  and the write is wired (the feature capacity 41).
+- **PROTOCOL.md**: the route's section after the bridge object (the gate, the
+  body, the checks in order, the answers' members and the presence rule, the
+  ordering by `bootId` and `publication`, the client's rules, `persist_uncertain`),
+  `dsdDAC.dacToken` and `dsdPlayback.publication` with their prose,
+  `dsd_choice_uncertain` among the refused words, eight error rows and five
+  wider cells, the write rate list, and `bridgeOutput`'s place among the
+  flags.
+- **The token guard** reads `policy.Intersect`'s refusals beside `Effective`
+  and `decide` (`dsdReadSideTokens`), so `dsd_choice_uncertain` is a word the
+  table must name.
+- **`qualificationVersion` 53**: `internal/alsapcm`'s lease test makes its
+  writes with the token, a guarded file; the runbook's five places and a
+  version paragraph follow.
+
+### Tests
+
+The backend (`internal/player/playback`): `TestTheTokenIsTheReadingsOwn`,
+`TestAWriteCarriesTheTokenItsReadSidePublished`,
+`TestEveryOutcomeAfterTheReadingPublishesThatReading`,
+`TestARefusalCarriesTheOptionsItWasDecidedOn`,
+`TestNoRefreshPublishesBetweenAWritesReadingAndItsPublication`,
+`TestTheAnswerIsThePairTheWritePublished`,
+`TestAWritesReadingWaitsForARefreshUnderWay`,
+`TestAWriteWhoseTimeRunsOutAtItsReadingWritesNothing`,
+`TestAStateWrittenBetweenTheDecisionAndThePublicationIsPublishedAfterIt`,
+`TestAPublicationThatPanicsAnswersWithNoEpoch`,
+`TestTheCauseIsKeptWhereItOccurs`,
+`TestEveryPublicationMovesThePublicationCount` and
+`TestNoSessionMeetsAChoicesReading`, and the choice's other tests, which make
+their writes with the token. The route (`internal/api`): `TestThePUTsChecksBeforeTheWrite`,
+`TestEveryChoiceOutcomeHasItsAnswer` (with a source-derived check that the
+backend's outcomes are the API's and the handler's switch names each),
+`TestAServerDeadlineAndAClientGoneAreAnsweredApart` and
+`TestTheChoiceFlagArrivesWithItsRoute`, with the guards (the error table,
+the routed and documented endpoints, the route registry, the health set, the
+member table and the token table). Serve (`cmd/bridge`), the real engine over
+serve's stand-in or the real backend, through the real route:
+`TestAPlayParkedBeforeItsBackendRegistrationRefusesTheWrite`,
+`TestEachTransitionRefusesTheWriteAtTheEngine` (a seek's, Next's,
+Previous's, PlayID's and PlayIndex's release, the release after a refused
+start and the next Start parked, a Play during a release, paused with the
+device held and let go, a release unconfirmed, and the backend's own refusal),
+`TestAWriteHoldsEveryStartUntilItReturns`,
+`TestTheReservationIsHeldUntilTheWriteReturnsWhateverTheRequestDoes` (a
+request cancelled while the write runs, two writes of one revision, a write
+that panics, and serve's stop while a write runs),
+`TestTheDACTokenRoundTrips`,
+`TestAWriteFromAnotherUnitsReadSideIsRefusedThroughTheRoute`,
+`TestAFirmwareChangeBetweenTheReadAndTheWriteIsDACChanged`,
+`TestAMakerChangeBetweenPublicationAndGETIsOneObservation`,
+`TestNoStampReachesTheWire`, `TestTheWritesFailedPathsThroughTheRoute`,
+`TestTheAnswerIsTheEffectiveChoice`,
+`TestAGETAcquiredBeforeAWritesPublicationOrdersBeforeItsAnswer`,
+`TestTheChoiceAnswerShapes`, `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames`
+and `TestEachChoiceAnswerShapeIsItsGolden`; the read side's tests carry the
+token and the publication, and its goldens (`cmd/bridge/testdata/dsd-outputs`)
+are written by `BRIDGE_WRITE_DSD_GOLDENS` under the test's key, beside a
+golden for each shape of the PUT's answer, which the iOS exporter writes to
+`dsd_choice_answers.json`.
+
+### Red first
+
+Each test above but `TestNoSessionMeetsAChoicesReading` failed, before this
+change's code was in place, for its own reason, run through `go test
+-overlay` with a shim that gives the new names none of their behaviour; that
+one pins a premise the configuration lease holds already, and its red is
+control 20. A guard that reads the source from disk reads this change's under
+an overlay, so its red is a control too. The failure lines are the batch's
+report's.
+
+### Controls
+
+Each a mutation of this change's code, predicted in writing before it ran,
+through `go test -overlay` (no file changed) or, for a guard that reads the
+source, an edit put back byte for byte; control 17 a commit no ref names.
+
+1. The adapter without the engine's reservation: the parked Start's and each
+   transition's write answered 200, a write ran holding no reservation, and
+   Play was admitted beside it.
+2. The reservation let go as the request's context ends: green at first, the
+   case asking Play before the server had seen its client go. The case now
+   waits for the context the write was asked under to end, and looks again as
+   the backend's write returns: red, 20 runs of 20.
+3. The token's check dropped, the key alone: red in the backend's token test,
+   the outcome table's `dac_changed` row, the route's other unit and firmware
+   cases, and the token's round trip across two boots.
+4. The token the stamp itself: red in `TestNoStampReachesTheWire` and in the
+   token's form.
+5. The token minted at GET from a reading of its own: red in
+   `TestAMakerChangeBetweenPublicationAndGETIsOneObservation`.
+6. `dsd_choice_uncertain` sent as `dsd_state_unreadable`: red in
+   `TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames`.
+7. A new word in `Intersect`: with the guard's read of `Intersect` dropped and
+   the refused words' row without `dsd_choice_uncertain`, the guard is green,
+   blind to the word; with the read, red. The guard holds the row equal to the
+   words the code emits both ways, so the read dropped with the row as it
+   stands is red as well.
+8. The write publishing a fresh reading: red in the outcome table's cases
+   whose box changes after the reading. The refusal's own test, whose box
+   changed before the reading, was green; it now offers native again once the
+   write has decided: red.
+9. Refreshes not owed while the write holds its reading: red.
+10. The answer read once the lease and the turn are let go: red.
+11. `Err` left nil: red in `TestTheCauseIsKeptWhereItOccurs`, and in the
+    route's failed paths, where a client gone is recorded 499 through its
+    cause alone; the API's own test, whose stand-in gives its cause, is green.
+12. The publication count not moved for a change of the read side alone: red,
+    and red in the ordering of a GET before the write's publication.
+13. `dsdMode` and `allowDoP` left out of the PUT's answer: red in the route's
+    and the API's tests.
+14. The player's readiness asked before the words: red, a 409 where 400.
+15. The flag advertised with no write wired: red.
+16. MPD's gate probed by the PUT: green at first, every case having asked
+    `/v1/health` before it; a case whose gate was never asked is red.
+17. `qualificationVersion` left at 52: the version gate refuses that head
+    ("guarded code changed without qualificationVersion increase") and passes
+    HEAD.
+18. The handler returning no answer at the deadline: red, an empty 200.
+19. To 26, the reviews' own: serve's wiring of the write, a Start not waiting
+    for a write's lease, a reading that changes nothing published all the
+    same, a 400 with the members, `dsdMode` and `allowDoP` omitted at "" and
+    false, the context not asked after the reading and after the lock (each red
+    in its own case, the other green), the publication made from the state
+    read again, and a code the error table does not name: each red.
+
+### Runs
+
+On this host (Linux, 16 cores), the change at its fourth commit, stacked on
+its base:
+
+- The pinned toolchain's gofmt over the changed Go files: nothing listed.
+- `make fmt vet test build-all` on an archive of the commit with the rules
+  patch applied, `P=8` and `TEST_PKGS='-count=1 -timeout 45m ./...'`: fmt 1 s
+  (nothing rewritten), vet 8 s, test 1,830 s (89 packages ok, none failed;
+  `cmd/bridge` 1,765 s, `internal/manifest` 1,697 s, `internal/alsapcm` 97 s,
+  `internal/alsa` 1.8 s), build-all 42 s.
+- `GOOS=linux GOARCH=386 make vet`: ok. `GOOS=windows` and `GOOS=darwin`:
+  `go vet` of the six changed packages ok, and `go test -c` of each ok.
+- `make docs-check`: ok.
+- The version gate (`scripts/qualification-version`) against the base: ok;
+  both native-integration overlays as `gate.yml` runs them: `cmd/bridge` 46 s
+  and `internal/player/playback` 6 s, every named test passed.
+- Under `-race -count=50`, by name, one package at a time: the backend's 41
+  choice tests (15 s), the lease's two in `internal/alsapcm` (26 s), the
+  route's 15 in `internal/api` with its guards (136 s), and serve's 20 in
+  `cmd/bridge` (404 s, `TestEachTransitionRefusesTheWriteAtTheEngine` 129 s of
+  it, `TestTheReservationIsHeldUntilTheWriteReturnsWhateverTheRequestDoes`
+  72 s): every run passed. `TestServeListsItsPlayerOnAGateOfItsOwn` under
+  `-race -count=10`: passed.
+- The iOS fixtures exported twice (`-p=1`): `dsd_dac_outputs.json`,
+  `dsd_choice_answers.json` and `dsd_outputs.json` byte for byte; the
+  manifest's documents and `fixtures-info.json`'s `deltaSince` carry the
+  export's own clock, and are byte for byte with its readings masked.
+
+### Budgets
+
+`output.md` 90,793 bytes, `wire.md` 65,911, `cli-serve.md` 99,486 (each of
+100,000), CLAUDE.md 53,936 (of 64,000).
+
+### Round 2
+
+- **The write's wait for the refreshes' lock ends at its request's context**
+  (`lockReading`, `dsd_choice.go`). A refresh holds the lock across its reading
+  of the DAC, which a USB control request the kernel holds can stall for as
+  long as USB's own timeouts allow. A `sync.Mutex` takes no context, so the
+  write hands its wait to a waiter on a goroutine of the backend's (`spawn`,
+  which `Wait` joins), and one compare-and-swap decides who owns the lock: the
+  write, which reads on its own goroutine before its lease is let go, or, its
+  wait given up, the waiter, which lets the lock go having read nothing. An
+  uncontended lock is taken at once (`TryLock`). A write whose wait is given up
+  answers `persist_failed` with the epoch standing, and lets go of its turn,
+  its lease and the engine's reservation while the refresh is still held. The
+  lock's later takes, its publication's and its hold's end, follow no context:
+  the write's hold of its reading keeps every refresh from reading the box
+  under the lock. A one-slot channel in place of the mutex was the other way;
+  it changes the mutex's six other sites and the test helpers that try it,
+  where the waiter changes one wait.
+- **The panic test joins the refresh its containment asks** before it clears
+  the seams, in both its cases, whatever that refresh publishes:
+  `Backend.Wait` counts it from the ask on.
+- **An optional member of the PUT's body is never null** (`optInt`,
+  `optBool`): `maxBitRate`, `confirmDoP` or `firstUseAcknowledged` null is
+  `400` `bad_request`, as a member of the wrong type is; absent, each is 0 or
+  false.
+- **One long form each** of the choice's write in
+  `ops/History-rules-output.md` and of the DSD state in
+  `ops/History-rules-player.md`.
+
+Tests: `TestAWriteWhoseTimeRunsOutAtItsReadingWritesNothing` takes the write's
+answer while the refresh is still parked, compares its epoch with the
+publication standing then, has a PCM Start open the DAC meanwhile (past the
+backend's lease), and lets the refresh publish a changed read side after, the
+write having read, written and published nothing;
+`TestAWriteWaitingForARefreshAnswersWithinItsTime` does the same through the
+route, the real engine and the real backend, a Play admitted and its Start come
+past the lease to the content once the PUT has answered;
+`TestThePUTsChecksBeforeTheWrite` refuses the three nulls. Each was red first
+against the round's base, for its own reason.
+
+Controls, each predicted in writing before it ran, through `go test -overlay`:
+- the wait made unbounded again: the timeout test waits its minute for the
+  write's answer, and the route's test for the PUT's;
+- the waiter reading the box once its write gave up: the unit read twice;
+- the panic test's join moved after its write of the seams, the refresh's work
+  5 ms late and a 200 ms pause after that write (the window made wide, the
+  pause ordering nothing): a data race between the write and the refresh's
+  `published`; with the join before the write, clean under the same
+  instrument;
+- the null check removed: the three bodies answered 200.
+
+Runs, on this host: under `-race -count=50`, by name, one package at a time,
+the backend's 41 choice tests (13 s), the route's 15 tests in `internal/api`
+with its guards (140 s), and serve's 21 route tests in `cmd/bridge` (432 s;
+the new one again beside the drain guard, 67 s), every run passing;
+`./internal/player/playback` (3 s), `./internal/api` (147 s) and
+`./cmd/bridge` (1,627 s) under `-race` once, the last on this round's head
+with the rules patch applied; `go vet` with the release tags for linux, darwin
+and windows; `make docs-check`, the citation guard and the version gate.
+
+### Main merged in, through a branch's merge (2026-11-16)
+
+Main at 8847ac27 comes in through a branch's merge of it (26e501f4), with B601's
+console test tone: a third holder of the backend's device slot, which
+`takeLease` refuses beside it (`toning`) and which `reserveTone` refuses while
+the lease is held. `takeLease` keeps this branch's signature, its outcome and
+the cause, with B601's check in its refusal and both sides' words in its doc;
+`New`'s literal keeps B601's `toneShut` beside the token's key and its seam.
+`TestAChoicesWriteBesideAToneIsRefused` writes with a token of a token's form
+(`fixtureToken`), so its write passes its words and is refused by the lease.
+The choice write's rule in `output.md` says the token, as its long form does,
+and both name the tone among what the lease is taken beside. The
+qualification version is 55: 53 on this branch and 54 on that merge.
+
+The route beside the tone: the tone runs outside the engine, so the engine
+grants a write its configuration reservation while the tone sounds, and the
+backend's lease refuses the write. The adapter lets the reservation go on
+every outcome of the backend's write (`serve_player_output_dsd.go`, its
+deferred `ReleaseConfiguration`).
+`TestAWriteBesideTheConsolesToneIsRefusedAndLetsTheReservationGo` drives it
+through the route, the real engine and the real backend: a tone admitted
+while a refresh holds the refreshes' lock, held in the slot having opened
+nothing; GET reads the player stopped (B601: the tone publishes no
+observation), and the refresh's token is the one published before; the PUT
+answers 409 `playback_not_stopped` with the four members, writes nothing and
+leaves no reservation; the tone let go, a Play is admitted. Its controls: the
+tone's check taken out of `takeLease` (the write was answered 200, written),
+and the reservation's release taken out of the adapter (the reservation held
+once the PUT answered).
 
 ## 2026-11-17 — B884 round 4: the warning states the fact and the hazard, and nothing else
 

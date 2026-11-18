@@ -37,16 +37,34 @@ import (
 // (playback.Backend.Facts), which carries the set published and what it says
 // of the bound DAC.
 
+// goldenTokenKey is the DAC token key of every backend the read side's tests
+// build (B728 B9 PR 3), so a token is a known function of the reading: the
+// goldens and the iOS fixtures carry real tokens, which a change of the
+// token's formula moves.
+var goldenTokenKey = []byte("the read side's tests' token key")
+
 // readSideBackend is a backend whose DSD is the effective policy over box
 // and store, the test DAC bound at card 5, edit applied to the policy first,
-// its set computed once.
+// its set computed once, its tokens made under goldenTokenKey.
 func readSideBackend(t *testing.T, box *playbacktest.Box, store playback.DSDStore, edit ...func(*playback.DSDPolicy)) *playback.Backend {
+	t.Helper()
+	return readSideBackendKeyed(t, goldenTokenKey, nil, box, store, edit...)
+}
+
+// readSideBackendKeyed is readSideBackend under the token key key, with seams
+// beside it when not nil: another boot's backend, whose tokens another key
+// makes, or one a test holds at a seam.
+func readSideBackendKeyed(t *testing.T, key []byte, seams *playback.Seams, box *playbacktest.Box, store playback.DSDStore, edit ...func(*playback.DSDPolicy)) *playback.Backend {
 	t.Helper()
 	p := playbacktest.Policy(5, box, store)
 	for _, e := range edit {
 		e(p)
 	}
-	b, err := playback.New(playback.Config{DSD: p, Resolver: dopContents{}, Locator: refusedNativeLocator{new(int)}})
+	if seams == nil {
+		seams = &playback.Seams{}
+	}
+	seams.DACTokenKey = key
+	b, err := playback.New(playback.Config{DSD: p, Resolver: dopContents{}, Locator: refusedNativeLocator{new(int)}, Seams: seams})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +207,13 @@ func TestTheBridgeElementCarriesTheDACChoice(t *testing.T) {
 		if d == nil || d.DACKey != playbacktest.DACKey().DACKey() || d.Profile != nil || d.Choice != (api.OutputDSDChoice{Mode: dsdstate.ModeAuto}) {
 			t.Fatalf("dsdDAC %+v, want the test DAC's key, no profile, auto with no revision", d)
 		}
+		// B728 B9 PR 3: the token the reading made, and the publication.
+		if !tokenForm.MatchString(d.DACToken) {
+			t.Errorf("dsdDAC's token %q is not of its form", d.DACToken)
+		}
+		if f.DSDPlayback == nil || f.DSDPlayback.Publication == 0 {
+			t.Errorf("dsdPlayback %+v carries no publication", f.DSDPlayback)
+		}
 		if got := []string{d.Options[0].Mode, d.Options[1].Mode, d.Options[2].Mode, d.Options[3].Mode}; len(d.Options) != 4 || !slices.Equal(got, []string{"native", "dop", "convert", "off"}) {
 			t.Errorf("the options %+v, want native, dop, convert and off", d.Options)
 		}
@@ -323,6 +348,12 @@ func TestTheBridgeElementCarriesTheDACChoice(t *testing.T) {
 		if after.DSDPlayback.PolicyGeneration != before.DSDPlayback.PolicyGeneration || !reflect.DeepEqual(after.DSDPlayback.Tuples, before.DSDPlayback.Tuples) {
 			t.Errorf("a first use observed moved the epoch: generation %d, want %d", after.DSDPlayback.PolicyGeneration, before.DSDPlayback.PolicyGeneration)
 		}
+		// It is a publication of its own, which orders it after the one before
+		// (B728 B9 PR 3), under the same token.
+		if after.DSDPlayback.Publication <= before.DSDPlayback.Publication || after.DSDDAC.DACToken != before.DSDDAC.DACToken {
+			t.Errorf("a first use observed published at %d after %d, token %s after %s: want a later publication, the token as it was",
+				after.DSDPlayback.Publication, before.DSDPlayback.Publication, after.DSDDAC.DACToken, before.DSDDAC.DACToken)
+		}
 	})
 }
 
@@ -379,7 +410,7 @@ func TestAConvertedEntryCarriesItsPlan(t *testing.T) {
 			// What was observed of native DSD64 on this box, before its choice
 			// went back to the bridge's auto, which converts on an unknown DAC.
 			st := dsdstate.Defaults()
-			st.DACs = []dsdstate.DAC{{Key: playbacktest.DACKey(), Evidence: []dsdstate.Evidence{{Transport: dsdstate.TransportNative, Format: string(format.DSDU32BE),
+			st.DACs = []dsdstate.DAC{{Key: playbacktest.DACKey(), Stamp: playbacktest.DACStamp(), Evidence: []dsdstate.Evidence{{Transport: dsdstate.TransportNative, Format: string(format.DSDU32BE),
 				BitRate: playbacktest.DSD64, BCDDevice: playbacktest.DACBCD, StreamingObservedAt: playbacktest.T0}}}}
 			b := readSideBackend(t, box, playbacktest.NewMemStore(st))
 			f := readSideFacts(t, b, config.PlayerDevice{})
@@ -601,6 +632,7 @@ func TestNoDACKeyOrModelCarriesASerialOrAPort(t *testing.T) {
 		Match:   []dacprofile.Match{{VendorID: "1234", ProductID: "5678"}},
 		Caveats: []dacprofile.Caveat{{Code: dacprofile.CaveatTransitionClicks, Transport: "dop", Note: "It clicks into DSD128."}}}}}
 	byPort := config.PlayerDevice{Transport: "usb", Binding: config.BindingPort, Port: port}
+	var tokens []string
 	keyOf := func(serial string) string {
 		box := playbacktest.NewBox(5)
 		box.SetUnit(5, unitWith(serial))
@@ -609,7 +641,7 @@ func TestNoDACKeyOrModelCarriesASerialOrAPort(t *testing.T) {
 			t.Fatal(err)
 		}
 		st := playbacktest.ChoiceState(dsdstate.ModeNative)
-		st.DACs[0].Key = key
+		st.DACs[0].Key, st.DACs[0].Stamp = key, dsdstate.StampOf(unitWith(serial).Manufacturer)
 		st.Warnings = []dsdstate.Warning{{Code: dsdstate.WarningMigrationRecordMissing, DAC: &key, At: playbacktest.T0}}
 		b := readSideBackend(t, box, playbacktest.NewMemStore(st), func(p *playback.DSDPolicy) {
 			p.Profiles = profiles
@@ -640,10 +672,19 @@ func TestNoDACKeyOrModelCarriesASerialOrAPort(t *testing.T) {
 		if len(f.DSDPlayback.Warnings) != 1 || f.DSDDAC.Profile == nil || len(f.DSDDAC.Profile.Caveats) != 1 {
 			t.Errorf("the warnings %+v and the profile %+v, want the DAC's own warning and the profile's caveat, each redacted", f.DSDPlayback.Warnings, f.DSDDAC.Profile)
 		}
+		if !tokenForm.MatchString(f.DSDDAC.DACToken) {
+			t.Errorf("the token %q is not of its form", f.DSDDAC.DACToken)
+		}
+		tokens = append(tokens, f.DSDDAC.DACToken)
 		return f.DSDDAC.DACKey
 	}
 	if a, b := keyOf("TESTDAC-0001"), keyOf("TESTDAC-0002"); a != b {
 		t.Errorf("two units of one model, each with its serial in its product string, publish the keys %s and %s: the key is a function of the serial", a, b)
+	}
+	// B728 B9 PR 3: one key, and a token for each unit, whose state's keys
+	// differ: a write made from one's read side is not the other's.
+	if tokens[0] == tokens[1] {
+		t.Errorf("two units of one key whose product strings differ publish one token %s", tokens[0])
 	}
 	f := readSideFacts(t, readSideBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(dsdstate.Defaults())), byPort)
 	if f.DSDDAC == nil || f.DSDDAC.DACKey != playbacktest.DACKey().DACKey() {
@@ -765,7 +806,7 @@ func TestARetainedObservationKeepsItsOwnDACsEvidence(t *testing.T) {
 		state func(st dsdstate.State, key dacprofile.Key) dsdstate.State
 	}{
 		{"another DAC in the bound port", otherModel, func(st dsdstate.State, key dacprofile.Key) dsdstate.State {
-			st.DACs = append(st.DACs, dsdstate.DAC{Key: key, Choice: &dsdstate.Choice{Mode: native, Revision: 1, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp},
+			st.DACs = append(st.DACs, dsdstate.DAC{Key: key, Stamp: playbacktest.DACStamp(), Choice: &dsdstate.Choice{Mode: native, Revision: 1, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp},
 				FirstUse: []dsdstate.FirstUse{{Transport: native, BCDDevice: playbacktest.DACBCD, AcknowledgedAt: playbacktest.T0}},
 				Listener: []dsdstate.Answer{listened(playbacktest.DACBCD)}})
 			return st

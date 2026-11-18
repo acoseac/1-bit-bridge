@@ -165,6 +165,10 @@ type dsdSet struct {
 	// profile is the profile that matched the unit, nil for an unknown DAC:
 	// the gain check at an open reads its exemptions.
 	profile *dacprofile.Profile
+	// token is the token of the unit the set was computed for, minted once
+	// with the reading it was made from (readBox), "" for no set: its read side
+	// publishes it (dsdDAC.dacToken), and a choice's write compares it.
+	token DACToken
 }
 
 // dsdPublished is what GET /v1/outputs reads of the player's DSD (B728 B8):
@@ -176,10 +180,14 @@ type dsdSet struct {
 // repoints one; the view moves with every refresh that says another thing of
 // the DAC, the pair then holding the set as it was (round 2: a view-only
 // change stored a new set and stranded each occurrence admitted under the
-// old one).
+// old one). seq is its publication (B728 B9 PR 3): one more than the pair's
+// before it, New's first being 1, so within one boot a larger one was
+// published later, whatever its set's generation or the choice's revision
+// says (PlayerPolicy.Publication).
 type dsdPublished struct {
 	set  *dsdSet
 	view DSDView
+	seq  uint64
 }
 
 // rateWords are the rates' names in a log line.
@@ -430,9 +438,10 @@ func readMixer(box DSDBox, card int, m alsa.UnitModel) policy.Mixer {
 	return mx
 }
 
-// probeUnit is what the probe's answers for key's model at bd hold for.
-func (b *Backend) probeUnit(key dacprofile.Key, bcd string, bd BoundDAC) alsapcm.ProbeUnit {
-	return alsapcm.ProbeUnit{Model: key.Canonical(), Firmware: canonicalBCD(bcd), Kernel: b.cfg.DSD.Kernel, Enumeration: bd.Enumeration}
+// probeUnit is what the probe's answers for key's model of stamp's maker at
+// bd hold for.
+func (b *Backend) probeUnit(key dacprofile.Key, stamp dsdstate.Stamp, bcd string, bd BoundDAC) alsapcm.ProbeUnit {
+	return alsapcm.ProbeUnit{Model: key.Canonical(), Stamp: string(stamp), Firmware: canonicalBCD(bcd), Kernel: b.cfg.DSD.Kernel, Enumeration: bd.Enumeration}
 }
 
 // readDSD computes the effective set from what it reads now (the design's
@@ -452,22 +461,29 @@ func (b *Backend) readDSD() (*dsdSet, DSDView) {
 
 // dsdReading is what one reading of the box establishes of the bound DAC
 // (readBox): the effective policy's inputs but the state, and what a set
-// made from them is computed for. A refresh makes its set from it and the
-// state; a choice's write checks its choice against it, on the state its
-// write is made from (B728 B9).
+// made from them is computed for, the unit's model's key, its maker's stamp
+// and its token among them. A refresh makes its set from it and the state; a
+// choice's write checks its choice against it, on the state its write is made
+// from (B728 B9), and publishes it.
 type dsdReading struct {
-	m    alsa.UnitModel
-	key  dacprofile.Key
-	in   policy.Inputs
-	tmpl dsdSet
+	m     alsa.UnitModel
+	key   dacprofile.Key
+	stamp dsdstate.Stamp
+	token DACToken
+	in    policy.Inputs
+	tmpl  dsdSet
 }
 
 // readBox reads the bound DAC from a fresh reading of the box: its unit's
-// model read from sysfs while it is still the unit that reading resolved,
-// its PCM device's playback altsets, the DoP gain check's mixer, the probe's
+// model read from sysfs while it is still the unit that reading resolved, and
+// the stamp of its manufacturer string as that read returned it
+// (dsdstate.StampOf: a string that did not read leaves no reading), its PCM
+// device's playback altsets, the DoP gain check's mixer, the probe's
 // answers, the profiles and the kernel; then the unit read again, so a card
-// renumbered while its files were read is never taken. It answers why not
-// where nothing could be read.
+// renumbered while its files were read is never taken. The reading's token
+// (dacToken: its key, its stamp and its firmware as read) is minted once, here,
+// and every set made from the reading carries it. It answers why not where
+// nothing could be read.
 func (b *Backend) readBox() (*dsdReading, string) {
 	p := b.cfg.DSD
 	if p.Bound == nil || p.Box == nil {
@@ -500,16 +516,18 @@ func (b *Backend) readBox() (*dsdReading, string) {
 		return nil, "the bound card changed while it was read"
 	}
 	unit := dacprofile.Unit{Key: key, BCDDevice: m.BCDDevice}
+	stamp := dsdstate.StampOf(m.Manufacturer)
+	token := b.dacToken(policy.Identity{Key: key, Stamp: stamp, BCDDevice: m.BCDDevice})
 	var answers []alsapcm.ProbeResult
 	if p.Probes != nil {
-		pu := b.probeUnit(key, m.BCDDevice, bd)
+		pu := b.probeUnit(key, stamp, m.BCDDevice, bd)
 		for _, c := range alsapcm.ProbeCandidates() {
 			answers = append(answers, p.Probes.Answer(pu, c))
 		}
 	}
-	r := &dsdReading{m: m, key: key, in: policy.Inputs{Unit: unit, Profiles: p.Profiles, Kernel: p.Kernel, Altsets: alts, Probe: answers, Mixer: mixer},
+	r := &dsdReading{m: m, key: key, stamp: stamp, token: token, in: policy.Inputs{Unit: unit, Stamp: stamp, Profiles: p.Profiles, Kernel: p.Kernel, Altsets: alts, Probe: answers, Mixer: mixer},
 		tmpl: dsdSet{computed: true, card: bd.Card, device: bd.Device, subdevice: bd.Subdevice, enumeration: bd.Enumeration,
-			model: unitText(strings.TrimSpace(strings.TrimSpace(m.Manufacturer)+" "+strings.TrimSpace(m.Product)), m.USB)}}
+			model: unitText(strings.TrimSpace(strings.TrimSpace(m.Manufacturer)+" "+strings.TrimSpace(m.Product)), m.USB), token: token}}
 	if p.Profiles != nil {
 		if prof, ok := p.Profiles.Match(unit); ok {
 			r.tmpl.profile = &prof
@@ -951,8 +969,9 @@ func (s *session) checkDSDActivation(o *occ) error {
 // checkDSDNode is the check after open of a DSD occurrence's node (the
 // design's sections 3.4 and 3.5), at its open and at every reopen after a
 // pause's release, admitted is the set the sink's DSD was admitted under:
-// the node's unit is the DAC that set was computed for, by its model's key
-// and its firmware (policy.Identity), never by its port; and for DoP the
+// the node's unit is the DAC that set was computed for, by its model's key,
+// its maker's stamp and its firmware (policy.Identity), never by its port, a
+// unit whose strings do not read refused; and for DoP the
 // gain check, read afresh at the node's card, passes for the plan's rate. A
 // PCM sink a converted occurrence plays in (B728 B11) has no native plan and
 // no gain check: its PCM changes no DoP word. It records the identity the
@@ -970,10 +989,10 @@ func (out *output) checkDSDNode(n alsapcm.NodeInfo, admitted *dsdSet) error {
 	if err != nil {
 		return fmt.Errorf("player backend: the opened node's unit does not key: %w", err)
 	}
-	id := policy.Identity{Key: key, BCDDevice: m.BCDDevice}
+	id := policy.Identity{Key: key, Stamp: dsdstate.StampOf(m.Manufacturer), BCDDevice: m.BCDDevice}
 	if !id.Same(admitted.set.Identity()) {
 		return &alsapcm.Error{Reason: alsapcm.ReasonWrongDevice, Op: "open", Endpoint: alsapcm.Endpoint{Card: n.Card, Device: n.Device},
-			Detail: "the node opened is not the DAC the effective DSD set was computed for (its model or its firmware differs)"}
+			Detail: "the node opened is not the DAC the effective DSD set was computed for (its model, its maker or its firmware differs)"}
 	}
 	if out.plan != nil && out.plan.Tuple.Transport == TransportDoP {
 		alts, err := p.Box.PlaybackAltsets(n.Card, n.Device)
@@ -1001,17 +1020,6 @@ func evidenceOf(d *dsdstate.DAC, transport, f string, bitRate int, bcd string) *
 	return &d.Evidence[len(d.Evidence)-1]
 }
 
-// dacOf is the state's entry of key's model, made when there is none.
-func dacOf(st *dsdstate.State, key dacprofile.Key) *dsdstate.DAC {
-	for i := range st.DACs {
-		if st.DACs[i].Key.Equal(key) {
-			return &st.DACs[i]
-		}
-	}
-	st.DACs = append(st.DACs, dsdstate.DAC{Key: key})
-	return &st.DACs[len(st.DACs)-1]
-}
-
 // tupleTransport is a plan's transport as the state names it.
 func tupleTransport(p policy.Plan) string {
 	if p.Outcome == policy.OutcomeDoP {
@@ -1021,14 +1029,17 @@ func tupleTransport(p policy.Plan) string {
 }
 
 // recordDSD writes into the player's DSD state what playback observed of
-// key's model, on a goroutine of the backend's own, never the audio path's,
-// counted among its writes (DSDWrites):
-// mutate changes the DAC's entry and reports whether it changed anything,
-// and an unchanged state writes nothing. A write the store refuses changes
+// key's model of stamp's maker, on a goroutine of the backend's own, never
+// the audio path's, counted among its writes (DSDWrites): mutate changes that
+// entry (dsdstate.State.Entry), never another maker's for the key, and
+// reports whether it changed anything, and an unchanged state writes nothing.
+// Its caller names the key and the stamp of the set or the probe what it
+// records was observed under, as they were then, never the set published
+// when the write is made. A write the store refuses changes
 // nothing and is said, the landed write's fence once (dsdstate's
 // ErrLandedNotHeld: the file holds a state the store does not, so no write
 // is made from it).
-func (b *Backend) recordDSD(what string, key dacprofile.Key, mutate func(d *dsdstate.DAC, now time.Time) bool) {
+func (b *Backend) recordDSD(what string, key dacprofile.Key, stamp dsdstate.Stamp, mutate func(d *dsdstate.DAC, now time.Time) bool) {
 	p := b.cfg.DSD
 	if p == nil || p.Store == nil {
 		return
@@ -1041,7 +1052,7 @@ func (b *Backend) recordDSD(what string, key dacprofile.Key, mutate func(d *dsds
 		}()
 		now := b.dsdNow()
 		err := p.Store.Update(func(st *dsdstate.State) error {
-			if !mutate(dacOf(st, key), now) {
+			if !mutate(st.Entry(key, stamp), now) {
 				return errUnchanged
 			}
 			return nil
@@ -1065,7 +1076,8 @@ var errUnchanged = errors.New("unchanged")
 // section 1.1): the sink's HW_PARAMS committed exactly the format, rate and
 // channels plan pp asked under set, as alsapcm's open requires, so the
 // kernel's driver took the tuple on this box, under the running kernel; for
-// DoP, its carrier alone. Nothing is recorded with no kernel release or no
+// DoP, its carrier alone, recorded in the entry of the model and maker set
+// was computed for. Nothing is recorded with no kernel release or no
 // firmware, which no rung counts. The caller reads set and pp under the
 // session's lock.
 func (b *Backend) noteDriverAccepted(set *dsdSet, pp policy.Plan) {
@@ -1073,7 +1085,7 @@ func (b *Backend) noteDriverAccepted(set *dsdSet, pp policy.Plan) {
 		return
 	}
 	kernel, bcd := b.cfg.DSD.Kernel, canonicalBCD(set.set.BCDDevice)
-	b.recordDSD("driver_accepted", set.set.Key, func(d *dsdstate.DAC, now time.Time) bool {
+	b.recordDSD("driver_accepted", set.set.Key, set.set.Stamp, func(d *dsdstate.DAC, now time.Time) bool {
 		e := evidenceOf(d, tupleTransport(pp), string(pp.Tuple.Format), pp.BitRate, bcd)
 		if !e.DriverAcceptedAt.IsZero() && e.Kernel == kernel {
 			return false
@@ -1086,15 +1098,16 @@ func (b *Backend) noteDriverAccepted(set *dsdSet, pp policy.Plan) {
 // noteStreamingObserved records the streaming_observed of plan pp under set,
 // and its transport's first use observed (the design's sections 1.1 and
 // 6.2): an occurrence of the tuple played streamingObserved of content, the
-// kernel establishing it, with no fault. Each is set once. The caller reads
-// set and pp under the session's lock.
+// kernel establishing it, with no fault, recorded in the entry of the model
+// and maker set was computed for. Each is set once. The caller reads set and
+// pp under the session's lock.
 func (b *Backend) noteStreamingObserved(set *dsdSet, pp policy.Plan) {
 	if set == nil || !set.computed || canonicalBCD(set.set.BCDDevice) == "" {
 		return
 	}
 	bcd := canonicalBCD(set.set.BCDDevice)
 	transport := tupleTransport(pp)
-	b.recordDSD("streaming_observed", set.set.Key, func(d *dsdstate.DAC, now time.Time) bool {
+	b.recordDSD("streaming_observed", set.set.Key, set.set.Stamp, func(d *dsdstate.DAC, now time.Time) bool {
 		changed := false
 		at := now.UTC().Truncate(time.Second)
 		if e := evidenceOf(d, transport, string(pp.Tuple.Format), pp.BitRate, bcd); e.StreamingObservedAt.IsZero() {
@@ -1228,7 +1241,8 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 	if err != nil {
 		return settled()
 	}
-	unit := b.probeUnit(key, m.BCDDevice, bd)
+	stamp := dsdstate.StampOf(m.Manufacturer)
+	unit := b.probeUnit(key, stamp, m.BCDDevice, bd)
 	ps.mu.Lock()
 	due := !ps.done || ps.probed != unit || ps.forced
 	ps.mu.Unlock()
@@ -1261,7 +1275,7 @@ func (b *Backend) probeDSD(ctx context.Context, cond ProbeConditions) (pending, 
 	// a write of the state and never a call to the device, recording answers
 	// the probe got while it alone held the device.
 	if rep.Opened {
-		b.noteProbed(key, m.BCDDevice, rep)
+		b.noteProbed(key, stamp, m.BCDDevice, rep)
 	}
 	b.dsdLog().Info("player: the silent probe asked the bound DAC", "opened", rep.Opened, "err", errorText(err))
 	return false, true
@@ -1352,7 +1366,9 @@ func (b *Backend) takeProbe(starts uint64, bd, now BoundDAC, bound bool, epoch a
 // its model's: the same unit at the same place and enumeration
 // (binding.SameUnit and its DevNum, read: 0 is a device number that did not
 // read, which tells no enumeration from another, so two of them are no
-// enumeration in common; round 3), of the same model and firmware. Its
+// enumeration in common; round 3), of the same model, maker (the stamp of its
+// manufacturer string as each read returned it) and firmware, a unit whose
+// strings do not read refused. Its
 // answers are recorded under that unit alone (alsapcm.ProbeUnit, and the
 // model's driver_accepted), so a unit swapped into the bound place between the
 // capture and the open, which the binding's own check passes, is asked nothing
@@ -1364,9 +1380,10 @@ func probedUnit(box DSDBox, m alsa.UnitModel, key dacprofile.Key) func(alsapcm.N
 			return fmt.Errorf("player backend: the probed node's unit did not read: %w", err)
 		}
 		k, err := dsdstate.KeyOf(now.USB, now.Product)
-		if err != nil || !k.Equal(key) || !binding.SameUnit(now.USB, m.USB) || now.USB.DevNum <= 0 || now.USB.DevNum != m.USB.DevNum || canonicalBCD(now.BCDDevice) != canonicalBCD(m.BCDDevice) {
+		if err != nil || !k.Equal(key) || dsdstate.StampOf(now.Manufacturer) != dsdstate.StampOf(m.Manufacturer) || !binding.SameUnit(now.USB, m.USB) ||
+			now.USB.DevNum <= 0 || now.USB.DevNum != m.USB.DevNum || canonicalBCD(now.BCDDevice) != canonicalBCD(m.BCDDevice) {
 			return &alsapcm.Error{Reason: alsapcm.ReasonWrongDevice, Op: "probe", Endpoint: alsapcm.Endpoint{Card: n.Card, Device: n.Device},
-				Detail: "the node opened is not the unit the probe was begun for (its place, enumeration, model or firmware differs)"}
+				Detail: "the node opened is not the unit the probe was begun for (its place, enumeration, model, maker or firmware differs)"}
 		}
 		return nil
 	}
@@ -1375,8 +1392,9 @@ func probedUnit(box DSDBox, m alsa.UnitModel, key dacprofile.Key) func(alsapcm.N
 // noteProbed records what a probe accepted as driver_accepted (the design's
 // section 5): each native format at its rate, and each DoP carrier whose
 // refined significant bits are 24 to 32 (alsapcm.ProbeResult.DoPCarrier), as
-// its DoP tuple's. Nothing with no kernel release or firmware.
-func (b *Backend) noteProbed(key dacprofile.Key, bcd string, rep alsapcm.ProbeReport) {
+// its DoP tuple's, in the entry of key's model of stamp's maker, the unit the
+// probe was begun for. Nothing with no kernel release or firmware.
+func (b *Backend) noteProbed(key dacprofile.Key, stamp dsdstate.Stamp, bcd string, rep alsapcm.ProbeReport) {
 	kernel, fw := b.cfg.DSD.Kernel, canonicalBCD(bcd)
 	if kernel == "" || fw == "" {
 		return
@@ -1399,7 +1417,7 @@ func (b *Backend) noteProbed(key dacprofile.Key, bcd string, rep alsapcm.ProbeRe
 	if len(accepted) == 0 {
 		return
 	}
-	b.recordDSD("driver_accepted (probe)", key, func(d *dsdstate.DAC, now time.Time) bool {
+	b.recordDSD("driver_accepted (probe)", key, stamp, func(d *dsdstate.DAC, now time.Time) bool {
 		changed := false
 		for _, a := range accepted {
 			if !nativeLogicalRate(a.bitRate) {
@@ -1414,20 +1432,21 @@ func (b *Backend) noteProbed(key dacprofile.Key, bcd string, rep alsapcm.ProbeRe
 	})
 }
 
-// ForgetDSDProbe drops the probe's answers for key's model and makes a probe
-// due: the migration's part for a DAC (the design's section 5). The probe is
+// ForgetDSDProbe drops the probe's answers for key's model of stamp's maker
+// and makes a probe due: the migration's part for a DAC (the design's section
+// 5). The probe is
 // owed (ProbeDSDPending), which the supervisor asks at its next tick, since
 // no snapshot comes of an unchanged DAC, and asked anew (asked), so a run
 // begun before it leaves it owed; and the probe's generation moves, in the
 // step the answers are dropped, so a probe under way keeps nothing of what it
 // asked before the part was made (publishProbe). A choice written for the DAC
 // (B9) makes a probe due and owed too, and drops nothing (oweProbe).
-func (b *Backend) ForgetDSDProbe(key dacprofile.Key) {
+func (b *Backend) ForgetDSDProbe(key dacprofile.Key, stamp dsdstate.Stamp) {
 	ps := &b.probeState
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	if p := b.cfg.DSD; p != nil && p.Probes != nil {
-		p.Probes.Forget(key.Canonical())
+		p.Probes.Forget(key.Canonical(), string(stamp))
 	}
 	ps.gen++
 	ps.asked++

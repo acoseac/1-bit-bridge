@@ -123,7 +123,7 @@ func TestAChoiceWriteForgetsTheModelsAnswers(t *testing.T) {
 	c := NewProbeCache()
 	record(t, c, brooklyn, answered())
 	record(t, c, other, answered())
-	c.Forget(brooklyn.Model)
+	c.Forget(brooklyn.Model, brooklyn.Stamp)
 	for _, cand := range []ProbeCandidate{nativeDSD64, nativeDSD256, carrierDSD64} {
 		if got := c.Answer(brooklyn, cand); got.Answer != ProbeNotProbed {
 			t.Errorf("%s outlived the choice written for its model: %+v", cand, got)
@@ -143,7 +143,7 @@ func TestAChoiceWriteForgetsTheModelsAnswers(t *testing.T) {
 func TestAChoiceWriteLapsesAProbeAlreadyRunning(t *testing.T) {
 	c := NewProbeCache()
 	running := c.Begin(brooklyn)
-	c.Forget(brooklyn.Model)
+	c.Forget(brooklyn.Model, brooklyn.Stamp)
 	if c.Record(running, answered()) {
 		t.Error("a report begun before the choice write was taken")
 	}
@@ -157,7 +157,7 @@ func TestAChoiceWriteLapsesAProbeAlreadyRunning(t *testing.T) {
 		t.Errorf("the write's own probe: %+v; want its answer kept", got)
 	}
 	running = c.Begin(brooklyn)
-	c.Forget("dacKey/1\n2972\n0047\n-\n=GO bar")
+	c.Forget("dacKey/1\n2972\n0047\n-\n=GO bar", "")
 	if !c.Record(running, ProbeReport{Results: []ProbeResult{{Candidate: target441, Answer: ProbeAccepted, Msbits: 16, Pause: true}}}) {
 		t.Error("a write for another model lapsed this model's probe")
 	}
@@ -245,10 +245,42 @@ func TestTheProbeCacheIsSafeForConcurrentUse(t *testing.T) {
 				c.Record(c.Begin(u), answered())
 				_ = c.Answer(u, nativeDSD64)
 				if i == 0 {
-					c.Forget(u.Model)
+					c.Forget(u.Model, u.Stamp)
 				}
 			}
 		}()
 	}
 	wg.Wait()
+}
+
+// TestEachMakerOfAModelHasAnswersOfItsOwn (B883): the cache keeps a model's
+// answers apart for each maker, its unit's stamp beside the model's key, which
+// does not hold it: a lookup for another maker's unit of the model, its
+// firmware, kernel and enumeration alike, finds none; a probe of that unit
+// lapses nothing of the first's; and Forget of one maker's answers leaves the
+// other's.
+func TestEachMakerOfAModelHasAnswersOfItsOwn(t *testing.T) {
+	first, second := brooklyn, brooklyn
+	first.Stamp, second.Stamp = "s1-"+fmt.Sprintf("%064x", 1), "s1-"+fmt.Sprintf("%064x", 2)
+	c := NewProbeCache()
+	record(t, c, first, answered())
+	for _, cand := range []ProbeCandidate{nativeDSD64, nativeDSD256, carrierDSD64} {
+		if got := c.Answer(second, cand); got.Answer != ProbeNotProbed {
+			t.Errorf("another maker's unit of the model reads %s: %+v; want not probed", cand, got)
+		}
+	}
+	record(t, c, second, ProbeReport{Results: []ProbeResult{{Candidate: nativeDSD64, Answer: ProbeRefused}}})
+	if got := c.Answer(first, nativeDSD64); got.Answer != ProbeAccepted {
+		t.Errorf("the first maker's answer once the other's unit was probed: %+v; want it kept", got)
+	}
+	if got := c.Answer(second, nativeDSD64); got.Answer != ProbeRefused {
+		t.Errorf("the other maker's answer: %+v; want its own probe's", got)
+	}
+	c.Forget(first.Model, first.Stamp)
+	if got := c.Answer(first, nativeDSD64); got.Answer != ProbeNotProbed {
+		t.Errorf("the first maker's answer outlived its Forget: %+v", got)
+	}
+	if got := c.Answer(second, nativeDSD64); got.Answer != ProbeRefused {
+		t.Errorf("the other maker's answer once the first's were forgotten: %+v; want it kept", got)
+	}
 }

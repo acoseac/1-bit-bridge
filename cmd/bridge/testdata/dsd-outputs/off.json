@@ -13,6 +13,7 @@
         "dsdPlayback": {
           "bootId": "golden-boot",
           "policyGeneration": 2,
+          "publication": 2,
           "reason": "dsd_off_by_choice",
           "tuples": [],
           "converted": [],
@@ -40,6 +41,7 @@
         },
         "dsdDAC": {
           "dacKey": "d1-29e725b72bbce9ac",
+          "dacToken": "t1-a2ca2a32aa499dbe7e01e2fe17c7fd2a",
           "choice": {
             "mode": "off",
             "maxBitRate": 0,

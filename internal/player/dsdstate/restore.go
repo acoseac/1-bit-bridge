@@ -14,8 +14,12 @@ import (
 // heard, and none of what was observed on the box the snapshot was taken on.
 // It keeps defaultMode, the marker, so a restored state never migrates the
 // restored bridge.yaml's legacy keys again, a migrated off stays off; the
-// warnings; and per DAC the choice, the DoP confirmation, the first-use
-// acknowledgements and the listener answers. It drops every evidence
+// warnings; and per DAC entry, of one model and maker, the choice, the DoP
+// confirmation, the first-use acknowledgements and the listener answers. A
+// snapshot's state of schema 1, an earlier build's, is first what Decode
+// holds in its place (fromSchema1: none of its DAC entries, the marker
+// schema_1 or state_unreadable), and is installed at schema 2 like any
+// other, in place of the box's state. It drops every evidence
 // observation (driverAcceptedAt, kernel, streamingObservedAt), and first
 // use's observedAt, which playback on this box records again, removing an
 // evidence entry left with no observation, and a DAC left holding nothing.

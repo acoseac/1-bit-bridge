@@ -14,9 +14,9 @@ import (
 )
 
 // aDSDState is a player-dsd.json the app could have written: a choice for
-// one DAC, and what this box observed of it.
-const aDSDState = `{"schemaVersion": 1, "defaultMode": "auto", "dacs": [{"key": {"vendorId": "20b1", "productId": "3009", "interface": 1, "product": "GO bar"},
-  "choice": {"mode": "native", "maxBitRate": 0, "revision": 2, "setAt": "2026-11-05T10:00:00Z", "setBy": "app"}, "dopConfirmed": null, "firstUse": [],
+// one DAC of one maker, and what this box observed of it.
+const aDSDState = `{"schemaVersion": 2, "defaultMode": "auto", "dacs": [{"key": {"vendorId": "20b1", "productId": "3009", "interface": 1, "product": "GO bar"},
+  "stamp": "s1-c382419e7cb5a229735d6ed02a2113d164f6eb67ab60c5dcdf6e0ead0c50840d", "choice": {"mode": "native", "maxBitRate": 0, "revision": 2, "setAt": "2026-11-05T10:00:00Z", "setBy": "app"}, "dopConfirmed": null, "firstUse": [],
   "listener": [], "evidence": [{"transport": "native", "format": "DSD_U32_BE", "bitRate": 2822400, "bcdDevice": "0123", "streamingObservedAt": "2026-11-05T10:05:00Z"}]}],
   "migratedFrom": null, "warnings": []}`
 

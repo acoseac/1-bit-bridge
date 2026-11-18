@@ -3,6 +3,8 @@ package dsdstate
 import (
 	"bytes"
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,11 +23,15 @@ import (
 // FileName is the state's file in the data directory.
 const FileName = "player-dsd.json"
 
-// SchemaVersion is the schema the state is written in. It is frozen: a later
-// field, or a meaning a field of it does not have, is a new schema, which
-// this build refuses (and sets aside) as it refuses any file it would not
-// write.
-const SchemaVersion = 1
+// SchemaVersion is the schema the state is written in, 2: each DAC entry is
+// keyed by its model's key and its maker's stamp. It is frozen: a later field,
+// or a meaning a field of it does not have, is a new schema, which this build
+// refuses (and sets aside) as it refuses any file it would not write.
+const SchemaVersion = 2
+
+// schema1 is the schema an earlier build wrote, whose entries name no maker:
+// frozen too, read by its own rules and converted (Decode), never written.
+const schema1 = 1
 
 // The choice's modes (the design's section 3.2). A DAC with no choice of its
 // own takes defaultMode, which is auto or off.
@@ -115,7 +121,7 @@ type State struct {
 	// migrated, or the state did not read.
 	DefaultMode string
 	// DACs are the DAC models the state holds something for, one entry a
-	// model.
+	// model and maker (its Key and Stamp).
 	DACs []DAC
 	// MigratedFrom is the migration's marker: nil while no migration ran,
 	// and then the migration runs (Migrate) when the legacy keys set any key.
@@ -124,9 +130,13 @@ type State struct {
 	Warnings []Warning
 }
 
-// DAC is what the state holds for one DAC model.
+// DAC is what the state holds for one DAC model of one maker.
 type DAC struct {
 	Key dacprofile.Key
+	// Stamp is the maker of the units the entry is for (StampOf): an entry is
+	// keyed by its model's key and its stamp, so a unit of another maker reads
+	// none of it, whatever key the two share.
+	Stamp Stamp
 	// Choice is the DAC's own choice, nil while it has none.
 	Choice *Choice
 	// DoPConfirmed is the user's confirmation that this DAC decodes DoP, or
@@ -184,6 +194,48 @@ type FirstUse struct {
 	// ObservedAt is when 5 s of content played under it with no fault (B7):
 	// zero until then. A restore drops it.
 	ObservedAt time.Time `json:"observedAt,omitzero"`
+}
+
+// Stamp is the maker of the units a DAC entry is for: "s1-" and 64 lowercase
+// hexadecimal digits, the SHA-256 of stampDomain, a NUL and the unit's
+// manufacturer string exactly as the box's readers return it, after their own
+// trim (alsa.SysfsReader's UnitModel and Qualification), or StampNone where
+// the unit has none, absent or empty. Nothing is redacted, folded or
+// normalized first: two strings a byte apart are two makers, whose entries
+// never answer for each other's units. It is kept in the state's file alone,
+// on no wire and in no log line.
+type Stamp string
+
+// StampNone is the stamp of a unit with no manufacturer string.
+const StampNone Stamp = "-"
+
+// stampDomain is what a stamp's digest is taken under, ahead of a NUL and
+// the manufacturer string.
+const stampDomain = "onebit:dsdstate:manufacturer:v1"
+
+// StampOf is the stamp of a unit whose manufacturer string the box's readers
+// read as manufacturer: StampNone for "", an absent or empty one. A string
+// that did not read is its reader's error, which its caller refuses on, and
+// never "".
+func StampOf(manufacturer string) Stamp {
+	if manufacturer == "" {
+		return StampNone
+	}
+	h := sha256.New()
+	h.Write([]byte(stampDomain))
+	h.Write([]byte{0})
+	h.Write([]byte(manufacturer))
+	return Stamp("s1-" + hex.EncodeToString(h.Sum(nil)))
+}
+
+// Valid reports whether s is a stamp StampOf makes: StampNone, or "s1-" and
+// 64 lowercase hexadecimal digits.
+func (s Stamp) Valid() bool {
+	if s == StampNone {
+		return true
+	}
+	digest, ok := strings.CutPrefix(string(s), "s1-")
+	return ok && validDigest(digest)
 }
 
 // Covers reports whether f covers the rate.
@@ -247,6 +299,9 @@ const (
 	// FromStateUnreadable: the state did not read, and the fresh state that
 	// took its place says no migration runs over it.
 	FromStateUnreadable = "state_unreadable"
+	// FromSchema1: the state was read from a schema-1 file, whose DAC entries
+	// were dropped, and no migration runs over it (Decode).
+	FromSchema1 = "schema_1"
 )
 
 // What a migration's part still waits for.
@@ -264,7 +319,7 @@ const (
 // and holding what the migration took, the legacy keys as bridge.yaml held
 // them at its first start, and what of it still waits.
 type Marker struct {
-	// From is keys or state_unreadable.
+	// From is keys, state_unreadable or, in schema 2 alone, schema_1.
 	From string `json:"from"`
 	// DSDMode, AllowDoP and DSDQualification are the legacy keys as written:
 	// "" (or nil) where unset.
@@ -309,23 +364,33 @@ func (s State) Unreadable() bool {
 	return slices.ContainsFunc(s.Warnings, func(w Warning) bool { return w.Code == WarningStateUnreadable })
 }
 
-// DAC is a copy of what the state holds for key's model.
-func (s State) DAC(key dacprofile.Key) (DAC, bool) {
-	if i := s.dacIndex(key); i >= 0 {
+// DAC is a copy of what the state holds for key's model of stamp's maker.
+func (s State) DAC(key dacprofile.Key, stamp Stamp) (DAC, bool) {
+	if i := s.dacIndex(key, stamp); i >= 0 {
 		return s.DACs[i].clone(), true
 	}
 	return DAC{}, false
 }
 
-// ChoiceFor is the choice that applies to key's model: its own when it has
-// one, else defaultMode with no cap (own false). It says nothing of a state
-// that does not read, which refuses every rate whatever the choice
-// (Unreadable): ask that first.
-func (s State) ChoiceFor(key dacprofile.Key) (mode string, maxBitRate int, own bool) {
-	if i := s.dacIndex(key); i >= 0 && s.DACs[i].Choice != nil {
+// ChoiceFor is the choice that applies to key's model of stamp's maker: its
+// own when it has one, else defaultMode with no cap (own false). It says
+// nothing of a state that does not read, which refuses every rate whatever
+// the choice (Unreadable): ask that first.
+func (s State) ChoiceFor(key dacprofile.Key, stamp Stamp) (mode string, maxBitRate int, own bool) {
+	if i := s.dacIndex(key, stamp); i >= 0 && s.DACs[i].Choice != nil {
 		return s.DACs[i].Choice.Mode, s.DACs[i].Choice.MaxBitRate, true
 	}
 	return s.DefaultMode, 0, false
+}
+
+// Entry is the entry of key's model of stamp's maker, added when the state
+// holds none: what a writer changes for the unit it writes for.
+func (s *State) Entry(key dacprofile.Key, stamp Stamp) *DAC {
+	if i := s.dacIndex(key, stamp); i >= 0 {
+		return &s.DACs[i]
+	}
+	s.DACs = append(s.DACs, DAC{Key: key, Stamp: stamp})
+	return &s.DACs[len(s.DACs)-1]
 }
 
 // ClearWarningsFor is what a choice written for key's model by the app or
@@ -339,9 +404,10 @@ func (s *State) ClearWarningsFor(key dacprofile.Key) {
 	})
 }
 
-// dacIndex is key's entry, or -1.
-func (s State) dacIndex(key dacprofile.Key) int {
-	return slices.IndexFunc(s.DACs, func(d DAC) bool { return d.Key.Equal(key) })
+// dacIndex is the entry of key's model of stamp's maker, or -1: an entry of
+// another stamp is another maker's, whatever its key.
+func (s State) dacIndex(key dacprofile.Key, stamp Stamp) int {
+	return slices.IndexFunc(s.DACs, func(d DAC) bool { return d.Key.Equal(key) && d.Stamp == stamp })
 }
 
 // Clone is a copy of s that shares nothing with it.
@@ -396,8 +462,8 @@ func (d DAC) empty() bool {
 	return d.Choice == nil && d.DoPConfirmed == nil && len(d.FirstUse) == 0 && len(d.Listener) == 0 && len(d.Evidence) == 0
 }
 
-// The file's shape. Every key is written, every list as [], a key's absent
-// interface and product as null.
+// The file's shape, schema 2's. Every key is written, every list as [], a
+// key's absent interface and product as null.
 type fileJSON struct {
 	SchemaVersion int           `json:"schemaVersion"`
 	DefaultMode   string        `json:"defaultMode"`
@@ -414,6 +480,27 @@ type keyJSON struct {
 }
 
 type dacJSON struct {
+	Key          keyJSON          `json:"key"`
+	Stamp        Stamp            `json:"stamp"`
+	Choice       *Choice          `json:"choice"`
+	DoPConfirmed *DoPConfirmation `json:"dopConfirmed"`
+	FirstUse     []FirstUse       `json:"firstUse"`
+	Listener     []Answer         `json:"listener"`
+	Evidence     []Evidence       `json:"evidence"`
+}
+
+// schema1JSON is schema 1's file, an earlier build's, which this build reads
+// alone and never writes (Decode): its entries hold no stamp, so a schema-1
+// file whose entry holds one does not decode.
+type schema1JSON struct {
+	SchemaVersion int              `json:"schemaVersion"`
+	DefaultMode   string           `json:"defaultMode"`
+	DACs          []schema1DACJSON `json:"dacs"`
+	MigratedFrom  *Marker          `json:"migratedFrom"`
+	Warnings      []warningJSON    `json:"warnings"`
+}
+
+type schema1DACJSON struct {
 	Key          keyJSON          `json:"key"`
 	Choice       *Choice          `json:"choice"`
 	DoPConfirmed *DoPConfirmation `json:"dopConfirmed"`
@@ -464,33 +551,71 @@ func hex16(s string) (uint16, error) {
 	return v, nil
 }
 
-// Decode reads a state from its file's bytes, refusing anything a writer of
-// this schema would not write: data past the file's bound, an unknown field,
-// data after the value, another schema, and any value check refuses. It
-// writes nothing and keeps nothing.
+// Decode reads a state from its file's bytes: schema 2, as this build writes
+// it, or schema 1, an earlier build's, each refused for anything a writer of
+// that schema would not write (data past the file's bound, an unknown field,
+// data after the value, any value its check refuses), and any other schema
+// refused. A schema-1 file is checked by schema 1's own rules in full first,
+// and then held as fromSchema1 converts it: none of its DAC entries, whose
+// maker it never recorded. It writes nothing and keeps nothing.
 func Decode(data []byte) (State, error) {
 	if len(data) > maxFileBytes {
 		return State{}, fmt.Errorf("dsdstate: more than %d bytes", maxFileBytes)
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	var f fileJSON
-	if err := dec.Decode(&f); err != nil {
+	var v struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&v); err != nil {
 		return State{}, fmt.Errorf("dsdstate: does not parse: %w", err)
 	}
+	switch v.SchemaVersion {
+	case SchemaVersion:
+		var f fileJSON
+		if err := decodeStrict(data, &f); err != nil {
+			return State{}, err
+		}
+		return stateOf(SchemaVersion, f)
+	case schema1:
+		var f1 schema1JSON
+		if err := decodeStrict(data, &f1); err != nil {
+			return State{}, err
+		}
+		f := fileJSON{DefaultMode: f1.DefaultMode, MigratedFrom: f1.MigratedFrom, Warnings: f1.Warnings}
+		for _, d := range f1.DACs {
+			f.DACs = append(f.DACs, dacJSON{Key: d.Key, Choice: d.Choice, DoPConfirmed: d.DoPConfirmed, FirstUse: d.FirstUse, Listener: d.Listener, Evidence: d.Evidence})
+		}
+		s, err := stateOf(schema1, f)
+		if err != nil {
+			return State{}, err
+		}
+		return fromSchema1(s), nil
+	}
+	return State{}, fmt.Errorf("dsdstate: schema %d, neither %d nor %d", v.SchemaVersion, schema1, SchemaVersion)
+}
+
+// decodeStrict decodes data into f, one value and nothing after it, refusing
+// a field f does not have.
+func decodeStrict(data []byte, f any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(f); err != nil {
+		return fmt.Errorf("dsdstate: does not parse: %w", err)
+	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return State{}, errors.New("dsdstate: data after the state")
+		return errors.New("dsdstate: data after the state")
 	}
-	if f.SchemaVersion != SchemaVersion {
-		return State{}, fmt.Errorf("dsdstate: schema %d, not %d", f.SchemaVersion, SchemaVersion)
-	}
+	return nil
+}
+
+// stateOf is the state f holds, refused for what schema's check refuses.
+func stateOf(schema int, f fileJSON) (State, error) {
 	s := State{DefaultMode: f.DefaultMode, MigratedFrom: f.MigratedFrom}
 	for i, d := range f.DACs {
 		k, err := d.Key.key()
 		if err != nil {
 			return State{}, fmt.Errorf("dsdstate: dacs[%d].key: %w", i, err)
 		}
-		s.DACs = append(s.DACs, DAC{Key: k, Choice: d.Choice, DoPConfirmed: d.DoPConfirmed, FirstUse: orNil(d.FirstUse), Listener: orNil(d.Listener), Evidence: orNil(d.Evidence)})
+		s.DACs = append(s.DACs, DAC{Key: k, Stamp: d.Stamp, Choice: d.Choice, DoPConfirmed: d.DoPConfirmed, FirstUse: orNil(d.FirstUse), Listener: orNil(d.Listener), Evidence: orNil(d.Evidence)})
 	}
 	for i, w := range f.Warnings {
 		out := Warning{Code: w.Code, Reason: w.Reason, At: w.At}
@@ -503,10 +628,34 @@ func Decode(data []byte) (State, error) {
 		}
 		s.Warnings = append(s.Warnings, out)
 	}
-	if err := s.check(); err != nil {
+	if err := s.checkAt(schema); err != nil {
 		return State{}, err
 	}
 	return s, nil
+}
+
+// fromSchema1 is the state this build holds in place of s, a state of
+// schema 1 that its rules took: s's defaultMode, auto or off, and the
+// warnings of the bridge's (state_unreadable, which refuses DSD at every rate
+// until a choice is written, and migrated_off) as they were; none of its DAC
+// entries, which name no maker, so no unit reads a choice, a consent, an
+// answer or evidence another maker's unit may have left; none of the
+// migration's warnings each owned by one, which no migration runs again to
+// clear; and its marker, state_unreadable as it was and otherwise schema_1,
+// none included, so no migration ever runs over it and nothing is derived
+// again from the legacy keys or an owner's record. It reads nothing but s, so
+// every start that reads the same file holds the same state.
+func fromSchema1(s State) State {
+	out := State{DefaultMode: s.DefaultMode, MigratedFrom: &Marker{From: FromSchema1}}
+	if m := s.MigratedFrom; m != nil && m.From == FromStateUnreadable {
+		out.MigratedFrom = &Marker{From: FromStateUnreadable}
+	}
+	for _, w := range s.Warnings {
+		if w.DAC == nil {
+			out.Warnings = append(out.Warnings, w)
+		}
+	}
+	return out
 }
 
 // encode is the file s is written as: s normalized, checked, compact,
@@ -527,7 +676,7 @@ func (s State) encode() ([]byte, error) {
 	}
 	f := fileJSON{SchemaVersion: SchemaVersion, DefaultMode: n.DefaultMode, DACs: []dacJSON{}, MigratedFrom: n.MigratedFrom, Warnings: []warningJSON{}}
 	for _, d := range n.DACs {
-		f.DACs = append(f.DACs, dacJSON{Key: keyOf(d.Key), Choice: d.Choice, DoPConfirmed: d.DoPConfirmed,
+		f.DACs = append(f.DACs, dacJSON{Key: keyOf(d.Key), Stamp: d.Stamp, Choice: d.Choice, DoPConfirmed: d.DoPConfirmed,
 			FirstUse: orEmpty(d.FirstUse), Listener: orEmpty(d.Listener), Evidence: orEmpty(d.Evidence)})
 	}
 	for _, w := range n.Warnings {
@@ -577,13 +726,16 @@ func orEmpty[T any](v []T) []T {
 }
 
 // normalized is s in the one order the file is written in: the DACs by
-// their keys' canonical forms, a DAC entry that holds nothing dropped, each
+// their keys' canonical forms, then by their stamps, a DAC entry that holds
+// nothing dropped (a stamp is the entry's identity, not what it holds), each
 // list by what keys its entries (native before DoP), and the warnings the
 // bridge's first, then by their DACs' keys, then by code.
 func (s State) normalized() State {
 	n := s.Clone()
 	n.DACs = slices.DeleteFunc(n.DACs, DAC.empty)
-	slices.SortFunc(n.DACs, func(a, b DAC) int { return cmp.Compare(a.Key.Canonical(), b.Key.Canonical()) })
+	slices.SortFunc(n.DACs, func(a, b DAC) int {
+		return cmp.Or(cmp.Compare(a.Key.Canonical(), b.Key.Canonical()), cmp.Compare(a.Stamp, b.Stamp))
+	})
 	for i := range n.DACs {
 		d := &n.DACs[i]
 		slices.SortFunc(d.FirstUse, func(a, b FirstUse) int { return cmp.Compare(transportOrder(a.Transport), transportOrder(b.Transport)) })
@@ -616,31 +768,42 @@ func ownerOrder(w Warning) string {
 	return "=" + w.DAC.Canonical()
 }
 
-// check refuses a state no writer of this schema writes. Its refusals name
-// the field and never quote a value.
-func (s State) check() error {
+// check refuses a state no writer of this build's schema writes (checkAt).
+func (s State) check() error { return s.checkAt(SchemaVersion) }
+
+// checkAt refuses a state no writer of schema writes. Its refusals name the
+// field and never quote a value. Schema 1's rules are frozen: an entry is a
+// model's alone and holds no stamp, and no marker is schema_1's; schema 2's
+// entry is a model's of one maker, its stamp a stamp (Stamp.Valid).
+func (s State) checkAt(schema int) error {
 	if s.DefaultMode != ModeAuto && s.DefaultMode != ModeOff {
 		return errors.New("dsdstate: defaultMode is neither auto nor off")
 	}
 	if len(s.DACs) > maxDACs {
 		return fmt.Errorf("dsdstate: more than %d DACs", maxDACs)
 	}
-	seen := map[string]bool{}
+	seen := map[[2]string]bool{}
 	for i, d := range s.DACs {
-		c := d.Key.Canonical()
-		if seen[c] {
-			return fmt.Errorf("dsdstate: dacs[%d] is a model another entry holds", i)
+		id := [2]string{d.Key.Canonical()}
+		if schema != schema1 {
+			id[1] = string(d.Stamp)
 		}
-		seen[c] = true
+		switch {
+		case seen[id] && schema == schema1:
+			return fmt.Errorf("dsdstate: dacs[%d] is a model another entry holds", i)
+		case seen[id]:
+			return fmt.Errorf("dsdstate: dacs[%d] is a model and maker another entry holds", i)
+		}
+		seen[id] = true
 		if d.empty() {
 			return fmt.Errorf("dsdstate: dacs[%d] holds nothing", i)
 		}
-		if err := d.check(); err != nil {
+		if err := d.check(schema); err != nil {
 			return fmt.Errorf("dsdstate: dacs[%d].%w", i, err)
 		}
 	}
 	if s.MigratedFrom != nil {
-		if err := s.MigratedFrom.check(); err != nil {
+		if err := s.MigratedFrom.check(schema); err != nil {
 			return fmt.Errorf("dsdstate: migratedFrom: %w", err)
 		}
 	}
@@ -661,7 +824,10 @@ func (s State) check() error {
 	return nil
 }
 
-func (d DAC) check() error {
+func (d DAC) check(schema int) error {
+	if schema != schema1 && !d.Stamp.Valid() {
+		return errors.New("stamp is not a stamp")
+	}
 	if c := d.Choice; c != nil {
 		switch {
 		case !slices.Contains([]string{ModeAuto, ModeNative, ModeDoP, ModeConvert, ModeOff}, c.Mode):
@@ -750,16 +916,23 @@ func (d DAC) check() error {
 	return nil
 }
 
-func (m Marker) check() error {
-	switch m.From {
-	case FromStateUnreadable:
+func (m Marker) check(schema int) error {
+	switch {
+	case m.From == FromStateUnreadable:
 		if m != (Marker{From: FromStateUnreadable}) {
 			return errors.New("a state_unreadable marker holds nothing else")
 		}
 		return nil
-	case FromKeys:
-	default:
+	case m.From == FromSchema1 && schema != schema1:
+		if m != (Marker{From: FromSchema1}) {
+			return errors.New("a schema_1 marker holds nothing else")
+		}
+		return nil
+	case m.From == FromKeys:
+	case schema == schema1:
 		return errors.New("from is neither keys nor state_unreadable")
+	default:
+		return errors.New("from is neither keys, state_unreadable nor schema_1")
 	}
 	part := dacPart(m.DSDMode, m.allowDoP())
 	switch {

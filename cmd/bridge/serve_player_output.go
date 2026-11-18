@@ -14,7 +14,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
-	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
 // GET /v1/outputs lists serve's player as an element of kind bridge (B470 PR
@@ -189,20 +188,23 @@ func (b *bridgeOutput) facts(ctx context.Context) (api.BridgeOutputFacts, engine
 }
 
 // bridgeDSDFacts is the element's dsdPlayback, dsdDAC and playback from one
-// read of the backend's facts (playback.Backend.Facts): the published epoch,
-// each tuple naming its transport (absent, native DSD) and its evidence, the
-// rates converted with their plans and those refused with their words, the
-// warnings, the bound DAC (nil while no DAC is available), and the current
-// occurrence's observation, nil before one is installed. A backend with no
-// read side (the harness's) publishes its epoch and tuples alone. The free
-// text of the DAC's and the profile's (the model, the profile's name, its
-// caveats' notes) goes out with the boot binding's serial and port taken out
-// wherever they show (playerText), the backend having taken out the unit's
-// own (B728 B8; binding note 11); every other string is a word of a closed
-// list, a hash, a date or hexadecimal digits, which a serial is not.
+// read of the backend's facts (playback.Backend.Facts), or from the policy a
+// choice's write answered with (bridgeOutput.ChooseDSD, live nil): the
+// published epoch and its publication, each tuple naming its transport
+// (absent, native DSD) and its evidence, the rates converted with their plans
+// and those refused with their words, each a word of the refused table, the
+// warnings, the bound DAC (nil while no DAC is available) with the token its
+// reading made, and the current occurrence's observation, nil before one is
+// installed. A backend with no read side (the harness's) publishes its epoch
+// and tuples alone. The free text of the DAC's and the profile's (the model,
+// the profile's name, its caveats' notes) goes out with the boot binding's
+// serial and port taken out wherever they show (playerText), the backend
+// having taken out the unit's own (B728 B8; binding note 11); every other
+// string is a word of a closed list, a hash, a token, a date or hexadecimal
+// digits, which a serial is not.
 func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts, device config.PlayerDevice) (*api.OutputDSDPlayback, *api.OutputDSDDAC, *api.OutputPlayback) {
 	v := policy.DSD
-	dsd := &api.OutputDSDPlayback{BootID: policy.BootID, PolicyGeneration: policy.Generation, Reason: wireDSDReason(policy.Reason), Tuples: []api.OutputDSDTuple{},
+	dsd := &api.OutputDSDPlayback{BootID: policy.BootID, PolicyGeneration: policy.Generation, Publication: policy.Publication, Reason: policy.Reason, Tuples: []api.OutputDSDTuple{},
 		Converted: []api.OutputDSDConverted{}, Refused: []api.OutputDSDRefused{}, Warnings: []api.OutputDSDWarning{},
 		Model: playerText(policy.Model, device), BCDDevice: policy.BCDDevice}
 	for i, p := range policy.Tuples {
@@ -220,7 +222,7 @@ func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts, 
 	var dac *api.OutputDSDDAC
 	if v != nil {
 		for _, r := range v.Refused {
-			dsd.Refused = append(dsd.Refused, api.OutputDSDRefused{BitRate: r.BitRate, Reason: wireDSDReason(r.Reason)})
+			dsd.Refused = append(dsd.Refused, api.OutputDSDRefused{BitRate: r.BitRate, Reason: r.Reason})
 		}
 		for _, w := range v.Warnings {
 			dsd.Warnings = append(dsd.Warnings, api.OutputDSDWarning{Code: w.Code, Reason: w.Reason})
@@ -230,34 +232,17 @@ func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts, 
 	return dsd, dac, bridgePlayback(policy, live)
 }
 
-// wireDSDReason is the word a rate's refusal goes out with, its own but for
-// dsd_choice_uncertain (policy.ReasonChoiceUncertain: a choice's write that
-// reached the state's file and is not known to be durable holds the set to
-// what the two states play alike, B728 B9), which no client knows until PR 3
-// adds it to PROTOCOL.md's table with the route that can make it: until then
-// it goes out as dsd_state_unreadable, the table's word for a player's DSD
-// state the bridge cannot vouch for, so no word the table does not name
-// reaches the wire. The source-derived token guard reads the policy's
-// Effective and decide, not choice.go's Intersect, so it would not see the
-// word go out (TestAnUncertainChoiceGoesOutAsAWordTheProtocolNames does). A
-// temporary mapping: PR 3 removes it with the word's row.
-func wireDSDReason(r string) string {
-	if r == string(policy.ReasonChoiceUncertain) {
-		return string(policy.ReasonStateUnreadable)
-	}
-	return r
-}
-
 // bridgeDSDDAC is the element's dsdDAC from the backend's read side of the
-// bound DAC, nil while there is none: its key, its profile, the choice that
-// applies, each mode's option (native's and DoP's rates, [] for none; DoP's
-// need of a confirmation and what blocks it; convert's plan, while it is
-// offered) and each transport's first use.
+// bound DAC, nil while there is none: its key, the token the reading the set
+// was computed from made (a write of its choice carries it back), its
+// profile, the choice that applies, each mode's option (native's and DoP's
+// rates, [] for none; DoP's need of a confirmation and what blocks it;
+// convert's plan, while it is offered) and each transport's first use.
 func bridgeDSDDAC(d *playback.DSDDAC, device config.PlayerDevice) *api.OutputDSDDAC {
 	if d == nil {
 		return nil
 	}
-	out := &api.OutputDSDDAC{DACKey: d.Key, Options: []api.OutputDSDOption{}, FirstUse: []api.OutputDSDFirstUse{},
+	out := &api.OutputDSDDAC{DACKey: d.Key, DACToken: string(d.Token), Options: []api.OutputDSDOption{}, FirstUse: []api.OutputDSDFirstUse{},
 		Choice: api.OutputDSDChoice{Mode: d.Choice.Mode, MaxBitRate: d.Choice.MaxBitRate, Revision: d.Choice.Revision, DoPConfirmed: d.Choice.DoPConfirmed}}
 	if p := d.Profile; p != nil {
 		out.Profile = &api.OutputDSDProfile{ID: p.ID, Name: playerText(p.Name, device), Caveats: []api.OutputDSDCaveat{}}

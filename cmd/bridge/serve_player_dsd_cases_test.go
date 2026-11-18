@@ -152,7 +152,7 @@ func TestAVersion35RecordOnAnotherPortMigrates(t *testing.T) {
 	if m := st.MigratedFrom; m == nil || m.RecordSHA256 != record.SHA256 || m.WaitingFor != "" {
 		t.Fatalf("the marker %+v, want the version 35 record taken (%s), nothing waiting", st.MigratedFrom, record.SHA256)
 	}
-	d, ok := st.DAC(goBarKey(t))
+	d, ok := st.DAC(goBarKey(t), goBarStamp())
 	if !ok || d.Choice == nil || d.Choice.Mode != dsdstate.ModeNative || len(d.FirstUse) != 1 ||
 		!reflect.DeepEqual(d.FirstUse[0].BitRates, []int{dsdstate.DSD64, dsdstate.DSD128}) || len(d.Listener) != 2 {
 		t.Fatalf("the GO bar's model holds %+v, want native, both approved rates acknowledged and clean", d)
@@ -217,7 +217,7 @@ func TestARefusedRecordLeavesAWarning(t *testing.T) {
 			if len(st.Warnings) != 1 || st.Warnings[0].Code != tc.code || st.Warnings[0].Reason != tc.reason || st.Warnings[0].DAC == nil || !st.Warnings[0].DAC.Equal(key) {
 				t.Fatalf("the warnings %+v, want %s (%q) owned by the GO bar's model", st.Warnings, tc.code, tc.reason)
 			}
-			d, _ := st.DAC(key)
+			d, _ := st.DAC(key, goBarStamp())
 			if c := d.Choice; c == nil || c.Mode != dsdstate.ModeNative || c.Revision != 1 || c.SetBy != dsdstate.ByMigration ||
 				len(d.FirstUse) != 0 || len(d.Listener) != 0 || d.DoPConfirmed != nil {
 				t.Errorf("the GO bar's model holds %+v, want native's fallback, nothing acknowledged", d)
@@ -385,7 +385,7 @@ func TestTheMigrationRunsOnceAndAgainAfterTheStateIsDeleted(t *testing.T) {
 	if !there || st.MigratedFrom == nil || !reflect.DeepEqual(*st.MigratedFrom, want) {
 		t.Fatalf("after the state was deleted the marker is %+v, want the input as it is now, %+v", st.MigratedFrom, want)
 	}
-	d, _ := st.DAC(goBarKey(t))
+	d, _ := st.DAC(goBarKey(t), goBarStamp())
 	if d.Choice == nil || d.Choice.Mode != dsdstate.ModeAuto || len(d.FirstUse) != 1 || !reflect.DeepEqual(d.FirstUse[0].BitRates, []int{dsdstate.DSD64, dsdstate.DSD128}) {
 		t.Errorf("after the state was deleted the GO bar's model holds %+v, want auto, the new record's two rates acknowledged", d)
 	}
@@ -420,7 +420,7 @@ func TestAMigrationWaitingForTheDACIsResolvedWhenItArrives(t *testing.T) {
 	if m := st.MigratedFrom; m == nil || m.WaitingFor != "" || m.RecordSHA256 != record.SHA256 {
 		t.Fatalf("once the DAC came the marker is %+v, want the record taken, nothing waiting", st.MigratedFrom)
 	}
-	if d, _ := st.DAC(goBarKey(t)); d.Choice == nil || d.Choice.Mode != dsdstate.ModeNative || len(d.FirstUse) != 1 {
+	if d, _ := st.DAC(goBarKey(t), goBarStamp()); d.Choice == nil || d.Choice.Mode != dsdstate.ModeNative || len(d.FirstUse) != 1 {
 		t.Errorf("once the DAC came its model holds %+v, want the record's rows", d)
 	}
 	stopped(t, ps)
@@ -455,7 +455,7 @@ func TestAMigrationWaitingForTheDACIsResolvedAtALaterStartWithTheKeysItCaptured(
 	if st.MigratedFrom == nil || !reflect.DeepEqual(*st.MigratedFrom, want) {
 		t.Fatalf("the later start left the marker %+v, want the captured keys' migration done, %+v", st.MigratedFrom, want)
 	}
-	d, _ := st.DAC(goBarKey(t))
+	d, _ := st.DAC(goBarKey(t), goBarStamp())
 	if d.Choice == nil || d.Choice.Mode != dsdstate.ModeNative || len(d.FirstUse) != 1 || !reflect.DeepEqual(d.FirstUse[0].BitRates, []int{dsdstate.DSD64}) {
 		t.Errorf("the later start gave the GO bar's model %+v, want the captured keys' native with DSD64 acknowledged", d)
 	}
@@ -466,8 +466,10 @@ func TestAMigrationWaitingForTheDACIsResolvedAtALaterStartWithTheKeysItCaptured(
 // model (identity_mismatch: here the manufacturer string, which the key does
 // not hold) gives that DAC the fallback and its warning, and waits for its
 // own model (record_model); when the binding resolves to a unit the reader
-// takes it for, the record's rows replace the fallback at the next revision,
-// its warning dropped, in the same run and at a later start.
+// takes it for, its maker's own, the record's rows are that unit's entry, at
+// its first revision, the first unit's fallback left as its own and the key's
+// warning dropped, in the same run and at a later start: the record's rows
+// are never the first unit's, whose maker it does not name.
 func TestARecordOfAnotherUnitWaitsForItsOwnModel(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -491,7 +493,7 @@ func TestARecordOfAnotherUnitWaitsForItsOwnModel(t *testing.T) {
 			if m := st.MigratedFrom; m == nil || m.WaitingFor != dsdstate.WaitingForRecordModel {
 				t.Fatalf("the marker %+v, want the record waiting for its own model", st.MigratedFrom)
 			}
-			if d, _ := st.DAC(key); d.Choice == nil || d.Choice.Revision != 1 || len(d.FirstUse) != 0 || len(st.Warnings) != 1 ||
+			if d, _ := st.DAC(key, goBarStamp()); d.Choice == nil || d.Choice.Revision != 1 || len(d.FirstUse) != 0 || len(st.Warnings) != 1 ||
 				st.Warnings[0].Reason != dsdstate.ReasonIdentityMismatch {
 				t.Fatalf("the GO bar holds %+v, warnings %+v; want the fallback and identity_mismatch", d, st.Warnings)
 			}
@@ -513,10 +515,18 @@ func TestARecordOfAnotherUnitWaitsForItsOwnModel(t *testing.T) {
 			if m := st.MigratedFrom; m == nil || m.WaitingFor != "" || m.RecordSHA256 != record.SHA256 {
 				t.Fatalf("once the record's model came the marker is %+v, want the record taken", st.MigratedFrom)
 			}
-			d, _ := st.DAC(key)
-			if c := d.Choice; c == nil || c.Mode != dsdstate.ModeNative || c.Revision != 2 || c.SetBy != dsdstate.ByMigration ||
+			d, _ := st.DAC(key, dsdstate.StampOf("iFi Audio"))
+			if c := d.Choice; c == nil || c.Mode != dsdstate.ModeNative || c.Revision != 1 || c.SetBy != dsdstate.ByMigration ||
 				len(d.FirstUse) != 1 || !reflect.DeepEqual(d.FirstUse[0].BitRates, []int{dsdstate.DSD64}) {
-				t.Errorf("once the record's model came the GO bar holds %+v, want the record's rows at revision 2", d)
+				t.Errorf("once the record's model came its unit holds %+v, want the record's rows at its first revision", d)
+			}
+			first, _ := st.DAC(key, goBarStamp())
+			if c := first.Choice; c == nil || c.Mode != dsdstate.ModeNative || c.Revision != 1 || c.SetBy != dsdstate.ByMigration ||
+				len(first.FirstUse) != 0 || len(first.Listener) != 0 || first.DoPConfirmed != nil {
+				t.Errorf("the first unit, of another maker, holds %+v, want its own fallback as it was", first)
+			}
+			if len(st.DACs) != 2 {
+				t.Errorf("the state holds %d entries, want the first unit's and the record's model's", len(st.DACs))
 			}
 			if len(st.Warnings) != 0 {
 				t.Errorf("the record's rows kept the fallback's warning: %+v", st.Warnings)

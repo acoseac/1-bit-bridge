@@ -124,8 +124,9 @@ func TestAToneBesideAProbeOrAWriteIsRefusedAtOnce(t *testing.T) {
 }
 
 // TestAChoicesWriteBesideAToneIsRefused (B601): a choice's write asked while
-// the console's tone holds the device slot is refused as playback_not_stopped
-// at once, the configuration lease never taken.
+// the console's tone holds the device slot, its words passing (a token of a
+// token's form among them), is refused as playback_not_stopped at once, the
+// configuration lease never taken.
 func TestAChoicesWriteBesideAToneIsRefused(t *testing.T) {
 	b := gateBackend(t, nil)
 	b.ToneOutput(true, "")
@@ -135,7 +136,7 @@ func TestAChoicesWriteBesideAToneIsRefused(t *testing.T) {
 	}
 	answer := make(chan ChoiceOutcome, 1)
 	go func() {
-		answer <- b.ChooseDSD(context.Background(), ChoiceRequest{DACKey: "k", Choice: policy.Choice{Mode: dsdstate.ModeNative, By: dsdstate.ByApp}}).Outcome
+		answer <- b.ChooseDSD(context.Background(), ChoiceRequest{DACKey: "k", DACToken: fixtureToken(t, b, fixtureStamp), Choice: policy.Choice{Mode: dsdstate.ModeNative, By: dsdstate.ByApp}}).Outcome
 	}()
 	if got := receiveWithin(t, answer, "the write's answer"); got != ChoicePlaybackNotStopped {
 		t.Errorf("a write beside the tone answered %s; want playback_not_stopped", got)

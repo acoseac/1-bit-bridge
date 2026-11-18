@@ -81,16 +81,17 @@ func boundFromFeed(feed *hotplug.Feed, boot config.PlayerDevice) func() (playbac
 
 // dsdPartChanged is what a DAC's part of the migration that changed the
 // player's DSD state does to the backend (playerDSD.changed, B728 B7): the
-// probe's answers for the DAC dropped and a probe made due and owed
+// probe's answers for the DAC, its model of its maker, dropped and a probe
+// made due and owed
 // (ForgetDSDProbe), which the supervisor's loop asks at its next tick
 // (ProbeDSDPending) whichever branch made the part: one made on the tick
 // (playerDSD.retry) has no snapshot behind it to probe at, and an unchanged
 // DAC gives none (round 2); and the policy read again, asked of the backend's
 // refresh goroutine (RequestRefreshDSD, B762), for as long as ctx lasts.
 // Serve's supervisor and output play's watch share it.
-func dsdPartChanged(ctx context.Context, be *playback.Backend) func(dacprofile.Key) {
-	return func(key dacprofile.Key) {
-		be.ForgetDSDProbe(key)
+func dsdPartChanged(ctx context.Context, be *playback.Backend) func(dacprofile.Key, dsdstate.Stamp) {
+	return func(key dacprofile.Key, stamp dsdstate.Stamp) {
+		be.ForgetDSDProbe(key, stamp)
 		be.RequestRefreshDSD(ctx, true)
 	}
 }
@@ -190,9 +191,10 @@ type playerDSD struct {
 	// (dsdstate.ErrLandedNotHeld), the migration's and playback's evidence.
 	done bool
 	// changed, when set, is told of a DAC's part that changed the state, the
-	// DAC's key: the player's backend probes the DAC anew and reads its
-	// policy again, as after a choice written for it (B728 B7).
-	changed func(dacprofile.Key)
+	// DAC's key and its maker's stamp: the player's backend probes the DAC
+	// anew and reads its policy again, as after a choice written for it (B728
+	// B7).
+	changed func(dacprofile.Key, dsdstate.Stamp)
 }
 
 // The bounds of asking again a part for a DAC that could not be made (ask):
@@ -275,7 +277,7 @@ func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound, unit *al
 	}
 	d.say(step, err, bound, unit)
 	if err == nil && step.Changed && bound != nil && d.changed != nil {
-		d.changed(bound.Key)
+		d.changed(bound.Key, bound.Stamp)
 	}
 	return err
 }
@@ -336,7 +338,7 @@ func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound, un
 	attrs := []any{"defaultMode", st.DefaultMode}
 	if bound != nil {
 		attrs = append(attrs, "dac", dacLabel(bound.Key, unit))
-		if mode, _, own := st.ChoiceFor(bound.Key); own {
+		if mode, _, own := st.ChoiceFor(bound.Key, bound.Stamp); own {
 			attrs = append(attrs, "choice", mode)
 		}
 	}

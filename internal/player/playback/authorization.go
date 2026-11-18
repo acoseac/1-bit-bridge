@@ -42,8 +42,14 @@ type Authorization struct {
 
 // PlayerPolicy is a copy of one published permission epoch, never live hardware.
 type PlayerPolicy struct {
-	BootID           string
-	Generation       uint64
+	BootID     string
+	Generation uint64
+	// Publication is the published pair's (B728 B9 PR 3): it grows by one at
+	// every publication of the player's DSD, a new set or its read side alone,
+	// New's first being 1, so within one BootID a larger one is later. It
+	// orders two copies and grants nothing; the harness's admission, which
+	// publishes no read side, leaves it 0.
+	Publication      uint64
 	Revision, Reason string
 	Tuples           []engine.NativePlan
 	// Converted are the rates the effective set converts to PCM (B728 B11),
@@ -429,6 +435,18 @@ func (b *Backend) publishPermission(p *permission, reason string) {
 	}
 }
 
+// policyOf is production's epoch of the pair pub (B728 B7): the effective set
+// published, the one selection admits by, with the bound unit's model and
+// firmware and no record's revision or date, since none is read; its read
+// side (B8), from the pair that holds the two, so one is never read beside
+// another's; and the pair's publication (B9 PR 3). The boot ID is New's, never
+// changed after it.
+func (b *Backend) policyOf(pub *dsdPublished) PlayerPolicy {
+	d := pub.set
+	view := pub.view.clone()
+	return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Publication: pub.seq, Reason: d.reason(), Tuples: d.tuples(), Converted: d.converted(), Model: d.model, BCDDevice: d.bcd(), DSD: &view}
+}
+
 // Policy returns a detached snapshot; reading it performs no hardware probes.
 func (b *Backend) Policy() PlayerPolicy {
 	b.policyMu.Lock()
@@ -437,15 +455,7 @@ func (b *Backend) Policy() PlayerPolicy {
 }
 func (b *Backend) copyPolicyLocked() PlayerPolicy {
 	if b.cfg.DSD != nil {
-		// Production (B728 B7): the effective set published, the one
-		// selection admits by, with the bound unit's model and firmware and no
-		// record's revision or date, since none is read; and its read side
-		// (B8), from the pair that holds the two, so one is never read beside
-		// another's.
-		pub := b.dsdPub.Load()
-		d := pub.set
-		view := pub.view.clone()
-		return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Reason: d.reason(), Tuples: d.tuples(), Converted: d.converted(), Model: d.model, BCDDevice: d.bcd(), DSD: &view}
+		return b.policyOf(b.dsdPub.Load())
 	}
 	p := b.policy
 	p.Tuples = slices.Clone(p.Tuples)

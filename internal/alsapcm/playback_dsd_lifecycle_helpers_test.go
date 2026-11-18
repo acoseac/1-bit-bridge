@@ -221,6 +221,7 @@ func waitOnEither(t *testing.T, what string, a, b func() <-chan struct{}, cond f
 func initialPolicy(mode string) dsdstate.State {
 	return dsdstate.State{DefaultMode: mode, DACs: []dsdstate.DAC{{
 		Key:          playbacktest.DACKey(),
+		Stamp:        playbacktest.DACStamp(),
 		DoPConfirmed: &dsdstate.DoPConfirmation{BCDDevice: playbacktest.DACBCD, ConfirmedAt: playbacktest.T0, SetBy: dsdstate.ByApp},
 		FirstUse: []dsdstate.FirstUse{
 			{Transport: dsdstate.TransportNative, BCDDevice: playbacktest.DACBCD, AcknowledgedAt: playbacktest.T0},

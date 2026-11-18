@@ -20,38 +20,76 @@ const (
 // refreshDSD reads and reconciles under one lock. The first failed reading
 // stops every session holding DSD and refuses admission; no failed operation
 // is retried. A subsequent independent reading may establish a fresh policy.
+// While a choice's write holds its reading (takeChoiceReading) it reads and
+// publishes nothing: it is owed (refreshOwed), asked once the write has
+// published (publishChoice), and answers the set published now. Only the
+// supervisor's and the probe's refreshes meet one: admission, a monitor and
+// an activation are a session's, and while the write holds the configuration
+// lease no Start registers, so none is admitted or acquires the device.
 func (b *Backend) refreshDSD(where string) (d *dsdSet, err error) {
 	b.dsdMu.Lock()
 	defer b.dsdMu.Unlock()
+	if b.choiceReading {
+		b.refreshOwed = true
+		return b.dsd.Load(), nil
+	}
 	defer func() {
 		if r := recover(); r != nil {
-			b.dsdRead = time.Time{}
-			b.logPanic("the effective DSD policy's reading ("+where+")", r)
-			b.mu.Lock()
-			ss := make([]*session, 0, len(b.sessions))
-			for _, s := range b.sessions {
-				ss = append(ss, s)
-			}
-			b.mu.Unlock()
-			for _, s := range ss {
-				if s.holdsDSD() {
-					s.stopDSD("the effective DSD policy's reading", true)
-				}
-			}
-			b.dsdJudged = b.dsd.Load()
+			b.containDSD("the effective DSD policy's reading ("+where+")", r)
 			d, err = b.dsd.Load(), errDSDUnread
 		}
 	}()
 	return b.refreshDSDLocked(), nil
 }
+
+// containDSD contains a panic in a reading of the policy or a publication of
+// it, under the refreshes' lock: logged without its value (logPanic), the next
+// reading made fresh (dsdRead), every session holding DSD stopped, and the set
+// published judged as it stands.
+func (b *Backend) containDSD(where string, r any) {
+	b.dsdRead = time.Time{}
+	b.logPanic(where, r)
+	b.mu.Lock()
+	ss := make([]*session, 0, len(b.sessions))
+	for _, s := range b.sessions {
+		ss = append(ss, s)
+	}
+	b.mu.Unlock()
+	for _, s := range ss {
+		if s.holdsDSD() {
+			s.stopDSD("the effective DSD policy's reading", true)
+		}
+	}
+	b.dsdJudged = b.dsd.Load()
+}
+
 func (b *Backend) refreshDSDLocked() *dsdSet {
 	read := b.dsdNow()
 	next, view := b.readDSD()
+	return b.publishLocked(read, next, view, nil)
+}
+
+// publishLocked publishes next and its read side view, read at read, the one
+// step a refresh and a choice's write publish by (publishChoice): a set that
+// plays what the published one does keeps its pointer and its generation, and
+// a read side that says another thing of the DAC is published beside it alone;
+// another set is published at the next generation, said once (logDSDSet), and
+// reconciled. Each pair stored takes the next publication (dsdPublished.seq);
+// a reading that changes nothing stores nothing, and moves nothing. stored,
+// when set, runs right after the pair is stored, or with the pair standing
+// where nothing changed, before the log, the Published seam and the
+// reconciliation. b.dsdMu is held.
+func (b *Backend) publishLocked(read time.Time, next *dsdSet, view DSDView, stored func(*dsdPublished)) *dsdSet {
 	b.dsdRead = read
 	cur := b.dsd.Load()
+	pub := b.dsdPub.Load()
 	if cur.same(next) {
-		if pub := b.dsdPub.Load(); !reflect.DeepEqual(pub.view, view) {
-			b.dsdPub.Store(&dsdPublished{set: cur, view: view})
+		if !reflect.DeepEqual(pub.view, view) {
+			pub = &dsdPublished{set: cur, view: view, seq: pub.seq + 1}
+			b.dsdPub.Store(pub)
+		}
+		if stored != nil {
+			stored(pub)
 		}
 		if b.dsdJudged != cur {
 			b.reconcileDSD(cur)
@@ -60,7 +98,11 @@ func (b *Backend) refreshDSDLocked() *dsdSet {
 	}
 	next.gen = cur.gen + 1
 	b.dsd.Store(next)
-	b.dsdPub.Store(&dsdPublished{set: next, view: view})
+	pub = &dsdPublished{set: next, view: view, seq: pub.seq + 1}
+	b.dsdPub.Store(pub)
+	if stored != nil {
+		stored(pub)
+	}
 	b.logDSDSet(next)
 	b.published()
 	b.reconcileDSD(next)
