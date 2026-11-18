@@ -15,7 +15,7 @@ is refused: the description is all Claude sees of it at startup.
 
   check-doc-budgets.py              check all of them (`make docs-check` and CI's docs-check job run this)
   check-doc-budgets.py --hook       PostToolUse hook: after an edit to one of these files, tell
-                                    Claude when a budget is exceeded (exit 2 shows it the message);
+                                    the agent when a budget is exceeded (exit 2 shows it the message);
                                     an edit of one of the engineering log's paths goes to
                                     check-engineering-log.py, which holds the archive frozen and
                                     each entry to its name
@@ -300,7 +300,7 @@ def engineering_log():
 
 
 def hook(root, stdin, budgets=BUDGETS):
-    """PostToolUse: exit 2 with a message for Claude when the edited file breaks a budget, or when it
+    """PostToolUse: exit 2 with a message for the agent when the edited file breaks a budget, or when it
     is one of the engineering log's paths and breaks the log's rules (check-engineering-log.py)."""
     try:
         event = json.loads(stdin)
