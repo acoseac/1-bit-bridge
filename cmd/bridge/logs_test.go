@@ -344,10 +344,12 @@ func TestBridgeLogsReadsTheServicesLogWhileTheServiceHoldsIt(t *testing.T) {
 
 // TestBridgeLogsOffWindowsIsAsItWas is a guard: on macOS and Linux bridge
 // logs reads DefaultLogPath and says what it always said, word for word, but
-// for the hint where that file is not there, which since 2026-11-18 says the
-// service manager creates it and names no `bridge serve` run in the
-// foreground, which writes no log file; and it asks nothing of a Windows
-// install.
+// for the hint where that file is not there, which since 2026-11-18 names no
+// `bridge serve` run in the foreground, which writes no log file: it says the
+// service manager creates the file where the bridge's service writes it, and
+// that a systemd unit sending the bridge's output to the journal is read with
+// journalctl, in one sentence on both systems; and it asks nothing of a
+// Windows install.
 func TestBridgeLogsOffWindowsIsAsItWas(t *testing.T) {
 	for _, goos := range []string{"darwin", "linux"} {
 		t.Run(goos, func(t *testing.T) {
@@ -363,7 +365,9 @@ func TestBridgeLogsOffWindowsIsAsItWas(t *testing.T) {
 			code, stdout, stderr := runBridgeLogs(t, host)
 			requireLogsRun(t, code, stdout, stderr, 1, "",
 				"logs: "+path+" does not exist (yet)\n"+
-					"  the service manager creates the file when it starts the bridge's service; run `bridge start` and retry.\n")
+					"  where the bridge's service writes this file, the service manager creates it when it starts the service, "+
+					"so run `bridge start` and retry; where a systemd unit sends the bridge's output to the journal instead, "+
+					"read it with journalctl.\n")
 
 			writeLogFile(t, path, "one\ntwo\nthree\n")
 			code, stdout, stderr = runBridgeLogs(t, host, "-n", "2")
@@ -431,7 +435,11 @@ func TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint(t *testing.T) {
 // with no & written. The walk reads every file the go tool builds here,
 // whatever its platform, and must find that declaration. It reads each file
 // through seamFindingsIn, which
-// TestTheLogsInstallCheckPinSeesEachWayToChangeIt holds to planted sources.
+// TestTheLogsInstallCheckPinSeesEachWayToChangeIt holds to planted sources,
+// each parsed with its identifiers resolved by the file's lexical scopes, so
+// that a local of the seam's name is told from the package's variable:
+// go/types would need the package type-checked, and every platform's files
+// together do not check as one package.
 func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
 	const seam = "logsInstallCheck"
 	matches, err := filepath.Glob("*.go")
@@ -446,7 +454,7 @@ func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
 		if strings.HasSuffix(name, "_test.go") || goToolIgnores(name) {
 			continue
 		}
-		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, name, nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
@@ -506,25 +514,57 @@ const (
 	// address with no & written. An unnamed func type, bare or in
 	// parentheses, has no methods and is no finding (isUnnamedFuncType).
 	seamDeclaredWithAType seamFindingKind = "declares it with a written type other than an unnamed func type"
-	// seamAssigned is the seam on the left of an assignment, or as a range
-	// clause's key or value, with either token.
+	// seamAssigned is the package's seam on the left of an assignment, or as
+	// a range clause's key or value. A := there declares a local of the
+	// seam's name, never the seam, and is no finding.
 	seamAssigned seamFindingKind = "assigns it"
-	// seamAddressTaken is the seam as the operand of &.
+	// seamAddressTaken is the package's seam as the operand of &.
 	seamAddressTaken seamFindingKind = "takes its address"
 )
 
 // seamFindingsIn reads one parsed file for the logs install check's seam, the
 // package variable named seam: where the file declares it, and each finding,
-// in the file's order. An identifier is read with its parentheses taken off
-// (isSeamIdent), so `(seam) = f` and `&(seam)` are `seam = f` and `&seam`.
+// in the file's order. f must be parsed with its identifiers resolved (no
+// parser.SkipObjectResolution): the parser resolves each one by the file's
+// lexical scopes, and an identifier is the seam only where it resolves to the
+// package's variable (isSeamIdent). A local of the seam's name, declared by :=
+// or var, as a parameter, a result or a receiver, or by a range, type switch
+// or select clause, resolves to its own declaration, so its writes and its
+// address are no finding; past its scope, and on the right of the declaration
+// that makes it, where that scope has not begun, the name is the package's
+// variable again. Only the file's top-level value specs declare the seam. An
+// identifier is read with its parentheses taken off, so `(seam) = f` and
+// `&(seam)` are `seam = f` and `&seam`.
 func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []token.Position, findings []seamFinding) {
+	if f.Scope == nil {
+		panic(fset.Position(f.Pos()).Filename + " was parsed with parser.SkipObjectResolution: its identifiers are not resolved to their scopes")
+	}
 	pkg := importNameOf(f, "github.com/acoseac/1-bit-bridge/internal/packaging")
+	// The package's variable as this file's identifiers resolve to it: the
+	// object of the file's own top-level declaration where it declares the
+	// seam, and nil where another file does, since the parser leaves an
+	// identifier no scope of the file declares unresolved.
+	obj := f.Scope.Lookup(seam)
+	topLevel := map[*ast.ValueSpec]bool{}
+	for _, d := range f.Decls {
+		if gen, ok := d.(*ast.GenDecl); ok {
+			for _, spec := range gen.Specs {
+				if vs, ok := spec.(*ast.ValueSpec); ok {
+					topLevel[vs] = true
+				}
+			}
+		}
+	}
 	found := func(at ast.Node, kind seamFindingKind) {
 		findings = append(findings, seamFinding{pos: fset.Position(at.Pos()), kind: kind})
 	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.ValueSpec:
+			// A function's var or const declares a local of its own.
+			if !topLevel[n] {
+				return true
+			}
 			for i, id := range n.Names {
 				if id.Name != seam {
 					continue
@@ -539,18 +579,18 @@ func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []t
 			}
 		case *ast.AssignStmt:
 			for _, lhs := range n.Lhs {
-				if isSeamIdent(lhs, seam) {
+				if isSeamIdent(lhs, seam, obj) {
 					found(lhs, seamAssigned)
 				}
 			}
 		case *ast.RangeStmt:
 			for _, target := range []ast.Expr{n.Key, n.Value} {
-				if isSeamIdent(target, seam) {
+				if isSeamIdent(target, seam, obj) {
 					found(target, seamAssigned)
 				}
 			}
 		case *ast.UnaryExpr:
-			if n.Op == token.AND && isSeamIdent(n.X, seam) {
+			if n.Op == token.AND && isSeamIdent(n.X, seam, obj) {
 				found(n.X, seamAddressTaken)
 			}
 		}
@@ -559,14 +599,17 @@ func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []t
 	return declared, findings
 }
 
-// isSeamIdent reports whether e, its parentheses taken off, is the identifier
-// named seam. A nil e, the key or the value a range clause leaves out, is not.
-func isSeamIdent(e ast.Expr, seam string) bool {
+// isSeamIdent reports whether e, its parentheses taken off, is an identifier
+// named seam that the parser resolved to obj, the package's variable as
+// seamFindingsIn finds it in the file. An identifier that a local of that name
+// declares, or that names one, holds the local's object instead. A nil e, the
+// key or the value a range clause leaves out, is not.
+func isSeamIdent(e ast.Expr, seam string, obj *ast.Object) bool {
 	if e == nil {
 		return false
 	}
 	id, ok := ast.Unparen(e).(*ast.Ident)
-	return ok && id.Name == seam
+	return ok && id.Name == seam && id.Obj == obj
 }
 
 // isUnnamedFuncType reports whether a declaration's written type e, its
@@ -582,16 +625,24 @@ func isUnnamedFuncType(e ast.Expr) bool {
 // TestTheLogsInstallCheckPinSeesEachWayToChangeIt holds seamFindingsIn, the
 // reading TestNoProductionCodeReassignsTheLogsInstallCheck gives each file of
 // the package, to planted files (backlog B618FU), each declaring the seam once,
-// as logs.go does, but where its row is about the declaration. Each way a file
-// can change the seam is one finding of its kind on the line planted: the five
-// the pin read past before B618FU (an assignment and an address taken through
-// parentheses, a range clause's value over a slice and its key over an
-// iter.Seq, and a declaration of a named type whose pointer method sets it,
-// called with no & written) and the three it caught (an assignment, an address
-// taken, a declaration of another value). A file that only reads the seam,
-// beside a named type whose pointer method sets another variable, has none,
-// and so has a file that declares it with an unnamed func type written, bare
-// or in parentheses, and only reads it: that type has no methods.
+// as logs.go does, but where its row is about the declaration or about a file
+// that does not declare it (elsewhere), as every other file of the package.
+// Each way a file can change the seam is one finding of its kind on the line
+// planted: the five the pin read past before B618FU (an assignment and an
+// address taken through parentheses, a range clause's value over a slice and
+// its key over an iter.Seq, and a declaration of a named type whose pointer
+// method sets it, called with no & written) and the three it caught (an
+// assignment, an address taken, a declaration of another value). A file that
+// only reads the seam, beside a named type whose pointer method sets another
+// variable, has none, and so has a file that declares it with an unnamed func
+// type written, bare or in parentheses, and only reads it: that type has no
+// methods. And a local of the seam's name changes nothing of the seam (a :=, a
+// range clause's :=, a later = to it, its address, a var, a parameter, a
+// result, a func literal's parameter, a type switch's or a select case's
+// define), with the seam declared in the file or not; while a write after such
+// a local's scope ends, and a write or the seam's address on the right of the
+// := that declares the local, whose scope has not begun there, are one finding
+// each.
 func TestTheLogsInstallCheckPinSeesEachWayToChangeIt(t *testing.T) {
 	const header = `package main
 
@@ -607,6 +658,10 @@ import (
 		name string
 		src  string          // the file after its imports
 		want seamFindingKind // the one finding's, on the line marked "// planted"; "" is none
+		// elsewhere is a file that does not declare the seam, as every file of
+		// the package but logs.go: its identifier of the seam's name that no
+		// scope of the file declares is the package's variable.
+		elsewhere bool
 	}{
 		{name: "an assignment through parentheses", want: seamAssigned, src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
 	(logsInstallCheck) = f // planted
@@ -671,21 +726,128 @@ func plant() bool {
 	return logsInstallCheck().Startup && logsInstallCheck != nil
 }
 `},
+		{name: "a local := that shadows it", src: asLogsGo + `func plant(f func() packaging.WindowsInstall) bool {
+	logsInstallCheck := f
+	return logsInstallCheck().Startup
+}
+`},
+		{name: "a local range := that shadows it", src: asLogsGo + `func plant(fs []func() packaging.WindowsInstall) {
+	for _, logsInstallCheck := range fs {
+		_ = logsInstallCheck()
+	}
+}
+`},
+		{name: "a later = to that shadow", src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
+	logsInstallCheck := f
+	logsInstallCheck = packaging.CheckWindowsInstall
+	_ = logsInstallCheck()
+}
+`},
+		{name: "the address of a shadow", src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
+	logsInstallCheck := packaging.CheckWindowsInstall
+	p := &logsInstallCheck
+	*p = f
+	_ = logsInstallCheck()
+}
+`},
+		{name: "a local var declaration that shadows it", src: asLogsGo + `type installCheck func() packaging.WindowsInstall
+
+func plant(f installCheck) {
+	var logsInstallCheck installCheck = f
+	logsInstallCheck = f
+	_ = logsInstallCheck()
+}
+`},
+		{name: "a parameter, a result and a func literal's parameter that shadow it", src: asLogsGo + `func plant(logsInstallCheck func() packaging.WindowsInstall) {
+	logsInstallCheck = nil
+	_ = &logsInstallCheck
+}
+
+func plantResult() (logsInstallCheck func() packaging.WindowsInstall) {
+	logsInstallCheck = packaging.CheckWindowsInstall
+	return
+}
+
+var plantLiteral = func(logsInstallCheck func() packaging.WindowsInstall) {
+	logsInstallCheck = nil
+}
+`},
+		{name: "a type switch's and a select case's defines that shadow it", src: asLogsGo + `func plant(v any, ch chan func() packaging.WindowsInstall) {
+	switch logsInstallCheck := v.(type) {
+	case func() packaging.WindowsInstall:
+		logsInstallCheck = nil
+		_ = &logsInstallCheck
+	}
+	select {
+	case logsInstallCheck := <-ch:
+		logsInstallCheck = nil
+		_ = &logsInstallCheck
+	default:
+	}
+}
+`},
+		{name: "a write after a shadow's scope ends", want: seamAssigned, src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
+	if logsInstallCheck := f; logsInstallCheck != nil {
+		logsInstallCheck = f
+	}
+	{
+		var logsInstallCheck = f
+		logsInstallCheck = f
+		_ = logsInstallCheck
+	}
+	for _, logsInstallCheck := range []func() packaging.WindowsInstall{f} {
+		logsInstallCheck = f
+		_ = logsInstallCheck
+	}
+	logsInstallCheck = f // planted
+}
+`},
+		{name: "its address taken on the right of a define that shadows it", want: seamAddressTaken, src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
+	logsInstallCheck := &logsInstallCheck // planted
+	*logsInstallCheck = f
+}
+`},
+		{name: "a write on the right of a define that shadows it", want: seamAssigned, src: asLogsGo + `func plant(f func() packaging.WindowsInstall) {
+	logsInstallCheck := func() {
+		logsInstallCheck = f // planted
+	}
+	logsInstallCheck()
+}
+`},
+		{name: "a write in a file that does not declare it, after a shadow's scope ends", want: seamAssigned, elsewhere: true, src: `func plant(f func() packaging.WindowsInstall) {
+	{
+		logsInstallCheck := f
+		logsInstallCheck = f
+		_ = logsInstallCheck
+	}
+	logsInstallCheck = f // planted
+}
+`},
+		{name: "a shadow in a file that does not declare it", elsewhere: true, src: `func plant(f func() packaging.WindowsInstall) {
+	logsInstallCheck := f
+	logsInstallCheck = f
+	_ = &logsInstallCheck
+}
+`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src := header + c.src
 			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, "planted.go", src, parser.SkipObjectResolution)
+			f, err := parser.ParseFile(fset, "planted.go", src, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
 			declared, findings := seamFindingsIn(fset, f, "logsInstallCheck")
-			if len(declared) != 1 {
-				t.Errorf("found logsInstallCheck declared at %q, want once", declared)
+			wantDeclared := 1 // once, as logs.go declares it
+			if c.elsewhere {
+				wantDeclared = 0
+			}
+			if len(declared) != wantDeclared {
+				t.Errorf("found logsInstallCheck declared at %q, want %d declaration(s)", declared, wantDeclared)
 			}
 			if c.want == "" {
 				if len(findings) != 0 {
-					t.Errorf("a file that only reads the seam has findings %q, want none", findings)
+					t.Errorf("a file that leaves the package's seam as it is has findings %q, want none", findings)
 				}
 				return
 			}

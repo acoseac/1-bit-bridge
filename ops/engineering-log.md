@@ -106266,3 +106266,210 @@ The gate after the last commit (`make fmt vet docs-check`, the four tests
 under `-race -count=20`, `./internal/player/...` under `-race`, and `go vet`
 of the engine package for windows and darwin) is in the branch's report: a
 record cannot hold the runs made on its own commit.
+
+## 2026-11-18 — Bridge lows 3's commit ids, corrected
+
+Branch `fix/bridge-lows4-1118`. This record corrects the commit ids three
+records of #1506 cite ("B618FU's pin: an unnamed func type written is no type
+of its own", "B901FU and B933, corrected" and "The foreground hints", 2026-11-18,
+above), which stay as written; nothing else changes.
+
+They cite the red-first commit as `3fff8a1c` (105868, 105915) and the branch
+point as `e7e41bdc` (105867, 105872, 105958, 105970, 106051, 106059, 106061):
+ids from before the round was replayed onto `54fd3749`, main's squash commit of
+#1505. Main's history holds #1506 as the squash commit `e4e7e3c7`, whose parent
+is `54fd3749`. The round's red-first commit is `59444697` on the PR branch
+(`fix/bridge-lows3-1118`; its parent `a9e304e3`, whose parent is `54fd3749`),
+and it is not an ancestor of main; nor are `3fff8a1c` and `e7e41bdc`. Commit
+messages are not rewritten, so this record says it. The trees match: `3fff8a1c`
+and `59444697` hold one tree (`55ef5b29`), `285cd03f` and `a9e304e3` another
+(`7b2dba06`), and `e7e41bdc` and `54fd3749` a third (`a963887c`), so every line
+those records cite "at e7e41bdc" reads the same at `54fd3749`, and the red-first
+run's code is `59444697`'s.
+
+## 2026-11-18 — Bridge lows 4: the pin reads the seam by lexical scope, comments and three sentences that said more than the code
+
+Branch `fix/bridge-lows4-1118`, from `e4e7e3c7` (main with #1506). Four
+commits: A, the install-check pin (test code alone); B, comments, two rules
+provenances and B618's long form; C, three user-facing sentences, the tests
+that pin them and B618's rule; D, the correction above and this record. No
+logic changes. Line numbers are main's, at `e4e7e3c7`.
+
+### A. The pin reads the seam by lexical scope (item 1)
+
+What was true. `seamFindingsIn` (`cmd/bridge/logs_test.go` 520-560) matched the
+seam by name alone. Its `AssignStmt` arm (540-545) reported every left-hand
+identifier named `logsInstallCheck`, a `:=` included; its `RangeStmt` arm
+(546-551) a range clause's key or value with either token; its `UnaryExpr` arm
+(552-555) the operand of every `&`; and its `ValueSpec` arm (527-539) counted
+every value spec of that name as a declaration of the seam, a function's `var`
+included. A `:=` inside a function declares a local, which shadows the
+package's variable and can never change it, so a local, every write to it and
+its address were findings, and a function's `var` failed the pin's "declared
+once". Both tests parsed with `parser.SkipObjectResolution` (449, 678).
+
+As built. Both tests parse with mode 0, and an identifier is the seam only where
+`isSeamIdent` finds its `Ident.Obj` equal to the file's `Scope.Lookup` of the
+seam's name: the object of the file's own top-level declaration where the file
+declares the seam, and nil where another file does, since go/parser's resolver
+leaves an identifier that no scope of the file declares unresolved
+(`resolveFile`, go1.27.3 `src/go/parser/resolver.go` 21-55). The resolver
+declares a `:=`'s left side after it walks the right (312-318), a `var`'s names
+after its values (450-464), a range clause's defines in the range's scope after
+its expression (415-447), a type switch's and a comm clause's in scopes of their
+own (371-392), and parameters, results and receivers in the function's scope
+(481-506, 515-521). Only the file's top-level value specs are declarations
+(`topLevel`), and a file parsed without its objects (no `File.Scope`) makes
+`seamFindingsIn` panic, naming the file, rather than read every identifier as
+the seam.
+
+Which and why. The parser's own resolution, not go/types and not a scope
+tracker of the test's: the pin reads every platform's files of the package
+(`filepath.Glob("*.go")`, no build constraint asked), which do not type-check as
+one package, and the table's planted files import what they do not use; and the
+resolver already gives each construct the reviews named (a function's `var`,
+parameters and results, a type switch's and a comm clause's defines, `&` on a
+shadow) its scope, where a second implementation is a second way to miss one.
+`Ident.Obj` and `File.Scope` are marked deprecated in go/ast in favour of
+go/types, which this pin cannot use; go/parser still fills them in mode 0, and
+`cmd/bridge/config_writers_test.go` reads `Ident.Obj` the same way (`assignAt`,
+208-218).
+
+Twelve rows of `TestTheLogsInstallCheckPinSeesEachWayToChangeIt`: seven locals
+of the seam's name that want no finding (a `:=`; a range clause's `:=`; a later
+`=` to that local; its address; a function's `var` of a named type and another
+value; a parameter, a named result and a func literal's parameter; a type
+switch's and a select case's defines), one more in a file that does not declare
+the seam (`elsewhere`, as every file but `logs.go`), and four that want one
+finding on the line planted: a write after the scope of three locals ends (an
+if's `:=`, a block's `var`, a range's `:=`), a write after a block's `:=` ends
+in a file that does not declare the seam, a write inside a func literal on the
+right of the `:=` that declares a local (its scope begins after the statement),
+and `logsInstallCheck := &logsInstallCheck`, whose `&` takes the package
+variable's address.
+
+### Red first and the controls
+
+Each predicted in writing before it ran. The rows were red first in the tree,
+before the fix was written; that run and the controls after it (`go test
+-overlay` builds of `logs_test.go` mutated in memory by exact-once
+replacements, the tree never edited) ran `-count=1 -v` over the two tests, the
+controls with the release tags, among them the red-first run again.
+
+| | code | predicted red | seen |
+|---|---|---|---|
+| red first | the new rows over the pin as it was (no resolution, every value spec, names alone) | the twelve new rows | those twelve, in both runs; the eleven earlier rows and the production pin green |
+| K0 | no mutation | none | none |
+| K1 | `isSeamIdent` by name alone | the twelve new rows | those twelve |
+| K2 | every value spec a declaration | the local `var` row and the write after a scope ends | those two |
+| K3 | the file's own object ignored (nil) | the nine rows that want a write or an address found in a file that declares the seam | those nine; the declaration rows, the no-finding rows, the two `elsewhere` rows and the production pin green |
+| K4 | the table's parse back to `SkipObjectResolution` | the table panics at its first row | it does, naming the file |
+| K5 | the production pin's parse back to `SkipObjectResolution` | the production pin panics | it does, naming the first file it parses |
+
+### B. Comments and records (items 2-7, 9)
+
+- `consoleLogPath`'s doc (`cmd/bridge/logs.go` 486-493) said the console and
+  `bridge logs` part "only where they ask of two bridges", and
+  `admin.Deps.LogPath`'s (`internal/admin/admin.go` 183-185) that `bridge logs`
+  reads the same file wherever the console runs inside the installed bridge.
+  They part too where the install check cannot tell and a service's log an
+  earlier install left sits beside a bridge the sign-in launcher started
+  (`openUncertainWindowsLog` reads the service's log where it is there, while
+  the console, not the service, offers the user's), and on a managed deployment
+  (`resolveLogFile` refuses first; `bridge logs` reads no config). Both say so.
+- `LogPath`'s doc (`admin.go` 195) said a file that "cannot be read" gets a
+  reason. `resolveLogFile` asks a stat (`handlers_logs.go` 81-87): a file this
+  process may not read is offered, and `streamFilteredLog`'s open fails in the
+  download (`logexport.go` 330-333). It describes the stat's failures and
+  promises no readability check.
+- "only a SERVICE install redirects that to a file" (`internal/admin/static/app.js`
+  7589, and `internal/admin/handlers_logs.go` 9, which named the launcher two
+  lines on) leaves out the Windows sign-in launcher: both say "a service install
+  or the sign-in launcher", as `admin.go` does.
+- `TestLogStatusUnavailableExplainsWhy`'s doc said the path "is not made
+  wherever the process has no home directory": cmd/bridge fails to make it only
+  where there is none and, on Windows outside the service, no `%LOCALAPPDATA%`
+  either (`packaging.WindowsLogDirs.UserLog`).
+- `cmd/bridge/doctor.go` (283-287, 308-312, 1131-1135) and `doctor.Deps.LogPath`
+  (`internal/doctor/doctor.go` 397-411) said the console's export offers its
+  file; it offers it only where it is there, and not on a managed deployment,
+  while the path is wired whatever: each says "when present". `LogPath`'s doc
+  also names `bridge init`'s preflight (`initPreflightDeps`, `init.go`
+  1604-1614), which sets no path, as the third place an empty one comes from.
+- `checkLogSize`'s doc (`internal/doctor/logsize.go` 41-48) said the check is
+  "skipped entirely" where the path is unset or its file absent. It is skipped on
+  a managed deployment alone (57); an empty path and an absent file each get an
+  ok of their own (65, 84).
+- An empty path read as a bridge that logs to its terminal in `LogUnresolved`'s
+  doc (`doctor.go` 420-426), `checkLogSize`'s comment (59-60), and
+  `doctorLogs`' and `shellDoctorLog`'s docs (`logs.go` 521-531, 545-553): each
+  says "the line's ok for an empty path" or its like.
+- `.claude/rules/cli-serve.md` 73 (B741) and 118 (B659), each with its long form
+  in `ops/History-rules-cli-serve.md` (3901, 3463), named the tools that
+  reviewed; each keeps its date and backlog id and names none. The whole file was
+  read for a tool or reviewer named in a provenance, and these two are all; the
+  review's ":51 and :65" matched nothing of the kind on main.
+- B618's long form promised that the pin reads an assignment's `=` and `:=`
+  alike (B618FU, 6409-6413); it says what holds since group A, and a dated
+  paragraph records the change.
+
+### C. Three sentences (items 8, 10-12)
+
+- The doctor's line for an empty log path (`logsize.go` 65) said "no log file
+  configured (logs go to the terminal)". An empty path is one that could not be
+  made, in a process with no home directory that a terminal or a service
+  manager may start, and one `bridge init`'s preflight never makes: a failing
+  preflight prints its whole report (`ensureDoctorClean`, `doctor.go`
+  1068-1079), this line among it. So the line says "no log file path was made
+  for this process, so there is no file to check", true in both, rather than
+  "could not be made", which a preflight's report would read as a failure it
+  never had. `TestCheckLogSizeQuietWhenAbsent` pins the words in
+  internal/doctor, and cmd/bridge's doctor log tests (`noPathOK`, which was
+  `terminalsOK`) through bridge doctor, its `--json` and the console's doctor.
+  `TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK` keeps its name, which its
+  doc says came from the old words.
+- Off Windows, where DefaultLogPath is not there, `bridge logs` said "the
+  service manager creates the file when it starts the bridge's service; run
+  `bridge start` and retry." (`logs.go` 154), which holds only where the
+  bridge's service writes that file. It says, in one `fmt.Fprintln` with no
+  branch by system: "where the bridge's service writes this file, the service
+  manager creates it when it starts the service, so run `bridge start` and
+  retry; where a systemd unit sends the bridge's output to the journal instead,
+  read it with journalctl." `TestBridgeLogsOffWindowsIsAsItWas` pins it on darwin
+  and linux.
+- The console's reason for an empty path (`handlers_logs.go` 79) named a cause
+  (no home directory) and where the output goes, which the console, handed an
+  empty path and no cause, does not know. It says "no log file path could be made
+  for this process". `TestLogStatusUnavailableExplainsWhy` wants it word for
+  word, and `TestLogBundleWorksWithoutALogFile` finds it in the bundle's log
+  section, where it also took "logs to the terminal". Container guidance there,
+  where an empty path could say `docker logs`, would be a branch, logic this
+  change does not make.
+- B618's rule (`cli-serve.md` 123 and its long form, 6221) excepted "their hint
+  where the file is not there" and named no words, so any rewording passed it.
+  Its bolded sentence now excepts two sentences of macOS and Linux and pins both
+  word for word, the hint and the doctor's line, and calls that line "an empty
+  path's ok" where it said "the terminal's ok". A dated paragraph of the long
+  form says why.
+- The review's pointer to `cmd/bridge/logs_test.go` 283-288 for a comment to
+  move with these sentences matched nothing of theirs on main; the comment that
+  does, `TestBridgeLogsOffWindowsIsAsItWas`'s doc (345-350), says the new hint.
+
+Red first, each predicted in writing: this round's tests over main's three
+strings (`go test -overlay` with group B's commit's `logs.go`, `logsize.go` and
+`handlers_logs.go`) failed exactly where predicted: both subtests of
+`TestBridgeLogsOffWindowsIsAsItWas`; the console row and the two off-Windows rows
+of `TestBridgeDoctorSaysWhenTheLogsPathCannotBeMade`; the off-Windows and console
+rows of `TestTheDoctorsLogNoteSurvivesItsRendering`; `no_path_made` of
+`TestCheckLogSizeQuietWhenAbsent`; `TestLogStatusUnavailableExplainsWhy`; and
+`TestLogBundleWorksWithoutALogFile`. The Windows warn rows and
+`TestALogThatCouldNotBeNamedIsNeverTheTerminalsOK` stayed green, and every one
+passed over the new strings.
+
+### Runs
+
+The gate after the last commit (`make fmt` with `git diff --exit-code`, `make
+vet`, `make docs-check`, the pin's tests under `-race -count=20`, cmd/bridge
+whole under `-race`, the touched tests of internal/admin and internal/doctor,
+and `go vet` for darwin and windows of the touched packages) is in the branch's
+report: a record cannot hold the runs made on its own commit.

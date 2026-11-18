@@ -138,9 +138,12 @@ func openLog(host logsHost, stderr io.Writer) (*os.File, int) {
 
 // openDefaultLog opens DefaultLogPath, in the words `bridge logs` said on
 // every platform before backlog B618, and still says off Windows but for the
-// hint where the file is not there, which names what creates it and, since
-// 2026-11-18, no `bridge serve` run in the foreground, which logs to its
-// terminal and writes no file.
+// hint where the file is not there, which since 2026-11-18 names no `bridge
+// serve` run in the foreground, which logs to its terminal and writes no file:
+// where the bridge's service writes the file, as the units `bridge init`
+// installs do, the service manager makes it when it starts the service, and
+// where a systemd unit sends the bridge's output to the journal instead, the
+// file never comes and journalctl reads that output.
 func openDefaultLog(host logsHost, stderr io.Writer) (*os.File, int) {
 	logPath, err := host.defaultLogPath()
 	if err != nil {
@@ -151,7 +154,7 @@ func openDefaultLog(host logsHost, stderr io.Writer) (*os.File, int) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(stderr, "logs: %s does not exist (yet)\n", logPath)
-			fmt.Fprintln(stderr, "  the service manager creates the file when it starts the bridge's service; run `bridge start` and retry.")
+			fmt.Fprintln(stderr, "  where the bridge's service writes this file, the service manager creates it when it starts the service, so run `bridge start` and retry; where a systemd unit sends the bridge's output to the journal instead, read it with journalctl.")
 			return nil, 1
 		}
 		fmt.Fprintf(stderr, "logs: open %s: %v\n", logPath, err)
@@ -484,13 +487,18 @@ func adminLogPath() string {
 // output at. A process run in the foreground writes no log file: it logs to
 // its terminal, so the file named may be an earlier launch's, or not there.
 // So the console and `bridge logs` read one file wherever the console runs
-// inside the installed bridge; they part only where they ask of two bridges,
-// a console of a bridge run another way beside a registered service, which
-// offers the user's log, not the service's. Whether the file is offered, or
-// graded, is decided where it is read: the export refuses it on a managed
-// deployment and offers it only where it is there (internal/admin's
-// resolveLogFile), and the doctor skips its check on a managed deployment
-// (doctor.Deps.Managed).
+// inside the installed bridge, and part in three cases. Where they ask of two
+// bridges, a console of a bridge run another way beside a registered service
+// offers the user's log, not the service's. Where the install check cannot
+// tell whether the service is registered, and a service's log an earlier
+// install left is there beside a bridge its sign-in launcher started, `bridge
+// logs` reads that service's log and the console offers the user's. And on a
+// managed deployment the console offers no file, while `bridge logs`, which
+// reads no config, reads the one it reads on any install, DefaultLogPath off
+// Windows. Whether the file is offered, or graded, is decided where it is
+// read: the export refuses it on a managed deployment and offers it only where
+// it is there (internal/admin's resolveLogFile), and the doctor skips its
+// check on a managed deployment (doctor.Deps.Managed).
 func consoleLogPath(host logsHost) string {
 	if host.goos == "windows" {
 		service := packaging.ServiceNotRegistered
@@ -523,12 +531,13 @@ type doctorLog struct {
 // install check included, runs on any host (hostLogs in production). bridge
 // doctor, run from a shell, grades the installed bridge's log as `bridge logs`
 // reads it (shellDoctorLog). The console's doctor (console, which
-// adminDoctorRunnerFor sets) grades the file the console's export offers its
-// process (consoleLogPath), and asks no install check: a console of a bridge
-// run another way beside a registered service grades the user's log, not the
-// service's; a process run in the foreground writes no log file, so the one
-// graded may be an earlier launch's. Where that file's path cannot be made it
-// names none, the terminal's ok, as the export offers none.
+// adminDoctorRunnerFor sets) grades the file whose path the console's export
+// is wired with (consoleLogPath), which the export offers its process when
+// present, and asks no install check: a console of a bridge run another way
+// beside a registered service grades the user's log, not the service's; a
+// process run in the foreground writes no log file, so the one graded may be
+// an earlier launch's. Where that file's path cannot be made it names none,
+// the line's ok for an empty path, as the export offers none.
 type doctorLogs struct {
 	host    logsHost
 	console bool
@@ -544,13 +553,14 @@ func (l doctorLogs) choose() doctorLog {
 
 // shellDoctorLog is the log bridge doctor grades from a shell: the one `bridge
 // logs` reads. Off Windows that is DefaultLogPath, and where its path cannot
-// be made (`env -u HOME bridge doctor`) no file, the terminal's ok, as before
-// backlog B618's round 2. On Windows it is the service's log while the install
-// check finds the service registered, running or not, and the user's otherwise
-// (chooseWindowsLog); where the check cannot tell, the service's where it is
-// there and the user's where only that is, each with a note that says so, and
-// neither, said, where neither is there. There a path that cannot be made is
-// said too: none of these is a bridge that logs to its terminal.
+// be made (`env -u HOME bridge doctor`) no file, the line's ok for an empty
+// path, as before backlog B618's round 2. On Windows it is the service's log
+// while the install check finds the service registered, running or not, and
+// the user's otherwise (chooseWindowsLog); where the check cannot tell, the
+// service's where it is there and the user's where only that is, each with a
+// note that says so, and neither, said, where neither is there. There a path
+// that cannot be made is said too, a warn (doctor.Deps.LogUnresolved), never
+// that ok.
 func shellDoctorLog(host logsHost) doctorLog {
 	if host.goos != "windows" {
 		p, err := host.defaultLogPath()
