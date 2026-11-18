@@ -15,7 +15,10 @@ is refused: the description is all Claude sees of it at startup.
 
   check-doc-budgets.py              check all of them (`make docs-check` and CI's docs-check job run this)
   check-doc-budgets.py --hook       PostToolUse hook: after an edit to one of these files, tell
-                                    Claude when a budget is exceeded (exit 2 shows it the message)
+                                    the agent when a budget is exceeded (exit 2 shows it the message);
+                                    an edit of one of the engineering log's paths goes to
+                                    check-engineering-log.py, which holds the archive frozen and
+                                    each entry to its name
   check-doc-budgets.py --self-test  pin the glob matching, the checks and the hook's input handling
 
 Over budget? Don't cut anything. In CLAUDE.md, first move a topic entry to the rules file that
@@ -37,6 +40,11 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUDGETS = {"claude": 64_000, "rules": 100_000, "load": 480_000}
 NEAR = 0.97  # at or above this share of a budget the full check says so, and still passes
+# The engineering log's paths, in any case: its frozen archive, anything below its folder, and a
+# dated Markdown file directly in ops/ (an entry filed where git may ignore it). The hook hands an
+# edit of one to scripts/check-engineering-log.py; any other path pays this one match.
+LOG_PATH = re.compile(r"ops/(?:engineering-log\.md|engineering-log/.+|\d{4}-\d{2}-\d{2}[^/]*\.md)",
+                      re.IGNORECASE | re.DOTALL)
 
 
 def glob_regex(pattern):
@@ -253,8 +261,47 @@ def report(root, m, budgets=BUDGETS):
     return 1 if broken else 0
 
 
+def repo_path(root, path):
+    """PATH relative to ROOT, spelled with "/", as the editor named it, or None outside ROOT.
+    normpath folds "." and "..", and no link inside the repository is resolved, so an edited link
+    keeps its own name and the engineering log's checker refuses it by that name. A link above the
+    repository is resolved (macOS's /var is /private/var): where PATH does not begin with ROOT as
+    given or as resolved, the folder on PATH's way that resolves to ROOT is the repository."""
+    full = os.path.normpath(os.path.join(root, path))
+    tops = {os.path.normcase(os.path.normpath(os.path.abspath(root))), os.path.normcase(os.path.realpath(root))}
+    real = os.path.normcase(os.path.realpath(root))
+    for resolve in (False, True):
+        folder = full
+        while os.path.dirname(folder) != folder:
+            folder = os.path.dirname(folder)
+            if (os.path.normcase(os.path.realpath(folder)) == real) if resolve else (os.path.normcase(folder) in tops):
+                try:
+                    return os.path.relpath(full, folder).replace(os.sep, "/")
+                except ValueError:  # Windows: no relative path across drives
+                    return None
+    return None
+
+
+_log_checker = []
+
+
+def engineering_log():
+    """scripts/check-engineering-log.py as a module, loaded once (its name holds a "-"). Imported
+    here, as the self-test's own modules are in self_test, so an edit of any other path pays none
+    of it."""
+    import importlib.util
+    if not _log_checker:
+        spec = importlib.util.spec_from_file_location("check_engineering_log",
+                                                      os.path.join(REPO, "scripts", "check-engineering-log.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _log_checker.append(module)
+    return _log_checker[0]
+
+
 def hook(root, stdin, budgets=BUDGETS):
-    """PostToolUse: exit 2 with a message for Claude when the edited file breaks a budget."""
+    """PostToolUse: exit 2 with a message for the agent when the edited file breaks a budget, or when it
+    is one of the engineering log's paths and breaks the log's rules (check-engineering-log.py)."""
     try:
         event = json.loads(stdin)
         path = (event.get("tool_input") or {}).get("file_path")
@@ -262,6 +309,11 @@ def hook(root, stdin, budgets=BUDGETS):
         return 0, ""
     if not isinstance(path, str):
         return 0, ""
+    # The log's paths are decided on the path as the editor named it, before anything below
+    # resolves it: a link named like the archive or an entry is refused as such, never followed.
+    named = repo_path(root, path)
+    if named is not None and LOG_PATH.fullmatch(named):
+        return engineering_log().hook_for(root, named)
     try:
         rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/")
     except ValueError:  # Windows: a file on another drive than the repository is none of these
@@ -293,6 +345,9 @@ def hook(root, stdin, budgets=BUDGETS):
 
 
 def self_test():
+    import builtins
+    import hashlib
+    import shutil
     ok = True
 
     def expect(name, got, want):
@@ -415,6 +470,101 @@ def self_test():
                    hook(root, event(os.path.join(root, ".claude/rules/c.md")), tight)[0], 0)
         finally:
             globals()["measure"] = real_measure
+
+    # The engineering log's paths, each through the hook as an edit event names it.
+    log = engineering_log()
+    entry = "ops/engineering-log/2026-11/2026-11-20-b888--feat-b888-log-per-entry.md"
+    entry_text = "## 2026-11-20 — B888: an entry\n\nText.\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, "root")
+
+        def put(rel, text, top=root):
+            path = os.path.join(top, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+            return path
+
+        def link(target, path):
+            try:
+                os.symlink(target, path)
+                return True
+            except (OSError, NotImplementedError):
+                print("self-test: no symlinks here, so a link row of the log's was not run")
+                return False
+
+        edit = lambda rel, top=root: hook(root, event_for(os.path.join(top, *rel.split("/"))))
+        archive = put("ops/engineering-log.md", "# Not the frozen archive\n")
+        put(entry, entry_text)
+        code, msg = edit("ops/engineering-log.md")
+        expect("an edit of an archive whose bytes are not the pinned ones is refused, naming the folder",
+               (code, "ops/engineering-log/<YYYY-MM>/" in msg), (2, True))
+        expect("a good entry passes", edit(entry), (0, ""))
+        put("ops/engineering-log/2026-11/2026-11-20-B888--feat-x.md", entry_text)
+        expect("a misnamed entry is refused", edit("ops/engineering-log/2026-11/2026-11-20-B888--feat-x.md")[0], 2)
+        os.remove(os.path.join(root, *"ops/engineering-log/2026-11/2026-11-20-B888--feat-x.md".split("/")))
+        dated = put("ops/2026-11-20-b888--feat-x.md", entry_text)
+        expect("a dated file directly in ops/ is refused", edit("ops/2026-11-20-b888--feat-x.md")[0], 2)
+        os.remove(dated)
+        expect("and let be once it is gone", edit("ops/2026-11-20-b888--feat-x.md"), (0, ""))
+        expect("a deleted entry is let be", edit("ops/engineering-log/2026-11/2026-11-20-gone--x.md"), (0, ""))
+
+        def raising_open(*args, **kwargs):
+            raise AssertionError("opened %r" % (args[:1],))
+        real_open, real_os_open = builtins.open, os.open
+        builtins.open, os.open = raising_open, raising_open
+        try:
+            got = hook(root, event_for(os.path.join(root, "src", "A.go")))
+        except AssertionError as e:
+            got = str(e)
+        finally:
+            builtins.open, os.open = real_open, real_os_open
+        expect("an unrelated path is let be, and nothing is read", got, (0, ""))
+
+        # With the fixture's archive pinned, every way of standing in for it is refused.
+        frozen = log.FROZEN_BYTES, log.FROZEN_SHA256
+        with open(archive, "rb") as f:
+            data = f.read()
+        log.FROZEN_BYTES, log.FROZEN_SHA256 = len(data), hashlib.sha256(data).hexdigest()
+        try:
+            expect("the pinned archive passes", edit("ops/engineering-log.md"), (0, ""))
+            alias = os.path.join(tmp, "alias")
+            if link(root, alias):
+                with open(archive, "a", encoding="utf-8") as f:
+                    f.write("one more line\n")
+                expect("an edit named through a link above the repository is still the archive's",
+                       edit("ops/engineering-log.md", alias)[0], 2)
+                put("ops/engineering-log.md", "# Not the frozen archive\n")
+            copy = put("copy/engineering-log.md", "# Not the frozen archive\n", tmp)
+            os.remove(archive)
+            if link(copy, archive):
+                expect("an archive that is a link to an identical copy is refused", edit("ops/engineering-log.md")[0], 2)
+                os.remove(archive)
+            put("ops/engineering-log.md", "# Not the frozen archive\n")
+            entry_path = os.path.join(root, *entry.split("/"))
+            os.remove(entry_path)
+            elsewhere = put("elsewhere/" + entry.rsplit("/", 1)[1], entry_text, tmp)
+            if link(elsewhere, entry_path):
+                expect("an entry that is a link is refused", edit(entry)[0], 2)
+                os.remove(entry_path)
+            if link(os.path.join(tmp, "nothing-here.md"), entry_path):
+                expect("an entry that is a link to nothing is refused, not let be as a delete", edit(entry)[0], 2)
+                os.remove(entry_path)
+            month = os.path.dirname(entry_path)
+            shutil.rmtree(month)
+            if link(os.path.dirname(elsewhere), month):
+                expect("an entry below a folder that is a link is refused", edit(entry)[0], 2)
+                os.remove(month)
+            put(entry, entry_text)
+            expect("the entry put back passes", edit(entry), (0, ""))
+            # Last: on a volume that folds case these name the files above, and a write rewrites them.
+            put("OPS/engineering-log/2026-11/" + entry.rsplit("/", 1)[1], entry_text)
+            expect("an entry's path in another case is refused",
+                   edit("OPS/engineering-log/2026-11/" + entry.rsplit("/", 1)[1])[0], 2)
+            put("ops/Engineering-Log.md", "# Not the frozen archive\n")
+            expect("the archive's name in another case is refused", edit("ops/Engineering-Log.md")[0], 2)
+        finally:
+            log.FROZEN_BYTES, log.FROZEN_SHA256 = frozen
     print("self-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

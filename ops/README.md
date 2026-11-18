@@ -25,16 +25,18 @@ Two different reasons put a file in `ops/`, and only the first is about secrecy:
 
 1. **It must not be published** — the table above. Host coordinates, exploit
    indexes. These are placeholdered or untracked.
-2. **It is internal working material** — `engineering-log.md`,
+2. **It is internal working material** — `engineering-log.md`, `engineering-log/`,
    `History-*.md`, `settings-apply-semantics.md`, `plan-*.md`. Nothing in them is sensitive;
    they simply aren't user-facing documentation, and `docs/` is the public
    website. They are tracked, and normal.
 
-`engineering-log.md` is the record behind every invariant in `CLAUDE.md` and
+The engineering log is the record behind every invariant in `CLAUDE.md` and
 the rules files — the
 measurement that settled it, the alternative that was rejected, the test that
 pins it, the PR. It was extracted from `CLAUDE.md` on 2026-09-02 because that
-file is auto-loaded into every agent session and had grown to 520 KB. **Only
+file is auto-loaded into every agent session and had grown to 520 KB.
+`engineering-log.md` holds it up to 2026-11-18, frozen; every record since is a
+file of its own under `engineering-log/`, named as its `README.md` says. **Only
 `CLAUDE.md` and the rules files are auto-loaded** (`.claude/rules/*.md`, each
 with the code its globs match), so a finding written only into the log never
 reaches a session: put the *rule* in `CLAUDE.md` or the rules file that loads
