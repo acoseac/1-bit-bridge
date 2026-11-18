@@ -422,8 +422,10 @@ func TestBridgeLogsReadsTheHostsLogThroughItsEntryPoint(t *testing.T) {
 // TestBridgeDoctorGradesTheHostsLogThroughItsEntryPoint), and production asks
 // the check its one declaration names, packaging.CheckWindowsInstall: no Go
 // file of this package but a test assigns it or takes its address, and that
-// declaration gives it no type of its own, whose pointer methods would change
-// it with no & written. The walk reads every file the go tool builds here,
+// declaration writes it no type but, at most, an unnamed func type, which has
+// no methods: any other type written (a named type, a selector, a generic
+// instantiation) may be a defined type, whose pointer methods would change it
+// with no & written. The walk reads every file the go tool builds here,
 // whatever its platform, and must find that declaration. It reads each file
 // through seamFindingsIn, which
 // TestTheLogsInstallCheckPinSeesEachWayToChangeIt holds to planted sources.
@@ -453,9 +455,10 @@ func TestNoProductionCodeReassignsTheLogsInstallCheck(t *testing.T) {
 			case seamDeclaredAsAnother:
 				t.Errorf("%s declares %s as something other than packaging.CheckWindowsInstall", c.pos, seam)
 			case seamDeclaredWithAType:
-				t.Errorf("%s declares %s with a type of its own: a method of that type with a pointer receiver "+
-					"changes it, its call taking the address with no &; declared with no type, it has "+
-					"packaging.CheckWindowsInstall's, which has no methods", c.pos, seam)
+				t.Errorf("%s declares %s with a written type other than an unnamed func type (a named type, a "+
+					"selector or a generic instantiation), which may have a method with a pointer receiver that "+
+					"changes it, its call taking the address with no &; declared with no type, or with an unnamed "+
+					"func type, its type has no methods", c.pos, seam)
 			default:
 				changed = append(changed, c.String())
 			}
@@ -493,10 +496,13 @@ const (
 	// seamDeclaredAsAnother is a declaration of the seam whose value is not
 	// packaging.CheckWindowsInstall, or that gives it none.
 	seamDeclaredAsAnother seamFindingKind = "declares it as something other than packaging.CheckWindowsInstall"
-	// seamDeclaredWithAType is a declaration that gives the seam a type of its
-	// own: a named type's method with a pointer receiver can change it, and a
-	// call of that method takes its address with no & written.
-	seamDeclaredWithAType seamFindingKind = "declares it with a type of its own"
+	// seamDeclaredWithAType is a declaration that writes the seam a type other
+	// than an unnamed func type (a named type, a selector pkg.Type, a generic
+	// instantiation): such a type may be a defined type, whose method with a
+	// pointer receiver can change the seam, a call of that method taking its
+	// address with no & written. An unnamed func type, bare or in
+	// parentheses, has no methods and is no finding (isUnnamedFuncType).
+	seamDeclaredWithAType seamFindingKind = "declares it with a written type other than an unnamed func type"
 	// seamAssigned is the seam on the left of an assignment, or as a range
 	// clause's key or value, with either token.
 	seamAssigned seamFindingKind = "assigns it"
@@ -524,7 +530,7 @@ func seamFindingsIn(fset *token.FileSet, f *ast.File, seam string) (declared []t
 				if pkg == "" || len(n.Values) != len(n.Names) || !isSelector(n.Values[i], pkg, "CheckWindowsInstall") {
 					found(id, seamDeclaredAsAnother)
 				}
-				if n.Type != nil {
+				if n.Type != nil && !isUnnamedFuncType(n.Type) {
 					found(id, seamDeclaredWithAType)
 				}
 			}
@@ -560,6 +566,16 @@ func isSeamIdent(e ast.Expr, seam string) bool {
 	return ok && id.Name == seam
 }
 
+// isUnnamedFuncType reports whether a declaration's written type e, its
+// parentheses taken off, is a func type written out, as
+// `func() packaging.WindowsInstall` is: an unnamed type, on which no method
+// can be declared (a method's receiver is a defined type), so a variable of
+// it has no method with a pointer receiver to change it.
+func isUnnamedFuncType(e ast.Expr) bool {
+	_, ok := ast.Unparen(e).(*ast.FuncType)
+	return ok
+}
+
 // TestTheLogsInstallCheckPinSeesEachWayToChangeIt holds seamFindingsIn, the
 // reading TestNoProductionCodeReassignsTheLogsInstallCheck gives each file of
 // the package, to planted files (backlog B618FU), each declaring the seam once,
@@ -570,7 +586,9 @@ func isSeamIdent(e ast.Expr, seam string) bool {
 // iter.Seq, and a declaration of a named type whose pointer method sets it,
 // called with no & written) and the three it caught (an assignment, an address
 // taken, a declaration of another value). A file that only reads the seam,
-// beside a named type whose pointer method sets another variable, has none.
+// beside a named type whose pointer method sets another variable, has none,
+// and so has a file that declares it with an unnamed func type written, bare
+// or in parentheses, and only reads it: that type has no methods.
 func TestTheLogsInstallCheckPinSeesEachWayToChangeIt(t *testing.T) {
 	const header = `package main
 

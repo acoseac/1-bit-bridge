@@ -6410,15 +6410,21 @@ address with no `&` written. Its walk of a file is one helper now,
 identifier's parentheses off before it compares it (`isSeamIdent`, false for
 the key or the value a range clause leaves out), reads a range clause's key and
 value with either token, as it reads an assignment's `=` and `:=`, and finds a
-declaration that gives the seam a type (`seamDeclaredWithAType`, reported in a
-message of its own); the pin keeps its glob, `goToolIgnores`, its two guards
-and its other messages. `TestTheLogsInstallCheckPinSeesEachWayToChangeIt`
+declaration that writes the seam a type other than an unnamed function type
+(`seamDeclaredWithAType`, reported in a message of its own): a named type, a
+selector or a generic instantiation may be a defined type with a pointer
+method, while an unnamed function type, written bare or in parentheses, has no
+methods and is no finding (`isUnnamedFuncType`, since 2026-11-18; until then
+every written type was one, for a reason an unnamed function type cannot
+give); the pin keeps its glob,
+`goToolIgnores`, its two guards and its other messages. `TestTheLogsInstallCheckPinSeesEachWayToChangeIt`
 parses planted files, each declaring the seam once as `logs.go` does but where
 its row is about the declaration: each of the five forms, and of the three the
 pin caught (an assignment, an address taken, a declaration of another value),
 is one finding of its kind on the line planted, and a file that only reads the
 seam (a call, a copy, a comparison with nil, a named type's pointer method used
-on another variable) has none. Two claims were corrected with it. This entry's
+on another variable) has none, nor, since 2026-11-18, has one that declares it
+with an unnamed function type written, bare or in parentheses. Two claims were corrected with it. This entry's
 rule forbade grading a log no path names as the terminal's ok from a shell,
 where round 3 gives that ok off Windows on purpose: it says from a shell on
 Windows now, in `cli-serve.md` and above. And *The console* and round 2 said a

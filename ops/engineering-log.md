@@ -105861,3 +105861,64 @@ last commit (`make fmt`, `make vet`, `make docs-check`, the two tests under
 `-race` once and twenty times, cmd/bridge whole under `-race`, and `go vet` for
 darwin and windows) is in the branch's report: a record cannot hold the runs
 made on its own commit.
+
+## 2026-11-18 — B618FU's pin: an unnamed func type written is no type of its own
+
+Branch `fix/bridge-lows3-1118`, from e7e41bdc (main with B618FU). Two commits:
+3fff8a1c adds two rows to the pin's table, red; this one exempts the type they
+write, corrects the pin's docs, its message and the long form, and appends
+this record. Test code and docs alone; no production code.
+
+### What was true (at e7e41bdc)
+
+`seamFindingsIn` (`cmd/bridge/logs_test.go` 511) reported
+`seamDeclaredWithAType` for every declaration of the seam whose
+`ValueSpec.Type` is not nil (527-529), and the pin's message (455-458) and the
+kind's doc (496-498) gave one reason: a method of that type with a pointer
+receiver changes the seam, its call taking the address with no `&`. That holds
+for a type name, which may name a defined type, and not for a func type written
+out: a method's receiver is a defined type, so an unnamed func type has no
+methods, as the seam's own type, `packaging.CheckWindowsInstall`'s signature,
+has none (the message said so of a declaration with no type). So
+`var logsInstallCheck func() packaging.WindowsInstall = packaging.CheckWindowsInstall`,
+which changes nothing, was a finding for a reason it cannot have, and so was
+the same type in parentheses. `ops/History-rules-cli-serve.md` (6413) said the
+pin finds a declaration that gives the seam a type, any type.
+
+### As built
+
+- `isUnnamedFuncType` (`logs_test.go` 574) answers whether a declaration's
+  written type, its parentheses taken off (`ast.Unparen`), is an
+  `*ast.FuncType`, and the `ValueSpec` arm reports `seamDeclaredWithAType`
+  only for a written type it does not answer for (533). What stays a finding
+  is a written type other than an unnamed func type: a named type, a selector
+  `pkg.Type`, a generic instantiation.
+- Two read-only rows of `TestTheLogsInstallCheckPinSeesEachWayToChangeIt`
+  declare the seam with `func() packaging.WindowsInstall`, bare and in
+  parentheses, call it and compare it with nil, and want no finding. The named
+  type's row stays a finding, and every other row's verdict is as it was.
+- The kind's value names what stays flagged ("declares it with a written type
+  other than an unnamed func type"), and its doc, the pin's message and the
+  docs of the two tests say so; the long form's B618FU paragraph names the
+  exception in place.
+
+### Red first and the controls
+
+Each was predicted in writing before it ran. The controls are `go test
+-overlay` builds of `logs_test.go` mutated in memory by exact-once
+replacements, so the tree was never edited (its status and the file's hash,
+compared before and after, unchanged), run with the release tags, `-count=1
+-v` and `-run` over the pin and its table, on this commit's code.
+
+| | code | predicted red | seen |
+|---|---|---|---|
+| red first | 3fff8a1c: the rows, no exemption | the two new rows, one finding each of kind `seamDeclaredWithAType` | those two, each "a file that only reads the seam has findings ["planted.go:9:5 declares it with a type of its own"], want none"; the nine other rows and the pin green |
+| K0 | no mutation | none | none |
+| K1 | the exemption reverted (`n.Type != nil` alone) | the two new rows | those two, the finding printed with the kind's new value |
+| K2 | `ast.Unparen` dropped from `isUnnamedFuncType` | the parenthesized row alone | that row alone |
+
+### Runs
+
+The gate after the last commit, the two tests under `-race -count=20` and the
+controls run again after this commit among it, is in the branch's report: a
+record cannot hold the runs made on its own commit.
