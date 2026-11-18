@@ -15,7 +15,9 @@ auto-loaded.
   - `<entry>`: the backlog item (`b888`, `b728-b9-pr-3b`), or a topic for an entry with none
     (`ci-ubuntu-2604`); a later entry of the same PR adds a word (`b601-round-2`; pad to two
     digits, `round-02`, where a PR may pass nine rounds, so `ls` keeps them in order);
-  - `<branch>`: your PR's branch, so two PRs never pick one name;
+  - `<branch>`: your PR's branch, as its slug below, so two PRs whose slugs differ never pick
+    one name; two branches can fold to one slug (`fix/foo` and `fix-foo`), and git then
+    reports the second entry of that name as an add/add conflict, never an overwrite;
   - both lowercased, every other run of characters one `-` (`fix/b898-updater-held-binary`
     is `fix-b898-updater-held-binary`), the whole name at most 120 characters. A branch slug
     longer than 56 characters keeps its first 47, then `-` and the first 8 hex digits of the

@@ -2,18 +2,20 @@
 """The engineering log: its archive frozen, and every record since in a file of its own.
 
 ops/engineering-log.md holds every record up to 2026-11-18 and is frozen: its size and the SHA-256
-of its bytes are pinned below, so no edit of it passes. Every record since is a file of its own, so
-that two PRs never write one file (backlog B888: every PR appended to the one log, and each merge
-left every open PR conflicting at its end):
+of its bytes are pinned below, so no edit of it passes. Every record since is a file of its own, which
+its PR adds, so that no PR appends to a file another wrote (backlog B888: every PR appended to the
+one log, and each merge left every open PR conflicting at its end):
 
     ops/engineering-log/<YYYY-MM>/<YYYY-MM-DD>-<entry>--<branch>.md
 
   <YYYY-MM-DD>  the day the entry is written, the date its heading carries; <YYYY-MM> its month
   <entry>       the backlog item (b888, b728-b9-pr-3b), or a topic for an entry with none; a later
                 entry of the same PR adds a word (b601-round-2)
-  <branch>      the PR's branch, so two open PRs never pick one name; a slug longer than 56
-                characters keeps its first 47, then "-" and the first 8 hex digits of the whole
-                slug's SHA-256 (--slug prints it)
+  <branch>      the PR's branch, so two open PRs whose slugs differ never pick one name (two
+                branches can fold to one slug, fix/foo and fix-foo, and git then reports the
+                second entry of that name as an add/add conflict, never an overwrite); a slug
+                longer than 56 characters keeps its first 47, then "-" and the first 8 hex digits
+                of the whole slug's SHA-256 (--slug prints it)
 
 Both are slugs: lowercase letters and digits, each other run of characters one "-", none at either
 end, so the first "--" after the date ends <entry>. The name is at most 120 characters. An entry is
@@ -398,6 +400,7 @@ def self_test():
     expect("a branch's slug", slug("fix/b898-updater-held-binary"), "fix-b898-updater-held-binary")
     expect("a slug lowercases and joins each run with one -", slug("Feat/B888 Log_per--Entry/"), "feat-b888-log-per-entry")
     expect("nothing left is nothing", slug("///"), "")
+    expect("two branch names can fold to one slug", (slug("fix/foo"), slug("fix-foo")), ("fix-foo", "fix-foo"))
     at_bound = "a" * 20 + "-" + "b" * 35
     expect("a slug of 56 characters is kept", slug(at_bound), at_bound)
     long_one = slug("feat/" + "x" * 52)
