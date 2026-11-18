@@ -105750,3 +105750,114 @@ Go 1.27.3 on Linux, the tags `ts_omit_webclient,ts_omit_debugeventbus`:
 203 s: 80 `--- PASS` lines (the test and each of its three cases, 20 times),
 no FAIL, SKIP or data race. The gate's runs on this branch are in the
 report.
+## 2026-11-18 — B618FU: the logs install-check pin sees every way to change the seam; two corrections
+
+Branch `fix/bridge-lows2-1118`, from main f2548960 (c6d4726d and #1501, which
+touches none of the files here but this log's end). One commit carries the
+tests, the comments, the rules line, its long form and this record; no
+production code or behaviour changes.
+
+### What was true (at f2548960, the lines c6d4726d has)
+
+`TestNoProductionCodeReassignsTheLogsInstallCheck` (`cmd/bridge/logs_test.go`
+427-481) held `logsInstallCheck` (`logs.go` 69,
+`var logsInstallCheck = packaging.CheckWindowsInstall`) to its one declaration,
+and its arms tested bare identifiers alone: a declaration's value and never its
+type (454), an assignment's left side (461), `&`'s operand (466), and no range
+clause. Five ways to change the seam passed it: `(logsInstallCheck) = f`;
+`p := &(logsInstallCheck); *p = f`; `for _, logsInstallCheck = range fs {}`;
+`for logsInstallCheck = range seq {}`; and
+`var logsInstallCheck installCheck = packaging.CheckWindowsInstall` beside
+`func (c *installCheck) set(f installCheck) { *c = f }`, whose call
+`logsInstallCheck.set(f)` takes the address with no `&`. `CheckWindowsInstall`
+is a func (`internal/packaging/logpath.go` 148), so declared with no type the
+seam's type is unnamed and has no methods. Each of the five, and the plain
+assignment and address the pin caught, was built as a scratch program, the
+planted file and a main that calls it with a check answering `Startup` true and
+then calls the seam: each printed true, the seam changed, and the file that
+only reads the seam printed false. The scratch was deleted.
+
+Two claims were wrong besides. `.claude/rules/cli-serve.md` 123 and its long
+form (`ops/History-rules-cli-serve.md` 6221) said "Don't … grade a log no path
+names as the terminal's ok from a shell", where B618's round 3 made the warn
+the Windows shell's alone, and off Windows a shell run whose path cannot be
+made is graded the terminal's ok (`shellDoctorLog`, `logs.go` 533-540, and the
+long form's round 3 paragraph). And the History's *The console* (6282-6283) and
+round 2 paragraph (6338-6340) said a console of a bridge run another way beside
+a registered service grades the log, or the file, it writes, as the docs of
+`consoleLogPath` (`logs.go` 462-473), `doctorLogs` (501-510) and
+`adminDoctorRunnerFor` (`doctor.go` 1125-1131) said: a bridge run in the
+foreground writes no log (`internal/packaging/logpath.go` 18), and outside the
+service the console's log is the user's (`logs_test.go` 500).
+
+### As built
+
+The pin's walk of each file is one helper, `seamFindingsIn(fset, f, seam)`
+(`logs_test.go` 511): a parsed file in; the positions it declares the seam at,
+and its findings, each a position and a kind (`seamFinding`,
+`seamFindingKind`), out. Every target, an assignment's left side, `&`'s operand
+and a range clause's key and value, goes through `isSeamIdent` (555), which
+answers false for a nil expression, the key or the value a range clause leaves
+out, before it takes the parentheses off (`ast.Unparen`) and compares the
+identifier. A `*ast.RangeStmt` arm reads `Key` and `Value` with either token,
+as the assignment arm reads `=` and `:=`. A declaration of the seam with a type
+(`n.Type != nil`) is `seamDeclaredWithAType`, which the pin reports in a
+message of its own: the declaration gives the seam a type of its own, whose
+pointer methods change it with no `&` written. The pin (430) keeps its glob,
+`goToolIgnores`, the `parsed < 20` and `len(declared) != 1` guards and its
+messages, byte for byte for the kinds it had, a declaration's reported as each
+file is read and the changes after the guards.
+`TestTheLogsInstallCheckPinSeesEachWayToChangeIt` (574) parses nine planted
+`package main` files (`parser.ParseFile(fset, "planted.go", src, …)`), each
+declaring the seam once as `logs.go` 69 does but the two rows about the
+declaration: the five forms above (the key over an
+`iter.Seq[func() packaging.WindowsInstall]`, the value over a slice), the three
+the pin caught (an assignment, an address taken, a declaration of another
+value), and a control that calls the seam, copies it to a local, compares it
+with nil and uses a named func type's pointer method on another variable. Each
+of the eight asserts one finding, its kind and the line marked `// planted`;
+the control asserts none; every row asserts one declaration.
+
+The rules line and its long form read "…as the terminal's ok from a shell on
+Windows, …", the same words (`cli-serve.md` from 99,325 bytes to 99,336). *The
+console* says a console of a bridge run another way beside a registered service
+"grades the user's log, the one a bridge its sign-in launcher started writes (a
+bridge run in the foreground logs to its terminal, so that file may be an
+earlier launch's)"; round 2's paragraph, which made the same claim, says the
+user's log too; a dated B618FU paragraph closes the B618 section; and round 3's
+paragraph stands as written. The docs of `consoleLogPath`, `doctorLogs` and
+`adminDoctorRunnerFor` say which file the console's export offers and that a
+process run in the foreground writes no log file, so the file named may be an
+earlier launch's. Outside `logs_test.go` the change is comments and docs alone.
+
+### Red first and the controls
+
+Each was predicted in writing before any ran
+(`.tmp/_lows2-1118/predictions.txt`, not committed), and each was a
+`go test -overlay` build of `logs_test.go` mutated in memory by exact-once
+replacements, so the tree was never edited (its status and the file's bytes,
+compared before and after each run, were unchanged), run with the release tags,
+`-count=1 -v` and `-run` over the two tests. Every run was as predicted, and
+the pin's own walk passed in each.
+
+| | mutation | predicted red | seen |
+|---|---|---|---|
+| K0 | none | none | none |
+| red first | the helper's arms as at c6d4726d: no `n.Type` term, no `ast.Unparen` in the assignment and `&` arms, no `RangeStmt` arm | the five missed forms' rows | those five, each "findings [], want one that …, on line 12" (13 for the named type's); the three caught rows and the control green |
+| K1 | the assignment arm without `ast.Unparen` | the parenthesized assignment's row | that row alone |
+| K2 | the `&` arm without it | the parenthesized address's row | that row alone |
+| K3 | no `RangeStmt` arm | the two range rows | those two alone |
+| K4 | no `n.Type` term | the named type's row | that row alone |
+
+### The runs
+
+Before this commit, on its tree, with Go 1.27.3, the release tags and TMPDIR
+`~/onebit/tmp`: go1.27.3's gofmt listed none of the three Go files; `go vet` of
+cmd/bridge was clean; `go test -race -count=20 -v -run` over the two tests
+printed 220 `--- PASS` lines (twenty runs of the two tests and their nine rows)
+and no failure, skip or race report (6.0 s); cmd/bridge's doc guards over the
+tree with this record passed, and so did `make docs-check`. The gate after the
+last commit (`make fmt`, `make vet`, `make docs-check`, the two tests under
+`-race` once and twenty times, cmd/bridge whole under `-race`, and `go vet` for
+darwin and windows) is in the branch's report: a record cannot hold the runs
+made on its own commit.
