@@ -280,6 +280,8 @@ def file_problems(root, rel):
     if state != "file":
         return out + ["stands where %s is %s: an entry is a regular file in real folders, as git keeps "
                       "it" % (at, state)]
+    if not rel.lower().endswith(".md"):
+        return out  # no Markdown, so no record: its name says all there is
     data = read_bytes(root, rel, st)
     if data is None:
         return out + ["could not be read"]
@@ -296,14 +298,18 @@ def git_paths(root, args, env=None):
 
 def listing(root, env=None):
     """(every path git tracks, repository-wide; {path: whether git ignores it} for every untracked
-    path below a top-level folder named like ops in any case, ignored ones included). Untracked
-    paths are judged by their names alone: what an ignored file holds is nobody's to read here."""
+    Markdown file below a top-level folder named like ops in any case, ignored ones included).
+    Untracked paths are judged by their names alone, what an ignored file holds being nobody's to
+    read here, and only a name that could be a record's: one ending in .md that does not begin
+    with "." (an editor's lock, the OS's .DS_Store and a backup's ~ are no records; committed,
+    git lists them as tracked, and they are refused)."""
     tracked = git_paths(root, ["--cached"], env)
     tops = sorted(n for n in os.listdir(root) if n.lower() == "ops" and os.path.isdir(os.path.join(root, n)))
     untracked = {}
     if tops:
         ignored = set(git_paths(root, ["--others", "--ignored", "--exclude-standard", "--"] + tops, env))
-        untracked = {p: p in ignored for p in git_paths(root, ["--others", "--"] + tops, env)}
+        untracked = {p: p in ignored for p in git_paths(root, ["--others", "--"] + tops, env)
+                     if p.lower().endswith(".md") and not p.rsplit("/", 1)[-1].startswith(".")}
     return tracked, untracked
 
 
@@ -566,7 +572,9 @@ def self_test():
             root, env = checkout(tmp, "good")
             put(root, "ops/engineering-log/2026-11/2026-11-20-c--b.md", (head + "x").replace("\n", "\r\n"))
             put(root, "ops/notes-review.md", "a review\n")
-            expect("a good checkout passes, an untracked entry judged by its name alone",
+            for junk in (".DS_Store", ".#2026-11-20-c--b.md", "2026-11-20-c--b.md~", "2026-11-20-hidden.swp"):
+                put(root, "ops/engineering-log/2026-11/" + junk, "junk\n")
+            expect("a good checkout passes, an untracked entry judged by its name alone, no lock or backup read",
                    check(root, size, digest, env), ([], 1))
             put(root, "ops/engineering-log/2026-11/2026-11-20-B--x.md", entry_text)
             put(root, "ops/engineering-log/2026-11/2026-11-20-hidden--x.md", entry_text)
@@ -584,7 +592,8 @@ def self_test():
             crlf = "ops/engineering-log/2026-11/2026-11-20-crlf--b.md"
             put(root, "ops/2026-11-20-b888--feat-x.md", entry_text)
             put(root, crlf, text_for(crlf).replace("\n", "\r\n"))
-            git(root, env, "add", "--", "ops/2026-11-20-b888--feat-x.md", crlf)
+            put(root, "ops/engineering-log/2026-11/.DS_Store", "junk\n")
+            git(root, env, "add", "--", "ops/2026-11-20-b888--feat-x.md", crlf, "ops/engineering-log/2026-11/.DS_Store")
             blob = git(root, env, "hash-object", "-w", "--stdin", data=entry_text.encode("utf-8")).decode().strip()
             git(root, env, "update-index", "--add", "--cacheinfo", "100644,%s,%s" % (blob, "OPS/" + entry[4:]))
             problems, _ = check(root, size, digest, env)
@@ -594,7 +603,9 @@ def self_test():
             expect("a tracked path in another case is misfiled", found(problems, "OPS/" + entry[4:], "lowercase"), True)
             expect("and with its twin it names one file where case folds",
                    any("OPS/%s and %s name one file" % (entry[4:], entry) in p for p in problems), True)
-            expect("nothing else is refused", len(problems), 4)
+            expect("a tracked file that is no entry is refused by its name",
+                   found(problems, "ops/engineering-log/2026-11/.DS_Store", "is not named"), True)
+            expect("nothing else is refused", len(problems), 5)
 
             root, env = checkout(tmp, "other-case", {"Ops/engineering-log/2026-11/2026-11-20-a--b.md": entry_text},
                                  add=False)

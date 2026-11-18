@@ -36,7 +36,9 @@ conflict, so every record since this entry is a file of its own, and the archive
   in a block quote ends where the quote ends. List items are not containers there.
 - **The listing.** `git ls-files -z --cached` repository-wide, so `Ops/…` and `OPS/…` are seen;
   `git ls-files -z --others` below every top-level folder named like `ops` in any case,
-  ignored files included, judged by name alone (what an ignored file holds is not read). A
+  ignored files included, judged by name alone (what an ignored file holds is not read), and
+  only a name that could be a record's: a `.md` not beginning with `.`, so an editor's lock,
+  `.DS_Store` and a backup's `~` fail no local run (committed, they are tracked and refused). A
   misfiled entry is the log's path in another case, a dated Markdown file directly in `ops/`
   (where `ops/*review*.md`, `*audit*` and `*findings*` are ignored, so such an entry could
   vanish from a commit), or a file named like an entry in any other folder. Two of the log's
@@ -93,8 +95,9 @@ tracked file was edited and nothing needed restoring; each went red on the rows 
 - The fences: a closer with text after it, a fence outliving its block quote, a backtick info
   holding a backtick opening a fence.
 - The listing: a literal `ops/` pathspec for the tracked paths, the literal `ops` alone for
-  the untracked scan, ignored files left out, untracked entries judged by content, no
-  case-fold check, an empty listing passing.
+  the untracked scan, ignored files left out, untracked entries judged by content, every
+  untracked name a candidate (a lock's and a backup's too), a file that is no Markdown read as
+  an entry, no case-fold check, an empty listing passing.
 - The hook: no dispatch, a dispatch on the resolved path, a dispatch that heeds case, a path
   `stat` cannot follow taken for a delete, only the last component asked for a link.
 - `verify_rules.py`: no entries' glob, an unanchored recursive one.
