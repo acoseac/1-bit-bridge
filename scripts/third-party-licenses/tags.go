@@ -119,7 +119,7 @@ var reviewedBuildSites = map[string][]string{
 		"BRIDGE_TEST_SMALL_VOLUME=/mnt/b264-small go test -tags @TAGS@ ./internal/transcode/ -run 'TestARenditionThatCouldNotBeWrittenWholeIsNotPublished' -count=1 -v",
 		"GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo \"$TEMP\")",
 		"run: go vet -tags @TAGS@ ./...",
-		"run: go test -tags @TAGS@ -timeout 30m ./...",
+		"go test -tags @TAGS@ -count=1 -timeout 45m -v ./... > \"$log\" 2>&1 || code=$?", // B942's measurement, reverted by the next commit.
 		"go run -tags @TAGS@ ./scripts/dac-profiles/ios-export -check",
 		"go test -tags @TAGS@ ./internal/player/dacprofile ./scripts/dac-profiles/ios-export -count=1 -v",
 	},
