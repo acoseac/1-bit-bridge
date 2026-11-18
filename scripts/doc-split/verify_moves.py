@@ -5,9 +5,11 @@
 
 The knowledge base is CLAUDE.md, AGENTS.md, .claude/rules/*.md, .claude/skills/*/SKILL.md, the
 top-level docs/*.md and the top-level ops/*.md (the History files, the runbooks and the playbook),
-except ops/engineering-log.md: that 3 MB log holds copies of many rules, so counting it would let a
-block lost from an instruction file be "found" there. A restructure moves blocks between them, so
-they are compared as one whole with REV. The working tree must still hold:
+except ops/engineering-log.md, the engineering log's frozen archive: its 7 MB hold copies of many
+rules, so counting it would let a block lost from an instruction file be "found" there; its entries
+(ops/engineering-log/<YYYY-MM>/*.md) sit a folder deeper than ops/*.md, outside it too. A
+restructure moves blocks between them, so they are compared as one whole with REV. The working
+tree must still hold:
   - every block REV had, byte for byte, at least as many times: a block that vanished, shrank or
     grew by a word fails. Relative link targets are compared by the file they point at, so a
     block moved to another folder may carry rebased links (mdblocks.rebase_links). The exception

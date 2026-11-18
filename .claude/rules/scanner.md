@@ -59,7 +59,7 @@ paths:
 
 The walk, the extractors and the tag and header parsers, the deletion and reconciliation passes, the watcher, and the store writes the scanner makes. The highest-stakes area of the codebase: a bug here deletes rows whose files are still on disk.
 
-Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in `ops/engineering-log.md`: grep it by symbol, file or PR number before changing anything a rule names.
+Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in the engineering log, `ops/engineering-log.md` and `ops/engineering-log/`: grep both by symbol, file or PR number before changing anything a rule names.
 
 ## Scanner, deletion passes, and manifest writes
 

@@ -106473,3 +106473,5 @@ vet`, `make docs-check`, the pin's tests under `-race -count=20`, cmd/bridge
 whole under `-race`, the touched tests of internal/admin and internal/doctor,
 and `go vet` for darwin and windows of the touched packages) is in the branch's
 report: a record cannot hold the runs made on its own commit.
+
+**Frozen on 2026-11-18.** This archive ends here, held to the SHA-256 of its bytes (`scripts/check-engineering-log.py`): every record since is a file of its own under [`ops/engineering-log/`](engineering-log/), named as [its README](engineering-log/README.md) says.

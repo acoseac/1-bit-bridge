@@ -23,7 +23,7 @@ paths:
 
 What the `/v1` API and the other wire surfaces promise the app: the served set, optional fields, tombstones, events, query encoding, endpoints and mDNS, and `PROTOCOL.md`. The cross-repo half of the contract (the Mirror-PR pair, `ProtocolVersion`) is in CLAUDE.md under "iOS companion".
 
-Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in `ops/engineering-log.md`: grep it by symbol, file or PR number before changing anything a rule names.
+Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in the engineering log, `ops/engineering-log.md` and `ops/engineering-log/`: grep both by symbol, file or PR number before changing anything a rule names.
 
 ## Wire-type discipline
 

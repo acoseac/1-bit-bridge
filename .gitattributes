@@ -50,3 +50,8 @@ internal/player/openhome/testdata/upstream/License.txt -text
 # OpenHome's upstream service files are pinned by their bytes (CRLF and all,
 # testdata/upstream/README.md lists the sums): no checkout may convert them.
 internal/player/openhome/testdata/upstream/** -text
+# The engineering log's archive is frozen and held to the SHA-256 of its
+# bytes (scripts/check-engineering-log.py); a CRLF checkout would change
+# the digest. Its entries are checked by the same script on every OS.
+ops/engineering-log.md text eol=lf
+ops/engineering-log/** text eol=lf

@@ -169,8 +169,9 @@ is the iOS one:
   iOS run, and the dangerous half is never a dead citation — it is a live
   imperative whose literal implementation reintroduces a fixed defect.**
 - `ops/` carries prior review artifacts (`audit-*.md`, `bug-review-*.md`) and
-  `ops/engineering-log.md`. Read the ones covering this surface before reviewing
-  it, or you will re-derive their conclusions.
+  the engineering log (`ops/engineering-log.md`, frozen on 2026-11-18, and a file
+  per entry under `ops/engineering-log/` since). Read the ones covering this
+  surface before reviewing it, or you will re-derive their conclusions.
 
 ---
 
@@ -450,9 +451,10 @@ make fmt vet test build-all
 
 ## Phase 9 — write down what generalises
 
-[BRIDGE] A dated entry, and the invariants in the rules file that loads with
-the surface's code, under its section (CLAUDE.md's "Where things live" lists
-them; a condensed file takes one line per entry and its long form goes to
+[BRIDGE] A dated entry (a file under `ops/engineering-log/`), and the
+invariants in the rules file that loads with the surface's code, under its
+section (CLAUDE.md's "Where things live" lists them; a condensed file takes
+one line per entry and its long form goes to
 `ops/History-rules-<name>.md`). A cross-cutting run gets one dated line under
 CLAUDE.md's "Review and fix batches — one line each", its record in
 `ops/History-Batches.md`. Include the invariants, the rejected-and-why list, and the **process**

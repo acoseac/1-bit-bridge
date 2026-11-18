@@ -34,7 +34,7 @@ paths:
 
 The config and its live and boot halves, managed settings and controls, service install and restart, atomic writes and file ownership, the token store's writes, the self-updater's binary swap, and the one-line installer (`scripts/install.sh`).
 
-Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in `ops/engineering-log.md`: grep it by symbol, file or PR number before changing anything a rule names.
+Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in the engineering log, `ops/engineering-log.md` and `ops/engineering-log/`: grep both by symbol, file or PR number before changing anything a rule names.
 
 ## Config, settings and process lifecycle
 

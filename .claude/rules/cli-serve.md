@@ -19,7 +19,7 @@ paths:
 
 The subcommands, `bridge init` and its preflight, `bridge doctor`, and `runServe`: its gates, loops, locks, shutdown and drains.
 
-Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in `ops/engineering-log.md`: grep it by symbol, file or PR number before changing anything a rule names.
+Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in the engineering log, `ops/engineering-log.md` and `ops/engineering-log/`: grep both by symbol, file or PR number before changing anything a rule names.
 
 ## The CLI and the serve wiring (`cmd/bridge`)
 

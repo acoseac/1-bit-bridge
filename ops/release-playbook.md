@@ -374,12 +374,14 @@ The operator is fixing every relevant bug before tagging the release, so correct
 Repo and tree
 - CLAUDE.md is ALREADY in your context (loaded automatically) and is the spec, with the rules
   files Claude Code loads beside the files you Read.
-  Do NOT Read it again; grep it for line numbers. Grep ops/engineering-log.md by symbol / file /
-  PR before changing anything a rule names, and read only what you need.
+  Do NOT Read it again; grep it for line numbers. Grep the engineering log (git grep -n <term> --
+  'ops/engineering-log*') by symbol / file / PR before changing anything a rule names, and
+  read only what you need.
 - Keep your context small: ranged reads, capped output (| tail -40, grep -c), never cat a big log.
 - You run in your OWN git worktree; work only there. Start: git fetch origin && git switch -c
   fix/<topic> origin/main. Before merging, git merge origin/main; never rebase or force-push once
-  bots reviewed. CLAUDE.md / ops/engineering-log.md conflicts: keep both sides, the log in date order.
+  bots reviewed. CLAUDE.md conflicts: keep both sides. ops/engineering-log.md is frozen: in a
+  conflict take main's copy, and keep your record in its own file under ops/engineering-log/.
 
 Workflow
 - Red-first tests; -count=1 for any run that proves something. COMMIT before every negative control.
@@ -390,7 +392,8 @@ Workflow
   A test timing out at exactly 600 s is the default -timeout, not a failure.
 - The rule goes in the rules file that loads with the code (CLAUDE.md "Where things live"; a
   condensed file takes one line, the long form its ops/History-rules-*.md), the record in
-  ops/engineering-log.md, all in the SAME PR as the code. Correct any stale claim you find.
+  a new file under ops/engineering-log/ (its README.md names it), all in the SAME PR as the
+  code. Correct any stale claim you find.
 - NO Claude attribution anywhere: no Co-Authored-By trailer, no "Generated with" footer.
 - Follow-ups outside your entry: a new Open entry in ~/Desktop/to-do/bridge-backlog.md (next free
   id; the file's shape; re-read before each edit; Edit tool). Never spawn_task.
