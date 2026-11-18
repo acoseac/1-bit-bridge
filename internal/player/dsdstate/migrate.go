@@ -142,10 +142,15 @@ func RecordToRead(s State, l Legacy) (name string, ask bool) {
 //     on.
 //
 // Once a part is done no step reads the record again, and a DAC bound
-// afterwards takes the defaults. A DAC that has a choice of its own, the
-// app's or the console's (ownChoice), is never migrated: the part done for
-// it writes nothing for it. A choice the migration writes clears no warning,
-// the one written with it included.
+// afterwards takes the defaults. Neither part runs over a state read from
+// schema 1 (its marker schema_1, fromSchema1) or one that did not read. Each
+// part files under the bound unit's own entry, its model's key and its
+// maker's stamp (in.Bound): a unit of another maker on the key keeps its
+// entry as it was, while the key's migration warnings are cleared and shown
+// for every maker sharing it, which explain and permit nothing. A DAC that
+// has a choice of its own, the app's or the console's (ownChoice), is never
+// migrated: the part done for it writes nothing for it. A choice the
+// migration writes clears no warning, the one written with it included.
 func Migrate(s State, in Input) (State, Step, error) {
 	if err := in.Legacy.check(); err != nil {
 		return s, Step{}, err
@@ -185,20 +190,20 @@ func Migrate(s State, in Input) (State, Step, error) {
 	if rec.Outcome < RecordMissing || rec.Outcome > RecordTaken {
 		return s, Step{}, errors.New("dsdstate: the owner's record was not read for the bound DAC")
 	}
-	key := in.Bound.Key
-	own := next.ownChoice(key)
+	key, stamp := in.Bound.Key, in.Bound.Stamp
+	own := next.ownChoice(key, stamp)
 	switch m.WaitingFor {
 	case WaitingForBoundDAC:
 		switch {
 		case rec.Outcome == RecordTaken:
 			if !own {
-				next.recordRows(key, *m, rec, at)
+				next.recordRows(key, stamp, *m, rec, at)
 				m.RecordSHA256 = rec.SHA256
 			}
 			m.WaitingFor = ""
 		default:
 			if !own {
-				next.fallbackRows(key, *m, at)
+				next.fallbackRows(key, stamp, *m, at)
 				w := Warning{Code: WarningMigrationRecordMissing, DAC: &key, At: at}
 				if rec.Outcome == RecordRefused {
 					w.Code, w.Reason = WarningMigrationRecordRefused, rec.Reason
@@ -216,7 +221,7 @@ func Migrate(s State, in Input) (State, Step, error) {
 			return next, step, nil
 		}
 		if !own {
-			next.recordRows(key, *m, rec, at)
+			next.recordRows(key, stamp, *m, rec, at)
 			m.RecordSHA256 = rec.SHA256
 		}
 		m.WaitingFor, step.Changed = "", true
@@ -224,16 +229,17 @@ func Migrate(s State, in Input) (State, Step, error) {
 	return next, step, nil
 }
 
-// ownChoice reports whether key's model has a choice the migration leaves
-// alone: any but the migration's own, at its first revision, which is the
-// fallback a unit of this key got when the reader refused the record for its
-// identity (Codex and the Claude API reviewer on #1405). The model comparison
-// reads fields the key does not hold (the PCM device, the manufacturer
-// string), so the record's own model can be refused as another unit, and its
-// fallback must not keep the record's exact unit from the record's rows. A
-// user's choice is the app's or the console's, so it always wins.
-func (s State) ownChoice(key dacprofile.Key) bool {
-	i := s.dacIndex(key)
+// ownChoice reports whether key's model of stamp's maker has a choice the
+// migration leaves alone: any but the migration's own, at its first revision,
+// which is the fallback a unit of this key and maker got when the reader
+// refused the record for its identity (two reviews of
+// #1405). The model comparison reads fields the key does not hold (the PCM
+// device, the manufacturer string), so the record's own model can be refused
+// as another unit, and its fallback must not keep the record's exact unit
+// from the record's rows. A user's choice is the app's or the console's, so
+// it always wins.
+func (s State) ownChoice(key dacprofile.Key, stamp Stamp) bool {
+	i := s.dacIndex(key, stamp)
 	if i < 0 || s.DACs[i].Choice == nil {
 		return false
 	}
@@ -241,13 +247,13 @@ func (s State) ownChoice(key dacprofile.Key) bool {
 	return c.SetBy != ByMigration || c.Revision != 1
 }
 
-// recordRows writes the rows of a record taken for key (Migrate's doc), into
-// an entry with no choice of its own, or with the migration's fallback,
-// which its choice replaces at the next revision and whose warning it drops
-// (ownChoice): an answer, an acknowledgement or a confirmation the entry
-// holds already stays.
-func (s *State) recordRows(key dacprofile.Key, m Marker, rec Record, at time.Time) {
-	d := s.entry(key)
+// recordRows writes the rows of a record taken for key's model of stamp's
+// maker (Migrate's doc), into an entry with no choice of its own, or with the
+// migration's fallback, which its choice replaces at the next revision, and
+// drops the key's migration warnings (ownChoice): an answer, an
+// acknowledgement or a confirmation the entry holds already stays.
+func (s *State) recordRows(key dacprofile.Key, stamp Stamp, m Marker, rec Record, at time.Time) {
+	d := s.Entry(key, stamp)
 	mode := m.DSDMode
 	revision := uint64(1)
 	if d.Choice != nil {
@@ -296,20 +302,12 @@ func (s *State) recordRows(key dacprofile.Key, m Marker, rec Record, at time.Tim
 	}
 }
 
-// fallbackRows writes the rows of no record, or a refused one, for key
-// (Migrate's doc): native's choice native, dop's dop, auto's nothing.
-func (s *State) fallbackRows(key dacprofile.Key, m Marker, at time.Time) {
+// fallbackRows writes the rows of no record, or a refused one, for key's
+// model of stamp's maker (Migrate's doc): native's choice native, dop's dop,
+// auto's nothing.
+func (s *State) fallbackRows(key dacprofile.Key, stamp Stamp, m Marker, at time.Time) {
 	if m.DSDMode != ModeNative && m.DSDMode != ModeDoP {
 		return
 	}
-	s.entry(key).Choice = &Choice{Mode: m.DSDMode, Revision: 1, SetAt: at, SetBy: ByMigration}
-}
-
-// entry is key's entry, added when the state holds none.
-func (s *State) entry(key dacprofile.Key) *DAC {
-	if i := s.dacIndex(key); i >= 0 {
-		return &s.DACs[i]
-	}
-	s.DACs = append(s.DACs, DAC{Key: key})
-	return &s.DACs[len(s.DACs)-1]
+	s.Entry(key, stamp).Choice = &Choice{Mode: m.DSDMode, Revision: 1, SetAt: at, SetBy: ByMigration}
 }

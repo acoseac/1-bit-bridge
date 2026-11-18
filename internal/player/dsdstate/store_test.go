@@ -18,7 +18,7 @@ import (
 // revision one more.
 func chooseNative(t *testing.T) func(*State) error {
 	return func(st *State) error {
-		d := st.entry(goBar(t))
+		d := st.Entry(goBar(t), iFi)
 		rev := uint64(1)
 		if d.Choice != nil {
 			rev = d.Choice.Revision + 1
@@ -66,7 +66,7 @@ func TestAWriteIsDurableBeforeItReturns(t *testing.T) {
 	if !slices.Contains(got, resolved) {
 		t.Fatalf("Update returned with the directories %v synced, without the data directory %s: not durable", got, resolved)
 	}
-	if mode, _, own := fileState(t, data).ChoiceFor(goBar(t)); mode != ModeNative || !own {
+	if mode, _, own := fileState(t, data).ChoiceFor(goBar(t), iFi); mode != ModeNative || !own {
 		t.Fatalf("the file holds %q (own %v) as Update returns", mode, own)
 	}
 
@@ -75,7 +75,7 @@ func TestAWriteIsDurableBeforeItReturns(t *testing.T) {
 	failing = true
 	mu.Unlock()
 	err = s.Update(func(st *State) error {
-		st.entry(goBar(t)).Choice = &Choice{Mode: ModeOff, Revision: 2, SetAt: t0, SetBy: ByApp}
+		st.Entry(goBar(t), iFi).Choice = &Choice{Mode: ModeOff, Revision: 2, SetAt: t0, SetBy: ByApp}
 		return nil
 	})
 	if !errors.Is(err, atomicwrite.ErrBarrierFailed) {
@@ -128,7 +128,7 @@ func TestADamagedStateRefusesDSDAndIsMovedAside(t *testing.T) {
 	for name, bad := range map[string]string{
 		"not_json":         "{\"schemaVersion\": 1, \"defaultMode\": \"au",
 		"an_unknown_field": `{"schemaVersion": 1, "defaultMode": "auto", "dacs": [], "migratedFrom": null, "warnings": [], "volume": 11}`,
-		"another_schema":   `{"schemaVersion": 2, "defaultMode": "auto", "dacs": [], "migratedFrom": null, "warnings": []}`,
+		"another_schema":   `{"schemaVersion": 3, "defaultMode": "auto", "dacs": [], "migratedFrom": null, "warnings": []}`,
 		"an_empty_rate_list": `{"schemaVersion": 1, "defaultMode": "auto", "dacs": [{"key": {"vendorId": "20b1", "productId": "3009", "interface": 1, "product": "GO bar"}, "choice": null, "dopConfirmed": null,
   "firstUse": [{"transport": "native", "bcdDevice": "0123", "bitRates": [], "acknowledgedAt": "2026-11-05T10:00:00Z"}], "listener": [], "evidence": []}], "migratedFrom": null, "warnings": []}`,
 	} {
@@ -166,7 +166,7 @@ func TestADamagedStateRefusesDSDAndIsMovedAside(t *testing.T) {
 			if after.Unreadable() || after.DefaultMode != ModeOff {
 				t.Fatalf("after a choice the state is %s: want the refusal cleared and defaultMode off", show(t, after))
 			}
-			if mode, _, own := after.ChoiceFor(hugo(t)); mode != ModeOff || own {
+			if mode, _, own := after.ChoiceFor(hugo(t), chord); mode != ModeOff || own {
 				t.Fatalf("another DAC takes %q after the choice, want off, never converted on a guess", mode)
 			}
 			if _, err := os.Stat(r.Aside); err != nil {
@@ -335,7 +335,7 @@ func TestWritesSerializeOnTheStore(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	d, _ := fileState(t, data).DAC(goBar(t))
+	d, _ := fileState(t, data).DAC(goBar(t), iFi)
 	if d.Choice == nil || d.Choice.Revision != writers {
 		t.Fatalf("after %d writes at once the revision is %+v, want %d", writers, d.Choice, writers)
 	}
@@ -347,7 +347,7 @@ func sizedState(t *testing.T, n int) State {
 	t.Helper()
 	of := func(product string) State {
 		k := newKey(t, 0x20b1, 0x3009, ptr(1), &product)
-		return State{DefaultMode: ModeAuto, DACs: []DAC{{Key: k, Choice: &Choice{Mode: ModeNative, Revision: 1, SetAt: t0, SetBy: ByApp}}}}
+		return State{DefaultMode: ModeAuto, DACs: []DAC{{Key: k, Stamp: iFi, Choice: &Choice{Mode: ModeNative, Revision: 1, SetAt: t0, SetBy: ByApp}}}}
 	}
 	b, err := of("x").encode()
 	if err != nil {
@@ -423,7 +423,7 @@ func TestAnUnreadableStateMovedAwayIsWritableAgain(t *testing.T) {
 	}
 	want := Refusing(t0)
 	want.Warnings = nil
-	want.DACs = []DAC{{Key: goBar(t), Choice: &Choice{Mode: ModeNative, Revision: 1, SetAt: t0, SetBy: ByApp}}}
+	want.DACs = []DAC{{Key: goBar(t), Stamp: iFi, Choice: &Choice{Mode: ModeNative, Revision: 1, SetAt: t0, SetBy: ByApp}}}
 	if got := fileState(t, data); !reflect.DeepEqual(got.normalized(), want.normalized()) {
 		t.Fatalf("the state written is %s, want the choice on the state that refuses, its refusal cleared", show(t, got))
 	}
@@ -433,7 +433,7 @@ func TestAnUnreadableStateMovedAwayIsWritableAgain(t *testing.T) {
 	if err := s.Update(chooseNative(t)); err != nil {
 		t.Fatalf("a write over the store's own file = %v: the store kept looking once its own write had landed", err)
 	}
-	if d, _ := fileState(t, data).DAC(goBar(t)); d.Choice == nil || d.Choice.Revision != 2 {
+	if d, _ := fileState(t, data).DAC(goBar(t), iFi); d.Choice == nil || d.Choice.Revision != 2 {
 		t.Fatalf("the second write left %+v, want the choice at revision 2", d.Choice)
 	}
 }

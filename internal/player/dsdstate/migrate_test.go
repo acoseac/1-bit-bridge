@@ -74,13 +74,13 @@ func TestTheMigrationTable(t *testing.T) {
 		{name: "native and a record taken", legacy: Legacy{DSDMode: ModeNative, DSDQualification: "approved.json"},
 			record: takenRecord([]int{DSD64, DSD128}, []int{DSD64}, "2026-10-01"),
 			want: State{DefaultMode: ModeAuto, MigratedFrom: marker(Legacy{DSDMode: ModeNative, DSDQualification: "approved.json"}, "", digest),
-				DACs: []DAC{{Key: gb, Choice: migrated(ModeNative),
+				DACs: []DAC{{Key: gb, Stamp: iFi, Choice: migrated(ModeNative),
 					FirstUse: []FirstUse{acknowledged(TransportNative, DSD64, DSD128)},
 					Listener: []Answer{clean(TransportNative, DSD64, "2026-10-01"), clean(TransportNative, DSD128, "2026-10-01")}}}}},
 		{name: "dop, allowDoP true and a record taken", legacy: Legacy{DSDMode: ModeDoP, AllowDoP: yes, DSDQualification: "approved.json"},
 			record: takenRecord([]int{DSD128}, []int{DSD64}, ""),
 			want: State{DefaultMode: ModeAuto, MigratedFrom: marker(Legacy{DSDMode: ModeDoP, AllowDoP: yes, DSDQualification: "approved.json"}, "", digest),
-				DACs: []DAC{{Key: gb, Choice: migrated(ModeDoP), DoPConfirmed: confirmedByMigration,
+				DACs: []DAC{{Key: gb, Stamp: iFi, Choice: migrated(ModeDoP), DoPConfirmed: confirmedByMigration,
 					FirstUse: []FirstUse{acknowledged(TransportDoP, DSD64)},
 					Listener: []Answer{clean(TransportDoP, DSD64, "")}}}}},
 		{name: "dop, allowDoP false: defaultMode off, migrated_off", legacy: Legacy{DSDMode: ModeDoP, AllowDoP: no, DSDQualification: "approved.json"},
@@ -94,27 +94,27 @@ func TestTheMigrationTable(t *testing.T) {
 		{name: "auto, allowDoP true and a record taken", legacy: Legacy{DSDMode: ModeAuto, AllowDoP: yes, DSDQualification: "approved.json"},
 			record: takenRecord([]int{DSD64}, []int{DSD128}, "2026-10-01"),
 			want: State{DefaultMode: ModeAuto, MigratedFrom: marker(Legacy{DSDMode: ModeAuto, AllowDoP: yes, DSDQualification: "approved.json"}, "", digest),
-				DACs: []DAC{{Key: gb, Choice: migrated(ModeAuto), DoPConfirmed: confirmedByMigration,
+				DACs: []DAC{{Key: gb, Stamp: iFi, Choice: migrated(ModeAuto), DoPConfirmed: confirmedByMigration,
 					FirstUse: []FirstUse{acknowledged(TransportNative, DSD64), acknowledged(TransportDoP, DSD128)},
 					Listener: []Answer{clean(TransportNative, DSD64, "2026-10-01"), clean(TransportDoP, DSD128, "2026-10-01")}}}}},
 		{name: "auto, allowDoP false and a record taken: DoP heard, not acknowledged", legacy: Legacy{DSDMode: ModeAuto, AllowDoP: no, DSDQualification: "approved.json"},
 			record: takenRecord([]int{DSD64}, []int{DSD128}, ""),
 			want: State{DefaultMode: ModeAuto, MigratedFrom: marker(Legacy{DSDMode: ModeAuto, AllowDoP: no, DSDQualification: "approved.json"}, "", digest),
-				DACs: []DAC{{Key: gb, Choice: migrated(ModeAuto),
+				DACs: []DAC{{Key: gb, Stamp: iFi, Choice: migrated(ModeAuto),
 					FirstUse: []FirstUse{acknowledged(TransportNative, DSD64)},
 					Listener: []Answer{clean(TransportNative, DSD64, ""), clean(TransportDoP, DSD128, "")}}}}},
 		{name: "native and no record", legacy: Legacy{DSDMode: ModeNative}, record: missingRecord,
 			want: State{DefaultMode: ModeAuto, MigratedFrom: marker(Legacy{DSDMode: ModeNative}, "", ""),
-				DACs: []DAC{{Key: gb, Choice: migrated(ModeNative)}}, Warnings: warnOf(WarningMigrationRecordMissing, "")}},
+				DACs: []DAC{{Key: gb, Stamp: iFi, Choice: migrated(ModeNative)}}, Warnings: warnOf(WarningMigrationRecordMissing, "")}},
 		{name: "native and a refused record", legacy: Legacy{DSDMode: ModeNative, DSDQualification: "approved.json"}, record: refusedRecord(ReasonStaleVersion),
 			want: State{DefaultMode: ModeAuto, MigratedFrom: marker(Legacy{DSDMode: ModeNative, DSDQualification: "approved.json"}, "", ""),
-				DACs: []DAC{{Key: gb, Choice: migrated(ModeNative)}}, Warnings: warnOf(WarningMigrationRecordRefused, ReasonStaleVersion)}},
+				DACs: []DAC{{Key: gb, Stamp: iFi, Choice: migrated(ModeNative)}}, Warnings: warnOf(WarningMigrationRecordRefused, ReasonStaleVersion)}},
 		{name: "dop, allowDoP true and no record", legacy: Legacy{DSDMode: ModeDoP, AllowDoP: yes, DSDQualification: "approved.json"}, record: missingRecord,
 			want: State{DefaultMode: ModeAuto, MigratedFrom: marker(Legacy{DSDMode: ModeDoP, AllowDoP: yes, DSDQualification: "approved.json"}, "", ""),
-				DACs: []DAC{{Key: gb, Choice: migrated(ModeDoP)}}, Warnings: warnOf(WarningMigrationRecordMissing, "")}},
+				DACs: []DAC{{Key: gb, Stamp: iFi, Choice: migrated(ModeDoP)}}, Warnings: warnOf(WarningMigrationRecordMissing, "")}},
 		{name: "dop, allowDoP true and a refused record", legacy: Legacy{DSDMode: ModeDoP, AllowDoP: yes, DSDQualification: "approved.json"}, record: refusedRecord(ReasonHashMismatch),
 			want: State{DefaultMode: ModeAuto, MigratedFrom: marker(Legacy{DSDMode: ModeDoP, AllowDoP: yes, DSDQualification: "approved.json"}, "", ""),
-				DACs: []DAC{{Key: gb, Choice: migrated(ModeDoP)}}, Warnings: warnOf(WarningMigrationRecordRefused, ReasonHashMismatch)}},
+				DACs: []DAC{{Key: gb, Stamp: iFi, Choice: migrated(ModeDoP)}}, Warnings: warnOf(WarningMigrationRecordRefused, ReasonHashMismatch)}},
 		{name: "auto and no record: the defaults, the warning", legacy: Legacy{DSDMode: ModeAuto}, record: missingRecord,
 			want: State{DefaultMode: ModeAuto, MigratedFrom: marker(Legacy{DSDMode: ModeAuto}, "", ""), Warnings: warnOf(WarningMigrationRecordMissing, "")}},
 		{name: "auto and a refused record: the defaults, the warning", legacy: Legacy{DSDMode: ModeAuto, DSDQualification: "approved.json"}, record: refusedRecord(ReasonUnreadable),
@@ -175,7 +175,7 @@ func TestTheBridgesPartIsAtOnceAndADACsWaits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode, _, own := s.ChoiceFor(goBar(t)); mode != ModeNative || !own || s.DefaultMode != ModeAuto {
+	if mode, _, own := s.ChoiceFor(goBar(t), iFi); mode != ModeNative || !own || s.DefaultMode != ModeAuto {
 		t.Fatalf("the bound DAC's part took %q (own %v), defaultMode %q: want the keys the migration took, native", mode, own, s.DefaultMode)
 	}
 	if _, _, err := Migrate(s, Input{Legacy: l, Bound: bound(t), Now: t0}); err != nil {
@@ -198,7 +198,7 @@ func TestAMigratedAcknowledgementListsItsRecordsRates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, _ := s.DAC(gb)
+	d, _ := s.DAC(gb, iFi)
 	if len(d.FirstUse) != 1 || !reflect.DeepEqual(d.FirstUse[0].BitRates, []int{DSD64}) {
 		t.Fatalf("the migrated first use is %+v, want DSD64 alone", d.FirstUse)
 	}
@@ -219,7 +219,7 @@ func TestAMigratedAcknowledgementListsItsRecordsRates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, _ = s.DAC(gb)
+	d, _ = s.DAC(gb, iFi)
 	if len(d.FirstUse) != 1 || d.FirstUse[0].Transport != TransportNative || d.DoPConfirmed != nil {
 		t.Fatalf("a native-only record under auto with allowDoP gives %+v, confirmed %+v: want native alone acknowledged and DoP neither acknowledged nor confirmed", d.FirstUse, d.DoPConfirmed)
 	}
@@ -339,7 +339,7 @@ func TestTheMigrationRunsOnce(t *testing.T) {
 	}
 	// The user chooses since: convert, for the GO bar.
 	if err := s.Update(func(st *State) error {
-		st.entry(goBar(t)).Choice = &Choice{Mode: ModeConvert, Revision: 2, SetAt: t0, SetBy: ByApp}
+		st.Entry(goBar(t), iFi).Choice = &Choice{Mode: ModeConvert, Revision: 2, SetAt: t0, SetBy: ByApp}
 		st.ClearWarningsFor(goBar(t))
 		return nil
 	}); err != nil {
@@ -368,7 +368,7 @@ func TestTheMigrationRunsOnce(t *testing.T) {
 	if _, err := openAt(t, data, options{}).Migrate(recordDir, l, bound(t)); err != nil {
 		t.Fatal(err)
 	}
-	if mode, _, own := fileState(t, data).ChoiceFor(goBar(t)); mode != ModeNative || !own {
+	if mode, _, own := fileState(t, data).ChoiceFor(goBar(t), iFi); mode != ModeNative || !own {
 		t.Fatalf("after the state was deleted the migration gave %q (own %v), want the keys migrated again: native", mode, own)
 	}
 
@@ -379,7 +379,7 @@ func TestTheMigrationRunsOnce(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(fresh, FileName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a fresh install with no legacy key wrote a state: %v", err)
 	}
-	written := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: brooklyn(t), Choice: &Choice{Mode: ModeConvert, Revision: 1, SetAt: t0, SetBy: ByApp}}}}
+	written := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: brooklyn(t), Stamp: mytek, Choice: &Choice{Mode: ModeConvert, Revision: 1, SetAt: t0, SetBy: ByApp}}}}
 	if got, step, err := Migrate(written, Input{Legacy: Legacy{}, Bound: bound(t), Now: t0}); err != nil || step.Changed || !reflect.DeepEqual(got, written) {
 		t.Fatalf("a step with no key over a state its first write made changed it: %+v %v", step, err)
 	}
@@ -394,12 +394,12 @@ func TestTheMigrationRunsOnce(t *testing.T) {
 // defaults and is not written for.
 func TestADACBoundLaterIsTheRecordsOrTakesTheDefaults(t *testing.T) {
 	l := Legacy{DSDMode: ModeNative, DSDQualification: "approved.json"}
-	first := &Bound{Key: brooklyn(t)}
+	first := &Bound{Key: brooklyn(t), Stamp: mytek}
 	s, _, err := Migrate(Defaults(), Input{Legacy: l, Bound: first, Record: refusedRecord(ReasonIdentityMismatch), Now: t0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode, _, own := s.ChoiceFor(brooklyn(t)); mode != ModeNative || !own {
+	if mode, _, own := s.ChoiceFor(brooklyn(t), mytek); mode != ModeNative || !own {
 		t.Fatalf("the first DAC, another model, took %q (own %v), want the fallback's native", mode, own)
 	}
 	bk := brooklyn(t)
@@ -417,7 +417,7 @@ func TestADACBoundLaterIsTheRecordsOrTakesTheDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, ok := s.DAC(goBar(t))
+	d, ok := s.DAC(goBar(t), iFi)
 	if !ok || d.Choice == nil || d.Choice.Mode != ModeNative || len(d.Listener) != 1 || len(d.FirstUse) != 1 {
 		t.Fatalf("the record's model, bound later, holds %+v: want the record's rows", d)
 	}
@@ -427,12 +427,12 @@ func TestADACBoundLaterIsTheRecordsOrTakesTheDefaults(t *testing.T) {
 	if name, ask := RecordToRead(s, l); ask {
 		t.Fatalf("RecordToRead once the record was taken asks %q", name)
 	}
-	third := &Bound{Key: hugo(t)}
+	third := &Bound{Key: hugo(t), Stamp: chord}
 	after, step, err := Migrate(s, Input{Legacy: l, Bound: third, Now: t0})
 	if err != nil || step.Changed || !reflect.DeepEqual(after, s) {
 		t.Fatalf("a third DAC bound once the record was taken changed the state: %+v, %v", step, err)
 	}
-	if mode, _, own := after.ChoiceFor(hugo(t)); mode != ModeAuto || own {
+	if mode, _, own := after.ChoiceFor(hugo(t), chord); mode != ModeAuto || own {
 		t.Fatalf("the third DAC takes %q (own %v), want the defaults", mode, own)
 	}
 }
@@ -451,13 +451,13 @@ func TestTheMigrationNeverOverwritesAChoice(t *testing.T) {
 		{Mode: ModeOff, Revision: 1, SetAt: t0, SetBy: ByConsole},
 		{Mode: ModeConvert, Revision: 7, SetAt: t0, SetBy: ByApp},
 	} {
-		own := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: gb, Choice: &choice}}}
+		own := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: gb, Stamp: iFi, Choice: &choice}}}
 		for _, rec := range []Record{takenRecord([]int{DSD64}, []int{DSD128}, ""), missingRecord, refusedRecord(ReasonStaleVersion), refusedRecord(ReasonIdentityMismatch)} {
 			got, _, err := Migrate(own, Input{Legacy: Legacy{DSDMode: ModeAuto, AllowDoP: ptr(true), DSDQualification: "approved.json"}, Bound: bound(t), Record: rec, Now: t0})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if d, _ := got.DAC(gb); !reflect.DeepEqual(d, own.DACs[0]) || len(got.Warnings) != 0 {
+			if d, _ := got.DAC(gb, iFi); !reflect.DeepEqual(d, own.DACs[0]) || len(got.Warnings) != 0 {
 				t.Fatalf("a record %v migrated over the DAC's own choice %+v: %s", rec.Outcome, choice, show(t, got))
 			}
 			if got.MigratedFrom.RecordSHA256 != "" {

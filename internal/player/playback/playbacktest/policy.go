@@ -45,6 +45,10 @@ func DACKey() dacprofile.Key {
 	return k
 }
 
+// DACStamp is the test DAC's maker as the state keys its entry
+// (dsdstate.StampOf of DACManufacturer).
+func DACStamp() dsdstate.Stamp { return dsdstate.StampOf(DACManufacturer) }
+
 // DACUSB is the test DAC's unit as sysfs reads it, at enumeration devnum.
 func DACUSB(devnum int) alsa.USBIdentity {
 	if devnum == 0 {
@@ -314,7 +318,7 @@ func (m *MemStore) Writes() int {
 // Evidence is what the state holds as observed of the test DAC's transport in
 // f at bitRate under its firmware, nil when nothing.
 func Evidence(st dsdstate.State, transport, f string, bitRate int) *dsdstate.Evidence {
-	d, ok := st.DAC(DACKey())
+	d, ok := st.DAC(DACKey(), DACStamp())
 	if !ok {
 		return nil
 	}
@@ -328,7 +332,7 @@ func Evidence(st dsdstate.State, transport, f string, bitRate int) *dsdstate.Evi
 
 // FirstUseOf is the test DAC's first-use entry for transport, nil when none.
 func FirstUseOf(st dsdstate.State, transport string) *dsdstate.FirstUse {
-	d, ok := st.DAC(DACKey())
+	d, ok := st.DAC(DACKey(), DACStamp())
 	if !ok {
 		return nil
 	}
@@ -348,7 +352,7 @@ func MigratedState(mode string, allowDoP bool, native, dop []int) dsdstate.State
 	allow := allowDoP
 	st, _, err := dsdstate.Migrate(dsdstate.Defaults(), dsdstate.Input{
 		Legacy: dsdstate.Legacy{DSDMode: mode, AllowDoP: &allow, DSDQualification: "dsd-qualification.json"},
-		Bound:  &dsdstate.Bound{Key: DACKey()},
+		Bound:  &dsdstate.Bound{Key: DACKey(), Stamp: DACStamp()},
 		Record: dsdstate.Record{Outcome: dsdstate.RecordTaken, SHA256: "5eed", BCDDevice: DACBCD, QualifiedOn: "2026-10-01",
 			Native: slices.Clone(native), DoP: slices.Clone(dop)},
 		Now: T0,
@@ -429,6 +433,7 @@ var T0 = time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
 func ChoiceState(mode string) dsdstate.State {
 	return dsdstate.State{DefaultMode: dsdstate.ModeAuto, DACs: []dsdstate.DAC{{
 		Key:          DACKey(),
+		Stamp:        DACStamp(),
 		Choice:       &dsdstate.Choice{Mode: mode, Revision: 1, SetAt: T0, SetBy: dsdstate.ByApp},
 		DoPConfirmed: &dsdstate.DoPConfirmation{BCDDevice: DACBCD, ConfirmedAt: T0, SetBy: dsdstate.ByApp},
 		FirstUse: []dsdstate.FirstUse{

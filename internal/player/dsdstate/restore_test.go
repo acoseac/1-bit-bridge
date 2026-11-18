@@ -25,8 +25,8 @@ import (
 // DAC left holding nothing. Bytes that do not decode are installed as they
 // are, so the next load refuses them.
 func TestARestoreKeepsWhatWasChosenAndHeard(t *testing.T) {
-	snapshot := schemaOneState(t)
-	snapshot.DACs = append(snapshot.DACs, DAC{Key: brooklyn(t), Evidence: []Evidence{{Transport: TransportDoP, Format: "S32_LE", BitRate: DSD128, BCDDevice: "0100", StreamingObservedAt: t0}}})
+	snapshot := everyFieldState(t)
+	snapshot.DACs = append(snapshot.DACs, DAC{Key: brooklyn(t), Stamp: mytek, Evidence: []Evidence{{Transport: TransportDoP, Format: "S32_LE", BitRate: DSD128, BCDDevice: "0100", StreamingObservedAt: t0}}})
 	in, err := snapshot.encode()
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestARestoreKeepsWhatWasChosenAndHeard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := schemaOneState(t)
+	want := everyFieldState(t)
 	want.DACs[1].Evidence = nil
 	want.DACs[1].FirstUse[0].ObservedAt = time.Time{}
 	if !reflect.DeepEqual(got.normalized(), want.normalized()) {
@@ -60,7 +60,7 @@ func TestARestoreReplacesTheBoxsStateDurably(t *testing.T) {
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	data := t.TempDir()
 	path := filepath.Join(data, FileName)
-	box := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: hugo(t), Choice: &Choice{Mode: ModeConvert, Revision: 1, SetAt: t0, SetBy: ByApp}}}}
+	box := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: hugo(t), Stamp: chord, Choice: &Choice{Mode: ModeConvert, Revision: 1, SetAt: t0, SetBy: ByApp}}}}
 	b, err := box.encode()
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestARestoreReplacesTheBoxsStateDurably(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	snap, err := schemaOneState(t).encode()
+	snap, err := everyFieldState(t).encode()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestARestoreReplacesTheBoxsStateDurably(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := fileState(t, data)
-	if mode, _, own := got.ChoiceFor(hugo(t)); mode != ModeAuto || own {
+	if mode, _, own := got.ChoiceFor(hugo(t), chord); mode != ModeAuto || own {
 		t.Fatalf("the box's own choice survived the restore: %q (own %v)", mode, own)
 	}
 	if want, err := ForRestore(snap); err != nil || string(want) != string(mustRead(t, path)) {
@@ -104,7 +104,7 @@ func mustRead(t *testing.T, path string) []byte {
 
 // compactSnapshot is a snapshot's state of dacs DAC models, each with a
 // choice, an acknowledgement and an evidence entry observed, and answers
-// listener answers, each of a tuple of its own, as a writer of schema 1
+// listener answers, each of a tuple of its own, as a writer of schema 2
 // writes it with nothing between its tokens: the file's own shape, marshalled
 // with no white space.
 func compactSnapshot(t *testing.T, dacs, answers int) []byte {
@@ -115,6 +115,7 @@ func compactSnapshot(t *testing.T, dacs, answers int) []byte {
 		product := fmt.Sprintf("DAC %03d", i)
 		d := dacJSON{
 			Key:      keyJSON{VendorID: "20b1", ProductID: fmt.Sprintf("%04x", 0x3100+i), Interface: ptr(1), Product: &product},
+			Stamp:    iFi,
 			Choice:   &Choice{Mode: ModeNative, Revision: 1, SetAt: t0, SetBy: ByApp},
 			FirstUse: []FirstUse{{Transport: TransportNative, BCDDevice: "0100", AcknowledgedAt: t0, ObservedAt: t0}},
 			Listener: []Answer{},
@@ -190,7 +191,7 @@ func TestARestoreOfAStateTheReaderTakesKeepsNothingObserved(t *testing.T) {
 func TestARestoreThatCannotWriteItsStateRestoresNothing(t *testing.T) {
 	durable(t)
 	product := "A" + strings.Repeat(" ", 200_000) + "Z"
-	snap := []byte(`{"schemaVersion":1,"defaultMode":"auto","dacs":[{"key":{"vendorId":"20b1","productId":"3009","interface":1,"product":"` + product + `"},` +
+	snap := []byte(`{"schemaVersion":2,"defaultMode":"auto","dacs":[{"key":{"vendorId":"20b1","productId":"3009","interface":1,"product":"` + product + `"},"stamp":"` + string(iFi) + `",` +
 		`"choice":{"mode":"native","maxBitRate":0,"revision":1,"setAt":"2026-11-05T10:00:00Z","setBy":"app"},"dopConfirmed":null,"firstUse":[],"listener":[],` +
 		`"evidence":[{"transport":"native","format":"DSD_U32_BE","bitRate":2822400,"bcdDevice":"0100","driverAcceptedAt":"2026-11-05T10:00:00Z","kernel":"6.12.47-v8-16k+"}]}],` +
 		`"migratedFrom":null,"warnings":[]}`)
@@ -199,7 +200,7 @@ func TestARestoreThatCannotWriteItsStateRestoresNothing(t *testing.T) {
 	}
 	data := t.TempDir()
 	path := filepath.Join(data, FileName)
-	box, err := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: hugo(t), Choice: &Choice{Mode: ModeConvert, Revision: 1, SetAt: t0, SetBy: ByApp}}}}.encode()
+	box, err := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: hugo(t), Stamp: chord, Choice: &Choice{Mode: ModeConvert, Revision: 1, SetAt: t0, SetBy: ByApp}}}}.encode()
 	if err != nil {
 		t.Fatal(err)
 	}

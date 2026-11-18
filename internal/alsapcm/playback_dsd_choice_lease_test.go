@@ -32,7 +32,7 @@ func (d *dsdRig) choiceOf(mode string) playback.ChoiceRequest {
 	if p.DSD == nil || p.DSD.DAC == nil {
 		d.t.Fatalf("the backend publishes no DAC: %+v", p.DSD)
 	}
-	return playback.ChoiceRequest{DACKey: p.DSD.DAC.Key, Choice: policy.Choice{BaseRevision: p.DSD.DAC.Choice.Revision, Mode: mode, By: dsdstate.ByApp}}
+	return playback.ChoiceRequest{DACKey: p.DSD.DAC.Key, ObservedStamp: playbacktest.DACStamp(), Choice: policy.Choice{BaseRevision: p.DSD.DAC.Choice.Revision, Mode: mode, By: dsdstate.ByApp}}
 }
 
 // write asks a write of mode, bounded by the watchdog.

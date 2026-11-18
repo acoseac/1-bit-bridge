@@ -1,9 +1,9 @@
 // Package dsdstate is the bridge player's DSD state (B728 B3;
 // ops/plan-b728-dsd-capability-design.md, sections 2.5 and 3.6): what the
-// user chose for each DAC model and what was heard and observed on it, kept
-// in <dataDir>/player-dsd.json, schema 1, beside the player's queue, and the
-// logic of the one migration of the legacy keys (dsdMode, allowDoP and
-// dsdQualification) into it. Serve's player opens it at its start and runs
+// user chose for each DAC model of each maker and what was heard and observed
+// on it, kept in <dataDir>/player-dsd.json, schema 2, beside the player's
+// queue, and the logic of the one migration of the legacy keys (dsdMode,
+// allowDoP and dsdQualification) into it. Serve's player opens it at its start and runs
 // the migration (B6; cmd/bridge's playerDSD), and bridge output play its own
 // in its state directory; since the cutover (B7) the player plays by it: the
 // effective policy (B5) reads it at every refresh, and playback writes into
@@ -11,8 +11,14 @@
 // observed). No approval record decides DSD any more.
 //
 // A DAC is keyed by its model, dacprofile.Key (B2's: the vendor and product
-// IDs, the interface and the product string), never by a serial, a port, a
-// card number or a device number, none of which the file holds. The state
+// IDs, the interface and the product string), and its maker's Stamp, a
+// digest of the unit's manufacturer string as the box's readers return it,
+// so a unit of another maker that shares the key reads none of another's
+// entry; never by a serial, a port, a card number or a device number, none of
+// which the file holds. A schema-1 file, an earlier build's, whose entries
+// named no maker, is read by its own rules and held with none of its entries
+// and no migration to run over it (Decode); its bytes stay until a write
+// changes that state, which writes schema 2. The state
 // keeps a bridge-wide defaultMode, the mode a DAC with no choice of its own
 // takes (auto, or off where an explicit dsdMode: off was migrated or the
 // state did not read), and per DAC: its choice, with the revision B9's

@@ -379,7 +379,7 @@ func TestAConvertedEntryCarriesItsPlan(t *testing.T) {
 			// What was observed of native DSD64 on this box, before its choice
 			// went back to the bridge's auto, which converts on an unknown DAC.
 			st := dsdstate.Defaults()
-			st.DACs = []dsdstate.DAC{{Key: playbacktest.DACKey(), Evidence: []dsdstate.Evidence{{Transport: dsdstate.TransportNative, Format: string(format.DSDU32BE),
+			st.DACs = []dsdstate.DAC{{Key: playbacktest.DACKey(), Stamp: playbacktest.DACStamp(), Evidence: []dsdstate.Evidence{{Transport: dsdstate.TransportNative, Format: string(format.DSDU32BE),
 				BitRate: playbacktest.DSD64, BCDDevice: playbacktest.DACBCD, StreamingObservedAt: playbacktest.T0}}}}
 			b := readSideBackend(t, box, playbacktest.NewMemStore(st))
 			f := readSideFacts(t, b, config.PlayerDevice{})
@@ -609,7 +609,7 @@ func TestNoDACKeyOrModelCarriesASerialOrAPort(t *testing.T) {
 			t.Fatal(err)
 		}
 		st := playbacktest.ChoiceState(dsdstate.ModeNative)
-		st.DACs[0].Key = key
+		st.DACs[0].Key, st.DACs[0].Stamp = key, dsdstate.StampOf(unitWith(serial).Manufacturer)
 		st.Warnings = []dsdstate.Warning{{Code: dsdstate.WarningMigrationRecordMissing, DAC: &key, At: playbacktest.T0}}
 		b := readSideBackend(t, box, playbacktest.NewMemStore(st), func(p *playback.DSDPolicy) {
 			p.Profiles = profiles
@@ -765,7 +765,7 @@ func TestARetainedObservationKeepsItsOwnDACsEvidence(t *testing.T) {
 		state func(st dsdstate.State, key dacprofile.Key) dsdstate.State
 	}{
 		{"another DAC in the bound port", otherModel, func(st dsdstate.State, key dacprofile.Key) dsdstate.State {
-			st.DACs = append(st.DACs, dsdstate.DAC{Key: key, Choice: &dsdstate.Choice{Mode: native, Revision: 1, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp},
+			st.DACs = append(st.DACs, dsdstate.DAC{Key: key, Stamp: playbacktest.DACStamp(), Choice: &dsdstate.Choice{Mode: native, Revision: 1, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp},
 				FirstUse: []dsdstate.FirstUse{{Transport: native, BCDDevice: playbacktest.DACBCD, AcknowledgedAt: playbacktest.T0}},
 				Listener: []dsdstate.Answer{listened(playbacktest.DACBCD)}})
 			return st

@@ -153,7 +153,7 @@ func migrated(t *testing.T, mode string, allowDoP bool) dsdstate.State {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound := &dsdstate.Bound{Key: dacKey(t), Identity: qualification.Identity{Vendor: "1234", ProductID: "5678", Manufacturer: "Test", Product: "Test DAC", BCDDevice: bcd, Port: "platform-xhci-hcd.0/usb1-1:1.0"}}
+	bound := &dsdstate.Bound{Key: dacKey(t), Stamp: testStamp, Identity: qualification.Identity{Vendor: "1234", ProductID: "5678", Manufacturer: "Test", Product: "Test DAC", BCDDevice: bcd, Port: "platform-xhci-hcd.0/usb1-1:1.0"}}
 	record := dsdstate.Record{Outcome: dsdstate.RecordTaken, SHA256: strings.Repeat("ab", 32), BCDDevice: bcd, QualifiedOn: "2026-11-01", Native: []int{dsd64}}
 	s, _, err = dsdstate.Migrate(s, dsdstate.Input{Legacy: legacy, Bound: bound, Record: record, Now: t0})
 	if err != nil {
@@ -206,7 +206,7 @@ func migratedEntry(t *testing.T, mode string, record bool) dsdstate.DAC {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound := &dsdstate.Bound{Key: dacKey(t), Identity: qualification.Identity{Vendor: "1234", ProductID: "5678", Manufacturer: "Test", Product: "Test DAC", BCDDevice: bcd, Port: "platform-xhci-hcd.0/usb1-1:1.0"}}
+	bound := &dsdstate.Bound{Key: dacKey(t), Stamp: testStamp, Identity: qualification.Identity{Vendor: "1234", ProductID: "5678", Manufacturer: "Test", Product: "Test DAC", BCDDevice: bcd, Port: "platform-xhci-hcd.0/usb1-1:1.0"}}
 	rec := dsdstate.Record{Outcome: dsdstate.RecordMissing}
 	if record {
 		rec = dsdstate.Record{Outcome: dsdstate.RecordTaken, SHA256: strings.Repeat("ab", 32), BCDDevice: bcd, QualifiedOn: "2026-11-01"}

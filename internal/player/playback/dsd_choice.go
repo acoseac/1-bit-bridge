@@ -67,10 +67,15 @@ var refusalOutcomes = map[policy.ChoiceReason]ChoiceOutcome{
 }
 
 // ChoiceRequest is a write of the bound DAC's DSD choice: the DAC's key as
-// GET /v1/outputs publishes it, and the choice.
+// GET /v1/outputs publishes it, the maker of the unit the writer read it for,
+// and the choice.
 type ChoiceRequest struct {
 	DACKey string
-	Choice policy.Choice
+	// ObservedStamp is the maker of the unit whose read side the write was
+	// made from: a write for another maker's unit on the same key is
+	// dac_changed, never written into the bound unit's entry.
+	ObservedStamp dsdstate.Stamp
+	Choice        policy.Choice
 }
 
 // ChoiceResult is a write's outcome and the epoch published once it ended:
@@ -85,8 +90,9 @@ type ChoiceResult struct {
 // ChooseDSD writes the bound DAC's DSD choice (the design's section 7.2), only
 // while the player is stopped, and answers how it ended with the epoch
 // published then. Its checks, in this order, each answered with its word,
-// nothing written and nothing published: the words of the choice
-// (bad_request); the writes' turn, waited for at most until ctx ends
+// nothing written and nothing published: the words of the choice and the
+// observed stamp, a stamp StampOf makes (bad_request); the writes' turn,
+// waited for at most until ctx ends
 // (persist_failed); the writes of the player's DSD state closed by the
 // player's stop (CloseDSDWrites: persist_failed); the player stopped, through
 // the configuration lease (takeLease: playback_not_stopped, at once), a probe
@@ -94,7 +100,9 @@ type ChoiceResult struct {
 // with no DSD policy (Config.DSD nil: state_unreadable, before the DAC is
 // read, which reads that policy's box); a bound DAC read fresh
 // (dac_unavailable); req.DACKey its key as the read side publishes it
-// (wireKey: dac_changed); a state that did not open (state_unreadable); no
+// (wireKey: dac_changed), and req.ObservedStamp the stamp of the maker that
+// reading read (dac_changed: another maker's unit on the key, whose entry is
+// not the bound unit's); a state that did not open (state_unreadable); no
 // earlier write landed and not known to be durable (choiceFenced:
 // persist_uncertain, a write of any writer's, an evidence write's included,
 // answered before the state's checks); then the policy's, inside the state's
@@ -146,7 +154,7 @@ func (b *Backend) answerNow(o ChoiceOutcome) ChoiceResult {
 }
 
 func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJournal) (res ChoiceResult) {
-	if err := req.Choice.Check(); err != nil {
+	if err := req.Choice.Check(); err != nil || !req.ObservedStamp.Valid() {
 		return b.answerNow(ChoiceBadRequest)
 	}
 	j.to = req.Choice.Mode
@@ -188,7 +196,10 @@ func (b *Backend) writeChoice(ctx context.Context, req ChoiceRequest, j *choiceJ
 		return ChoiceResult{Outcome: ChoiceDACUnavailable}
 	}
 	j.dac = wireKey(r.key, r.m.USB)
-	if j.dac != req.DACKey {
+	if j.dac != req.DACKey || req.ObservedStamp != r.stamp {
+		// Another DAC model, or another maker's unit on the key, whose read
+		// side the write was made from: answered before anything is read of
+		// the state, its fence or its revision.
 		return ChoiceResult{Outcome: ChoiceDACChanged}
 	}
 	if p.Store == nil {
@@ -205,7 +216,7 @@ func (b *Backend) writeChoice(ctx context.Context, req ChoiceRequest, j *choiceJ
 	if st := p.Store.State(); st.Unreadable() {
 		j.from = dsdstate.ModeOff
 	} else {
-		j.from, _, _ = st.ChoiceFor(r.key)
+		j.from, _, _ = st.ChoiceFor(r.key, r.stamp)
 	}
 	now := b.dsdNow()
 	var wrote dsdstate.State

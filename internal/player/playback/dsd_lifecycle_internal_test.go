@@ -24,6 +24,10 @@ const (
 
 var fixtureT0 = time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
 
+// fixtureStamp is the fixture's unit's maker, as the state keys its entry:
+// the stamp of the manufacturer string fixtureBox reads.
+var fixtureStamp = dsdstate.StampOf("Test")
+
 func fixtureUSB() alsa.USBIdentity {
 	return alsa.USBIdentity{ID: alsa.USBID{Vendor: 0x1234, Product: 0x5678}, Serial: usbid.New("TESTDAC-0001"), Port: "platform-xhci-hcd.0/usb2-1", Interface: 0, DevNum: 2}
 }
@@ -85,6 +89,7 @@ func nativeFixture(t *testing.T) dsdstate.State {
 	}
 	return dsdstate.State{DefaultMode: dsdstate.ModeNative, DACs: []dsdstate.DAC{{
 		Key:      key,
+		Stamp:    fixtureStamp,
 		FirstUse: []dsdstate.FirstUse{{Transport: dsdstate.TransportNative, BCDDevice: fixtureBCD, AcknowledgedAt: fixtureT0}},
 	}}}
 }

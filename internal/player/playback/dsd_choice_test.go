@@ -117,7 +117,7 @@ func revisionOf(t *testing.T, p playback.PlayerPolicy) uint64 {
 // choiceOf is a write of mode over base for b's DAC.
 func choiceOf(t *testing.T, b *playback.Backend, mode string, base uint64, edit ...func(*playback.ChoiceRequest)) playback.ChoiceRequest {
 	t.Helper()
-	r := playback.ChoiceRequest{DACKey: keyOf(t, b), Choice: policy.Choice{BaseRevision: base, Mode: mode, By: dsdstate.ByApp}}
+	r := playback.ChoiceRequest{DACKey: keyOf(t, b), ObservedStamp: playbacktest.DACStamp(), Choice: policy.Choice{BaseRevision: base, Mode: mode, By: dsdstate.ByApp}}
 	for _, e := range edit {
 		e(&r)
 	}
@@ -155,7 +155,7 @@ func TestAChoiceIsWrittenAndAnsweredFromTheEpochItPublished(t *testing.T) {
 	if c := res.Policy.DSD.DAC.Choice; c.Mode != dsdstate.ModeConvert || c.Revision != 1 {
 		t.Errorf("the answer's choice %+v, want convert at revision 1", c)
 	}
-	if mode, _, own := store.State().ChoiceFor(playbacktest.DACKey()); !own || mode != dsdstate.ModeConvert {
+	if mode, _, own := store.State().ChoiceFor(playbacktest.DACKey(), playbacktest.DACStamp()); !own || mode != dsdstate.ModeConvert {
 		t.Errorf("the state holds %s (own %v), want convert", mode, own)
 	}
 	res = b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1, acknowledged))
@@ -198,7 +198,7 @@ func TestEveryRefusalChangesNothing(t *testing.T) {
 			p.Bound = func() (playback.BoundDAC, bool) { return playback.BoundDAC{}, false }
 		}, nil,
 			func(t *testing.T, b *playback.Backend) playback.ChoiceRequest {
-				return playback.ChoiceRequest{DACKey: "d1-0123456789abcdef", Choice: policy.Choice{BaseRevision: 1, Mode: dsdstate.ModeOff, By: dsdstate.ByApp}}
+				return playback.ChoiceRequest{DACKey: "d1-0123456789abcdef", ObservedStamp: playbacktest.DACStamp(), Choice: policy.Choice{BaseRevision: 1, Mode: dsdstate.ModeOff, By: dsdstate.ByApp}}
 			}, playback.ChoiceDACUnavailable},
 		{"another DAC's key", native, nil, nil, func(t *testing.T, b *playback.Backend) playback.ChoiceRequest {
 			return choiceOf(t, b, dsdstate.ModeOff, 1, func(r *playback.ChoiceRequest) { r.DACKey = "d1-0000000000000000" })
@@ -371,7 +371,7 @@ func TestAWriteBackOfARevisionReadInTheWindowIsAnsweredWithTheDurableOne(t *test
 	if got := revisionOf(t, read); got != 0 {
 		t.Fatalf("the epoch published in the window says revision %d, want 0: it trails the state", got)
 	}
-	if mode, _, _ := store.State().ChoiceFor(playbacktest.DACKey()); mode != dsdstate.ModeConvert {
+	if mode, _, _ := store.State().ChoiceFor(playbacktest.DACKey(), playbacktest.DACStamp()); mode != dsdstate.ModeConvert {
 		t.Fatalf("the state in the window holds %s, want convert, written", mode)
 	}
 	second := make(chan playback.ChoiceResult, 1)
@@ -520,7 +520,7 @@ func TestARejectionAtTheCurrentRevisionNeedsTheAcknowledgement(t *testing.T) {
 	b, store, _ := choiceBackend(t, st)
 	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1)), playback.ChoiceFirstUseUnacknowledged)
 	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1, acknowledged)), playback.ChoiceWritten)
-	if d, _ := store.State().DAC(playbacktest.DACKey()); len(d.Listener) != 0 {
+	if d, _ := store.State().DAC(playbacktest.DACKey(), playbacktest.DACStamp()); len(d.Listener) != 0 {
 		t.Errorf("the rejection is still held: %+v", d.Listener)
 	}
 }
@@ -615,7 +615,7 @@ func TestAnEvidenceWriteRacingAChoiceMovesNoRevision(t *testing.T) {
 			if got := leased.Load(); got != 1 {
 				t.Errorf("the write took the lease %d times, want once: a write goes round no more", got)
 			}
-			d, _ := store.State().DAC(playbacktest.DACKey())
+			d, _ := store.State().DAC(playbacktest.DACKey(), playbacktest.DACStamp())
 			if rejected := len(d.Listener) != 0; rejected == tc.ack {
 				t.Errorf("the listener's answers after the write: %+v; want the rejection kept unless the write acknowledged native", d.Listener)
 			}
@@ -750,7 +750,7 @@ func TestALandedWriteOfTheRealStoreFencesWhatFollowsAndIsReadAtTheNextStart(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode, _, own := again.State().ChoiceFor(playbacktest.DACKey()); !own || mode != dsdstate.ModeConvert {
+	if mode, _, own := again.State().ChoiceFor(playbacktest.DACKey(), playbacktest.DACStamp()); !own || mode != dsdstate.ModeConvert {
 		t.Errorf("the next start reads %s (own %v), want convert, what landed", mode, own)
 	}
 }
@@ -801,7 +801,7 @@ func acceptedNative(ep alsapcm.Endpoint) alsapcm.ProbeReport {
 func TestAWrittenChoiceOwesAProbeAndKeepsTheProbesAnswers(t *testing.T) {
 	store := playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeNative))
 	pol := playbacktest.Policy(5, playbacktest.NewBox(5), store)
-	unit := alsapcm.ProbeUnit{Model: playbacktest.DACKey().Canonical(), Firmware: playbacktest.DACBCD, Kernel: playbacktest.Kernel, Enumeration: "test/2"}
+	unit := alsapcm.ProbeUnit{Model: playbacktest.DACKey().Canonical(), Stamp: string(playbacktest.DACStamp()), Firmware: playbacktest.DACBCD, Kernel: playbacktest.Kernel, Enumeration: "test/2"}
 	pol.Probes.Record(pol.Probes.Begin(unit), acceptedNative(alsapcm.Endpoint{Card: 5}))
 	var asked atomic.Int32
 	b, err := playback.New(playback.Config{Resolver: noContent{}, Locator: cardFive{}, DSD: pol,

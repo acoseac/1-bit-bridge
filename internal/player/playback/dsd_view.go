@@ -159,20 +159,23 @@ func noView(st dsdstate.State) DSDView {
 
 // viewOf is the read side of d, a set computed for the unit usb from the
 // state st: what each rate's plan and facts (policy.Rate) say, the choice st
-// holds for the set's model, and its first use under the set's firmware.
+// holds for the set's model of its maker (its key and stamp: never another
+// maker's entry for the key), and its first use under the set's firmware.
+// The warnings it shows are the key's, whichever maker's unit of it the
+// migration's part went to: they explain, and permit nothing.
 // Its free text (the profile's name, its caveats' notes) goes out with the
 // unit's own serial and port taken out (unitText), as the model does, and
 // its key with them taken out of the product string (wireKey).
 func viewOf(d *dsdSet, st dsdstate.State, usb alsa.USBIdentity) DSDView {
 	s := d.set
 	key, bcd := s.Key, canonicalBCD(s.BCDDevice)
-	mode, maxBitRate, own := st.ChoiceFor(key)
+	mode, maxBitRate, own := st.ChoiceFor(key, s.Stamp)
 	if s.Unreadable {
 		// No choice applies over a state that did not read: every rate is
 		// refused before one is read (the design's section 3.2).
 		mode, maxBitRate, own = dsdstate.ModeOff, 0, false
 	}
-	dac, _ := st.DAC(key)
+	dac, _ := st.DAC(key, s.Stamp)
 	v := DSDView{Mode: mode, Evidence: []DSDEvidence{}, Refused: []DSDRefusal{}, Warnings: warningsOf(st, &key)}
 	choice := DSDChoice{Mode: mode, MaxBitRate: maxBitRate}
 	if own && dac.Choice != nil {

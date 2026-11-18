@@ -11,12 +11,14 @@ import (
 )
 
 // Bound is the DAC the binding resolves to now, as the migration asks of it:
-// its model's key, which the state keys it by, and the legacy reader's
-// identity of it (qualification.Identity), which holds the anchored port,
-// since the reader requires one, and which the migration's comparison
-// (sameModel) passes over. BoundOf makes one from the box's readings.
+// its model's key and its maker's stamp, which the state keys its entry by,
+// and the legacy reader's identity of it (qualification.Identity), which
+// holds the anchored port, since the reader requires one, and which the
+// migration's comparison (sameModel) passes over. BoundOf makes one from the
+// box's readings.
 type Bound struct {
 	Key      dacprofile.Key
+	Stamp    Stamp
 	Identity qualification.Identity
 }
 
@@ -25,9 +27,11 @@ type Bound struct {
 // binding names on it (device, subdevice): the key of its model, the USB
 // vendor and product IDs, the interface the card is and its product string,
 // and the identity the legacy reader compares, built as the harness's
-// readPermission builds it (production's until B728's cutover, B7). A
-// serial, a card number and a device number go
-// into neither, and the port into the identity alone.
+// readPermission builds it (production's until B728's cutover, B7), and the
+// stamp of its manufacturer string as the reader read it (StampOf), the
+// stamp the effective policy reads the unit's entry by. A serial, a card
+// number and a device number go into none of them, and the port into the
+// identity alone.
 func BoundOf(card alsa.Identity, q alsa.QualificationIdentity, device, subdevice int) (Bound, error) {
 	if card.Kind != alsa.IdentityUSB || card.USB == nil {
 		return Bound{}, errors.New("dsdstate: the card is not a USB unit whose identity was read")
@@ -36,7 +40,7 @@ func BoundOf(card alsa.Identity, q alsa.QualificationIdentity, device, subdevice
 	if err != nil {
 		return Bound{}, err
 	}
-	return Bound{Key: key, Identity: qualification.Identity{
+	return Bound{Key: key, Stamp: StampOf(q.Manufacturer), Identity: qualification.Identity{
 		Vendor: usbid.Hex16(card.USB.ID.Vendor), ProductID: usbid.Hex16(card.USB.ID.Product),
 		Manufacturer: q.Manufacturer, Product: q.Product, BCDDevice: q.BCDDevice, Port: q.Port,
 		Interface: q.Interface, Device: device, Subdevice: subdevice,

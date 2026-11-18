@@ -306,7 +306,7 @@ func TestAChangeThatMovesNoPlanIsPublishedInItsEpoch(t *testing.T) {
 func TestTheEvidenceIsThePolicysRung(t *testing.T) {
 	native64 := alsapcm.ProbeCandidate{Format: format.DSDU32BE, RateHz: playbacktest.DSD64 / 32}
 	accepted := func(p *playback.DSDPolicy) {
-		u := alsapcm.ProbeUnit{Model: playbacktest.DACKey().Canonical(), Firmware: playbacktest.DACBCD, Kernel: playbacktest.Kernel, Enumeration: "test/2"}
+		u := alsapcm.ProbeUnit{Model: playbacktest.DACKey().Canonical(), Stamp: string(playbacktest.DACStamp()), Firmware: playbacktest.DACBCD, Kernel: playbacktest.Kernel, Enumeration: "test/2"}
 		p.Probes.Record(p.Probes.Begin(u), alsapcm.ProbeReport{Opened: true, Results: []alsapcm.ProbeResult{{Candidate: native64, Answer: alsapcm.ProbeAccepted, Pause: true}}})
 	}
 	evidence := func(e dsdstate.Evidence) dsdstate.State {

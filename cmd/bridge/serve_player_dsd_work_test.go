@@ -103,7 +103,7 @@ func (h *heldDACProbe) await(t *testing.T) {
 func goBarProbeEvidence(t *testing.T, dataDir string) *dsdstate.Evidence {
 	t.Helper()
 	st, _ := dsdStateIn(t, dataDir)
-	d, ok := st.DAC(goBarKey(t))
+	d, ok := st.DAC(goBarKey(t), goBarStamp())
 	if !ok {
 		return nil
 	}

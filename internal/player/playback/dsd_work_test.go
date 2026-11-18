@@ -217,7 +217,7 @@ func (b *boundAt) unplug(box *playbacktest.Box) {
 // probedAt is the unit a probe of the test DAC at enumeration devnum keeps
 // its answers under.
 func probedAt(devnum int) alsapcm.ProbeUnit {
-	return alsapcm.ProbeUnit{Model: playbacktest.DACKey().Canonical(), Firmware: playbacktest.DACBCD, Kernel: playbacktest.Kernel, Enumeration: fmt.Sprintf("test/%d", devnum)}
+	return alsapcm.ProbeUnit{Model: playbacktest.DACKey().Canonical(), Stamp: string(playbacktest.DACStamp()), Firmware: playbacktest.DACBCD, Kernel: playbacktest.Kernel, Enumeration: fmt.Sprintf("test/%d", devnum)}
 }
 
 // accepted are the frame rates at which the probe's cache keeps DSD_U32_BE
@@ -449,10 +449,12 @@ func TestAStaleProbeKeepsNothingAndStaysOwed(t *testing.T) {
 		during func(r *probeRig)
 		now    int // the enumeration the next ask probes
 	}{
-		{"a migration's part for the DAC made while it ran", false, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey()) }, 2},
-		{"a migration's part made while a probe that met a busy node ran", true, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey()) }, 2},
+		{"a migration's part for the DAC made while it ran", false, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey(), playbacktest.DACStamp()) }, 2},
+		{"a migration's part made while a probe that met a busy node ran", true, func(r *probeRig) { r.b.ForgetDSDProbe(playbacktest.DACKey(), playbacktest.DACStamp()) }, 2},
 		{"the DAC enumerated anew while it ran", false, func(r *probeRig) { r.bound.replug(r.box, 3) }, 3},
-		{"the probe cache's epoch moved alone while it ran", false, func(r *probeRig) { r.pol.Probes.Forget(playbacktest.DACKey().Canonical()) }, 2},
+		{"the probe cache's epoch moved alone while it ran", false, func(r *probeRig) {
+			r.pol.Probes.Forget(playbacktest.DACKey().Canonical(), string(playbacktest.DACStamp()))
+		}, 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			probe := newHeldProbe(dsd64Frames, dsd128Frames)

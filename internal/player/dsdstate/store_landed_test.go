@@ -41,7 +41,7 @@ func TestAWriteThatLandsWithoutItsBarrierFencesEveryLaterWrite(t *testing.T) {
 	}
 	key := brooklyn(t)
 	err := s.Update(func(st *State) error {
-		st.DACs = append(st.DACs, DAC{Key: key, Evidence: []Evidence{{Transport: TransportNative, Format: "DSD_U32_BE", BitRate: DSD64, BCDDevice: "0100", DriverAcceptedAt: t0, Kernel: "6.12.1"}}})
+		st.DACs = append(st.DACs, DAC{Key: key, Stamp: mytek, Evidence: []Evidence{{Transport: TransportNative, Format: "DSD_U32_BE", BitRate: DSD64, BCDDevice: "0100", DriverAcceptedAt: t0, Kernel: "6.12.1"}}})
 		return nil
 	})
 	if !errors.Is(err, ErrLandedNotHeld) {
