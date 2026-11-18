@@ -106473,3 +106473,216 @@ vet`, `make docs-check`, the pin's tests under `-race -count=20`, cmd/bridge
 whole under `-race`, the touched tests of internal/admin and internal/doctor,
 and `go vet` for darwin and windows of the touched packages) is in the branch's
 report: a record cannot hold the runs made on its own commit.
+
+## 2026-11-18 — B909 and B910: the park waits for the driver's interrupt, and a given-up verification's later steps wait at their gates
+
+Branch `fix/bridge-flakes-1118`, from main 6282e5a6. Two CI flakes, each of
+which stopped the chain when it fired on main, and this record: B909's commit
+81c3a553 changes `internal/sqlitetest` (a package only tests import), B910's
+commit 9a7f869b changes one test of `cmd/bridge`. No production code changes.
+
+### B909: a cancelled statement let go before the driver's interrupt
+
+`TestAParkedWriteIsStoppedByItsCancel/an_update_that_moves_a_key` failed on
+main's gate run 43808221667, job `test -race (rest)`: "the parked statement
+returned <nil>, want context.Canceled". The test parks an UPDATE inside the
+statement (the park's collation, #998), cancels its context, and lets its
+comparisons go one at a time with a yield before each (`ReleaseUntil`,
+`internal/sqlitetest/sqlitetest.go` 212 at 6282e5a6).
+
+What decides the answer, in modernc v1.62.0: the call's watcher goroutine
+(`interruptOnDone`, `sqlite.go` 83-140), on the context's end, marks the call
+stopped (the CAS of `done`, 120), sets `canceled` (121) and calls
+`conn.interrupt` (122), which sets the connection's interrupt flag
+(`Xsqlite3_interrupt`, one atomic store,
+`lib/sqlite_g_000000000007fd6b.go` 926-928). `stmt.exec`'s deferred check
+answers `ctx.Err()` where `done` or `canceled` is set (`stmt.go` 109-114),
+whether or not SQLite saw the interrupt. So a statement is cancelled exactly
+when that goroutine has marked it before its call returns, and nothing waited
+for that: the yield gives it a chance. With GOMAXPROCS above 1 another processor can
+take the readied goroutine and be kept off the CPU while the test's processor
+lets the statement's last comparisons go.
+
+The review's lock question: `conn.interrupt` takes the connection's mutex
+(`conn.go` 877-895), which only `Close` takes besides (1080); neither a step
+nor the collation's call holds it (`collationTrampoline`, `sqlite.go`
+1339-1349, holds only `xCollations.mu`'s read lock, and lets it go before the
+call), and `sqlite3_interrupt` and `sqlite3_is_interrupted` (936-938) take
+none of SQLite's locks. So a wait for the flag cannot deadlock the statement.
+
+The fix: `Park.Cancel(t, path, cancel)` calls the cancel and then waits,
+bounded by the Park's give-up and ended by `Disarm`, until the statement's
+connection reports the flag. The one exported read of it is the driver's
+`IsValid` (`conn.go` 1128-1145: false once closed or interrupted, true for an
+in-memory database whatever its flag). It is asked from the test's goroutine,
+between sleeps of 50 µs doubling to 5 ms, never from the comparison, which
+stays parked and calls nothing on its connection, under the connection's own
+mutex (the embedded `sync.Mutex`, through `sync.Locker`), since `Close` writes
+the handle `IsValid` reads under it. The collation's callback has no handle on
+its connection, so the connection is found by its database: a second
+connection hook (`trackConnection`) records every connection the driver opens
+by its DSN's file and drops those closed or interrupted since, and `Cancel`
+takes the one open and not interrupted on the database at path, refusing
+before it cancels anything where there are none or several. A test whose
+database has a pool of several (the scanner's cancellation tests, serve's
+upscale seed) cannot name the connection and keeps `ReleaseUntil`'s yield;
+its assertions hold whether or not the parked statement itself answered the
+cancellation, since every later write runs on the cancelled context (a
+transaction's commit answers its context's error, and the one autocommit
+reset asserts nothing about its row).
+
+`TestAParkedWriteIsStoppedByItsCancel` cancels through `Cancel`, its pool kept
+to one connection. `TestACancelThatReachesTheDriverLateIsWaitedFor` delays the
+interrupt on purpose: its cancel is delivered only once `Cancel` has looked
+for the interrupt and found none (the `awaiting` hook, a field of the Park
+that only this package's tests set). `TestCancelsWaitEnds` pins the three
+other ends: no interrupt (fails at the Park's give-up, held as a channel the
+test closes), `Disarm` (returns, failing nothing), and a second connection
+open on the database (fails before the cancel).
+
+Reproduction. The case as it is, `-race`, prebuilt binary: quiet 300 of 300
+(50 iterations at GOMAXPROCS 2); beside 16 nice-0 CPU hogs, seven lanes at
+GOMAXPROCS 1, 2 and 4, 0 of 2,100 cancelled subtests; lanes at nice 5 to 19
+beside the hogs, 0 of 420; 18 lanes pinned to 7 CPUs, 0 of 2,160. A
+cancelled run is mostly its database's setup and fsyncs, so the window was
+amplified: a scratch test added by `go test -overlay` (never in the tree)
+repeats the cancelled cycle on one database, which costs no fsync since a
+cancelled statement rolls back (a delete answered as cancelled can still
+commit, past SQLite's last interrupt check, so that loop puts the row back).
+On main's helper: quiet 0 of 900; 16 hogs beside eight lanes at GOMAXPROCS 2
+and 4, 0 of 36,000; twelve lanes pinned to four CPUs at GOMAXPROCS 4, 2 of
+54,000 (an insert and a delete); lanes at nice 10 and GOMAXPROCS 4 beside 16
+nice-0 hogs, 3 of 18,000, all three updates (3 of 6,000), the sighting's
+statement. Those lanes at nice 10 are the stressor: a woken thread of theirs
+does not preempt a hog, so the interrupt's goroutine waits while the running
+thread finishes the statement. The A/B, one binary at HEAD with both helpers
+and that stressor, the two run side by side for the same load, update and
+insert, 1,500 cycles a lane, eight lanes each: main's helper (cancel, then
+`ReleaseUntil`, whose code is unchanged) 6 of 24,000 not cancelled (5 of
+12,000 updates, 1 of 12,000 inserts); `Cancel` 0 of 24,000, where main's rate
+expects 6 (a chance of 0.25% by luck).
+
+Red first, deterministic: the new tests over main's `sqlitetest.go` with a
+names-only shim (the `awaiting` field, set by nothing, and a `Cancel` that
+calls the cancel and waits for nothing, as main's tests did) fail
+`TestACancelThatReachesTheDriverLateIsWaitedFor` 5 of 5 with CI's own
+message, and `TestCancelsWaitEnds`' give-up and refusal cases; at HEAD the
+package is green 20 of 20.
+
+Controls, predicted in writing first, each an exact-once mutation of
+`sqlitetest.go` laid over the tree by `go test -overlay`: C1 `Cancel` waits
+for nothing: the regression red ("returned <nil>") and the no-interrupt case;
+C2 `Cancel` takes the first live connection whatever their number, and C3
+`liveConns` asks the DSN's name alone: the second-connection case red (it
+called the cancel, the test's own that interrupts nothing, and waited to the
+Park's give-up); C4
+the give-up returns without failing: the no-interrupt case red; C5 the wait
+ignores `Disarm`: the disarmed case red at the Park's 10 s. C1's first run,
+with the hook called before the wait, kept the regression green: the late
+cancel then landed during `ReleaseUntil`'s yields, so a helper that waited for
+nothing still passed. The hook now runs inside the wait, each time `Cancel`
+finds no interrupt, which only a waiting `Cancel` reaches, and C1 is red there.
+
+Every other user of the package, at HEAD under the same stressor, green
+throughout: the package's whole suite 40 times; `internal/manifest`'s eleven
+(the eight cancelled scans and the three upscale-target commit tests) 10
+times; `internal/backup`'s five (the mid-VACUUM cancel and the four
+snapshot-stop tests) 15 times; `cmd/bridge`'s mid-snapshot ticker test 20
+times, and its seven serve and fingerprint users 3 times each, in one process
+(two serves in separate processes can meet on the console's default port). The
+sqlitetest lane's binary predates the move of the regression's hook into the
+wait, which changes nothing a test without the hook runs; the gate ran the
+package again on the commit.
+
+### B910: the given-up verification's write passed its second on Windows
+
+`TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads/whose_record_was_not_read_back`
+failed on windows-latest (main's gate run 43829994608) at
+`backup_round4_test.go` 242 ("the command did not say ... alone, with no
+record printed") and 270 ("a reader reads database PENDING, want INCOMPLETE:
+deadline"), green on macOS and every Linux shard.
+
+The step that turns the record from PENDING into INCOMPLETE (deadline): once
+the parked check (`parkChecks`, 300 ms) has been given up at its deadline and
+half of `StopWriteBound` more (`finish.go` 571-582, 791-807), the verdict's
+write is refused at its admission (`publishOf`, `hold.go` 462-466) and its
+INCOMPLETE is written in a step of its own (`stepIncomplete`, `finish.go`
+625-630): `publishVerdict` reads the record (`verify_record.go` 301), stages
+it with its fsync (535-570) and renames it (576). The wait on wall time is
+that step's bound, `laterBound(deadline)` (`hold.go` 539-545), a second from
+its start, armed by `runStep`'s timer (487-528). Past it the step is given up
+(`giveUpAs` cancels its signal, 221-233), the rename, which asks that signal
+first (`atomicwrite.RenameWithRetryUnsyncedCtx`), is skipped, the record stays
+PENDING, and the outcome is `WriteUnfinished` (`finish.go` 150-153, 631).
+The test assumed the write ends within that second.
+
+The manifest's reads the test counted, measured with a hook that logged each
+read's callers: the first the record's read (`verifyHeld.func4`,
+`stepReadRecord`), the second the INCOMPLETE's write (`publishVerdict` from
+`verifyHeld.func8`), the third the read-back (`verifyHeld.func2.1`). So the
+count's third read is the read-back where the steps run in turn; a write step
+given up before its goroutine reached its read would move it onto the write.
+
+Not a production finding (the stop condition of both reviews): the command
+says a write was recorded only where `stageAndRename` returned nil, after the
+rename (`verify_record.go` 344-346), and every other write words it as not
+finished or failed. The sighting's two failures say the write did not finish
+and the record is PENDING, which agree.
+
+The matching red: a delay of 1.5 s injected at the INCOMPLETE's staging
+(`SetVerdictWriteFailuresForTest`'s stage, which returns nil after it) in that
+subtest alone, joined onto one of its lines so every reported line is main's:
+main's test failed `whose_record_was_not_read_back` 3 of 3 and nothing else,
+at 242 and 270, with `over a PENDING` green. 242 fired because the sentence
+was missing: stdout said "its write did not finish; its read-back was given
+up, so its record was not read", and held no `database:`. The control, main's
+file with no delay, is green 3 of 3. Under the CPU stressor above (lanes at
+nice 10 beside 16 hogs) main's test stayed green, 10 of 10: on Linux the
+write's staging is quick, and the runner's slow write is what the delay
+stands in for.
+
+The fix holds both later steps at their gates (`SetStepGateForTest`) in every
+case of the table, given up only where a case fires one once its step has come
+where the case means it given up: in `whose write did not finish` the write's,
+once its rename has landed and the barrier after it stalls (the barrier
+closes a channel for the manifest's path); in `whose record was not read back`
+the read-back's, once it has parked on its own seam
+(`SetReadBackFailureForTest`), with no count of the manifest's reads. The
+command runs through `backupCmdContext` on a goroutine the test joins
+(`drainLoopOnCleanup`), the waits for a step and for the answer bounded, an
+answer before the case's step failing at once; the cleanups release the
+stalls and fire every gate, join the command, drain the holds (`parkChecks`)
+and only then put the seams back; each gate is asserted to have held its step
+(`StepGate.Entered`); and the reader's read comes once the rename the command
+reports has landed. The check keeps its real 300 ms deadline, so the record
+says deadline. With the 1.5 s delay HEAD's test is green 3 of 3, and under the
+stressor 10 of 10. On Windows the write's gate waits however long its staging
+and fsync take; what bounds the case now is the command's own watchdog
+(`VerifyCmdLockWait`'s 15 s, the deadline and `watchdogSlack`, then
+`StopWriteBound`), about 21 s. CI's run of this test on windows-latest is
+what proves it there: a vet for windows runs nothing.
+
+`TestTheTickerSaysWhatAGivenUpVerificationsRecordReads` leaves its own write
+of INCOMPLETE, and its read-back, to the same second. It has not been seen to
+fail and is not this change's; the branch's report names it as a follow-up.
+
+Controls, predicted in writing first, `go test -overlay` over the test file:
+D1 the gates scoped to a snapshot no verification makes: all five subtests red
+at "no gate held ...", and at nothing else; D2 the write's gate fired before
+its rename: `whose write did not finish` red ("answered with no rename of its
+record landed", and the words with PENDING); D4 no park on the read-back:
+`whose record was not read back` red at once ("answered before the
+read-back's park").
+
+### Rules
+
+`.claude/rules/build-ci-tests.md` gains two lines, after the park's (#998) and
+after B901's, and `ops/History-rules-build-ci-tests.md` their long forms, with
+a sentence on the yield in the park's own long form.
+
+### Runs
+
+The gates on this branch (`make fmt vet docs-check`, `make test` of
+`internal/sqlitetest` and `cmd/bridge`, `go vet` for darwin and windows, and
+`make fmt vet test build-all`) are in its report: a record cannot hold the
+runs made on its own commit.
