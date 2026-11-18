@@ -105922,3 +105922,61 @@ compared before and after, unchanged), run with the release tags, `-count=1
 The gate after the last commit, the two tests under `-race -count=20` and the
 controls run again after this commit among it, is in the branch's report: a
 record cannot hold the runs made on its own commit.
+
+## 2026-11-18 — B901FU and B933, corrected: a timed control, one step's entry, a default endpoint
+
+Branch `fix/bridge-lows3-1118`. This commit appends this record, a correction
+of B901FU's and B933's (2026-11-18, above), which stay as written, and changes
+two test comments and one test message; no code changes, so no control.
+
+### B901FU's second control was a timed observation
+
+B901FU's controls lead (`ops/engineering-log.md` 105727-105729) says the
+read-back's goroutine starts before the worker's select takes the stop and
+shortens its bound, "so a delayed worker arms that bound late, and neither
+control lets a timer decide its verdict"; its C2 (105740-105743) held the park
+"for twice `StopWriteBound`" and found every park "let go by the time, no
+answer having come, so no give-up came".
+
+C1's verdict was the worker's answer, which alone let its read-back go, its
+watchdog only able to call the control invalid. C2's was its park's timer's.
+Once the stop has come, a step's bound is `StopWriteBound` from the moment the
+worker's select takes the stop (`internal/backup/hold.go` 521-525), after the
+step's goroutine has started (478): a worker delayed there past
+`StopWriteBound` arms that bound so late that a read-back with no gate would be
+given up only after a park of twice `StopWriteBound` had ended. So no answer
+within the park does not show that the gate suppressed the give-up: C2 is a
+timed observation, in which no worker answer, and so no give-up, came within
+the park in ten runs. What shows that the gate held the read-back is its
+entry, which C2 asserted at the park, and the code: a step its gate holds has
+neither the stop nor the bound (489-494). The lead's claim holds for C1 alone.
+
+### B901FU's assertion asks one step's entry
+
+`TestARecheckThatDidNotEndLeavesTheVetoItMade`'s gated cases require, once the
+worker has ended, that the read-back came to its gate
+(`internal/backup/verify_round5_test.go` 344-353 at e7e41bdc). Its comment
+said that "a gate that matched no hold held none of the steps after the
+check", and its `t.Fatal` that "the gate held none of the steps after the
+check". Each gated step has an entry of its own (`StepGate.Entered`,
+`internal/backup/seams.go` 493-503), and the assertion reads the read-back's
+alone, which says nothing of the verdict's write or of INCOMPLETE's. The
+comment says the read-back came to its gate and that the other steps' entries
+are not asked; the message is "the read-back never came to its gate".
+
+### B933's default endpoint
+
+`TestPlainMPDWhenNothingElseIsInstalled`'s comment
+(`internal/mpd/inspect_test.go` 253 at e7e41bdc) said "The file names
+127.0.0.1:6600", where the fixture's `mpd.conf` holds `music_directory` alone.
+Without an explicit `Endpoint`, `Inspect` dials the endpoint the config gives
+(`internal/mpd/inspect.go` 174-177), here its default, `127.0.0.1:6600`, for a
+file that sets neither `bind_to_address` nor `port` (`conf/conf.go` 551-555,
+`DefaultPort` at 75), which the host's own MPD may answer. The comment says
+so; B933's record (105486) says "dials the one the file names" of the same
+default.
+
+### Checks
+
+go1.27.3's gofmt lists the two test files clean, and cmd/bridge's doc guards
+pass over this record; the two tests' runs are in the branch's report.

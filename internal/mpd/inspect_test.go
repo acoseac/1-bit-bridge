@@ -250,7 +250,9 @@ func TestTildeFlagExpandsBeforeDial(t *testing.T) {
 func TestPlainMPDWhenNothingElseIsInstalled(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "etc", "mpd.conf"), "music_directory \"/music\"\n")
-	// The file names 127.0.0.1:6600, which the host's own MPD may answer (B933).
+	// The file names no endpoint, and without an explicit Endpoint inspection
+	// dials the default the config gives, 127.0.0.1:6600, which the host's
+	// own MPD may answer (B933).
 	srv := startFake(t, fakeOpts{mode: "hangup"})
 	rep := Inspect(context.Background(), Options{Root: root, Endpoint: srv.addr})
 	if rep.Software.Name != "MPD" || rep.MusicDirectory != "/music" || rep.MPD.Version != "" || rep.MPD.Endpoint != srv.addr {
