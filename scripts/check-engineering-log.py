@@ -157,7 +157,7 @@ def going_on(line, containers):
 
 def opened(rest):
     """(the containers REST opens, outermost first, and what is left of it): block quote markers
-    and list item markers, but where the rest is a thematic break (`- - -`). An item's width is
+    and list item markers, except where the rest is a thematic break (`- - -`). An item's width is
     its marker's, the up to three spaces before it included, and the spaces after it, one where it
     is blank or more than four follow."""
     out = []

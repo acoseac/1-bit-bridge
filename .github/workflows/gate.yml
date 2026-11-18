@@ -69,11 +69,11 @@ name: gate
 #
 # A seventh, `docs-check`, is a text check like `go-version` (Python 3
 # stdlib on the Python the job pins, no Go toolchain): `make docs-check`
-# holds the instruction files Claude Code loads on its own to their byte
-# budgets (CLAUDE.md, each .claude/rules/*.md, the worst single-file
-# load), holds the engineering log's archive to its frozen bytes and its
-# entries to their names (scripts/check-engineering-log.py), and runs the
-# doc tools' self-tests.
+# holds the instruction files that load into a session on their own to
+# their byte budgets (CLAUDE.md, each .claude/rules/*.md, the worst
+# single-file load), holds the engineering log's archive to its frozen
+# bytes and its entries to their names (scripts/check-engineering-log.py),
+# and runs the doc tools' self-tests.
 # The repo has no git hooks, so this job is where an over-budget CLAUDE.md,
 # or an edit of the log's archive, goes red. See scripts/doc-split/README.md.
 #
