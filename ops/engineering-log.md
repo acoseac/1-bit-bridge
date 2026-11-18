@@ -105157,3 +105157,61 @@ Go 1.27.3 on Linux, the tags `ts_omit_webclient,ts_omit_debugeventbus`:
 ./cmd/bridge/`, ok in 196 s: 80 `--- PASS` lines (each test, and each of
 the first's two cases, 20 times), no FAIL and no data race. The gate's runs
 on this branch are in the report.
+
+## 2026-11-18 — B904FU: the stall's join ends at the drain's give-up
+
+Branch `fix/bridge-lows-1118`, after B895TFU's commit. This commit changes
+one doc comment, `playerStall.end`'s in `cmd/bridge/serve_player_test.go`,
+and appends this record, a correction of B904's (2026-11-15, above), which
+stays as written. No code changes, so no control; #1477 left this as a
+follow-up.
+
+### What was said
+
+`end`'s doc said it joins the player "until a drain's give-up
+(serveDrainGiveUp): nothing waits for a player nobody has stopped, and the
+start has ended before its directories go and the medium's seam is
+restored" (`cmd/bridge/serve_player_test.go` 506-509 at 589ba334). B904's
+record said of `end`: "All of that happens before the directories and the
+medium seam go." (`ops/engineering-log.md` 100478-100479), and "So the player
+is joined before `persistentMedium`'s restore." (100487).
+
+### What the code does
+
+Both of `end`'s waits are bounded, so neither claim holds without a
+condition:
+
+- a serve that has not decided its player is waited for until
+  `serveDrainGiveUp`, and `end` then returns with no join
+  (`serve_player_test.go` 518-522 at 589ba334), leaving the drain, next, to
+  report the serve that did not return;
+- the wait for the player's `settled` ends there with `t.Errorf` (531-535).
+
+`serveDrainGiveUp` fires `serveDrainReserve`, 10 s, before the test binary's
+deadline, and never in a binary with no deadline (`serve_wait_test.go` 56-60,
+70-77). `end` is registered once serve's drain is (`launchServe`,
+`main_test.go` 282-285), so the cleanups after it, the drain, the removal of
+the case's directories and `persistentMedium`'s restore, run either way. A
+start that ends before the give-up has ended before its directories go and
+the medium's seam is restored, as in every run that passes; one that ignores
+its stop, or a serve that does not return, ends the wait at the give-up with
+the test failed, and those cleanups then run beside it; with no deadline the
+wait has no bound.
+
+### The change
+
+The doc's text after "(serveDrainGiveUp):" now reads: "nothing waits for a
+player nobody has stopped, and a start that ends before that give-up has
+ended before its directories go and the medium's seam is restored. A start
+that ignores its stop, or a serve that does not return, ends the wait at the
+give-up with the test failed, here or by the drain next, and the cleanups
+after this one still run beside it; with no test deadline the wait has no
+bound." Its last sentence, on a serve that has not decided its player, is
+kept.
+
+### Checks
+
+go1.27.3's gofmt lists the file clean. The doc scanners in cmd/bridge
+(`TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`,
+`TestNoBlankKeepers`) pass over the comment and this record; the full
+`./cmd/bridge` run is in the report.
