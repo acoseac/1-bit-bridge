@@ -539,7 +539,9 @@ func iosLineProblems(base baseline, ps []dacprofile.Profile) []string {
 			if !ok {
 				continue
 			}
-			_ = text
+			if cites := strings.HasPrefix(text, "DACProfile.swift "); cites != inBase[p.ID] {
+				problems = append(problems, fmt.Sprintf("%s: its ios line is %q, and the baseline holds the row %v: a row of the baseline names its own registry row, a row added past it its submission", p.ID, line, inBase[p.ID]))
+			}
 		}
 	}
 	return problems
