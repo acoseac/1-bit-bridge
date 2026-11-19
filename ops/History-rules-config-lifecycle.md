@@ -3801,7 +3801,16 @@ deferred state, restarting nothing
 (`TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion`; until
 then `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall` asserted the clear
 over a backup that could not be run;
-`TestTheBootRollbackKeepsItsMarkerWhereTheBackupCannotBeInspected`). The early
+`TestTheBootRollbackKeepsItsMarkerWhereTheBackupCannotBeInspected`). A backup
+that can never say its version (one that cannot run, prints no version line,
+or whose lookup keeps failing) keeps the marker so at every start for the
+whole window, and every install of the target is refused for all of it: the
+refusal's advice, a restart, only asks the backup again. Since backlog
+B898FU's round 3 the kept line says so and names the window's end in UTC
+(the marker's `AttemptedAt` and `updater.RecencyWindow()`), both tests above
+holding an install attempted an hour before. Until this PR (B898FU) the boot
+cleared the install at the first such answer, so no later start asked again.
+The early
 and the crash rollbacks say a backup they could not inspect as such, never as
 none, and record nothing for it (backlog B898FU's round 3: the crash
 rollback's record of it, round 2's, ended the auto-installer's hold;

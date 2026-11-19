@@ -2726,7 +2726,10 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		// renamed, as those rollbacks leave their install and a restore
 		// refused for a hold keeps it below, for the next start to ask again:
 		// the window bounds the keep, a start past it clearing the install as
-		// abandoned (BootClearAbandoned).
+		// abandoned (BootClearAbandoned). Until then swapAwaitingRestart
+		// refuses an install of the target as waiting for its restart, which a
+		// restart does not end while the backup does not answer: the line says
+		// so, and when the window ends (backlog B898FU's round 3).
 		why, unanswered := backupNotPrevious(ctx, binaryPath+".bak", st.PreviousVersion, seams)
 		if why != "" || unanswered != nil {
 			if err := ctx.Err(); err != nil {
@@ -2735,8 +2738,11 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 			}
 			if unanswered != nil {
 				fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak "+
-					"at this start, since the backup did not say its version: %v; the install's marker is kept, for the next start to ask again\n",
-					st.TargetVersion, current, binaryPath, unanswered)
+					"at this start, since the backup did not say its version: %v; the install's marker is kept, for the next start to ask again; "+
+					"until the backup says its version or the window ends at %s, an install of %s is refused as waiting for its restart, "+
+					"and a restart only asks the backup again\n",
+					st.TargetVersion, current, binaryPath, unanswered, st.AttemptedAt.Add(updater.RecencyWindow()).UTC().Format(time.RFC3339),
+					st.TargetVersion)
 				return nil
 			}
 			fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak, "+
