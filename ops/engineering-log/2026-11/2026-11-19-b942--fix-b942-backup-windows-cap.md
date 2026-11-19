@@ -7,8 +7,8 @@ the rule; `95efbac8`, the measurement again after the fix, and `875b1b12`, its r
 production code changes, and no cap: `internal/backup`'s 45 minutes on the native legs are
 B897's (`fix/b897-make-test-headroom-v2`, not on main). The census, the Makefile's `test` recipe,
 the legs and B897's lines are as main has them once each measurement is reverted. This session
-ran on the Linux test host, which pushes nothing: the measurement commits were not run on CI, and what they
-are for is the owner's to run and read (the last section).
+ran on the Linux test host, which pushes nothing, so the measurement commits ran on CI only once
+the branch was pushed: their numbers are under "The CI measurements".
 
 ### The hazard
 
@@ -54,7 +54,7 @@ before and after `internal/backup`, subtests and a failure: 40 lines in order, t
 packages' tests left out, the exit code passed through; macOS's BSD `awk`, `sort` and `grep` were
 not run here (`/usr/bin/sort` is named, a Windows runner's `sort.exe` kept out of the way).
 
-On CI this step is owed: neither measurement commit has run (below).
+On CI this step ran once the branch was pushed ("The CI measurements" has its numbers).
 
 Locally (the Linux test host, 16 cores, load 0.08; TMPDIR on ext4; go1.27.3 with the release tags), from
 binaries built with `go test -c`, "real" from `0b51be76` (main's tests) and "counting" from the
@@ -103,7 +103,7 @@ commits and stop there. Neither number existed when it was built; both are under
 the Linux test host measured (the three 29.2 % of the package on a disk whose flush costs 6.6 ms a start,
 the counting flush saving 96.4 %) and on the premise's estimate for Windows (26-30 ms a start
 there, plausibly 550-650 s of the median's 1,058 s), neither of which is the Windows
-measurement: the decision is provisional, and the owner's (the last section). The review
+measurement: the decision was provisional until the CI measurements, which confirmed it. The review
 wanted the rule line after the second measurement; it is committed before it here, so on a miss
 its commit is reverted with the fix's.
 
@@ -177,9 +177,9 @@ that the write asked for its flush and that the strict writer's barrier ran afte
 diff touches lines 52 and 224 of the rules file and appends to the history's end, so the two do
 not meet.
 
-### Step 5: the proof, and what is owed
+### Step 5: the proof on CI
 
-Owed to CI, in this order (the review: the gate cancels a run in progress when the ref
+Run on CI in this order (the review: the gate cancels a run in progress when the ref
 moves, so each measurement is pushed alone and its runs finished before anything later is):
 
 1. Push `9e0ca732` alone (the PR open to main) and let both native legs finish. Read each leg's
@@ -213,7 +213,9 @@ Both measurement commits ran on the pull request's gate, on the Windows and macO
   (`TestAdoptionBoundsReservedSpaceAcross4097Restarts`), 589.2 s, 53.7 % of the package: over
   the 25 % stop, so the fix went on. On macOS the package took 338.0 s.
 - After the fix (`95efbac8`, gate run 44445826255): on Windows the package took 528.5 s and the
-  three 7.37 s, 14.40 s and 15.41 s, 37.2 s.
+  three 15.41 s (`TestRestoreAdoptsUUIDOnlyAfter8193Starts`), 14.40 s
+  (`TestLegacyFloorlessSnapshotRestoresAboveTheAdoptionCeiling`) and 7.37 s
+  (`TestAdoptionBoundsReservedSpaceAcross4097Restarts`), 37.2 s.
 - The runners' speed, the median over the six calibration packages of seconds against the
   premise's medians, was 1.076 before and 0.805 after: normalised, the three fell from 547.6 s to
   46.2 s, 91.6 %, past the 70 % bar, so the fix stays; the package fell from about 1,020 s to

@@ -1218,7 +1218,7 @@
   crash either side of a flush, in `crashRestore`, which still makes each; the
   strict writer's own barriers and checks, in atomicwrite's
   `TestWriteBytesDurable_*` tests. Controls, as `go test -overlay` builds: the
-  per-start jump off by one reds the three by their token checks, over main's
+  first start's value one later reds the three at their first start by their token checks, over main's
   test files and over the fix's alike; the strict writer skipping its staged
   file's flush (the rename and every barrier kept), the engine writing its
   reservation through `WriteBytes`, and a start writing it twice each red all
