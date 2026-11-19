@@ -762,6 +762,14 @@ def self_test():
          head + "[ref]: /url\nbar\n===\n2. ```\n   ## inside\n   ```\n", [1]),
         ("a thematic break under definitions alone is one, so 2. after it opens an item",
          head + "[ref]: /url\n---\n2. ```\n   ## inside\n   ```\n", [1]),
+        ("a backslash before a label's closing bracket escapes it, so nothing is defined and the underline makes a heading",
+         head + "[a\\]: /url\n===\n2. ```\n   ## inside\n   ```\n", [1]),
+        ("two backslashes are one escaped, so the bracket after them ends the label",
+         head + "[a\\\\]: /url\n===\n2. ```\n   ## stray\n```\n", [1, 5]),
+        ("a backslash before a letter escapes nothing and is the label's own",
+         head + "[a\\q]: /url\n===\n2. ```\n   ## stray\n```\n", [1, 5]),
+        ("and so is one before a line end, which the label holds too",
+         head + "[a\\\nb]: /url\n===\n2. ```\n   ## stray\n```\n", [1, 6]),
     ]
     for name, text, want in definitions:
         expect(name, h2_lines(text), want)
