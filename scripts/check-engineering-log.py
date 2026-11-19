@@ -644,6 +644,8 @@ def self_test():
         ("0. does not interrupt one either", head + "\nparagraph\n0. ```\n   ## inside\n   ```\n", [1, 5]),
         ("an empty bullet does not: under a paragraph it is a setext underline",
          head + "\nparagraph\n-\n  ```\n## after\n```\n", [1]),
+        ("nor does an empty +, which underlines nothing: it is more of the paragraph's text",
+         head + "\nparagraph\n+\n  ```\n## sample\n```\n", [1]),
         ("a line four spaces in under a paragraph's text is more of it, so 2. after it is too",
          head + "\nparagraph\n    more\n2. ```\n   ## inside\n   ```\n", [1, 6]),
         ("an underline ends the paragraph, so 2. after it opens an item",
