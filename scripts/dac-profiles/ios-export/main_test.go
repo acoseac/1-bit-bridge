@@ -343,7 +343,60 @@ type declared struct {
 // baseline, declared in this file by hand from each row's submission and its
 // maker's figures, never from the catalog or the export, so the export is
 // held to them as it is to the baseline.
-var additions = declared{}
+var additions = declared{
+	rows: []row{{
+		// The Fosi Audio ZH3 (B944), from its wizard submission of 2026-11-19
+		// (app 2.2 (17), iOS 27.3) by the iOS procedure's rules, and its
+		// maker's page read that day: DSD64 heard after a click; DSD128 and
+		// DSD256 held the lock proxy with the listening not sure, neither
+		// heard nor failed; DSD512, never attempted, its 1411.2 kHz carrier
+		// asked in the PCM sweep and 768 kHz negotiated, refused; every PCM
+		// rate to 768 kHz negotiated exactly, the submitter's 32 bits the
+		// maker's USB figure too; its own volume control, which the iOS slider
+		// does not move, and DoP held below iOS maximum with the tone heard,
+		// so the volume unknown; no time a rung measured clean; and the
+		// maker's DSD512, which names no transport.
+		ID: "fosiaudio.zh3", Name: "Fosi Audio ZH3", Maker: "Fosi Audio", LegacyPatterns: []string{"Fosi Audio ZH3"},
+		LegacyCeiling: "dsd64", PCM: dacprofile.IOSPCM{MaxRateHz: 768000, BitDepth: 32}, VolumeTopology: "unknown",
+		NameKeys: nameKeys{PortNames: []string{"Fosi Audio ZH3"}, Tokens: []string{"Fosi Audio ZH3"}, ExcludedTokens: []string{}, Scope: "model"},
+		Evidence: evidence{
+			Heard:     []heard{{Rate: "dsd64", Source: source{Kind: "submission", Date: ptr("2026-11-19")}}},
+			Failed:    []failed{{Rate: "dsd512", Failure: "carrierRefused", Source: source{Kind: "submission", Date: ptr("2026-11-19")}}},
+			Statement: statement{Case: "dsdWithoutDoPStatement", UpTo: ptr("dsd512"), Source: &source{Kind: "maker", Date: ptr("2026-11-19")}},
+		},
+	}},
+	// The name iOS reported for the ZH3's port, verbatim, with a trailing
+	// space and in two other cases.
+	names: []corpusName{
+		{Name: "Fosi Audio ZH3", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "exact")},
+		{Name: "Fosi Audio ZH3 ", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "exact")},
+		{Name: "fosi audio zh3", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "token")},
+		{Name: "FOSI AUDIO ZH3", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "token")},
+	},
+	// Fosi Audio's products that take USB audio from a host, as its store
+	// listed them on 2026-11-19, each named as the ZH3 names itself: no row
+	// may reach one, by either matcher.
+	siblings: noMatch("Fosi Audio ZD3", "Fosi Audio K7", "Fosi Audio DS1", "Fosi Audio DS2", "Fosi Audio SK02",
+		"Fosi Audio GR40", "Fosi Audio ZH1", "Fosi Audio Q6", "Fosi Audio DS3", "Fosi Audio MD3", "Fosi Audio K5 Pro",
+		"Fosi Audio Q4", "Fosi Audio C1", "Fosi Audio C3", "Fosi Audio MC331", "Fosi Audio MC351"),
+}
+
+// ptr is a pointer to v.
+func ptr[T any](v T) *T { return &v }
+
+// known is the strict matcher's answer naming the model row id, by tier.
+func known(id, tier string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"known":{"id":%q,"scope":"model","tier":%q}}`, id, tier))
+}
+
+// noMatch are names neither matcher gives a row.
+func noMatch(names ...string) []corpusName {
+	var cs []corpusName
+	for _, n := range names {
+		cs = append(cs, corpusName{Name: n, Strict: json.RawMessage(`{"unknown":"noMatch"}`)})
+	}
+	return cs
+}
 
 // asMap is v encoded and decoded again, as a row of the export decodes.
 func asMap(v any) map[string]any {
@@ -579,6 +632,121 @@ func TestAnAdditionIsHeldToItsDeclaration(t *testing.T) {
 	} {
 		if problems := check(tc.mutate); !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, tc.words) }) {
 			t.Errorf("%s: the parity says %q, want a problem saying %q", tc.name, problems, tc.words)
+		}
+	}
+}
+
+// TestAnAddedRowAndEveryOtherRowKeepTheirOwnNames: each row declared past the
+// baseline and every other row of the export keep their names apart, both
+// ways, as the iOS procedure's step 6 asks: no pattern or token of another
+// row, and no generic name, lies inside the added row's names (its port
+// names, tokens and patterns, and the names its unit reported), and none of
+// its patterns or tokens lies inside another row's names (its keys and the
+// corpus names either matcher gives it) or a generic name, all folded; the
+// live matcher's first hit and the strict matcher's answer for each of the
+// added row's names is that row, and for each of another row's names never
+// is; and every known sibling declared with it is the catalog's and reached
+// by no row: by no legacy pattern, which the live matcher takes it by and no
+// excluded token rules out, and by neither matcher.
+func TestAnAddedRowAndEveryOtherRowKeepTheirOwnNames(t *testing.T) {
+	base := readBaseline(t)
+	db, err := dacprofile.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var x export
+	if err := json.Unmarshal(fresh(t), &x); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	var patterns [][]string
+	for _, r := range x.Rows {
+		ids, patterns = append(ids, r.ID), append(patterns, r.LegacyPatterns)
+	}
+	keysOf := func(r row) []string { return slices.Concat(r.LegacyPatterns, r.NameKeys.Tokens) }
+	namesOf := func(r row) []string {
+		names := slices.Concat(r.NameKeys.PortNames, keysOf(r))
+		for _, c := range slices.Concat(base.ParityCorpus, additions.names) {
+			if c.live() == r.ID || strictKnown(string(c.Strict)) == r.ID {
+				names = append(names, c.Name)
+			}
+		}
+		return names
+	}
+	inside := func(name, key string) bool { return strings.Contains(fold(strings.TrimSpace(name)), fold(key)) }
+	if len(additions.rows) == 0 {
+		t.Fatal("no row is declared past the baseline, so nothing was checked")
+	}
+	for _, d := range additions.rows {
+		i := slices.IndexFunc(x.Rows, func(r row) bool { return r.ID == d.ID })
+		if i < 0 {
+			t.Errorf("%s is declared past the baseline and not in the export", d.ID)
+			continue
+		}
+		a := x.Rows[i]
+		own := namesOf(a)
+		for _, n := range own {
+			if got := firstHit(n, ids, patterns); got != a.ID {
+				t.Errorf("%s: its name %q is the live matcher's %q", a.ID, n, got)
+			}
+			if got := strictKnown(strictMatch(n, x)); got != a.ID {
+				t.Errorf("%s: its name %q is the strict matcher's %q", a.ID, n, got)
+			}
+		}
+		for _, g := range x.GenericNames {
+			for _, n := range own {
+				if inside(n, g) {
+					t.Errorf("%s: the generic name %q lies inside its name %q", a.ID, g, n)
+				}
+			}
+			for _, k := range keysOf(a) {
+				if inside(g, k) {
+					t.Errorf("%s: its key %q lies inside the generic name %q", a.ID, k, g)
+				}
+			}
+		}
+		for _, r := range x.Rows {
+			if r.ID == a.ID {
+				continue
+			}
+			for _, k := range keysOf(r) {
+				for _, n := range own {
+					if inside(n, k) {
+						t.Errorf("%s's key %q lies inside %s's name %q", r.ID, k, a.ID, n)
+					}
+				}
+			}
+			for _, n := range namesOf(r) {
+				for _, k := range keysOf(a) {
+					if inside(n, k) {
+						t.Errorf("%s's key %q lies inside %s's name %q", a.ID, k, r.ID, n)
+					}
+				}
+				if firstHit(n, ids, patterns) == a.ID {
+					t.Errorf("%s's name %q is %s's to the live matcher", r.ID, n, a.ID)
+				}
+				if strictKnown(strictMatch(n, x)) == a.ID {
+					t.Errorf("%s's name %q is %s's to the strict matcher", r.ID, n, a.ID)
+				}
+			}
+		}
+	}
+	for _, s := range additions.siblings {
+		if !slices.Contains(db.IOSKnownSiblings, s.Name) {
+			t.Errorf("the sibling %q is declared and not among the catalog's known siblings, which its lint keeps off every model row", s.Name)
+		}
+		for i, ps := range patterns {
+			for _, p := range ps {
+				if inside(s.Name, p) {
+					t.Errorf("the sibling %q holds %s's legacy pattern %q, which the live matcher takes it by", s.Name, ids[i], p)
+				}
+			}
+		}
+		if got := firstHit(s.Name, ids, patterns); got != "" {
+			t.Errorf("the sibling %q is the live matcher's %q", s.Name, got)
+		}
+		if got := strictMatch(s.Name, x); !jsonEqual(got, json.RawMessage(`{"unknown":"noMatch"}`)) {
+			t.Errorf("the sibling %q is the strict matcher's %s", s.Name, got)
 		}
 	}
 }

@@ -932,30 +932,41 @@ func TestTheIOSNameKeysLint(t *testing.T) {
 }
 
 // TestNoKnownSiblingReachesAModelRow: no known sibling (iosKnownSiblings,
-// iOS PR 1's list) reaches a model row through the strict matcher, by either
-// of its keys, so a catalog edit that lets one in fails at the lint, before
-// any export or baseline: the E30 II Lite's name given to the E30 II as a
-// port name, which the matcher takes before any token and no excluded token
-// rules out, and the E30 II's excluded token Lite dropped, which lets the
-// Lite's names reach it by its tokens, are each refused.
+// iOS PR 1's list and those a row added past the baseline brings) reaches a
+// model row through the strict matcher, by either of its keys, so a catalog
+// edit that lets one in fails at the lint, before any export or baseline: the
+// E30 II Lite's name given to the E30 II as a port name, which the matcher
+// takes before any token and no excluded token rules out, the E30 II's
+// excluded token Lite dropped, which lets the Lite's names reach it by its
+// tokens, a Fosi sibling's name given to the ZH3 as a port name, and the
+// ZH3's token widened to its maker's name, which every Fosi sibling holds, are
+// each refused.
 func TestNoKnownSiblingReachesAModelRow(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		mutate func(x *IOS)
-		words  string
+		name, id, sibling string
+		mutate            func(x *IOS)
+		words             string
 	}{
-		{"a sibling's name as the model's port name", func(x *IOS) { x.PortNames = append(x.PortNames, "TOPPING E30 II Lite") },
+		{"a sibling's name as the model's port name", "topping.e30ii", "TOPPING E30 II Lite",
+			func(x *IOS) { x.PortNames = append(x.PortNames, "TOPPING E30 II Lite") },
 			`"TOPPING E30 II Lite" reaches this model row through the strict matcher, by its port name`},
-		{"the excluded token that keeps the sibling off dropped", func(x *IOS) { x.ExcludedTokens = nil },
+		{"the excluded token that keeps the sibling off dropped", "topping.e30ii", "TOPPING E30II Lite",
+			func(x *IOS) { x.ExcludedTokens = nil },
 			`"TOPPING E30II Lite" reaches this model row through the strict matcher, by its token`},
+		{"a Fosi sibling's name as the ZH3's port name", "fosiaudio.zh3", "Fosi Audio DS1",
+			func(x *IOS) { x.PortNames = append(x.PortNames, "Fosi Audio DS1") },
+			`"Fosi Audio DS1" reaches this model row through the strict matcher, by its port name`},
+		{"the ZH3's token widened to its maker's name", "fosiaudio.zh3", "Fosi Audio ZD3",
+			func(x *IOS) { x.NameTokens = []string{"Fosi Audio"} },
+			`"Fosi Audio ZD3" reaches this model row through the strict matcher, by its token`},
 	} {
 		db := mustDefault(t)
-		i := slices.IndexFunc(db.Profiles, func(p Profile) bool { return p.ID == "topping.e30ii" })
-		if i < 0 || !slices.Contains(db.IOSKnownSiblings, "TOPPING E30 II Lite") {
-			t.Fatal("the embedded database holds no E30 II row, or not its Lite among the known siblings")
+		i := slices.IndexFunc(db.Profiles, func(p Profile) bool { return p.ID == tc.id })
+		if i < 0 || !slices.Contains(db.IOSKnownSiblings, tc.sibling) {
+			t.Fatalf("the embedded database holds no %s row, or not %q among the known siblings", tc.id, tc.sibling)
 		}
 		tc.mutate(db.Profiles[i].IOS)
-		if problems := db.Lint(); !lintSays(problems, "profile topping.e30ii", tc.words) {
+		if problems := db.Lint(); !lintSays(problems, "profile "+tc.id, tc.words) {
 			t.Errorf("%s: the lint says %v, want a problem saying %q", tc.name, problems, tc.words)
 		}
 	}
