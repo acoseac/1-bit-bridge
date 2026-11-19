@@ -711,18 +711,118 @@ func TestAnAdditionIsHeldToItsDeclaration(t *testing.T) {
 	}
 }
 
+// namesApart is every way the rows declared past the baseline (add) and the
+// other rows of an export (x) fail to keep their names apart, a sentence each,
+// the corpus (the baseline's parity corpus) and add's declared names giving
+// the names either matcher answers with a row, as the iOS procedure's step 6
+// asks, both ways: no legacy pattern or token of another row, and no generic
+// name, lies inside the added row's names (its port names, patterns and
+// tokens, and the names its unit reported), and none of its patterns or tokens
+// lies inside another row's names (its port names, patterns and tokens, and
+// the corpus names either matcher gives it) or a generic name, all folded,
+// each said as the kind of key it is; the live matcher's first hit and the
+// strict matcher's answer for each of the added row's names is that row, and
+// for each of another row's names never is; and every known sibling declared
+// with it is reached by no row: by no legacy pattern, which the live matcher
+// takes it by and no excluded token rules out, and by neither matcher.
+func namesApart(corpus []corpusName, add declared, x export) []string {
+	var problems []string
+	say := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+	var ids []string
+	var patterns [][]string
+	for _, r := range x.Rows {
+		ids, patterns = append(ids, r.ID), append(patterns, r.LegacyPatterns)
+	}
+	namesOf := func(r row) []string {
+		names := slices.Concat(r.NameKeys.PortNames, r.LegacyPatterns, r.NameKeys.Tokens)
+		for _, c := range slices.Concat(corpus, add.names) {
+			if c.live() == r.ID || strictKnown(string(c.Strict)) == r.ID {
+				names = append(names, c.Name)
+			}
+		}
+		return names
+	}
+	inside := func(name, key string) bool { return strings.Contains(fold(strings.TrimSpace(name)), fold(key)) }
+	for _, d := range add.rows {
+		i := slices.IndexFunc(x.Rows, func(r row) bool { return r.ID == d.ID })
+		if i < 0 {
+			say("%s is declared past the baseline and not in the export", d.ID)
+			continue
+		}
+		a := x.Rows[i]
+		own := namesOf(a)
+		for _, n := range own {
+			if got := firstHit(n, ids, patterns); got != a.ID {
+				say("%s: its name %q is the live matcher's %q", a.ID, n, got)
+			}
+			if got := strictKnown(strictMatch(n, x)); got != a.ID {
+				say("%s: its name %q is the strict matcher's %q", a.ID, n, got)
+			}
+		}
+		for _, g := range x.GenericNames {
+			for _, n := range own {
+				if inside(n, g) {
+					say("%s: the generic name %q lies inside its name %q", a.ID, g, n)
+				}
+			}
+			for _, k := range slices.Concat(a.LegacyPatterns, a.NameKeys.Tokens) {
+				if inside(g, k) {
+					say("%s: its key %q lies inside the generic name %q", a.ID, k, g)
+				}
+			}
+		}
+		for _, r := range x.Rows {
+			if r.ID == a.ID {
+				continue
+			}
+			for _, way := range [][2]row{{r, a}, {a, r}} {
+				from, to := way[0], way[1]
+				for _, n := range namesOf(to) {
+					for _, k := range from.LegacyPatterns {
+						if inside(n, k) {
+							say("%s's legacy pattern %q lies inside %s's name %q", from.ID, k, to.ID, n)
+						}
+					}
+					for _, k := range from.NameKeys.Tokens {
+						if inside(n, k) {
+							say("%s's token %q lies inside %s's name %q", from.ID, k, to.ID, n)
+						}
+					}
+				}
+			}
+			for _, n := range namesOf(r) {
+				if firstHit(n, ids, patterns) == a.ID {
+					say("%s's name %q is %s's to the live matcher", r.ID, n, a.ID)
+				}
+				if strictKnown(strictMatch(n, x)) == a.ID {
+					say("%s's name %q is %s's to the strict matcher", r.ID, n, a.ID)
+				}
+			}
+		}
+	}
+	for _, s := range add.siblings {
+		for i, ps := range patterns {
+			for _, p := range ps {
+				if inside(s.Name, p) {
+					say("the sibling %q holds %s's legacy pattern %q, which the live matcher takes it by", s.Name, ids[i], p)
+				}
+			}
+		}
+		if got := firstHit(s.Name, ids, patterns); got != "" {
+			say("the sibling %q is the live matcher's %q", s.Name, got)
+		}
+		if got := strictMatch(s.Name, x); !jsonEqual(got, json.RawMessage(`{"unknown":"noMatch"}`)) {
+			say("the sibling %q is the strict matcher's %s", s.Name, got)
+		}
+	}
+	return problems
+}
+
 // TestAnAddedRowAndEveryOtherRowKeepTheirOwnNames: each row declared past the
 // baseline and every other row of the export keep their names apart, both
-// ways, as the iOS procedure's step 6 asks: no pattern or token of another
-// row, and no generic name, lies inside the added row's names (its port
-// names, tokens and patterns, and the names its unit reported), and none of
-// its patterns or tokens lies inside another row's names (its keys and the
-// corpus names either matcher gives it) or a generic name, all folded; the
-// live matcher's first hit and the strict matcher's answer for each of the
-// added row's names is that row, and for each of another row's names never
-// is; and every known sibling declared with it is the catalog's and reached
-// by no row: by no legacy pattern, which the live matcher takes it by and no
-// excluded token rules out, and by neither matcher.
+// ways, every check namesApart makes over the baseline's corpus; and every
+// known sibling declared with them is among the catalog's, which its lint
+// keeps off every model row.
 func TestAnAddedRowAndEveryOtherRowKeepTheirOwnNames(t *testing.T) {
 	base := readBaseline(t)
 	db, err := dacprofile.Default()
@@ -733,96 +833,75 @@ func TestAnAddedRowAndEveryOtherRowKeepTheirOwnNames(t *testing.T) {
 	if err := json.Unmarshal(fresh(t), &x); err != nil {
 		t.Fatal(err)
 	}
-	var ids []string
-	var patterns [][]string
-	for _, r := range x.Rows {
-		ids, patterns = append(ids, r.ID), append(patterns, r.LegacyPatterns)
-	}
-	keysOf := func(r row) []string { return slices.Concat(r.LegacyPatterns, r.NameKeys.Tokens) }
-	namesOf := func(r row) []string {
-		names := slices.Concat(r.NameKeys.PortNames, keysOf(r))
-		for _, c := range slices.Concat(base.ParityCorpus, additions.names) {
-			if c.live() == r.ID || strictKnown(string(c.Strict)) == r.ID {
-				names = append(names, c.Name)
-			}
-		}
-		return names
-	}
-	inside := func(name, key string) bool { return strings.Contains(fold(strings.TrimSpace(name)), fold(key)) }
 	if len(additions.rows) == 0 {
 		t.Fatal("no row is declared past the baseline, so nothing was checked")
 	}
-	for _, d := range additions.rows {
-		i := slices.IndexFunc(x.Rows, func(r row) bool { return r.ID == d.ID })
-		if i < 0 {
-			t.Errorf("%s is declared past the baseline and not in the export", d.ID)
-			continue
-		}
-		a := x.Rows[i]
-		own := namesOf(a)
-		for _, n := range own {
-			if got := firstHit(n, ids, patterns); got != a.ID {
-				t.Errorf("%s: its name %q is the live matcher's %q", a.ID, n, got)
-			}
-			if got := strictKnown(strictMatch(n, x)); got != a.ID {
-				t.Errorf("%s: its name %q is the strict matcher's %q", a.ID, n, got)
-			}
-		}
-		for _, g := range x.GenericNames {
-			for _, n := range own {
-				if inside(n, g) {
-					t.Errorf("%s: the generic name %q lies inside its name %q", a.ID, g, n)
-				}
-			}
-			for _, k := range keysOf(a) {
-				if inside(g, k) {
-					t.Errorf("%s: its key %q lies inside the generic name %q", a.ID, k, g)
-				}
-			}
-		}
-		for _, r := range x.Rows {
-			if r.ID == a.ID {
-				continue
-			}
-			for _, k := range keysOf(r) {
-				for _, n := range own {
-					if inside(n, k) {
-						t.Errorf("%s's key %q lies inside %s's name %q", r.ID, k, a.ID, n)
-					}
-				}
-			}
-			for _, n := range namesOf(r) {
-				for _, k := range keysOf(a) {
-					if inside(n, k) {
-						t.Errorf("%s's key %q lies inside %s's name %q", a.ID, k, r.ID, n)
-					}
-				}
-				if firstHit(n, ids, patterns) == a.ID {
-					t.Errorf("%s's name %q is %s's to the live matcher", r.ID, n, a.ID)
-				}
-				if strictKnown(strictMatch(n, x)) == a.ID {
-					t.Errorf("%s's name %q is %s's to the strict matcher", r.ID, n, a.ID)
-				}
-			}
-		}
+	for _, p := range namesApart(base.ParityCorpus, additions, x) {
+		t.Error(p)
 	}
 	for _, s := range additions.siblings {
 		if !slices.Contains(db.IOSKnownSiblings, s.Name) {
 			t.Errorf("the sibling %q is declared and not among the catalog's known siblings, which its lint keeps off every model row", s.Name)
 		}
-		for i, ps := range patterns {
-			for _, p := range ps {
-				if inside(s.Name, p) {
-					t.Errorf("the sibling %q holds %s's legacy pattern %q, which the live matcher takes it by", s.Name, ids[i], p)
-				}
+	}
+}
+
+// TestALegacyPatternSharedWithAnAddedRowIsACollision: a row that collides
+// with the ZH3 through a legacy pattern alone, which the lint does not compare
+// across rows, is refused by namesApart, each case by one diagnostic: a
+// fixture row (fixture.shared, its token Fixture Shared and port name FIXTURE
+// SHARED, which nothing else holds) added to the export's rows only, never
+// declared, after the ZH3 with the pattern "Audio ZH3", which lies inside the
+// ZH3's names, or "Fosi Audio ZH3 Pro", inside which the ZH3's pattern lies,
+// and before the ZH3 with "Audio ZH3", whose first hit then takes the ZH3's
+// port; each beside a counterpart whose pattern misses by a character (ZH4)
+// and which namesApart passes.
+func TestALegacyPatternSharedWithAnAddedRowIsACollision(t *testing.T) {
+	base := readBaseline(t)
+	var x export
+	if err := json.Unmarshal(fresh(t), &x); err != nil {
+		t.Fatal(err)
+	}
+	zh3 := slices.IndexFunc(x.Rows, func(r row) bool { return r.ID == "fosiaudio.zh3" })
+	if zh3 < 0 {
+		t.Fatal("the export holds no fosiaudio.zh3 row")
+	}
+	shared := func(pattern string, before bool) export {
+		s := row{ID: "fixture.shared", Name: "Fixture Shared", Maker: "Fixture", LegacyPatterns: []string{pattern}, LegacyCeiling: "none",
+			NameKeys: nameKeys{PortNames: []string{"FIXTURE SHARED"}, Tokens: []string{"Fixture Shared"}, ExcludedTokens: []string{}, Scope: "model"}}
+		at := len(x.Rows)
+		if before {
+			at = zh3
+		}
+		y := x
+		y.Rows = slices.Insert(slices.Clone(x.Rows), at, s)
+		return y
+	}
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		before  bool
+		want    string // the one diagnostic the case asserts, or "" for none at all
+	}{
+		{"its pattern inside the ZH3's names", "Audio ZH3", false,
+			`fixture.shared's legacy pattern "Audio ZH3" lies inside fosiaudio.zh3's name "Fosi Audio ZH3"`},
+		{"its pattern a character off the ZH3's names", "Audio ZH4", false, ""},
+		{"the ZH3's pattern inside its names", "Fosi Audio ZH3 Pro", false,
+			`fosiaudio.zh3's legacy pattern "Fosi Audio ZH3" lies inside fixture.shared's name "Fosi Audio ZH3 Pro"`},
+		{"the ZH3's pattern a character off its names", "Fosi Audio ZH4 Pro", false, ""},
+		{"an earlier row's pattern taking the ZH3's port", "Audio ZH3", true,
+			`fosiaudio.zh3: its name "Fosi Audio ZH3" is the live matcher's "fixture.shared"`},
+		{"an earlier row's pattern a character off the ZH3's port", "Audio ZH4", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			problems := namesApart(base.ParityCorpus, additions, shared(tc.pattern, tc.before))
+			switch {
+			case tc.want == "" && len(problems) > 0:
+				t.Errorf("namesApart says %q, want nothing", problems)
+			case tc.want != "" && !slices.Contains(problems, tc.want):
+				t.Errorf("namesApart says %q, want %q among them", problems, tc.want)
 			}
-		}
-		if got := firstHit(s.Name, ids, patterns); got != "" {
-			t.Errorf("the sibling %q is the live matcher's %q", s.Name, got)
-		}
-		if got := strictMatch(s.Name, x); !jsonEqual(got, json.RawMessage(`{"unknown":"noMatch"}`)) {
-			t.Errorf("the sibling %q is the strict matcher's %s", s.Name, got)
-		}
+		})
 	}
 }
 
