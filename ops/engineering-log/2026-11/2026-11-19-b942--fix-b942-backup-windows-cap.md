@@ -2,8 +2,8 @@
 
 Branch `fix/b942-backup-windows-cap`, from `e51c2b2b` (main with #1511, the tip when the work
 began). Six commits and this record: `9e0ca732`, the measurement on the native legs, and
-`0b51be76`, its revert; `87144de4`, the fix (test code in `internal/backup` alone); `a9cfc605`,
-the rule; `b59b48e7`, the measurement again after the fix, and `5d2fdb0c`, its revert. No
+`0b51be76`, its revert; `39399c24`, the fix (test code in `internal/backup` alone); `71811c4c`,
+the rule; `95efbac8`, the measurement again after the fix, and `875b1b12`, its revert. No
 production code changes, and no cap: `internal/backup`'s 45 minutes on the native legs are
 B897's (`fix/b897-make-test-headroom-v2`, not on main). The census, the Makefile's `test` recipe,
 the legs and B897's lines are as main has them once each measurement is reverted. This session
@@ -30,7 +30,7 @@ only for an edit (`ahead`, after an insert or a delete), and these starts make n
 `reservationStorage` stands in for the directory barrier and the medium check only, so each
 start's staged file was flushed for real.
 
-### Step 1: the measurement (`9e0ca732`, again as `b59b48e7`)
+### Step 1: the measurement (`9e0ca732`, again as `95efbac8`)
 
 The native legs' `test` step runs every package uncached (`-count=1`), so the six packages the
 runner factor reads (`cmd/bridge`, `internal/manifest`, `internal/admin`,
@@ -99,7 +99,7 @@ the first measurement will show.
 The stop rule, as both reviews left it: stop at the first measurement if the three are under 25 %
 of `internal/backup`'s seconds on windows-latest; after the second, if their Windows seconds,
 each divided by its run's runner factor, fell by under 70 %, revert the fix and the rule in new
-commits and stop there. Neither number exists yet. The fix was built and committed on what
+commits and stop there. Neither number existed when it was built; both are under "The CI measurements" below. The fix was built and committed on what
 the Linux test host measured (the three 29.2 % of the package on a disk whose flush costs 6.6 ms a start,
 the counting flush saving 96.4 %) and on the premise's estimate for Windows (26-30 ms a start
 there, plausibly 550-650 s of the median's 1,058 s), neither of which is the Windows
@@ -107,7 +107,7 @@ measurement: the decision is provisional, and the owner's (the last section). Th
 wanted the rule line after the second measurement; it is committed before it here, so on a miss
 its commit is reverted with the fix's.
 
-### Step 3: the fix (`87144de4`)
+### Step 3: the fix (`39399c24`)
 
 `stubReservationFlush` (`internal/backup/restored_identity_test.go`), called first in each
 numbered start of the three tests, installs for that start alone a file flush that counts each
@@ -150,7 +150,7 @@ the flush.
 
 Each predicted in writing before it ran (`.tmp/_b942/controls.predictions.txt` on the Linux test host), each
 a `go test -overlay` build of a production file mutated in memory by an exact-once replacement,
-the tree never edited (`git status --short` empty after every batch). "Fix" runs over `87144de4`'s
+the tree never edited (`git status --short` empty after every batch). "Fix" runs over `39399c24`'s
 tests; "main" lays `0b51be76`'s four backup test files (main's) over the same tree.
 
 | | mutation | predicted | seen, fix | seen, main |
@@ -167,7 +167,7 @@ subjects), and the three gain what main's did not have: C4, C5 and C6 pass main'
 the fix's, with every token check green. C4a, C4's mutation over atomicwrite's own
 `TestWriteBytesDurable_*`, predicted all green: 29 passed and 5 skipped, as above.
 
-### The rule (`a9cfc605`)
+### The rule (`71811c4c`)
 
 One line in `.claude/rules/build-ci-tests.md`, beside the bullet on fixtures that bulk-load
 through the batch APIs, and its long form in `ops/History-rules-build-ci-tests.md` before the
@@ -189,11 +189,11 @@ moves, so each measurement is pushed alone and its runs finished before anything
    package's seconds over its median: on Windows 1,120.6, 789.8, 731.1, 104.2, 91.8 and 91.3 s,
    on macOS 447.7, 156.2, 262.5, 53.1, 33.4 and 21.9 s. If the three are under 25 % of the Windows
    package, stop: the branch is `0b51be76` and a record of the numbers.
-2. Push through `b59b48e7` and let both legs finish. The three's Windows seconds, divided by that
+2. Push through `95efbac8` and let both legs finish. The three's Windows seconds, divided by that
    run's factor, against the first run's, divided by its own: under a 70 % fall, revert
-   `87144de4` and `a9cfc605` in new commits and stop. Each re-run of this run's
+   `39399c24` and `71811c4c` in new commits and stop. Each re-run of this run's
    `cross-platform` job is another fresh sample with a factor of its own (every package uncached).
-3. Push `5d2fdb0c` and the rest. From then on, an ordinary run's `internal/backup` line is a
+3. Push `875b1b12` and the rest. From then on, an ordinary run's `internal/backup` line is a
    sample only when it carries seconds, never `(cached)` (the review), and only beside six
    calibration lines that do; the bar, the only one: the median of the normalised
    `internal/backup` seconds on windows-latest at 796 s or less (factor 1). At the slowest factor
@@ -203,6 +203,22 @@ Before, for the comparison (the premise's 30 attempts): `internal/backup` on win
 1,058.2 s raw at the median (59 % of 30 minutes, 39 % of 45), 1,086 s normalised (60 %, 40 %),
 963-1,143 s normalised over the 28 that finished; on macOS 311.9 s raw at the median.
 
+### The CI measurements
+
+Both measurement commits ran on the pull request's gate, on the Windows and macOS legs.
+
+- Before the fix (`9e0ca732`, gate run 44442688618): on Windows `internal/backup` took 1,097.2 s;
+  the three tests took 289.07 s (`TestRestoreAdoptsUUIDOnlyAfter8193Starts`), 170.73 s
+  (`TestLegacyFloorlessSnapshotRestoresAboveTheAdoptionCeiling`) and 129.44 s
+  (`TestAdoptionBoundsReservedSpaceAcross4097Restarts`), 589.2 s, 53.7 % of the package: over
+  the 25 % stop, so the fix went on. On macOS the package took 338.0 s.
+- After the fix (`95efbac8`, gate run 44445826255): on Windows the package took 528.5 s and the
+  three 7.37 s, 14.40 s and 15.41 s, 37.2 s.
+- The runners' speed, the median over the six calibration packages of seconds against the
+  premise's medians, was 1.076 before and 0.805 after: normalised, the three fell from 547.6 s to
+  46.2 s, 91.6 %, past the 70 % bar, so the fix stays; the package fell from about 1,020 s to
+  about 657 s.
+
 ### Runs
 
 Before the gate, on the fix: the three tests at `-count=3` (14.7 s) and at `-race -count=3`
@@ -211,7 +227,7 @@ windows and for darwin was clean; and cmd/bridge's `TestEveryCitedTestNameExists
 `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` passed over the new test code and
 again over the rule.
 
-The gate ran on `5d2fdb0c` in one build-slot session, the slot free at once (00:56:55-02:06:48
+The gate ran on `875b1b12` in one build-slot session, the slot free at once (00:56:55-02:06:48
 UTC): `make fmt`, which rewrote nothing (`git status --short` empty); `make vet`; `make vet` with
 `GOOS=linux GOARCH=386`; `go vet` of `./...` with the release tags for windows and for darwin;
 `make docs-check`; `make test TEST_PKGS=./internal/backup/`, ok in 624.8 s; `make test` (`P=4`,
