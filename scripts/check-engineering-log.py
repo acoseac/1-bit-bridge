@@ -653,8 +653,8 @@ def self_test():
         ("and so does 01.", head + "\nparagraph\n01. ```\n    ## inside\n    ```\n", [1]),
         ("and a bullet", head + "\nparagraph\n- ```\n  ## inside\n  ```\n", [1]),
         ("a line that leaves its item opens one with any marker", head + "\n- foo\n2. bar\n  ```\n## x\n  ```\n", [1]),
-        ("an item that holds something goes on past a blank line",
-         head + "-\n  foo\n\n  ```\n  ## inside\n  ```\n", [1]),
+        ("an item that holds something goes on past a blank line, its fence two spaces into it",
+         head + "-\n  foo\n\n    ```\n  ## inside\n    ```\n", [1]),
         ("a fence's closing line is no paragraph's text", head + "```\nx\n```\n2. ```\n   ## inside\n   ```\n", [1]),
     ]
     for name, text, want in paragraphs:
