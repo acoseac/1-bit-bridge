@@ -68,32 +68,36 @@ import (
 // and under the lock it held every other taker past the 30 s each waits, at
 // every start of a crash loop. Before them the backup is a regular file whose
 // identity is fixed through a handle on it, closed before anything runs it,
-// and the settings' digest is read (updater.ConfigDigest). Then it follows the
-// early rollback (recoverRefusedInstall) step for step: the install marker's
-// lock, held from the marker's read again through the rename (never without
-// the exclusion), and the decision made again under it with nothing run
-// again: the marker still asks for the rollback, the version the backup
-// answered is its PreviousVersion, the install is the one the runs were asked
-// for (its TargetVersion and AttemptedAt compared, its PreviousVersion held
-// through the version the backup answered, which matched the marker checked
-// before the lock and must match the one read again under it: the three
-// fields refuseCrashRollbackBeforeTheLock compares), the backup is the file
-// they ran (os.SameFile, its size, its modification time) and the settings
-// have the digest they were read with; then the hold and the veto recorded
-// durably before the rename, and the marker put back where the rename fails. A
-// refusal decided before the lock is said, then recorded under the lock that
-// refuseCrashRollbackBeforeTheLock takes for it; a change found under the
-// lock refuses this start's rollback, said and recorded, and the next start of
-// the loop asks again. A backup that could not be inspected, before the lock
-// or under it (a lookup or an open that failed otherwise than finding nothing
-// there), is said and recorded nowhere (backlog B898FU's round 3): it shows
-// the backup neither gone nor refused, and a record would end the
-// auto-installer's hold (updater.ProbationHolds), which asks the backup's
-// lookup itself; the words such a failure was recorded in until then are
-// cleared where the same install still asks (clearInspectionRefusal). A stop
-// while a run runs, or found once the lock is held, records nothing. A lock
-// that cannot be held, or a filesystem that keeps none, still leaves the
-// install as it is, said as before, the runs asked already.
+// and the settings' digest is read (updater.ConfigDigest); every observation
+// of the backup reads its identity as it is taken (fsutil.EntryIdentity, the
+// handle's stat), so no comparison reads one, and one that cannot be read is a
+// backup that could not be inspected (backlog B898FU's round 4). Then it
+// follows the early rollback (recoverRefusedInstall) step for step: the
+// install marker's lock, held from the marker's read again through the rename
+// (never without the exclusion), and the decision made again under it with
+// nothing run again: the marker still asks for the rollback, the version the
+// backup answered is its PreviousVersion, the install is the one the runs were
+// asked for (its TargetVersion and AttemptedAt compared, its PreviousVersion
+// held through the version the backup answered, which matched the marker
+// checked before the lock and must match the one read again under it: the
+// three fields refuseCrashRollbackBeforeTheLock compares), the backup is the
+// file they ran (os.SameFile, its size, its modification time) and the
+// settings have the digest they were read with; then the hold and the veto
+// recorded durably before the rename, and the marker put back where the rename
+// fails. A refusal decided before the lock is said, then recorded under the
+// lock that refuseCrashRollbackBeforeTheLock takes for it; a change found
+// under the lock refuses this start's rollback, said and recorded, and the
+// next start of the loop asks again. A backup that could not be inspected,
+// before the lock or under it (a lookup or an open that failed otherwise than
+// finding nothing there, an identity not read), is said and recorded nowhere
+// (backlog B898FU's round 3): it shows the backup neither gone nor refused,
+// and a record would end the auto-installer's hold (updater.ProbationHolds),
+// which asks the backup's lookup itself; the words such a failure was recorded
+// in until then are cleared where the same install still asks
+// (clearInspectionRefusal). A stop while a run runs, or found once the lock is
+// held, records nothing. A lock that cannot be held, or a filesystem that
+// keeps none, still leaves the install as it is, said as before, the runs
+// asked already.
 //
 // A crash before the admission is not counted: a candidate that never runs
 // is what the settings check before the swap sees, and a start refused for
@@ -143,14 +147,25 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		return 0, false
 	}
 	backup := binaryPath + ".bak"
-	fi, err := os.Lstat(backup)
+	// Each observation of the backup's entry reads its identity as it is
+	// taken (fsutil.EntryIdentity, or a test's serveOpts.backupIdentity), so
+	// the comparisons below read nothing (backlog B898FU's round 4): on
+	// Windows an Lstat's identity is read by os.SameFile as it compares, by
+	// opening the path then, and a read that failed there compared as another
+	// file and was recorded as a backup that changed.
+	identityOf := opts.backupIdentity
+	if identityOf == nil {
+		identityOf = fsutil.EntryIdentity
+	}
+	fi, err := identityOf(backup)
 	switch {
 	case err != nil && !errors.Is(err, os.ErrNotExist):
 		// A lookup that fails otherwise than finding nothing there (a
-		// permission, a link loop on the way) shows no backup absent (backlog
-		// B898FU's round 2): said as a backup that could not be inspected,
-		// never as none, and recorded nowhere (its round 3), so the
-		// auto-installer's hold asks the backup's lookup itself.
+		// permission, a link loop on the way, an identity that could not be
+		// read) shows no backup absent (backlog B898FU's rounds 2 and 4): said
+		// as a backup that could not be inspected, never as none, and recorded
+		// nowhere (its round 3), so the auto-installer's hold asks the
+		// backup's lookup itself.
 		refuseBefore(fmt.Sprintf("the backup at %s could not be inspected (%s)", backup, fsutil.ErrorWithoutPath(err)), "")
 		return 0, false
 	case err != nil || !fi.Mode().IsRegular():
@@ -158,14 +173,12 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		return 0, false
 	}
 	// Which file the runs ask, fixed before either: through a handle on it,
-	// since on Windows an Lstat's file ID is read by path when os.SameFile
-	// first compares it, so an Lstat taken here and compared under the lock
-	// would take a file put in the backup's place meanwhile for the backup; a
-	// handle's stat carries its file's ID as it is taken. Opened as a file
+	// whose stat carries its file's identity as it is taken, as the entry's
+	// observations above and under the lock carry theirs. Opened as a file
 	// (fsutil.OpenAsFile: a named pipe put there is refused without a wait),
-	// required to be the entry the Lstat found, and closed at once, before
-	// the runs and the restore, which opens the backup for deletion and which
-	// this open would refuse while it stood.
+	// required to be the entry the first observation found, and closed at
+	// once, before the runs and the restore, which opens the backup for
+	// deletion and which this open would refuse while it stood.
 	f, identity, err := fsutil.OpenAsFile(backup)
 	if err != nil {
 		// An open that fails, the Lstat having found a regular file, is said
@@ -175,22 +188,7 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		return 0, false
 	}
 	_ = f.Close()
-	// readAtTheComparison is an Lstat's identity as the comparisons read it:
-	// os.SameFile's own read, which on Windows opens the path as it compares
-	// (os/types_windows.go's loadFileId) and answers another file where that
-	// open fails. A test's serveOpts.backupIdentity reads it in its place, a
-	// read that fails answering another file too (backlog B898FU's round 4).
-	readAtTheComparison := func(lstat os.FileInfo) os.FileInfo {
-		if opts.backupIdentity == nil {
-			return lstat
-		}
-		read, err := opts.backupIdentity(backup)
-		if err != nil {
-			return identityNotRead{lstat}
-		}
-		return read
-	}
-	if !identity.Mode().IsRegular() || !os.SameFile(readAtTheComparison(fi), identity) {
+	if !identity.Mode().IsRegular() || !os.SameFile(fi, identity) {
 		refuseBefore("the backup changed while it was checked", "the backup changed while it was checked")
 		return 0, false
 	}
@@ -293,16 +291,17 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		refuse("the install changed while its backup was checked", "the install changed while its backup was checked")
 		return 0, false
 	}
-	switch now, err := os.Lstat(backup); {
+	switch now, err := identityOf(backup); {
 	case err != nil && !errors.Is(err, os.ErrNotExist):
-		// A lookup that fails otherwise than finding nothing there shows the
+		// A lookup that fails otherwise than finding nothing there, an
+		// identity that could not be read among them (round 4), shows the
 		// backup neither gone nor changed (backlog B898FU's round 3): said,
 		// and recorded nowhere, as before the lock.
 		say(st, fmt.Sprintf("the backup at %s could not be inspected again under the install marker's lock (%s)", backup,
 			fsutil.ErrorWithoutPath(err)))
 		clearInspectionRefusal(dataDir, st, save, stderr)
 		return 0, false
-	case err != nil || !now.Mode().IsRegular() || !os.SameFile(identity, readAtTheComparison(now)) ||
+	case err != nil || !now.Mode().IsRegular() || !os.SameFile(identity, now) ||
 		now.Size() != identity.Size() || !now.ModTime().Equal(identity.ModTime()):
 		refuse("the backup changed while it was checked", "the backup changed while it was checked")
 		return 0, false
@@ -360,10 +359,6 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		"run bridge serve again)\n", st.FailedStarts, current, st.PreviousVersion, binaryPath, current, st.PreviousVersion)
 	return supervision.RestartExitCode, true
 }
-
-// identityNotRead is an Lstat whose identity could not be read: os.SameFile
-// answers false for it, as for one whose read of the identity failed.
-type identityNotRead struct{ os.FileInfo }
 
 // rollbackWaitsForTheRestore is why a rollback leaves an install where an
 // unfinished restore of the database stands in dataDir (its journal,

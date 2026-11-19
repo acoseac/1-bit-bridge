@@ -3874,7 +3874,7 @@ closed by backlog B894 (the next section).
 
 ## The crash rollback asks its backup before the install marker's lock (backlog B894, B898's F1, 2026-11-19)
 
-- **…and the crash rollback asks its backup's version and settings check before the install marker's lock, and decides again under it on the marker read again, the backup's identity and the settings' digest** (2026-11-19, backlog B894, B898's F1; backlog B898FU's round 3): before the lock, after the unlocked read's `updater.CrashRollback`, the restore journal's check and `refuseCrashRollbackOnARead` as before, the backup is a regular file (`os.Lstat`; a lookup that fails otherwise than finding nothing there refused as a backup that could not be inspected, never as none, and recorded nowhere: backlog B898FU's rounds 2 and 3) whose identity is fixed through a handle on it (`fsutil.OpenAsFile`, the handle's stat, the same file as the Lstat's, closed at once), the settings' digest is read (`updater.ConfigDigest`), and the backup's version (`backupVersion`, held to the unlocked read's `PreviousVersion`) and its settings check (`updater.CheckConfig`) run; then the lock (`updater.LockState`: a lock that cannot be taken, a stop in its wait and a filesystem that keeps none said as before, the runs asked already), the context asked once it is held, the marker read again and `CrashRollback` asked of it again, and under the lock, neither run asked again: the version answered against the marker read again (the one `PreviousVersion` refusal there, in its old words, which holds that marker's `PreviousVersion` to the checked one's, the version having matched it before the lock), the same install (`TargetVersion`, `AttemptedAt`, and `PreviousVersion` so), the backup the same regular file (`os.SameFile` against the handle's identity, its size, its modification time), and the settings read again with the digest they had, a read that fails refusing at either point. A change found under the lock refuses this start's rollback, said and recorded in words that name no path, and the next start of the loop asks again (`RollbackRefused` is no input to `CrashRollback`, and `CrashRollbackRecord` clears it). A refusal decided before the lock is said and recorded under a lock taken for it (`refuseCrashRollbackBeforeTheLock`, never called while the lock is held): on the marker read again, recorded where the same install (its `TargetVersion`, `PreviousVersion` and `AttemptedAt`) still asks, the marker's own why where it refuses the rollback itself, nothing said or written for another install, and the line said with nothing recorded where the lock cannot be held, the marker cannot be read again or serve's stop has come. A backup that could not be inspected, before the lock (a lookup that failed otherwise than finding nothing there, an open that failed) or under it (the lookup asked again, failing so, where a backup gone is a change still), is said and recorded nowhere, a refusal the marker read again records in the words such a failure had until then cleared where the same install still asks, and one of any other cause kept (backlog B898FU's round 3: recorded, it ended the auto-installer's hold, `updater.ProbationHolds`). **Never run them with the lock held, never run them again under it, and never put back a backup whose install, identity or settings changed since they answered. Don't fix the identity by a bare Lstat, take two failed reads of the settings for the same settings, or take the lock again to record a refusal while holding it. Don't record a refusal for a backup it could not inspect, before the lock or under it (a lookup that failed otherwise than finding nothing there, or an open that failed: said, nothing recorded), keep a refusal recorded in the words such a failure had until B898FU's round 3 where the same install's inspection fails again, or clear one of any other cause there.** `TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock`, `TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait`, `TestABackupChangedWhileItWasCheckedIsNotPutBack`, `TestTheBackupIsNotPutBackOverSettingsItDidNotCheck`, `TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock`, `TestAStopAroundTheBackupsChecksWritesNothing`, `TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked`, `TestTheCrashRollbackTellsABackupItCannotInspectFromNone`, `TestTheCrashRollbackTellsABackupItCannotOpenFromNone` and `TestTheCrashRollbackTellsABackupItCannotInspectUnderItsLockFromAChange` pin it.
+- **…and the crash rollback asks its backup's version and settings check before the install marker's lock, and decides again under it on the marker read again, the backup's identity and the settings' digest** (2026-11-19, backlog B894, B898's F1; backlog B898FU's rounds 3 and 4): before the lock, after the unlocked read's `updater.CrashRollback`, the restore journal's check and `refuseCrashRollbackOnARead` as before, the backup is a regular file (`fsutil.EntryIdentity`, an `os.Lstat` whose identity is read as it is taken, since backlog B898FU's round 4; a lookup that fails otherwise than finding nothing there, an identity that cannot be read among them, refused as a backup that could not be inspected, never as none, and recorded nowhere: that backlog's rounds 2 to 4) whose identity is fixed through a handle on it (`fsutil.OpenAsFile`, the handle's stat, the same file as the Lstat's, closed at once), the settings' digest is read (`updater.ConfigDigest`), and the backup's version (`backupVersion`, held to the unlocked read's `PreviousVersion`) and its settings check (`updater.CheckConfig`) run; then the lock (`updater.LockState`: a lock that cannot be taken, a stop in its wait and a filesystem that keeps none said as before, the runs asked already), the context asked once it is held, the marker read again and `CrashRollback` asked of it again, and under the lock, neither run asked again: the version answered against the marker read again (the one `PreviousVersion` refusal there, in its old words, which holds that marker's `PreviousVersion` to the checked one's, the version having matched it before the lock), the same install (`TargetVersion`, `AttemptedAt`, and `PreviousVersion` so), the backup the same regular file (`os.SameFile` against the handle's identity, of the entry observed again under the lock through `fsutil.EntryIdentity`, so that it reads no identity; its size, its modification time), and the settings read again with the digest they had, a read that fails refusing at either point. A change found under the lock refuses this start's rollback, said and recorded in words that name no path, and the next start of the loop asks again (`RollbackRefused` is no input to `CrashRollback`, and `CrashRollbackRecord` clears it). A refusal decided before the lock is said and recorded under a lock taken for it (`refuseCrashRollbackBeforeTheLock`, never called while the lock is held): on the marker read again, recorded where the same install (its `TargetVersion`, `PreviousVersion` and `AttemptedAt`) still asks, the marker's own why where it refuses the rollback itself, nothing said or written for another install, and the line said with nothing recorded where the lock cannot be held, the marker cannot be read again or serve's stop has come. A backup that could not be inspected, before the lock (a lookup that failed otherwise than finding nothing there, an open that failed) or under it (the lookup asked again, failing so, where a backup gone is a change still), is said and recorded nowhere, a refusal the marker read again records in the words such a failure had until then cleared where the same install still asks, and one of any other cause kept (backlog B898FU's round 3: recorded, it ended the auto-installer's hold, `updater.ProbationHolds`). **Never run them with the lock held, never run them again under it, and never put back a backup whose install, identity or settings changed since they answered. Don't fix the identity by a bare Lstat, take two failed reads of the settings for the same settings, or take the lock again to record a refusal while holding it. Don't record a refusal for a backup it could not inspect, before the lock or under it (a lookup that failed otherwise than finding nothing there, or an open that failed: said, nothing recorded), keep a refusal recorded in the words such a failure had until B898FU's round 3 where the same install's inspection fails again, or clear one of any other cause there. Don't compare an identity read but at its observation (`fsutil.EntryIdentity`: on Windows through a handle on the entry, not followed, asking no access), or take one that cannot be read for a change.** `TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock`, `TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait`, `TestABackupChangedWhileItWasCheckedIsNotPutBack`, `TestTheBackupIsNotPutBackOverSettingsItDidNotCheck`, `TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock`, `TestAStopAroundTheBackupsChecksWritesNothing`, `TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked`, `TestTheCrashRollbackTellsABackupItCannotInspectFromNone`, `TestTheCrashRollbackTellsABackupItCannotOpenFromNone`, `TestTheCrashRollbackTellsABackupItCannotInspectUnderItsLockFromAChange`, `TestTheCrashRollbackTellsABackupWhoseIdentityCannotBeReadFromAChange`, `TestTheCrashRollbackPutsBackABackupAnotherHandleReads`, `TestTheCrashRollbackTellsALinkAtItsBackupFromABackupItCannotInspect`, `TestTheCrashRollbackPutsBackABackupRecordedAsChangedOnceItsIdentityReads` and fsutil's `TestEntryIdentityIsTheFilesAtItsRead` pin it.
 
 *The hazard.* The crash rollback (B660) held `update-state.lock` from its
 marker's read again to its rename, and ran both of its backup's runs under it:
@@ -3955,6 +3955,10 @@ handle and every `os.SameFile` there, the one under the lock among them, to
 compare it, since the behaviour it stands for is Windows' alone: a bare
 Lstat's file ID read by path at its first comparison, so that a file put in
 the backup's place while the runs ran compares under the lock as the backup.
+Since backlog B898FU's round 4 it requires too that every name an
+`os.SameFile` there compares the identity with is bound by a call of the
+reader `recoverCrashedInstall` falls back to `fsutil.EntryIdentity` for, and
+that the function calls neither `os.Lstat` nor `os.Stat`.
 
 *Cancellation.* `ProbeVersionWithin` answers serve's stop with the context's
 error, and the version's refusal says so in its old words; the record's lock
@@ -4025,6 +4029,53 @@ this user may not open) and
 a marker may hold already, the hold asked while the failure is laid and once
 it has recovered, and `TestABackupChangedWhileItWasCheckedIsNotPutBack`'s
 backup gone during its settings check pins the change.
+
+*An identity that cannot be read (backlog B898FU's round 4).* On Windows
+`os.Lstat` reads no file ID: `os.SameFile` reads it as it compares, by
+opening the path then (Go 1.27.3's `os/types_windows.go`, `loadFileId`: a
+`CreateFile` asking no access and sharing nothing), and answers false where
+that open fails, which both comparisons recorded as a backup that changed
+while it was checked, ending the auto-installer's hold over a backup that
+may stand as it was. Each of the three observations now reads its identity
+as it is taken, so neither comparison reads one: the entry's two, before the
+lock and under it, through `fsutil.EntryIdentity` (on POSIX `os.Lstat`,
+which carries the device and the inode as it is taken; on Windows the entry
+itself opened, a reparse point not followed and a directory too, asking no
+access and giving every kind of sharing, as `entryOf` opens one, its type
+and identity read from that handle, which is closed before it returns), and
+the handle's, `fsutil.OpenAsFile`'s stat taken before its close, as since
+bridge lows 8. A read that fails takes the inspection failure's path: said,
+recorded nowhere, the hold kept
+(`TestTheCrashRollbackTellsABackupWhoseIdentityCannotBeReadFromAChange`,
+each read failed through `serveOpts.backupIdentity`, nil in production); an
+entry that is not there, one that is no regular file (a symbolic link or a
+junction, read as itself:
+`TestTheCrashRollbackTellsALinkAtItsBackupFromABackupItCannotInspect`) and
+an identity that differs keep their recorded refusals. An open that asks no
+read, write or delete access takes no part in sharing: it fails for no other
+handle's sharing and refuses no rename or removal of its file while it is
+open (fsutil's `TestEntryIdentitysHandleRefusesNoRenameOrRemoval` and
+`TestEntryIdentityReadsBesideAHandleThatSharesNothing`, Windows' alone). By
+that rule a reader beside `loadFileId`'s open did not make it fail either,
+and what the failed read stands for is a file being deleted, an access
+refused or a filter that refuses the open;
+`TestTheCrashRollbackPutsBackABackupAnotherHandleReads` holds a real reader
+that shares reading and writing through the inspection, and its run on
+Windows at `2534dc60`, before the fix, tells whether such a reader made the
+old read fail. The two opens by path are not `fsutil.OpenAsFile`'s: its
+handle (`os.Open`'s: `GENERIC_READ`, sharing reading and writing and no
+deletion, Go 1.27.3's `syscall/syscall_windows.go:376,395`) refuses a rename
+while it is open, and it follows a reparse point, so a link at the path
+would read as its target; the helper's open reaches no pipe, opening a link
+as the link, and a pipe or a device reads as no regular file. A refusal
+recorded as a backup that changed, which such a failed read wrote until this
+round, is cleared by no start for its words, which a backup replaced writes
+too: the next start inspects again, and one whose identities read and match
+goes on, its put-back or its own refusal taking the record's place
+(`TestTheCrashRollbackPutsBackABackupRecordedAsChangedOnceItsIdentityReads`,
+the recovery this round chose); while the read keeps failing, that refusal
+stands and the auto-installer does not wait (the row of a backup that
+changed in every case that seeds a refusal on disk).
 
 *What stays open.* The early and the boot rollbacks still ask their backup's
 version under the lock (10 s each; their rows fit, at 19.4 s). A step under
