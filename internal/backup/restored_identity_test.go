@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +125,85 @@ func startRestoredPlayer(t *testing.T, dir string) *engine.Engine {
 		}
 	})
 	return e
+}
+
+// reservationFlush stands in for the flush of the reservation file one start
+// of the engine writes, in the three tests that start the real engine
+// thousands of times to check the reservation's arithmetic, 20,483 starts a
+// run (TestAdoptionBoundsReservedSpaceAcross4097Restarts,
+// TestRestoreAdoptsUUIDOnlyAfter8193Starts and
+// TestLegacyFloorlessSnapshotRestoresAboveTheAdoptionCeiling; B942). Inside
+// each numbered start the strict writer still stages the file, renames it
+// into place and runs its directory barrier, recorded here and answering nil
+// as reservationStorage's does; only the staged file's flush is counted
+// instead of made. Every other file is flushed, and so is everything those
+// tests do outside their numbered starts: the snapshot, the restore, the
+// adoption and the starts after them.
+//
+// So they no longer exercise the real flush of a start's reservation, 20,483
+// times a run. An engine start's real flush stays in every other test here
+// that starts one (startRestoredPlayer, firstValues), these three's starts
+// after their loops among them, and in the engine's own
+// TestAReservationIsMadeOnlyWithItsDirectoryEntry; a flush that fails, in the
+// restore's failure injection (TestRestoreRequiresTheReservationBarriersBeforeIdentity,
+// its file case); a crash on either side of a flush, in crashRestore, which
+// still makes each one; and the strict writer's own barriers and checks, in
+// atomicwrite's 34 TestWriteBytesDurable_* tests (the WriteBytesDurable
+// bullet of .claude/rules/config-lifecycle.md).
+type reservationFlush struct {
+	mu sync.Mutex
+	// staged is each reservation file the start flushed, and barriers each
+	// directory the strict writer synced after the first of them.
+	staged, barriers []string
+}
+
+// stubReservationFlush installs a reservationFlush for the rest of t, one
+// numbered start. Its restores run once the engine has stopped:
+// startRestoredPlayer's cleanup, registered after them, runs first.
+func stubReservationFlush(t *testing.T) *reservationFlush {
+	t.Helper()
+	f := &reservationFlush{}
+	t.Cleanup(atomicwrite.SetSyncFileForTest(f.flush))
+	t.Cleanup(atomicwrite.SetSyncDirForTest(f.barrier))
+	return f
+}
+
+// flush counts the file the engine's reservation writer staged (its
+// ".player-ids-" prefix, engine.New's) and flushes any other file.
+func (f *reservationFlush) flush(file *os.File) error {
+	if !strings.HasPrefix(filepath.Base(file.Name()), ".player-ids-") {
+		return file.Sync()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.staged = append(f.staged, file.Name())
+	return nil
+}
+
+// barrier records each directory the strict writer syncs once a reservation
+// file was flushed, and answers nil, as reservationStorage's barrier does.
+func (f *reservationFlush) barrier(dir string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.staged) > 0 {
+		f.barriers = append(f.barriers, dir)
+	}
+	return nil
+}
+
+// requireOneDurableWrite fails the start unless it wrote its reservation once,
+// through the strict writer: one reservation file's flush asked for, and after
+// it the strict writer's barrier of the directory the file was staged in. The
+// count alone would take atomicwrite.WriteBytes, which asks for the same
+// flush; its directory barrier is another (commitDirEntry's), which records
+// nothing here.
+func (f *reservationFlush) requireOneDurableWrite(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.staged) != 1 || !slices.Contains(f.barriers, filepath.Dir(f.staged[0])) {
+		t.Fatalf("the start flushed %v and then synced %v: want one reservation file's flush, then its directory's barrier from the strict writer", f.staged, f.barriers)
+	}
 }
 
 func firstValues(t *testing.T, dir string, written engine.Reservation) (uint32, uint32) {
