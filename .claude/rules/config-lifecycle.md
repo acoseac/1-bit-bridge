@@ -147,35 +147,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `applyDefaults`, and don't turn it into a `Validate` refusal: a
   `BRIDGE_LIBRARY_NAME` of spaces would then stop a bridge from starting
   after an update, over a display name.
-- **…and every stored name is one a pairing code can CARRY** (#1046). The
-  app also refuses a `name=` over 256 Characters ("Pairing code's name field
-  is too long.") and one that is not UTF-8 (Foundation leaves the item with
-  no value: "missing the name field"). The console took any length (257
-  characters answered 200 `live`, and the next QR did not pair), and `bridge
-  init --name $'Caf\xe9 Tunes'`, "Café" typed in a Latin-1 terminal, was
-  saved as `!!binary` and served with `name=Caf%E9`. **The cap,
-  `config.MaxLibraryNameLength`, is 256 RUNES**: a Character is one or more
-  scalars, so that is never more than 256 Characters on any iOS version,
-  whatever Unicode tables it segments by, and Go has no grapheme
-  segmentation to count the app's way. It is conservative for multi-scalar
-  Characters (37 family emoji, 259 scalars, are refused; the app counts 37).
-  Don't count bytes: 256 `é` must pass. **Refuse what the operator types,
-  repair what is already stored** (#1042's rule, one step on):
-  `config.CheckLibraryName` refuses in the PATCH (400 `validate`, nothing
-  written) and in init's `--name` (exit 2, before anything is written),
-  through `CleanTypedLibraryName` since B744 (the next bullet), and
-  init's prompt asks again; `Normalize` repairs a config's or an override's
-  name (`config.RepairLibraryName`: U+FFFD for bytes that are not UTF-8,
-  its control characters removed, cut
-  to 256 runes and re-trimmed, with a WARN), because a `Load` refusal would
-  stop a bridge from starting over a display name. init keeps and offers an
-  install's name AS LOAD SERVES IT, or its prompt would offer a name it then
-  refuses. Don't cut in the PATCH instead: that stores a name nobody typed.
-  **Nor in the console**: the name box has NO `maxlength`. It counts UTF-16
-  units, so it stopped names the handler takes (129 emoji), and it cut a
-  paste without a word; the handler's 400 is what the page shows ("Save
-  failed: libraryName: must be at most 256 characters, …"). Added in #1046's
-  first round, removed on review (CodeRabbit).
+- **…and every stored name is one a pairing code can CARRY** (#1046) → History-rules-config-lifecycle.md
 - **…and a library name loses its control characters, the runes U+0000 to U+001F, U+007F and U+0080 to U+009F read after decoding, wherever it is set: what is typed (`config.CleanTypedLibraryName`: init's `--name` and its prompt, the console's save) after the refusal of bytes that are not UTF-8 and before its length is counted, and what loads (`RepairLibraryName`: the file, `BRIDGE_LIBRARY_NAME`, a prior install's name, with the repair's WARN), so a name served live is the name served after a restart; the Bonjour instance strips by the same definition (`config.WithoutControlCharacters`)** (2026-11-07, backlog B744). **Don't strip bytes rather than runes, strip before the UTF-8 refusal, count a typed name's length before its controls are gone, or give an entry a strip of its own.** → History-rules-config-lifecycle.md
 - **A configured URL is named in every refusal and warning by its field,
   its scheme and its host, never its value** (backlog B54). #1074 gave the
