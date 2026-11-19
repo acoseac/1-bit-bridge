@@ -559,6 +559,108 @@ func TestTheBootRollbackLeavesABackupThatIsNotThePreviousVersion(t *testing.T) {
 	}
 }
 
+// TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion: a boot
+// rollback whose backup did not say its version within its bound leaves the
+// install as it is, as the early and the crash rollbacks do (backlog B898FU):
+// the binary, the backup and the marker byte for byte, nothing put back, and
+// said; the next start asks again, and once the backup answers puts it back.
+// A stop while the backup answers leaves the install so too, and is the
+// housekeeping's answer. A backup that is not there, which is never asked,
+// and one that says another version still clear the install, the backup left
+// where it is. Each row is an install of its own, armed, its backup in place.
+func TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// noBackup removes the backup before the boot; answer is the
+		// backup's to the version's ask, on the boot's context, which stop
+		// cancels.
+		noBackup bool
+		answer   func(ctx context.Context, stop context.CancelFunc) (string, error)
+		asked    int
+		stopped  bool
+		kept     bool
+		says     []string
+	}{
+		{name: "it did not answer within its bound",
+			answer: func(context.Context, context.CancelFunc) (string, error) {
+				return "", errors.New("it did not answer within 1s")
+			}, asked: 1, kept: true,
+			says: []string{"the backup did not say its version: it did not answer within 1s", "the install's marker is kept"}},
+		{name: "a stop while it answered",
+			answer: func(ctx context.Context, stop context.CancelFunc) (string, error) {
+				stop()
+				return "", ctx.Err()
+			}, asked: 1, stopped: true, kept: true,
+			says: []string{"stopped while the backup said its version"}},
+		{name: "no backup", noBackup: true,
+			says: []string{"there is no backup to put back"}},
+		{name: "another version",
+			answer: func(context.Context, context.CancelFunc) (string, error) { return "0.0.0-older", nil },
+			asked:  1,
+			says:   []string{"the backup is 0.0.0-older, where the install replaced " + previousVersion}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRefusedInstall(t, "")
+			r.marker.TargetVersion = "9.9.9"
+			r.saveMarker(t, r.dataDir)
+			watched := []string{r.bin, r.bak}
+			if tc.noBackup {
+				if err := os.Remove(r.bak); err != nil {
+					t.Fatal(err)
+				}
+				watched = []string{r.bin}
+			}
+			if tc.kept {
+				watched = append(watched, updater.StatePath(r.dataDir))
+			}
+			files := watch(t, watched...)
+			ctx, stop := context.WithCancel(t.Context())
+			defer stop()
+			asked, restored := 0, 0
+			var stderr bytes.Buffer
+			err := bootHousekeepingWith(ctx, &stderr, r.dataDir, r.bin, previousVersion, bootSeams{
+				restore: func(string, string) error { restored++; return nil },
+				probeVersion: func(ctx context.Context, _ string, _ time.Duration) (string, error) {
+					asked++
+					return tc.answer(ctx, stop)
+				},
+				probeBound: testBackupProbeTimeout})
+			if tc.stopped != errors.Is(err, context.Canceled) || (!tc.stopped && err != nil) {
+				t.Fatalf("the housekeeping = %v, want the stop's error %v; stderr=%s", err, tc.stopped, stderr.String())
+			}
+			files.requireUnchanged(t)
+			if asked != tc.asked || restored != 0 {
+				t.Errorf("the backup was asked its version %d time(s) and put back %d, want %d and never", asked, restored, tc.asked)
+			}
+			if armed := updater.InstallArmed(markerOf(t, r.dataDir)); armed != tc.kept {
+				t.Errorf("the install is armed: %v, want %v; stderr=%s", armed, tc.kept, stderr.String())
+			}
+			for _, s := range tc.says {
+				if !strings.Contains(stderr.String(), s) {
+					t.Errorf("the housekeeping did not say %q; stderr=%s", s, stderr.String())
+				}
+			}
+			if !tc.kept {
+				return
+			}
+			// The next start, the backup answering, puts it back through the
+			// production restore.
+			stderr.Reset()
+			if err := bootHousekeepingWith(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, bootSeams{
+				probeVersion: func(context.Context, string, time.Duration) (string, error) { return r.marker.PreviousVersion, nil },
+				probeBound:   testBackupProbeTimeout}); err != nil || !strings.Contains(stderr.String(), "rolling back to .bak") {
+				t.Fatalf("the next start's housekeeping = %v, want it to put the backup back; stderr=%s", err, stderr.String())
+			}
+			if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
+				t.Errorf("the binary reports %q after the next start, want %s", got, previousVersion)
+			}
+			if st := markerOf(t, r.dataDir); updater.InstallArmed(st) || st.MigrationVeto != "9.9.9" {
+				t.Errorf("the marker after the next start = %+v, want the install cleared, its version's migrations vetoed", st)
+			}
+		})
+	}
+}
+
 // TestAServeWithoutItsDataDirsLockRollsBackAtItsBoot: a serve that could not
 // take its data dir's lock (a lock that fails, which serve starts without)
 // runs its boot's rollback all the same, which stops no service manager's

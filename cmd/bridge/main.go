@@ -2716,13 +2716,26 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		// the install's PreviousVersion, as the early and crash rollbacks ask
 		// it. A marker left armed over a swap that moved nothing, its disarm
 		// not written, has an older backup beside the binary that runs, and
-		// putting that back would be a downgrade by two versions. Any other
-		// backup is left where it is, and the install cleared as one never
-		// swapped; a stop while it answers leaves the install as it is.
-		if why := backupNotPrevious(ctx, binaryPath+".bak", st.PreviousVersion, seams); why != "" {
+		// putting that back would be a downgrade by two versions. A backup
+		// that is not there, or that says another version, is left where it
+		// is, and the install cleared as one never swapped. A stop while it
+		// answers, and a backup that did not say its version, which shows
+		// neither (backlog B898FU), leave the marker as it was read, nothing
+		// written or renamed, as those rollbacks leave their install and a
+		// restore refused for a hold keeps it below, for the next start to
+		// ask again: the window bounds the keep, a start past it clearing the
+		// install as abandoned (BootClearAbandoned).
+		why, unanswered := backupNotPrevious(ctx, binaryPath+".bak", st.PreviousVersion, seams)
+		if why != "" || unanswered != nil {
 			if err := ctx.Err(); err != nil {
 				fmt.Fprintf(stderr, "updater: stopped while the backup said its version; the install is left as it is, for a later start\n")
 				return err
+			}
+			if unanswered != nil {
+				fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak "+
+					"at this start, since the backup did not say its version: %v; the install's marker is kept, for the next start to ask again\n",
+					st.TargetVersion, current, binaryPath, unanswered)
+				return nil
 			}
 			fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak, "+
 				"since %s: it is left where it is\n", st.TargetVersion, current, binaryPath, why)
@@ -2823,12 +2836,15 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 }
 
 // backupNotPrevious says why the backup at bak is not the version an install
-// replaced, previous, for the boot rollback to leave it (backlog B898): not a
-// regular file, no version said within seams.probeBound, or another version;
-// "" where it is.
-func backupNotPrevious(ctx context.Context, bak, previous string, seams bootSeams) string {
+// replaced, previous, for the boot rollback to leave it (backlog B898): why,
+// where that is shown (not a regular file, or another version), for the
+// rollback to clear the install; and apart from it (backlog B898FU), where
+// the backup said no version within seams.probeBound, the probe's error,
+// which shows neither, for the rollback to keep the marker; "" and nil where
+// the backup is previous.
+func backupNotPrevious(ctx context.Context, bak, previous string, seams bootSeams) (why string, unanswered error) {
 	if fi, err := os.Lstat(bak); err != nil || !fi.Mode().IsRegular() {
-		return fmt.Sprintf("there is no backup to put back, a regular file at %s", bak)
+		return fmt.Sprintf("there is no backup to put back, a regular file at %s", bak), nil
 	}
 	probe := seams.probeVersion
 	if probe == nil {
@@ -2836,12 +2852,12 @@ func backupNotPrevious(ctx context.Context, bak, previous string, seams bootSeam
 	}
 	got, err := probe(ctx, bak, seams.probeBound)
 	if err != nil {
-		return fmt.Sprintf("the backup did not say its version: %v", err)
+		return "", err
 	}
 	if !updater.SameVersion(got, previous) {
-		return fmt.Sprintf("the backup is %s, where the install replaced %s", got, previous)
+		return fmt.Sprintf("the backup is %s, where the install replaced %s", got, previous), nil
 	}
-	return ""
+	return "", nil
 }
 
 func main() {
