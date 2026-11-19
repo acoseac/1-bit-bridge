@@ -153,6 +153,41 @@ says the new span and points at it. Both files stay under 100,000 bytes (99,825
 and 99,783). The History file's B898 lines that named F1 as open (the crash
 row, and its open list) and B760's narrative of the lock span are corrected.
 
+### The runs
+
+At `87bb0b29` (the records' head), one build-slot session, the slot free at
+once:
+
+- `make fmt` (the tree unchanged), `make vet` and `make docs-check`, and
+  `GOOS=windows` and `GOOS=darwin` `go vet` of `./cmd/bridge/` and
+  `./internal/updater/` with the tags: clean.
+- The seven tests, `-race -count=20`: ok, 18.3 s. The crash-rollback suites
+  (every test in `serve_crash_rollback_test.go`,
+  `serve_crash_rollback_refused_test.go`, `serve_crash_rollback_lock_test.go`
+  and `serve_held_binary_test.go`), `-race`, twenty runs as four lanes of five
+  from one race binary, started 20 s apart: every lane PASS, 591 s (one run
+  alone, 102 s).
+- `make test` with `TEST_PKGS='-count=1 -timeout 45m ./internal/updater/'`: ok,
+  41 s; with `./cmd/bridge/`: ok, 1,614 s. The Makefile's 30 m is close to
+  cmd/bridge's time under `-race`, so these runs give it 45 m, as recent gates
+  did.
+- `make fmt vet test build-all P=8 TEST_PKGS='-count=1 -timeout 45m ./...'`: 91
+  packages ok and none failed (cmd/bridge 1,753.8 s, manifest 1,647.1 s, admin
+  1,275.8 s), the six targets built, 1,806 s.
+
+`d2439800` then gave `crashInstallAtTheLimit` a layout of its own: it had
+taken `newRefusedInstall`'s and removed the backup at once, which on Windows is
+a copy of the test binary (about 89 MB) that a scanner may still hold as it is
+removed. After it: `go vet` for linux, windows and darwin clean; the seven
+tests and cmd/bridge's three doc guards `-race -count=20` ok; the eleven
+controls again, the same reds and C8 green; and the reds over `f3255e6a`'s
+`serve_crashed_install.go` (laid over with `go test -overlay`), the same
+verdicts, each line 19 further down. A second slot session on `d2439800`:
+`make vet` and `make docs-check` clean, and `make test` with
+`TEST_PKGS='-count=1 -timeout 45m ./cmd/bridge/'` ok, 1,616 s. The commit
+that adds this section changes this file alone; `make docs-check` and the
+citation guard ran over it again.
+
 ### What stays open
 
 - The early and the boot rollbacks still ask their backup's version under the
