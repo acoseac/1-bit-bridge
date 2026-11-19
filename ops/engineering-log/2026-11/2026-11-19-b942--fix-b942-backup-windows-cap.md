@@ -7,7 +7,7 @@ the rule; `b59b48e7`, the measurement again after the fix, and `5d2fdb0c`, its r
 production code changes, and no cap: `internal/backup`'s 45 minutes on the native legs are
 B897's (`fix/b897-make-test-headroom-v2`, not on main). The census, the Makefile's `test` recipe,
 the legs and B897's lines are as main has them once each measurement is reverted. This session
-ran on legion0, which pushes nothing: the measurement commits were not run on CI, and what they
+ran on the Linux test host, which pushes nothing: the measurement commits were not run on CI, and what they
 are for is the owner's to run and read (the last section).
 
 ### The hazard
@@ -35,12 +35,12 @@ start's staged file was flushed for real.
 The native legs' `test` step runs every package uncached (`-count=1`), so the six packages the
 runner factor reads (`cmd/bridge`, `internal/manifest`, `internal/admin`,
 `scripts/third-party-licenses`, `internal/api`, `internal/transcode`) run beside
-`internal/backup` on the same runner as in an ordinary run (Codex's review: a factor from another
+`internal/backup` on the same runner as in an ordinary run (the review: a factor from another
 job cannot describe the measurement's runner); `-v` into a log under `$RUNNER_TEMP`, so
 `internal/backup`'s top-level tests carry their seconds (the ordinary logs are not verbose);
 `-timeout 45m` a package, so a slow runner's `internal/backup` ends with its time rather than at
 the cap; and the job's `timeout-minutes` 120 for that commit, so vet and an uncached suite whose
-packages may each take 45 minutes are not killed with the log's tail (Cursor's review). The
+packages may each take 45 minutes are not killed with the log's tail (the review). The
 step prints every package's `ok`/`FAIL` line (the package's seconds, the share's denominator),
 `internal/backup`'s 40 slowest top-level `--- PASS`/`--- FAIL` lines, slowest first, and the
 three tests' lines, then exits with go test's code; the whole log is uploaded as the artifact
@@ -56,7 +56,7 @@ not run here (`/usr/bin/sort` is named, a Windows runner's `sort.exe` kept out o
 
 On CI this step is owed: neither measurement commit has run (below).
 
-Locally (legion0, 16 cores, load 0.08; TMPDIR on ext4; go1.27.3 with the release tags), from
+Locally (the Linux test host, 16 cores, load 0.08; TMPDIR on ext4; go1.27.3 with the release tags), from
 binaries built with `go test -c`, "real" from `0b51be76` (main's tests) and "counting" from the
 fix, each run alone with `-test.run` the three tests and `-test.count=1`, three rounds in the
 build slot with the variants interleaved:
@@ -100,10 +100,10 @@ The stop rule, as both reviews left it: stop at the first measurement if the thr
 of `internal/backup`'s seconds on windows-latest; after the second, if their Windows seconds,
 each divided by its run's runner factor, fell by under 70 %, revert the fix and the rule in new
 commits and stop there. Neither number exists yet. The fix was built and committed on what
-legion0 measured (the three 29.2 % of the package on a disk whose flush costs 6.6 ms a start,
+the Linux test host measured (the three 29.2 % of the package on a disk whose flush costs 6.6 ms a start,
 the counting flush saving 96.4 %) and on the premise's estimate for Windows (26-30 ms a start
 there, plausibly 550-650 s of the median's 1,058 s), neither of which is the Windows
-measurement: the decision is provisional, and the owner's (the last section). Cursor's review
+measurement: the decision is provisional, and the owner's (the last section). The review
 wanted the rule line after the second measurement; it is committed before it here, so on a miss
 its commit is reverted with the fix's.
 
@@ -119,12 +119,12 @@ so they run once the engine has stopped. After the token check, `requireOneDurab
 the start unless exactly one reservation file's flush was asked for and the strict writer's
 barrier of that file's directory ran after it: `atomicwrite.WriteBytes` asks for the same flush
 through the same seam, and its own barrier is another (`commitDirEntry`, `syncParentDir`), so a
-start that wrote through it fails as one that flushed nothing does (Codex's review: a count alone
+start that wrote through it fails as one that flushed nothing does (the review: a count alone
 would take either writer). The hooks hold for a numbered start alone, so
 `TestRestoreAdoptsUUIDOnlyAfter8193Starts`'s snapshot, restore and `firstValues` start keep their
 real flushes, as does everything the three do outside their numbered starts (the adoption, the
 starts after each loop), and the count is a start's, never a total, so no check counts what
-those steps flush (Cursor's review); `reservationStorage`, which 114 calls in 29 files share, is
+those steps flush (the review); `reservationStorage`, which 114 calls in 29 files share, is
 unchanged. No assertion, start,
 subtest, iteration or bound changed, and every start still runs the real engine, its strict
 writer staging, renaming and syncing, so `ops/History-rules-player.md` 396 ("runs the real engine
@@ -135,20 +135,20 @@ It stays pinned where the helper's comment says: every other test here that star
 (`startRestoredPlayer`, `firstValues`), these three's starts after their loops among them, and
 the engine's `TestAReservationIsMadeOnlyWithItsDirectoryEntry` (`reserve_test.go` 142), which
 drives the engine's own strict writer with the real flush and a test barrier, the engine-level
-guard Codex's review asked to cite; a flush that fails, in the restore's failure injection
+guard the review asked to cite; a flush that fails, in the restore's failure injection
 (`TestRestoreRequiresTheReservationBarriersBeforeIdentity`, its file case, which answers an error
 and calls no `Sync`); a crash on either side of a flush, in `crashRestore`, the crash seam that
 still calls `f.Sync()`; and the strict writer's own barriers and checks, in atomicwrite's 34
 `TestWriteBytesDurable_*` tests (config-lifecycle.md's WriteBytesDurable bullet lists 25 of
 them). None of those holds the staged file's flush itself: under C4's mutation below (the strict
-writer's staged file unflushed), the 29 of them that run on legion0 all passed, the other five
+writer's staged file unflushed), the 29 of them that run on the Linux test host all passed, the other five
 skipping there as they always do (four need a mount namespace, one a volume that folds case);
 the restore's injection and the new check are what fail if the strict writer stops asking for
 the flush.
 
 ### Step 4: the controls
 
-Each predicted in writing before it ran (`.tmp/_b942/controls.predictions.txt` on legion0), each
+Each predicted in writing before it ran (`.tmp/_b942/controls.predictions.txt` on the Linux test host), each
 a `go test -overlay` build of a production file mutated in memory by an exact-once replacement,
 the tree never edited (`git status --short` empty after every batch). "Fix" runs over `87144de4`'s
 tests; "main" lays `0b51be76`'s four backup test files (main's) over the same tree.
@@ -179,7 +179,7 @@ not meet.
 
 ### Step 5: the proof, and what is owed
 
-Owed to CI, in this order (Cursor's review: the gate cancels a run in progress when the ref
+Owed to CI, in this order (the review: the gate cancels a run in progress when the ref
 moves, so each measurement is pushed alone and its runs finished before anything later is):
 
 1. Push `9e0ca732` alone (the PR open to main) and let both native legs finish. Read each leg's
@@ -194,7 +194,7 @@ moves, so each measurement is pushed alone and its runs finished before anything
    `87144de4` and `a9cfc605` in new commits and stop. Each re-run of this run's
    `cross-platform` job is another fresh sample with a factor of its own (every package uncached).
 3. Push `5d2fdb0c` and the rest. From then on, an ordinary run's `internal/backup` line is a
-   sample only when it carries seconds, never `(cached)` (Codex's review), and only beside six
+   sample only when it carries seconds, never `(cached)` (the review), and only beside six
    calibration lines that do; the bar, the only one: the median of the normalised
    `internal/backup` seconds on windows-latest at 796 s or less (factor 1). At the slowest factor
    read so far (1.81), 796 s is 1,441 s: 80 % of 30 minutes, 53 % of 45.
