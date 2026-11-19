@@ -176,11 +176,12 @@ def destination_end(text, pos):
 
 
 def only_references(lines):
-    """Whether LINES, a paragraph's, each from its first character that is not a space, hold
-    nothing but link reference definitions: a label of at most 999 characters, some of them not
-    white space, then ":", a destination and an optional title, each after white space, and
-    nothing after them on their line but spaces and tabs. A title followed on its line by more is
-    no part of its definition, which then ends with its destination where that ends a line."""
+    """Whether LINES, a paragraph's as written, each from its first character that is neither a
+    space nor a tab, hold nothing but link reference definitions: a label of at most 999
+    characters, a tab one of them, some of them not white space, then ":", a destination and an
+    optional title, each after white space, and nothing after them on their line but spaces and
+    tabs. A title followed on its line by more is no part of its definition, which then ends with
+    its destination where that ends a line."""
     text, pos = "\n".join(lines), 0
     while pos < len(text):
         m = LABEL.match(text, pos)
@@ -265,6 +266,21 @@ def starts(rest, tip, inside):
         rest = rest[width:]
 
 
+def as_written(raw, rest):
+    """REST, the end of RAW's line as h2_lines reads it, its tabs expanded, from its first character
+    that is not a space, as RAW holds it: the characters that are neither a space nor a tab are the
+    same in both and in the same order, and a tab in RAW is one character, as CommonMark keeps it in
+    a paragraph's text."""
+    tail = rest.lstrip(" ")
+    if "\t" not in raw:
+        return tail
+    keep, start = len(tail) - tail.count(" "), len(raw)
+    while keep:
+        start -= 1
+        keep -= raw[start] not in " \t"
+    return raw[start:]
+
+
 def h2_lines(text):
     """The numbers of TEXT's lines that are `## ` lines outside fenced code: after up to three
     spaces, `##` then a space, a tab or the line's end. A line in a block quote begins with its
@@ -287,7 +303,9 @@ def h2_lines(text):
     line of the same character, at least as many of them, with nothing after them but white space;
     it ends where a container it opened in ends, and the line that ends it is read afresh. A tab
     is read as the spaces that reach the next column a multiple of four from the line's start,
-    CommonMark's tab stops, so two spaces and a tab are four columns, as one tab is.
+    CommonMark's tab stops, so two spaces and a tab are four columns, as one tab is. The blocks
+    are placed by those columns; a paragraph's text is kept as written (as_written), a tab one
+    character in it, as a label's 999 count it.
 
     The containers are markdownShellLines' (scripts/third-party-licenses/tags.go), which differs:
     it follows no paragraph, so a line indented less than an item's width ends the item there,
@@ -296,10 +314,11 @@ def h2_lines(text):
     spaces before a fence or a marker do not make code there; a tab is four spaces there wherever
     it stands; and a thematic break (`- - -`) is read as list items. HTML blocks are read by
     neither: a `## ` line inside one counts here."""
-    # fence: (its character, how many); paragraph: an open one's lines, each from its first non-space
+    # fence: (its character, how many); paragraph: an open one's lines as written, each from its first
+    # character that is neither a space nor a tab (as_written)
     found, containers, fence, paragraph = [], [], None, []
-    for number, line in enumerate(text.split("\n"), 1):
-        line = line.expandtabs(4)
+    for number, raw in enumerate(text.split("\n"), 1):
+        line = raw.expandtabs(4)
         k, rest = going_on(line, containers)
         if fence:
             if k == len(containers):
@@ -311,13 +330,13 @@ def h2_lines(text):
             fence = None  # a container it opened in has ended, and the fence with it: read the line afresh
         more, rest, kind = starts(rest, paragraph, bool(paragraph) and k == len(containers))
         if kind == "text" and paragraph and not more:
-            paragraph.append(rest.lstrip(" "))
+            paragraph.append(as_written(raw, rest))
             continue  # the paragraph goes on, lazily where a container did not, and every container with it
         if more or kind != "blank":
             for container in containers[:k]:
                 container[1] = True  # it holds what this line opens or puts in it
         containers = containers[:k] + more
-        paragraph = [rest.lstrip(" ")] if kind == "text" else []
+        paragraph = [as_written(raw, rest)] if kind == "text" else []
         if kind == "fence":
             m = FENCE_OPEN.fullmatch(rest.lstrip(" "))
             fence = (m.group(1)[0], len(m.group(1)))
