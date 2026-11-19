@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,8 +171,10 @@ func TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded(t *testi
 // barrier after it does not answer, the read-back once it has parked on its
 // own seam (SetReadBackFailureForTest), never by counting the manifest's
 // reads. The command runs on a goroutine the test joins, each wait bounded,
-// and an answer before the step a case holds fails at once; the check keeps
-// its real deadline, so its record says deadline.
+// and an answer before the step a case holds fails the case, judged by what
+// that goroutine noted of the step as the command returned (noteReached),
+// never by the step's seam as it stands later; the check keeps its real
+// deadline, so its record says deadline.
 func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -236,6 +241,20 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 				}))
 			}
 			parkChecks(t, root)
+			// The step a case holds the verification at, its seam and its
+			// gate, chosen before the command starts, so that its goroutine
+			// notes that seam as the command returns; none where a case holds
+			// no step.
+			var (
+				held               <-chan struct{}
+				heldStep, heldWhat string
+			)
+			switch tc.name {
+			case "whose write did not finish":
+				held, heldStep, heldWhat = landed, stepOfIncomplete, "the write's rename"
+			case "whose record was not read back":
+				held, heldStep, heldWhat = parked, stepOfReadBack, "the read-back's park"
+			}
 			// Registered after parkChecks, so run before its wait for the
 			// holds: the command is joined once the stalls and the gates are
 			// let go, which runs first.
@@ -245,22 +264,25 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 			t.Cleanup(func() { letGo.Do(func() { close(stalled) }); gate.FireAll() })
 			var stdout, stderr bytes.Buffer
 			code := 0
+			var heldAtAnswer atomic.Bool
 			go func() {
 				defer close(answered)
+				defer noteReached(held, &heldAtAnswer)
 				code = backupCmdContext(ctx, []string{"--config", cfgPath, "--verify", dir}, &stdout, &stderr)
 			}()
-			switch tc.name {
-			case "whose write did not finish":
-				reachedBeforeTheAnswer(t, landed, answered, "the write's rename")
-				gate.Fire(stepOfIncomplete)
-			case "whose record was not read back":
-				reachedBeforeTheAnswer(t, parked, answered, "the read-back's park")
-				gate.Fire(stepOfReadBack)
+			if held != nil {
+				reachedBeforeTheAnswer(t, held, answered, &heldAtAnswer, heldWhat)
+				gate.Fire(heldStep)
 			}
 			select {
 			case <-answered:
 			case <-time.After(time.Minute):
 				t.Fatal("bridge backup --verify did not answer within a minute")
+			}
+			// Whichever the wait before the gate took, what the command's
+			// goroutine noted as it answered says which came first.
+			if held != nil && !heldAtAnswer.Load() {
+				t.Fatalf("bridge backup --verify answered before %s, which came after it", heldWhat)
 			}
 			for _, step := range []string{stepOfIncomplete, stepOfReadBack} {
 				select {
@@ -338,21 +360,108 @@ const (
 )
 
 // reachedBeforeTheAnswer waits until reached closes, the step a case holds a
-// verification at reached, and fails the test at once where the command
-// answered before it, or where neither comes within a minute.
-func reachedBeforeTheAnswer(t *testing.T, reached, answered <-chan struct{}, what string) {
+// verification at reached, or the command answers, and fails the test where
+// the command answered before that step, or where neither comes within a
+// minute. Where the step comes with no answer it returns at once: the command
+// answers only once the case fires the step's gate, after this returns.
+// Wherever the command has answered as it looks, whichever it saw first, it
+// reads what the command's goroutine noted as the command returned
+// (reachedAtAnswer, by noteReached), never reached as it stands then: a step
+// that a worker the verification abandoned reaches after the answer reads as
+// reached to a look that comes later, and with both closed a select takes
+// either.
+func reachedBeforeTheAnswer(t testing.TB, reached, answered <-chan struct{}, reachedAtAnswer *atomic.Bool, what string) {
 	t.Helper()
 	select {
 	case <-reached:
 	case <-answered:
-		select {
-		case <-reached:
-		default:
-			t.Fatalf("bridge backup --verify answered before %s", what)
-		}
 	case <-time.After(time.Minute):
 		t.Fatalf("%s did not come within a minute", what)
 	}
+	if closedNow(answered) && !reachedAtAnswer.Load() {
+		t.Fatalf("bridge backup --verify answered before %s", what)
+	}
+}
+
+// noteReached records in reachedAtAnswer whether reached has closed. The
+// command's goroutine defers it after the close of its answer, so it runs as
+// backupCmdContext returns, before the answer closes, and
+// reachedBeforeTheAnswer reads what it noted once the answer is in.
+func noteReached(reached <-chan struct{}, reachedAtAnswer *atomic.Bool) {
+	reachedAtAnswer.Store(closedNow(reached))
+}
+
+// TestReachedBeforeTheAnswerJudgesTheStepAsItStoodAtTheAnswer pins the order
+// reachedBeforeTheAnswer judges by what the command's goroutine noted as it
+// answered (noteReached): an answer before the step fails the case even where
+// the step has come since, as one a worker the verification abandoned reaches
+// after the answer, and so does an answer with no step; a step before the
+// answer passes, and a step with no answer, the command held at that step's
+// gate, returns at once, waiting for no answer, which comes only once the case
+// fires the gate. Each case makes its events in turn before the helper looks,
+// the answer as the command's goroutine makes it. Red on the helper that read
+// the step again once the answer was in, which passed an answer before a step
+// that had come by its look.
+func TestReachedBeforeTheAnswerJudgesTheStepAsItStoodAtTheAnswer(t *testing.T) {
+	const answeredFirst = "bridge backup --verify answered before the step"
+	for _, tc := range []struct {
+		name string
+		// events are made in turn: "step" closes the step's seam, and
+		// "answer" notes it and closes the answer, as the command's goroutine
+		// does.
+		events []string
+		fatal  string
+	}{
+		{"the step, then the answer", []string{"step", "answer"}, ""},
+		{"the step, with no answer", []string{"step"}, ""},
+		{"the answer, then the step", []string{"answer", "step"}, answeredFirst},
+		{"the answer, with no step", []string{"answer"}, answeredFirst},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reached, answered := make(chan struct{}), make(chan struct{})
+			var reachedAtAnswer atomic.Bool
+			for _, event := range tc.events {
+				switch event {
+				case "step":
+					close(reached)
+				case "answer":
+					noteReached(reached, &reachedAtAnswer)
+					close(answered)
+				}
+			}
+			rec := &fatalRecorder{TB: t}
+			ended := make(chan struct{})
+			go func() { // rec's Fatalf ends the goroutine calling it
+				defer close(ended)
+				reachedBeforeTheAnswer(rec, reached, answered, &reachedAtAnswer, "the step")
+			}()
+			// Nothing holds it: it ends by itself, at rec's Goexit or its return.
+			drainLoopOnCleanup(t, func() {}, ended, "reachedBeforeTheAnswer")
+			select {
+			case <-ended:
+			case <-time.After(10 * time.Second):
+				t.Fatal("reachedBeforeTheAnswer did not return within 10s")
+			}
+			if rec.fatal != tc.fatal {
+				t.Errorf("reachedBeforeTheAnswer failed the case with %q, want %q", rec.fatal, tc.fatal)
+			}
+		})
+	}
+}
+
+// fatalRecorder is a testing.TB whose Fatalf records the message and ends the
+// goroutine calling it, as FailNow would, without failing the test that holds
+// it.
+type fatalRecorder struct {
+	testing.TB
+	fatal string
+}
+
+func (r *fatalRecorder) Helper() {}
+
+func (r *fatalRecorder) Fatalf(format string, args ...any) {
+	r.fatal = fmt.Sprintf(format, args...)
+	runtime.Goexit()
 }
 
 // TestTheTickerSaysWhatAGivenUpVerificationsRecordReads: the ticker's report
