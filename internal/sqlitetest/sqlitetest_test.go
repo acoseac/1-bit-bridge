@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -277,6 +278,59 @@ func TestOpeningAConnectionWaitsOnNoOtherConnectionsLock(t *testing.T) {
 	conns.mu.Unlock()
 	if n != 0 {
 		t.Errorf("%d connections recorded for %s once its one was closed, want 0", n, path)
+	}
+}
+
+// TestThePruneClearsTheSlotsItDrops: an open's prune compacts each file's
+// list in place and leaves no connection it dropped in the slots past what it
+// keeps. Of two connections to one database, the first open and the second
+// closed, an open of another database keeps the first alone, and the list's
+// array holds nothing past it. A prune that filtered into the list's own
+// start left the closed connection's record there until an append to that
+// file's list wrote over it, which no open of another database makes.
+func TestThePruneClearsTheSlotsItDrops(t *testing.T) {
+	dir := t.TempDir()
+	path, other := filepath.Join(dir, "kept.db"), filepath.Join(dir, "other.db")
+	// Registered first, so run last, once every connection here has closed:
+	// the registry keeps nothing of this test's.
+	t.Cleanup(func() {
+		conns.mu.Lock()
+		defer conns.mu.Unlock()
+		delete(conns.byFile, path)
+		delete(conns.byFile, other)
+	})
+	open, closed := openWAL(t, path), openWAL(t, path)
+	for _, db := range []*sql.DB{open, closed} {
+		if err := db.Ping(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conns.mu.Lock()
+	recorded := slices.Clone(conns.byFile[path])
+	conns.mu.Unlock()
+	if len(recorded) != 2 {
+		t.Fatalf("%d connections recorded for %s, want 2", len(recorded), path)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := openWAL(t, other).Ping(); err != nil {
+		t.Fatal(err)
+	}
+	conns.mu.Lock()
+	list := conns.byFile[path]
+	kept, past := slices.Clone(list), slices.Clone(list[len(list):cap(list)])
+	conns.mu.Unlock()
+	if len(kept) != 1 || kept[0] != recorded[0] {
+		t.Fatalf("the prune kept %d connections for %s, want the open one alone", len(kept), path)
+	}
+	if len(past) == 0 {
+		t.Fatal("the list has no slot past what it keeps: the prune no longer compacts it in place, which this case is written for")
+	}
+	for i, c := range past {
+		if c != nil {
+			t.Errorf("slot %d, past the list's length, still holds a connection (the closed one: %t)", len(kept)+i, c == recorded[1])
+		}
 	}
 }
 
