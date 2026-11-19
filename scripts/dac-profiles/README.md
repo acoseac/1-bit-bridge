@@ -148,4 +148,7 @@ the statement, and the export reads that clause's head alone as the entry's
 source (`fieldLog`, `2026-06-21`). A source names a kind and a date, never a
 person. A DoP claim's `source` is its own row of the registry
 ("DACProfile.swift <row> at iOS <commit>"), a dated listening or a dated
-maker's document.
+maker's document. A row added past the registry's baseline, which no commit
+of the registry holds as a row, names in its `ios` line the dated wizard
+submission it came from (`ios: wizard submission 2026-11-19`), and its DoP
+claim then cites no registry row (B944).

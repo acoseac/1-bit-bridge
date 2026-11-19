@@ -52,7 +52,8 @@ func dropLine(p *Profile, claim string) {
 // no line, a line naming no date or version (or a date that is none), an
 // email, a line for a claim the profile does not make or for none at all, a
 // source of a kind the claim cannot have or that does not say where it is,
-// and an ios line that is not the profile's own registry row.
+// and an ios line that is neither the profile's own registry row nor a dated
+// wizard submission (TestARowAddedPastTheRegistryNamesItsSubmission).
 func TestEveryClaimNamesItsProvenance(t *testing.T) {
 	db := mustDefault(t)
 	if problems := db.Lint(); len(problems) > 0 {
@@ -151,6 +152,45 @@ func TestEveryClaimNamesItsProvenance(t *testing.T) {
 			t.Errorf("a shared reference ID with %s lints as %v", tc.name, problems)
 		}
 	}
+}
+
+// TestARowAddedPastTheRegistryNamesItsSubmission: a row the iOS registry
+// never held, added to the catalog first from a wizard run (B944), names in
+// its ios line the dated submission it came from ("ios: wizard submission
+// 2026-11-19", then nothing, ", " or " (" and free text), and its DoP claim
+// cites no registry row, which would name an iOS commit that does not hold
+// it: each form lints clean beside a DoP claim sourced to the listening, and
+// a submission with no date, a date that is none, a date run into its text,
+// a submission of another kind, and a DoP claim that cites the registry beside
+// a submission are each refused.
+func TestARowAddedPastTheRegistryNamesItsSubmission(t *testing.T) {
+	submission := func(line string) func(db *Database) {
+		return func(db *Database) {
+			p := &db.Profiles[0]
+			p.Provenance[1] = line
+			p.DoP.Source = Source{Kind: SourceListening, Ref: "wizard submission 2026-11-19"}
+		}
+	}
+	for _, line := range []string{
+		"ios: wizard submission 2026-11-19",
+		"ios: wizard submission 2026-11-19, the port name iOS reported",
+		"ios: wizard submission 2026-11-19 (app 2.2 (17), iOS 27.3)",
+	} {
+		db := iosPair()
+		submission(line)(db)
+		if problems := db.Lint(); len(problems) > 0 {
+			t.Errorf("%q lints as %v", line, problems)
+		}
+	}
+	runDBCases(t, []dbCase{
+		{"a submission with no date", submission("ios: wizard submission (one unit)"), "own registry row"},
+		{"a submission on a date that is none", submission("ios: wizard submission 2026-13-45"), "own registry row"},
+		{"a submission's date run into its text", submission("ios: wizard submission 2026-11-19th"), "own registry row"},
+		{"a submission of another kind", submission("ios: forum submission 2026-11-19"), "own registry row"},
+		{"a DoP claim that cites the registry beside a submission", func(db *Database) {
+			db.Profiles[0].Provenance[1] = "ios: wizard submission 2026-11-19"
+		}, "the profile's ios line names a submission"},
+	})
 }
 
 // TestAHeardRateIsAHearingNeverALock: a heard DoP rate is on-device

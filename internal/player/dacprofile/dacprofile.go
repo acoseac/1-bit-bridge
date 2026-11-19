@@ -160,16 +160,18 @@ type Profile struct {
 	IOS *IOS `json:"ios"`
 	// Provenance is one line a claim: "identity: …" (a profile with a match
 	// alone), "native: …", "dop: …", "timing: …", "caveat <code>: …" and
-	// "ios: DACProfile.swift <id> at iOS <commit>", each naming its source
-	// and its date or version. A dop line's clauses (the text after "dop: ",
-	// split on semicolons and trimmed) credit DoP evidence only in one form: a
-	// marker, its rates separated by commas, then a colon and free text, or
-	// the clause's end ("refused DSD256: the unit would not negotiate its
-	// carrier (iOS cd125088)"). The markers are heard; the failures refused,
-	// silence at, noise at and no frames at; and the statements stated DoP to
-	// and stated DSD to, with one rate, and stated no DSD. With IOS, the text
-	// after a colon opens with its source's head (Credit). A marker clause of
-	// another shape, or a rate heard and failed, is a problem.
+	// "ios: DACProfile.swift <id> at iOS <commit>", or for a row added past
+	// the registry "ios: wizard submission <date>" (B944), each naming its
+	// source and its date or version. A dop line's clauses (the text after
+	// "dop: ", split on semicolons and trimmed) credit DoP evidence only in
+	// one form: a marker, its rates separated by commas, then a colon and free
+	// text, or the clause's end ("refused DSD256: the unit would not negotiate
+	// its carrier (iOS cd125088)"). The markers are heard; the failures
+	// refused, silence at, noise at and no frames at; and the statements
+	// stated DoP to and stated DSD to, with one rate, and stated no DSD. With
+	// IOS, the text after a colon opens with its source's head (Credit). A
+	// marker clause of another shape, or a rate heard and failed, is a
+	// problem.
 	Provenance []string `json:"provenance"`
 }
 
