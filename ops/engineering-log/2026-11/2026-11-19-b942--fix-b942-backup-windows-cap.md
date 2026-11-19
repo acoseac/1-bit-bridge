@@ -91,21 +91,23 @@ run each at the end of the gate's session (below):
 | real flush | 770.2 s | 157.46 s | 20.4 % |
 | counting flush | 624.1 s | 11.54 s | 1.8 % |
 
-146.1 s less, 19.0 % of the package. None of this is windows-latest's: a flush there costs what
-the first measurement will show.
+146.1 s less, 19.0 % of the package. None of this is windows-latest's: there the three took
+589.2 s before the fix, 28.8 ms a start, and 37.2 s after it, 1.8 ms a start ("The CI
+measurements").
 
 ### Step 2: the decision
 
-The stop rule, as both reviews left it: stop at the first measurement if the three are under 25 %
-of `internal/backup`'s seconds on windows-latest; after the second, if their Windows seconds,
-each divided by its run's runner factor, fell by under 70 %, revert the fix and the rule in new
-commits and stop there. Neither number existed when it was built; both are under "The CI measurements" below. The fix was built and committed on what
-the Linux test host measured (the three 29.2 % of the package on a disk whose flush costs 6.6 ms a start,
-the counting flush saving 96.4 %) and on the premise's estimate for Windows (26-30 ms a start
-there, plausibly 550-650 s of the median's 1,058 s), neither of which is the Windows
-measurement: the decision was provisional until the CI measurements, which confirmed it. The review
-wanted the rule line after the second measurement; it is committed before it here, so on a miss
-its commit is reverted with the fix's.
+The stop rule, as both reviews left it, was to stop at the first measurement if the three were
+under 25 % of `internal/backup`'s seconds on windows-latest, and after the second, if their
+Windows seconds, each divided by its run's runner factor, fell by under 70 %, to revert the fix
+and the rule in new commits and stop there. Neither number existed when it was built; both are
+under "The CI measurements" below. The fix was built and committed on what the Linux test host
+measured (the three 29.2 % of the package on a disk whose flush costs 6.6 ms a start, the
+counting flush saving 96.4 %) and on the premise's estimate for Windows (26-30 ms a start there,
+plausibly 550-650 s of the median's 1,058 s), neither of which is the Windows measurement: the
+decision was provisional until the CI measurements, which confirmed it. The review wanted the
+rule line after the second measurement; it was committed before it here, so that a miss would
+have reverted its commit with the fix's, and there was no miss.
 
 ### Step 3: the fix (`39399c24`)
 
@@ -179,25 +181,28 @@ not meet.
 
 ### Step 5: the proof on CI
 
-Run on CI in this order (the review: the gate cancels a run in progress when the ref
-moves, so each measurement is pushed alone and its runs finished before anything later is):
+It ran on CI in this order (the review: the gate cancels a run in progress when the ref moves,
+so each measurement was pushed alone and its runs finished before anything later was):
 
-1. Push `9e0ca732` alone (the PR open to main) and let both native legs finish. Read each leg's
-   step output and artifact: the six calibration packages' seconds (a line at its cap is no
-   sample), `internal/backup`'s package line, the 40 slowest top-level tests with each one's
-   share, the three's sum and share. The runner factor is the median, over the six, of each
-   package's seconds over its median: on Windows 1,120.6, 789.8, 731.1, 104.2, 91.8 and 91.3 s,
-   on macOS 447.7, 156.2, 262.5, 53.1, 33.4 and 21.9 s. If the three are under 25 % of the Windows
-   package, stop: the branch is `0b51be76` and a record of the numbers.
-2. Push through `95efbac8` and let both legs finish. The three's Windows seconds, divided by that
-   run's factor, against the first run's, divided by its own: under a 70 % fall, revert
-   `39399c24` and `71811c4c` in new commits and stop. Each re-run of this run's
-   `cross-platform` job is another fresh sample with a factor of its own (every package uncached).
-3. Push `875b1b12` and the rest. From then on, an ordinary run's `internal/backup` line is a
-   sample only when it carries seconds, never `(cached)` (the review), and only beside six
-   calibration lines that do; the bar, the only one: the median of the normalised
-   `internal/backup` seconds on windows-latest at 796 s or less (factor 1). At the slowest factor
-   read so far (1.81), 796 s is 1,441 s: 80 % of 30 minutes, 53 % of 45.
+1. `9e0ca732` was pushed alone (the PR open to main), and both native legs finished. Each leg's
+   step output and artifact held the six calibration packages' seconds (a line at its cap is no
+   sample), `internal/backup`'s package line and its 40 slowest top-level tests, which give each
+   one's share and the three's sum and share. The runner factor is the median, over the six, of
+   each package's seconds over its median: on Windows 1,120.6, 789.8, 731.1, 104.2, 91.8 and
+   91.3 s, on macOS 447.7, 156.2, 262.5, 53.1, 33.4 and 21.9 s. Had the three been under 25 % of
+   the Windows package, the work would have stopped there, the branch at `0b51be76` and a record
+   of the numbers; they were 53.7 %.
+2. `95efbac8` was pushed next, and both legs finished. The three's Windows seconds, divided by
+   that run's factor, were set against the first run's, divided by its own: a fall under 70 %
+   would have reverted `39399c24` and `71811c4c` in new commits and stopped the work there; they
+   fell 91.6 %. Each re-run of that run's `cross-platform` job is another fresh sample with a
+   factor of its own (every package uncached).
+3. `875b1b12` and the rest were pushed after it. From then on, an ordinary run's
+   `internal/backup` line is a sample only when it carries seconds, never `(cached)` (the
+   review), and only beside six calibration lines that do; the bar, the only one: the median of
+   the normalised `internal/backup` seconds on windows-latest at 796 s or less (factor 1). The
+   measurement run after the fix put the package at about 657 s normalised. At the slowest
+   factor read so far (1.81), 796 s is 1,441 s: 80 % of 30 minutes, 53 % of 45.
 
 Before, for the comparison (the premise's 30 attempts): `internal/backup` on windows-latest
 1,058.2 s raw at the median (59 % of 30 minutes, 39 % of 45), 1,086 s normalised (60 %, 40 %),

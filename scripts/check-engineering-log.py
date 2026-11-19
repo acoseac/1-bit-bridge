@@ -80,6 +80,16 @@ ATX = re.compile(r"#{1,6}(?:[ \t]|$)")
 UNDERLINE = re.compile(r"(?:=+|-+)[ \t]*")  # under a paragraph, a setext heading's
 FENCE_OPEN = re.compile(r"(`{3,}|~{3,})(.*)")
 FENCE_CLOSE = re.compile(r"(`{3,}|~{3,})[ \t]*")
+# A link reference definition's parts, CommonMark's: a label up to its first unescaped "]"; a title
+# in quotes, apostrophes or parentheses; a destination in <>, which holds no line end; a backslash
+# escapes the character after it in each. White space between them may hold one line end, and a
+# definition's line ends in spaces and tabs alone.
+LABEL = re.compile(r"\[(?:[^\\\[\]]|\\.)*\]", re.S)
+TITLE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|\((?:[^()\\]|\\.)*\)', re.S)
+ANGLED = re.compile(r"<(?:[^<>\n\\]|\\.)*>")
+SPNL = re.compile(r"[ \t]*(?:\n[ \t]*)?")
+LINE_END = re.compile(r"[ \t]*(?:\n|$)")
+PUNCTUATION = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"  # ASCII's, what a backslash escapes
 # An entry filed anywhere else, by its name alone: a file named like an entry in any folder, and
 # any dated Markdown file directly in ops/ that git tracks. Untracked, a dated note there that is
 # not named like an entry is no record: git ignores *review*, *audit* and *findings* names in ops/
@@ -140,6 +150,55 @@ def name_problems(sub):
     return out
 
 
+def destination_end(text, pos):
+    """Where the link destination at POS of TEXT ends, or None where none stands there: one in <>,
+    or a run of no white space and no ASCII control character whose unescaped parentheses
+    balance, a backslash escaping the punctuation after it."""
+    if text.startswith("<", pos):
+        m = ANGLED.match(text, pos)
+        return m.end() if m else None
+    start, depth = pos, 0
+    while pos < len(text):
+        c = text[pos]
+        if c == "\\" and pos + 1 < len(text) and text[pos + 1] in PUNCTUATION:
+            pos += 2
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if not depth:
+                break
+            depth -= 1
+        elif c <= " " or c == "\x7f":
+            break
+        pos += 1
+    return pos if pos > start and not depth else None
+
+
+def only_references(lines):
+    """Whether LINES, a paragraph's, each from its first character that is not a space, hold
+    nothing but link reference definitions: a label of at most 999 characters, some of them not
+    white space, then ":", a destination and an optional title, each after white space, and
+    nothing after them on their line but spaces and tabs. A title followed on its line by more is
+    no part of its definition, which then ends with its destination where that ends a line."""
+    text, pos = "\n".join(lines), 0
+    while pos < len(text):
+        m = LABEL.match(text, pos)
+        if not m or m.end() - pos > 1001 or not text[pos + 1:m.end() - 1].strip(" \t\n") or \
+                not text.startswith(":", m.end()):
+            return False
+        end = destination_end(text, SPNL.match(text, m.end() + 1).end())
+        if end is None:
+            return False
+        gap = SPNL.match(text, end).end()
+        title = TITLE.match(text, gap) if gap > end else None
+        line_end = (title and LINE_END.match(text, title.end())) or LINE_END.match(text, end)
+        if not line_end:
+            return False
+        pos = line_end.end()
+    return True
+
+
 def going_on(line, containers):
     """(how many of CONTAINERS, outermost first, LINE goes on in, and what is left of it). Each is
     [width, holds]: a block quote's width None, and it goes on where its marker stands; a list
@@ -164,12 +223,13 @@ def going_on(line, containers):
 def starts(rest, tip, inside):
     """(the containers REST opens, outermost first, what is left of it, and what that is: "fence",
     "heading", "break", "underline", "code", "blank" or "text"), as CommonMark's block starts read
-    it. TIP says a paragraph is the last block open, INSIDE that it goes on in every container
-    the line goes on in: there a list item interrupts it only with something on its line and,
-    ordered, numbered 1, a run of `=` or `-` underlines it, and a line indented four spaces or more
-    is its text (where TIP alone holds, a lazy line's). A thematic break (`- - -`) opens no item.
-    An item's width is its marker's, the up to three spaces before it included, and the spaces
-    after it, one where it holds nothing yet or more than four follow."""
+    it. TIP is the lines of a paragraph that is the last block open ([] where none is), INSIDE that
+    it goes on in every container the line goes on in: there a list item interrupts it only with
+    something on its line and, ordered, numbered 1, a run of `=` or `-` underlines it unless it
+    holds nothing but link reference definitions (only_references), and a line indented four
+    spaces or more is its text (where TIP alone holds, a lazy line's). A thematic break (`- - -`)
+    opens no item. An item's width is its marker's, the up to three spaces before it included, and
+    the spaces after it, one where it holds nothing yet or more than four follow."""
     out = []
     while True:
         if not rest.strip(" "):
@@ -188,7 +248,7 @@ def starts(rest, tip, inside):
         m = FENCE_OPEN.fullmatch(body)
         if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
             return out, rest, "fence"
-        if interrupting and UNDERLINE.fullmatch(body):
+        if interrupting and UNDERLINE.fullmatch(body) and not only_references(tip):
             return out, rest, "underline"
         if BREAK.fullmatch(rest):
             return out, rest, "break"
@@ -216,22 +276,30 @@ def h2_lines(text):
     at least, or is blank, but for an item that holds nothing yet, which a blank line ends. A
     paragraph's lazy line, one that starts no block, keeps every container open. A list item
     interrupts a paragraph only with something on its line and, ordered, numbered 1, so `2.` or an
-    empty `-` after a paragraph's text is more of that text, and a lone run of `-` or `=` under it
-    underlines it; a quote, a heading, a fence and a thematic break always interrupt it. Inside its
-    containers, after up to three spaces, a fence opens on three or more backticks or tildes, a
-    backtick fence's info holding no backtick, and closes on a line of the same character, at
-    least as many of them, with nothing after them but white space; it ends where a container it
-    opened in ends, and the line that ends it is read afresh.
+    empty `+` or `*` after a paragraph's text is more of that text, and a lone run of `-` or `=`
+    under it underlines it, a lone `-` too: it is read as an underline before it is read as an
+    item. A paragraph that holds nothing but link reference definitions (`[ref]: /url`) has no
+    text for an underline to make a heading of, so there the run is read as any other line under a
+    paragraph's text: a thematic break where it is one, and more of the paragraph where it is not
+    (CommonMark's `[foo]: /url` then `===`). A quote, a heading, a fence and a thematic break
+    always interrupt a paragraph. Inside its containers, after up to three spaces, a fence opens on
+    three or more backticks or tildes, a backtick fence's info holding no backtick, and closes on a
+    line of the same character, at least as many of them, with nothing after them but white space;
+    it ends where a container it opened in ends, and the line that ends it is read afresh. A tab
+    is read as the spaces that reach the next column a multiple of four from the line's start,
+    CommonMark's tab stops, so two spaces and a tab are four columns, as one tab is.
 
     The containers are markdownShellLines' (scripts/third-party-licenses/tags.go), which differs:
     it follows no paragraph, so a line indented less than an item's width ends the item there,
     every marker opens one and a blank line goes on in one; code in a fence opens a container
     there, so a fence's line that begins with a marker (`- ```) closes the fence; more than three
-    spaces before a fence or a marker do not make code there; and a thematic break (`- - -`) is
-    read as list items. HTML blocks are read by neither: a `## ` line inside one counts here."""
-    found, containers, fence, paragraph = [], [], None, False  # fence: (its character, how many)
+    spaces before a fence or a marker do not make code there; a tab is four spaces there wherever
+    it stands; and a thematic break (`- - -`) is read as list items. HTML blocks are read by
+    neither: a `## ` line inside one counts here."""
+    # fence: (its character, how many); paragraph: an open one's lines, each from its first non-space
+    found, containers, fence, paragraph = [], [], None, []
     for number, line in enumerate(text.split("\n"), 1):
-        line = line.replace("\t", "    ")
+        line = line.expandtabs(4)
         k, rest = going_on(line, containers)
         if fence:
             if k == len(containers):
@@ -241,14 +309,15 @@ def h2_lines(text):
                     fence = None
                 continue
             fence = None  # a container it opened in has ended, and the fence with it: read the line afresh
-        more, rest, kind = starts(rest, paragraph, paragraph and k == len(containers))
+        more, rest, kind = starts(rest, paragraph, bool(paragraph) and k == len(containers))
         if kind == "text" and paragraph and not more:
+            paragraph.append(rest.lstrip(" "))
             continue  # the paragraph goes on, lazily where a container did not, and every container with it
         if more or kind != "blank":
             for container in containers[:k]:
                 container[1] = True  # it holds what this line opens or puts in it
         containers = containers[:k] + more
-        paragraph = kind == "text"
+        paragraph = [rest.lstrip(" ")] if kind == "text" else []
         if kind == "fence":
             m = FENCE_OPEN.fullmatch(rest.lstrip(" "))
             fence = (m.group(1)[0], len(m.group(1)))
@@ -627,6 +696,8 @@ def self_test():
         ("a list item in a quote ends with the quote", head + "> - ```\n>   ## inside\n>   ```\n## after\n", [1, 5]),
         ("a heading in a list item outside a fence is one", head + "- item\n  ## sub\n", [1, 3]),
         ("a thematic break opens no list item", head + "- - -\n  ```\n## a\n", [1]),
+        ("two spaces and a tab reach column four, so a fence two columns into an item opens in it",
+         head + "- item\n  \t```\n  ## sample\n  ```\n", [1]),
     ]
     for name, text, want in lists:
         expect(name, h2_lines(text), want)
@@ -643,6 +714,8 @@ def self_test():
         ("0. does not interrupt one either", head + "\nparagraph\n0. ```\n   ## inside\n   ```\n", [1, 5]),
         ("an empty bullet does not: under a paragraph it is a setext underline",
          head + "\nparagraph\n-\n  ```\n## after\n```\n", [1]),
+        ("nor does an empty +, which underlines nothing: it is more of the paragraph's text",
+         head + "\nparagraph\n+\n  ```\n## sample\n```\n", [1]),
         ("a line four spaces in under a paragraph's text is more of it, so 2. after it is too",
          head + "\nparagraph\n    more\n2. ```\n   ## inside\n   ```\n", [1, 6]),
         ("an underline ends the paragraph, so 2. after it opens an item",
@@ -658,6 +731,20 @@ def self_test():
         ("a fence's closing line is no paragraph's text", head + "```\nx\n```\n2. ```\n   ## inside\n   ```\n", [1]),
     ]
     for name, text, want in paragraphs:
+        expect(name, h2_lines(text), want)
+    # Link reference definitions alone give an underline no text to make a heading of (CommonMark's
+    # `[foo]: /url` then `===`, a paragraph's text): each row as lists'.
+    definitions = [
+        ("an underline under definitions alone is more of their paragraph, so 2. after it is too",
+         "## 2026-11-18 — Example\n[ref]: /url\n===\n2. ```\n   ## stray\n```\n", [1, 5]),
+        ("a definition may span lines, its title on a line of its own",
+         head + "[ref]:\n/url\n'title'\n===\n2. ```\n   ## stray\n```\n", [1, 7]),
+        ("text past the definitions is a heading's, so 2. after its underline opens an item",
+         head + "[ref]: /url\nbar\n===\n2. ```\n   ## inside\n   ```\n", [1]),
+        ("a thematic break under definitions alone is one, so 2. after it opens an item",
+         head + "[ref]: /url\n---\n2. ```\n   ## inside\n   ```\n", [1]),
+    ]
+    for name, text, want in definitions:
         expect(name, h2_lines(text), want)
     twice = ["holds 2 `## ` lines outside fenced code, not one: each entry is a file of its own"]
     expect("so those entries are refused, and the valid ones accepted",
