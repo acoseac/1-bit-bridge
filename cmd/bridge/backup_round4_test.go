@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,6 +157,19 @@ func TestBridgeBackupVerifySaysWhatARecheckFoundWhereItCannotBeRecorded(t *testi
 // printed, its read-back given up said as that since the sixth round. Red on
 // the round before, which said "it wrote nothing" wherever what was found was
 // not recorded.
+//
+// Once the check is given up, the write of its INCOMPLETE and the read of the
+// record after it are each a step whose bound is a second from its start
+// (laterBound), and windows-latest passed the write's: its rename was skipped,
+// the command said its write did not finish, and the record read PENDING
+// (backlog B910). So both steps are held at their gates (SetStepGateForTest),
+// given up only where a case fires one, once its step has come where the case
+// means it to be given up: the write once its rename has landed and the
+// barrier after it does not answer, the read-back once it has parked on its
+// own seam (SetReadBackFailureForTest), never by counting the manifest's
+// reads. The command runs on a goroutine the test joins, each wait bounded,
+// and an answer before the step a case holds fails at once; the check keeps
+// its real deadline, so its record says deadline.
 func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -194,34 +206,69 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 				t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(string) error { return errors.New("injected: the staging failed") }, nil, nil))
 			}
 			mpath := filepath.Join(dir, backup.ManifestFile)
+			gate, restoreGate := backup.SetStepGateForTest(root, filepath.Base(dir), stepOfIncomplete, stepOfReadBack)
+			t.Cleanup(restoreGate)
 			stalled := make(chan struct{})
 			var letGo sync.Once
-			switch tc.name {
-			case "whose write did not finish":
-				// The rename lands, and the folder's sync after it does not
-				// answer until the test's end.
-				t.Cleanup(backup.SetSyncVerdictForTest(func(path string) error {
-					if path == mpath {
+			// The barrier after the write's rename says the rename has landed;
+			// in "whose write did not finish" it does not answer until the
+			// test's end.
+			landed := make(chan struct{})
+			var land sync.Once
+			t.Cleanup(backup.SetSyncVerdictForTest(func(path string) error {
+				if path == mpath {
+					land.Do(func() { close(landed) })
+					if tc.name == "whose write did not finish" {
 						<-stalled
 					}
-					return fsutil.SyncParentDir(path)
-				}))
-			case "whose record was not read back":
-				// The verification reads the manifest a third time to read its
-				// record back, after its first read and its write's: that read
-				// does not answer until the test's end.
-				var reads atomic.Int32
-				t.Cleanup(backup.SetOnManifestReadForTest(func(path string) {
-					if path == mpath && reads.Add(1) == 3 {
-						<-stalled
-					}
+				}
+				return fsutil.SyncParentDir(path)
+			}))
+			// The read-back of "whose record was not read back" parks before
+			// it reads anything, until the test's end.
+			parked := make(chan struct{})
+			if tc.name == "whose record was not read back" {
+				var park sync.Once
+				t.Cleanup(backup.SetReadBackFailureForTest(func(string) error {
+					park.Do(func() { close(parked) })
+					<-stalled
+					return nil
 				}))
 			}
 			parkChecks(t, root)
-			// Registered after parkChecks, so run before its wait for the holds.
-			t.Cleanup(func() { letGo.Do(func() { close(stalled) }) })
+			// Registered after parkChecks, so run before its wait for the
+			// holds: the command is joined once the stalls and the gates are
+			// let go, which runs first.
+			ctx, cancel := context.WithCancel(context.Background())
+			answered := make(chan struct{})
+			drainLoopOnCleanup(t, cancel, answered, "bridge backup --verify")
+			t.Cleanup(func() { letGo.Do(func() { close(stalled) }); gate.FireAll() })
 			var stdout, stderr bytes.Buffer
-			code := backupCmd([]string{"--config", cfgPath, "--verify", dir}, &stdout, &stderr)
+			code := 0
+			go func() {
+				defer close(answered)
+				code = backupCmdContext(ctx, []string{"--config", cfgPath, "--verify", dir}, &stdout, &stderr)
+			}()
+			switch tc.name {
+			case "whose write did not finish":
+				reachedBeforeTheAnswer(t, landed, answered, "the write's rename")
+				gate.Fire(stepOfIncomplete)
+			case "whose record was not read back":
+				reachedBeforeTheAnswer(t, parked, answered, "the read-back's park")
+				gate.Fire(stepOfReadBack)
+			}
+			select {
+			case <-answered:
+			case <-time.After(time.Minute):
+				t.Fatal("bridge backup --verify did not answer within a minute")
+			}
+			for _, step := range []string{stepOfIncomplete, stepOfReadBack} {
+				select {
+				case <-gate.Entered(step):
+				default:
+					t.Errorf("no gate held %s: it kept its bound of a second", step)
+				}
+			}
 			out, errs := stdout.String(), stderr.String()
 			if (tc.name == "over a PENDING" || tc.name == "whose record was not read back") && strings.Contains(out+errs, "cache stamp was skipped") {
 				t.Errorf("the live recovery step skipped its cache stamp:\n%s%s", out, errs)
@@ -241,14 +288,12 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 				if at < 0 || strings.Contains(out, "database:") {
 					t.Errorf("the command did not say %q alone, with no record printed:\n%s", tc.wrote, out)
 				}
-				letGo.Do(func() { close(stalled) })
 			case at < 0 || !strings.Contains(out[at:], reads):
 				t.Errorf("the command did not say %q, then %q:\n%s", tc.wrote, reads, out)
 			}
 			if strings.Contains(out, "it wrote nothing") {
 				t.Errorf("the command said it wrote nothing of a write that began:\n%s", out)
 			}
-			letGo.Do(func() { close(stalled) })
 			for _, never := range []string{"this check found", "was not recorded"} {
 				if strings.Contains(out+errs, never) {
 					t.Errorf("the command said %q of a verification given up:\n%s%s", never, out, errs)
@@ -257,7 +302,17 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 			if tc.name == "whose INCOMPLETE is not written" && !strings.Contains(errs, "injected: the staging failed") {
 				t.Errorf("the command did not say its write failed:\n%s", errs)
 			}
-			// What it says the record reads is what a reader reads.
+			// What it says the record reads is what a reader reads, once the
+			// rename of the record it says it wrote has landed: before the
+			// answer, which follows the write's step, so nothing is waited for
+			// here, the stalls and the checks' park still held.
+			if tc.reads == backup.StateIncomplete {
+				select {
+				case <-landed:
+				default:
+					t.Fatalf("bridge backup --verify answered with no rename of its record landed:\n%s%s", out, errs)
+				}
+			}
 			entries, err := backup.List(root)
 			if err != nil {
 				t.Fatal(err)
@@ -271,6 +326,32 @@ func TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+// The steps of a verification given up, in the backup package's words, that
+// TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads holds at
+// their gates (backup.SetStepGateForTest).
+const (
+	stepOfIncomplete = "its write of INCOMPLETE"
+	stepOfReadBack   = "its read of the record after it"
+)
+
+// reachedBeforeTheAnswer waits until reached closes, the step a case holds a
+// verification at reached, and fails the test at once where the command
+// answered before it, or where neither comes within a minute.
+func reachedBeforeTheAnswer(t *testing.T, reached, answered <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-reached:
+	case <-answered:
+		select {
+		case <-reached:
+		default:
+			t.Fatalf("bridge backup --verify answered before %s", what)
+		}
+	case <-time.After(time.Minute):
+		t.Fatalf("%s did not come within a minute", what)
 	}
 }
 

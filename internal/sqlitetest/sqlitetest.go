@@ -23,6 +23,15 @@
 // This was backuptest's park, written for VACUUM (#998), until the scanner's
 // cancellation tests needed the same stop inside an UPDATE.
 //
+// A test cancels a parked statement through the Park (Cancel), which waits
+// until the driver has interrupted the statement before anything lets it go
+// (backlog B909), wherever the statement's connection is the one open on its
+// database; a test whose database has a pool of several, a scan's or a
+// serve's, cancels and lets go, and the interrupt's timing is left to
+// ReleaseUntil's yields. To find the connection the package keeps every
+// connection the driver opens, by the file its DSN names, through a second
+// connection hook.
+//
 // It also watches transactions roll back (RollbackWatch). database/sql rolls
 // a transaction back from a goroutine of its own once the transaction's
 // context is done (Tx.awaitDone), whatever the goroutine that runs the
@@ -34,7 +43,10 @@
 package sqlitetest
 
 import (
+	"context"
+	"database/sql/driver"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,6 +72,7 @@ func init() {
 	// In init for the collation's reason: modernc's Driver.Open reads its
 	// connection hooks without the lock RegisterConnectionHook takes.
 	sqlite.RegisterConnectionHook(hookRollbacks)
+	sqlite.RegisterConnectionHook(trackConnection)
 }
 
 // compare orders two keys byte by byte, as SQLite's BINARY collation does,
@@ -77,7 +90,7 @@ func Armed() bool { return armed.Load() != nil }
 
 // Park holds every key comparison under the collation until the test lets
 // it go, one comparison at a time. Arm or ArmUntil arms it; Wait,
-// WaitUnless and ReleaseUntil drive it.
+// WaitUnless, Cancel and ReleaseUntil drive it.
 type Park struct {
 	arrived chan struct{} // a comparison is waiting to be let go
 	next    chan struct{} // lets the waiting comparison go
@@ -88,6 +101,11 @@ type Park struct {
 	// when that is, for the failure.
 	giveUp func() <-chan time.Time
 	bound  string
+
+	// awaiting, nil but in this package's tests, runs each time Cancel has
+	// found no interrupt yet, before it sleeps: only a Cancel that waits for
+	// the interrupt runs it.
+	awaiting func()
 }
 
 // perWaitBound is how long a Park armed by Arm waits for each thing it waits
@@ -185,6 +203,58 @@ func (p *Park) WaitUnless(t testing.TB, stopped <-chan struct{}) bool {
 	}
 }
 
+// Cancel calls cancel, the cancel of the context the parked statement runs
+// on, and returns once the driver has interrupted the statement: from then on
+// the statement comes back as that context's error, however its comparisons
+// are let go (ReleaseUntil) and however soon it then ends. The statement's
+// connection is the one connection to the database at path that is open and
+// not interrupted as Cancel begins; with none, or more than one, Cancel fails
+// the test before it cancels anything, since it cannot tell which interrupt
+// to wait for. It fails the test too where no interrupt has come when the
+// Park's waits give up, and returns, waiting no more, once the Park is
+// disarmed.
+//
+// The driver stops a running statement from a goroutine of its own, which
+// runs once the statement's context is done (modernc's interruptOnDone): it
+// marks the call stopped, which is what the call answers from then on whether
+// or not SQLite sees the interrupt, then calls sqlite3_interrupt, which sets
+// the connection's interrupt flag. Nothing tells a test when that goroutine
+// has run, and a statement let go before it has can end first and answer no
+// error, ReleaseUntil's yields notwithstanding: backlog B909, an UPDATE that
+// moved one key of an 8-row index, on CI's -race job. So Cancel waits for the
+// flag, which the connection reports through IsValid, false once it is set
+// (sqlite3_is_interrupted, an atomic load that takes no lock of SQLite's).
+// It asks from the test's goroutine, never from the comparison, which stays
+// parked and asks its connection nothing, and it asks between sleeps, since
+// the flag announces nothing. An in-memory database's connection reports
+// itself valid whatever its flag, so Cancel serves a file database alone.
+func (p *Park) Cancel(t testing.TB, path string, cancel context.CancelFunc) {
+	t.Helper()
+	live := liveConns(path)
+	if len(live) != 1 {
+		t.Fatalf("sqlitetest: Cancel waits for the interrupt of the one connection to %s that is open and not interrupted, and %d are", path, len(live))
+		return
+	}
+	cancel()
+	giveUp := p.giveUp()
+	for pause := 50 * time.Microsecond; live[0].live(); pause = min(2*pause, 5*time.Millisecond) {
+		if p.awaiting != nil {
+			p.awaiting()
+		}
+		next := time.NewTimer(pause)
+		select {
+		case <-next.C:
+		case <-p.off:
+			next.Stop()
+			return
+		case <-giveUp:
+			next.Stop()
+			t.Fatalf("sqlitetest: the cancel did not interrupt the parked statement %s", p.bound)
+			return
+		}
+	}
+}
+
 // ReleaseUntil lets go the comparison Wait saw, then each one after it, one
 // at a time, until done is closed, and reports how many it let go. It fails
 // the test if the statement neither compares again nor lets done close
@@ -209,6 +279,12 @@ func (p *Park) WaitUnless(t testing.TB, stopped <-chan struct{}) bool {
 // without the yield never failed, but the cancel landed as late as the 31st
 // comparison, the last one the source's rows produce. As written it lands on
 // the first or the second.
+//
+// The yield does not make the driver's goroutine run, though: another
+// processor can take it and then be kept off the CPU while this one lets the
+// statement end (backlog B909, on CI's -race job). A test that cancels the
+// statement calls Cancel before this, which waits for the interrupt; the
+// yield is all a test has that cannot name the statement's connection.
 func (p *Park) ReleaseUntil(t testing.TB, done <-chan struct{}) int {
 	t.Helper()
 	released := 0
@@ -228,6 +304,105 @@ func (p *Park) ReleaseUntil(t testing.TB, done <-chan struct{}) int {
 			t.Fatalf("sqlitetest: the statement neither compared again nor finished %s", p.bound)
 		}
 	}
+}
+
+// conns is every connection the driver has opened since init that was open
+// and not interrupted when it last opened one, by the file its DSN names
+// (trackConnection): where Cancel finds a parked statement's connection.
+var conns struct {
+	mu     sync.Mutex
+	byFile map[string][]*tracked
+}
+
+// tracked is a connection the driver opened, as Cancel asks it.
+type tracked struct {
+	// lock is the lock the driver's connection takes to close and to
+	// interrupt (its embedded sync.Mutex), held across IsValid so that its
+	// read of the connection's handle never races a close.
+	lock  connLock
+	valid driver.Validator
+}
+
+// connLock is what a connection's lock answers: sync.Mutex's methods.
+type connLock interface {
+	Lock()
+	Unlock()
+	TryLock() bool
+}
+
+// live reports whether the connection is open and not interrupted.
+func (c *tracked) live() bool {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	return c.valid.IsValid()
+}
+
+// gone reports whether the connection has closed or been interrupted, asking
+// only where its lock is free at once: one a close or an interrupt holds now
+// is kept, and asked again at the next open.
+func (c *tracked) gone() bool {
+	if !c.lock.TryLock() {
+		return false
+	}
+	defer c.lock.Unlock()
+	return !c.valid.IsValid()
+}
+
+// trackConnection records in conns a connection the driver has just opened,
+// under the file its DSN names (name up to any query), and drops every
+// connection recorded that has closed or been interrupted since (gone), so
+// that conns keeps little more than the connections open; it waits on no
+// other connection's lock, which a close holds across SQLite's close, a WAL
+// database's checkpoint among it. A connection that does not take the lock
+// its close takes, or does not report whether it is valid, is not recorded,
+// and Cancel finds none to wait for.
+func trackConnection(conn sqlite.ExecQuerierContext, name string) error {
+	lock, locks := conn.(connLock)
+	valid, reports := conn.(driver.Validator)
+	if !locks || !reports {
+		return nil
+	}
+	file, _, _ := strings.Cut(name, "?")
+	conns.mu.Lock()
+	defer conns.mu.Unlock()
+	if conns.byFile == nil {
+		conns.byFile = make(map[string][]*tracked)
+	}
+	for f, list := range conns.byFile {
+		kept := list[:0]
+		for _, c := range list {
+			if !c.gone() {
+				kept = append(kept, c)
+			}
+		}
+		if len(kept) == 0 {
+			delete(conns.byFile, f)
+		} else {
+			conns.byFile[f] = kept
+		}
+	}
+	conns.byFile[file] = append(conns.byFile[file], &tracked{lock: lock, valid: valid})
+	return nil
+}
+
+// liveConns is the connections conns records for the database at path, by
+// the name dsn.File gives it or by the path itself, that are open and not
+// interrupted now. It asks each under that connection's lock, waiting for it,
+// which a close holds across SQLite's close, so it asks them once it has let
+// the registry's lock go, which every open takes (trackConnection); and it
+// asks a copy of what the registry holds, a slice of its own, since an open
+// compacts a list in place.
+func liveConns(path string) []*tracked {
+	conns.mu.Lock()
+	candidates := slices.Concat(conns.byFile[dsn.File(path, "")], conns.byFile[path])
+	conns.mu.Unlock()
+	var live []*tracked
+	for _, c := range candidates {
+		if c.live() {
+			live = append(live, c)
+		}
+	}
+	return live
 }
 
 // watching is the RollbackWatch every rollback hook reports to, or nil when
