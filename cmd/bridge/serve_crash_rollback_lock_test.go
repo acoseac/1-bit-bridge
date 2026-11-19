@@ -410,12 +410,12 @@ func TestTheBackupIsNotPutBackOverSettingsItDidNotCheck(t *testing.T) {
 // is read again once the install marker's lock is held, after the backup's
 // runs, and the rollback acts only on what it reads then. Another install's
 // marker, saved while the backup was checked, is left as it was written,
-// nothing said, recorded or renamed over it. The same install, its marker now
-// naming another version as the one it replaced, is refused in the words the
-// backup's version has always been refused in, its answer held to the marker
-// read again. And an install made again meanwhile, its versions and its count
-// as they were and its AttemptedAt alone moved, is refused as another install
-// than the one the backup was checked for.
+// nothing said, recorded or renamed over it. A marker of the install's target
+// and attempt that names another version as the one it replaced is refused in
+// the words the backup's version has always been refused in, its answer held
+// to the marker read again. And an install made again meanwhile, its versions
+// and its count as they were and its AttemptedAt alone moved, is refused as
+// another install than the one the backup was checked for.
 func TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock(t *testing.T) {
 	t.Run("another install's marker", func(t *testing.T) {
 		r := crashInstallAtTheLimit(t)
@@ -589,4 +589,64 @@ func TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked(t *testing
 		}}
 		requirePutBack(t, r, crashRollBack(t.Context(), t, r, b))
 	})
+}
+
+// TestARefusalBeforeTheLockIsNotRecordedOverAnotherReplacedVersion: a
+// refusal decided before the install marker's lock is said and recorded under
+// it only where the marker read again is the install the refusal was decided
+// for, its TargetVersion, its PreviousVersion and its AttemptedAt
+// (refuseCrashRollbackBeforeTheLock). A marker that names another version as
+// the one the install replaced, its target, its attempt and its count as they
+// were and the crash rollback still asked for, is another install's: the
+// refusal, decided of the install the marker no longer describes, is neither
+// said nor recorded over it, whichever of the backup's runs refused, and the
+// next start asks again. Each run's stand-in saves that marker, then answers
+// its refusal.
+func TestARefusalBeforeTheLockIsNotRecordedOverAnotherReplacedVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		runs func(replaced func()) *backupRuns
+	}{
+		{"the backup's version did not answer", func(replaced func()) *backupRuns {
+			return &backupRuns{version: func(context.Context) (string, error) {
+				replaced()
+				return "", errors.New("the version's run ended with no answer")
+			}}
+		}},
+		{"the backup refused the settings", func(replaced func()) *backupRuns {
+			return &backupRuns{check: func(context.Context) updater.ConfigCheck {
+				replaced()
+				return updater.ConfigCheck{Verdict: updater.ConfigRefused, Reasons: []string{"line 3: a key the backup does not know"}}
+			}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := crashInstallAtTheLimit(t)
+			binaries := watch(t, r.bin, r.bak)
+			var written watchedFiles
+			replaced := func() {
+				st := markerOf(t, r.dataDir)
+				st.PreviousVersion = "0.0.0-other"
+				if ok, why := updater.CrashRollback(st, version.ServerVersion); !ok {
+					t.Fatalf("the marker changed to %+v asks for no crash rollback (%q): the test shows nothing", st, why)
+				}
+				if err := updater.SaveState(r.dataDir, st); err != nil {
+					t.Fatal(err)
+				}
+				written = watch(t, updater.StatePath(r.dataDir))
+			}
+			got := crashRollBack(t.Context(), t, r, tc.runs(replaced))
+			requireLeft(t, r, got, binaries)
+			if written == nil {
+				t.Fatal("no run of the backup saved the marker: the test shows nothing")
+			}
+			written.requireUnchanged(t)
+			if lines := updaterLines(got.stderr); lines != "" {
+				t.Errorf("the crash rollback spoke over a marker naming another replaced version: %q", lines)
+			}
+			if st := markerOf(t, r.dataDir); st.RollbackRefused != "" {
+				t.Errorf("the marker's refusal = %q, want none recorded over another install", st.RollbackRefused)
+			}
+		})
+	}
 }
