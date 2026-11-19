@@ -174,3 +174,123 @@ On b9cd7b00, `-race` with the release tags, the build slot held throughout:
 `go vet` of the package for windows and darwin with the release tags is clean. The gate on
 this record's own commit (`make fmt vet test build-all`, `make docs-check`) is in the
 branch's report: a record cannot hold the runs made on its own commit.
+
+### Round 2
+
+Commit 22e4ee37 changes `internal/backup/seams.go` and the two test files; the commit after
+it holds this section and the rule's edit. Round 1's gate on 98f0aefc was green: `make fmt`
+changed nothing, then `make vet`, `make docs-check`, `make test` (P=8, `-timeout 45m`, 91
+packages in 1,780 s, cmd/bridge 1,741 s) and `make build-all`.
+
+What the round fixes. At 98f0aefc the helper timed the arrival by `time.Since(start)` in
+`within` (`verify_stuck_test.go` 236-240) when the test's goroutine received the gate's entry,
+at its gate arm (246-248) or at the answer arm's look at the gate (262-265): when the test saw
+the worker at its gate, not when the worker came. A host that keeps the test's goroutine off
+the CPU past the bound reads an arrival in time as late, the flake class this PR removes.
+
+Where the time is taken. `StepGate` and `SetStepGateForTest` live in
+`internal/backup/seams.go`, a production file of package `backup`, not a test file, and the
+round changes it only to record the first arrival's time. `gateOf` (532), which `runStep`
+calls on the holder's goroutine with the hold's lock held (`hold.go` 474), sets `stepGate.at`
+(452) from `time.Now()` inside the entry's `sync.Once`, before it closes `entered` (539-540);
+`StepGate.EnteredAt` (515) reads it only once `entered` is closed, the receive from the closed
+channel ordering the read after the write. `gateOf` reaches that code only where a test has
+installed a gate (`stepGateForTest`, nil in production), so production does nothing new.
+`Entered` stays a closed broadcast, which the helper and `requireGatesHeld` both read; a time
+sent on a channel would have held the worker under its hold's lock.
+
+The helper's signature is now (`verify_stuck_test.go` 235):
+
+`awaitParkedAndGivenUpAt(t *testing.T, entered <-chan struct{}, gate *backup.StepGate, step string, done <-chan T, read func(T) (backup.Verification, error), start time.Time, bound time.Duration) T`
+
+`within` takes the measured duration: for a gated case the worker's `EnteredAt` minus
+`start`, at either arm (258); for the nil-gate path `time.Since(start)` as the answer is
+received (271). `awaitParkedAndGivenUp`'s signature is unchanged. Every call site, by grep:
+the gated two,
+`TestAGivenUpVerificationReadsItsRecordBack` (`verify_hold_test.go` 860) and
+`TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` (`verify_stuck_test.go` 483), pass the
+gate and `stepOfIncomplete`; the nil-gate three are unchanged:
+`TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries/a_retry_given_up`
+(`verify_hold_test.go` 492), `TestARecheckGivenUpLeavesTheVetoItMade` (592) and
+`givenUpCheckOf` (`restore_source_test.go` 210), which
+`TestARestoreRefusesASnapshotAGivenUpCheckHolds`,
+`TestARestoreRefusedByTheSpellingItIsGivenResolvesNothing` and the two hold-given-up cases of
+`TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven` call. Its closures mark themselves
+helpers, so a failure names the caller's line.
+
+### Round 2's controls
+
+Temporary mutations, laid over the two test files by `go test -overlay` and never in the
+tree, so nothing was left to restore; each predicted in writing before its run. A scratch
+generator writes each control's overlay and runs, `seams.go` as committed:
+
+`GOTOOLCHAIN=go1.27.3 go test -race -count=1 -v -overlay <the control's overlay.json> -tags ts_omit_webclient,ts_omit_debugeventbus -run '^(TestAGivenUpVerificationReadsItsRecordBack|TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds)$' -timeout 30m ./internal/backup/`
+
+Each hook is joined onto one existing line, so every reported line is the file's own:
+
+- the hold: `time.Sleep(bound + time.Second)` before the helper's loop, so the test's
+  goroutine reaches either arm 4.3 s in, past the 3.3 s bound;
+- the gate arm forced: the answer's case is a nil channel until the gate arm has fired; the
+  answer arm forced: the outer gate arm's channel is nil, so only the answer arm's look at the
+  gate sees the arrival; each forced arm logs its name;
+- the premise: each gated case reads the worker's own time, `gate.EnteredAt(stepOfIncomplete)`
+  minus `start`, logs it, and fails where it is past the bound.
+
+What they did:
+
+- 98f0aefc's helper, the hold, the gate arm forced: red in all four runs (the case's three
+  subtests and the sibling), "came to the step held at its gate 4.302…s after it began; its
+  bound is 3.3s", each run's forced arm logged and its premise 1.301-1.302 s, in time by the
+  worker's own time. With the answer arm forced, the same.
+- 22e4ee37's helper, the same hooks: green on each arm, four of four, the premise 1.301-1.302 s.
+- An arrival late in fact, the check's grace held 4 s (`SetCheckGraceForTest`) and no hold,
+  each arm forced: red on both arms at "came to the step held at its gate 4.304…s after it
+  began".
+- The nil-gate path, `TestARecheckGivenUpLeavesTheVetoItMade`: the grace held 4 s, red at
+  "answered 4.306…s after it began" with either helper; the hold alone, red at "answered
+  4.302…s": the nil-gate path still times the answer as the test receives it, which this round
+  keeps. The new helper names the caller's line (`verify_hold_test.go` 592), the old its own
+  (`verify_stuck_test.go` 238).
+- Round 1's claims under the new helper: the INCOMPLETE's staging stalled 3 s past its second,
+  green; the write's gate removed, red with the sighting's words; the gates scoped to a snapshot
+  no verification makes, red at once.
+
+### Round 2's runs
+
+On 22e4ee37, inside the build slot, one race binary built with `GOTOOLCHAIN=go1.27.3` and the
+release tags, every case that reaches the helper run 200 times without CPU load and 200 times
+beside 16 busy loops, in shards, each shard its own invocation under `-test.timeout 30m`.
+Durations below are each shard's own, from its log's last write.
+
+- Without load, ten shards side by side: `TestAGivenUpVerificationReadsItsRecordBack` 2 x 100
+  (793 s each), `TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds` 2 x 100 (736 s),
+  `TestARecheckGivenUpLeavesTheVetoItMade` x200 (913 s), its `a_retry_given_up` case of
+  `TestAVetoThatStoodBeforeAVerificationStaysOverTheVERIFIEDItCarries` x200 (909 s),
+  `TestARestoreRefusesASnapshotAGivenUpCheckHolds` x200 (720 s),
+  `TestARestoreRefusedByTheSpellingItIsGivenResolvesNothing` x200 (720 s), and the two
+  hold-given-up cases of `TestEveryAdmissionRefusalNamesTheSnapshotAsItWasGiven` 2 x 100
+  (757 s): every one of the 1,400 runs passed (600 subtests of the case, 400 of the admission
+  cases, 200 retries), none skipped.
+- Beside 16 busy loops, each shard at GOMAXPROCS 2: the case 4 x 50 (658-667 s) and the
+  sibling 4 x 50 (1,175-1,234 s) side by side, a load average near 23: 400 of 400 passed;
+  then twelve shards side by side, a load average near 28: the two restore tests 2 x 100 each
+  (744-751 s) and the admission cases 4 x 50 (770-795 s), 600 of 600 passed. In that wave two
+  shards of 100 did not fit their timeout: the recheck's second (98 runs passed, its 99th 4 s
+  in) and the retry's first (97 passed, its 98th 16 s in) each ended at
+  `panic: test timed out after 30m0s`, with no assertion failed in either; the other recheck
+  and retry shards of 100 passed, 1,642 s and 1,714 s.
+- The loaded recheck and retry again, 200 each, as shards of 50 beside 16 busy loops, eight
+  shards side by side at a load average near 22: 400 of 400 passed (the 200 retries' subtests
+  too), each shard within its timeout (840-922 s). With the first attempt's passing shards, the
+  loaded runs of every case passed 200 of 200 in shards that fit.
+
+`go vet` of `internal/backup` for linux and windows with the release tags under
+`GOTOOLCHAIN=go1.27.3` is clean. The gate on this section's own commit is in the branch's
+report.
+
+### Left as it is after round 2
+
+The nil-gate path's answer is still timed where the test receives it: a host that keeps the
+test's goroutine off the CPU past the bound would still fail its three callers, as the bounds
+`requireReturnedWithin` takes would. Timing that answer where its caller's goroutine has it is
+a change of its own.
