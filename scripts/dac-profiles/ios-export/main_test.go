@@ -778,11 +778,6 @@ func namesApart(corpus []corpusName, add declared, x export) []string {
 			for _, way := range [][2]row{{r, a}, {a, r}} {
 				from, to := way[0], way[1]
 				for _, n := range namesOf(to) {
-					for _, k := range from.LegacyPatterns {
-						if inside(n, k) {
-							say("%s's legacy pattern %q lies inside %s's name %q", from.ID, k, to.ID, n)
-						}
-					}
 					for _, k := range from.NameKeys.Tokens {
 						if inside(n, k) {
 							say("%s's token %q lies inside %s's name %q", from.ID, k, to.ID, n)
