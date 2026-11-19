@@ -3015,7 +3015,10 @@ first read, whether the count asks for the crash rollback
 (`updater.CrashRollback` answering yes, or why not), and hands the start to
 it whole (`recoverCrashedRefusedInstall`): the data dir's lock taken as the
 early rollback takes it, then `recoverCrashedInstall` itself, never a copy,
-holding the install marker's lock from its read through the rename, its
+holding the install marker's lock from its read through the rename (since
+backlog B894 from the marker's read again: the backup's version and settings
+check run before that lock, and the rollback decides again under it, the
+section after B898's below), its
 checks in their order (`CrashRollback` again under the lock, the migration
 begun among them; the backup a regular file; its version,
 `ProbeVersionWithin`; its settings check, `CheckConfig`, of the settings as
@@ -3757,7 +3760,10 @@ and 25.15 s in the foreground with the SCM's stop, the early and the boot
 rollbacks 19.4 s each (with the backup's 10 s version), every one inside the
 30 s every other taker waits (`TestEveryProtectedOperationFitsInsideTheMarkersLockWait`,
 cmd/bridge's `TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait`); the
-crash rollback's row is backlog B898's F1. These count the waits at their
+crash rollback's row was backlog B898's F1, 51.4 s with its backup's version
+and settings check under the lock, past the wait, until backlog B894 moved
+both runs before the lock: since then it is 9.4 s, the operator's rollback's
+figure (the next section). These count the waits at their
 lengths in the schedule and the bounds each step is given: what a step under
 way takes on its filesystem (an open, a rename, a copy across volumes) adds to
 them, and no step is begun once its deadline has passed.
@@ -3787,8 +3793,116 @@ throughout, once the operation has returned and before any file is read), the
 waits on a clock they move, each sleep overrunning by a millisecond
 (`realHolds`). The reds at main and at round
 1's and round 2's heads, and the negative controls, are in `ops/engineering-log.md`,
-2026-11-15, B898 PR 1 and its rounds 2 and 3. What stays open is backlog B898's F1,
-F2, F3, F4, F7, F8 and F9.
+2026-11-15, B898 PR 1 and its rounds 2 and 3. What stays open is backlog B898's
+F2, F3, F4, F7, F8 and F9; its F1, the crash rollback's hold past the wait, is
+closed by backlog B894 (the next section).
+
+## The crash rollback asks its backup before the install marker's lock (backlog B894, B898's F1, 2026-11-19)
+
+- **…and the crash rollback asks its backup's version and settings check before the install marker's lock, and decides again under it on the marker read again, the backup's identity and the settings' digest** (2026-11-19, backlog B894, B898's F1): before the lock, after the unlocked read's `updater.CrashRollback`, the restore journal's check and `refuseCrashRollbackOnARead` as before, the backup is a regular file (`os.Lstat`) whose identity is fixed through a handle on it (`fsutil.OpenAsFile`, the handle's stat, the same file as the Lstat's, closed at once), the settings' digest is read (`updater.ConfigDigest`), and the backup's version (`backupVersion`, held to the unlocked read's `PreviousVersion`) and its settings check (`updater.CheckConfig`) run; then the lock (`updater.LockState`: a lock that cannot be taken, a stop in its wait and a filesystem that keeps none said as before, the runs asked already), the context asked once it is held, the marker read again and `CrashRollback` asked of it again, and under the lock, neither run asked again: the version answered against the marker read again (the one `PreviousVersion` refusal there, in its old words), the same install (`TargetVersion`, `AttemptedAt`), the backup the same regular file (`os.SameFile` against the handle's identity, its size, its modification time), and the settings read again with the digest they had, a read that fails refusing at either point. A change found under the lock refuses this start's rollback, said and recorded in words that name no path, and the next start of the loop asks again (`RollbackRefused` is no input to `CrashRollback`, and `CrashRollbackRecord` clears it). A refusal decided before the lock is said and recorded under a lock taken for it (`refuseCrashRollbackBeforeTheLock`, never called while the lock is held): on the marker read again, recorded where the same install still asks, the marker's own why where it refuses the rollback itself, nothing said or written for another install, and the line said with nothing recorded where the lock cannot be held, the marker cannot be read again or serve's stop has come. **Never run them with the lock held, never run them again under it, and never put back a backup whose install, identity or settings changed since they answered. Don't fix the identity by a bare Lstat, take two failed reads of the settings for the same settings, or take the lock again to record a refusal while holding it.** `TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock`, `TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait`, `TestABackupChangedWhileItWasCheckedIsNotPutBack`, `TestTheBackupIsNotPutBackOverSettingsItDidNotCheck`, `TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock`, `TestAStopAroundTheBackupsChecksWritesNothing` and `TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked` pin it.
+
+*The hazard.* The crash rollback (B660) held `update-state.lock` from its
+marker's read again to its rename, and ran both of its backup's runs under it:
+`version` within `updater.VersionProbeTimeout` (10 s, 12 s once killed with
+its pipes' wait) and `serve --validate-config` within the settings check's
+30 s (32 s once killed, `updater.ConfigCheckBound`). Every other taker of the
+lock waits 30 s (`defaultStateLockWait`), so a check that did not answer kept
+the lock past that wait at every start of a crash loop. cmd/bridge's pin
+summed the row at 51.4 s; the reachable worst was 49.4 s on Windows and
+42.75 s on any OS for a check that did not answer, and its likeliest form, a
+fast version beside a check that hangs, 32.75 s. What met it was `bridge
+update`, refused after its download ("another process held the install
+marker's lock for 30s …: try again once it is done", exit 1), and a CLI
+command whose store open had a migration step pending, refused as it would
+have been anyway. Nothing was corrupted, and the console never met it: it runs
+in that serve, after its start.
+
+*Why the runs move, and not the wait.* An install already runs its
+candidate's settings check before the lock and decides again under it (the
+B692 bullet's `decideUnderLock`), and the two runs were what put the row past
+the wait: 40 s of it, 42 s for a check killed at its bound. With them before
+the lock the row is two marker writes and the restore's waits, 9.4 s, the
+operator's rollback's figure. A longer wait was rejected: one constant serves
+every taker and none can tell who holds a kernel lock, so every CLI taker
+would wait silently behind any holder, the wait would follow the backup's
+timeouts, and a child process would still run under the lock. Documenting
+the overrun was rejected too: it kept the pin's exception for good, and the
+hold past the wait at every start whose backup check hangs.
+
+*What can change between the runs and the lock, and what catches it.* The
+lock is free while the runs run, so an install can take it, decide and swap;
+a store open that would migrate can take it and is refused by the count's
+gate; and a hand can replace or rewrite the backup or the settings, which the
+marker's lock never excluded. The decision under the lock catches each: an
+install that landed leaves a marker of another version, which `CrashRollback`
+answers with no why, so nothing is said, recorded or renamed over it; a
+marker of the same install naming another replaced version is refused by the
+version's answer held to the marker read again; an install made again (its
+`AttemptedAt` alone) by the same-install comparison; a backup replaced or
+rewritten by its identity, its size and its modification time; settings
+changed, or gone, by their digest. One overlap is new, and Windows' alone: an
+install whose swap comes while a run executes the backup is refused at its
+vacate (a rename onto a mapped image answers Access is denied, which no wait
+ends: internal/updater's `TestARenameOntoTheRunningImageIsAnsweredAtOnce`),
+its marker put back as it read it and nothing moved, so `bridge update` fails
+saying nothing was moved where before it waited for the lock; the person runs
+it again, and the crash rollback, finding the install as its runs found it,
+goes on. Accepted: where it matters, a check that hangs, the install was
+refused before too, once its 30 s wait for the lock had passed, where it is
+refused now at once on Windows and lands elsewhere; a run that answers lasts
+milliseconds, the window such an overlap needs; and this refusal is as safe
+and as worded. The two runs open no
+data dir (`version` prints and exits; `serve --validate-config` is
+`checkServeConfig`, which loads the settings and writes, opens and binds
+nothing, the contract every release with the check keeps), and the check
+never writes the settings, so the digest read before it holds.
+
+*The identity, on Windows.* An `os.Lstat`'s file ID is read by path when
+`os.SameFile` first compares it (Go 1.27.3's `os/types_windows.go`:
+`sameFile` calls `loadFileId`), so an Lstat taken before the runs and
+compared under the lock reads the file at the path then, and a replacement
+compares as the backup. A handle's stat fills the ID from the handle at once
+(`newFileStatFromGetFileInformationByHandle`), so the identity is taken
+through `fsutil.OpenAsFile` (a named pipe put in the backup's place is refused
+without a wait), required to be the entry the Lstat found, and the handle is
+closed before the runs and the restore: Go's `os.Open` on Windows shares no
+deletion, which the restore's probes and renames need. Forcing the Lstat's
+load at once (an early `os.SameFile` of it) would work too, but rests on Go
+keeping what that call loaded, which it does not document; the handle's stat
+was chosen. Off Windows an Lstat carries its device and inode as it is taken,
+so the bare-Lstat control is green there and red on Windows alone.
+
+*Cancellation.* `ProbeVersionWithin` answers serve's stop with the context's
+error, and the version's refusal says so in its old words; the record's lock
+is then asked for on the stopped context, and `refuseCrashRollbackBeforeTheLock`
+records nothing once the stop has come: `LockState` takes an uncontended lock
+on a context that has ended, so the context is asked after the take. The
+settings check's own stop is said in its old line and records nothing, as
+before, with no lock taken for it. A stop that comes as the runs answer is
+found once the main path's lock is held, before the marker is read again, and
+nothing is recorded or renamed.
+
+*The record of a refusal decided before the lock.* `refuseCrashRollbackOnARead`
+records only the re-read's own why and says nothing where the install still
+asks, so it cannot record these refusals, which are reached only where it
+asks; and called while the main path held the lock it would wait on that
+hold, the lock being a kernel lock on an open file, which a second take in
+one process waits on as on another process's. The new helper takes the lock
+only where the main path does not hold it, reads the marker again, records the
+refusal where the same install (`TargetVersion`, `AttemptedAt`) still asks,
+the marker's own why where it refuses, nothing for another install, and says
+the line from the marker checked, recording nothing, where the lock cannot be
+held, the marker cannot be read again or the start was stopped.
+
+*What stays open.* The early and the boot rollbacks still ask their backup's
+version under the lock (10 s each; their rows fit, at 19.4 s). A step under
+way takes what its filesystem takes, which no schedule bounds. `bridge
+update`'s words behind a crash loop say to try again once it is done, which
+may not come while the loop goes on; stopping the service first ends it. No
+taker's wait knows its holder. A binary shared by two data dirs was never
+covered by the marker's lock. Backlog B894 and B898's F1 are one hazard under
+two ids. B898's other follow-ups stay as they were. The record is
+`ops/engineering-log/2026-11/2026-11-19-b894--fix-b894-rollback-lock-bound.md`.
 
 ## Config, settings and process lifecycle
 
