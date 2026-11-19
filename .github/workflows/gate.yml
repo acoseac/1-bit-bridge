@@ -516,10 +516,7 @@ jobs:
     # without the job being killed out from under it first. A job killed
     # at the wall clock loses the log tail, which is the part worth
     # reading.
-    #
-    # B942's measurement (this commit alone, reverted by the next): 120, so
-    # vet and an uncached suite whose packages may each take 45m end in time.
-    timeout-minutes: 120
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -617,36 +614,8 @@ jobs:
       # `go test` applies the timeout PER package binary, so the job-level
       # timeout-minutes above has to leave room for several slow packages
       # in sequence — hence 60 there against 30 here.
-      #
-      # B942's measurement (this commit alone, reverted by the next): every
-      # package uncached (-count=1), so the six the runner factor reads
-      # (cmd/bridge, internal/manifest, internal/admin,
-      # scripts/third-party-licenses, internal/api, internal/transcode) run
-      # beside internal/backup as in an ordinary run; -v into a log, so
-      # backup's top-level tests carry their seconds; 45m a package, so a
-      # slow runner's backup ends with its time rather than at the cap. The
-      # step prints every package's line, backup's 40 slowest top-level tests
-      # and its three many-start tests; the whole log is uploaded below.
       - name: test
-        run: |
-          log="$RUNNER_TEMP/b942-measure.log"
-          code=0
-          go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1 -timeout 45m -v ./... > "$log" 2>&1 || code=$?
-          echo "Every package's line:"
-          grep -E '^(ok|FAIL)[[:space:]]+github\.com/' "$log" || true
-          echo "internal/backup's 40 slowest top-level tests, slowest first:"
-          awk '/^(ok|FAIL)[ \t]+github\.com\// { if ($2 == "github.com/acoseac/1-bit-bridge/internal/backup") { for (i = 0; i < n; i++) print t[i]; exit } n = 0; next } /^--- (PASS|FAIL): / { t[n++] = $0 }' "$log" | /usr/bin/sort -t '(' -k 2,2 -rn | awk 'NR <= 40'
-          echo "Its three many-start tests:"
-          grep -E '^--- (PASS|FAIL): (TestAdoptionBoundsReservedSpaceAcross4097Restarts|TestRestoreAdoptsUUIDOnlyAfter8193Starts|TestLegacyFloorlessSnapshotRestoresAboveTheAdoptionCeiling) ' "$log" || true
-          exit "$code"
-      - name: Upload the measurement's log
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: b942-measure-${{ matrix.os }}
-          path: ${{ runner.temp }}/b942-measure.log
-          if-no-files-found: warn
-          retention-days: 30
+        run: go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m ./...
 
   # Single green signal that fans in the parallel jobs. `if: always()` + the
   # explicit result check means a failed (or cancelled) dependency fails the
