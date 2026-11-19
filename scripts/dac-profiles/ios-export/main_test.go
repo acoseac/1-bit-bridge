@@ -752,6 +752,9 @@ func namesApart(corpus []corpusName, add declared, x export) []string {
 		a := x.Rows[i]
 		own := namesOf(a)
 		for _, n := range own {
+			if got := firstHit(n, ids, patterns); got != a.ID {
+				say("%s: its name %q is the live matcher's %q", a.ID, n, got)
+			}
 			if got := strictKnown(strictMatch(n, x)); got != a.ID {
 				say("%s: its name %q is the strict matcher's %q", a.ID, n, got)
 			}
