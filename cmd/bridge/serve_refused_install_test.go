@@ -623,7 +623,10 @@ func storeOneMigrationBehind(t *testing.T, dataDir string) {
 // version other than the backup's opened the data dir, beside the backup's
 // version, which an operator's rollback of that backup refuses on (backlog
 // B705): until B705 the refused boot rollback's clear dropped it, and this
-// test asserted that it did, as the rule then said.
+// test asserted that it did, as the rule then said. A boot whose backup did
+// not say its version clears nothing, and keeps the marker as it was, the
+// hold in it (backlog B898FU): until then it cleared the install, and this
+// test asserted that it did.
 func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 	hold := updater.State{RejectedVersion: "9.9.9", RejectedReason: "9.9.9 refuses this bridge's settings: line 4: x",
 		RejectedConfigDigest: "a digest of the settings"}
@@ -638,10 +641,12 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 		// opened is the version the step leaves recorded as having opened
 		// the data dir, beside the backup's.
 		opened string
-		// answers makes the backup a bridge that says the version the
-		// install replaced, which the boot asks before it puts it back
-		// (backlog B898).
-		answers bool
+		// says makes the backup a bridge that says that version, which the
+		// boot asks before it puts it back (backlog B898); "" leaves it a
+		// file that does not run, so says none.
+		says string
+		// kept says the step leaves the marker as it was.
+		kept bool
 	}{
 		{name: "the backup's cleanup after a confirmed install", bakGone: true,
 			marker: updater.State{Status: "installed", TargetVersion: version.ServerVersion, PreviousVersion: previousVersion,
@@ -662,10 +667,13 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 		{name: "an install that never reached its swap, the data dir opened since", opened: version.ServerVersion,
 			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-time.Minute), DataDirOpenedBy: version.ServerVersion}},
-		{name: "an install that did not come up", bakGone: true, veto: "9.9.8", answers: true,
+		{name: "an install that did not come up", bakGone: true, veto: "9.9.8", says: previousVersion,
 			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-time.Minute), SwapStarted: true}},
-		{name: "an install that did not come up beside a backup that does not say the version it replaced",
+		{name: "an install that did not come up beside a backup of another version than the one it replaced", says: "0.0.0-older",
+			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
+				AttemptedAt: now.Add(-time.Minute), SwapStarted: true}},
+		{name: "an install that did not come up beside a backup that does not say its version", kept: true,
 			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-time.Minute), SwapStarted: true}},
 		{name: "an install that did not come up, the data dir opened since", opened: "9.9.8",
@@ -681,21 +689,26 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if tc.answers {
+			if tc.says != "" {
 				if err := os.Remove(bin + ".bak"); err != nil {
 					t.Fatal(err)
 				}
-				installBridgeCopy(t, bin+".bak", previousVersion)
+				installBridgeCopy(t, bin+".bak", tc.says)
 			}
 			st := tc.marker
 			st.RejectedVersion, st.RejectedReason, st.RejectedConfigDigest = hold.RejectedVersion, hold.RejectedReason, hold.RejectedConfigDigest
 			if err := updater.SaveState(dataDir, st); err != nil {
 				t.Fatal(err)
 			}
+			marker := watch(t, updater.StatePath(dataDir))
 			var stderr bytes.Buffer
 			maybeRollbackOnBoot(t.Context(), &stderr, dataDir, bin, serveOpts{backupProbeTimeout: testBackupProbeTimeout})
 			if _, err := os.Lstat(bin + ".bak"); tc.bakGone != os.IsNotExist(err) {
 				t.Fatalf("the backup after the boot step: lstat %v, want it gone %v; stderr=%s", err, tc.bakGone, stderr.String())
+			}
+			if tc.kept {
+				marker.requireUnchanged(t)
+				return
 			}
 			got, err := updater.LoadState(dataDir)
 			if err != nil {

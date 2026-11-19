@@ -2490,7 +2490,7 @@ record is in `ops/engineering-log.md`, 2026-11-04, B707.
 
 ## An install counted healthy only once it has answered and stayed up (backlog B660, 2026-11-06)
 
-- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly make the next start try to roll it back, before it writes anything, which a migration of the store begun, a restore of the store (recorded as a migration is, `State.StoreMigratedBy`, and refused to the version the install replaces, which that record would not cover: `updater.ErrRestoreByPreviousVersion`; the install marker's lock held from the restore's admission through the database's replacement, so no install is armed unrecorded meanwhile), or a backup that cannot be shown to run here, prevents, and neither the crash rollback nor the early rollback acts while an unfinished restore of the database's journal stands (B653 PR 2a)** (2026-11-06, backlog B660; its rounds 2 and 3, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, or dial an IPv6 wildcard on IPv4's loopback alone, don't count a stop (take its count back as the stop arrives once the start has answered as ready and once the teardown has run before that, so a start killed before it is ready stays counted; ask whether an end is a stop of the caller's context and the restart request once the teardown has run, never of serve's own context or of the stop's notice; ask for the marker's lock again within one budget for the teardown and the take-back, inside the shortest stop wait of systemd, launchd and the SCM, a take-back begun once a teardown past the budget has run two seconds still, below the SCM's wait; and join it before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or an end of the tailnet listener serve did not begin, don't read a start as running from the data dir's lock, a command's too, from a marker read before the install marker's lock, or from an exclusive try, which another probe's hold refuses (a start runs only where the marker's token names a lock that start holds exclusively, which every probe tries shared, its token cleared at every return), don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back, don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
+- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly make the next start try to roll it back, before it writes anything, which a migration of the store begun, a restore of the store (recorded as a migration is, `State.StoreMigratedBy`, and refused to the version the install replaces, which that record would not cover: `updater.ErrRestoreByPreviousVersion`; the install marker's lock held from the restore's admission through the database's replacement, so no install is armed unrecorded meanwhile), or a backup that cannot be shown to run here, prevents, and neither the crash rollback nor the early rollback acts while an unfinished restore of the database's journal stands (B653 PR 2a)** (2026-11-06, backlog B660; its rounds 2 and 3, 2026-11-07). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, or dial an IPv6 wildcard on IPv4's loopback alone, don't count a stop (take its count back as the stop arrives once the start has answered as ready and once the teardown has run before that, so a start killed before it is ready stays counted; ask whether an end is a stop of the caller's context and the restart request once the teardown has run, never of serve's own context or of the stop's notice; ask for the marker's lock again within one budget for the teardown and the take-back, inside the shortest stop wait of systemd, launchd and the SCM, a take-back begun once a teardown past the budget has run two seconds still, below the SCM's wait; and join it before the data dir's lock goes), a port another process holds or an address the host does not have, don't take back a permission refusal the backup would not meet (file capabilities the binary lacks) or an end of the tailnet listener serve did not begin, don't read a start as running from the data dir's lock, a command's too, from a marker read before the install marker's lock, or from an exclusive try, which another probe's hold refuses (a start runs only where the marker's token names a lock that start holds exclusively, which every probe tries shared, its token cleared at every return), don't roll back once a migration step has begun or where the backup refuses the settings, does not answer their check or predates it, don't let a command but serve's own start migrate the store while the install awaits its confirmation after a start that did not end cleanly, don't hold the auto-installer for a backup the crash rollback would not put back or let a failed lookup of the backup lift the hold (a crash rollback that could not inspect its backup says so and records nothing), don't promise a put-back, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
 
 *The defect* (the self-healing study of 2026-11-02, read from the code;
 B613's "Not here" above; B198's scenario). `DecideBootAction` answered
@@ -2720,8 +2720,11 @@ a deferred reason), while the marker is an unconfirmed install of the running
 version, the process has been up for less than twice the window
 (`Options.Uptime`, monotonic), and the crash rollback would put the backup
 beside the binary back (`ProbationHolds(st, current, binaryPath, uptime)`,
-both callers passing the binary serve runs as: no `RollbackRefused`, `.bak`
-a regular file, and `CrashRollbackAtLimit` passing; the second round added
+both callers passing the binary serve runs as: no `RollbackRefused`, which
+the crash rollback records for no backup it could not inspect since backlog
+B898FU's round 3, `.bak` a regular file or, since its round 2, a lookup of
+it that fails otherwise than finding nothing there, which cannot tell, and
+`CrashRollbackAtLimit` passing; the second round added
 the first two and the last beside the migration it asked alone, since a
 hold kept for a backup no rollback would put back held a newer release,
 perhaps the fix, for nothing). A swap then would replace
@@ -3336,7 +3339,7 @@ pin it. The records, with their negative controls, are in
 
 ## The update check's off switch (backlog B761's PR 1, 2026-11-09)
 
-- **`update.checkEnabled` off asks GitHub nothing and installs nothing new: a check (the start's, a tick's, Check now) and an install are admitted only while it is on, and an install again at its decision under the install marker's lock (`commit`), past which its swap finishes; the off transition (`Updater.ChecksSwitched`, once a settings save is published) stops every check and every install before that decision through its own context; a tick checks only where the switch was on when its wait was armed and no transition came since (the poll loop's `schedule`, against `switchGen`, which every `ChecksSwitched` advances under `gateMu`), and otherwise fires only the restart the auto-installer deferred after a swap that committed, through its gates; on again, the cadence's wait starts over and asks nothing; an install whose process took the switch as it started reads it again as it begins and at its decision (`InstallOptions.RereadSwitch`: `bridge update`'s, the file it resolved and its environment), settings that no longer load refusing it in their load's words; the console's save of an off holds the install marker's lock until the updater is told (`updater.LockForChecksOff`), taken before the holder's lock, `gateMu` after both, so it lands before an install's decision or after its swap; the status masks what a check found (`Status.CheckEnabled`); a status, every rollback (the console's and a start's) and the probation are never refused, and a release from before the switch refuses settings that write its key, so the console's off is refused while the boot's crash rollback would put back such a backup, or while the install marker cannot be read beside a backup or a failed lookup of one (`updater.ChecksOffRefused`, failing closed; one not there or not parsing is no install, as at a start), and no writer outside the holder writes the key from its environment (`KeepFiledSwitches`)** (2026-11-09, backlog B761's PR 1, five rounds). **Don't read the switch for an admission or a decision outside `gateMu`, or a file's reread under it, stop a check or an install with a cancel that carries a cause, stop an install past its decision or commit one the off transition stopped, let a tick ask GitHub whose wait was armed while the switch was off or before a transition, ask at a wake or because the switch came on, let the auto-installer begin an install with the switch off, take a reread that failed for an off or find the config again to reread it, leave a committed swap's deferred restart to a check, show a cached release as current while off, refuse a status, a rollback or the probation for the switch, or advise writing the key true where taking it out turns the checks on. Don't save the console's off but under the install marker's lock (without it only where the filesystem keeps none), take that lock under the holder's or the console's lock, ask for it again on a path that holds it, decide the probation's refusal but by the boot's own predicate and the backup's own answers, or take a check that did not answer, or a marker that could not be read beside a backup or a failed lookup of one, for a yes.**
+- **`update.checkEnabled` off asks GitHub nothing and installs nothing new: a check (the start's, a tick's, Check now) and an install are admitted only while it is on, and an install again at its decision under the install marker's lock (`commit`), past which its swap finishes; the off transition (`Updater.ChecksSwitched`, once a settings save is published) stops every check and every install before that decision through its own context; a tick checks only where the switch was on when its wait was armed and no transition came since (the poll loop's `schedule`, against `switchGen`, which every `ChecksSwitched` advances under `gateMu`), and otherwise fires only the restart the auto-installer deferred after a swap that committed, through its gates; on again, the cadence's wait starts over and asks nothing; an install whose process took the switch as it started reads it again as it begins and at its decision (`InstallOptions.RereadSwitch`: `bridge update`'s, the file it resolved and its environment), settings that no longer load refusing it in their load's words; the console's save of an off holds the install marker's lock until the updater is told (`updater.LockForChecksOff`), taken before the holder's lock, `gateMu` after both, so it lands before an install's decision or after its swap; the status masks what a check found (`Status.CheckEnabled`); a status, every rollback (the console's and a start's) and the probation are never refused, and a release from before the switch refuses settings that write its key, so the console's off is refused while the boot's crash rollback would put back such a backup, or while a lookup of that backup fails, or the install marker cannot be read beside a backup or a failed lookup of one (`updater.ChecksOffRefused`, failing closed; one not there or not parsing is no install, as at a start), and no writer outside the holder writes the key from its environment (`KeepFiledSwitches`)** (2026-11-09, backlog B761's PR 1, five rounds). **Don't read the switch for an admission or a decision outside `gateMu`, or a file's reread under it, stop a check or an install with a cancel that carries a cause, stop an install past its decision or commit one the off transition stopped, let a tick ask GitHub whose wait was armed while the switch was off or before a transition, ask at a wake or because the switch came on, let the auto-installer begin an install with the switch off, take a reread that failed for an off or find the config again to reread it, leave a committed swap's deferred restart to a check, show a cached release as current while off, refuse a status, a rollback or the probation for the switch, or advise writing the key true where taking it out turns the checks on. Don't save the console's off but under the install marker's lock (without it only where the filesystem keeps none), take that lock under the holder's or the console's lock, ask for it again on a path that holds it, decide the probation's refusal but by the boot's own predicate and the backup's own answers, or take a check that did not answer, a failed lookup of the backup, or a marker that could not be read beside a backup, for a yes.**
 
 *What goes out.* While update checks are on, the default, the updater sends
 one unauthenticated GET of GitHub's latest release at its start and once
@@ -3562,6 +3565,19 @@ with the switch, so the no-backup case keeps nothing from a rollback.
 Every text that names backlog B831 names it in a sentence of its own that
 says only where it applies (Codex on round 4).
 
+*A failed lookup beside a marker the off reads (backlog B898FU's round 2).*
+Round 5 left `ProbationHolds` and the decision over a marker it reads on
+`backupBeside`, which read a lookup that failed otherwise than finding
+nothing there as no backup: the off was saved, and the automatic install
+not held, over a backup whose presence could not be told. Both ask
+`backupAt` now, and `backupBeside` is gone: such a lookup refuses the off as
+a check that did not answer does (`ChecksOffUncheckedError`, its Detail the
+lookup's failure without a path, its cause kept by `Unwrap`), and holds the
+automatic install, at most twice the window, its reason naming the failure
+without a path, since a later start's crash rollback may find a backup this
+lookup could not. `TestAReadMarkerRefusesTheOffWhereTheBackupCannotBeLookedUp`
+and `TestTheAutoInstallerWaitsWhereTheBackupCannotBeLookedUp` pin it.
+
 `TestNoRequestAtTheStartOrATickWhileUpdateChecksAreOff` (whose tick turns red
 with the tick's gate alone reverted), `TestARequestAtTheStartAndAtATickWhileUpdateChecksAreOn`,
 `TestCheckNowAsksNothingWhileUpdateChecksAreOff`,
@@ -3622,7 +3638,7 @@ round 5.
 
 ## The updater waits out a held binary where it is in place (backlog B898 PR 1, 2026-11-15)
 
-- **The updater's renames of the binary, and the probes before them, wait out another process's hold only while the binary is in place and nothing is armed, each step tried by its operation's deadline, and a binary a failed put-back left missing refuses every install, rollback and deferred restart until it is back** (2026-11-15, backlog B898 PR 1): a hold is Windows' sharing or lock violation (`inUse`), never Access is denied; each step is retried alone on `forwardWaits` (eight attempts over 4.75 s of waits) by the operation's forward deadline, a monotonic time set as the operation begins (`deadline`, read on the moves' clock, `time.Now` through `renameNow` in production), so that the time each step takes, waiting or not, is the next one's; a wait is admitted only while some of the deadline remains, shortened to what remains, and the attempt after an admitted wait is made however long the wait took, so the schedule's last attempt comes at the deadline, past it by no more than its wait overran; once the deadline is seen to have passed no step is begun and no wait admitted, a step not tried answering `ErrDeadlinePassed` (`NothingMoved`, or `BinaryMissing` on the rollback's missing-binary path, never `InUse`) and a swap whose probes ended past it arming nothing; the swap's vacate and either place have one attempt, the place after a vacate that landed is made whatever the time, and a refused place is put back on `recoveryWaits` (seven attempts over 3.15 s) by a deadline set as the put-back begins, its first attempt made whatever that deadline says, a put-back that lands late being a put-back; a step under way is never cut short (a rename takes no context), so each bound counts the waits as they were asked of the clock, never a step's own time; each failure is a `*SwapError` saying what it left (`NothingMoved`, `PutBack`, `BinaryMissing` and its `Recover`); the latch asks the disk under the install marker's lock (`binaryLatch`, `ErrBinaryMissing`; the Updates panel through `RollbackRefusalAt`); a rollback whose put-back left no binary keeps its record, the boot's keeps its marker where a hold or its deadline left the binary where it was, an install answers a marker it could not put back (`MarkerNotRestoredError`), and `RollbackBinary` stops no service. **Don't wait with the binary vacated but for the put-back, wait once a swap is armed, retry a swap or a rollback whole, take Access is denied for a hold, draw the put-back's waits from the forward deadline, begin a step or admit a wait once its deadline has passed, make an admitted wait longer than what remains of its deadline or skip the attempt after it, leave the put-back's first attempt to its deadline, read a step its deadline left untried as one that landed or as a hold, arm a swap whose probes ended past its deadline, leave the place after a landed vacate untried or take a put-back that landed late for a failure, put a marker back as read where the put-back left no binary, install, roll back or restart while the binary is not on disk, wrap the latch's refusal in another, or stop a service in a rollback.** `TestEachHeldRenameIsWaitedForWhereTheBinaryIsInPlace`, `TestEachSwapOutcomeSaysWhatItLeft`, `TestEveryStepIsTriedByItsOperationsDeadline`, `TestEveryAttemptIsMadeOnAClockTheStepsMove`, `TestThePutBacksFirstAttemptIsMadeHoweverLateItComes`, `TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried`, `TestNothingWaitsWithNoBinaryButThePutBack`, `TestNoWaitFollowsTheSwapsArming`, `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed`, `TestAMissingBinaryRefusesEveryInstallAndRollback`, `TestARollbackThatLeavesNoBinaryKeepsItsRecord`, `TestAnInstallWhoseMarkerCannotBePutBackSaysSo`, `TestADeferredRestartIsNotRequestedWhileTheBinaryIsMissing`, `TestTheRollbackStopsNoService`, `TestEveryProtectedOperationFitsInsideTheMarkersLockWait`, cmd/bridge's `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse` and `TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt`, and Windows' `held_windows_test.go`, pin it.
+- **The updater's renames of the binary, and the probes before them, wait out another process's hold only while the binary is in place and nothing is armed, each step tried by its operation's deadline, and a binary a failed put-back left missing refuses every install, rollback and deferred restart until it is back** (2026-11-15, backlog B898 PR 1; B898FU, 2026-11-19): a hold is Windows' sharing or lock violation (`inUse`), never Access is denied; each step is retried alone on `forwardWaits` (eight attempts over 4.75 s of waits) by the operation's forward deadline, a monotonic time set as the operation begins (`deadline`, read on the moves' clock, `time.Now` through `renameNow` in production), so that the time each step takes, waiting or not, is the next one's; a wait is admitted only while some of the deadline remains, shortened to what remains, and the attempt after an admitted wait is made however long the wait took, so the schedule's last attempt comes at the deadline, past it by no more than its wait overran; once the deadline is seen to have passed no step is begun and no wait admitted, a step not tried answering `ErrDeadlinePassed` (`NothingMoved`, or `BinaryMissing` on the rollback's missing-binary path, never `InUse`) and a swap whose probes ended past it arming nothing; the swap's vacate and either place have one attempt, the place after a vacate that landed is made whatever the time, and a refused place is put back on `recoveryWaits` (seven attempts over 3.15 s) by a deadline set as the put-back begins, its first attempt made whatever that deadline says, a put-back that lands late being a put-back; a step under way is never cut short (a rename takes no context), so each bound counts the waits as they were asked of the clock, never a step's own time; each failure is a `*SwapError` saying what it left (`NothingMoved`, `PutBack`, `BinaryMissing` and its `Recover`); the latch asks the disk under the install marker's lock (`binaryLatch`, `ErrBinaryMissing`; the Updates panel through `RollbackRefusalAt`); a rollback whose put-back left no binary keeps its record, the boot's keeps its marker where a hold or its deadline left the binary where it was, and keeps it as read where the backup did not say its version (backlog B898FU), an install answers a marker it could not put back (`MarkerNotRestoredError`), and `RollbackBinary` stops no service. **Don't wait with the binary vacated but for the put-back, wait once a swap is armed, retry a swap or a rollback whole, take Access is denied for a hold, draw the put-back's waits from the forward deadline, begin a step or admit a wait once its deadline has passed, make an admitted wait longer than what remains of its deadline or skip the attempt after it, leave the put-back's first attempt to its deadline, read a step its deadline left untried as one that landed or as a hold, arm a swap whose probes ended past its deadline, leave the place after a landed vacate untried or take a put-back that landed late for a failure, put a rollback's marker back as read where its put-back left no binary, install, roll back or restart while the binary is not on disk, answer an install's pending-restart or sessions refusal before the latch's, clear an install at boot over a backup that did not say its version or could not be inspected, wrap the latch's refusal in another, or stop a service in a rollback.** `TestEachHeldRenameIsWaitedForWhereTheBinaryIsInPlace`, `TestEachSwapOutcomeSaysWhatItLeft`, `TestEveryStepIsTriedByItsOperationsDeadline`, `TestEveryAttemptIsMadeOnAClockTheStepsMove`, `TestThePutBacksFirstAttemptIsMadeHoweverLateItComes`, `TestASlowCopyAcrossVolumesLeavesTheSwapsProbesUntried`, `TestNothingWaitsWithNoBinaryButThePutBack`, `TestNoWaitFollowsTheSwapsArming`, `TestThePutBackKeepsItsWaitWhateverTheStepsBeforeItUsed`, `TestAMissingBinaryRefusesEveryInstallAndRollback`, `TestARollbackThatLeavesNoBinaryKeepsItsRecord`, `TestAnInstallWhoseMarkerCannotBePutBackSaysSo`, `TestADeferredRestartIsNotRequestedWhileTheBinaryIsMissing`, `TestTheRollbackStopsNoService`, `TestEveryProtectedOperationFitsInsideTheMarkersLockWait`, cmd/bridge's `TestTheBootRollbackKeepsItsMarkerWhereTheBinaryWasInUse`, `TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion`, `TestTheBootRollbackKeepsItsMarkerWhereTheBackupCannotBeInspected` and `TestAPutBackOnAClockItsStepsMoveKeepsEveryAttempt`, and Windows' `held_windows_test.go`, pin it.
 
 *The hazard.* Windows' `os.Rename` is `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`,
 which opens its source for delete access: another handle on the source that
@@ -3729,7 +3745,23 @@ auto-installer's deferred restart, which would end the one bridge running
 with nothing to start again, in whatever process asks, for any target and
 however old the marker: `binaryLatch` asks the disk (`os.Lstat`), never a flag
 in memory or in the marker. The Updates panel asks the same latch first
-(`RollbackRefusalAt`).
+(`RollbackRefusalAt`). Before its download an install asks it right after
+`ErrNoUpdate` and its in-flight try-lock (`ErrInstallInFlight`), ahead of
+the refusal of a swap of its release waiting for its restart
+(`swapAwaitingRestart`, `ErrInstallPendingRestart`) and of the sessions gate
+(`ErrActiveSessions`), as it is asked under the lock ahead of
+`decideUnderLock` (backlog B898FU). Until then those two came first: a swap
+that left no binary puts back the marker it read, which can be an earlier
+install's of the same release in its window, and the next install of that
+release answered `ErrInstallPendingRestart`, "restart the bridge instead of
+installing again", where the latch refuses; the operator's restart route
+asks no latch, so a restart taken on that advice ends the one bridge running
+with nothing to start again (the auto-installer's restart asks the latch and
+refuses). An install not forced, over a download in flight, answered the
+sessions gate, and the latch refused it once the download ended. Nothing was
+installed either way. The `Force: false` case with a session in flight and
+the in-window marker are rows of
+`TestAMissingBinaryRefusesEveryInstallAndRollback`.
 
 *What a failed put-back leaves.* A rollback whose put-back left no binary
 keeps the record it wrote before its restore (the operator's
@@ -3744,11 +3776,48 @@ the boot rollback's ends the start after its housekeeping
 (`maybeRollbackOnBoot` returns it; exit 1, before the updater and every
 listener); the early rollback's start refuses its settings as before. Each
 line names the rename. The boot rollback asks the backup its version before
-it renames it, and leaves a backup that does not say the install's
-`PreviousVersion` (a marker left armed over a swap that moved nothing, beside
-an older backup); it keeps its vetoed marker after a restore refused for a
-hold, or one its deadline left untried, for the next start to ask again, and
-clears the install as before after any other failure.
+it renames it. Where no backup is there or is no regular file, or the backup says another
+version than the install's `PreviousVersion` (a marker left armed over a swap that
+moved nothing, beside an older backup), it leaves the backup where it is and
+clears the install. A backup that does not say its version (it did not answer
+within its bound, could not be run, exited otherwise or printed no version
+line), or that could not be inspected (a lookup that failed otherwise than
+finding nothing there, a permission or a link loop on the way: backlog
+B898FU's round 2, where the failure had read as no backup), shows neither,
+and the boot keeps the install's marker as it read it,
+nothing written or renamed, for the next start to ask again, as the early and
+the crash rollbacks leave their install on that answer (backlog B898FU);
+until then it cleared the install as for another version, so no later start
+asked again. The probe runs only at a boot of the install's
+`PreviousVersion`, since any other version's admission records
+`DataDirOpenedBy` first, which the boot takes before the probe: what the
+clear lost was the rename of a backup of that version, or the verdict on an
+older one. A stop while the backup answers leaves the install as it is too,
+and is the housekeeping's answer. The window bounds the keep: a start past it
+clears the install as abandoned (`recencyWindow`, 6 h), and until then
+`swapAwaitingRestart` refuses an install of the target as waiting for its
+restart, as after a held restore, which the auto-installer takes as a
+deferred state, restarting nothing
+(`TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion`; until
+then `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall` asserted the clear
+over a backup that could not be run;
+`TestTheBootRollbackKeepsItsMarkerWhereTheBackupCannotBeInspected`). A backup
+that can never say its version (one that cannot run, prints no version line,
+or whose lookup keeps failing) keeps the marker so at every start for the
+whole window, and every install of the target is refused for all of it: the
+refusal's advice, a restart, only asks the backup again. Since backlog
+B898FU's round 3 the kept line says so and names the window's end in UTC
+(the marker's `AttemptedAt` and `updater.RecencyWindow()`), both tests above
+holding an install attempted an hour before. Until this PR (B898FU) the boot
+cleared the install at the first such answer, so no later start asked again.
+The early
+and the crash rollbacks say a backup they could not inspect as such, never as
+none, and record nothing for it (backlog B898FU's round 3: the crash
+rollback's record of it, round 2's, ended the auto-installer's hold;
+`TestTheEarlyRollbackTellsABackupItCannotInspectFromNone`,
+`TestTheCrashRollbackTellsABackupItCannotInspectFromNone`). It keeps its vetoed marker after a
+restore refused for a hold, or one its deadline left untried, for the next
+start to ask again, and clears the install as before after any other failure.
 
 *The console and `bridge update`.* The three classes are the console's 500
 `recovery-required`, 500 `marker-not-restored` and 409 `binary-in-use`, in
@@ -3805,7 +3874,7 @@ closed by backlog B894 (the next section).
 
 ## The crash rollback asks its backup before the install marker's lock (backlog B894, B898's F1, 2026-11-19)
 
-- **…and the crash rollback asks its backup's version and settings check before the install marker's lock, and decides again under it on the marker read again, the backup's identity and the settings' digest** (2026-11-19, backlog B894, B898's F1): before the lock, after the unlocked read's `updater.CrashRollback`, the restore journal's check and `refuseCrashRollbackOnARead` as before, the backup is a regular file (`os.Lstat`) whose identity is fixed through a handle on it (`fsutil.OpenAsFile`, the handle's stat, the same file as the Lstat's, closed at once), the settings' digest is read (`updater.ConfigDigest`), and the backup's version (`backupVersion`, held to the unlocked read's `PreviousVersion`) and its settings check (`updater.CheckConfig`) run; then the lock (`updater.LockState`: a lock that cannot be taken, a stop in its wait and a filesystem that keeps none said as before, the runs asked already), the context asked once it is held, the marker read again and `CrashRollback` asked of it again, and under the lock, neither run asked again: the version answered against the marker read again (the one `PreviousVersion` refusal there, in its old words, which holds that marker's `PreviousVersion` to the checked one's, the version having matched it before the lock), the same install (`TargetVersion`, `AttemptedAt`, and `PreviousVersion` so), the backup the same regular file (`os.SameFile` against the handle's identity, its size, its modification time), and the settings read again with the digest they had, a read that fails refusing at either point. A change found under the lock refuses this start's rollback, said and recorded in words that name no path, and the next start of the loop asks again (`RollbackRefused` is no input to `CrashRollback`, and `CrashRollbackRecord` clears it). A refusal decided before the lock is said and recorded under a lock taken for it (`refuseCrashRollbackBeforeTheLock`, never called while the lock is held): on the marker read again, recorded where the same install (its `TargetVersion`, `PreviousVersion` and `AttemptedAt`) still asks, the marker's own why where it refuses the rollback itself, nothing said or written for another install, and the line said with nothing recorded where the lock cannot be held, the marker cannot be read again or serve's stop has come. **Never run them with the lock held, never run them again under it, and never put back a backup whose install, identity or settings changed since they answered. Don't fix the identity by a bare Lstat, take two failed reads of the settings for the same settings, or take the lock again to record a refusal while holding it.** `TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock`, `TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait`, `TestABackupChangedWhileItWasCheckedIsNotPutBack`, `TestTheBackupIsNotPutBackOverSettingsItDidNotCheck`, `TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock`, `TestAStopAroundTheBackupsChecksWritesNothing` and `TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked` pin it.
+- **…and the crash rollback asks its backup's version and settings check before the install marker's lock, and decides again under it on the marker read again, the backup's identity and the settings' digest** (2026-11-19, backlog B894, B898's F1; backlog B898FU's rounds 3 and 4): before the lock, after the unlocked read's `updater.CrashRollback`, the restore journal's check and `refuseCrashRollbackOnARead` as before, the backup is a regular file (`fsutil.EntryIdentity`, an `os.Lstat` whose identity is read as it is taken, since backlog B898FU's round 4; a lookup that fails otherwise than finding nothing there, an identity that cannot be read among them, refused as a backup that could not be inspected, never as none, and recorded nowhere: that backlog's rounds 2 to 4) whose identity is fixed through a handle on it (`fsutil.OpenAsFile`, the handle's stat, the same file as the Lstat's, closed at once), the settings' digest is read (`updater.ConfigDigest`), and the backup's version (`backupVersion`, held to the unlocked read's `PreviousVersion`) and its settings check (`updater.CheckConfig`) run; then the lock (`updater.LockState`: a lock that cannot be taken, a stop in its wait and a filesystem that keeps none said as before, the runs asked already), the context asked once it is held, the marker read again and `CrashRollback` asked of it again, and under the lock, neither run asked again: the version answered against the marker read again (the one `PreviousVersion` refusal there, in its old words, which holds that marker's `PreviousVersion` to the checked one's, the version having matched it before the lock), the same install (`TargetVersion`, `AttemptedAt`, and `PreviousVersion` so), the backup the same regular file (`os.SameFile` against the handle's identity, of the entry observed again under the lock through `fsutil.EntryIdentity`, so that it reads no identity; its size, its modification time), and the settings read again with the digest they had, a read that fails refusing at either point. A change found under the lock refuses this start's rollback, said and recorded in words that name no path, and the next start of the loop asks again (`RollbackRefused` is no input to `CrashRollback`, and `CrashRollbackRecord` clears it). A refusal decided before the lock is said and recorded under a lock taken for it (`refuseCrashRollbackBeforeTheLock`, never called while the lock is held): on the marker read again, recorded where the same install (its `TargetVersion`, `PreviousVersion` and `AttemptedAt`) still asks, the marker's own why where it refuses the rollback itself, nothing said or written for another install, and the line said with nothing recorded where the lock cannot be held, the marker cannot be read again or serve's stop has come. A backup that could not be inspected, before the lock (a lookup that failed otherwise than finding nothing there, an open that failed) or under it (the lookup asked again, failing so, where a backup gone is a change still), is said and recorded nowhere, a refusal the marker read again records in the words such a failure had until then cleared where the same install still asks, and one of any other cause kept (backlog B898FU's round 3: recorded, it ended the auto-installer's hold, `updater.ProbationHolds`). **Never run them with the lock held, never run them again under it, and never put back a backup whose install, identity or settings changed since they answered. Don't fix the identity by a bare Lstat, take two failed reads of the settings for the same settings, or take the lock again to record a refusal while holding it. Don't record a refusal for a backup it could not inspect, before the lock or under it (a lookup that failed otherwise than finding nothing there, or an open that failed: said, nothing recorded), keep a refusal recorded in the words such a failure had until B898FU's round 3 where the same install's inspection fails again, or clear one of any other cause there. Don't compare an identity read but at its observation (`fsutil.EntryIdentity`: on Windows through a handle on the entry, not followed, asking no access), or take one that cannot be read for a change.** Where the identity cannot be read at any start, nothing is recorded and the auto-installer's hold is the probation's own, per process: it holds while that process has been up less than twice `updater.ProbationWindow` (20 min, `ProbationHolds`), so each new start of a crash loop holds again; only a start that answers as ready and stays up `ProbationWindow` ends it, by confirming the install (`ConfirmInstall`), a clean stop taking back its count alone (`TakeBackFailedStart`); a manual install is never held, and replaces the backup with the version running, unconfirmed; each start says it, and the console's Updates panel shows the wait and the probation. `TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock`, `TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait`, `TestABackupChangedWhileItWasCheckedIsNotPutBack`, `TestTheBackupIsNotPutBackOverSettingsItDidNotCheck`, `TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock`, `TestAStopAroundTheBackupsChecksWritesNothing`, `TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked`, `TestTheCrashRollbackTellsABackupItCannotInspectFromNone`, `TestTheCrashRollbackTellsABackupItCannotOpenFromNone`, `TestTheCrashRollbackTellsABackupItCannotInspectUnderItsLockFromAChange`, `TestTheCrashRollbackTellsABackupWhoseIdentityCannotBeReadFromAChange`, `TestTheCrashRollbackPutsBackABackupAnotherHandleReads`, `TestTheCrashRollbackTellsALinkAtItsBackupFromABackupItCannotInspect`, `TestTheCrashRollbackPutsBackABackupRecordedAsChangedOnceItsIdentityReads` and fsutil's `TestEntryIdentityIsTheFilesAtItsRead` pin it.
 
 *The hazard.* The crash rollback (B660) held `update-state.lock` from its
 marker's read again to its rename, and ran both of its backup's runs under it:
@@ -3886,6 +3955,10 @@ handle and every `os.SameFile` there, the one under the lock among them, to
 compare it, since the behaviour it stands for is Windows' alone: a bare
 Lstat's file ID read by path at its first comparison, so that a file put in
 the backup's place while the runs ran compares under the lock as the backup.
+Since backlog B898FU's round 4 it requires too that every name an
+`os.SameFile` there compares the identity with is bound by a call of the
+reader `recoverCrashedInstall` falls back to `fsutil.EntryIdentity` for, and
+that the function calls neither `os.Lstat` nor `os.Stat`.
 
 *Cancellation.* `ProbeVersionWithin` answers serve's stop with the context's
 error, and the version's refusal says so in its old words; the record's lock
@@ -3921,6 +3994,127 @@ pins the helper's third field, the refusal coming from either run, and
 `TestARefusalBeforeTheLockIsSaidAndRecordedNowhereWhileTheLockIsHeld` the
 line said with nothing recorded where another holder keeps the lock for the
 whole wait, serve's context live.
+
+*A backup that could not be inspected (backlog B898FU's round 3).* Round 2
+said and recorded a lookup of the backup that failed otherwise than finding
+nothing there as a backup that could not be inspected, beside B894's record
+of an open that failed, and the lookup asked again under the lock recorded
+such a failure as a backup that changed while it was checked. Each record
+ended the auto-installer's hold: `ProbationHolds` answers no hold once
+`RollbackRefused` is set, before its own lookup, which fails closed, so the
+start, going on, ran the new version, and its updater's first poll could
+install a newer release over the backup, the last version known to run,
+putting the version that crashes in its place. Now each is said, the
+lookup's and the open's in their words and the lookup under the lock as a
+backup that could not be inspected again, and recorded nowhere:
+`refuseCrashRollbackBeforeTheLock` takes an empty `recorded` for that, and
+under the lock a lookup that fails is told from one that finds nothing
+there, a backup gone being a change still, as a replacement, a rewrite or a
+moved time is. The hold then asks its own lookup, which holds where it fails
+(round 2) and where it finds a regular file, which is what an open that
+failed leaves. A record in either old set of words, left by a start before,
+would keep the hold off as well, and the admission keeps `RollbackRefused`:
+a start whose inspection fails clears those words where the marker read
+again under the lock is the same install (its `TargetVersion`,
+`PreviousVersion` and `AttemptedAt`, the fields a record is held to), and
+keeps a refusal of any other cause, which keeps the auto-installer from
+waiting (`TestTheAutoInstallerDoesNotWaitBesideARefusedRollback`). The
+probation's status, which read the record, says once more that the next
+start tries to put the backup back, as it does, asking the backup again.
+`TestTheCrashRollbackTellsABackupItCannotInspectFromNone`,
+`TestTheCrashRollbackTellsABackupItCannotOpenFromNone` (a regular backup
+this user may not open) and
+`TestTheCrashRollbackTellsABackupItCannotInspectUnderItsLockFromAChange`
+(the lookup broken during the settings check) pin it, each over the refusals
+a marker may hold already, the hold asked while the failure is laid and once
+it has recovered, and `TestABackupChangedWhileItWasCheckedIsNotPutBack`'s
+backup gone during its settings check pins the change.
+
+*An identity that cannot be read (backlog B898FU's round 4).* On Windows
+`os.Lstat` reads no file ID: `os.SameFile` reads it as it compares, by
+opening the path then (Go 1.27.3's `os/types_windows.go`, `loadFileId`: a
+`CreateFile` asking no access and sharing nothing), and answers false where
+that open fails, which both comparisons recorded as a backup that changed
+while it was checked, ending the auto-installer's hold over a backup that
+may stand as it was. Each of the three observations now reads its identity
+as it is taken, so neither comparison reads one: the entry's two, before the
+lock and under it, through `fsutil.EntryIdentity` (on POSIX `os.Lstat`,
+which carries the device and the inode as it is taken; on Windows the entry
+itself opened, a reparse point not followed and a directory too, asking no
+access and giving every kind of sharing, as `entryOf` opens one, its type
+and identity read from that handle, which is closed before it returns), and
+the handle's, `fsutil.OpenAsFile`'s stat taken before its close, as since
+bridge lows 8. A read that fails takes the inspection failure's path: said,
+recorded nowhere, the hold kept
+(`TestTheCrashRollbackTellsABackupWhoseIdentityCannotBeReadFromAChange`,
+each read failed through `serveOpts.backupIdentity`, nil in production); an
+entry that is not there, one that is no regular file (a symbolic link or a
+junction, read as itself:
+`TestTheCrashRollbackTellsALinkAtItsBackupFromABackupItCannotInspect`) and
+an identity that differs keep their recorded refusals. An open that asks no
+read, write or delete access takes no part in sharing: it fails for no other
+handle's sharing and refuses no rename or removal of its file while it is
+open (fsutil's `TestEntryIdentitysHandleRefusesNoRenameOrRemoval` and
+`TestEntryIdentityReadsBesideAHandleThatSharesNothing`, Windows' alone). By
+that rule a reader beside `loadFileId`'s open did not make it fail either,
+and what the failed read stands for is a file being deleted, an access
+refused or a filter that refuses the open;
+`TestTheCrashRollbackPutsBackABackupAnotherHandleReads` holds a real reader
+that shares reading and writing through the inspection, and its run on
+Windows at `2534dc60`, before the fix, tells whether such a reader made the
+old read fail. The two opens by path are not `fsutil.OpenAsFile`'s: its
+handle (`os.Open`'s: `GENERIC_READ`, sharing reading and writing and no
+deletion, Go 1.27.3's `syscall/syscall_windows.go:376,395`) refuses a rename
+while it is open, and it follows a reparse point, so a link at the path
+would read as its target; the helper's open reaches no pipe, opening a link
+as the link, and a pipe or a device reads as no regular file. A refusal
+recorded as a backup that changed, which such a failed read wrote until this
+round, is cleared by no start for its words, which a backup replaced writes
+too: the next start inspects again, and one whose identities read and match
+goes on, its put-back or its own refusal taking the record's place
+(`TestTheCrashRollbackPutsBackABackupRecordedAsChangedOnceItsIdentityReads`,
+the recovery this round chose); while the read keeps failing, that refusal
+stands and the auto-installer does not wait (the row of a backup that
+changed in every case that seeds a refusal on disk).
+
+*The hold's bound where the identity never reads (backlog B898FU's round
+4).* A backup whose identity cannot be read at any start is said at every
+start of the loop at the limit (`crashRollbackLine`,
+`cmd/bridge/serve_crashed_install.go:392`: "could not be inspected" before
+the lock, "could not be inspected again under the install marker's lock"
+under it) and recorded nowhere, so the install stays on probation and the
+auto-installer's hold is `ProbationHolds`' own
+(`internal/updater/probation.go:452-471`). That hold is per process: it
+holds while the marker awaits the running version's confirmation and the
+process has been up less than twice `ProbationWindow` (`:453`; 10 min,
+`state.go:259`), its uptime counted from the updater's `New` on the
+monotonic clock (`updater.go:248-252`), and the auto-installer asks it at
+its first poll and at every check after (`updater.go:747-751`,
+`DefaultCheckInterval` 6 h, `:60`), again under the install marker's lock
+(`install.go:1016-1018`). Each start's process begins at zero, so a crash
+loop of short starts holds again at each one, with no end of its own, and a
+start that runs past 20 minutes unconfirmed (one that never answers as
+ready) stops holding for itself, its next poll free to install a newer
+release, perhaps the fix. What ends the hold is the install's confirmation:
+a start that answers as ready and stays up `ProbationWindow`
+(`ConfirmInstall`, `probation.go:43-67`; serve's `confirm`,
+`serve_probation.go:554-561`) stamps it installed, and nothing awaits a
+confirmation after. A clean stop confirms nothing: it takes back that
+start's count (`TakeBackFailedStart`, `probation.go:131-156`), and the next
+start holds again at its first poll. A migration of the store begun ends it
+too (`CrashRollbackAtLimit` refuses, `:456-458`), and so does the rollback,
+once a start's reads succeed and it puts the backup back. A manual install
+(`bridge update`, the console's Install) is never held, the hold being asked
+of an automatic install alone (`install.go:1012-1018`): it replaces the
+backup with the version running, unconfirmed, and confirms nothing. What the
+operator sees: each start's line at the limit; the console's Updates panel,
+with the wait as its deferred reason (`Status.DeferredReason`,
+`updater.go:748`: the version "awaits its confirmation ...: auto-install
+waits until it is confirmed, or for at most 20m0s") and the probation in
+`ProbationStatus`' words, which `bridge doctor` prints too and which,
+nothing recorded, say that the next start tries to put the backup back; and
+the Info line `auto-install deferred`, its reason the running install's
+confirmation (`:749`).
 
 *What stays open.* The early and the boot rollbacks still ask their backup's
 version under the lock (10 s each; their rows fit, at 19.4 s). A step under
@@ -4288,3 +4482,57 @@ two ids. B898's other follow-ups stay as they were. The record is
 *Since backlog B898 (2026-11-15).* **The new bytes are STAGED beside `dst` before anything is vacated, so the no-file window is two adjacent renames and never encloses a copy; since backlog B898 the staging comes before the swap is armed, and the settings check's copy, beside `dst` already (`checkedBeside`: its directory and its `.bridge-check-` name), is taken as it is and given `dst`'s mode.** **Don't stage a candidate twice, or arm the swap before its staging.** Every production install stages its verified candidate beside the binary for its settings check (`stageForCheck`), so the swap's own staging made a second copy after `armSwap`, and a hold on it (a scanner reading the copy the check had just run) failed a swap already armed. The swap now takes that copy as its staged file, and stages only a candidate that is elsewhere (an install with no settings path, the tests), before it arms, on the swap's forward deadline, so that the time a staging takes, a copy across volumes among it, is the probes' after it; on Unix the copy's mode is set from `dst`'s as the staging set it (`TestASwapOfTheCheckedCandidateGivesItTheBinarysMode`, under the runbook's umask), and the cross-device copy is shown to run (`TestSwapBinaryFallsBackToCopyOnCrossDeviceRename`: the staging's rename refused, the file at `dst` another than the source).
 
 - **`bridge update` refuses its check and its install, exit 1, while `update.checkEnabled` is off, read through `loadCLIConfig` (the file and `BRIDGE_UPDATE_CHECK_ENABLED`, as serve reads them), before anything is asked of GitHub or written, its first sentence naming what turned the checks off; and reads it again, from the file it resolved as it started and its environment, as its install begins and at the install's decision under the install marker's lock (`rereadUpdateSwitch`, `updater.InstallOptions.RereadSwitch`): an off refuses the install with the running bridge unchanged, and settings that no longer load refuse it with their load's error (`settingsRereadError`), never as an off; and where the file writes the key, whatever its value and whatever turned the checks off (`config.WritesUpdateCheckKey`: the YAML's own keys, aliases and merges resolved, a key written null or with no value counted, a comment not, bytes it cannot read counted), its refusal says too that a release from before the switch refuses the key, and how to keep the checks off without it** (2026-11-09, backlog B761's PR 1; the reread its round 2, the caveat its round 3, the key's own presence its round 4). **Don't read the switch from the file alone, bind it at the command's start, find the config again for the reread, take a load that failed for an off, say a start's rollback runs with the key written without that caveat, or decide the caveat by the decoded switch or by what turned the checks off.** `TestBridgeUpdateRefusesItsCheckAndItsInstallWhileUpdateChecksAreOff`, `TestBridgeUpdateReadsTheSwitchAgainOnceItsPromptIsAnswered`, `TestBridgeUpdateRefusesItsInstallWhereTheSettingsNoLongerRead`, `TestTheCaveatIsSaidWhereTheFilesKeyCannotBeRuledOut` and internal/config's `TestWritesUpdateCheckKeyReadsTheDocumentsOwnKeys` pin it.
+
+- **A container's doctor report must not advise a host it is not on
+  either** (backlog B190). In the Docker image a healthy bridge's report
+  ended "14 ok, 3 warn", two of them `service-manager` ("use `bridge init
+  --no-service`", to an image that already runs `serve` and whose documented
+  `docker run … init` already passes the flag) and `browser-opener` ("no
+  opener found", in an image with no browser). In a container both still
+  run, and a failing one is reported "check skipped" with no advice, while
+  a passing one (a system container with its own systemd, Toolbx's shared
+  opener) still says what it found. The verdict is `Deps.InContainer`,
+  which `fsutil.InContainer()` sets from Docker's
+  `/.dockerenv` or Podman's `/run/.containerenv` (marker files, never cgroup
+  parsing), in `bridge doctor` (the console shares its report) and in init's
+  preflight (`initPreflightDeps`), so the two cannot grade one container
+  differently. Unlike `Managed` it skips nothing else: a container's
+  operator has a shell (`docker exec`), so `log-file-size` and every other
+  check still speak to them. The console's no-log-file hint asks the same
+  helper. **Don't detect a container from cgroups or an env var only our
+  image sets, don't widen the skip past these two checks, and don't set the
+  verdict in one report's inputs and not the other's, and don't skip a
+  check that passes.** Pinned by
+  `TestInContainerSkipsTheHostOperatorChecks`,
+  `TestInContainerKeepsTheChecksItsOperatorCanActOn` and
+  `TestDoctorAndInitCarryTheContainerVerdict`.
+
+- **…and every stored name is one a pairing code can CARRY** (#1046). The
+  app also refuses a `name=` over 256 Characters ("Pairing code's name field
+  is too long.") and one that is not UTF-8 (Foundation leaves the item with
+  no value: "missing the name field"). The console took any length (257
+  characters answered 200 `live`, and the next QR did not pair), and `bridge
+  init --name $'Caf\xe9 Tunes'`, "Café" typed in a Latin-1 terminal, was
+  saved as `!!binary` and served with `name=Caf%E9`. **The cap,
+  `config.MaxLibraryNameLength`, is 256 RUNES**: a Character is one or more
+  scalars, so that is never more than 256 Characters on any iOS version,
+  whatever Unicode tables it segments by, and Go has no grapheme
+  segmentation to count the app's way. It is conservative for multi-scalar
+  Characters (37 family emoji, 259 scalars, are refused; the app counts 37).
+  Don't count bytes: 256 `é` must pass. **Refuse what the operator types,
+  repair what is already stored** (#1042's rule, one step on):
+  `config.CheckLibraryName` refuses in the PATCH (400 `validate`, nothing
+  written) and in init's `--name` (exit 2, before anything is written),
+  through `CleanTypedLibraryName` since B744 (the next bullet), and
+  init's prompt asks again; `Normalize` repairs a config's or an override's
+  name (`config.RepairLibraryName`: U+FFFD for bytes that are not UTF-8,
+  its control characters removed, cut
+  to 256 runes and re-trimmed, with a WARN), because a `Load` refusal would
+  stop a bridge from starting over a display name. init keeps and offers an
+  install's name AS LOAD SERVES IT, or its prompt would offer a name it then
+  refuses. Don't cut in the PATCH instead: that stores a name nobody typed.
+  **Nor in the console**: the name box has NO `maxlength`. It counts UTF-16
+  units, so it stopped names the handler takes (129 emoji), and it cut a
+  paste without a word; the handler's 400 is what the page shows ("Save
+  failed: libraryName: must be at most 256 characters, …"). Added in #1046's
+  first round, removed on review.

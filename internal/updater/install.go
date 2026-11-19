@@ -166,7 +166,8 @@ type InstallOptions struct {
 //     decision or that found the switch off at it (backlog B761): nothing
 //     armed or swapped.
 //   - ErrBinaryMissing while the binary is not at opts.BinaryPath (the
-//     recovery latch, backlog B898): nothing written or swapped.
+//     recovery latch, backlog B898), asked before ErrInstallPendingRestart
+//     and ErrActiveSessions (backlog B898FU): nothing written or swapped.
 //   - A swap that failed is a *SwapError, wrapped: ErrBinaryInUse where
 //     another process's hold ended it with the binary in place,
 //     ErrBinaryMissing where it left none (the marker put back as read
@@ -268,6 +269,19 @@ func (u *Updater) install(ctx context.Context, a *admission, opts InstallOptions
 		return status, ErrInstallInFlight
 	}
 	defer u.installInFlight.Store(false)
+	// The recovery latch (backlog B898), read here without the install
+	// marker's lock to spare a download it would refuse, and asked again under
+	// the lock, where it binds. It is asked before the refusal of a swap
+	// waiting for its restart and before the sessions gate (backlog B898FU): a
+	// swap that left no binary puts back the marker it read, which can be an
+	// earlier install's of this release in its window, and that refusal's
+	// advice is then a restart, which the operator's restart route makes over
+	// a missing binary (it asks no latch), ending the one bridge running with
+	// nothing to start again; and a wait for the downloads in flight would end
+	// at this refusal all the same.
+	if err := binaryLatch(opts.BinaryPath); err != nil {
+		return status, fmt.Errorf("%w; nothing was installed", err)
+	}
 	// A swap for this same target has already landed and the process has
 	// not restarted into it. Installing again re-runs the whole ~30 MiB
 	// download, and — worse — swapBinary's EEXIST retry does
@@ -313,12 +327,6 @@ func (u *Updater) install(ctx context.Context, a *admission, opts InstallOptions
 	if !opts.Force && opts.Sessions != nil && opts.Sessions.Inflight() > 0 {
 		return status, fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
-	}
-	// The recovery latch (backlog B898), read here without the install
-	// marker's lock to spare a download it would refuse, and asked again under
-	// the lock, where it binds.
-	if err := binaryLatch(opts.BinaryPath); err != nil {
-		return status, fmt.Errorf("%w; nothing was installed", err)
 	}
 
 	// Permission preflight FIRST, before any network I/O: if we can't

@@ -657,9 +657,9 @@ var backupCases = []struct {
 // answers a backup there for a regular file at the binary's path and .bak,
 // none for nothing there, an entry that is no regular file or a binary path
 // that is not absolute, and the lookup's error for a lookup that fails
-// otherwise (a permission, a link loop: backlog B761's round 5), while
-// backupBeside, which the crash rollback's own requirement reads, answers as
-// it did: true for the regular file alone.
+// otherwise (a permission, a link loop: backlog B761's round 5). Until backlog
+// B898FU's round 2, backupBeside read that error as none for ProbationHolds
+// and the off's decision over a marker it reads; both now ask backupAt.
 func TestTheBackupsLookupTellsWhatIsNotThereFromWhatCannotBeLookedUp(t *testing.T) {
 	for _, tc := range backupCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -670,9 +670,6 @@ func TestTheBackupsLookupTellsWhatIsNotThereFromWhatCannotBeLookedUp(t *testing.
 			there, err := backupAt(c.bin)
 			if there != tc.there || (tc.cause == nil) != (err == nil) || (tc.cause != nil && !errors.Is(err, tc.cause)) {
 				t.Errorf("backupAt = %v, %v; want %v, the lookup's error %v", there, err, tc.there, tc.cause)
-			}
-			if got := backupBeside(c.bin); got != tc.there {
-				t.Errorf("backupBeside = %v, want %v as before", got, tc.there)
 			}
 		})
 	}
@@ -726,6 +723,49 @@ func TestAnUnreadableMarkerRefusesTheOffOnlyWhereABackupMayStand(t *testing.T) {
 			if got, err := os.ReadFile(c.cfg); err != nil || string(got) != offSettings {
 				t.Errorf("the settings after the decision = %q (%v), want them as they were", got, err)
 			}
+		})
+	}
+}
+
+// TestAReadMarkerRefusesTheOffWhereTheBackupCannotBeLookedUp: over an install
+// marker the decision reads, at the crash rollback's limit, a lookup of the
+// backup that fails otherwise than finding nothing there refuses the off,
+// failing closed, as a check that did not answer does, its Detail naming the
+// lookup's failure and its causes keeping it (backlog B898FU's round 2):
+// whether a backup stands that a later start's crash rollback could put back
+// cannot be told from it. Until then that lookup read as no backup, and the
+// off was saved, as it still is over nothing there, no regular file there or
+// a binary path that names none. The backup is asked nothing, and the
+// settings and the marker are as they were.
+func TestAReadMarkerRefusesTheOffWhereTheBackupCannotBeLookedUp(t *testing.T) {
+	for _, tc := range backupCases {
+		if tc.there {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			st := probationMarker(1)
+			c := newOffCase(t, &st)
+			if tc.place != nil {
+				tc.place(t, &c)
+			}
+			marker := markerBytes(t, c)
+			b := refusesTheKey(c)
+			err := c.decide(context.Background(), b, 0)
+			if tc.cause == nil {
+				if err != nil {
+					t.Errorf("the off's decision with %s = %v, want it saved", tc.name, err)
+				}
+			} else {
+				requireUnchecked(t, err, c, "the backup could not be looked up")
+				if !errors.Is(err, tc.cause) {
+					t.Errorf("the refusal's causes do not keep the lookup's failure, %v: %v", tc.cause, err)
+				}
+				requireNoPathIn(t, err, c.dir, filepath.Dir(c.bin))
+			}
+			if got := b.askedOf(); got != "" {
+				t.Errorf("the backup was asked %q, want nothing", got)
+			}
+			requireAsIs(t, c, marker)
 		})
 	}
 }

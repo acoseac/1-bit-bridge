@@ -173,11 +173,14 @@ func (e *ChecksOffRefusal) Is(target error) bool { return target == ErrChecksOff
 var ErrChecksOffUnchecked = errors.New("whether an off saved now would keep a crash rollback from putting the backup back could not be told")
 
 // ChecksOffUncheckedError is ChecksOffRefused's refusal, failing closed, of an
-// off whose backup did not answer what the decision asks it: Detail says what
-// failed, for the bridge's log alone, and may name the bridge's own files.
+// off whose backup did not answer what the decision asks it, or could not be
+// looked up (backlog B898FU's round 2): Detail says what failed, for the
+// bridge's log alone, and may name the bridge's own files; Unwrap keeps a
+// lookup's failure for code.
 type ChecksOffUncheckedError struct {
 	Target, Previous string
 	Detail           string
+	err              error
 }
 
 func (e *ChecksOffUncheckedError) Error() string {
@@ -190,6 +193,10 @@ func (e *ChecksOffUncheckedError) Error() string {
 
 // Is makes a *ChecksOffUncheckedError match ErrChecksOffUnchecked.
 func (e *ChecksOffUncheckedError) Is(target error) bool { return target == ErrChecksOffUnchecked }
+
+// Unwrap is the lookup's failure where the backup could not be looked up, nil
+// for a check that did not answer.
+func (e *ChecksOffUncheckedError) Unwrap() error { return e.err }
 
 // ChecksOffMarkerError is ChecksOffRefused's refusal, failing closed, of an
 // off over an install marker it could not read while a backup stands beside
@@ -233,9 +240,12 @@ func (e *ChecksOffMarkerError) Unwrap() error { return e.err }
 // crash rollback's own checks at their limit (CrashRollbackAtLimit: an install
 // of Current armed, swapped, over another version, no migration of the store
 // begun, no other version recorded over the data dir), whatever its count;
-// then a regular file at BinaryPath+".bak", the backup it would put back. Where
-// either rules the crash rollback out, the save takes nothing from it, and is
-// no refusal. Otherwise it asks the backup as the crash rollback asks it
+// then a regular file at BinaryPath+".bak", the backup it would put back
+// (backupAt). Where either rules the crash rollback out, the save takes
+// nothing from it, and is no refusal; a lookup of the backup that fails
+// otherwise than finding nothing there refuses the off, failing closed
+// (*ChecksOffUncheckedError; backlog B898FU's round 2: until then it read as
+// no backup here). Otherwise it asks the backup as the crash rollback asks it
 // (CheckConfig: its own `serve --validate-config`), first of the settings as
 // the file holds them with update.checkEnabled written false
 // (config.WithUpdateChecksOff, in a copy beside the settings file, so that
@@ -270,7 +280,7 @@ func (e *ChecksOffMarkerError) Unwrap() error { return e.err }
 // another user, root among them, reads what this one may not, and its crash
 // rollback may then act on an install the off kept from its backup. Where no
 // backup stands there (nothing at its path, an entry that is no regular file,
-// a binary path that names none, as backupBeside reads one), the off is saved
+// a binary path that names none, as backupAt reads one), the off is saved
 // over such a marker too (round 5, the Claude review's Low): no crash rollback
 // puts back a backup that is not there, and a backup appears only through a
 // later install, which waits for this decision's hold of the install marker's
@@ -289,7 +299,20 @@ func ChecksOffRefused(ctx context.Context, s ChecksOffSave) error {
 		}
 		return &ChecksOffMarkerError{Detail: detail, err: errors.Join(err, lookErr)}
 	}
-	if ok, _ := CrashRollbackAtLimit(st, s.Current); !ok || !backupBeside(s.BinaryPath) {
+	if ok, _ := CrashRollbackAtLimit(st, s.Current); !ok {
+		return nil
+	}
+	// The backup the crash rollback would put back: none there takes nothing
+	// from the rollback, and a lookup that fails otherwise than finding nothing
+	// there refuses the off, failing closed, as a check that did not answer
+	// does (backlog B898FU's round 2): a later start's crash rollback may find
+	// a backup this lookup could not.
+	there, lookErr := backupAt(s.BinaryPath)
+	if lookErr != nil {
+		return &ChecksOffUncheckedError{Target: st.TargetVersion, Previous: st.PreviousVersion,
+			Detail: "the backup could not be looked up: " + fsutil.ErrorWithoutPath(lookErr), err: lookErr}
+	}
+	if !there {
 		return nil
 	}
 	within := s.Within

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
@@ -67,23 +68,33 @@ import (
 // and under the lock it held every other taker past the 30 s each waits, at
 // every start of a crash loop. Before them the backup is a regular file whose
 // identity is fixed through a handle on it, closed before anything runs it,
-// and the settings' digest is read (updater.ConfigDigest). Then it follows the
-// early rollback (recoverRefusedInstall) step for step: the install marker's
-// lock, held from the marker's read again through the rename (never without
-// the exclusion), and the decision made again under it with nothing run
-// again: the marker still asks for the rollback, the version the backup
-// answered is its PreviousVersion, the install is the one the runs were asked
-// for (its TargetVersion and AttemptedAt compared, its PreviousVersion held
-// through the version the backup answered, which matched the marker checked
-// before the lock and must match the one read again under it: the three
-// fields refuseCrashRollbackBeforeTheLock compares), the backup is the file
-// they ran (os.SameFile, its size, its modification time) and the settings
-// have the digest they were read with; then the hold and the veto recorded
-// durably before the rename, and the marker put back where the rename fails. A
-// refusal decided before the lock is said, then recorded under the lock that
-// refuseCrashRollbackBeforeTheLock takes for it; a change found under the
-// lock refuses this start's rollback, said and recorded, and the next start of
-// the loop asks again. A stop while a run runs, or found once the lock is
+// and the settings' digest is read (updater.ConfigDigest); every observation
+// of the backup reads its identity as it is taken (fsutil.EntryIdentity, the
+// handle's stat), so no comparison reads one, and one that cannot be read is a
+// backup that could not be inspected (backlog B898FU's round 4). Then it
+// follows the early rollback (recoverRefusedInstall) step for step: the
+// install marker's lock, held from the marker's read again through the rename
+// (never without the exclusion), and the decision made again under it with
+// nothing run again: the marker still asks for the rollback, the version the
+// backup answered is its PreviousVersion, the install is the one the runs were
+// asked for (its TargetVersion and AttemptedAt compared, its PreviousVersion
+// held through the version the backup answered, which matched the marker
+// checked before the lock and must match the one read again under it: the
+// three fields refuseCrashRollbackBeforeTheLock compares), the backup is the
+// file they ran (os.SameFile, its size, its modification time) and the
+// settings have the digest they were read with; then the hold and the veto
+// recorded durably before the rename, and the marker put back where the rename
+// fails. A refusal decided before the lock is said, then recorded under the
+// lock that refuseCrashRollbackBeforeTheLock takes for it; a change found
+// under the lock refuses this start's rollback, said and recorded, and the
+// next start of the loop asks again. A backup that could not be inspected,
+// before the lock or under it (a lookup or an open that failed otherwise than
+// finding nothing there, an identity not read), is said and recorded nowhere
+// (backlog B898FU's round 3): it shows the backup neither gone nor refused,
+// and a record would end the auto-installer's hold (updater.ProbationHolds),
+// which asks the backup's lookup itself; the words such a failure was recorded
+// in until then are cleared where the same install still asks
+// (clearInspectionRefusal). A stop while a run runs, or found once the lock is
 // held, records nothing. A lock that cannot be held, or a filesystem that
 // keeps none, still leaves the install as it is, said as before, the runs
 // asked already.
@@ -123,8 +134,9 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 	}
 	// The backup, asked before the install marker's lock (backlog B894): what
 	// refuses it here is said, and recorded under the lock, which
-	// refuseCrashRollbackBeforeTheLock takes for it. checked is the marker the
-	// runs are asked for.
+	// refuseCrashRollbackBeforeTheLock takes for it, but a backup that could
+	// not be inspected, given no words to record (backlog B898FU's round 3).
+	// checked is the marker the runs are asked for.
 	checked := st
 	refuseBefore := func(said, recorded string) {
 		refuseCrashRollbackBeforeTheLock(ctx, dataDir, current, checked, said, recorded, then, save, stderr)
@@ -135,24 +147,44 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		return 0, false
 	}
 	backup := binaryPath + ".bak"
-	fi, err := os.Lstat(backup)
-	if err != nil || !fi.Mode().IsRegular() {
+	// Each observation of the backup's entry reads its identity as it is
+	// taken (fsutil.EntryIdentity, or a test's serveOpts.backupIdentity), so
+	// the comparisons below read nothing (backlog B898FU's round 4): on
+	// Windows an Lstat's identity is read by os.SameFile as it compares, by
+	// opening the path then, and a read that failed there compared as another
+	// file and was recorded as a backup that changed.
+	identityOf := opts.backupIdentity
+	if identityOf == nil {
+		identityOf = fsutil.EntryIdentity
+	}
+	fi, err := identityOf(backup)
+	switch {
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		// A lookup that fails otherwise than finding nothing there (a
+		// permission, a link loop on the way, an identity that could not be
+		// read) shows no backup absent (backlog B898FU's rounds 2 and 4): said
+		// as a backup that could not be inspected, never as none, and recorded
+		// nowhere (its round 3), so the auto-installer's hold asks the
+		// backup's lookup itself.
+		refuseBefore(fmt.Sprintf("the backup at %s could not be inspected (%s)", backup, fsutil.ErrorWithoutPath(err)), "")
+		return 0, false
+	case err != nil || !fi.Mode().IsRegular():
 		refuseBefore(fmt.Sprintf("there is no backup to put back, a regular file at %s", backup), "there is no backup beside the binary to put back")
 		return 0, false
 	}
 	// Which file the runs ask, fixed before either: through a handle on it,
-	// since on Windows an Lstat's file ID is read by path when os.SameFile
-	// first compares it, so an Lstat taken here and compared under the lock
-	// would take a file put in the backup's place meanwhile for the backup; a
-	// handle's stat carries its file's ID as it is taken. Opened as a file
+	// whose stat carries its file's identity as it is taken, as the entry's
+	// observations above and under the lock carry theirs. Opened as a file
 	// (fsutil.OpenAsFile: a named pipe put there is refused without a wait),
-	// required to be the entry the Lstat found, and closed at once, before
-	// the runs and the restore, which opens the backup for deletion and which
-	// this open would refuse while it stood.
+	// required to be the entry the first observation found, and closed at
+	// once, before the runs and the restore, which opens the backup for
+	// deletion and which this open would refuse while it stood.
 	f, identity, err := fsutil.OpenAsFile(backup)
 	if err != nil {
-		refuseBefore(fmt.Sprintf("the backup at %s could not be opened to tell which file its checks ask (%s)", backup, fsutil.ErrorWithoutPath(err)),
-			"the backup could not be opened to tell which file its checks ask")
+		// An open that fails, the Lstat having found a regular file, is said
+		// in its own words and recorded nowhere (backlog B898FU's round 3),
+		// whatever failed it: the next start's lookup says what stands there.
+		refuseBefore(fmt.Sprintf("the backup at %s could not be opened to tell which file its checks ask (%s)", backup, fsutil.ErrorWithoutPath(err)), "")
 		return 0, false
 	}
 	_ = f.Close()
@@ -259,8 +291,18 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		refuse("the install changed while its backup was checked", "the install changed while its backup was checked")
 		return 0, false
 	}
-	if now, err := os.Lstat(backup); err != nil || !now.Mode().IsRegular() || !os.SameFile(identity, now) ||
-		now.Size() != identity.Size() || !now.ModTime().Equal(identity.ModTime()) {
+	switch now, err := identityOf(backup); {
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		// A lookup that fails otherwise than finding nothing there, an
+		// identity that could not be read among them (round 4), shows the
+		// backup neither gone nor changed (backlog B898FU's round 3): said,
+		// and recorded nowhere, as before the lock.
+		say(st, fmt.Sprintf("the backup at %s could not be inspected again under the install marker's lock (%s)", backup,
+			fsutil.ErrorWithoutPath(err)))
+		clearInspectionRefusal(dataDir, st, save, stderr)
+		return 0, false
+	case err != nil || !now.Mode().IsRegular() || !os.SameFile(identity, now) ||
+		now.Size() != identity.Size() || !now.ModTime().Equal(identity.ModTime()):
 		refuse("the backup changed while it was checked", "the backup changed while it was checked")
 		return 0, false
 	}
@@ -367,6 +409,35 @@ func recordCrashRollbackRefusal(dataDir string, st updater.State, why string, sa
 	}
 }
 
+// inspectionRefusals are the words the crash rollback recorded, until backlog
+// B898FU's round 3, for a backup it could not inspect before the install
+// marker's lock: a lookup that failed otherwise than finding nothing there
+// (its round 2) and an open that failed (backlog B894). It records nothing
+// for one since: such a record shows the backup neither gone nor refused, and
+// ends the auto-installer's hold (updater.ProbationHolds), which then would
+// let a newer release replace the backup, the last version known to run.
+var inspectionRefusals = []string{
+	"the backup could not be inspected",
+	"the backup could not be opened to tell which file its checks ask",
+}
+
+// clearInspectionRefusal clears a refusal recorded in inspectionRefusals'
+// words, which a start before left, from the marker st describes, for a start
+// whose own inspection of the backup failed, so the auto-installer's hold
+// asks the backup's lookup again; a refusal of any other cause stands. The
+// install marker's lock is the caller's, and st the marker read again under
+// it, of the install the backup was checked for. A clear that cannot be
+// written is said.
+func clearInspectionRefusal(dataDir string, st updater.State, save func(string, updater.State) error, stderr io.Writer) {
+	if !slices.Contains(inspectionRefusals, st.RollbackRefused) {
+		return
+	}
+	st.RollbackRefused = ""
+	if err := save(dataDir, st); err != nil {
+		fmt.Fprintf(stderr, "updater: the install marker still records a backup that could not be inspected as a refused rollback: %v\n", err)
+	}
+}
+
 // refuseCrashRollbackOnARead says why the crash rollback leaves an install
 // that its first check refused on a read without the install marker's lock,
 // and records it under that lock, on the marker read again and checked again,
@@ -408,7 +479,11 @@ func refuseCrashRollbackOnARead(ctx context.Context, dataDir, current, why, then
 // path holds the marker read again to, its PreviousVersion there through the
 // version the backup answered); where the marker read again refuses the
 // rollback itself, its own why said and recorded; and nothing said or written
-// where it is another install, or none the rollback acts on. Where the lock
+// where it is another install, or none the rollback acts on. A refusal given
+// no words to record (recorded empty: a backup that could not be inspected,
+// backlog B898FU's round 3) is said there and recorded nowhere, and a refusal
+// the marker records in the words such a failure had until then is cleared
+// (clearInspectionRefusal), one of any other cause kept. Where the lock
 // cannot be held, serve's stop has come (a lock that needed no wait is taken
 // on a context that has ended), or the marker cannot be read again, said from
 // checked and nothing recorded. Called only while this process does not hold
@@ -436,6 +511,10 @@ func refuseCrashRollbackBeforeTheLock(ctx context.Context, dataDir, current stri
 	case ok && updater.SameVersion(st.TargetVersion, checked.TargetVersion) &&
 		updater.SameVersion(st.PreviousVersion, checked.PreviousVersion) && st.AttemptedAt.Equal(checked.AttemptedAt):
 		crashRollbackLine(stderr, st, said, then)
+		if recorded == "" {
+			clearInspectionRefusal(dataDir, st, save, stderr)
+			return
+		}
 		recordCrashRollbackRefusal(dataDir, st, recorded, save, stderr)
 	}
 }

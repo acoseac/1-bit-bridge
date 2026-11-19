@@ -184,7 +184,16 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 		noRollback(stderr, st, waits)
 		return 0, false
 	}
-	if fi, err := os.Lstat(backup); err != nil || !fi.Mode().IsRegular() {
+	// A lookup of the backup that fails otherwise than finding nothing there
+	// (a permission, a link loop on the way) shows no backup absent, and is
+	// said as a backup that could not be inspected, never as none (backlog
+	// B898FU's round 2), as the crash rollback says it.
+	fi, err := os.Lstat(backup)
+	switch {
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		noRollback(stderr, st, fmt.Sprintf("the backup at %s could not be inspected (%s)", backup, fsutil.ErrorWithoutPath(err)))
+		return 0, false
+	case err != nil || !fi.Mode().IsRegular():
 		noRollback(stderr, st, fmt.Sprintf("there is no backup to put back, a regular file at %s", backup))
 		return 0, false
 	}
