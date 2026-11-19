@@ -63,11 +63,14 @@ func countMarkerWrites(t *testing.T) func(dataDir string) int {
 // TestAMissingBinaryRefusesEveryInstallAndRollback: an install's swap that
 // left no binary latches the disk, not the process: another Updater over the
 // same data dir, as another process would make it, refuses an install of the
-// same release and of a newer one, before their download, and a rollback,
-// writing nothing, with the marker as the swap left it and with one past its
-// window; the Updates panel's predicate says the latch's reason before the
-// marker's. The rename the swap's error names puts the binary back, and the
-// latch opens.
+// same release and of a newer one, forced or over a download in flight,
+// before their download, and a rollback, writing nothing, with the marker as
+// the swap left it, with an earlier install's marker for the release in its
+// window and with one past its window; the latch answers before the refusal
+// of a swap waiting for its restart and before the sessions gate, whose
+// advice is a restart (backlog B898FU). The Updates panel's predicate says
+// the latch's reason before the marker's. The rename the swap's error names
+// puts the binary back, and the latch opens.
 func TestAMissingBinaryRefusesEveryInstallAndRollback(t *testing.T) {
 	fix, newer := newInstallFixture(t, "0.2.3"), newInstallFixture(t, "0.2.4")
 	dir, live := installLayout(t)
@@ -78,16 +81,22 @@ func TestAMissingBinaryRefusesEveryInstallAndRollback(t *testing.T) {
 		t.Fatalf("the install = %v, want its swap to leave no binary", err)
 	}
 	r.script = map[string]*refusals{}
+	// A download in flight, which an install that is not forced asks about.
+	sessions := NewTracker()
+	sessions.Begin()
+	t.Cleanup(sessions.End)
 	refusesAll := func(when string) {
 		t.Helper()
 		before := readFile(t, StatePath(dir))
 		for _, f := range []*installFixture{fix, newer} {
-			fetched := f.archiveFetches.Load()
-			_, err := installingUpdater(t, f, "0.2.1").Install(context.Background(),
-				InstallOptions{DataDir: dir, BinaryPath: live, Force: true, Verifier: noopVerifier})
-			if !errors.Is(err, ErrBinaryMissing) || f.archiveFetches.Load() != fetched {
-				t.Errorf("%s, an install of %s = %v (downloads %d to %d), want the latch's refusal before any download",
-					when, f.latestVersion, err, fetched, f.archiveFetches.Load())
+			for _, opts := range []InstallOptions{{Force: true}, {Sessions: sessions}} {
+				opts.DataDir, opts.BinaryPath, opts.Verifier = dir, live, noopVerifier
+				fetched := f.archiveFetches.Load()
+				_, err := installingUpdater(t, f, "0.2.1").Install(context.Background(), opts)
+				if !errors.Is(err, ErrBinaryMissing) || f.archiveFetches.Load() != fetched {
+					t.Errorf("%s, an install of %s (forced %v) = %v (downloads %d to %d), want the latch's refusal before any download",
+						when, f.latestVersion, opts.Force, err, fetched, f.archiveFetches.Load())
+				}
 			}
 		}
 		// The latch's own error, never a refusal of the rollback's, which the
@@ -101,6 +110,17 @@ func TestAMissingBinaryRefusesEveryInstallAndRollback(t *testing.T) {
 		}
 	}
 	refusesAll("as the swap left it")
+	// An earlier install's marker for the release, its swap started and in
+	// its window, as a later install whose swap left no binary puts back the
+	// marker it read.
+	if err := SaveState(dir, State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
+		AttemptedAt: time.Now().UTC(), SwapStarted: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !New(Options{}).swapAwaitingRestart(dir, "0.2.3") {
+		t.Fatal("the release's marker in its window does not read as a swap waiting for its restart")
+	}
+	refusesAll("with the release's marker in its window")
 	old := State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
 		AttemptedAt: time.Now().UTC().Add(-2 * recencyWindow), SwapStarted: true}
 	if err := SaveState(dir, old); err != nil {
