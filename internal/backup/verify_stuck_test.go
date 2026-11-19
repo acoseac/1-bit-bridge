@@ -215,21 +215,77 @@ func checkGraceOf(t *testing.T, dir string) (begun <-chan struct{}, pass func())
 // so does either wait past bound and 30 s (backlog B872).
 func awaitParkedAndGivenUp[T any](t *testing.T, entered <-chan struct{}, done <-chan T, read func(T) (backup.Verification, error), start time.Time, bound time.Duration) T {
 	t.Helper()
+	return awaitParkedAndGivenUpAt(t, entered, nil, "", done, read, start, bound)
+}
+
+// awaitParkedAndGivenUpAt is awaitParkedAndGivenUp for a verification whose
+// steps after its check's give-up are held at their gates (SetStepGateForTest),
+// step being the first of them, held by gate: a step held at its gate ends
+// when it answers, however long the host takes, so bound times the worker's
+// arrival at that step, which follows the check's give-up at once, and the
+// answer, which comes once the held steps have answered, is awaited past it
+// under the watchdog alone (backlog B945: timed at the answer, a held write
+// slower than the bound's slack would fail the case all the same). The
+// arrival is timed where it happened, by the time the worker recorded as it
+// was handed the gate (StepGate.EnteredAt), never where this goroutine saw it
+// (B945's second round: a host that ran this goroutine late read an arrival
+// in time as late, at either arm that sees it). An answer that comes before
+// the worker came to that step fails the test at once: the case held nothing.
+// A nil gate times the answer, where this goroutine receives it.
+func awaitParkedAndGivenUpAt[T any](t *testing.T, entered <-chan struct{}, gate *backup.StepGate, step string, done <-chan T, read func(T) (backup.Verification, error), start time.Time, bound time.Duration) T {
+	t.Helper()
 	var answer T
 	timeout := time.NewTimer(bound + 30*time.Second)
 	defer timeout.Stop()
-	for entered != nil || done != nil {
+	within := func(what string, took time.Duration) {
+		t.Helper()
+		if took > bound {
+			t.Errorf("the verification whose check was given up %s %v after it began; its bound is %v", what, took, bound)
+		}
+	}
+	var gated <-chan struct{}
+	if gate != nil {
+		gated = gate.Entered(step)
+	}
+	// arrived times the worker's arrival at the step held at its gate, its
+	// entry seen closed, by the time the worker recorded there.
+	arrived := func() {
+		t.Helper()
+		at, ok := gate.EnteredAt(step)
+		if !ok {
+			t.Fatalf("%s read as entered with no time of its arrival", step)
+		}
+		within("came to the step held at its gate", at.Sub(start))
+	}
+	timed := gate == nil
+	for entered != nil || gated != nil || done != nil {
 		select {
 		case <-entered:
 			entered = nil
+		case <-gated:
+			gated = nil
+			arrived()
 		case answer = <-done:
 			done = nil
-			if took := time.Since(start); took > bound {
-				t.Errorf("the verification whose check was given up answered %v after it began; its bound is %v", took, bound)
+			if timed {
+				within("answered", time.Since(start))
 			}
-			if record, err := read(answer); entered != nil && !errors.Is(err, backup.ErrCheckGivenUp) {
+			record, err := read(answer)
+			if entered != nil && !errors.Is(err, backup.ErrCheckGivenUp) {
 				t.Fatalf("the verification answered %v before its check reached its park, its record %s %v: no check was left to give up",
 					err, record.DatabaseState, record.DatabaseReasons)
+			}
+			if gated != nil {
+				// The worker closes the entry before the step it holds runs, so
+				// before it answers: one the select did not take is closed.
+				select {
+				case <-gated:
+					gated = nil
+					arrived()
+				default:
+					t.Fatalf("the verification answered %v, its record %s %v, before it came to the step held at its gate: the case held nothing",
+						err, record.DatabaseState, record.DatabaseReasons)
+				}
 			}
 		case <-timeout.C:
 			if done == nil {
@@ -388,6 +444,15 @@ func backupsLockHeld(root string) (bool, error) {
 // wait for it ran to the package's timeout on macOS's CI). Red on the round
 // before, which let all of it go once its caller had its answer, and pruned
 // under it.
+//
+// What the record of the check given up reads is the write of its
+// INCOMPLETE, a step whose bound is a second from its start once the check is
+// given up (laterBound), as the read of the record after it is: a host that
+// ran that write past its second would leave the record PENDING, its rename
+// skipped. Both steps are held at their gates until they answer, as
+// TestAGivenUpVerificationReadsItsRecordBack holds them (backlog B945), the
+// bound timing the check's give-up by the arrival the worker recorded, never
+// the answer (awaitParkedAndGivenUpAt).
 func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	src := storeWithTracks(t, 5)
 	oldest := verifiedSnapshot(t, src)
@@ -404,17 +469,22 @@ func TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds(t *testing.T) {
 	const deadline = 300 * time.Millisecond
 	restoreDeadline := backup.SetVerifyDeadlineForTest(deadline)
 	t.Cleanup(restoreDeadline)
+	// Put back once the callers' cleanup, which fires every gate first, has
+	// joined the verification and drained its holds.
+	gate, restoreGate := backup.SetStepGateForTest(root, filepath.Base(c.Dir), stepOfIncomplete, stepOfReadBack)
+	t.Cleanup(restoreGate)
 	unlock := holdUnlockOf(t, root)
 	entered, release := parkCheck(t, c.Dir)
 
-	callers := joinBackupCallers(t, func() { release(); unlock.release() })
+	callers := joinBackupCallers(t, func() { release(); gate.FireAll(); unlock.release() })
 	done := make(chan backup.Result, 1)
 	start := time.Now()
 	callers.start(func() { done <- backup.FinishCapture(context.Background(), c, keepOne, backup.VerifyOptions{}) })
-	res := awaitParkedAndGivenUp(t, entered, done, finishAnswer, start, deadline+backup.StopWriteBound/2+2*time.Second)
+	res := awaitParkedAndGivenUpAt(t, entered, gate, stepOfIncomplete, done, finishAnswer, start, deadline+backup.StopWriteBound/2+2*time.Second)
 	if !errors.Is(res.VerifyErr, backup.ErrCheckGivenUp) || !errors.Is(res.VerifyErr, context.DeadlineExceeded) {
 		t.Errorf("the verification answered %v, want its check given up at the deadline", res.VerifyErr)
 	}
+	requireGatesHeld(t, gate, stepOfIncomplete, stepOfReadBack)
 	if !res.PruneSkipped {
 		t.Errorf("the verification's own prune ran beside the check it gave up: %+v", res.Prune)
 	}

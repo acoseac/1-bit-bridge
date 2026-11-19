@@ -439,12 +439,17 @@ type stepGateFixture struct {
 }
 
 // stepGate is one step's gate: fired, closed once, when the test fires it,
-// and entered, closed once, when a hold first comes to the step (gateOf).
+// and entered, closed once, when a hold first comes to the step (gateOf),
+// after at is set to when it came.
 type stepGate struct {
 	fired     chan struct{}
 	once      sync.Once
 	entered   chan struct{}
 	enterOnce sync.Once
+	// at is when a hold first came to the step, read on the hold's own
+	// goroutine as gateOf hands it its gate: set once, before entered closes,
+	// and read only once entered is closed (StepGate.EnteredAt).
+	at time.Time
 }
 
 var stepGateForTest atomic.Pointer[stepGateFixture]
@@ -462,7 +467,8 @@ type StepGate struct{ f *stepGateFixture }
 // and steps keep their production bounds. A test fires every gate (FireAll)
 // before it joins the callers whose steps it may hold, and restores the seam
 // once they and their holds have ended; it asks whether a hold came to a step
-// (Entered), since a gate that matches no hold holds nothing.
+// (Entered), since a gate that matches no hold holds nothing, and when, as the
+// hold recorded it (EnteredAt).
 func SetStepGateForTest(root, snapshot string, steps ...string) (*StepGate, func()) {
 	f := &stepGateFixture{root: root, snapshot: snapshot, gates: make(map[string]*stepGate, len(steps))}
 	for _, step := range steps {
@@ -502,16 +508,37 @@ func (g *StepGate) Entered(step string) <-chan struct{} {
 	return s.entered
 }
 
+// EnteredAt is when a hold first came to the step named, read on the hold's
+// own goroutine as it was handed its gate, before that step ran, and whether
+// one has (Entered closed): when the step was reached, never when a test saw
+// Entered close. A step the gate does not hold is the test's error.
+func (g *StepGate) EnteredAt(step string) (time.Time, bool) {
+	s := g.f.gates[step]
+	if s == nil {
+		panic(fmt.Sprintf("backup: no gate holds the step %q", step))
+	}
+	select {
+	case <-s.entered:
+		return s.at, true
+	default:
+		return time.Time{}, false
+	}
+}
+
 // gateOf is the gate a test holds the step named words of h by
 // (SetStepGateForTest): nil in production, and for every other step. Handing
-// a hold its gate marks the step entered (StepGate.Entered). With h.mu held.
+// a hold its gate first records when it came (StepGate.EnteredAt), then marks
+// the step entered (StepGate.Entered). With h.mu held.
 func gateOf(h *hold, words string) <-chan struct{} {
 	f := stepGateForTest.Load()
 	if f == nil || f.root != h.root || (f.snapshot != "" && f.snapshot != h.snapshot) {
 		return nil
 	}
 	if s := f.gates[words]; s != nil {
-		s.enterOnce.Do(func() { close(s.entered) })
+		s.enterOnce.Do(func() {
+			s.at = time.Now()
+			close(s.entered)
+		})
 		return s.fired
 	}
 	return nil
