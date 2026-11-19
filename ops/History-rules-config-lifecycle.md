@@ -3879,6 +3879,13 @@ load at once (an early `os.SameFile` of it) would work too, but rests on Go
 keeping what that call loaded, which it does not document; the handle's stat
 was chosen. Off Windows an Lstat carries its device and inode as it is taken,
 so the bare-Lstat control is green there and red on Windows alone.
+`TestTheCrashRollbackFixesTheBackupsIdentityThroughAHandle` (2026-11-19,
+bridge lows 8) therefore reads `recoverCrashedInstall`'s source on every
+host, requiring the identity to be the stat `fsutil.OpenAsFile` takes of its
+handle and every `os.SameFile` there, the one under the lock among them, to
+compare it, since the behaviour it stands for is Windows' alone: a bare
+Lstat's file ID read by path at its first comparison, so that a file put in
+the backup's place while the runs ran compares under the lock as the backup.
 
 *Cancellation.* `ProbeVersionWithin` answers serve's stop with the context's
 error, and the version's refusal says so in its old words; the record's lock

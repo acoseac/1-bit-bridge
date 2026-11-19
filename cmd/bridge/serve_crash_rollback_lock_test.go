@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -716,5 +719,119 @@ func TestARefusalBeforeTheLockIsSaidAndRecordedNowhereWhileTheLockIsHeld(t *test
 	if waits != 2 || ctx.Err() != nil {
 		t.Errorf("the rollback's take of the held lock was heard waiting %d times (the context's end: %v); want once, the context live",
 			waits-1, ctx.Err())
+	}
+}
+
+// TestTheCrashRollbackFixesTheBackupsIdentityThroughAHandle: the identity the
+// crash rollback holds its backup to under the install marker's lock is the
+// stat of a handle opened on the backup before its runs (fsutil.OpenAsFile's
+// stat of the file it opened), never a bare Lstat's. What rests on it is
+// Windows' alone: there an Lstat's file ID is read by path when os.SameFile
+// first compares it (Go 1.27.3's os/types_windows.go, sameFile and
+// loadFileId), so an Lstat taken before the runs and compared under the lock
+// would take a file put in the backup's place meanwhile for the backup, where
+// elsewhere an Lstat carries its device and inode as it is taken, and the
+// replacements of TestABackupChangedWhileItWasCheckedIsNotPutBack are refused
+// either way. So the source is read, on every host: in recoverCrashedInstall
+// the second result of its one fsutil.OpenAsFile is the identity, which
+// nothing else there binds, and every os.SameFile there compares it, one of
+// them after the install marker's lock is taken.
+func TestTheCrashRollbackFixesTheBackupsIdentityThroughAHandle(t *testing.T) {
+	const name = "serve_crashed_install.go"
+	raw, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, name, strings.ReplaceAll(string(raw), "\r\n", "\n"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if d, ok := d.(*ast.FuncDecl); ok && d.Recv == nil && d.Name.Name == "recoverCrashedInstall" && d.Body != nil {
+			fn = d
+		}
+	}
+	if fn == nil {
+		t.Fatalf("%s declares no recoverCrashedInstall", name)
+	}
+	calls := func(n ast.Node, pkg, function string) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != function {
+			return false
+		}
+		id, ok := sel.X.(*ast.Ident)
+		return ok && id.Name == pkg
+	}
+	identity, opens, lockAt := "", 0, token.NoPos
+	var sameFiles []*ast.CallExpr
+	bound := map[string][]token.Pos{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					bound[id.Name] = append(bound[id.Name], n.Pos())
+				}
+			}
+			if len(n.Lhs) == 3 && len(n.Rhs) == 1 && calls(n.Rhs[0], "fsutil", "OpenAsFile") {
+				if id, ok := n.Lhs[1].(*ast.Ident); ok && id.Name != "_" {
+					identity = id.Name
+				}
+			}
+		case *ast.ValueSpec:
+			for _, id := range n.Names {
+				bound[id.Name] = append(bound[id.Name], n.Pos())
+			}
+		case *ast.CallExpr:
+			switch {
+			case calls(n, "fsutil", "OpenAsFile"):
+				opens++
+			case calls(n, "os", "SameFile"):
+				sameFiles = append(sameFiles, n)
+			case calls(n, "updater", "LockState") && lockAt == token.NoPos:
+				lockAt = n.Pos()
+			}
+		}
+		return true
+	})
+	if opens != 1 {
+		t.Errorf("recoverCrashedInstall calls fsutil.OpenAsFile %d times, want once: the handle whose stat is the backup's identity", opens)
+	}
+	if identity == "" {
+		t.Fatal("recoverCrashedInstall binds no fsutil.OpenAsFile handle's stat to a name: the backup's identity is not a handle's")
+	}
+	if at := bound[identity]; len(at) != 1 {
+		var where []string
+		for _, p := range at {
+			where = append(where, fset.Position(p).String())
+		}
+		t.Errorf("%s is bound %d times in recoverCrashedInstall (%s), want once, by fsutil.OpenAsFile: bound again, it may be a bare Lstat's",
+			identity, len(at), strings.Join(where, ", "))
+	}
+	if lockAt == token.NoPos {
+		t.Fatal("recoverCrashedInstall takes no updater.LockState: the test shows nothing")
+	}
+	afterLock := 0
+	for _, call := range sameFiles {
+		if !slices.ContainsFunc(call.Args, func(arg ast.Expr) bool {
+			id, ok := arg.(*ast.Ident)
+			return ok && id.Name == identity
+		}) {
+			t.Errorf("the os.SameFile at %s does not compare %s, the handle's stat: on Windows a bare Lstat's file ID is read by path "+
+				"as it is compared", fset.Position(call.Pos()), identity)
+		}
+		if call.Pos() > lockAt {
+			afterLock++
+		}
+	}
+	if afterLock == 0 {
+		t.Errorf("none of recoverCrashedInstall's %d os.SameFile calls comes after its updater.LockState: the backup is not held to "+
+			"its identity under the lock", len(sameFiles))
 	}
 }
