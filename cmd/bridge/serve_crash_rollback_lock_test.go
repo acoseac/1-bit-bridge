@@ -650,3 +650,71 @@ func TestARefusalBeforeTheLockIsNotRecordedOverAnotherReplacedVersion(t *testing
 		})
 	}
 }
+
+// TestARefusalBeforeTheLockIsSaidAndRecordedNowhereWhileTheLockIsHeld: a
+// refusal decided before the install marker's lock, where another holder keeps
+// that lock for the whole of LockState's wait (an install between its decision
+// and its swap, say), is said from the marker checked and recorded nowhere,
+// since only the lock's holder writes the marker: the install marker and both
+// binaries are left byte for byte as they were. The case holds the lock
+// through an open of the lock file of its own, which a take in this process
+// waits on as on another process's (markersLockHeld), with the wait
+// shortened and serve's context live, so the helper's take ends at its wait's
+// end with LockState's *updater.StateLockError, never at a stop: the same take
+// answers that error before the rollback runs, the rollback's take is heard
+// waiting on the held lock, the context has not ended once it returns, and the
+// case's own take shows the filesystem keeps locks.
+func TestARefusalBeforeTheLockIsSaidAndRecordedNowhereWhileTheLockIsHeld(t *testing.T) {
+	r := crashInstallAtTheLimit(t)
+	lock := updater.StateLockPath(r.dataDir)
+	f, err := fsutil.OpenLockFile(filepath.Dir(lock), filepath.Base(lock))
+	if err != nil {
+		t.Fatalf("open the install marker's lock file: %v", err)
+	}
+	if err := fsutil.TryLock(f); err != nil {
+		_ = f.Close()
+		t.Fatalf("take the install marker's lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = fsutil.Unlock(f)
+		_ = f.Close()
+	})
+	t.Cleanup(updater.SetStateLockWaitForTest(100 * time.Millisecond))
+	waits := 0
+	t.Cleanup(updater.SetStateLockWaitingForTest(func(dataDir string) {
+		if dataDir == r.dataDir {
+			waits++
+		}
+	}))
+	ctx := t.Context()
+	var refused *updater.StateLockError
+	if l, err := updater.LockState(ctx, r.dataDir); !errors.As(err, &refused) || !errors.Is(err, updater.ErrStateLockHeld) ||
+		ctx.Err() != nil || waits != 1 {
+		l.Release()
+		t.Fatalf("the install marker's lock, held for the case, answered %+v, %v after %d waits (the context's end: %v); "+
+			"want a *updater.StateLockError of a lock held for the whole wait, after one, the context live", l, err, waits, ctx.Err())
+	}
+	files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
+	const reason = "line 3: a key the backup does not know"
+	b := &backupRuns{check: func(context.Context) updater.ConfigCheck {
+		return updater.ConfigCheck{Verdict: updater.ConfigRefused, Reasons: []string{reason}}
+	}}
+	got := crashRollBack(ctx, t, r, b)
+	want := []string{"the backup's version " + lockFound(true), "the backup's settings check " + lockFound(true)}
+	if !slices.Equal(b.asked, want) {
+		t.Errorf("the backup was asked %q; want %q, the case's hold standing", b.asked, want)
+	}
+	if got.code != 0 || got.acted || len(got.renames) != 0 {
+		t.Errorf("the crash rollback = %d (acted %v) after %d renames, want it to leave the install; stderr=%s",
+			got.code, got.acted, len(got.renames), got.stderr)
+	}
+	const said = "refuses this bridge's settings, so it would not start on them: " + reason
+	if lines := updaterLines(got.stderr); !strings.Contains(lines, "not rolling back the install") || !strings.Contains(lines, said) {
+		t.Errorf("the start did not say %q; its updater lines: %q", said, lines)
+	}
+	files.requireUnchanged(t)
+	if waits != 2 || ctx.Err() != nil {
+		t.Errorf("the rollback's take of the held lock was heard waiting %d times (the context's end: %v); want once, the context live",
+			waits-1, ctx.Err())
+	}
+}
