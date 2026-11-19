@@ -216,8 +216,9 @@ def h2_lines(text):
     at least, or is blank, but for an item that holds nothing yet, which a blank line ends. A
     paragraph's lazy line, one that starts no block, keeps every container open. A list item
     interrupts a paragraph only with something on its line and, ordered, numbered 1, so `2.` or an
-    empty `-` after a paragraph's text is more of that text, and a lone run of `-` or `=` under it
-    underlines it; a quote, a heading, a fence and a thematic break always interrupt it. Inside its
+    empty `+` or `*` after a paragraph's text is more of that text, and a lone run of `-` or `=`
+    under it underlines it, a lone `-` too: it is read as an underline before it is read as an
+    item. A quote, a heading, a fence and a thematic break always interrupt a paragraph. Inside its
     containers, after up to three spaces, a fence opens on three or more backticks or tildes, a
     backtick fence's info holding no backtick, and closes on a line of the same character, at
     least as many of them, with nothing after them but white space; it ends where a container it
