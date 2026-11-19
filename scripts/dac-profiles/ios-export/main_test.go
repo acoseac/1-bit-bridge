@@ -424,7 +424,10 @@ func asMap(v any) map[string]any {
 // past the baseline included, so a regression they bring is seen; for names
 // two rows' patterns hold, the first hit the baseline's rows give; and the
 // corpus names the two matchers answer apart, exactly the four iOS PR 1
-// declares, a declared name apart only where it says so.
+// declares and never a declared name: an added row's names answer the same
+// through both matchers (namesApart asks both to name its row), so a declared
+// name the two answer apart is refused, and so is one whose Exception says
+// they do.
 func parity(base baseline, add declared, exported []byte, siblings []string) []string {
 	var problems []string
 	say := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
