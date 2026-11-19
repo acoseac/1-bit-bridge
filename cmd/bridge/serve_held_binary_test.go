@@ -762,9 +762,11 @@ func TestBridgeUpdateSaysTheRenameThatPutsTheBinaryBack(t *testing.T) {
 // a marker write's retries, the forward and the recovery schedules), and each
 // row the terms its function makes, run at its worst (the forward deadline
 // spent whole, the place refused, the put-back landing at its last attempt),
-// the writes, the waits and the bounds asked for recorded. Every row fits
-// inside the wait every other taker gives the lock but the one backlog B898's
-// F1 names.
+// the writes and the waits recorded, and the bound each run of the backup is
+// asked within where it finds the lock held as it runs (markersLockHeld).
+// Every row fits inside the wait every other taker gives the lock: the crash
+// rollback asks its backup before it takes the lock (backlog B894, B898's F1,
+// whose 51.4 s its row counted until then), so its row counts no bound.
 func TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait(t *testing.T) {
 	var mu sync.Mutex
 	writes := 0
@@ -794,12 +796,16 @@ func TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait(t *testing.T) {
 		var bounds []time.Duration
 		opts := serveOpts{configPath: r.cfg, binaryPath: r.bin, restoreBackup: h.restore(),
 			probeVersion: func(_ context.Context, _ string, within time.Duration) (string, error) {
-				bounds = append(bounds, within)
+				if markersLockHeld(t, r.dataDir) {
+					bounds = append(bounds, within)
+				}
 				return r.marker.PreviousVersion, nil
 			},
 			// The check takes no bound: it is the check's own.
 			checkConfig: func(context.Context, string, string) updater.ConfigCheck {
-				bounds = append(bounds, updater.ConfigCheckBound())
+				if markersLockHeld(t, r.dataDir) {
+					bounds = append(bounds, updater.ConfigCheckBound())
+				}
 				return updater.ConfigCheck{Verdict: updater.ConfigValid}
 			}}
 		before := written()
@@ -844,7 +850,7 @@ func TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait(t *testing.T) {
 		past bool
 	}{
 		{"early", run{2, waits, []time.Duration{updater.VersionProbeTimeout}}, false},
-		{"crash", run{2, waits, []time.Duration{updater.VersionProbeTimeout, updater.ConfigCheckBound()}}, true},
+		{"crash", run{2, waits, nil}, false},
 		{"boot", run{2, waits, []time.Duration{updater.VersionProbeTimeout}}, false},
 	} {
 		got := runs[row.name]
