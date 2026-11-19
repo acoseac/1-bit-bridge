@@ -7,11 +7,14 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -224,31 +227,277 @@ func TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock(t *testing.T) 
 	requirePutBack(t, r, got)
 }
 
+// refusalOnDisk is a refusal of the crash rollback an earlier start recorded
+// in the install marker (State.RollbackRefused), which a start whose
+// inspection of the backup fails clears or keeps (backlog B898FU's round 3).
+type refusalOnDisk struct {
+	name, recorded string
+	cleared        bool
+}
+
+// refusalsOnDisk are what such a start may find recorded: no refusal; each of
+// the words an inspection that failed was recorded in until round 3, a
+// lookup's (its round 2) and an open's (backlog B894), which it clears; and a
+// refusal of another cause, which it keeps, and with it the auto-installer's
+// not waiting (TestTheAutoInstallerDoesNotWaitBesideARefusedRollback).
+var refusalsOnDisk = []refusalOnDisk{
+	{name: "no refusal recorded"},
+	{name: "a refusal recorded for a lookup that failed", recorded: "the backup could not be inspected", cleared: true},
+	{name: "a refusal recorded for an open that failed", recorded: "the backup could not be opened to tell which file its checks ask", cleared: true},
+	{name: "a refusal of another cause recorded", recorded: "the backup did not say its version"},
+}
+
+// lay records d's refusal in r's marker, as an earlier start left it, and
+// returns the marker as it reads then and its file, watched.
+func (d refusalOnDisk) lay(t *testing.T, r *refusedInstall) (updater.State, watchedFiles) {
+	t.Helper()
+	r.marker.RollbackRefused = d.recorded
+	r.saveMarker(t, r.dataDir)
+	return markerOf(t, r.dataDir), watch(t, updater.StatePath(r.dataDir))
+}
+
+// requireUnrecorded requires r's marker after a start whose inspection of the
+// backup failed, d laid before it (the marker then, before, and its file,
+// watched): nothing written where d is kept, and otherwise d's refusal
+// cleared and nothing else of the marker changed.
+func (d refusalOnDisk) requireUnrecorded(t *testing.T, r *refusedInstall, before updater.State, marker watchedFiles) {
+	t.Helper()
+	if !d.cleared {
+		marker.requireUnchanged(t)
+		return
+	}
+	got := markerOf(t, r.dataDir)
+	if got.RollbackRefused != "" {
+		t.Errorf("the marker's refusal = %q, want %q, recorded for an inspection that failed, cleared", got.RollbackRefused, d.recorded)
+	}
+	got.RollbackRefused, before.RollbackRefused = "", ""
+	if !reflect.DeepEqual(got, before) {
+		t.Errorf("the marker = %+v, want %+v: its refusal alone cleared", got, before)
+	}
+}
+
+// requireHold requires the auto-installer's hold over the backup beside
+// binaryPath, the path the start was given (updater.ProbationHolds, the
+// process up a minute), as r's marker reads now: holding where it records no
+// refusal, as after a start whose inspection of the backup failed, and not
+// where it keeps d's refusal of another cause. when says when it is asked.
+func (d refusalOnDisk) requireHold(t *testing.T, r *refusedInstall, binaryPath, when string) {
+	t.Helper()
+	st := markerOf(t, r.dataDir)
+	hold := updater.ProbationHolds(st, st.TargetVersion, binaryPath, time.Minute)
+	switch kept := d.recorded != "" && !d.cleared; {
+	case !kept && hold == "":
+		t.Errorf("%s, the auto-installer does not wait beside a backup the crash rollback could not inspect (the marker's refusal %q)",
+			when, st.RollbackRefused)
+	case kept && hold != "":
+		t.Errorf("%s, the auto-installer waits beside a rollback refused for another cause (%q): %s", when, st.RollbackRefused, hold)
+	}
+}
+
 // TestTheCrashRollbackTellsABackupItCannotInspectFromNone: a lookup of the
 // backup that fails otherwise than finding nothing there (inspectionFailures)
 // is refused before the install marker's lock as a backup that could not be
-// inspected, said and recorded so, never as no backup (backlog B898FU's round
-// 2): the record is what the probation's status says of the rollback. The
-// backup is asked nothing, nothing is put back, and the install stays for the
-// next start to ask again, as after every refusal.
+// inspected, never as no backup (backlog B898FU's round 2), and recorded
+// nowhere (its round 3): recorded, it lifted the auto-installer's hold
+// (updater.ProbationHolds) over the backup, the last version known to run,
+// which the hold is for. So the hold stands while the lookup fails, its own
+// lookup failing as the rollback's did, and once the lookup has recovered; a
+// refusal an earlier start recorded in the words such a failure had is
+// cleared, and one of another cause kept (refusalsOnDisk). The backup is
+// asked nothing, nothing is put back, and the install stays for the next
+// start to ask again.
 func TestTheCrashRollbackTellsABackupItCannotInspectFromNone(t *testing.T) {
 	for _, f := range inspectionFailures {
 		t.Run(f.name, func(t *testing.T) {
+			for _, d := range refusalsOnDisk {
+				t.Run(d.name, func(t *testing.T) {
+					r := crashInstallAtTheLimit(t)
+					binaries := watch(t, r.bin, r.bak)
+					before, marker := d.lay(t, r)
+					binaryPath, recovered := f.laid(t, r.bin)
+					given := *r
+					given.bin = binaryPath
+					b := &backupRuns{}
+					got := crashRollBack(t.Context(), t, &given, b)
+					d.requireHold(t, r, binaryPath, "while the lookup fails")
+					recovered()
+					requireLeft(t, r, got, binaries)
+					if lines := updaterLines(got.stderr); !strings.Contains(lines, "not rolling back the install") ||
+						!strings.Contains(lines, "could not be inspected") || strings.Contains(lines, "there is no backup") {
+						t.Errorf("the start did not say that the backup could not be inspected, or said there is none; its updater lines: %q", lines)
+					}
+					d.requireUnrecorded(t, r, before, marker)
+					d.requireHold(t, r, binaryPath, "once the lookup has recovered")
+					if len(b.asked) != 0 {
+						t.Errorf("the backup was asked %q, want nothing", b.asked)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestTheCrashRollbackTellsABackupItCannotOpenFromNone: a backup whose lookup
+// finds a regular file that this user may not open, its read permission
+// taken off, is refused before the install marker's lock in the open's own
+// words, as a backup that could not be opened to tell which file its checks
+// ask, and recorded nowhere (backlog B898FU's round 3), as a lookup that
+// fails is: the auto-installer's hold stands while the open fails, its own
+// lookup finding a regular file there, and once the backup opens again; a
+// refusal an earlier start recorded in the words such a failure had is
+// cleared, and one of another cause kept (refusalsOnDisk). The backup is
+// asked nothing and nothing is put back. A file this user may not open needs
+// POSIX modes and a user that is not root, whom no mode refuses.
+func TestTheCrashRollbackTellsABackupItCannotOpenFromNone(t *testing.T) {
+	for _, d := range refusalsOnDisk {
+		t.Run(d.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+				t.Skip("a file this user may not open needs POSIX modes and a user that is not root")
+			}
 			r := crashInstallAtTheLimit(t)
 			binaries := watch(t, r.bin, r.bak)
-			binaryPath, recovered := f.laid(t, r.bin)
-			given := *r
-			given.bin = binaryPath
-			b := &backupRuns{}
-			got := crashRollBack(t.Context(), t, &given, b)
-			recovered()
-			requireLeft(t, r, got, binaries)
-			requireRefusal(t, r, got.stderr, "could not be inspected", "the backup could not be inspected")
-			if st := markerOf(t, r.dataDir); strings.Contains(st.RollbackRefused, "no backup") {
-				t.Errorf("the recorded refusal = %q, want it to say no word of no backup", st.RollbackRefused)
+			before, marker := d.lay(t, r)
+			fi, err := os.Lstat(r.bak)
+			if err != nil {
+				t.Fatal(err)
 			}
+			if err := os.Chmod(r.bak, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(r.bak, fi.Mode().Perm()) })
+			if now, err := os.Lstat(r.bak); err != nil || !now.Mode().IsRegular() {
+				t.Fatalf("the premise: a lookup of the backup answered %v (%v), want a regular file", now, err)
+			}
+			if f, _, err := fsutil.OpenAsFile(r.bak); !errors.Is(err, fs.ErrPermission) {
+				if f != nil {
+					_ = f.Close()
+				}
+				t.Fatalf("the premise: an open of the backup answered %v, want %v", err, fs.ErrPermission)
+			}
+			b := &backupRuns{}
+			got := crashRollBack(t.Context(), t, r, b)
+			d.requireHold(t, r, r.bin, "while the backup cannot be opened")
+			if err := os.Chmod(r.bak, fi.Mode().Perm()); err != nil {
+				t.Fatal(err)
+			}
+			requireLeft(t, r, got, binaries)
+			if lines := updaterLines(got.stderr); !strings.Contains(lines, "not rolling back the install") ||
+				!strings.Contains(lines, "could not be opened to tell which file its checks ask") {
+				t.Errorf("the start did not say that the backup could not be opened; its updater lines: %q", lines)
+			}
+			d.requireUnrecorded(t, r, before, marker)
+			d.requireHold(t, r, r.bin, "once the backup opens again")
 			if len(b.asked) != 0 {
 				t.Errorf("the backup was asked %q, want nothing", b.asked)
+			}
+		})
+	}
+}
+
+// TestTheCrashRollbackTellsABackupItCannotInspectUnderItsLockFromAChange: a
+// backup whose lookup comes to fail otherwise than finding nothing there
+// while its settings check runs, the directory it is in made one this user
+// may not search or a link on the way to it made a loop, is found so by the
+// lookup the rollback asks again under the install marker's lock, said as a
+// backup that could not be inspected again, never as one that changed, and
+// recorded nowhere (backlog B898FU's round 3; until then it was recorded as a
+// backup that changed while it was checked, which lifted the auto-installer's
+// hold): the hold stands while the lookup fails and once it has recovered; a
+// refusal an earlier start recorded in the words such a failure had is
+// cleared, and one of another cause kept (refusalsOnDisk). Nothing is put
+// back. A backup that went while it was checked is a change still
+// (TestABackupChangedWhileItWasCheckedIsNotPutBack).
+func TestTheCrashRollbackTellsABackupItCannotInspectUnderItsLockFromAChange(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause error
+		// path is the binary's path the rollback is given, which reaches the
+		// binary and its backup until lay makes the backup's lookup fail;
+		// recovered, which lay returns, lets it reach them again.
+		path func(t *testing.T, r *refusedInstall) string
+		lay  func(t *testing.T, r *refusedInstall) (recovered func())
+	}{
+		{"a directory this user may not search", fs.ErrPermission,
+			func(t *testing.T, r *refusedInstall) string {
+				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+					t.Skip("a directory this user may not search needs POSIX modes and a user that is not root")
+				}
+				return r.bin
+			},
+			func(t *testing.T, r *refusedInstall) func() {
+				dir := filepath.Dir(r.bin)
+				fi, err := os.Stat(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(dir, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dir, fi.Mode().Perm()) })
+				return func() {
+					if err := os.Chmod(dir, fi.Mode().Perm()); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}},
+		{"a link loop on the way", syscall.ELOOP,
+			func(t *testing.T, r *refusedInstall) string {
+				if runtime.GOOS == "windows" {
+					t.Skip("a link loop needs symbolic links, which Windows gives only with a privilege")
+				}
+				via := filepath.Join(r.dir, "via")
+				if err := os.Symlink(filepath.Dir(r.bin), via); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(via, filepath.Base(r.bin))
+			},
+			func(t *testing.T, r *refusedInstall) func() {
+				via := filepath.Join(r.dir, "via")
+				point := func(target string) {
+					if err := os.Remove(via); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(target, via); err != nil {
+						t.Fatal(err)
+					}
+				}
+				point("via")
+				return func() { point(filepath.Dir(r.bin)) }
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, d := range refusalsOnDisk {
+				t.Run(d.name, func(t *testing.T) {
+					r := crashInstallAtTheLimit(t)
+					binaryPath := tc.path(t, r)
+					binaries := watch(t, r.bin, r.bak)
+					before, marker := d.lay(t, r)
+					given := *r
+					given.bin = binaryPath
+					recovered := func() {}
+					b := &backupRuns{check: func(context.Context) updater.ConfigCheck {
+						recovered = tc.lay(t, r)
+						if _, err := os.Lstat(binaryPath + ".bak"); !errors.Is(err, tc.cause) {
+							recovered()
+							t.Fatalf("the premise: a lookup of the backup during its settings check answered %v, want %v", err, tc.cause)
+						}
+						return updater.ConfigCheck{Verdict: updater.ConfigValid}
+					}}
+					got := crashRollBack(t.Context(), t, &given, b)
+					d.requireHold(t, r, binaryPath, "while the lookup fails")
+					recovered()
+					requireLeft(t, r, got, binaries)
+					if lines := updaterLines(got.stderr); !strings.Contains(lines, "not rolling back the install") ||
+						!strings.Contains(lines, "could not be inspected again") || strings.Contains(lines, "the backup changed while it was checked") {
+						t.Errorf("the start did not say that the backup could not be inspected again, or said it changed; its updater lines: %q", lines)
+					}
+					d.requireUnrecorded(t, r, before, marker)
+					d.requireHold(t, r, binaryPath, "once the lookup has recovered")
+					want := []string{"the backup's version " + lockFound(false), "the backup's settings check " + lockFound(false)}
+					if !slices.Equal(b.asked, want) {
+						t.Errorf("the backup was asked %q; want %q", b.asked, want)
+					}
+				})
 			}
 		})
 	}
@@ -299,8 +548,12 @@ func replacementBeside(t *testing.T, r *refusedInstall) string {
 // backup replaced while it was asked, in its settings check or between its
 // version and its check, by a file that no size, time or answer tells from it,
 // is not put back, nor one rewritten in place to another size, its time kept,
-// or whose modification time alone moved: the start says so and records it,
-// and the next start of the loop asks again.
+// or whose modification time alone moved, nor one gone while it was checked,
+// a lookup that finds nothing there being a change, where one that fails
+// otherwise is not (backlog B898FU's round 3,
+// TestTheCrashRollbackTellsABackupItCannotInspectUnderItsLockFromAChange):
+// the start says so and records it, and the next start of the loop asks
+// again.
 func TestABackupChangedWhileItWasCheckedIsNotPutBack(t *testing.T) {
 	const why = "the backup changed while it was checked"
 	replace := func(t *testing.T, r *refusedInstall, replacement string) {
@@ -342,15 +595,22 @@ func TestABackupChangedWhileItWasCheckedIsNotPutBack(t *testing.T) {
 				after.Size(), after.ModTime(), os.SameFile(before, after))
 		}
 	}
+	remove := func(t *testing.T, r *refusedInstall, _ string) {
+		if err := os.Remove(r.bak); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, tc := range []struct {
 		name   string
 		inThe  string
 		change func(t *testing.T, r *refusedInstall, replacement string)
+		gone   bool
 	}{
-		{"replaced during its settings check", "check", replace},
-		{"replaced between its version and its check", "version", replace},
-		{"rewritten to another size, its time kept", "check", rewrite},
-		{"its modification time alone moved", "check", touch},
+		{"replaced during its settings check", "check", replace, false},
+		{"replaced between its version and its check", "version", replace, false},
+		{"rewritten to another size, its time kept", "check", rewrite, false},
+		{"its modification time alone moved", "check", touch, false},
+		{"gone during its settings check", "check", remove, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := crashInstallAtTheLimit(t)
@@ -372,7 +632,9 @@ func TestABackupChangedWhileItWasCheckedIsNotPutBack(t *testing.T) {
 			got := crashRollBack(t.Context(), t, r, b)
 			requireLeft(t, r, got, binaries)
 			requireRefusal(t, r, got.stderr, why, why)
-			requireBackupThere(t, r)
+			if !tc.gone {
+				requireBackupThere(t, r)
+			}
 		})
 	}
 }
