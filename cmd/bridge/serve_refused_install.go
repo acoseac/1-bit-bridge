@@ -276,15 +276,18 @@ func noRollback(stderr io.Writer, st updater.State, why string) {
 	fmt.Fprintf(stderr, "updater: not rolling back the install of %s: %s\n", st.TargetVersion, why)
 }
 
-// backupProbeBound is how long either rollback gives the backup to say its
-// version: production's bound, updater.VersionProbeTimeout, unless a boot test
-// gives one of its own (serveOpts.backupProbeTimeout; backlog B706). A backup
-// that has not answered by then is not put back. In the early rollback,
-// serve refuses its settings as it always has, the binary, the backup and
-// the install marker as they were, and the next start, which the service
-// manager makes, asks it again.
-// The install marker's lock is held across the ask, and LockState's other
-// takers wait 30 s for it, so production's bound stays well under that.
+// backupProbeBound is how long a rollback at a start (the early, the crash
+// and the boot rollback) gives the backup to say its version: production's
+// bound, updater.VersionProbeTimeout, unless a boot test gives one of its own
+// (serveOpts.backupProbeTimeout; backlog B706). A backup that has not
+// answered by then is not put back. In the early rollback, serve refuses its
+// settings as it always has, the binary, the backup and the install marker as
+// they were, and the next start, which the service manager makes, asks it
+// again.
+// The early and the boot rollbacks hold the install marker's lock across the
+// ask, and LockState's other takers wait 30 s for it, so production's bound
+// stays well under that; the crash rollback asks before it takes the lock
+// (backlog B894), as it asks the backup's settings check.
 func backupProbeBound(opts serveOpts) time.Duration {
 	if opts.backupProbeTimeout > 0 {
 		return opts.backupProbeTimeout
