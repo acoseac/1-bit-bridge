@@ -110,12 +110,15 @@ func crashInstallAtTheLimit(t *testing.T) *refusedInstall {
 // (serveOpts.checkConfig), on the goroutine the rollback runs on, the test's:
 // each records whether it found the install marker's lock held, then does what
 // version or check does and answers what it answers, or, where that is unset,
-// answers as a backup of previousVersion that loads the settings.
+// answers as a backup of previousVersion that loads the settings. identity,
+// where set, is the rollback's read of its backup's identity
+// (serveOpts.backupIdentity).
 type backupRuns struct {
-	dataDir string
-	version func(ctx context.Context) (string, error)
-	check   func(ctx context.Context) updater.ConfigCheck
-	asked   []string
+	dataDir  string
+	version  func(ctx context.Context) (string, error)
+	check    func(ctx context.Context) updater.ConfigCheck
+	identity func(path string) (os.FileInfo, error)
+	asked    []string
 }
 
 // lockFound is how backupRuns records what a run found.
@@ -131,7 +134,7 @@ func lockFound(held bool) string {
 func (b *backupRuns) opts(t *testing.T, r *refusedInstall, restore func(dst, ext string) error) serveOpts {
 	t.Helper()
 	b.dataDir = r.dataDir
-	return serveOpts{configPath: r.cfg, binaryPath: r.bin, restoreBackup: restore,
+	return serveOpts{configPath: r.cfg, binaryPath: r.bin, restoreBackup: restore, backupIdentity: b.identity,
 		probeVersion: func(ctx context.Context, _ string, _ time.Duration) (string, error) {
 			b.asked = append(b.asked, "the backup's version "+lockFound(markersLockHeld(t, b.dataDir)))
 			if b.version != nil {
@@ -239,12 +242,17 @@ type refusalOnDisk struct {
 // the words an inspection that failed was recorded in until round 3, a
 // lookup's (its round 2) and an open's (backlog B894), which it clears; and a
 // refusal of another cause, which it keeps, and with it the auto-installer's
-// not waiting (TestTheAutoInstallerDoesNotWaitBesideARefusedRollback).
+// not waiting (TestTheAutoInstallerDoesNotWaitBesideARefusedRollback). A
+// backup that changed while it was checked is such a cause, though a read of
+// its identity that failed was recorded in those words too until round 4: they
+// record a backup replaced as well, so no start clears them by their words
+// (TestTheCrashRollbackPutsBackABackupRecordedAsChangedOnceItsIdentityReads).
 var refusalsOnDisk = []refusalOnDisk{
 	{name: "no refusal recorded"},
 	{name: "a refusal recorded for a lookup that failed", recorded: "the backup could not be inspected", cleared: true},
 	{name: "a refusal recorded for an open that failed", recorded: "the backup could not be opened to tell which file its checks ask", cleared: true},
 	{name: "a refusal of another cause recorded", recorded: "the backup did not say its version"},
+	{name: "a refusal recorded for a backup that changed", recorded: "the backup changed while it was checked"},
 }
 
 // lay records d's refusal in r's marker, as an earlier start left it, and
@@ -556,6 +564,127 @@ func TestTheCrashRollbackTellsABackupItCannotInspectUnderItsLockFromAChange(t *t
 				})
 			}
 		})
+	}
+}
+
+// errIdentityNotRead is what a case's read of the backup's identity answers
+// where the case fails it.
+var errIdentityNotRead = errors.New("its identity could not be read")
+
+// TestTheCrashRollbackTellsABackupWhoseIdentityCannotBeReadFromAChange: an
+// unchanged backup whose identity cannot be read, before the install
+// marker's lock or under it (serveOpts.backupIdentity failing that read, as a
+// Windows read of a file's ID may fail while the file stands as it was), is
+// said as a backup that could not be inspected, never as one that changed,
+// and recorded nowhere (backlog B898FU's round 4: until then such a read
+// compared as another file, recorded "the backup changed while it was
+// checked", and so ended the auto-installer's hold): the hold stands; a
+// refusal an earlier start recorded in the words an inspection that failed
+// had is cleared, and one of any other cause kept, a backup that changed among
+// them (refusalsOnDisk). Nothing is put back, and the read that fails is the
+// case's: the first, before the lock and before the runs, or the second,
+// under it, the runs asked.
+func TestTheCrashRollbackTellsABackupWhoseIdentityCannotBeReadFromAChange(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		failed int // the read that fails
+		said   string
+		runs   int
+	}{
+		{"before the install marker's lock", 1, "could not be inspected (", 0},
+		{"under the install marker's lock", 2, "could not be inspected again", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, d := range refusalsOnDisk {
+				t.Run(d.name, func(t *testing.T) {
+					r := crashInstallAtTheLimit(t)
+					binaries := watch(t, r.bin, r.bak)
+					before, marker := d.lay(t, r)
+					reads := 0
+					b := &backupRuns{identity: func(path string) (os.FileInfo, error) {
+						reads++
+						if reads == tc.failed {
+							return nil, &fs.PathError{Op: "read the identity of", Path: path, Err: errIdentityNotRead}
+						}
+						return os.Lstat(path)
+					}}
+					got := crashRollBack(t.Context(), t, r, b)
+					requireLeft(t, r, got, binaries)
+					if lines := updaterLines(got.stderr); !strings.Contains(lines, "not rolling back the install") ||
+						!strings.Contains(lines, tc.said) || strings.Contains(lines, "the backup changed while it was checked") {
+						t.Errorf("the start did not say that the backup could not be inspected, or said it changed; its updater lines: %q", lines)
+					}
+					if reads != tc.failed || len(b.asked) != tc.runs {
+						t.Errorf("the identity was read %d times and the backup asked %q; want %d reads and %d runs", reads, b.asked, tc.failed, tc.runs)
+					}
+					d.requireUnrecorded(t, r, before, marker)
+					d.requireHold(t, r, r.bin, "once the start goes on")
+				})
+			}
+		})
+	}
+}
+
+// TestTheCrashRollbackPutsBackABackupAnotherHandleReads: a backup another
+// handle holds open for reading, sharing reading and writing as os.Open's
+// does (an indexer or a scanner reading it), is inspected and compared as one
+// nobody holds, and put back, the reader let go just before the put-back,
+// which a handle that shares no deletion refuses on Windows; the
+// auto-installer's hold stands while the reader holds it. The case is
+// Windows' (backlog B898FU's round 4): there os.SameFile read an Lstat's
+// identity by the path as it compared, opening the file with no access asked
+// for and nothing shared, beside the reader's handle; elsewhere a reader
+// changes nothing.
+func TestTheCrashRollbackPutsBackABackupAnotherHandleReads(t *testing.T) {
+	r := crashInstallAtTheLimit(t)
+	reader, err := os.Open(r.bak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := true
+	letGo := func() {
+		if held {
+			held = false
+			_ = reader.Close()
+		}
+	}
+	t.Cleanup(letGo)
+	b := &backupRuns{check: func(context.Context) updater.ConfigCheck {
+		st := markerOf(t, r.dataDir)
+		if updater.ProbationHolds(st, st.TargetVersion, r.bin, time.Minute) == "" {
+			t.Error("while another handle reads the backup, the auto-installer does not wait")
+		}
+		return updater.ConfigCheck{Verdict: updater.ConfigValid}
+	}}
+	var got crashRollback
+	restore := func(dst, ext string) error {
+		got.renames = append(got.renames, markerOf(t, r.dataDir))
+		letGo()
+		return updater.RollbackBinary(dst, ext)
+	}
+	var stderr bytes.Buffer
+	got.code, got.acted = recoverCrashedInstall(t.Context(), r.dataDir, r.cfg, b.opts(t, r, restore), crashRollbackGoesOn, &stderr)
+	got.stderr = stderr.String()
+	requirePutBack(t, r, got)
+}
+
+// TestTheCrashRollbackPutsBackABackupRecordedAsChangedOnceItsIdentityReads: a
+// refusal recorded as a backup that changed while it was checked, which a
+// read of the backup's identity that failed wrote until backlog B898FU's round
+// 4, as a backup replaced writes still, is cleared by no start for its words;
+// the next start inspects the backup again, and where each identity reads and
+// they match, goes on and puts the backup back, its record in that refusal's
+// place (the recovery that round chose). While the read keeps failing, the
+// refusal stands and the auto-installer does not wait (refusalsOnDisk's row of
+// a backup that changed).
+func TestTheCrashRollbackPutsBackABackupRecordedAsChangedOnceItsIdentityReads(t *testing.T) {
+	r := crashInstallAtTheLimit(t)
+	r.marker.RollbackRefused = "the backup changed while it was checked"
+	r.saveMarker(t, r.dataDir)
+	got := crashRollBack(t.Context(), t, r, &backupRuns{})
+	requirePutBack(t, r, got)
+	if at := got.renames[0]; at.RollbackRefused != "" {
+		t.Errorf("the marker as the backup was put back records %q, want the refusal gone with the rollback's record", at.RollbackRefused)
 	}
 }
 

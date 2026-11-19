@@ -175,7 +175,22 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		return 0, false
 	}
 	_ = f.Close()
-	if !identity.Mode().IsRegular() || !os.SameFile(fi, identity) {
+	// readAtTheComparison is an Lstat's identity as the comparisons read it:
+	// os.SameFile's own read, which on Windows opens the path as it compares
+	// (os/types_windows.go's loadFileId) and answers another file where that
+	// open fails. A test's serveOpts.backupIdentity reads it in its place, a
+	// read that fails answering another file too (backlog B898FU's round 4).
+	readAtTheComparison := func(lstat os.FileInfo) os.FileInfo {
+		if opts.backupIdentity == nil {
+			return lstat
+		}
+		read, err := opts.backupIdentity(backup)
+		if err != nil {
+			return identityNotRead{lstat}
+		}
+		return read
+	}
+	if !identity.Mode().IsRegular() || !os.SameFile(readAtTheComparison(fi), identity) {
 		refuseBefore("the backup changed while it was checked", "the backup changed while it was checked")
 		return 0, false
 	}
@@ -287,7 +302,7 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 			fsutil.ErrorWithoutPath(err)))
 		clearInspectionRefusal(dataDir, st, save, stderr)
 		return 0, false
-	case err != nil || !now.Mode().IsRegular() || !os.SameFile(identity, now) ||
+	case err != nil || !now.Mode().IsRegular() || !os.SameFile(identity, readAtTheComparison(now)) ||
 		now.Size() != identity.Size() || !now.ModTime().Equal(identity.ModTime()):
 		refuse("the backup changed while it was checked", "the backup changed while it was checked")
 		return 0, false
@@ -345,6 +360,10 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 		"run bridge serve again)\n", st.FailedStarts, current, st.PreviousVersion, binaryPath, current, st.PreviousVersion)
 	return supervision.RestartExitCode, true
 }
+
+// identityNotRead is an Lstat whose identity could not be read: os.SameFile
+// answers false for it, as for one whose read of the identity failed.
+type identityNotRead struct{ os.FileInfo }
 
 // rollbackWaitsForTheRestore is why a rollback leaves an install where an
 // unfinished restore of the database stands in dataDir (its journal,

@@ -3297,6 +3297,12 @@ type serveOpts struct {
 	// (backlog B898's pin of what holds the install marker's lock).
 	probeVersion func(ctx context.Context, binary string, within time.Duration) (string, error)
 	checkConfig  func(ctx context.Context, binary, configPath string) updater.ConfigCheck
+	// backupIdentity stands in for the crash rollback's read of its backup's
+	// identity, the one its comparisons make (os.SameFile's of an Lstat,
+	// which on Windows reads it by the path as it compares), so a test can
+	// make that read fail before the install marker's lock or under it
+	// (backlog B898FU's round 4). Nil in production.
+	backupIdentity func(path string) (os.FileInfo, error)
 	// updateReleases is the releases API serve's updater asks (its Client):
 	// nil, GitHub's, everywhere but the boot tests, which point it at a
 	// server of their own and count what it is asked (backlog B761). Per
