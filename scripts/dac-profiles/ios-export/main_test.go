@@ -211,7 +211,9 @@ func TestAnUnrecordedRowExportsNoEvidence(t *testing.T) {
 
 // corpusName is a name of the baseline's parity corpus or its known
 // siblings, with the live matcher's answer at iOS 3145606a (null for none),
-// the strict matcher's, and whether iOS PR 1 declares the two apart.
+// the strict matcher's, and whether iOS PR 1 declares the two apart; or a
+// name declared past the baseline (declared), with the answers each matcher
+// must give it.
 type corpusName struct {
 	Name      string
 	Live      *string
@@ -301,19 +303,19 @@ func foldAll(v any) any {
 	return out
 }
 
-// TestTheExportMatchesTheIOSBaseline: the baseline is the dispatch's, by its
-// SHA-256; the export's rows are the baseline's, in its order and field by
-// field, the legacy patterns, the tokens and the excluded tokens compared
-// after iOS's fold, the times in whole milliseconds; its generic names are
-// the baseline's, and so are the catalog's known siblings, which its lint
-// keeps off every model row; for every name of the corpus and the known
-// siblings, the live matcher's first hit over the export's legacy patterns is
-// the baseline's, with no exception, and so it is for names two rows'
-// patterns hold, by the baseline's rows; and the strict matcher over the
-// export's keys gives each name the baseline's strict answer, which differs
-// from the live one in the corpus exactly for the four names iOS PR 1
-// declares.
-func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
+// baseline is the iOS registry's baseline as the parity reads it: its generic
+// names, iOS PR 1's parity corpus and known siblings with each matcher's
+// answer at iOS 3145606a, and its rows in the registry's shape.
+type baseline struct {
+	GenericNames                []string
+	ParityCorpus, KnownSiblings []corpusName
+	Rows                        []map[string]any
+}
+
+// readBaseline is testdata/ios-registry-3145606a.json, refused unless its
+// SHA-256 is the dispatch's.
+func readBaseline(t *testing.T) baseline {
+	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "ios-registry-3145606a.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -321,47 +323,90 @@ func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
 	if got := fmt.Sprintf("%x", sha256.Sum256(b)); got != baselineSHA256 {
 		t.Fatalf("the baseline's SHA-256 is %s, not the dispatch's %s", got, baselineSHA256)
 	}
-	var base struct {
-		GenericNames                []string
-		ParityCorpus, KnownSiblings []corpusName
-		Rows                        []map[string]any
-	}
+	var base baseline
 	if err := json.Unmarshal(b, &base); err != nil {
 		t.Fatal(err)
 	}
-	exported := fresh(t)
+	return base
+}
+
+// declared is what the catalog holds past the baseline (B944): its rows in
+// the export's own shape, in order after the baseline's; the names their
+// units reported; and the known siblings they bring, after the baseline's,
+// each name with the answers both matchers must give it.
+type declared struct {
+	rows            []row
+	names, siblings []corpusName
+}
+
+// additions are the catalog's rows, names and known siblings past the
+// baseline, declared in this file by hand from each row's submission and its
+// maker's figures, never from the catalog or the export, so the export is
+// held to them as it is to the baseline.
+var additions = declared{}
+
+// asMap is v encoded and decoded again, as a row of the export decodes.
+func asMap(v any) map[string]any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		panic(err)
+	}
+	return m
+}
+
+// parity is every way an export and the catalog's known siblings differ from
+// the baseline and the declarations past it (add), a sentence each: the
+// generic names; the known siblings, the baseline's in its order and then
+// the declared ones; the rows, the baseline's at their places and field by
+// field, the legacy patterns, the tokens and the excluded tokens compared
+// after iOS's fold and the times in whole milliseconds, then each declared
+// row field by field as declared, and no row past them; for every name of the
+// baseline's corpus and known siblings and of the declarations, the live
+// matcher's first hit over the export's legacy patterns and the strict
+// matcher's answer over its keys, both over the whole export, the rows added
+// past the baseline included, so a regression they bring is seen; for names
+// two rows' patterns hold, the first hit the baseline's rows give; and the
+// corpus names the two matchers answer apart, exactly the four iOS PR 1
+// declares, a declared name apart only where it says so.
+func parity(base baseline, add declared, exported []byte, siblings []string) []string {
+	var problems []string
+	say := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
 	var x export
 	var rows struct{ Rows []map[string]any }
 	if err := errors.Join(json.Unmarshal(exported, &x), json.Unmarshal(exported, &rows)); err != nil {
-		t.Fatal(err)
+		return []string{err.Error()}
 	}
 	if !slices.Equal(x.GenericNames, base.GenericNames) {
-		t.Errorf("the generic names are %q, the baseline's %q", x.GenericNames, base.GenericNames)
+		say("the generic names are %q, the baseline's %q", x.GenericNames, base.GenericNames)
 	}
-	db, err := dacprofile.Default()
-	if err != nil {
-		t.Fatal(err)
+	var want []string
+	for _, c := range append(slices.Clone(base.KnownSiblings), add.siblings...) {
+		want = append(want, c.Name)
 	}
-	var siblings []string
-	for _, c := range base.KnownSiblings {
-		siblings = append(siblings, c.Name)
+	if !slices.Equal(siblings, want) {
+		say("the catalog's known siblings are %q, the baseline's and then the declared ones %q", siblings, want)
 	}
-	if !slices.Equal(db.IOSKnownSiblings, siblings) {
-		t.Errorf("the catalog's known siblings are %q, the baseline's %q", db.IOSKnownSiblings, siblings)
-	}
-	if len(rows.Rows) != len(base.Rows) {
-		t.Fatalf("the export has %d rows, the baseline %d", len(rows.Rows), len(base.Rows))
+	if len(rows.Rows) != len(base.Rows)+len(add.rows) {
+		say("the export has %d rows, the baseline %d and the declarations %d", len(rows.Rows), len(base.Rows), len(add.rows))
+		return problems
 	}
 	var ids, baseIDs []string
 	var patterns, basePatterns [][]string
+	for _, r := range x.Rows {
+		ids, patterns = append(ids, r.ID), append(patterns, r.LegacyPatterns)
+	}
 	for i, w := range base.Rows {
 		g := rows.Rows[i]
-		ids, baseIDs = append(ids, x.Rows[i].ID), append(baseIDs, w["id"].(string))
+		baseIDs = append(baseIDs, w["id"].(string))
 		var ps []string
 		for _, p := range w["legacyPatterns"].([]any) {
 			ps = append(ps, p.(string))
 		}
-		patterns, basePatterns = append(patterns, x.Rows[i].LegacyPatterns), append(basePatterns, ps)
+		basePatterns = append(basePatterns, ps)
 		g["order"] = float64(i + 1)
 		g["legacyPatterns"] = foldAll(g["legacyPatterns"])
 		keys := g["nameKeys"].(map[string]any)
@@ -369,31 +414,47 @@ func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
 		g["evidence"].(map[string]any)["hiddenMode"] = g["hiddenMode"]
 		for _, f := range slices.Sorted(maps.Keys(w)) {
 			if !reflect.DeepEqual(g[f], w[f]) {
-				t.Errorf("row %d (%v), %s: the export's %v, the baseline's %v", i+1, w["id"], f, g[f], w[f])
+				say("row %d (%v), %s: the export's %v, the baseline's %v", i+1, w["id"], f, g[f], w[f])
 			}
 		}
 		if len(g) != len(w) {
-			t.Errorf("row %d (%v): the export holds %d fields, the baseline %d", i+1, w["id"], len(g), len(w))
+			say("row %d (%v): the export holds %d fields, the baseline %d", i+1, w["id"], len(g), len(w))
 		}
 	}
-	for _, c := range append(slices.Clone(base.ParityCorpus), base.KnownSiblings...) {
-		if got := firstHit(c.Name, ids, patterns); got != c.live() {
-			t.Errorf("%q: the export's first hit is %q, the baseline's live matcher's %q", c.Name, got, c.live())
+	for j, d := range add.rows {
+		i := len(base.Rows) + j
+		g, w := rows.Rows[i], asMap(d)
+		for _, f := range slices.Sorted(maps.Keys(w)) {
+			if !reflect.DeepEqual(g[f], w[f]) {
+				say("row %d (%s), %s: the export's %v, the declaration's %v", i+1, d.ID, f, g[f], w[f])
+			}
 		}
-		if got := strictMatch(c.Name, x); !jsonEqual(got, c.Strict) {
-			t.Errorf("%q: the strict matcher over the export's keys answers %s, the baseline %s", c.Name, got, c.Strict)
+		if len(g) != len(w) {
+			say("row %d (%s): the export holds %d fields, the declaration %d", i+1, d.ID, len(g), len(w))
 		}
 	}
+	replay := func(whose string, cs []corpusName) {
+		for _, c := range cs {
+			if got := firstHit(c.Name, ids, patterns); got != c.live() {
+				say("%q: the export's first hit is %q, %s live answer %q", c.Name, got, whose, c.live())
+			}
+			if got := strictMatch(c.Name, x); !jsonEqual(got, c.Strict) {
+				say("%q: the strict matcher over the export's keys answers %s, %s strict answer %s", c.Name, got, whose, c.Strict)
+			}
+		}
+	}
+	replay("the baseline's", append(slices.Clone(base.ParityCorpus), base.KnownSiblings...))
+	replay("its declared", append(slices.Clone(add.names), add.siblings...))
 	for _, name := range []string{"iFi (by AMR) iFi USB Audio SE", "Hugo 2 Mojo 2 Qutest"} {
 		if got, want := firstHit(name, ids, patterns), firstHit(name, baseIDs, basePatterns); got != want {
-			t.Errorf("%q, a name two rows' patterns hold: the export's first hit is %q, the baseline's rows' %q", name, got, want)
+			say("%q, a name two rows' patterns hold: the export's first hit is %q, the baseline's rows' %q", name, got, want)
 		}
 	}
 	var apart []string
-	for _, c := range base.ParityCorpus {
+	for _, c := range append(slices.Clone(base.ParityCorpus), add.names...) {
 		differ := strictKnown(strictMatch(c.Name, x)) != c.live()
 		if differ != c.Exception {
-			t.Errorf("%q: the strict and live answers differ %v, and iOS PR 1 declares them apart %v", c.Name, differ, c.Exception)
+			say("%q: the strict and live answers differ %v, and its declaration says they differ %v", c.Name, differ, c.Exception)
 		}
 		if differ && !slices.Contains(apart, fold(c.Name)) {
 			apart = append(apart, fold(c.Name))
@@ -401,7 +462,124 @@ func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
 	}
 	slices.Sort(apart)
 	if want := []string{"brooklyn", "brooklyn dac", "ka3", "topping e30"}; !slices.Equal(apart, want) {
-		t.Errorf("the corpus names the strict and live matchers answer apart are %q, iOS PR 1 declares %q", apart, want)
+		say("the corpus names the strict and live matchers answer apart are %q, iOS PR 1 declares %q", apart, want)
+	}
+	return problems
+}
+
+// TestTheExportMatchesTheIOSBaseline: the baseline is the dispatch's, by its
+// SHA-256; the export and the catalog's known siblings are the baseline's and
+// then the declared additions', every check parity makes; and a row of the
+// baseline names its own registry row in its ios line while a row added past
+// it names its dated submission, never an iOS commit that does not hold it.
+func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
+	base := readBaseline(t)
+	db, err := dacprofile.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range parity(base, additions, fresh(t), db.IOSKnownSiblings) {
+		t.Error(p)
+	}
+	inBase := map[string]bool{}
+	for _, w := range base.Rows {
+		inBase[w["id"].(string)] = true
+	}
+	for _, p := range db.Profiles {
+		for _, line := range p.Provenance {
+			if text, ok := strings.CutPrefix(line, "ios: "); ok && strings.HasPrefix(text, "DACProfile.swift ") != inBase[p.ID] {
+				t.Errorf("%s: its ios line is %q, and the baseline holds the row %v: a row of the baseline names its own registry row, a row added past it its submission", p.ID, line, inBase[p.ID])
+			}
+		}
+	}
+}
+
+// TestAnAdditionIsHeldToItsDeclaration: past the baseline the parity takes a
+// row and a known sibling only as declared, and replays the baseline's corpus
+// over the whole export: a fixture row added to the catalog at the next
+// order and declared passes, and each of these is refused: the row exported
+// and not declared, declared and not exported, exported otherwise than
+// declared, or put before the baseline's rows; a legacy pattern of it that
+// takes a corpus name the baseline's live matcher gives no row, which a
+// replay over the baseline's rows alone would not see; a known sibling the
+// catalog lists and no declaration names, and one declared that it does not
+// list; and a declared sibling a row reaches.
+func TestAnAdditionIsHeldToItsDeclaration(t *testing.T) {
+	base := readBaseline(t)
+	order := len(base.Rows) + len(additions.rows) + 1
+	added := func() dacprofile.Profile {
+		return dacprofile.Profile{ID: "fixture.added", Name: "Fixture Added", Match: []dacprofile.Match{}, Caveats: []dacprofile.Caveat{},
+			IOS: &dacprofile.IOS{Order: order, Maker: "Fixture", LegacyPatterns: []string{"Fixture Added"}, PortNames: []string{"FIXTURE ADDED"},
+				NameTokens: []string{"Fixture Added"}, ExcludedTokens: []string{}, NameScope: "model",
+				PCM: dacprofile.IOSPCM{MaxRateHz: 384000, BitDepth: 32}, VolumeTopology: "unknown"},
+			Provenance: []string{"ios: wizard submission 2026-11-19"}}
+	}
+	addedRow := func() row {
+		return row{ID: "fixture.added", Name: "Fixture Added", Maker: "Fixture", LegacyPatterns: []string{"Fixture Added"}, LegacyCeiling: "none",
+			PCM: dacprofile.IOSPCM{MaxRateHz: 384000, BitDepth: 32}, VolumeTopology: "unknown",
+			NameKeys: nameKeys{PortNames: []string{"FIXTURE ADDED"}, Tokens: []string{"Fixture Added"}, ExcludedTokens: []string{}, Scope: "model"},
+			Evidence: evidence{Heard: []heard{}, Failed: []failed{}, Statement: statement{Case: "unrecorded"}}}
+	}
+	lite := corpusName{Name: "Fixture Added Lite", Strict: json.RawMessage(`{"unknown":"noMatch"}`)}
+	check := func(mutate func(db *dacprofile.Database, add *declared)) []string {
+		t.Helper()
+		db, err := dacprofile.Default()
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.Profiles = append(db.Profiles, added())
+		add := declared{rows: append(slices.Clone(additions.rows), addedRow()), names: slices.Clone(additions.names),
+			siblings: slices.Clone(additions.siblings)}
+		if mutate != nil {
+			mutate(db, &add)
+		}
+		exported, err := build(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parity(base, add, exported, db.IOSKnownSiblings)
+	}
+	if problems := check(nil); len(problems) > 0 {
+		t.Fatalf("a fixture row declared past the baseline is refused: %q", problems)
+	}
+	last := func(db *dacprofile.Database) *dacprofile.Profile { return &db.Profiles[len(db.Profiles)-1] }
+	for _, tc := range []struct {
+		name   string
+		mutate func(db *dacprofile.Database, add *declared)
+		words  string
+	}{
+		{"exported and not declared", func(_ *dacprofile.Database, add *declared) { add.rows = add.rows[:len(add.rows)-1] },
+			"the export has"},
+		{"declared and not exported", func(db *dacprofile.Database, _ *declared) { db.Profiles = db.Profiles[:len(db.Profiles)-1] },
+			"the export has"},
+		{"exported otherwise than declared", func(db *dacprofile.Database, _ *declared) { last(db).IOS.PCM.MaxRateHz = 768000 },
+			"(fixture.added), pcm: the export's"},
+		{"put before the baseline's rows", func(db *dacprofile.Database, _ *declared) {
+			for _, p := range db.Profiles {
+				if p.IOS != nil {
+					p.IOS.Order++
+				}
+			}
+			last(db).IOS.Order = 1
+		}, "row 1 (chord.hugo2), id: the export's fixture.added"},
+		{"a legacy pattern that takes a corpus name", func(db *dacprofile.Database, add *declared) {
+			last(db).IOS.LegacyPatterns = []string{"FIIO KA1"}
+			add.rows[len(add.rows)-1].LegacyPatterns = []string{"FIIO KA1"}
+		}, `"FIIO KA1": the export's first hit is "fixture.added", the baseline's live answer ""`},
+		{"a known sibling no declaration names", func(db *dacprofile.Database, _ *declared) {
+			db.IOSKnownSiblings = append(db.IOSKnownSiblings, lite.Name)
+		}, "the catalog's known siblings are"},
+		{"a declared sibling the catalog does not list", func(_ *dacprofile.Database, add *declared) {
+			add.siblings = append(add.siblings, lite)
+		}, "the catalog's known siblings are"},
+		{"a declared sibling a row reaches", func(db *dacprofile.Database, add *declared) {
+			db.IOSKnownSiblings = append(db.IOSKnownSiblings, lite.Name)
+			add.siblings = append(add.siblings, lite)
+		}, `"Fixture Added Lite": the export's first hit is "fixture.added", its declared live answer ""`},
+	} {
+		if problems := check(tc.mutate); !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, tc.words) }) {
+			t.Errorf("%s: the parity says %q, want a problem saying %q", tc.name, problems, tc.words)
+		}
 	}
 }
 

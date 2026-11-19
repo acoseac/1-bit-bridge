@@ -124,8 +124,9 @@ type Database struct {
 	// chip's or a board's default string, which no match reads.
 	IOSGenericNames []GenericName `json:"iosGenericNames"`
 	// IOSKnownSiblings are iOS PR 1's known siblings, as the registry's
-	// baseline lists them: models beside a row's with no row of their own,
-	// whose names its strict matcher must answer with no model row (Lint).
+	// baseline lists them, then those a row added past it brings (B944):
+	// models beside a row's with no row of their own, whose names its strict
+	// matcher must answer with no model row (Lint).
 	IOSKnownSiblings []string  `json:"iosKnownSiblings"`
 	Profiles         []Profile `json:"profiles"`
 }
