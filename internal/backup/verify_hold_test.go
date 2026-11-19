@@ -802,11 +802,13 @@ func TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing(t *testing.T
 // failure went unsaid, the record read PENDING. Both steps are held at their
 // gates (SetStepGateForTest), fired only at the test's end, each required to
 // have held its step, as TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads
-// holds them (backlog B910); the bound times the check's give-up, which the
-// worker's arrival at the first of them follows at once, never the answer,
-// which a held step leaves to the host (awaitParkedAndGivenUpAt); and each
-// case requires how far its write went and that its record was read back
-// (Write, RecordRead, ReadErr), which Recorded alone does not tell apart.
+// holds them (backlog B910); the bound times the check's give-up by the
+// worker's arrival at the first of them, which follows it at once, as the
+// worker recorded it (StepGate.EnteredAt), never by the answer, which a held
+// step leaves to the host, or by when the test's goroutine saw it
+// (awaitParkedAndGivenUpAt); and each case requires how far its write went
+// and that its record was read back (Write, RecordRead, ReadErr), which
+// Recorded alone does not tell apart.
 func TestAGivenUpVerificationReadsItsRecordBack(t *testing.T) {
 	for _, tc := range []string{"over a PENDING", "over a FAILED", "whose INCOMPLETE is not written"} {
 		t.Run(tc, func(t *testing.T) {
@@ -855,7 +857,7 @@ func TestAGivenUpVerificationReadsItsRecordBack(t *testing.T) {
 				res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
 				done <- verifyAnswer{res, err}
 			})
-			a := awaitParkedAndGivenUpAt(t, p.entered, gate.Entered(stepOfIncomplete), done, verifyAnswer.read, start, deadline+backup.StopWriteBound/2+2*time.Second)
+			a := awaitParkedAndGivenUpAt(t, p.entered, gate, stepOfIncomplete, done, verifyAnswer.read, start, deadline+backup.StopWriteBound/2+2*time.Second)
 			res, err := a.res, a.err
 			if !errors.Is(err, backup.ErrCheckGivenUp) {
 				t.Fatalf("the verification answered %v, want it given up", err)
