@@ -1189,6 +1189,46 @@
   21-digit value (bash rejects it as not an integer at all, so a numeric guard
   could never bound it). Same family as the grep below.
 
+- **A test whose subject is not durability, and which makes thousands of durable
+  writes on its way (an engine started thousands of times, each start's
+  reservation written through the strict writer), counts the flush of each such
+  write's staged file instead of making it, in the step that writes it alone, and
+  asserts in that step that the write asked for its flush and that the strict
+  writer's directory barrier ran after it** (2026-11-19, backlog B942).
+  `TestAdoptionBoundsReservedSpaceAcross4097Restarts`,
+  `TestRestoreAdoptsUUIDOnlyAfter8193Starts` and
+  `TestLegacyFloorlessSnapshotRestoresAboveTheAdoptionCeiling` check the
+  reservation's arithmetic over 20,483 real engine starts a run, each of which
+  flushed its staged reservation file: on legion0's ext4, without the race
+  detector, the three took 139.6 s with the flushes and 5.0 s counting them, and
+  `internal/backup` 477.5 s against 342.7 s, while on windows-latest the package
+  had reached its 30-minute cap on the slowest runners. Each numbered start calls
+  `stubReservationFlush` before it starts the engine, so the hooks' restores run
+  once the engine has stopped, and `requireOneDurableWrite` after its token
+  check: exactly one staged reservation file (the engine's `.player-ids-` prefix)
+  asked for its flush, and after it the strict writer's barrier of that file's
+  directory, which `atomicwrite.WriteBytes`, flushing through the same seam,
+  never runs (its barrier is `commitDirEntry`'s). Every other file in the step is
+  flushed, and so is everything the test does outside its numbered starts: the
+  snapshot, the restore, the adoption, the starts after the loop. A real engine
+  start's flush stays in every other `reservationStorage` test that starts one,
+  and in the engine's `TestAReservationIsMadeOnlyWithItsDirectoryEntry`; a flush
+  that fails, in the restore's failure injection
+  (`TestRestoreRequiresTheReservationBarriersBeforeIdentity`, its file case); a
+  crash either side of a flush, in `crashRestore`, which still makes each; the
+  strict writer's own barriers and checks, in atomicwrite's
+  `TestWriteBytesDurable_*` tests. Controls, as `go test -overlay` builds: the
+  per-start jump off by one reds the three by their token checks, over main's
+  test files and over the fix's alike; the strict writer skipping its staged
+  file's flush (the rename and every barrier kept), the engine writing its
+  reservation through `WriteBytes`, and a start writing it twice each red all
+  three by the new check, every token check passing, where main's test files stay
+  green. **Don't stand the counter in for a whole test (its snapshot, restore and
+  lifecycle writes keep their real flushes), assert a total across its steps,
+  count a flush without asking which writer asked for it, or count the flushes of
+  a test whose subject is durability.** Record:
+  `ops/engineering-log/2026-11/2026-11-19-b942--fix-b942-backup-windows-cap.md`.
+
 - **Size a SQLite-heavy fixture by build tag when the test has no concurrency.**
   The compaction tests seed, delete and vacuum on one goroutine, so `-race` can
   find nothing in them — but the code paths must still RUN there, so shrink the
