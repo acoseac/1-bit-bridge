@@ -133,7 +133,16 @@ func recoverCrashedInstall(ctx context.Context, dataDir, configPath string, opts
 	}
 	backup := binaryPath + ".bak"
 	fi, err := os.Lstat(backup)
-	if err != nil || !fi.Mode().IsRegular() {
+	switch {
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		// A lookup that fails otherwise than finding nothing there (a
+		// permission, a link loop on the way) shows no backup absent (backlog
+		// B898FU's round 2): said and recorded as a backup that could not be
+		// inspected, as one that did not say its version is, never as none.
+		refuseBefore(fmt.Sprintf("the backup at %s could not be inspected (%s)", backup, fsutil.ErrorWithoutPath(err)),
+			"the backup could not be inspected")
+		return 0, false
+	case err != nil || !fi.Mode().IsRegular():
 		refuseBefore(fmt.Sprintf("there is no backup to put back, a regular file at %s", backup), "there is no backup beside the binary to put back")
 		return 0, false
 	}

@@ -657,9 +657,9 @@ var backupCases = []struct {
 // answers a backup there for a regular file at the binary's path and .bak,
 // none for nothing there, an entry that is no regular file or a binary path
 // that is not absolute, and the lookup's error for a lookup that fails
-// otherwise (a permission, a link loop: backlog B761's round 5), while
-// backupBeside, which the crash rollback's own requirement reads, answers as
-// it did: true for the regular file alone.
+// otherwise (a permission, a link loop: backlog B761's round 5). Until backlog
+// B898FU's round 2, backupBeside read that error as none for ProbationHolds
+// and the off's decision over a marker it reads; both now ask backupAt.
 func TestTheBackupsLookupTellsWhatIsNotThereFromWhatCannotBeLookedUp(t *testing.T) {
 	for _, tc := range backupCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -670,9 +670,6 @@ func TestTheBackupsLookupTellsWhatIsNotThereFromWhatCannotBeLookedUp(t *testing.
 			there, err := backupAt(c.bin)
 			if there != tc.there || (tc.cause == nil) != (err == nil) || (tc.cause != nil && !errors.Is(err, tc.cause)) {
 				t.Errorf("backupAt = %v, %v; want %v, the lookup's error %v", there, err, tc.there, tc.cause)
-			}
-			if got := backupBeside(c.bin); got != tc.there {
-				t.Errorf("backupBeside = %v, want %v as before", got, tc.there)
 			}
 		})
 	}

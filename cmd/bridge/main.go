@@ -2717,14 +2717,16 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		// it. A marker left armed over a swap that moved nothing, its disarm
 		// not written, has an older backup beside the binary that runs, and
 		// putting that back would be a downgrade by two versions. A backup
-		// that is not there, or that says another version, is left where it
-		// is, and the install cleared as one never swapped. A stop while it
-		// answers, and a backup that did not say its version, which shows
-		// neither (backlog B898FU), leave the marker as it was read, nothing
-		// written or renamed, as those rollbacks leave their install and a
-		// restore refused for a hold keeps it below, for the next start to
-		// ask again: the window bounds the keep, a start past it clearing the
-		// install as abandoned (BootClearAbandoned).
+		// that is not there or is no regular file, or that says another
+		// version, is left where it is, and the install cleared as one never
+		// swapped. A stop while it answers, and a backup that did not say its
+		// version (backlog B898FU) or could not be inspected (a lookup that
+		// failed otherwise than finding nothing there: its round 2), which
+		// shows neither, leave the marker as it was read, nothing written or
+		// renamed, as those rollbacks leave their install and a restore
+		// refused for a hold keeps it below, for the next start to ask again:
+		// the window bounds the keep, a start past it clearing the install as
+		// abandoned (BootClearAbandoned).
 		why, unanswered := backupNotPrevious(ctx, binaryPath+".bak", st.PreviousVersion, seams)
 		if why != "" || unanswered != nil {
 			if err := ctx.Err(); err != nil {
@@ -2837,13 +2839,19 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 
 // backupNotPrevious says why the backup at bak is not the version an install
 // replaced, previous, for the boot rollback to leave it (backlog B898): why,
-// where that is shown (not a regular file, or another version), for the
-// rollback to clear the install; and apart from it (backlog B898FU), where
-// the backup said no version within seams.probeBound, the probe's error,
-// which shows neither, for the rollback to keep the marker; "" and nil where
-// the backup is previous.
+// where that is shown (nothing at bak, an entry there that is no regular
+// file, or another version), for the rollback to clear the install; and apart
+// from it (backlog B898FU), where the backup said no version within
+// seams.probeBound, or its lookup failed otherwise than finding nothing there
+// (a permission, a link loop on the way: B898FU's round 2), what failed, which
+// shows neither, for the rollback to keep the marker; "" and nil where the
+// backup is previous.
 func backupNotPrevious(ctx context.Context, bak, previous string, seams bootSeams) (why string, unanswered error) {
-	if fi, err := os.Lstat(bak); err != nil || !fi.Mode().IsRegular() {
+	fi, err := os.Lstat(bak)
+	switch {
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return "", fmt.Errorf("it could not be inspected (%s)", fsutil.ErrorWithoutPath(err))
+	case err != nil || !fi.Mode().IsRegular():
 		return fmt.Sprintf("there is no backup to put back, a regular file at %s", bak), nil
 	}
 	probe := seams.probeVersion

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // An install's probation (backlog B660). The version installed booting proves
@@ -432,22 +434,33 @@ func ProbationStatus(st State, current string, running bool) Probation {
 // twice ProbationWindow, and the crash rollback would put back the backup
 // beside binaryPath, the binary serve runs as: no rollback of it was refused
 // (State.RollbackRefused), the backup is there (a regular file at
-// binaryPath+".bak"), and the crash rollback's own checks of the marker would
-// pass at the limit (CrashRollbackAtLimit: a migration of the store begun, an
-// install that never reached its swap, a data dir another version opened since
-// all refuse it). B660's second round added the first two, and the third
-// beside the migration it asked alone: a hold kept for a backup no rollback
-// would put back held a newer release, perhaps the fix, for nothing. Until
-// the install is confirmed, that backup is the last version known to run
-// here; an install now would replace it with current, which has not shown it
-// runs. Past the bound an install that never answered does not wait on
-// itself, since a newer release may be its fix. A manual install is never
+// binaryPath+".bak") or its lookup fails otherwise than finding nothing
+// there, which cannot tell (backlog B898FU's round 2: until then a failed
+// lookup held nothing), and the crash rollback's own checks of the marker
+// would pass at the limit (CrashRollbackAtLimit: a migration of the store
+// begun, an install that never reached its swap, a data dir another version
+// opened since all refuse it). B660's second round added the first two, and
+// the third beside the migration it asked alone: a hold kept for a backup no
+// rollback would put back held a newer release, perhaps the fix, for nothing.
+// Until the install is confirmed, that backup is the last version known to
+// run here; an install now would replace it with current, which has not
+// shown it runs. Past the bound an install that never answered does not wait
+// on itself, since a newer release may be its fix. A manual install is never
 // held, and replaces the backup with the unconfirmed version.
 func ProbationHolds(st State, current, binaryPath string, uptime time.Duration) string {
 	if !AwaitsConfirmation(st, current) || uptime >= 2*ProbationWindow || st.RollbackRefused != "" {
 		return ""
 	}
-	if ok, _ := CrashRollbackAtLimit(st, current); !ok || !backupBeside(binaryPath) {
+	if ok, _ := CrashRollbackAtLimit(st, current); !ok {
+		return ""
+	}
+	there, err := backupAt(binaryPath)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("%s awaits its confirmation (answered and up for %s), and the backup beside it could not be looked up (%s), "+
+			"so whether a crash rollback would put it back cannot be told, and an install now could replace it: auto-install waits "+
+			"until it is confirmed, or for at most %s", current, ProbationWindow, fsutil.ErrorWithoutPath(err), 2*ProbationWindow)
+	case !there:
 		return ""
 	}
 	return fmt.Sprintf("%s awaits its confirmation (answered and up for %s), and the backup beside it, which a crash rollback "+
@@ -455,17 +468,10 @@ func ProbationHolds(st State, current, binaryPath string, uptime time.Duration) 
 		current, ProbationWindow, 2*ProbationWindow)
 }
 
-// backupBeside reports whether a backup a crash rollback could put back
-// stands beside binaryPath: a regular file at binaryPath+".bak", as the crash
-// rollback requires it. A path that is not absolute names no backup, and a
-// lookup that fails reads as none here (backupAt tells the two apart).
-func backupBeside(binaryPath string) bool {
-	there, err := backupAt(binaryPath)
-	return there && err == nil
-}
-
-// backupAt is backupBeside's lookup, telling what is not there from what
-// cannot be looked up (backlog B761's round 5): a backup there, a regular
+// backupAt is the lookup of the backup a crash rollback could put back,
+// telling what is not there from what cannot be looked up (backlog B761's
+// round 5; ProbationHolds and ChecksOffRefused ask it, and since B898FU's
+// round 2 both fail closed on its error): a backup there, a regular
 // file at binaryPath+".bak"; none, with no error, for nothing at that path,
 // an entry there that is no regular file, or a binary path that is not
 // absolute; and none with the lookup's error where it failed otherwise than
