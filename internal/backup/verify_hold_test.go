@@ -794,6 +794,19 @@ func TestARecheckWhereNoDirectoryCanBeSyncedChecksAndRecordsNothing(t *testing.T
 // nothing. The park and the answer are awaited in either order, bounded
 // (awaitParkedAndGivenUp; backlog B872's second round: the call was made on
 // the test's goroutine, waited for no park, and had no bound of the test's).
+//
+// Once the check is given up, the write of its INCOMPLETE and the read of the
+// record after it are each a step whose bound is a second from its start
+// (laterBound), and windows-latest passed the write's (backlog B945): a write
+// given up answers nothing, so where its INCOMPLETE is not written its
+// failure went unsaid, the record read PENDING. Both steps are held at their
+// gates (SetStepGateForTest), fired only at the test's end, each required to
+// have held its step, as TestBridgeBackupVerifySaysWhatAGivenUpVerificationsRecordReads
+// holds them (backlog B910); the bound times the check's give-up, which the
+// worker's arrival at the first of them follows at once, never the answer,
+// which a held step leaves to the host (awaitParkedAndGivenUpAt); and each
+// case requires how far its write went and that its record was read back
+// (Write, RecordRead, ReadErr), which Recorded alone does not tell apart.
 func TestAGivenUpVerificationReadsItsRecordBack(t *testing.T) {
 	for _, tc := range []string{"over a PENDING", "over a FAILED", "whose INCOMPLETE is not written"} {
 		t.Run(tc, func(t *testing.T) {
@@ -814,18 +827,23 @@ func TestAGivenUpVerificationReadsItsRecordBack(t *testing.T) {
 				c = captureT(t, src)
 				dir = c.Dir
 			}
+			injected := errors.New("injected: the staging failed")
 			if tc == "whose INCOMPLETE is not written" {
-				t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(string) error { return errors.New("injected: the staging failed") }, nil, nil))
+				t.Cleanup(backup.SetVerdictWriteFailuresForTest(func(string) error { return injected }, nil, nil))
 			}
 			const deadline = 300 * time.Millisecond
 			t.Cleanup(backup.SetVerifyDeadlineForTest(deadline))
+			// Put back once the callers' cleanup, which fires every gate first,
+			// has joined the verification and drained its holds.
+			gate, restoreGate := backup.SetStepGateForTest(filepath.Dir(dir), filepath.Base(dir), stepOfIncomplete, stepOfReadBack)
+			t.Cleanup(restoreGate)
 			p := newParking()
 			t.Cleanup(backup.SetOnLowPriorityForTest(p.park))
 			t.Cleanup(func() {
 				p.release()
 				awaitClean(t)
 			})
-			callers := joinBackupCallers(t, p.release)
+			callers := joinBackupCallers(t, func() { p.release(); gate.FireAll() })
 			done := make(chan verifyAnswer, 1)
 			start := time.Now()
 			callers.start(func() {
@@ -837,30 +855,61 @@ func TestAGivenUpVerificationReadsItsRecordBack(t *testing.T) {
 				res, err := backup.VerifySnapshot(context.Background(), dir, backup.VerifyOptions{})
 				done <- verifyAnswer{res, err}
 			})
-			a := awaitParkedAndGivenUp(t, p.entered, done, verifyAnswer.read, start, deadline+backup.StopWriteBound/2+2*time.Second)
+			a := awaitParkedAndGivenUpAt(t, p.entered, gate.Entered(stepOfIncomplete), done, verifyAnswer.read, start, deadline+backup.StopWriteBound/2+2*time.Second)
 			res, err := a.res, a.err
 			if !errors.Is(err, backup.ErrCheckGivenUp) {
 				t.Fatalf("the verification answered %v, want it given up", err)
 			}
+			requireGatesHeld(t, gate, stepOfIncomplete, stepOfReadBack)
+			if !res.RecordRead || res.ReadErr != nil {
+				t.Errorf("the record was not read back (%v); want it read back", res.ReadErr)
+			}
 			switch tc {
 			case "over a PENDING":
-				if !res.Recorded || res.Record.DatabaseState != backup.StateIncomplete {
-					t.Errorf("given up over a PENDING: recorded %v, the record reads %s; want its INCOMPLETE recorded", res.Recorded, res.Record.DatabaseState)
+				if !res.Recorded || res.Write != backup.WriteRecorded || res.Record.DatabaseState != backup.StateIncomplete {
+					t.Errorf("given up over a PENDING: recorded %v, its write %s, the record reads %s; want its INCOMPLETE recorded",
+						res.Recorded, res.Write, res.Record.DatabaseState)
 				}
 				if strings.Contains(err.Error(), "cache stamp was skipped") {
 					t.Errorf("the live recovery step skipped its cache stamp: %v", err)
 				}
 			case "over a FAILED":
-				if res.Recorded || res.Record.DatabaseState != backup.StateFailed {
-					t.Errorf("given up over a FAILED: recorded %v, the record reads %s; want nothing recorded and FAILED read", res.Recorded, res.Record.DatabaseState)
+				if res.Recorded || res.Write != backup.WriteUnchanged || res.Record.DatabaseState != backup.StateFailed {
+					t.Errorf("given up over a FAILED: recorded %v, its write %s, the record reads %s; want nothing to change, nothing recorded and FAILED read",
+						res.Recorded, res.Write, res.Record.DatabaseState)
 				}
 			case "whose INCOMPLETE is not written":
-				if res.Recorded || res.Record.DatabaseState != backup.StatePending || !strings.Contains(err.Error(), "injected") {
-					t.Errorf("an INCOMPLETE not written: recorded %v, the record reads %s, %v; want nothing recorded, the PENDING read and the write's failure said",
-						res.Recorded, res.Record.DatabaseState, err)
+				if res.Recorded || res.Write != backup.WriteFailed || res.Record.DatabaseState != backup.StatePending ||
+					!errors.Is(err, injected) || !strings.Contains(err.Error(), injected.Error()) {
+					t.Errorf("an INCOMPLETE not written: recorded %v, its write %s, the record reads %s, %v; want nothing recorded, the write failed, the PENDING read and the write's failure said",
+						res.Recorded, res.Write, res.Record.DatabaseState, err)
 				}
 			}
 		})
+	}
+}
+
+// The steps a verification takes once its check is given up, in the backup
+// package's words, that TestAGivenUpVerificationReadsItsRecordBack and
+// TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds hold at their gates
+// (backup.SetStepGateForTest).
+const (
+	stepOfIncomplete = "its write of INCOMPLETE"
+	stepOfReadBack   = "its read of the record after it"
+)
+
+// requireGatesHeld fails the test where no hold came to one of the steps
+// named, each held at its gate by gate, once the verification has answered:
+// a gate that matches no hold, by its folder or its snapshot, holds nothing,
+// and its step keeps its bound.
+func requireGatesHeld(t *testing.T, gate *backup.StepGate, steps ...string) {
+	t.Helper()
+	for _, step := range steps {
+		select {
+		case <-gate.Entered(step):
+		default:
+			t.Errorf("no gate held %s: it kept its bound of a second", step)
+		}
 	}
 }
 
