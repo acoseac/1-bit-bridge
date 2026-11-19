@@ -353,9 +353,11 @@ func (c *tracked) gone() bool {
 // connection recorded that has closed or been interrupted since (gone), so
 // that conns keeps little more than the connections open; it waits on no
 // other connection's lock, which a close holds across SQLite's close, a WAL
-// database's checkpoint among it. A connection that does not take the lock
-// its close takes, or does not report whether it is valid, is not recorded,
-// and Cancel finds none to wait for.
+// database's checkpoint among it. A list is compacted in place, and the slots
+// past what it keeps are cleared (slices.DeleteFunc), so that its array holds
+// no connection it dropped. A connection that does not take the lock its
+// close takes, or does not report whether it is valid, is not recorded, and
+// Cancel finds none to wait for.
 func trackConnection(conn sqlite.ExecQuerierContext, name string) error {
 	lock, locks := conn.(connLock)
 	valid, reports := conn.(driver.Validator)
@@ -369,13 +371,7 @@ func trackConnection(conn sqlite.ExecQuerierContext, name string) error {
 		conns.byFile = make(map[string][]*tracked)
 	}
 	for f, list := range conns.byFile {
-		kept := list[:0]
-		for _, c := range list {
-			if !c.gone() {
-				kept = append(kept, c)
-			}
-		}
-		if len(kept) == 0 {
+		if kept := slices.DeleteFunc(list, (*tracked).gone); len(kept) == 0 {
 			delete(conns.byFile, f)
 		} else {
 			conns.byFile[f] = kept
