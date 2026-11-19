@@ -74,8 +74,10 @@ ENTRY_PATH = re.compile(r"([0-9]{4}-[0-9]{2})/(\1-[0-9]{2})-(%s)--(%s)\.md" % (S
 HEADING = re.compile(r"## ([0-9]{4}-[0-9]{2}-[0-9]{2}) — (\S.*)")
 H2 = re.compile(r"##(?:[ \t]|$)")
 QUOTE = re.compile(r" {0,3}> ?")
-LIST_ITEM = re.compile(r" {0,3}(?:[-*+]|[0-9]{1,9}[.)])(?= |$)")
+LIST_ITEM = re.compile(r" {0,3}(?:[-*+]|([0-9]{1,9})[.)])(?= |$)")  # an ordered item's number its group
 BREAK = re.compile(r" {0,3}([-*_])(?: *\1){2,} *")  # a thematic break, which no list item is
+ATX = re.compile(r"#{1,6}(?:[ \t]|$)")
+UNDERLINE = re.compile(r"(?:=+|-+)[ \t]*")  # under a paragraph, a setext heading's
 FENCE_OPEN = re.compile(r"(`{3,}|~{3,})(.*)")
 FENCE_CLOSE = re.compile(r"(`{3,}|~{3,})[ \t]*")
 # An entry filed anywhere else, by its name alone: a file named like an entry in any folder, and
@@ -139,41 +141,67 @@ def name_problems(sub):
 
 
 def going_on(line, containers):
-    """(how many of CONTAINERS, outermost first, LINE goes on in, and what is left of it): a block
-    quote (None) where its marker stands, a list item (its width) where the line is blank or
-    indented by that width at least."""
-    for k, width in enumerate(containers):
+    """(how many of CONTAINERS, outermost first, LINE goes on in, and what is left of it). Each is
+    [width, holds]: a block quote's width None, and it goes on where its marker stands; a list
+    item's the columns its content starts at, and it goes on where the line is indented by that
+    many at least, or is blank, but for an item that holds nothing yet, which a blank line ends."""
+    for k, (width, holds) in enumerate(containers):
         if width is None:
             m = QUOTE.match(line)
             if not m:
                 return k, line
             line = line[m.end():]
-        elif line.strip(" "):
-            if len(line) - len(line.lstrip(" ")) < width:
+        elif not line.strip(" "):
+            if not holds:
                 return k, line
+        elif len(line) - len(line.lstrip(" ")) < width:
+            return k, line
+        else:
             line = line[width:]
     return len(containers), line
 
 
-def opened(rest):
-    """(the containers REST opens, outermost first, and what is left of it): block quote markers
-    and list item markers, except where the rest is a thematic break (`- - -`). An item's width is
-    its marker's, the up to three spaces before it included, and the spaces after it, one where it
-    is blank or more than four follow."""
+def starts(rest, tip, inside):
+    """(the containers REST opens, outermost first, what is left of it, and what that is: "fence",
+    "heading", "break", "underline", "code", "blank" or "text"), as CommonMark's block starts read
+    it. TIP says a paragraph is the last block open, INSIDE that it goes on in every container
+    the line goes on in: there a list item interrupts it only with something on its line and,
+    ordered, numbered 1, a run of `=` or `-` underlines it, and a line indented four spaces or more
+    is its text (where TIP alone holds, a lazy line's). A thematic break (`- - -`) opens no item.
+    An item's width is its marker's, the up to three spaces before it included, and the spaces
+    after it, one where it holds nothing yet or more than four follow."""
     out = []
     while True:
+        if not rest.strip(" "):
+            return out, rest, "blank"
+        indent = len(rest) - len(rest.lstrip(" "))
+        if indent > 3:
+            return out, rest, "text" if tip and not out else "code"
+        body, interrupting = rest[indent:], inside and not out
         m = QUOTE.match(rest)
         if m:
-            out.append(None)
+            out.append([None, True])
             rest = rest[m.end():]
             continue
+        if ATX.match(body):
+            return out, rest, "heading"
+        m = FENCE_OPEN.fullmatch(body)
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            return out, rest, "fence"
+        if interrupting and UNDERLINE.fullmatch(body):
+            return out, rest, "underline"
+        if BREAK.fullmatch(rest):
+            return out, rest, "break"
         m = LIST_ITEM.match(rest)
-        if not m or BREAK.fullmatch(rest):
-            return out, rest
+        if not m:
+            return out, rest, "text"
         after = rest[m.end():]
+        empty = not after.strip(" ")
+        if interrupting and (empty or (m.group(1) is not None and int(m.group(1)) != 1)):
+            return out, rest, "text"
         spaces = len(after) - len(after.lstrip(" "))
-        width = m.end() + (spaces if after.strip(" ") and spaces <= 4 else 1)
-        out.append(width)
+        width = m.end() + (spaces if not empty and spaces <= 4 else 1)
+        out.append([width, not empty])
         rest = rest[width:]
 
 
@@ -182,41 +210,48 @@ def h2_lines(text):
     spaces, `##` then a space, a tab or the line's end. A line in a block quote begins with its
     `>`, so a quoted `> ## ` is none.
 
-    The fences follow markdownShellLines' containers (scripts/third-party-licenses/tags.go): block
-    quotes and list items. A quote goes on where its marker stands (`>`, up to three spaces before
-    it and one after), a list item where a line is blank or indented by the item's width at least.
-    Inside its containers, after up to three spaces, a fence opens on three or more backticks or
-    tildes, a backtick fence's info holding no backtick, and closes on a line of the same
-    character, at least as many of them, with nothing after them but white space; it ends where a
-    container it opened in ends, and the line that ends it is read afresh. Where it departs from
-    markdownShellLines: code in a fence opens no container, so a line in a fence that begins with a
-    marker (`- ```) closes nothing; more than three spaces before a fence or a marker make code,
-    not one; and a thematic break (`- - -`) opens no list item. As there, no paragraph is followed,
-    so four of CommonMark's list rules are not: a paragraph's lazy line keeps its item open, an
-    empty item and an ordered one not starting at 1 interrupt no paragraph, and an item that
-    begins with a blank line ends at the next. Here a line indented less than an item's width ends
-    it, every marker opens one, and a blank line goes on in it."""
-    found, containers, fence = [], [], None  # fence: (its character, how many, its containers)
+    Fenced code is read with CommonMark's containers, block quotes and list items, and the
+    paragraph rules that decide where an item ends. A quote goes on where its marker stands (`>`,
+    up to three spaces before it and one after); a list item where a line is indented by its width
+    at least, or is blank, but for an item that holds nothing yet, which a blank line ends. A
+    paragraph's lazy line, one that starts no block, keeps every container open. A list item
+    interrupts a paragraph only with something on its line and, ordered, numbered 1, so `2.` or an
+    empty `-` after a paragraph's text is more of that text, and a lone run of `-` or `=` under it
+    underlines it; a quote, a heading, a fence and a thematic break always interrupt it. Inside its
+    containers, after up to three spaces, a fence opens on three or more backticks or tildes, a
+    backtick fence's info holding no backtick, and closes on a line of the same character, at
+    least as many of them, with nothing after them but white space; it ends where a container it
+    opened in ends, and the line that ends it is read afresh.
+
+    The containers are markdownShellLines' (scripts/third-party-licenses/tags.go), which differs:
+    it follows no paragraph, so a line indented less than an item's width ends the item there,
+    every marker opens one and a blank line goes on in one; code in a fence opens a container
+    there, so a fence's line that begins with a marker (`- ```) closes the fence; more than three
+    spaces before a fence or a marker do not make code there; and a thematic break (`- - -`) is
+    read as list items. HTML blocks are read by neither: a `## ` line inside one counts here."""
+    found, containers, fence, paragraph = [], [], None, False  # fence: (its character, how many)
     for number, line in enumerate(text.split("\n"), 1):
         line = line.replace("\t", "    ")
+        k, rest = going_on(line, containers)
         if fence:
-            k, rest = going_on(line, fence[2])
-            if k == len(fence[2]):
+            if k == len(containers):
                 indent = len(rest) - len(rest.lstrip(" "))
                 m = FENCE_CLOSE.fullmatch(rest[indent:]) if indent <= 3 else None
                 if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
                     fence = None
                 continue
-            fence, containers = None, fence[2][:k]  # a container it opened in has ended, and the fence with it
-        else:
-            k, rest = going_on(line, containers)
-            containers = containers[:k]
-        more, rest = opened(rest)
-        containers = containers + more
-        indent = len(rest) - len(rest.lstrip(" "))
-        m = FENCE_OPEN.fullmatch(rest[indent:]) if indent <= 3 else None
-        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-            fence = (m.group(1)[0], len(m.group(1)), containers)
+            fence = None  # a container it opened in has ended, and the fence with it: read the line afresh
+        more, rest, kind = starts(rest, paragraph, paragraph and k == len(containers))
+        if kind == "text" and paragraph and not more:
+            continue  # the paragraph goes on, lazily where a container did not, and every container with it
+        if more or kind != "blank":
+            for container in containers[:k]:
+                container[1] = True  # it holds what this line opens or puts in it
+        containers = containers[:k] + more
+        paragraph = kind == "text"
+        if kind == "fence":
+            m = FENCE_OPEN.fullmatch(rest.lstrip(" "))
+            fence = (m.group(1)[0], len(m.group(1)))
             continue
         indent = len(line) - len(line.lstrip(" "))
         if indent <= 3 and H2.match(line[indent:]):
@@ -595,6 +630,39 @@ def self_test():
     ]
     for name, text, want in lists:
         expect(name, h2_lines(text), want)
+    # A paragraph decides where an item ends and whether a marker opens one: each row as lists'.
+    empty_then_blank = head + "\n-\n\n  ```\ncode\n  ```\n## stray\n"
+    two_after_text = head + "\nparagraph\n2. item\n   ```\n## sample\n```\n"
+    lazy = head + "\n- foo\nbar\n    ```\n  ## looks\n    ```\n"
+    two_as_text = head + "\nThe number is\n2. ```\n   ## stray\n```\n"
+    paragraphs = [
+        ("an item that holds nothing ends at a blank line, its fence closing outside it", empty_then_blank, [1, 8]),
+        ("an ordered item not numbered 1 does not interrupt a paragraph", two_after_text, [1]),
+        ("a lazy line keeps its item open", lazy, [1]),
+        ("a heading after a 2. that is a paragraph's text is one", two_as_text, [1, 5]),
+        ("0. does not interrupt one either", head + "\nparagraph\n0. ```\n   ## inside\n   ```\n", [1, 5]),
+        ("an empty bullet does not: under a paragraph it is a setext underline",
+         head + "\nparagraph\n-\n  ```\n## after\n```\n", [1]),
+        ("a line four spaces in under a paragraph's text is more of it, so 2. after it is too",
+         head + "\nparagraph\n    more\n2. ```\n   ## inside\n   ```\n", [1, 6]),
+        ("an underline ends the paragraph, so 2. after it opens an item",
+         head + "\nparagraph\n===\n2. ```\n   ## inside\n   ```\n", [1]),
+        ("after a heading 2. opens an item", head + "2. ```\n   ## inside\n   ```\n", [1]),
+        ("and after a blank line", head + "\nparagraph\n\n2. ```\n   ## inside\n   ```\n", [1]),
+        ("1. interrupts a paragraph", head + "\nparagraph\n1. ```\n   ## inside\n   ```\n", [1]),
+        ("and so does 01.", head + "\nparagraph\n01. ```\n    ## inside\n    ```\n", [1]),
+        ("and a bullet", head + "\nparagraph\n- ```\n  ## inside\n  ```\n", [1]),
+        ("a line that leaves its item opens one with any marker", head + "\n- foo\n2. bar\n  ```\n## x\n  ```\n", [1]),
+        ("an item that holds something goes on past a blank line",
+         head + "-\n  foo\n\n  ```\n  ## inside\n  ```\n", [1]),
+        ("a fence's closing line is no paragraph's text", head + "```\nx\n```\n2. ```\n   ## inside\n   ```\n", [1]),
+    ]
+    for name, text, want in paragraphs:
+        expect(name, h2_lines(text), want)
+    twice = ["holds 2 `## ` lines outside fenced code, not one: each entry is a file of its own"]
+    expect("so those entries are refused, and the valid ones accepted",
+           [content_problems(good, text.encode("utf-8")) for text in (empty_then_blank, two_after_text, lazy, two_as_text)],
+           [twice, [], [], twice])
     expect("text that is not UTF-8", content_problems(good, head.encode("utf-8") + b"\xff\n"), ["is not UTF-8"])
     expect("the README needs no heading", content_problems("README.md", b"# The engineering log\n"), [])
 
