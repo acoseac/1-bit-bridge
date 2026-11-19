@@ -32,16 +32,18 @@ auto-loaded.
 - A new record is a new file: never append to a file another PR wrote. If the name is taken,
   add a word. A round of an open PR may be a file of its own or a `### Round N` section in its
   PR's own file.
-- An entry is filed here alone. The check reads every path git tracks and, untracked, every
-  `.md` file below a top-level folder named `ops` in any letter case, those git ignores
-  included, a folder it ignores whole too, and elsewhere every `.md` file whose name holds
-  `--`, one git ignores by its own name included but none in a folder git ignores whole, as
-  `.tmp/` where scratch goes. A file it reads that is named like an entry and stands outside
-  this folder fails the check. The edit hook reports such a file as it is written (exit 2),
-  except below a folder whose name begins with `.`. A dated note directly in `ops/` not named
-  like an entry (no `--<branch>`) may stand there untracked, as the private notes git ignores
-  there do (`*audit*`, `*review*`, `*findings*`); committed, any dated Markdown file directly
-  in `ops/` fails the check.
+- An entry is filed here alone. The check reads every path git tracks, whatever its name.
+  Untracked, it reads only a file whose name ends in `.md`, in any letter case, and does not
+  begin with `.` (an editor's lock file is no record): every such file below a top-level
+  folder named `ops` in any letter case, those git ignores included, a folder it ignores
+  whole too, and elsewhere every such file whose name holds `--`, one git ignores by its own
+  name included but none in a folder git ignores whole, as `.tmp/` where scratch goes. A file
+  it reads that is named like an entry and stands outside this folder fails the check. The
+  edit hook reports such a file as it is written (exit 2), except below a folder whose name
+  begins with `.`. A dated note directly in `ops/` not named like an entry (no `--<branch>`)
+  may stand there untracked, as the private notes git ignores there do (`*audit*`,
+  `*review*`, `*findings*`); committed, any dated Markdown file directly in `ops/` fails the
+  check.
 - An entry is edited only to correct it. The citation guard (`TestEveryCitedTestNameExists`)
   reads every entry, never the archive, so a PR that renames or retires a test an entry cites
   corrects that citation in the entry.
