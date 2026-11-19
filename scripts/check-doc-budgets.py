@@ -510,8 +510,8 @@ def self_test():
         expect("a dated file directly in ops/ is refused", edit("ops/2026-11-20-b888--feat-x.md")[0], 2)
         os.remove(dated)
         expect("and let be once it is gone", edit("ops/2026-11-20-b888--feat-x.md"), (0, ""))
-        note = put("ops/2026-11-20-loupe-audit.md", "a private note\n")
-        expect("a dated note directly in ops/ not named like an entry is let be", edit("ops/2026-11-20-loupe-audit.md"),
+        note = put("ops/2026-11-20-sample-audit.md", "a private note\n")
+        expect("a dated note directly in ops/ not named like an entry is let be", edit("ops/2026-11-20-sample-audit.md"),
                (0, ""))
         os.remove(note)
         expect("a deleted entry is let be", edit("ops/engineering-log/2026-11/2026-11-20-gone--x.md"), (0, ""))

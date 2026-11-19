@@ -865,9 +865,11 @@ def self_test():
                                                        misfiled_problem(hidden) + ", and git ignores it there"])
 
             root, env = checkout(tmp, "dated-notes")
-            note, plain_note, named = "ops/2026-11-20-loupe-audit.md", "ops/2026-11-20-notes.md", "ops/2026-11-20-x-audit--feat-x.md"
+            note, plain_note, named = "ops/2026-11-20-sample-audit.md", "ops/2026-11-20-notes.md", "ops/2026-11-20-x-audit--feat-x.md"
             for rel in (note, plain_note, named):
                 put(root, rel, "a private note\n")
+            expect("git ignores the one note and not the other, so the rows below take both arms",
+                   [listing(root, env)[1].get(rel) for rel in (note, plain_note, named)], [True, False, True])
             expect("an untracked dated note in ops/, ignored or not, is let be, and one named like an entry is not",
                    check(root, size, digest, env)[0], [misfiled_problem(named) + ", and git ignores it there"])
             expect("the hook lets the two notes be", [hook_for(root, note), hook_for(root, plain_note)], [(0, ""), (0, "")])
