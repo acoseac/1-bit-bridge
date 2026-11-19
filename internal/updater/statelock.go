@@ -36,9 +36,10 @@ const stateLockRetry = 50 * time.Millisecond
 // defaultStateLockWait is how long LockState waits for another holder (the
 // early rollback holds the lock across its backup's version, at most
 // VersionProbeTimeout's 10 s in production, a record and a rename; the crash
-// rollback, across its backup's version, its backup's settings check, two
-// marker writes and a rename, backlog B898's F1; a disarm, across one marker
-// write;
+// rollback, across the marker's read again, its checks again of the install,
+// the backup's identity and the settings' digest, two marker writes and a
+// rename, its backup's version and settings check asked before it takes the
+// lock (backlog B894, B898's F1); a disarm, across one marker write;
 // the boot's housekeeping, across its backup's version, two marker writes and
 // a rename or the backup's removal; an install, across a marker read, its
 // marker writes and its swap, which on Windows first waits up to scmStopWait

@@ -33,7 +33,10 @@ var configCheckTimeout = 30 * time.Second
 
 // ConfigCheckBound is the longest a settings check runs: its bound and the
 // wait for its pipes once a run past it is killed, for cmd/bridge's pin of
-// what the crash rollback holds the install marker's lock for (backlog B898).
+// what a rollback at a start holds the install marker's lock for (backlog
+// B898), which counts it only for a check run with that lock held: since
+// backlog B894 (B898's F1) the crash rollback runs its backup's before it
+// takes the lock, and no rollback runs one under it.
 func ConfigCheckBound() time.Duration { return configCheckTimeout + waitDelay }
 
 // VersionProbeTimeout is ProbeVersion's bound, which the early rollback asks
