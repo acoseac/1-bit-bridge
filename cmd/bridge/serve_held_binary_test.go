@@ -559,33 +559,48 @@ func TestTheBootRollbackLeavesABackupThatIsNotThePreviousVersion(t *testing.T) {
 	}
 }
 
+// keptUntil is what a boot rollback that keeps the marker over a backup that
+// did not say its version says of the window that bounds the keep (backlog
+// B898FU's round 3): an install of target, attempted at attempted, is refused
+// as waiting for its restart until the backup says its version or the window
+// ends, updater.RecencyWindow() after the attempt, in UTC, and a restart only
+// asks the backup again.
+func keptUntil(attempted time.Time, target string) string {
+	return fmt.Sprintf("until the backup says its version or the window ends at %s, an install of %s is refused as waiting for its "+
+		"restart, and a restart only asks the backup again", attempted.Add(updater.RecencyWindow()).UTC().Format(time.RFC3339), target)
+}
+
 // TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion: a boot
 // rollback whose backup did not say its version within its bound leaves the
 // install as it is, as the early and the crash rollbacks do (backlog B898FU):
 // the binary, the backup and the marker byte for byte, nothing put back, and
-// said; the next start asks again, and once the backup answers puts it back.
-// A stop while the backup answers leaves the install so too, and is the
-// housekeeping's answer. A backup that is not there or is no regular file,
-// which is never asked, and one that says another version still clear the
-// install, the backup left where it is. Each row is an install of its own,
-// armed, its backup in place.
+// said, with the window's end (keptUntil, the install attempted an hour
+// before, so the end the attempt gives is not the start's clock's); the next
+// start asks again, and once the backup answers puts it back. A stop while
+// the backup answers leaves the install so too, and is the housekeeping's
+// answer. A backup that is not there or is no regular file, which is never
+// asked, and one that says another version still clear the install, the
+// backup left where it is. Each row is an install of its own, armed, its
+// backup in place.
 func TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// noBackup removes the backup before the boot, and dirBackup puts a
 		// directory in its place; answer is the backup's to the version's
-		// ask, on the boot's context, which stop cancels.
+		// ask, on the boot's context, which stop cancels; window says that the
+		// line names the window's end.
 		noBackup, dirBackup bool
 		answer              func(ctx context.Context, stop context.CancelFunc) (string, error)
 		asked               int
 		stopped             bool
 		kept                bool
 		says                []string
+		window              bool
 	}{
 		{name: "it did not answer within its bound",
 			answer: func(context.Context, context.CancelFunc) (string, error) {
 				return "", errors.New("it did not answer within 1s")
-			}, asked: 1, kept: true,
+			}, asked: 1, kept: true, window: true,
 			says: []string{"the backup did not say its version: it did not answer within 1s", "the install's marker is kept"}},
 		{name: "a stop while it answered",
 			answer: func(ctx context.Context, stop context.CancelFunc) (string, error) {
@@ -605,6 +620,7 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRefusedInstall(t, "")
 			r.marker.TargetVersion = "9.9.9"
+			r.marker.AttemptedAt = time.Now().UTC().Add(-time.Hour)
 			r.saveMarker(t, r.dataDir)
 			watched := []string{r.bin, r.bak}
 			if tc.noBackup || tc.dirBackup {
@@ -643,7 +659,11 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion(t *testi
 			if armed := updater.InstallArmed(markerOf(t, r.dataDir)); armed != tc.kept {
 				t.Errorf("the install is armed: %v, want %v; stderr=%s", armed, tc.kept, stderr.String())
 			}
-			for _, s := range tc.says {
+			says := tc.says
+			if tc.window {
+				says = append(slices.Clone(says), keptUntil(r.marker.AttemptedAt, "9.9.9"))
+			}
+			for _, s := range says {
 				if !strings.Contains(stderr.String(), s) {
 					t.Errorf("the housekeeping did not say %q; stderr=%s", s, stderr.String())
 				}
@@ -745,15 +765,17 @@ var inspectionFailures = []inspectionFailure{
 // as one whose backup did not say its version (backlog B898FU's round 2): the
 // housekeeping answers nil, the backup is asked nothing and nothing is put
 // back, the binary, the backup and the marker are as they were byte for byte
-// once the filesystem has recovered, and the line says so; the next start
-// then asks the backup and puts it back. Until then the failed lookup was
-// taken for no backup, and the install cleared, so no later start could roll
-// it back.
+// once the filesystem has recovered, and the line says so, with the window's
+// end (keptUntil, the install attempted an hour before); the next start then
+// asks the backup and puts it back. Until then the failed lookup was taken
+// for no backup, and the install cleared, so no later start could roll it
+// back.
 func TestTheBootRollbackKeepsItsMarkerWhereTheBackupCannotBeInspected(t *testing.T) {
 	for _, f := range inspectionFailures {
 		t.Run(f.name, func(t *testing.T) {
 			r := newRefusedInstall(t, "")
 			r.marker.TargetVersion = "9.9.9"
+			r.marker.AttemptedAt = time.Now().UTC().Add(-time.Hour)
 			r.saveMarker(t, r.dataDir)
 			files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
 			binaryPath, recovered := f.laid(t, r.bin)
@@ -777,7 +799,8 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBackupCannotBeInspected(t *testing
 			if st := markerOf(t, r.dataDir); !updater.InstallArmed(st) {
 				t.Errorf("the marker = %+v, want the install kept; stderr=%s", st, stderr.String())
 			}
-			for _, s := range []string{"the backup did not say its version: it could not be inspected", "the install's marker is kept"} {
+			for _, s := range []string{"the backup did not say its version: it could not be inspected", "the install's marker is kept",
+				keptUntil(r.marker.AttemptedAt, "9.9.9")} {
 				if !strings.Contains(stderr.String(), s) {
 					t.Errorf("the housekeeping did not say %q; stderr=%s", s, stderr.String())
 				}
