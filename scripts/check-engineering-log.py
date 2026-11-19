@@ -285,18 +285,21 @@ def h2_lines(text):
     always interrupt a paragraph. Inside its containers, after up to three spaces, a fence opens on
     three or more backticks or tildes, a backtick fence's info holding no backtick, and closes on a
     line of the same character, at least as many of them, with nothing after them but white space;
-    it ends where a container it opened in ends, and the line that ends it is read afresh.
+    it ends where a container it opened in ends, and the line that ends it is read afresh. A tab
+    is read as the spaces that reach the next column a multiple of four from the line's start,
+    CommonMark's tab stops, so two spaces and a tab are four columns, as one tab is.
 
     The containers are markdownShellLines' (scripts/third-party-licenses/tags.go), which differs:
     it follows no paragraph, so a line indented less than an item's width ends the item there,
     every marker opens one and a blank line goes on in one; code in a fence opens a container
     there, so a fence's line that begins with a marker (`- ```) closes the fence; more than three
-    spaces before a fence or a marker do not make code there; and a thematic break (`- - -`) is
-    read as list items. HTML blocks are read by neither: a `## ` line inside one counts here."""
+    spaces before a fence or a marker do not make code there; a tab is four spaces there wherever
+    it stands; and a thematic break (`- - -`) is read as list items. HTML blocks are read by
+    neither: a `## ` line inside one counts here."""
     # fence: (its character, how many); paragraph: an open one's lines, each from its first non-space
     found, containers, fence, paragraph = [], [], None, []
     for number, line in enumerate(text.split("\n"), 1):
-        line = line.replace("\t", "    ")
+        line = line.expandtabs(4)
         k, rest = going_on(line, containers)
         if fence:
             if k == len(containers):
@@ -693,6 +696,8 @@ def self_test():
         ("a list item in a quote ends with the quote", head + "> - ```\n>   ## inside\n>   ```\n## after\n", [1, 5]),
         ("a heading in a list item outside a fence is one", head + "- item\n  ## sub\n", [1, 3]),
         ("a thematic break opens no list item", head + "- - -\n  ```\n## a\n", [1]),
+        ("two spaces and a tab reach column four, so a fence two columns into an item opens in it",
+         head + "- item\n  \t```\n  ## sample\n  ```\n", [1]),
     ]
     for name, text, want in lists:
         expect(name, h2_lines(text), want)
