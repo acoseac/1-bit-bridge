@@ -161,8 +161,9 @@ func TestEveryClaimNamesItsProvenance(t *testing.T) {
 // cites no registry row, which would name an iOS commit that does not hold
 // it: each form lints clean beside a DoP claim sourced to the listening, and
 // a submission with no date, a date that is none, a date run into its text,
-// a submission of another kind, and a DoP claim that cites the registry beside
-// a submission are each refused.
+// a submission of another kind, a submission whose free text holds an email
+// address (refused as in every source), and a DoP claim that cites the
+// registry beside a submission are each refused.
 func TestARowAddedPastTheRegistryNamesItsSubmission(t *testing.T) {
 	submission := func(line string) func(db *Database) {
 		return func(db *Database) {
@@ -187,6 +188,7 @@ func TestARowAddedPastTheRegistryNamesItsSubmission(t *testing.T) {
 		{"a submission on a date that is none", submission("ios: wizard submission 2026-13-45"), "own registry row"},
 		{"a submission's date run into its text", submission("ios: wizard submission 2026-11-19th"), "own registry row"},
 		{"a submission of another kind", submission("ios: forum submission 2026-11-19"), "own registry row"},
+		{"a submission whose free text holds an email", submission("ios: wizard submission 2026-11-19 (sent from someone@example.org)"), "holds an email address"},
 		{"a DoP claim that cites the registry beside a submission", func(db *Database) {
 			db.Profiles[0].Provenance[1] = "ios: wizard submission 2026-11-19"
 		}, "the profile's ios line names a submission"},
