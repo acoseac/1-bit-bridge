@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -410,12 +413,12 @@ func TestTheBackupIsNotPutBackOverSettingsItDidNotCheck(t *testing.T) {
 // is read again once the install marker's lock is held, after the backup's
 // runs, and the rollback acts only on what it reads then. Another install's
 // marker, saved while the backup was checked, is left as it was written,
-// nothing said, recorded or renamed over it. The same install, its marker now
-// naming another version as the one it replaced, is refused in the words the
-// backup's version has always been refused in, its answer held to the marker
-// read again. And an install made again meanwhile, its versions and its count
-// as they were and its AttemptedAt alone moved, is refused as another install
-// than the one the backup was checked for.
+// nothing said, recorded or renamed over it. A marker of the install's target
+// and attempt that names another version as the one it replaced is refused in
+// the words the backup's version has always been refused in, its answer held
+// to the marker read again. And an install made again meanwhile, its versions
+// and its count as they were and its AttemptedAt alone moved, is refused as
+// another install than the one the backup was checked for.
 func TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock(t *testing.T) {
 	t.Run("another install's marker", func(t *testing.T) {
 		r := crashInstallAtTheLimit(t)
@@ -589,4 +592,246 @@ func TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked(t *testing
 		}}
 		requirePutBack(t, r, crashRollBack(t.Context(), t, r, b))
 	})
+}
+
+// TestARefusalBeforeTheLockIsNotRecordedOverAnotherReplacedVersion: a
+// refusal decided before the install marker's lock is said and recorded under
+// it only where the marker read again is the install the refusal was decided
+// for, its TargetVersion, its PreviousVersion and its AttemptedAt
+// (refuseCrashRollbackBeforeTheLock). A marker that names another version as
+// the one the install replaced, its target, its attempt and its count as they
+// were and the crash rollback still asked for, is another install's: the
+// refusal, decided of the install the marker no longer describes, is neither
+// said nor recorded over it, whichever of the backup's runs refused, and the
+// next start asks again. Each run's stand-in saves that marker, then answers
+// its refusal.
+func TestARefusalBeforeTheLockIsNotRecordedOverAnotherReplacedVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		runs func(replaced func()) *backupRuns
+	}{
+		{"the backup's version did not answer", func(replaced func()) *backupRuns {
+			return &backupRuns{version: func(context.Context) (string, error) {
+				replaced()
+				return "", errors.New("the version's run ended with no answer")
+			}}
+		}},
+		{"the backup refused the settings", func(replaced func()) *backupRuns {
+			return &backupRuns{check: func(context.Context) updater.ConfigCheck {
+				replaced()
+				return updater.ConfigCheck{Verdict: updater.ConfigRefused, Reasons: []string{"line 3: a key the backup does not know"}}
+			}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := crashInstallAtTheLimit(t)
+			binaries := watch(t, r.bin, r.bak)
+			var written watchedFiles
+			replaced := func() {
+				st := markerOf(t, r.dataDir)
+				st.PreviousVersion = "0.0.0-other"
+				if ok, why := updater.CrashRollback(st, version.ServerVersion); !ok {
+					t.Fatalf("the marker changed to %+v asks for no crash rollback (%q): the test shows nothing", st, why)
+				}
+				if err := updater.SaveState(r.dataDir, st); err != nil {
+					t.Fatal(err)
+				}
+				written = watch(t, updater.StatePath(r.dataDir))
+			}
+			got := crashRollBack(t.Context(), t, r, tc.runs(replaced))
+			requireLeft(t, r, got, binaries)
+			if written == nil {
+				t.Fatal("no run of the backup saved the marker: the test shows nothing")
+			}
+			written.requireUnchanged(t)
+			if lines := updaterLines(got.stderr); lines != "" {
+				t.Errorf("the crash rollback spoke over a marker naming another replaced version: %q", lines)
+			}
+			if st := markerOf(t, r.dataDir); st.RollbackRefused != "" {
+				t.Errorf("the marker's refusal = %q, want none recorded over another install", st.RollbackRefused)
+			}
+		})
+	}
+}
+
+// TestARefusalBeforeTheLockIsSaidAndRecordedNowhereWhileTheLockIsHeld: a
+// refusal decided before the install marker's lock, where another holder keeps
+// that lock for the whole of LockState's wait (an install between its decision
+// and its swap, say), is said from the marker checked and recorded nowhere,
+// since only the lock's holder writes the marker: the install marker and both
+// binaries are left byte for byte as they were. The case holds the lock
+// through an open of the lock file of its own, which a take in this process
+// waits on as on another process's (markersLockHeld), with the wait
+// shortened and serve's context live, so the helper's take ends at its wait's
+// end with LockState's *updater.StateLockError, never at a stop: the same take
+// answers that error before the rollback runs, the rollback's take is heard
+// waiting on the held lock, the context has not ended once it returns, and the
+// case's own take shows the filesystem keeps locks.
+func TestARefusalBeforeTheLockIsSaidAndRecordedNowhereWhileTheLockIsHeld(t *testing.T) {
+	r := crashInstallAtTheLimit(t)
+	lock := updater.StateLockPath(r.dataDir)
+	f, err := fsutil.OpenLockFile(filepath.Dir(lock), filepath.Base(lock))
+	if err != nil {
+		t.Fatalf("open the install marker's lock file: %v", err)
+	}
+	if err := fsutil.TryLock(f); err != nil {
+		_ = f.Close()
+		t.Fatalf("take the install marker's lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = fsutil.Unlock(f)
+		_ = f.Close()
+	})
+	t.Cleanup(updater.SetStateLockWaitForTest(100 * time.Millisecond))
+	waits := 0
+	t.Cleanup(updater.SetStateLockWaitingForTest(func(dataDir string) {
+		if dataDir == r.dataDir {
+			waits++
+		}
+	}))
+	ctx := t.Context()
+	var refused *updater.StateLockError
+	if l, err := updater.LockState(ctx, r.dataDir); !errors.As(err, &refused) || !errors.Is(err, updater.ErrStateLockHeld) ||
+		ctx.Err() != nil || waits != 1 {
+		l.Release()
+		t.Fatalf("the install marker's lock, held for the case, answered %+v, %v after %d waits (the context's end: %v); "+
+			"want a *updater.StateLockError of a lock held for the whole wait, after one, the context live", l, err, waits, ctx.Err())
+	}
+	files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
+	const reason = "line 3: a key the backup does not know"
+	b := &backupRuns{check: func(context.Context) updater.ConfigCheck {
+		return updater.ConfigCheck{Verdict: updater.ConfigRefused, Reasons: []string{reason}}
+	}}
+	got := crashRollBack(ctx, t, r, b)
+	want := []string{"the backup's version " + lockFound(true), "the backup's settings check " + lockFound(true)}
+	if !slices.Equal(b.asked, want) {
+		t.Errorf("the backup was asked %q; want %q, the case's hold standing", b.asked, want)
+	}
+	if got.code != 0 || got.acted || len(got.renames) != 0 {
+		t.Errorf("the crash rollback = %d (acted %v) after %d renames, want it to leave the install; stderr=%s",
+			got.code, got.acted, len(got.renames), got.stderr)
+	}
+	const said = "refuses this bridge's settings, so it would not start on them: " + reason
+	if lines := updaterLines(got.stderr); !strings.Contains(lines, "not rolling back the install") || !strings.Contains(lines, said) {
+		t.Errorf("the start did not say %q; its updater lines: %q", said, lines)
+	}
+	files.requireUnchanged(t)
+	if waits != 2 || ctx.Err() != nil {
+		t.Errorf("the rollback's take of the held lock was heard waiting %d times (the context's end: %v); want once, the context live",
+			waits-1, ctx.Err())
+	}
+}
+
+// TestTheCrashRollbackFixesTheBackupsIdentityThroughAHandle: the identity the
+// crash rollback holds its backup to under the install marker's lock is the
+// stat of a handle opened on the backup before its runs (fsutil.OpenAsFile's
+// stat of the file it opened), never a bare Lstat's. What rests on it is
+// Windows' alone: there an Lstat's file ID is read by path when os.SameFile
+// first compares it (Go 1.27.3's os/types_windows.go, sameFile and
+// loadFileId), so an Lstat taken before the runs and compared under the lock
+// would take a file put in the backup's place meanwhile for the backup, where
+// elsewhere an Lstat carries its device and inode as it is taken, and the
+// replacements of TestABackupChangedWhileItWasCheckedIsNotPutBack are refused
+// either way. So the source is read, on every host: in recoverCrashedInstall
+// the second result of its one fsutil.OpenAsFile is the identity, which
+// nothing else there binds, and every os.SameFile there compares it, one of
+// them after the install marker's lock is taken.
+func TestTheCrashRollbackFixesTheBackupsIdentityThroughAHandle(t *testing.T) {
+	const name = "serve_crashed_install.go"
+	raw, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, name, strings.ReplaceAll(string(raw), "\r\n", "\n"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if d, ok := d.(*ast.FuncDecl); ok && d.Recv == nil && d.Name.Name == "recoverCrashedInstall" && d.Body != nil {
+			fn = d
+		}
+	}
+	if fn == nil {
+		t.Fatalf("%s declares no recoverCrashedInstall", name)
+	}
+	calls := func(n ast.Node, pkg, function string) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != function {
+			return false
+		}
+		id, ok := sel.X.(*ast.Ident)
+		return ok && id.Name == pkg
+	}
+	identity, opens, lockAt := "", 0, token.NoPos
+	var sameFiles []*ast.CallExpr
+	bound := map[string][]token.Pos{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					bound[id.Name] = append(bound[id.Name], n.Pos())
+				}
+			}
+			if len(n.Lhs) == 3 && len(n.Rhs) == 1 && calls(n.Rhs[0], "fsutil", "OpenAsFile") {
+				if id, ok := n.Lhs[1].(*ast.Ident); ok && id.Name != "_" {
+					identity = id.Name
+				}
+			}
+		case *ast.ValueSpec:
+			for _, id := range n.Names {
+				bound[id.Name] = append(bound[id.Name], n.Pos())
+			}
+		case *ast.CallExpr:
+			switch {
+			case calls(n, "fsutil", "OpenAsFile"):
+				opens++
+			case calls(n, "os", "SameFile"):
+				sameFiles = append(sameFiles, n)
+			case calls(n, "updater", "LockState") && lockAt == token.NoPos:
+				lockAt = n.Pos()
+			}
+		}
+		return true
+	})
+	if opens != 1 {
+		t.Errorf("recoverCrashedInstall calls fsutil.OpenAsFile %d times, want once: the handle whose stat is the backup's identity", opens)
+	}
+	if identity == "" {
+		t.Fatal("recoverCrashedInstall binds no fsutil.OpenAsFile handle's stat to a name: the backup's identity is not a handle's")
+	}
+	if at := bound[identity]; len(at) != 1 {
+		var where []string
+		for _, p := range at {
+			where = append(where, fset.Position(p).String())
+		}
+		t.Errorf("%s is bound %d times in recoverCrashedInstall (%s), want once, by fsutil.OpenAsFile: bound again, it may be a bare Lstat's",
+			identity, len(at), strings.Join(where, ", "))
+	}
+	if lockAt == token.NoPos {
+		t.Fatal("recoverCrashedInstall takes no updater.LockState: the test shows nothing")
+	}
+	afterLock := 0
+	for _, call := range sameFiles {
+		if !slices.ContainsFunc(call.Args, func(arg ast.Expr) bool {
+			id, ok := arg.(*ast.Ident)
+			return ok && id.Name == identity
+		}) {
+			t.Errorf("the os.SameFile at %s does not compare %s, the handle's stat: on Windows a bare Lstat's file ID is read by path "+
+				"as it is compared", fset.Position(call.Pos()), identity)
+		}
+		if call.Pos() > lockAt {
+			afterLock++
+		}
+	}
+	if afterLock == 0 {
+		t.Errorf("none of recoverCrashedInstall's %d os.SameFile calls comes after its updater.LockState: the backup is not held to "+
+			"its identity under the lock", len(sameFiles))
+	}
 }

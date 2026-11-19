@@ -73,10 +73,13 @@ import (
 // the exclusion), and the decision made again under it with nothing run
 // again: the marker still asks for the rollback, the version the backup
 // answered is its PreviousVersion, the install is the one the runs were asked
-// for (its TargetVersion and AttemptedAt), the backup is the file they ran
-// (os.SameFile, its size, its modification time) and the settings have the
-// digest they were read with; then the hold and the veto recorded durably
-// before the rename, and the marker put back where the rename fails. A
+// for (its TargetVersion and AttemptedAt compared, its PreviousVersion held
+// through the version the backup answered, which matched the marker checked
+// before the lock and must match the one read again under it: the three
+// fields refuseCrashRollbackBeforeTheLock compares), the backup is the file
+// they ran (os.SameFile, its size, its modification time) and the settings
+// have the digest they were read with; then the hold and the veto recorded
+// durably before the rename, and the marker put back where the rename fails. A
 // refusal decided before the lock is said, then recorded under the lock that
 // refuseCrashRollbackBeforeTheLock takes for it; a change found under the
 // lock refuses this start's rollback, said and recorded, and the next start of
@@ -400,16 +403,18 @@ func refuseCrashRollbackOnARead(ctx context.Context, dataDir, current, why, then
 // backup's version and its settings check), and records it under the lock,
 // which it takes for that and lets go: said once and recorded (said, then
 // recorded, which names no path) from the marker read again under it where
-// the same install (its TargetVersion and AttemptedAt) still asks for the
-// rollback; where the marker read again refuses the rollback itself, its own
-// why said and recorded; and nothing said or written where it is another
-// install, or none the rollback acts on. Where the lock cannot be held,
-// serve's stop has come (a lock that needed no wait is taken on a context
-// that has ended), or the marker cannot be read again, said from checked and
-// nothing recorded. Called only while this process does not hold the lock, a
-// kernel lock on an open file, which a second take in one process waits on
-// as on another process's hold. Nothing is put back. then is what the start
-// does next (crashRollbackLine).
+// the same install still asks for the rollback, its TargetVersion, its
+// PreviousVersion and its AttemptedAt as checked has them (the three the main
+// path holds the marker read again to, its PreviousVersion there through the
+// version the backup answered); where the marker read again refuses the
+// rollback itself, its own why said and recorded; and nothing said or written
+// where it is another install, or none the rollback acts on. Where the lock
+// cannot be held, serve's stop has come (a lock that needed no wait is taken
+// on a context that has ended), or the marker cannot be read again, said from
+// checked and nothing recorded. Called only while this process does not hold
+// the lock, a kernel lock on an open file, which a second take in one process
+// waits on as on another process's hold. Nothing is put back. then is what the
+// start does next (crashRollbackLine).
 func refuseCrashRollbackBeforeTheLock(ctx context.Context, dataDir, current string, checked updater.State, said, recorded, then string,
 	save func(string, updater.State) error, stderr io.Writer) {
 	lock, err := updater.LockState(ctx, dataDir)
@@ -428,7 +433,8 @@ func refuseCrashRollbackBeforeTheLock(ctx context.Context, dataDir, current stri
 	case why != "":
 		crashRollbackLine(stderr, st, why, then)
 		recordCrashRollbackRefusal(dataDir, st, why, save, stderr)
-	case ok && updater.SameVersion(st.TargetVersion, checked.TargetVersion) && st.AttemptedAt.Equal(checked.AttemptedAt):
+	case ok && updater.SameVersion(st.TargetVersion, checked.TargetVersion) &&
+		updater.SameVersion(st.PreviousVersion, checked.PreviousVersion) && st.AttemptedAt.Equal(checked.AttemptedAt):
 		crashRollbackLine(stderr, st, said, then)
 		recordCrashRollbackRefusal(dataDir, st, recorded, save, stderr)
 	}
