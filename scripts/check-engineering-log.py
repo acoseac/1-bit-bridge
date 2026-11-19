@@ -746,6 +746,24 @@ def self_test():
     ]
     for name, text, want in definitions:
         expect(name, h2_lines(text), want)
+    # A tab is read at four-column stops where the blocks are read, and is one character of a
+    # paragraph's text, as CommonMark counts a label's 999: each row as lists'.
+    label = "[" + "a" * 997 + "\tb]"  # 999 characters between its brackets, one of them a tab
+    tabs = [
+        ("a label's 999 characters count a tab as one", head + label + ": /url\n===\n2. ```\n   ## stray\n```\n", [1, 5]),
+        ("and 1,000 are refused, a tab among them",
+         head + "[" + "a" * 998 + "\tb]: /url\n===\n2. ```\n   ## inside\n   ```\n", [1]),
+        ("a tab that indents a paragraph's later line is no character of the label on it",
+         head + "[ref]: /url\n\t" + label + ": /u2\n===\n2. ```\n   ## stray\n```\n", [1, 6]),
+        ("a tab after a list marker is the spaces after it, so its item holds the fence it opens",
+         head + "-\t```\n2. ```\n   ## h\n", [1]),
+        ("a tab after a quote marker gives its space and two columns, so the quote holds a fence and foo ends both",
+         head + ">\t```\nfoo\n2. ```\n   ## h\n", [1, 5]),
+        ("tabs between a thematic break's stars keep it one, so 2. after it opens an item",
+         head + "\nparagraph\n*\t*\t*\n2. ```\n   ## inside\n   ```\n", [1]),
+    ]
+    for name, text, want in tabs:
+        expect(name, h2_lines(text), want)
     twice = ["holds 2 `## ` lines outside fenced code, not one: each entry is a file of its own"]
     expect("so those entries are refused, and the valid ones accepted",
            [content_problems(good, text.encode("utf-8")) for text in (empty_then_blank, two_after_text, lazy, two_as_text)],
