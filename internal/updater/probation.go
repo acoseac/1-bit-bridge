@@ -433,7 +433,9 @@ func ProbationStatus(st State, current string, running bool) Probation {
 // of the running version current, this process has been up for less than
 // twice ProbationWindow, and the crash rollback would put back the backup
 // beside binaryPath, the binary serve runs as: no rollback of it was refused
-// (State.RollbackRefused), the backup is there (a regular file at
+// (State.RollbackRefused, which cmd/bridge's crash rollback leaves unrecorded
+// for a backup it could not inspect: backlog B898FU's round 3, where such a
+// record had ended this hold), the backup is there (a regular file at
 // binaryPath+".bak") or its lookup fails otherwise than finding nothing
 // there, which cannot tell (backlog B898FU's round 2: until then a failed
 // lookup held nothing), and the crash rollback's own checks of the marker
