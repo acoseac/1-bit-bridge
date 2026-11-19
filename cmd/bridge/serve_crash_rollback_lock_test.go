@@ -337,6 +337,62 @@ func TestTheCrashRollbackTellsABackupItCannotInspectFromNone(t *testing.T) {
 	}
 }
 
+// TestTheCrashRollbackRecordsTheMarkersOwnRefusalBesideABackupItCannotInspect:
+// a start whose lookup of the backup fails, a refusal it records nowhere
+// (backlog B898FU's round 3), still records the refusal of the marker it reads
+// again under the install marker's lock where that marker refuses the rollback
+// itself: here a migration of the store, recorded while the start waited for
+// the lock by the holder the case stands in for, which let the lock go once it
+// had written it, as a migrating store open does. The line says the marker's
+// why alone. The lock is held through an open of its lock file of the case's
+// own (markersLockHeld), and the holder writes when the start's take first
+// finds it held, on the start's goroutine.
+func TestTheCrashRollbackRecordsTheMarkersOwnRefusalBesideABackupItCannotInspect(t *testing.T) {
+	r := crashInstallAtTheLimit(t)
+	binaries := watch(t, r.bin, r.bak)
+	binaryPath, recovered := inspectionFailures[0].laid(t, r.bin)
+	lock := updater.StateLockPath(r.dataDir)
+	held, err := fsutil.OpenLockFile(filepath.Dir(lock), filepath.Base(lock))
+	if err != nil {
+		t.Fatalf("open the install marker's lock file: %v", err)
+	}
+	if err := fsutil.TryLock(held); err != nil {
+		_ = held.Close()
+		t.Fatalf("take the install marker's lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = fsutil.Unlock(held)
+		_ = held.Close()
+	})
+	migrated := false
+	t.Cleanup(updater.SetStateLockWaitingForTest(func(dataDir string) {
+		if dataDir != r.dataDir || migrated {
+			return
+		}
+		migrated = true
+		st := markerOf(t, r.dataDir)
+		st.StoreMigratedBy = version.ServerVersion
+		if err := updater.SaveState(r.dataDir, st); err != nil {
+			t.Errorf("record the migration: %v", err)
+		}
+		if err := fsutil.Unlock(held); err != nil {
+			t.Errorf("let the install marker's lock go: %v", err)
+		}
+	}))
+	given := *r
+	given.bin = binaryPath
+	got := crashRollBack(t.Context(), t, &given, &backupRuns{})
+	recovered()
+	if !migrated {
+		t.Fatalf("the start never waited for the lock held for the case: the test shows nothing; stderr=%s", got.stderr)
+	}
+	requireLeft(t, r, got, binaries)
+	requireRefusal(t, r, got.stderr, "began a migration of the store", "began a migration of the store")
+	if lines := updaterLines(got.stderr); strings.Contains(lines, "could not be inspected") {
+		t.Errorf("the start said the lookup's refusal beside the marker's own; its updater lines: %q", lines)
+	}
+}
+
 // TestTheCrashRollbackTellsABackupItCannotOpenFromNone: a backup whose lookup
 // finds a regular file that this user may not open, its read permission
 // taken off, is refused before the install marker's lock in the open's own
