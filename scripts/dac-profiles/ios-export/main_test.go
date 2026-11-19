@@ -520,11 +520,37 @@ func parity(base baseline, add declared, exported []byte, siblings []string) []s
 	return problems
 }
 
+// iosLineProblems is every ios line of ps that names its source otherwise than
+// the baseline says, a sentence each: a row the baseline holds names its own
+// registry row ("ios: DACProfile.swift <id> at iOS <commit>"), and a row added
+// past it the dated wizard submission it came from ("ios: wizard submission
+// <date>"), never an iOS commit, which holds no such row. The lint takes
+// either form on any row, having no baseline, so this boundary is held here
+// alone (B944).
+func iosLineProblems(base baseline, ps []dacprofile.Profile) []string {
+	inBase := map[string]bool{}
+	for _, w := range base.Rows {
+		inBase[w["id"].(string)] = true
+	}
+	var problems []string
+	for _, p := range ps {
+		for _, line := range p.Provenance {
+			text, ok := strings.CutPrefix(line, "ios: ")
+			if !ok {
+				continue
+			}
+			if cites := strings.HasPrefix(text, "DACProfile.swift "); cites != inBase[p.ID] {
+				problems = append(problems, fmt.Sprintf("%s: its ios line is %q, and the baseline holds the row %v: a row of the baseline names its own registry row, a row added past it its submission", p.ID, line, inBase[p.ID]))
+			}
+		}
+	}
+	return problems
+}
+
 // TestTheExportMatchesTheIOSBaseline: the baseline is the dispatch's, by its
 // SHA-256; the export and the catalog's known siblings are the baseline's and
-// then the declared additions', every check parity makes; and a row of the
-// baseline names its own registry row in its ios line while a row added past
-// it names its dated submission, never an iOS commit that does not hold it.
+// then the declared additions', every check parity makes; and every ios line
+// of the catalog names the source the baseline says (iosLineProblems).
 func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
 	base := readBaseline(t)
 	db, err := dacprofile.Default()
@@ -534,16 +560,65 @@ func TestTheExportMatchesTheIOSBaseline(t *testing.T) {
 	for _, p := range parity(base, additions, fresh(t), db.IOSKnownSiblings) {
 		t.Error(p)
 	}
-	inBase := map[string]bool{}
-	for _, w := range base.Rows {
-		inBase[w["id"].(string)] = true
+	for _, p := range iosLineProblems(base, db.Profiles) {
+		t.Error(p)
 	}
-	for _, p := range db.Profiles {
-		for _, line := range p.Provenance {
-			if text, ok := strings.CutPrefix(line, "ios: "); ok && strings.HasPrefix(text, "DACProfile.swift ") != inBase[p.ID] {
-				t.Errorf("%s: its ios line is %q, and the baseline holds the row %v: a row of the baseline names its own registry row, a row added past it its submission", p.ID, line, inBase[p.ID])
+}
+
+// TestTheBaselineDecidesWhichIOSLineARowNames: iosLineProblems holds the
+// boundary the lint cannot, with no baseline, on catalogs the lint takes: a
+// row of the baseline (the FiiO KA17) whose ios line is rewritten as a wizard
+// submission, its DoP claim moved to the listening, and the row added past it
+// (the ZH3) whose ios line cites its registry row at iOS 3145606a are each
+// refused, naming the row; each has a counterpart that differs in the form
+// alone and passes, the KA17 citing its own row at that commit and the ZH3
+// naming a submission on another day.
+func TestTheBaselineDecidesWhichIOSLineARowNames(t *testing.T) {
+	base := readBaseline(t)
+	ios := func(line string) func(p *dacprofile.Profile) {
+		return func(p *dacprofile.Profile) {
+			for j, l := range p.Provenance {
+				if strings.HasPrefix(l, "ios: ") {
+					p.Provenance[j] = line
+				}
 			}
 		}
+	}
+	for _, tc := range []struct {
+		name, id string
+		edit     func(p *dacprofile.Profile)
+		want     string // the problem's words, or "" for none
+	}{
+		{"a baseline row naming a submission", "fiio.ka17", func(p *dacprofile.Profile) {
+			ios("ios: wizard submission 2026-11-02")(p)
+			p.DoP.Source = dacprofile.Source{Kind: dacprofile.SourceListening, Ref: "wizard submission 2026-11-02"}
+		}, `fiio.ka17: its ios line is "ios: wizard submission 2026-11-02", and the baseline holds the row true`},
+		{"a baseline row citing its own row", "fiio.ka17", ios("ios: DACProfile.swift fiio.ka17 at iOS 3145606a"), ""},
+		{"an added row citing the registry", "fosiaudio.zh3", ios("ios: DACProfile.swift fosiaudio.zh3 at iOS 3145606a"),
+			`fosiaudio.zh3: its ios line is "ios: DACProfile.swift fosiaudio.zh3 at iOS 3145606a", and the baseline holds the row false`},
+		{"an added row naming a submission", "fosiaudio.zh3", ios("ios: wizard submission 2026-11-20"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := dacprofile.Default()
+			if err != nil {
+				t.Fatal(err)
+			}
+			i := slices.IndexFunc(db.Profiles, func(p dacprofile.Profile) bool { return p.ID == tc.id })
+			if i < 0 {
+				t.Fatalf("the catalog holds no %s row", tc.id)
+			}
+			tc.edit(&db.Profiles[i])
+			if problems := db.Lint(); len(problems) > 0 {
+				t.Fatalf("the edited catalog lints as %v, and each case is one the lint takes", problems)
+			}
+			problems := iosLineProblems(base, db.Profiles)
+			switch {
+			case tc.want == "" && len(problems) > 0:
+				t.Errorf("iosLineProblems says %q, want nothing", problems)
+			case tc.want != "" && !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, tc.want) }):
+				t.Errorf("iosLineProblems says %q, want a problem saying %q", problems, tc.want)
+			}
+		})
 	}
 }
 
