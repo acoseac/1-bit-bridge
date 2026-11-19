@@ -770,6 +770,14 @@ def self_test():
          head + "[a\\q]: /url\n===\n2. ```\n   ## stray\n```\n", [1, 5]),
         ("and so is one before a line end, which the label holds too",
          head + "[a\\\nb]: /url\n===\n2. ```\n   ## stray\n```\n", [1, 6]),
+        ("a title on the line after its destination is the definition's, so the underline is more of the paragraph",
+         head + "[ref]: /url\n\"title\"\n===\n2. ```\n   ## stray\n```\n", [1, 6]),
+        ("text after that title ends the definition at its destination's line, so its line is text and the underline a heading's",
+         head + "[ref]: /url\n\"title\" ok\n===\n2. ```\n   ## inside\n   ```\n", [1]),
+        ("a title indented on the next line, then a second definition, leave the underline no text",
+         head + "[ref]: /url\n  \"title\"\n[two]: /u2\n===\n2. ```\n   ## stray\n```\n", [1, 7]),
+        ("a title across two lines with text after it defines nothing, its destination ending no line",
+         head + "[ref]: /url \"line1\nline2\" trailing\n===\n2. ```\n   ## inside\n   ```\n", [1]),
     ]
     for name, text, want in definitions:
         expect(name, h2_lines(text), want)
