@@ -565,21 +565,22 @@ func TestTheBootRollbackLeavesABackupThatIsNotThePreviousVersion(t *testing.T) {
 // the binary, the backup and the marker byte for byte, nothing put back, and
 // said; the next start asks again, and once the backup answers puts it back.
 // A stop while the backup answers leaves the install so too, and is the
-// housekeeping's answer. A backup that is not there, which is never asked,
-// and one that says another version still clear the install, the backup left
-// where it is. Each row is an install of its own, armed, its backup in place.
+// housekeeping's answer. A backup that is not there or is no regular file,
+// which is never asked, and one that says another version still clear the
+// install, the backup left where it is. Each row is an install of its own,
+// armed, its backup in place.
 func TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// noBackup removes the backup before the boot; answer is the
-		// backup's to the version's ask, on the boot's context, which stop
-		// cancels.
-		noBackup bool
-		answer   func(ctx context.Context, stop context.CancelFunc) (string, error)
-		asked    int
-		stopped  bool
-		kept     bool
-		says     []string
+		// noBackup removes the backup before the boot, and dirBackup puts a
+		// directory in its place; answer is the backup's to the version's
+		// ask, on the boot's context, which stop cancels.
+		noBackup, dirBackup bool
+		answer              func(ctx context.Context, stop context.CancelFunc) (string, error)
+		asked               int
+		stopped             bool
+		kept                bool
+		says                []string
 	}{
 		{name: "it did not answer within its bound",
 			answer: func(context.Context, context.CancelFunc) (string, error) {
@@ -594,6 +595,8 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion(t *testi
 			says: []string{"stopped while the backup said its version"}},
 		{name: "no backup", noBackup: true,
 			says: []string{"there is no backup to put back"}},
+		{name: "a directory where the backup goes", dirBackup: true,
+			says: []string{"there is no backup to put back"}},
 		{name: "another version",
 			answer: func(context.Context, context.CancelFunc) (string, error) { return "0.0.0-older", nil },
 			asked:  1,
@@ -604,11 +607,16 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion(t *testi
 			r.marker.TargetVersion = "9.9.9"
 			r.saveMarker(t, r.dataDir)
 			watched := []string{r.bin, r.bak}
-			if tc.noBackup {
+			if tc.noBackup || tc.dirBackup {
 				if err := os.Remove(r.bak); err != nil {
 					t.Fatal(err)
 				}
 				watched = []string{r.bin}
+			}
+			if tc.dirBackup {
+				if err := os.Mkdir(r.bak, 0o755); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if tc.kept {
 				watched = append(watched, updater.StatePath(r.dataDir))
@@ -647,6 +655,137 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion(t *testi
 			// production restore.
 			stderr.Reset()
 			if err := bootHousekeepingWith(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, bootSeams{
+				probeVersion: func(context.Context, string, time.Duration) (string, error) { return r.marker.PreviousVersion, nil },
+				probeBound:   testBackupProbeTimeout}); err != nil || !strings.Contains(stderr.String(), "rolling back to .bak") {
+				t.Fatalf("the next start's housekeeping = %v, want it to put the backup back; stderr=%s", err, stderr.String())
+			}
+			if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
+				t.Errorf("the binary reports %q after the next start, want %s", got, previousVersion)
+			}
+			if st := markerOf(t, r.dataDir); updater.InstallArmed(st) || st.MigrationVeto != "9.9.9" {
+				t.Errorf("the marker after the next start = %+v, want the install cleared, its version's migrations vetoed", st)
+			}
+		})
+	}
+}
+
+// inspectionFailure is a way a lookup of the backup beside an install's
+// binary fails otherwise than finding nothing there, which shows no backup
+// absent (backlog B898FU's round 2): lay makes the lookup of the backup
+// beside bin fail with cause, and returns the binary's path a rollback is to
+// be given, the backup at that path and .bak, and recovered, which lets the
+// filesystem recover, after which that path reaches bin and its backup.
+type inspectionFailure struct {
+	name  string
+	cause error
+	lay   func(t *testing.T, bin string) (binaryPath string, recovered func())
+}
+
+// laid is f laid over the backup beside bin, its premise required: a lookup
+// of the backup at the binary's path it returns fails with f's cause.
+func (f inspectionFailure) laid(t *testing.T, bin string) (string, func()) {
+	t.Helper()
+	binaryPath, recovered := f.lay(t, bin)
+	if _, err := os.Lstat(binaryPath + ".bak"); !errors.Is(err, f.cause) {
+		recovered()
+		t.Fatalf("the premise: a lookup of the backup answered %v, want %v", err, f.cause)
+	}
+	return binaryPath, recovered
+}
+
+// inspectionFailures are the boot, the early and the crash rollbacks' backups
+// that cannot be inspected: a directory this user may not search, which needs
+// POSIX modes and a user that is not root, whom no mode refuses, and a link
+// loop on the way, which needs symbolic links, which Windows gives only with
+// a privilege; neither runs on Windows, as the package's other such fixtures.
+var inspectionFailures = []inspectionFailure{
+	{"a directory this user may not search", fs.ErrPermission, func(t *testing.T, bin string) (string, func()) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("a directory this user may not search needs POSIX modes and a user that is not root")
+		}
+		dir := filepath.Dir(bin)
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, fi.Mode().Perm()) })
+		return bin, func() {
+			if err := os.Chmod(dir, fi.Mode().Perm()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}},
+	{"a link loop on the way", syscall.ELOOP, func(t *testing.T, bin string) (string, func()) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a link loop needs symbolic links, which Windows gives only with a privilege")
+		}
+		loop := filepath.Join(filepath.Dir(filepath.Dir(bin)), "loop")
+		if err := os.Symlink("loop", loop); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(loop, filepath.Base(bin)), func() {
+			// The link repointed at the binary's directory, through which the
+			// path reaches the binary and its backup.
+			if err := os.Remove(loop); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Dir(bin), loop); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}},
+}
+
+// TestTheBootRollbackKeepsItsMarkerWhereTheBackupCannotBeInspected: a boot
+// rollback whose lookup of the backup fails otherwise than finding nothing
+// there (inspectionFailures) shows no backup absent, and leaves the install
+// as one whose backup did not say its version (backlog B898FU's round 2): the
+// housekeeping answers nil, the backup is asked nothing and nothing is put
+// back, the binary, the backup and the marker are as they were byte for byte
+// once the filesystem has recovered, and the line says so; the next start
+// then asks the backup and puts it back. Until then the failed lookup was
+// taken for no backup, and the install cleared, so no later start could roll
+// it back.
+func TestTheBootRollbackKeepsItsMarkerWhereTheBackupCannotBeInspected(t *testing.T) {
+	for _, f := range inspectionFailures {
+		t.Run(f.name, func(t *testing.T) {
+			r := newRefusedInstall(t, "")
+			r.marker.TargetVersion = "9.9.9"
+			r.saveMarker(t, r.dataDir)
+			files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
+			binaryPath, recovered := f.laid(t, r.bin)
+			asked, restored := 0, 0
+			var stderr bytes.Buffer
+			err := bootHousekeepingWith(t.Context(), &stderr, r.dataDir, binaryPath, previousVersion, bootSeams{
+				restore: func(string, string) error { restored++; return nil },
+				probeVersion: func(context.Context, string, time.Duration) (string, error) {
+					asked++
+					return r.marker.PreviousVersion, nil
+				},
+				probeBound: testBackupProbeTimeout})
+			recovered()
+			if err != nil {
+				t.Fatalf("the housekeeping = %v, want nil; stderr=%s", err, stderr.String())
+			}
+			files.requireUnchanged(t)
+			if asked != 0 || restored != 0 {
+				t.Errorf("the backup was asked its version %d time(s) and put back %d, want neither", asked, restored)
+			}
+			if st := markerOf(t, r.dataDir); !updater.InstallArmed(st) {
+				t.Errorf("the marker = %+v, want the install kept; stderr=%s", st, stderr.String())
+			}
+			for _, s := range []string{"the backup did not say its version: it could not be inspected", "the install's marker is kept"} {
+				if !strings.Contains(stderr.String(), s) {
+					t.Errorf("the housekeeping did not say %q; stderr=%s", s, stderr.String())
+				}
+			}
+			// The next start, the filesystem recovered and the backup
+			// answering, puts it back through the production restore.
+			stderr.Reset()
+			if err := bootHousekeepingWith(t.Context(), &stderr, r.dataDir, binaryPath, previousVersion, bootSeams{
 				probeVersion: func(context.Context, string, time.Duration) (string, error) { return r.marker.PreviousVersion, nil },
 				probeBound:   testBackupProbeTimeout}); err != nil || !strings.Contains(stderr.String(), "rolling back to .bak") {
 				t.Fatalf("the next start's housekeeping = %v, want it to put the backup back; stderr=%s", err, stderr.String())

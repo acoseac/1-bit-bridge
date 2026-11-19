@@ -146,6 +146,32 @@ func TestTheAutoInstallerDoesNotWaitWithoutABackup(t *testing.T) {
 	requireNoWait(t, upd, auto)
 }
 
+// TestTheAutoInstallerWaitsWhereTheBackupCannotBeLookedUp: a lookup of the
+// backup beside the binary that fails otherwise than finding nothing there (a
+// permission, a link loop on the way) cannot tell whether a crash rollback
+// would put a backup back, so the running install's probation holds the
+// automatic install as it does beside a backup there, at most twice the
+// window, its reason naming no path (backlog B898FU's round 2); until then
+// that lookup read as no backup, and nothing was held. Nothing there, no
+// regular file there, or a binary path that names none still hold nothing.
+func TestTheAutoInstallerWaitsWhereTheBackupCannotBeLookedUp(t *testing.T) {
+	for _, tc := range backupCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newOffCase(t, nil)
+			if tc.place != nil {
+				tc.place(t, &c)
+			}
+			why := ProbationHolds(onProbation(), "0.0.1", c.bin, time.Minute)
+			if want := tc.there || tc.cause != nil; (why != "") != want {
+				t.Errorf("the probation's hold beside %s = %q, want held %v", tc.name, why, want)
+			}
+			if filepath.IsAbs(c.bin) && strings.Contains(why, filepath.Dir(c.bin)) {
+				t.Errorf("the hold's reason names a path: %q", why)
+			}
+		})
+	}
+}
+
 // TestTheAutoInstallerDoesNotWaitWhereTheCrashRollbackWouldRefuse: a marker
 // the crash rollback's own checks refuse at its limit (an install that never
 // reached its swap, one that names no version to go back to, a data dir

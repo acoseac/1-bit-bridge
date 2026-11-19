@@ -86,3 +86,31 @@ func TestABackupSilentPastItsBoundIsAskedAgainAtTheNextStart(t *testing.T) {
 		t.Errorf("the marker after the next start = %+v (%v), want the rollback's record, holding this version back", st, err)
 	}
 }
+
+// TestTheEarlyRollbackTellsABackupItCannotInspectFromNone: a lookup of the
+// backup that fails otherwise than finding nothing there (inspectionFailures)
+// leaves the install as the early rollback leaves every install it does not
+// put back, serve refusing its settings as before, exit 2, and nothing
+// written, and its line says the backup could not be inspected, never that
+// there is none (backlog B898FU's round 2).
+func TestTheEarlyRollbackTellsABackupItCannotInspectFromNone(t *testing.T) {
+	for _, f := range inspectionFailures {
+		t.Run(f.name, func(t *testing.T) {
+			r := newRefusedInstall(t, "scanIntervalSec: 010\n")
+			files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
+			binaryPath, recovered := f.laid(t, r.bin)
+			given := *r
+			given.bin = binaryPath
+			code, stderr := given.serve(t, serveOpts{})
+			recovered()
+			if code != 2 {
+				t.Fatalf("serve over a backup it cannot inspect = %d, want 2, the settings' refusal as before; stderr=%s", code, stderr)
+			}
+			files.requireUnchanged(t)
+			requireNoStoreOpened(t, r.dataDir)
+			if said := updaterLines(stderr); !strings.Contains(said, "could not be inspected") || strings.Contains(said, "there is no backup") {
+				t.Errorf("serve did not say that the backup could not be inspected, or said there is none; its updater lines: %q", said)
+			}
+		})
+	}
+}

@@ -221,6 +221,36 @@ func TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock(t *testing.T) 
 	requirePutBack(t, r, got)
 }
 
+// TestTheCrashRollbackTellsABackupItCannotInspectFromNone: a lookup of the
+// backup that fails otherwise than finding nothing there (inspectionFailures)
+// is refused before the install marker's lock as a backup that could not be
+// inspected, said and recorded so, never as no backup (backlog B898FU's round
+// 2): the record is what the probation's status says of the rollback. The
+// backup is asked nothing, nothing is put back, and the install stays for the
+// next start to ask again, as after every refusal.
+func TestTheCrashRollbackTellsABackupItCannotInspectFromNone(t *testing.T) {
+	for _, f := range inspectionFailures {
+		t.Run(f.name, func(t *testing.T) {
+			r := crashInstallAtTheLimit(t)
+			binaries := watch(t, r.bin, r.bak)
+			binaryPath, recovered := f.laid(t, r.bin)
+			given := *r
+			given.bin = binaryPath
+			b := &backupRuns{}
+			got := crashRollBack(t.Context(), t, &given, b)
+			recovered()
+			requireLeft(t, r, got, binaries)
+			requireRefusal(t, r, got.stderr, "could not be inspected", "the backup could not be inspected")
+			if st := markerOf(t, r.dataDir); strings.Contains(st.RollbackRefused, "no backup") {
+				t.Errorf("the recorded refusal = %q, want it to say no word of no backup", st.RollbackRefused)
+			}
+			if len(b.asked) != 0 {
+				t.Errorf("the backup was asked %q, want nothing", b.asked)
+			}
+		})
+	}
+}
+
 // handleIdentity is path's stat taken through a handle on it, closed at once:
 // on Windows an Lstat's file ID is read by path when os.SameFile first
 // compares it, so only a handle's stat fixes which file it is as it is taken.
