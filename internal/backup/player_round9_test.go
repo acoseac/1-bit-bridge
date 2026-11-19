@@ -28,10 +28,12 @@ func TestRestoreAdoptsUUIDOnlyAfter8193Starts(t *testing.T) {
 	var snap string
 	for i := 0; i < 8193; i++ {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			flush := stubReservationFlush(t)
 			token := startRestoredPlayer(t, dir).Snapshot().Token()
 			if token != uint32(i)*8192+4097 {
 				t.Fatalf("startup token %d at start %d", token, i)
 			}
+			flush.requireOneDurableWrite(t)
 			highest = max(highest, token)
 		})
 		if i == 0 {

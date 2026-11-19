@@ -192,6 +192,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   each take `Store.mu` and run their own BEGIN/COMMIT/fsync; a fixture calling
   the singular form pays that per row, under the detector. Seeding 4,000 rows:
   19.0s against 6.8s.
+- **A test whose subject is not durability, and which makes thousands of durable writes on its way (an engine started thousands of times, each start's reservation written through the strict writer), counts the flush of each such write's staged file instead of making it, in the step that writes it alone, and asserts in that step that the write asked for its flush and that the strict writer's directory barrier ran after it** (2026-11-19, backlog B942). **Don't stand the counter in for a whole test (its snapshot, restore and lifecycle writes keep their real flushes), assert a total across its steps, count a flush without asking which writer asked for it, or count the flushes of a test whose subject is durability.** → History-rules-build-ci-tests.md
 - **Size a SQLite-heavy fixture by build tag when the test has no concurrency.** → History-rules-build-ci-tests.md
 - **Fuzz targets need `-fuzzminimizetime 1s`** — the 60s default burns CPU
   without incrementing `execs` while the run still says PASS, so the failure
