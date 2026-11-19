@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -59,24 +60,42 @@ func markersLockHeld(t *testing.T, dataDir string) bool {
 const backupBytes = "the previous bridge binary"
 
 // crashInstallAtTheLimit is an install whose count asks for the crash
-// rollback, laid out as the pin of the lock's wait lays it
+// rollback, its marker as the pin of the lock's wait lays it
 // (TestEveryRollbackAtAStartFitsInsideTheMarkersLockWait):
 // updater.ProbationFailedStarts starts of this version counted, each recorded
-// as having opened the data dir. Its backup is a file of its own, backupBytes,
-// which its cases rewrite and replace: newRefusedInstall's is a hard link to
-// the running test binary where the host makes one (installBridgeCopy), and
-// its runs are stood in for here, so nothing runs it.
+// as having opened the data dir. Its binary and its backup are small files of
+// its own, the backup backupBytes, which its cases rewrite and replace, and
+// nothing runs either, the backup's runs being stood in for: never
+// newRefusedInstall's backup (installBridgeCopy), a hard link to the running
+// test binary where the host makes one, and on Windows a copy of it, which a
+// scanner may still hold when a case would replace it.
 func crashInstallAtTheLimit(t *testing.T) *refusedInstall {
 	t.Helper()
-	r := newRefusedInstall(t, "")
-	r.marker.FailedStarts, r.marker.DataDirOpenedBy = updater.ProbationFailedStarts, version.ServerVersion
+	dir := t.TempDir()
+	r := &refusedInstall{dir: dir, cfg: filepath.Join(dir, "bridge.yaml"), dataDir: filepath.Join(dir, "data")}
+	r.writeSettings(t, "dataDir: "+r.dataDir+"\n", "")
+	name := "bridge"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	r.bin = filepath.Join(dir, "bin", name)
+	r.bak = r.bin + ".bak"
+	for _, d := range []string{r.dataDir, filepath.Dir(r.bin)} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, b := range map[string]string{r.bin: "the new bridge binary", r.bak: backupBytes} {
+		if err := os.WriteFile(path, []byte(b), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.marker = updater.State{
+		Status: "installing", TargetVersion: version.ServerVersion, PreviousVersion: previousVersion,
+		AttemptedAt: time.Now().UTC().Add(-time.Minute), SwapStarted: true,
+		FailedStarts: updater.ProbationFailedStarts, DataDirOpenedBy: version.ServerVersion,
+	}
 	r.saveMarker(t, r.dataDir)
-	if err := os.Remove(r.bak); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(r.bak, []byte(backupBytes), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	return r
 }
 
