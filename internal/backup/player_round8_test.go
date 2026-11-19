@@ -26,10 +26,12 @@ func TestAdoptionBoundsReservedSpaceAcross4097Restarts(t *testing.T) {
 	var highest uint32
 	for i := 0; i < 4097; i++ {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			flush := stubReservationFlush(t)
 			token := startRestoredPlayer(t, dir).Snapshot().Token()
 			if token != uint32(i)*8192+4097 {
 				t.Fatalf("startup token %d at restart %d", token, i)
 			}
+			flush.requireOneDurableWrite(t)
 			highest = max(highest, token)
 		})
 	}
