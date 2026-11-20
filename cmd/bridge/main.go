@@ -2728,27 +2728,48 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		// putting that back would be a downgrade by two versions. A backup
 		// that is not there or is no regular file, or that says another
 		// version, is left where it is, and the install cleared as one never
-		// swapped. A stop while it answers, and a backup that did not say its
-		// version (backlog B898FU) or could not be inspected (a lookup that
-		// failed otherwise than finding nothing there: its round 2), which
-		// shows neither, leave the marker as it was read, nothing written or
-		// renamed, as those rollbacks leave their install and a restore
-		// refused for a hold keeps it below, for the next start to ask again:
-		// the window bounds the keep, a start past it clearing the install as
-		// abandoned (BootClearAbandoned). Until then swapAwaitingRestart
-		// refuses an install of the target as waiting for its restart, which a
-		// restart does not end while the backup does not answer: the line says
-		// so, and when the window ends (backlog B898FU's round 3).
+		// swapped. A stop while it answers or once it has answered, and a
+		// backup that did not say its version (backlog B898FU) or could not
+		// be inspected (a lookup that failed otherwise than finding nothing
+		// there: its round 2), which shows neither, leave the marker as it
+		// was read, nothing written or renamed, as those rollbacks leave their
+		// install and a restore refused for a hold keeps it below, for the
+		// next start to ask again: the window bounds the keep, a start past it
+		// clearing the install as abandoned (BootClearAbandoned). Until then
+		// swapAwaitingRestart refuses an install of the target as waiting for
+		// its restart, which a restart does not end while the backup does not
+		// answer: the line says so, and when the window ends (backlog B898FU's
+		// round 3), or, where it ended while the backup was asked, that it has
+		// (backlog B951).
 		why, unanswered := backupNotPrevious(ctx, binaryPath+".bak", st.PreviousVersion, seams)
 		if seams.answered != nil {
 			seams.answered(why, unanswered)
 		}
+		// Serve's stop, asked again whatever the backup answered and before
+		// anything is written (backlog B951): the probe's last look at the
+		// context comes before its answer is read, so a stop that landed after
+		// it, the backup's version said, went on to the veto's write and the
+		// restore during serve's stop. What is left is the moment between
+		// this look and that write, which holds no wait.
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintf(stderr, "updater: stopped as the backup said its version; the install is left as it is, for a later start\n")
+			return err
+		}
 		if why != "" || unanswered != nil {
-			if err := ctx.Err(); err != nil {
-				fmt.Fprintf(stderr, "updater: stopped while the backup said its version; the install is left as it is, for a later start\n")
-				return err
-			}
 			if unanswered != nil {
+				// The decision read the clock before the backup was asked, and
+				// the ask can outlast the window (backlog B951): asked again, a
+				// window that has ended is said so, and nothing is promised
+				// past its end.
+				if updater.DecideBootAction(st, current, now().UTC()) == updater.BootClearAbandoned {
+					fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak "+
+						"at this start, since the backup did not say its version: %v; the install's marker is kept by this start, but its window "+
+						"ended at %s while the backup was asked: the next start of %s clears the install as abandoned, without asking the "+
+						"backup, and leaves the backup where it is\n",
+						st.TargetVersion, current, binaryPath, unanswered, st.AttemptedAt.Add(updater.RecencyWindow()).UTC().Format(time.RFC3339),
+						current)
+					return nil
+				}
 				fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak "+
 					"at this start, since the backup did not say its version: %v; the install's marker is kept, for the next start to ask again; "+
 					"until the backup says its version or the window ends at %s, an install of %s is refused as waiting for its restart, "+

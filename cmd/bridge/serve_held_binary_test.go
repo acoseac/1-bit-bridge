@@ -607,7 +607,7 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBackupDidNotSayItsVersion(t *testi
 				stop()
 				return "", ctx.Err()
 			}, asked: 1, stopped: true, kept: true,
-			says: []string{"stopped while the backup said its version"}},
+			says: []string{"stopped as the backup said its version"}},
 		{name: "no backup", noBackup: true,
 			says: []string{"there is no backup to put back"}},
 		{name: "a directory where the backup goes", dirBackup: true,
