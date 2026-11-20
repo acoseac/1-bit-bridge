@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,9 +48,12 @@ func (s *statePanics) State() dsdstate.State {
 // fresh (dsdRead zeroed), and a refresh asked; the write's outcome stands, its
 // state written and durable, and its answer carries no epoch unless its pair
 // was stored. The writes' turn, the configuration lease and the write's hold
-// of its reading are let go, and the next refresh publishes the state written.
-// Before the pair is stored, the panic stands for any (a published set gone);
-// after it, the store's state panics at the publication's read.
+// of its reading are let go. The refresh the containment asked runs, its end
+// heard (Seams.ChoiceRefreshed) before anything else refreshes: before the
+// pair is stored it publishes the state written, at the next publication;
+// after it, it finds that pair standing and publishes nothing. Before the
+// pair is stored, the panic stands for any (a published set gone); after it,
+// the store's state panics at the publication's read.
 func TestAPublicationThatPanicsAnswersWithNoEpoch(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -83,6 +87,9 @@ func TestAPublicationThatPanicsAnswersWithNoEpoch(t *testing.T) {
 			}
 			b.RefreshDSD(true)
 			key := boundKey(t, b)
+			standing := b.dsdPub.Load().seq
+			refreshed := make(chan struct{})
+			var once sync.Once
 			b.cfg.Seams = &Seams{ChoiceWritten: func(error) {
 				if tc.stored {
 					store.armed.Store(true)
@@ -90,13 +97,34 @@ func TestAPublicationThatPanicsAnswersWithNoEpoch(t *testing.T) {
 				}
 				saved = b.dsd.Load()
 				b.dsd.Store(nil)
-			}}
+			}, ChoiceRefreshed: func() { once.Do(func() { close(refreshed) }) }}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			res := b.ChooseDSD(ctx, ChoiceRequest{DACKey: key, DACToken: boundToken(t, b), Choice: policy.Choice{Mode: dsdstate.ModeConvert, By: dsdstate.ByApp}})
-			// The refresh the containment asks runs on a goroutine of the
-			// backend's, counted from the ask on, and reads the seams: it is
-			// joined, whatever it publishes, before they go.
+			// The refresh the containment asks runs on the refreshes'
+			// goroutine: what it published is read once it has returned, and
+			// before anything else refreshes.
+			select {
+			case <-refreshed:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the refresh the containment asked never ran")
+			}
+			pub := b.dsdPub.Load()
+			if got := pub.view.DAC.Choice.Mode; got != dsdstate.ModeConvert {
+				t.Errorf("the containment's refresh left %s published; want the state written, convert", got)
+			}
+			// The one publication after the one standing: the containment's
+			// refresh's before the pair was stored, the write's own after it,
+			// which that refresh found standing.
+			if pub.seq != standing+1 {
+				t.Errorf("publication %d once the containment's refresh returned, %d standing before the write; want one publication, %d", pub.seq, standing, standing+1)
+			}
+			if tc.stored && pub.seq != res.Policy.Publication {
+				t.Errorf("publication %d once the containment's refresh returned; want the write's own, %d, standing", pub.seq, res.Policy.Publication)
+			}
+			// That refresh ran on a goroutine of the backend's, counted from
+			// the ask on: its seam reached is not its goroutine ended, so it is
+			// joined before the seams go.
 			if err := b.Wait(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -129,15 +157,6 @@ func TestAPublicationThatPanicsAnswersWithNoEpoch(t *testing.T) {
 			lease, turn, reading, locked := ChoiceHeldForTest(b)
 			if !locked || lease || turn || reading {
 				t.Fatalf("after the publication's panic: locked %v, lease %v, turn %v, reading %v; want every hold let go", locked, lease, turn, reading)
-			}
-			b.RefreshDSD(true)
-			if got := b.dsdPub.Load().view.DAC.Choice.Mode; got != dsdstate.ModeConvert {
-				t.Errorf("the next refresh publishes %s; want the state written, convert", got)
-			}
-			wctx, wcancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer wcancel()
-			if err := b.Wait(wctx); err != nil {
-				t.Fatal(err)
 			}
 		})
 	}

@@ -110,7 +110,9 @@ func (b *Backend) ProbeDSDPending() bool {
 // joined with every force asked meanwhile, and run once that one has
 // returned, so an input that changed while a reading was held is read again.
 // The refreshes publish one at a time, in the order their readings were taken
-// (refreshDSD's lock), whichever goroutine reads.
+// (refreshDSD's lock), whichever goroutine reads. The first run after a
+// choice's write asked one (askChoiceRefresh) runs the ChoiceRefreshed seam
+// once it has returned.
 func (b *Backend) RequestRefreshDSD(ctx context.Context, force bool) {
 	if b.cfg.DSD == nil {
 		return
@@ -124,9 +126,21 @@ func (b *Backend) RequestRefreshDSD(ctx context.Context, force bool) {
 	}
 	b.refreshRun.ask(spawn, func(r any) { b.logPanic("the effective DSD policy's refresh", r) }, func() {
 		if ctx.Err() == nil {
+			asked := b.choiceRefresh.Swap(false)
 			b.RefreshDSD(b.refreshForced.Swap(false))
+			if asked {
+				b.choiceRefreshed()
+			}
 		}
 	})
+}
+
+// askChoiceRefresh asks the refresh a choice's write owes once its hold of
+// its reading has ended (publishChoice, endChoiceReading): forced, on a
+// context its request's end does not end.
+func (b *Backend) askChoiceRefresh(ctx context.Context) {
+	b.choiceRefresh.Store(true)
+	b.RequestRefreshDSD(context.WithoutCancel(ctx), true)
 }
 
 // DSDWrites is closed once no write of the player's DSD state runs, nor the

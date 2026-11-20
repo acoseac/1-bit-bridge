@@ -382,7 +382,7 @@ func (b *Backend) endChoiceReading(ctx context.Context) {
 	}
 	b.dsdMu.Unlock()
 	if held && owed {
-		b.RequestRefreshDSD(context.WithoutCancel(ctx), true)
+		b.askChoiceRefresh(ctx)
 	}
 }
 
@@ -529,7 +529,7 @@ func (b *Backend) publishChoice(ctx context.Context, rd choiceRead, d choiceDeci
 		return !pub.set.same(now) || !reflect.DeepEqual(pub.view, nowView)
 	}()
 	if owed {
-		b.RequestRefreshDSD(context.WithoutCancel(ctx), true)
+		b.askChoiceRefresh(ctx)
 	}
 	if res.Outcome == ChoiceBadRequest {
 		res.Policy, res.Epoch = PlayerPolicy{}, false
@@ -685,5 +685,11 @@ func (b *Backend) choicePublished() {
 func (b *Backend) choiceAnswered() {
 	if sm := b.cfg.Seams; sm != nil && sm.ChoiceAnswered != nil {
 		sm.ChoiceAnswered()
+	}
+}
+
+func (b *Backend) choiceRefreshed() {
+	if sm := b.cfg.Seams; sm != nil && sm.ChoiceRefreshed != nil {
+		sm.ChoiceRefreshed()
 	}
 }
