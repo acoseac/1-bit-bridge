@@ -2620,12 +2620,17 @@ func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath
 // bootSeams are what the boot's housekeeping calls that a test stands in for,
 // production's where unset: restore puts the backup back
 // (updater.RollbackBinary), remove takes it away after a confirmed install
-// (updater.RemoveBackup), and probeVersion asks the backup its version
-// (updater.ProbeVersionWithin) within probeBound.
+// (updater.RemoveBackup), probeVersion asks the backup its version
+// (updater.ProbeVersionWithin) within probeBound, and now reads the clock the
+// housekeeping decides by (time.Now). answered, nil in production, hears what
+// backupNotPrevious answered as it returns, before anything is decided on it:
+// a test parks the housekeeping there while it stops it (backlog B951).
 type bootSeams struct {
 	restore, remove func(dst, suffix string) error
 	probeVersion    func(ctx context.Context, binary string, within time.Duration) (string, error)
 	probeBound      time.Duration
+	now             func() time.Time
+	answered        func(why string, unanswered error)
 }
 
 // bootHousekeepingWith is bootHousekeeping through seams: a test removes the
@@ -2638,13 +2643,17 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 	if remove == nil {
 		remove = updater.RemoveBackup
 	}
+	now := seams.now
+	if now == nil {
+		now = time.Now
+	}
 	// A marker that asks nothing of this boot asks for no lock: a filesystem
 	// that keeps none, or a lock another process holds, costs a boot with
 	// nothing to do no wait and no line. An install of this version on
 	// probation is one (backlog B660). What a boot acts on is read again
 	// under the lock, and decided there.
 	if st, err := updater.LoadState(dataDir); err == nil {
-		if action := updater.DecideBootAction(st, current, time.Now().UTC()); action == updater.BootNoop || action == updater.BootInstallProbation {
+		if action := updater.DecideBootAction(st, current, now().UTC()); action == updater.BootNoop || action == updater.BootInstallProbation {
 			return nil
 		}
 	}
@@ -2663,7 +2672,7 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		fmt.Fprintf(stderr, "updater: load state: %s\n", fsutil.ErrorWithoutPath(err))
 		return nil
 	}
-	action := updater.DecideBootAction(st, current, time.Now().UTC())
+	action := updater.DecideBootAction(st, current, now().UTC())
 	switch action {
 	case updater.BootNoop, updater.BootInstallProbation:
 		// The install of this version on probation, however long after its
@@ -2719,24 +2728,48 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		// putting that back would be a downgrade by two versions. A backup
 		// that is not there or is no regular file, or that says another
 		// version, is left where it is, and the install cleared as one never
-		// swapped. A stop while it answers, and a backup that did not say its
-		// version (backlog B898FU) or could not be inspected (a lookup that
-		// failed otherwise than finding nothing there: its round 2), which
-		// shows neither, leave the marker as it was read, nothing written or
-		// renamed, as those rollbacks leave their install and a restore
-		// refused for a hold keeps it below, for the next start to ask again:
-		// the window bounds the keep, a start past it clearing the install as
-		// abandoned (BootClearAbandoned). Until then swapAwaitingRestart
-		// refuses an install of the target as waiting for its restart, which a
-		// restart does not end while the backup does not answer: the line says
-		// so, and when the window ends (backlog B898FU's round 3).
+		// swapped. A stop while it answers or once it has answered, and a
+		// backup that did not say its version (backlog B898FU) or could not
+		// be inspected (a lookup that failed otherwise than finding nothing
+		// there: its round 2), which shows neither, leave the marker as it
+		// was read, nothing written or renamed, as those rollbacks leave their
+		// install and a restore refused for a hold keeps it below, for the
+		// next start to ask again: the window bounds the keep, a start past it
+		// clearing the install as abandoned (BootClearAbandoned). Until then
+		// swapAwaitingRestart refuses an install of the target as waiting for
+		// its restart, which a restart does not end while the backup does not
+		// answer: the line says so, and when the window ends (backlog B898FU's
+		// round 3), or, where it ended while the backup was asked, that it has
+		// (backlog B951).
 		why, unanswered := backupNotPrevious(ctx, binaryPath+".bak", st.PreviousVersion, seams)
+		if seams.answered != nil {
+			seams.answered(why, unanswered)
+		}
+		// Serve's stop, asked again whatever the backup answered and before
+		// anything is written (backlog B951): the probe's last look at the
+		// context comes before its answer is read, so a stop that landed after
+		// it, the backup's version said, went on to the veto's write and the
+		// restore during serve's stop. What is left is the moment between
+		// this look and that write, which holds no wait.
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintf(stderr, "updater: stopped as the backup said its version; the install is left as it is, for a later start\n")
+			return err
+		}
 		if why != "" || unanswered != nil {
-			if err := ctx.Err(); err != nil {
-				fmt.Fprintf(stderr, "updater: stopped while the backup said its version; the install is left as it is, for a later start\n")
-				return err
-			}
 			if unanswered != nil {
+				// The decision read the clock before the backup was asked, and
+				// the ask can outlast the window (backlog B951): asked again, a
+				// window that has ended is said so, and nothing is promised
+				// past its end.
+				if updater.DecideBootAction(st, current, now().UTC()) == updater.BootClearAbandoned {
+					fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak "+
+						"at this start, since the backup did not say its version: %v; the install's marker is kept by this start, but its window "+
+						"ended at %s while the backup was asked: the next start of %s clears the install as abandoned, without asking the "+
+						"backup, and leaves the backup where it is\n",
+						st.TargetVersion, current, binaryPath, unanswered, st.AttemptedAt.Add(updater.RecencyWindow()).UTC().Format(time.RFC3339),
+						current)
+					return nil
+				}
 				fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak "+
 					"at this start, since the backup did not say its version: %v; the install's marker is kept, for the next start to ask again; "+
 					"until the backup says its version or the window ends at %s, an install of %s is refused as waiting for its restart, "+

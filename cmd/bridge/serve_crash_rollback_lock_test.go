@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -112,12 +113,14 @@ func crashInstallAtTheLimit(t *testing.T) *refusedInstall {
 // version or check does and answers what it answers, or, where that is unset,
 // answers as a backup of previousVersion that loads the settings. identity,
 // where set, is the rollback's read of its backup's identity
-// (serveOpts.backupIdentity).
+// (serveOpts.backupIdentity), and save its write of the install marker
+// (serveOpts.saveUpdateState).
 type backupRuns struct {
 	dataDir  string
 	version  func(ctx context.Context) (string, error)
 	check    func(ctx context.Context) updater.ConfigCheck
 	identity func(path string) (os.FileInfo, error)
+	save     func(dataDir string, st updater.State) error
 	asked    []string
 }
 
@@ -134,7 +137,7 @@ func lockFound(held bool) string {
 func (b *backupRuns) opts(t *testing.T, r *refusedInstall, restore func(dst, ext string) error) serveOpts {
 	t.Helper()
 	b.dataDir = r.dataDir
-	return serveOpts{configPath: r.cfg, binaryPath: r.bin, restoreBackup: restore, backupIdentity: b.identity,
+	return serveOpts{configPath: r.cfg, binaryPath: r.bin, restoreBackup: restore, backupIdentity: b.identity, saveUpdateState: b.save,
 		probeVersion: func(ctx context.Context, _ string, _ time.Duration) (string, error) {
 			b.asked = append(b.asked, "the backup's version "+lockFound(markersLockHeld(t, b.dataDir)))
 			if b.version != nil {
@@ -621,6 +624,75 @@ func TestTheCrashRollbackTellsABackupWhoseIdentityCannotBeReadFromAChange(t *tes
 					d.requireHold(t, r, r.bin, "once the start goes on")
 				})
 			}
+		})
+	}
+}
+
+// TestAClearOfAnInspectionRefusalWhoseWriteFailsIsSaidUnconfirmed: a start
+// whose inspection of the backup fails clears a refusal an earlier start
+// recorded in the words such a failure had (clearInspectionRefusal), and
+// where that clear's write answers an error, it says what is known: the
+// clear was attempted, and its durability is unconfirmed (backlog B951). A
+// write that renamed the marker into place and then failed its directory's
+// barrier (updater.SaveState, the barrier's sync failed through
+// updater.SetMarkerBarrierForTest) has landed the clear, not confirmed
+// durable; one that failed before its rename leaves the refusal recorded.
+// Until then the line said the marker still recorded the refusal, which the
+// first does not. The inspection fails at the identity's read before the
+// install marker's lock (serveOpts.backupIdentity), and nothing is put back.
+func TestAClearOfAnInspectionRefusalWhoseWriteFailsIsSaidUnconfirmed(t *testing.T) {
+	var armed atomic.Bool
+	t.Cleanup(updater.SetMarkerBarrierForTest(func(step string) error {
+		if step == "sync" && armed.CompareAndSwap(true, false) {
+			return syscall.EIO
+		}
+		return nil
+	}))
+	for _, tc := range []struct {
+		name   string
+		save   func(dataDir string, st updater.State) error
+		landed bool
+	}{
+		{"its rename landed and its barrier failed", func(dataDir string, st updater.State) error {
+			armed.Store(true)
+			return updater.SaveState(dataDir, st)
+		}, true},
+		{"it failed before its rename", func(string, updater.State) error {
+			return errors.New("the disk is full")
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := crashInstallAtTheLimit(t)
+			binaries := watch(t, r.bin, r.bak)
+			d := refusalsOnDisk[1]
+			before, marker := d.lay(t, r)
+			saves := 0
+			var saveErr error
+			b := &backupRuns{
+				identity: func(path string) (os.FileInfo, error) {
+					return nil, &fs.PathError{Op: "read the identity of", Path: path, Err: errIdentityNotRead}
+				},
+				save: func(dataDir string, st updater.State) error {
+					saves++
+					saveErr = tc.save(dataDir, st)
+					return saveErr
+				}}
+			got := crashRollBack(t.Context(), t, r, b)
+			requireLeft(t, r, got, binaries)
+			if saves != 1 || saveErr == nil {
+				t.Fatalf("the premise: the clear's write was made %d time(s) and answered %v, want once and an error; stderr=%s",
+					saves, saveErr, got.stderr)
+			}
+			want := "updater: the clear of the install marker's refusal recorded for a backup that could not be inspected was attempted, " +
+				"and its durability is unconfirmed: " + saveErr.Error()
+			if lines := updaterLines(got.stderr); !strings.Contains(lines, want) || strings.Contains(lines, "still records") {
+				t.Errorf("the start did not say the clear as attempted and unconfirmed, or said the refusal still recorded; its updater lines: %q", lines)
+			}
+			if tc.landed {
+				d.requireUnrecorded(t, r, before, marker)
+				return
+			}
+			marker.requireUnchanged(t)
 		})
 	}
 }
