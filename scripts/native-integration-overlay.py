@@ -19,17 +19,24 @@ for source in sorted((root / "internal/alsapcm").glob("*_test.go")):
         replace[str(target)] = str(source)
 if not replace:
     sys.exit("no package alsapcm test support found")
-source = root / "cmd/bridge/output_dsdtest_integration_test.go"
-enabled = output.with_suffix(".go.txt")
 tag = "//go:build nativeintegration\n"
-text = source.read_text()
-if not text.startswith(tag) or text.count(tag) != 1:
-    sys.exit("native integration test lost its exact leading build tag")
-text = text.removeprefix(tag)
-if "//go:build" in text or "// +build" in text:
-    sys.exit("native integration test retains a build constraint")
-enabled.write_text(text)
-replace[str(source)] = str(enabled)
+# The CLI's integration tests: the harness's, and every other file of
+# cmd/bridge named *_integration_test.go (the DSD choice's route over a real
+# Start, B728 B9 PR 3b's follow-up), each enabled by its exact leading build
+# tag alone.
+sources = sorted((root / "cmd/bridge").glob("*_integration_test.go"))
+if root / "cmd/bridge/output_dsdtest_integration_test.go" not in sources:
+    sys.exit("native integration test missing")
+for source in sources:
+    text = source.read_text()
+    if not text.startswith(tag) or text.count(tag) != 1:
+        sys.exit(f"native integration test {source.name} lost its exact leading build tag")
+    text = text.removeprefix(tag)
+    if "//go:build" in text or "// +build" in text:
+        sys.exit(f"native integration test {source.name} retains a build constraint")
+    enabled = output.with_suffix("." + source.stem + ".go.txt")
+    enabled.write_text(text)
+    replace[str(source)] = str(enabled)
 # The backend integration suite uses the same fake in a separate test package.
 # Its accepting admission remains a _test.go function, never a binary option.
 source = root / "internal/player/playback/native_integration_test.go"
