@@ -213,7 +213,9 @@ func readSettings(path string, raw []byte) (*Config, error) {
 		return nil, err
 	}
 	c.resolvePaths(filepath.Dir(abs))
-	c.normalizeSettings()
+	if err := c.normalizeSettings(); err != nil {
+		return nil, err
+	}
 	return &c, nil
 }
 
@@ -221,22 +223,29 @@ func readSettings(path string, raw []byte) (*Config, error) {
 // enrich base URL is one normalize refuses, which leaves the whole config as
 // it was, each base URL is kept in the form normalizeBaseURL gives it, or as
 // written where it gives none, and everything else is normalized all the same.
-func (c *Config) normalizeSettings() {
+// Normalize refuses nothing but those two URLs today
+// (TestNormalizeRefusesNothingButABaseURL); a refusal it gains is returned,
+// with neither URL to blame, so the turn refuses the file rather than compare
+// settings left unnormalized (B535's round 2, hardening).
+func (c *Config) normalizeSettings() error {
 	if c.normalize(false) == nil {
-		return
+		return nil
 	}
 	bases := []*string{&c.Enrich.MusicBrainzBaseURL, &c.Enrich.CoverArtBaseURL}
 	written := make([]string, len(bases))
 	for i, base := range bases {
 		written[i], *base = *base, ""
 	}
-	_ = c.normalize(false) // its one refusal is a base URL's, and none is left
+	if err := c.normalize(false); err != nil {
+		return err
+	}
 	for i, base := range bases {
 		*base = written[i]
 		if v, err := normalizeBaseURL("", written[i]); err == nil {
 			*base = v
 		}
 	}
+	return nil
 }
 
 // loadsAtNextStart is data, a config file's bytes (the file a save would

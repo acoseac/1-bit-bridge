@@ -237,6 +237,32 @@ func TestAnUnreadPlayerBlockIsComparedByItsSource(t *testing.T) {
 	}
 }
 
+// TestNormalizeRefusesNothingButABaseURL: normalize, which readSettings runs
+// on a file's settings, refuses nothing but one of the two enrich base URLs,
+// which normalizeSettings blanks before it normalizes again: with both blank,
+// a config whose every setting is set (fillNonZero), and one whose every word
+// is a word no setting takes (empty, white space, control characters, a scheme
+// with no host, 4 KiB), normalizes. normalizeSettings returns a refusal it
+// meets with no URL to blame, which the turn's read refuses the file over;
+// none exists today, so this holds the invariant that hardening rests on
+// (B535's round 2).
+func TestNormalizeRefusesNothingButABaseURL(t *testing.T) {
+	census := settingCensus(reflect.TypeFor[Config](), "", nil)
+	for _, word := range []string{"", "  ", "\x00\x07\x1b", "http://", "a b\tc\nd", strings.Repeat("x", 4096)} {
+		c := &Config{}
+		fillNonZero(reflect.ValueOf(c).Elem())
+		for _, s := range census {
+			if f := reflect.ValueOf(c).Elem().FieldByIndex(s.index); f.Kind() == reflect.String {
+				f.SetString(word)
+			}
+		}
+		c.Enrich.MusicBrainzBaseURL, c.Enrich.CoverArtBaseURL = "", ""
+		if err := c.normalize(false); err != nil {
+			t.Errorf("normalize, every setting's word %q but the base URLs blank, refused: %v", word, err)
+		}
+	}
+}
+
 // TestASaveKeepsASerialAnotherWriterChanged: a serial (usbid.Serial, whose
 // one field is unexported and which writes itself as one value) is one
 // setting, so another writer's change of it is kept by a save of another
