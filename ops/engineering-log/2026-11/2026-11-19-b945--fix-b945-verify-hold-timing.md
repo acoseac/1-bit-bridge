@@ -222,9 +222,14 @@ helpers, so a failure names the caller's line.
 
 Temporary mutations, laid over the two test files by `go test -overlay` and never in the
 tree, so nothing was left to restore; each predicted in writing before its run. A scratch
-generator writes each control's overlay and runs, `seams.go` as committed:
+generator writes each control's overlay and runs, `seams.go` as committed, for the two gated
+tests:
 
 `GOTOOLCHAIN=go1.27.3 go test -race -count=1 -v -overlay <the control's overlay.json> -tags ts_omit_webclient,ts_omit_debugeventbus -run '^(TestAGivenUpVerificationReadsItsRecordBack|TestAnAbandonedCheckKeepsItsHoldsUntilItsCheckerEnds)$' -timeout 30m ./internal/backup/`
+
+That `-run` selects those two tests alone. `TestARecheckGivenUpLeavesTheVetoItMade`, whose
+nil-gate controls are below, is not among them, and its command line was not recorded
+(corrected in place on 2026-11-20 by bridge lows 11).
 
 Each hook is joined onto one existing line, so every reported line is the file's own:
 
