@@ -425,8 +425,10 @@ Windows-runner check, distinct from portable race-test results.
   reload of the live snapshot is out of scope (nothing reloads the config).
   A holder told nothing (a test's `NewRuntimeConfig` alone) saves its first
   Update over whatever the file holds and records from then on.
-  `TestUpdateRefusesAFileAnotherWriterChanged`,
-  `TestServeRefusesASettingsSaveOverAConfigAnotherWriterChanged`.
+  `TestUpdateRefusesAFileAnotherWriterChanged`, and serve's
+  `…RefusesASettingsSaveOverAConfigAnotherWriterChanged`, which B535 renamed
+  `TestServeMergesASettingsSaveIntoAConfigAnotherWriterChanged` when it made
+  that save merge (below).
 
   **The turn and the comparison come before `fn`** (the second round; the
   Claude review's finding 2 and Codex's 3). The first round cloned, ran

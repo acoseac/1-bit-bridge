@@ -12,6 +12,10 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/acoseac/1-bit-bridge/internal/usbid"
 )
 
 // writeConfig writes YAML to a tmp dir and returns (configPath, libraryRoot).
@@ -835,6 +839,10 @@ func assertNoSharedPointers(t *testing.T, a, b reflect.Value, path string, seen 
 	}
 	switch a.Kind() {
 	case reflect.Struct:
+		if a.Type() == reflect.TypeFor[usbid.Serial]() {
+			// A serial is immutable (its doc), so a clone may share it.
+			return
+		}
 		for i := 0; i < a.NumField(); i++ {
 			field := a.Type().Field(i)
 			assertNoSharedPointers(t, a.Field(i), b.Field(i), path+"."+field.Name, seen)
@@ -967,6 +975,13 @@ func fillNonZero(v reflect.Value) {
 				fillNonZero(f.Elem())
 			}
 		case reflect.Struct:
+			if f.Type() != reflect.TypeFor[PlayerConfig]() && f.Type().Implements(reflect.TypeFor[yaml.Marshaler]()) {
+				// A struct that writes itself as one value (a serial, whose
+				// one field is unexported) is filled as that value, read from
+				// a word as the file's is: walked, it would stay unset.
+				_ = yaml.Unmarshal([]byte("x"), f.Addr().Interface())
+				continue
+			}
 			fillNonZero(f)
 		}
 	}

@@ -336,36 +336,75 @@ func TestEditSavesOnlyOverTheFileItRead(t *testing.T) {
 
 // TestARefusedUpdateRunsNoneOfItsChange: Update takes its turn and compares
 // the file with what it last read or wrote before it runs fn, so a save it
-// refuses runs nothing of the caller's change. The console's root changes
-// change the library index in fn (a library going from one root to more
-// wipes every filesystem row, and unlinks every rendition and waveform),
-// and until B506's second round fn ran first, so a save refused for a file
-// another writer had changed had already done that, again on every retry.
+// refuses there (the file removed, its name opening another file, a file that
+// does not decode, a deployment setting another writer changed) runs nothing
+// of the caller's change; and a change of a setting another writer changed,
+// which fn makes on the clone before it asks check, is refused at that check,
+// before fn's own work. The console's root changes change the library index
+// in fn (a library going from one root to more wipes every filesystem row, and
+// unlinks every rendition and waveform), and until B506's second round fn ran
+// first, so a save refused for a file another writer had changed had already
+// done that, again on every retry.
 func TestARefusedUpdateRunsNoneOfItsChange(t *testing.T) {
-	dir := t.TempDir()
-	cfg := updateTestCfg(t, dir)
-	path := filepath.Join(dir, "bridge.yaml")
-	if err := saveAt(cfg, path); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rc := NewRuntimeConfig(cfg)
-	rc.RecordFile(fileTarget(t, path), raw)
-	writeMeanwhile(t, path, string(bytes.Replace(raw, []byte("Home"), []byte("Away"), 1)))
-	ran := false
-	err = rc.Update(path, func(c *Config) error {
-		ran = true
-		c.LibraryName = "Renamed"
-		return nil
-	})
-	if !errors.Is(err, ErrChangedOutside) {
-		t.Fatalf("Update over a file another writer changed = %v, want ErrChangedOutside", err)
-	}
-	if ran {
-		t.Error("Update ran its change before it compared the file, and refused the save after")
+	for _, tc := range []struct {
+		name      string
+		meanwhile func(t *testing.T, rc *RuntimeConfig, path string, raw []byte)
+		// setsChanged is a change fn makes on the clone, asking check
+		// after it and before its work: of the setting the other writer
+		// changed.
+		setsChanged bool
+	}{
+		{"the file removed", func(t *testing.T, _ *RuntimeConfig, path string, _ []byte) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"its name opening another file", func(t *testing.T, rc *RuntimeConfig, path string, raw []byte) {
+			rc.RecordFile(BootFile{target: filepath.Join(filepath.Dir(path), "elsewhere.yaml"), resolved: true}, raw)
+		}, false},
+		{"a file that does not decode", func(t *testing.T, _ *RuntimeConfig, path string, raw []byte) {
+			writeMeanwhile(t, path, string(raw)+"noSuchSetting: 1\n")
+		}, false},
+		{"a deployment setting another writer changed", func(t *testing.T, _ *RuntimeConfig, path string, raw []byte) {
+			writeMeanwhile(t, path, string(raw)+"deployment:\n  managedSettings:\n    - libraryName\n")
+		}, false},
+		{"a setting the change changes too", func(t *testing.T, _ *RuntimeConfig, path string, raw []byte) {
+			writeMeanwhile(t, path, string(bytes.Replace(raw, []byte("Home"), []byte("Away"), 1)))
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := updateTestCfg(t, dir)
+			path := filepath.Join(dir, "bridge.yaml")
+			if err := saveAt(cfg, path); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rc := NewRuntimeConfig(cfg)
+			rc.RecordFile(fileTarget(t, path), raw)
+			tc.meanwhile(t, rc, path, raw)
+			ran := false
+			err = rc.UpdateChecked(path, func(c *Config, check func() error) error {
+				if tc.setsChanged {
+					c.LibraryName = "Renamed"
+					if err := check(); err != nil {
+						return err
+					}
+				}
+				ran = true
+				c.ScanIntervalSec = 60
+				return nil
+			})
+			if !errors.Is(err, ErrChangedOutside) {
+				t.Errorf("Update over %s = %v, want ErrChangedOutside", tc.name, err)
+			}
+			if ran {
+				t.Error("Update ran its change's work before it refused the save")
+			}
+		})
 	}
 }
 
@@ -492,19 +531,23 @@ func TestAnUnlockedTurnSavesOnlyOverWhatItFound(t *testing.T) {
 func ptr(s string) *string { return &s }
 
 // TestUpdateRefusesAFileAnotherWriterChanged: a console save (Update) reads
-// the file again in its turn, and saves only over the bytes it last read
-// (RecordFile) or wrote: over a file another writer changed or removed
-// since, it saves and stores nothing, and says so naming the file and no
-// value. Its own saves move what it compares with, so saves in a row go
-// through.
+// the file again in its turn, and saves over a file another writer changed
+// only what that writer left it to change: one whose setting the save changes
+// too (the library name, the same size), or one removed since, it saves and
+// stores nothing, and says so naming the file, the setting by its yaml path
+// and no value. Its own saves move what it compares with, so saves in a row
+// go through. A save over another writer's change of another setting lands
+// (TestASaveKeepsASettingAnotherWriterChanged).
 func TestUpdateRefusesAFileAnotherWriterChanged(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// meanwhile is the other writer, nil for none.
+		// meanwhile is the other writer, nil for none, and names the setting
+		// the refusal names, "" for none.
 		meanwhile func(t *testing.T, path string)
+		names     string
 	}{
-		{"nothing written meanwhile", nil},
-		{"a change of the same size", func(t *testing.T, path string) {
+		{"nothing written meanwhile", nil, ""},
+		{"another writer's change of the name the save changes", func(t *testing.T, path string) {
 			b, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -513,22 +556,12 @@ func TestUpdateRefusesAFileAnotherWriterChanged(t *testing.T) {
 			if err := os.WriteFile(path, b, 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}},
-		{"a root added", func(t *testing.T, path string) {
-			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer f.Close()
-			if _, err := f.WriteString("scanIntervalSec: 7200\n"); err != nil {
-				t.Fatal(err)
-			}
-		}},
+		}, "libraryName"},
 		{"the file removed", func(t *testing.T, path string) {
 			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -562,13 +595,20 @@ func TestUpdateRefusesAFileAnotherWriterChanged(t *testing.T) {
 			}
 			var changed *ChangedOutsideError
 			if !errors.As(err, &changed) || !errors.Is(err, ErrChangedOutside) || changed.Path != path {
-				t.Fatalf("Update over a file another writer changed = %v, want a *ChangedOutsideError for %s", err, path)
-			}
-			if msg := err.Error(); !strings.Contains(msg, "restart the bridge") || strings.Contains(msg, "Home") || strings.Contains(msg, "Renamed") {
+				t.Errorf("Update over a file another writer changed = %v, want a *ChangedOutsideError for %s", err, path)
+			} else if msg := err.Error(); !strings.Contains(msg, "restart the bridge") || strings.Contains(msg, "Home") ||
+				strings.Contains(msg, "Renamed") || strings.Contains(msg, "Away") {
 				t.Errorf("refusal %q: want it to say what to do, and no value", msg)
+			} else if !strings.Contains(msg, tc.names) {
+				t.Errorf("refusal %q: want it to name the setting another writer changed, %s", msg, tc.names)
 			}
 			if after, _ := os.ReadFile(path); !bytes.Equal(after, before) {
 				t.Errorf("Update wrote over the other writer's file:\n%s", after)
+			}
+			if tc.names != "" {
+				if after := loadAt(t, path); after.LibraryName != "Away" {
+					t.Errorf("the file loads libraryName %q, want the other writer's", after.LibraryName)
+				}
 			}
 			if rc.Load().LibraryName != "Home" {
 				t.Errorf("the refused Update stored libraryName %q", rc.Load().LibraryName)

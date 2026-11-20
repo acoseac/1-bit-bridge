@@ -236,12 +236,20 @@ func envBindings() []envBinding {
 // live holder's save writes the file's own value for each one an update
 // left as it was, so a save does not write a variable's value into the
 // file (filedEnvValues, backlog B761).
-func (c *Config) applyEnvOverrides() {
+func (c *Config) applyEnvOverrides() { c.applyEnvOverridesAs(true) }
+
+// applyEnvOverridesAs is applyEnvOverrides, saying what it says of a
+// variable (one that does not read as its setting, an opt-out's that reads
+// as neither on nor off, a legacy alias whose setting is gone) only where
+// warn: the live holder loads the file a save would write as the next start
+// loads it, the variables applied, without repeating what the start said
+// (backlog B535).
+func (c *Config) applyEnvOverridesAs(warn bool) {
 	byPath := make(map[string]envBinding, 128)
 	set := map[string]bool{}
 	for _, b := range envBindings() {
 		byPath[b.YAMLPath] = b
-		if v, ok := os.LookupEnv(b.EnvVar); ok && v != "" && c.applyEnvValue(b, b.EnvVar, v) {
+		if v, ok := os.LookupEnv(b.EnvVar); ok && v != "" && c.applyEnvValueAs(b, b.EnvVar, v, warn) {
 			set[b.YAMLPath] = true
 		}
 	}
@@ -253,11 +261,13 @@ func (c *Config) applyEnvOverrides() {
 		if !ok {
 			// The field was renamed or removed out from under the alias.
 			// Loud, because the alias is now silently doing nothing.
-			validateLogger.Warn("legacy env alias points at a config field that no longer exists",
-				"var", name, "path", path)
+			if warn {
+				validateLogger.Warn("legacy env alias points at a config field that no longer exists",
+					"var", name, "path", path)
+			}
 			continue
 		}
-		if v, ok := os.LookupEnv(name); ok && v != "" && c.applyEnvValue(b, name, v) {
+		if v, ok := os.LookupEnv(name); ok && v != "" && c.applyEnvValueAs(b, name, v, warn) {
 			set[path] = true
 		}
 	}
@@ -311,14 +321,20 @@ func parseSwitchEnv(raw string) (on, ok bool) {
 // a value of white space alone, which says nothing, as an empty one does; on
 // or off as parseSwitchEnv reads it; and off, with unreadableSwitchEnv
 // naming the variable and never its value, for anything else.
-func readSwitchEnv(name, raw string) (on, set bool) {
+func readSwitchEnv(name, raw string) (on, set bool) { return readSwitchEnvAs(name, raw, true) }
+
+// readSwitchEnvAs is readSwitchEnv, saying unreadableSwitchEnv only where
+// warn (applyEnvOverridesAs).
+func readSwitchEnvAs(name, raw string, warn bool) (on, set bool) {
 	if strings.TrimSpace(raw) == "" {
 		return false, false
 	}
 	if on, ok := parseSwitchEnv(raw); ok {
 		return on, true
 	}
-	validateLogger.Warn(unreadableSwitchEnv, "var", name)
+	if warn {
+		validateLogger.Warn(unreadableSwitchEnv, "var", name)
+	}
 	return false, true
 }
 
@@ -355,9 +371,20 @@ func UpdateCheckEnabledFromEnv() (on, set bool) {
 // that does not read as the leaf's boolean or whole number, an opt-out's
 // white space) and for a leaf it cannot set.
 func (c *Config) applyEnvValue(b envBinding, name, raw string) bool {
+	return c.applyEnvValueAs(b, name, raw, true)
+}
+
+// applyEnvValueAs is applyEnvValue, saying what it says of a value it does
+// not take only where warn (applyEnvOverridesAs).
+func (c *Config) applyEnvValueAs(b envBinding, name, raw string, warn bool) bool {
 	fv := envLeaf(c, b)
 	if !fv.CanSet() {
 		return false
+	}
+	say := func(msg string) {
+		if warn {
+			validateLogger.Warn(msg, "var", name)
+		}
 	}
 	switch b.kind {
 	case reflect.String:
@@ -365,7 +392,7 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) bool {
 	case reflect.Bool:
 		v, err := strconv.ParseBool(raw)
 		if err != nil {
-			validateLogger.Warn(unparseableBoolEnv, "var", name)
+			say(unparseableBoolEnv)
 			return false
 		}
 		fv.SetBool(v)
@@ -373,7 +400,7 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) bool {
 		switch b.elemKind {
 		case reflect.Bool:
 			if switchEnvPaths[b.YAMLPath] {
-				on, set := readSwitchEnv(name, raw)
+				on, set := readSwitchEnvAs(name, raw, warn)
 				if set {
 					fv.Set(reflect.ValueOf(&on))
 				}
@@ -381,14 +408,14 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) bool {
 			}
 			v, err := strconv.ParseBool(raw)
 			if err != nil {
-				validateLogger.Warn(unparseableBoolEnv, "var", name)
+				say(unparseableBoolEnv)
 				return false
 			}
 			fv.Set(reflect.ValueOf(&v))
 		case reflect.Int, reflect.Int64:
 			n, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {
-				validateLogger.Warn(unparseableIntEnv, "var", name)
+				say(unparseableIntEnv)
 				return false
 			}
 			// Allocate through the field's own element type so an
@@ -402,7 +429,7 @@ func (c *Config) applyEnvValue(b envBinding, name, raw string) bool {
 	case reflect.Int, reflect.Int64:
 		v, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
-			validateLogger.Warn(unparseableIntEnv, "var", name)
+			say(unparseableIntEnv)
 			return false
 		}
 		fv.SetInt(v)

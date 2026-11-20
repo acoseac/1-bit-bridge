@@ -97,8 +97,11 @@ var turnReadHelpers = map[string]bool{"configChangedSinceRead": true, "configSti
 // bridge.yaml over the file its turn found, which is what a restore is for,
 // once configStillAsRead has found that file to be the one its caller read;
 // and the live holder's UpdateChecked saves its snapshot, read at boot or
-// last written by it, only while bytes.Equal finds Found's bytes to be the
-// ones it last read or wrote.
+// last written by it, only once compareTurn has compared Found's bytes with
+// the ones it last read or wrote, refusing a file it cannot merge into (gone,
+// repointed, undecodable, a deployment setting changed), and then writes each
+// setting another writer changed since as the turn's bytes hold it (backlog
+// B535).
 // RuntimeConfig.Update saves through UpdateChecked and is no writer of the
 // sweep's itself. Every other named writer that saves itself saves what its
 // turn found: Edit, and bind, what LoadFound gave (bind's SaveIf comparison
@@ -109,7 +112,7 @@ var turnReadHelpers = map[string]bool{"configChangedSinceRead": true, "configSti
 var comparedSaves = map[string]string{
 	"cmd/bridge/init.go:saveInitConfig":                      "configChangedSinceRead",
 	"internal/backup/backup.go:RestoreWithOptions":           "configStillAsRead",
-	"internal/config/runtime.go:RuntimeConfig.UpdateChecked": "bytes.Equal",
+	"internal/config/runtime.go:RuntimeConfig.UpdateChecked": "compareTurn",
 }
 
 // notConfigWriters are the functions that write a file while they name the
@@ -450,11 +453,11 @@ func lockOrderProblem(key string, site configWriteSite, lock string) string {
 // returns before the save, at the top level of the function's body, or
 // directly inside a top-level check of the turn against nil (a restore's: a
 // save through a nil turn writes nothing), in one of three forms: the call
-// itself, or negated, in a condition of && and || (init's, and the holder's
-// `fileKnown && (… || !bytes.Equal(…))`), or an error the if's initializer
-// takes from it that the condition finds non-nil (a restore's). A comparison
-// inside the nil check refuses only a save made through the very name the
-// check tests, which nothing assigns between the check and the save
+// itself, or negated, in a condition of && and || (init's), or an error the
+// if's initializer takes from it that the condition finds non-nil (a
+// restore's, and the holder's: `if err := r.compareTurn(…); err != nil`). A
+// comparison inside the nil check refuses only a save made through the very
+// name the check tests, which nothing assigns between the check and the save
 // (savesThroughUnmoved): a save through another turn name, the one the
 // checked name was copied from among them, through that name assigned again
 // since the check, or through a method value, goes past a check that let a
@@ -471,15 +474,17 @@ func lockOrderProblem(key string, site configWriteSite, lock string) string {
 // (`pick(stale, found)`); which answer of a comparison means the file changed
 // (an if that returns when configChangedSinceRead finds no change passes as
 // one that returns when it finds one); a conjunct beside the comparison that
-// switches its refusal off (`enabled && configChangedSinceRead(…)`, the shape
-// of the holder's fileKnown, which lets a holder told nothing save); an
-// assignment to the nil-checked name that is not one to the sweep, through a
-// pointer (`*p = other`) or in a function literal written before the check
-// and called after it; and a helper in another function that writes the path
-// a caller hands it (`writeBlob(cfgPath, data)`), which names no config path
-// itself while its caller makes no write the sweep knows. Variables are told
-// apart by the parser's resolution, so a name shadowed in a block is not the
-// one outside it; positions are the source's, never the control flow's.
+// switches its refusal off (`enabled && configChangedSinceRead(…)`), or a
+// comparison that answers nil in a state of its own (the holder's compareTurn
+// for a holder told nothing, which lets it save, and for another writer's
+// change it merges); an assignment to the nil-checked name that is not one to
+// the sweep, through a pointer (`*p = other`) or in a function literal written
+// before the check and called after it; and a helper in another function that
+// writes the path a caller hands it (`writeBlob(cfgPath, data)`), which names
+// no config path itself while its caller makes no write the sweep knows.
+// Variables are told apart by the parser's resolution, so a name shadowed in
+// a block is not the one outside it; positions are the source's, never the
+// control flow's.
 func derivationProblem(key string, site configWriteSite, lock string, compared map[string]string) string {
 	lockAt, turns := site.lockAt(lock), site.turnVars(lock)
 	check, listed := compared[key]

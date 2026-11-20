@@ -101,10 +101,15 @@ var (
 		"and held its lock for longer than %s, so nothing was written: try again", config.LockWait)
 	errMsgSaveConfigNoLockManager = "the filesystem holding the config file gave no lock beside it, so nothing was written: " +
 		"it has no working lock manager; mount it with local locking, or start its lock service, and try again"
-	errMsgSaveConfigChangedOutside = "the config file was changed or removed by another writer since this bridge read it " +
-		"(a bridge command such as library add or init, or an edit), or its name now opens another file (a link at it " +
-		"repointed), so this change was not saved, and the file keeps what that writer left: restart the bridge to load " +
-		"the file, then make the change again"
+	errMsgSaveConfigInTurn = "the config file was changed by another writer while this save had its turn at it (an edit, " +
+		"or a bridge older than the config's lock), so this change was not saved, and the file keeps what that writer " +
+		"left: make the change again, or restart the bridge to load the file first"
+	errMsgSaveConfigRemoved = "the config file was removed since this bridge read it, so this change was not saved: put " +
+		"the file back, then " + errMsgRestartToLoad
+	errMsgSaveConfigRepointed = "the config file's name now opens another file than the one this bridge read (a link " +
+		"at it repointed), so this change was not saved: " + errMsgRestartToLoad
+	errMsgSaveConfigUndecodable = "the config file does not read as a bridge config as another writer left it, so this " +
+		"change was not saved: correct the file, then " + errMsgRestartToLoad
 	errMsgSaveConfigBootUnresolved = "this bridge could not resolve the file its config's name opens when it started, " +
 		"so it cannot say which file its settings were read from, and this change was not saved: restart the bridge " +
 		"once that name resolves, then make the change again"
@@ -113,26 +118,69 @@ var (
 	errMsgSaveConfig = "the bridge could not save the config file, and the bridge's log says why"
 )
 
+// errMsgRestartToLoad is the remedy every refusal of a file another writer
+// changed ends with.
+const errMsgRestartToLoad = "restart the bridge to load the file, then make the change again"
+
 // saveConfigRefusal is what the console says of err, a save of the config
 // file that was refused or failed, by its class: try again past another
-// writer's lock, repair the lock manager, restart over a file changed
-// outside the holder (a change in the turn and a repointed name are the
-// holder's own form of it), restart once the name resolves, fix a link to
-// no file, or, for any other failure, read the log.
+// writer's lock, repair the lock manager, and, of a file changed outside the
+// holder, by its kind (changedOutsideRefusal: a change of a setting another
+// writer changed, a deployment setting changed, a file gone, repointed, that
+// does not decode or that the next start would refuse, a change in the save's
+// own turn, each restarted past), restart once the name resolves, fix a link
+// to no file, or, for any other failure, read the log. It never calls the
+// error's Error, which names the config file.
 func saveConfigRefusal(err error) string {
+	var outside *config.ChangedOutsideError
 	switch {
 	case errors.Is(err, config.ErrBusy):
 		return errMsgSaveConfigBusy
 	case errors.Is(err, config.ErrNoLockManager):
 		return errMsgSaveConfigNoLockManager
-	case errors.Is(err, config.ErrChangedOutside), errors.Is(err, config.ErrChangedInTurn), errors.Is(err, config.ErrNameMoved):
-		return errMsgSaveConfigChangedOutside
+	case errors.As(err, &outside):
+		return changedOutsideRefusal(outside)
+	case errors.Is(err, config.ErrChangedInTurn):
+		return errMsgSaveConfigInTurn
+	case errors.Is(err, config.ErrNameMoved):
+		return errMsgSaveConfigRepointed
 	case errors.Is(err, config.ErrBootUnresolved):
 		return errMsgSaveConfigBootUnresolved
 	case errors.Is(err, fsutil.ErrDanglingLink):
 		return errMsgSaveConfigLinkToNothing
 	}
 	return errMsgSaveConfig
+}
+
+// changedOutsideRefusal is what the console says of e, the live holder's
+// refusal of a save once another writer changed the config file, by its kind
+// (backlog B535): in fixed words, the settings it is about by their yaml
+// paths, and never the file's path or a value.
+func changedOutsideRefusal(e *config.ChangedOutsideError) string {
+	settings, them := strings.Join(e.Settings, ", "), "it"
+	if len(e.Settings) > 1 {
+		them = "them"
+	}
+	switch e.Kind {
+	case config.OutsideRemoved:
+		return errMsgSaveConfigRemoved
+	case config.OutsideRepointed:
+		return errMsgSaveConfigRepointed
+	case config.OutsideUndecodable:
+		return errMsgSaveConfigUndecodable
+	case config.OutsideDeployment:
+		return "another writer changed the deployment settings in the config file (" + settings + "), which decide " +
+			"what this console may change, so this change was not saved, and the file keeps what that writer left: " +
+			errMsgRestartToLoad
+	case config.OutsideConflict:
+		return "another writer changed " + settings + " in the config file since this bridge read it, and this change " +
+			"changes " + them + " too, so it was not saved, and the file keeps what that writer left: " + errMsgRestartToLoad
+	case config.OutsideUnloadable:
+		return "this change, beside the settings another writer changed in the config file (" + settings + "), would " +
+			"leave a file this bridge would not load at its next start (the bridge's log says why), so it was not saved, " +
+			"and the file keeps what that writer left: " + errMsgRestartToLoad
+	}
+	return errMsgSaveConfigInTurn
 }
 
 // writeSaveConfigErr answers a save of the config file that was refused or
@@ -1904,19 +1952,26 @@ func (s *Server) applyRootAddition(w http.ResponseWriter, r *http.Request, abs s
 	//
 	// The wipe runs inside the Update below, in bridge.yaml's turn and
 	// after the holder's comparison of the file (backlog B506): a save
-	// refused because another writer changed the config since serve read
-	// it, or because another writer holds its lock past the wait, is
-	// refused before the wipe, so it wipes nothing (and unlinks no
-	// rendition), however often the operator retries. Before, the wipe ran
-	// first and the refusal came after it. The turn's comparison is asked
-	// once more just before the wipe starts (check), so the one refusal
-	// that can still come after it is a writer that takes no turns (an
-	// edit, a bridge older than the lock) landing during the wipe itself or
-	// the save's staging: that costs the renditions and waveforms the wipe
-	// unlinked, which a successful add drops too (the rows' path form
-	// changes), and which come back as they first came (B506's third round,
-	// ops/History-rules-config-lifecycle.md); the rows come back with the
-	// compensating scan.
+	// refused there (a file gone or that does not decode, a name repointed,
+	// a deployment setting another writer changed, another writer's lock
+	// held past the wait) is refused before the wipe, so it wipes nothing
+	// (and unlinks no rendition), however often the operator retries.
+	// Before, the wipe ran first and the refusal came after it. The root
+	// list is set on the clone first, and the turn's check is asked just
+	// before the wipe starts (check): it reads the file again, and refuses a
+	// root list another writer changed too, and a file the save would write
+	// that the next start would refuse (another writer's variants folder
+	// below the added root), before anything is unlinked (backlog B535). No
+	// destructive step runs before a check that could refuse it: an add
+	// that takes the library past two roots wipes nothing, and the holder
+	// checks its file again once fn returns, before the save. The one
+	// refusal that can still come after the wipe is a writer that takes no
+	// turns (an edit, a bridge older than the lock) landing during the wipe
+	// itself or the save's staging: that costs the renditions and waveforms
+	// the wipe unlinked, which a successful add drops too (the rows' path
+	// form changes), and which come back as they first came (B506's third
+	// round, ops/History-rules-config-lifecycle.md); the rows come back with
+	// the compensating scan.
 	var carryGen int64
 	var wiped bool
 	var wipeErr error
@@ -1928,6 +1983,7 @@ func (s *Server) applyRootAddition(w http.ResponseWriter, r *http.Request, abs s
 	// can't be silently dropped by our Save. If Save fails the clone
 	// is discarded — no manual rollback required.
 	err := s.deps.CfgHolder.UpdateChecked(s.deps.CfgPath, func(next *config.Config, check func() error) error {
+		next.LibraryRoots = newList
 		if willTransition {
 			if err := check(); err != nil {
 				return err
@@ -1939,7 +1995,6 @@ func (s *Server) applyRootAddition(w http.ResponseWriter, r *http.Request, abs s
 			}
 			carryGen, wiped = gen, true
 		}
-		next.LibraryRoots = newList
 		return nil
 	})
 	if wipeErr != nil {
@@ -2097,13 +2152,16 @@ func (s *Server) applyRootRemoval(w http.ResponseWriter, r *http.Request, newLis
 	//
 	// The manifest op runs inside the Update below, in bridge.yaml's turn
 	// and after the holder's comparison of the file, as the add path's
-	// wipe does (backlog B506): a save refused before it (another writer
-	// changed the config since serve read it, or holds its lock past the
-	// wait) deletes no row and unlinks no sidecar, and the turn's
-	// comparison is asked again just before it starts (check), so only a
-	// writer that takes no turns landing during the op itself or the
-	// save's staging is refused after it: at the cost of the renditions and
-	// waveforms the op unlinked, those a successful remove drops too.
+	// wipe does (backlog B506): a save refused before it (the file gone or
+	// undecodable, its name repointed, a deployment setting another writer
+	// changed, another writer's lock held past the wait) deletes no row and
+	// unlinks no sidecar. The root list is set on the clone first and the
+	// turn's check is asked just before the op starts (check), which reads
+	// the file again and refuses a root list another writer changed too and
+	// a file the next start would refuse (backlog B535), so only a writer
+	// that takes no turns landing during the op itself or the save's staging
+	// is refused after it: at the cost of the renditions and waveforms the
+	// op unlinked, those a successful remove drops too.
 	var carryGen int64
 	var collapsed bool
 	var opErr error
@@ -2114,6 +2172,7 @@ func (s *Server) applyRootRemoval(w http.ResponseWriter, r *http.Request, newLis
 	// between our checks above and here can't be silently dropped.
 	// On Save failure the clone is discarded — no manual rollback.
 	err := s.deps.CfgHolder.UpdateChecked(s.deps.CfgPath, func(next *config.Config, check func() error) error {
+		next.LibraryRoots = newList
 		if err := check(); err != nil {
 			return err
 		}
@@ -2128,7 +2187,6 @@ func (s *Server) applyRootRemoval(w http.ResponseWriter, r *http.Request, newLis
 			opErr, opCode = err, "delete-tracks"
 			return err
 		}
-		next.LibraryRoots = newList
 		return nil
 	})
 	if opErr != nil {
