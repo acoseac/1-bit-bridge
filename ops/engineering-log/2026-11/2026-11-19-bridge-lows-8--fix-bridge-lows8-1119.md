@@ -12,6 +12,14 @@ reachable in production today. Lines cited of the old code are `bc79885c`'s. Eac
 predicted in writing before it ran. Each was laid into the tree uncommitted, after its item's
 commit, and run; its file was then restored from memory, and the tree was checked clean.
 
+Corrected on 2026-11-19 by Bridge lows 10 where this record could not be checked: each red's and
+control's selector given and its command line said not recorded; the lanes' tags named, and their
+timeout and the gate's command lines and results said not recorded; and items 2 and 4 said green at
+the base by construction. Its record,
+`ops/engineering-log/2026-11/2026-11-19-bridge-lows-10--fix-bridge-lows10-1119.md`, gives its
+reruns of this record's runs, each with its command line verbatim and its result: the lanes'
+tests again, the controls K1, M1 and P1 again, and its gate.
+
 ### Item 1: the same install is all three fields
 
 What was true. `refuseCrashRollbackBeforeTheLock` (`cmd/bridge/serve_crashed_install.go`
@@ -51,6 +59,12 @@ Red first: the case over `bc79885c`'s production code. Both cases were red as pr
 - `:648`, "the marker's refusal = "the backup did not say its version", want none recorded over
   another install", and in the check's case its own why.
 
+That run's command line was not recorded, nor how the base's production code was laid under the
+case. Its selector, from the case it names, is
+`-run '^TestARefusalBeforeTheLockIsNotRecordedOverAnotherReplacedVersion$'`. Control K1 below puts
+the base's condition back, so Bridge lows 10's rerun of K1 is this red again, at that bundle's
+lines, with its command line.
+
 Both cases are green at `9f77d9ff`. Controls at `9f77d9ff`, each run over the seven crash-rollback
 lock tests then in the file (B894's six and this one):
 
@@ -58,6 +72,11 @@ lock tests then in the file (B894's six and this one):
 | --- | --- | --- | --- |
 | K1 | the new clause removed: the base's condition | both cases red at 643, 645 and 648; every other test green | as predicted |
 | K2 | `st.PreviousVersion` compared with itself | as K1 | as predicted |
+
+The controls' command lines were not recorded. The selector the table's words give, the seven tests
+the file defines at `9f77d9ff`, is
+`-run '^(TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock|TestABackupChangedWhileItWasCheckedIsNotPutBack|TestTheBackupIsNotPutBackOverSettingsItDidNotCheck|TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock|TestAStopAroundTheBackupsChecksWritesNothing|TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked|TestARefusalBeforeTheLockIsNotRecordedOverAnotherReplacedVersion)$'`.
+Bridge lows 10's record gives its rerun of K1 with its command line.
 
 ### Item 2: a lock another holder keeps
 
@@ -86,7 +105,10 @@ by a stop or an unheld lock:
 
 Both runs' stand-ins found the lock held (`markersLockHeld`), so the case's hold stood throughout.
 The case is green at `c5348201`. It is green over `bc79885c`'s production file too (laid over
-the tree by `go test -overlay`), whose branch is the same.
+the tree by `go test -overlay`), whose branch is the same: the case pins what the base already
+did, so it is green at the base by construction and went red first nowhere, and its reds are its
+controls' (M1 and M3 below). That run's command line was not recorded; its selector, from the case
+it names, is `-run '^TestARefusalBeforeTheLockIsSaidAndRecordedNowhereWhileTheLockIsHeld$'`.
 
 Controls at `c5348201`, each run over the eight lock tests (B894's six and the two new ones):
 
@@ -95,6 +117,11 @@ Controls at `c5348201`, each run over the eight lock tests (B894's six and the t
 | M1 | the branch records the refusal: `recordCrashRollbackRefusal(dataDir, checked, recorded, save, stderr)` after its line | the new case red at "update-state.json changed"; `TestAStopAroundTheBackupsChecksWritesNothing/in_the_backup's_version` red the same way, since its stop reaches the branch by `ctx.Err()`; the rest green | as predicted, at `:715` and `:520` |
 | M2 | the condition alone: its first term, `err != nil`, dropped | every case green, since a nil lock is not `Held` and the branch is taken as before; this is why the control is M1 | as predicted: all eight tests green |
 | M3 | the branch's line removed | the new case red at its "did not say"; the stop case red at its own | as predicted, at `:713` ("the start did not say …; its updater lines: """) and `:518` |
+
+The controls' command lines were not recorded. The selector the table's words give, the eight tests
+the file defines at `c5348201`, is
+`-run '^(TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock|TestABackupChangedWhileItWasCheckedIsNotPutBack|TestTheBackupIsNotPutBackOverSettingsItDidNotCheck|TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock|TestAStopAroundTheBackupsChecksWritesNothing|TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked|TestARefusalBeforeTheLockIsNotRecordedOverAnotherReplacedVersion|TestARefusalBeforeTheLockIsSaidAndRecordedNowhereWhileTheLockIsHeld)$'`.
+Bridge lows 10's record gives its rerun of M1 with its command line.
 
 ### Item 3: the History's order, and its same install
 
@@ -143,7 +170,9 @@ The rules file, `config-lifecycle.md`, stays at 99,783 bytes. `make docs-check` 
 `TestEveryCitedTestNameExists` passed over the edited file. Control G1, at `922bea8c`: the edited
 paragraph's citation of item 1's test was renamed with a suffix (`…Ghost`). The guard went red as
 predicted: "no test function of this name exists: … (cited by
-ops/History-rules-config-lifecycle.md)".
+ops/History-rules-config-lifecycle.md)". These runs' command lines were not recorded; the guard's
+selector is `-run '^TestEveryCitedTestNameExists$'` in `./cmd/bridge/`, and Bridge lows 10's record
+gives its own runs of it, a control of G1's kind among them, with their command lines.
 
 ### Item 4: the Windows identity, pinned on every host
 
@@ -165,7 +194,10 @@ The pin. `TestTheCrashRollbackFixesTheBackupsIdentityThroughAHandle` reads
   `updater.LockState`.
 
 One sentence in the History's paragraph on the identity names the Windows-only behaviour the pin
-stands for. The pin is green at `d91bad24`.
+stands for. The pin is green at `d91bad24`, and at the base by construction: it judges only the
+body of `recoverCrashedInstall`, which no commit of this bundle changed (from `bc79885c` to `d91bad24`
+the production file's diff is item 1's condition in `refuseCrashRollbackBeforeTheLock` and two doc
+comments), so it went red first nowhere, and its reds are its controls' (P1 to P3 below).
 
 Controls at `d91bad24`, each on disk while the pin read the file, each run over the pin and the
 eight lock tests:
@@ -176,22 +208,34 @@ eight lock tests:
 | P2 | the handle kept, the compare under the lock made against the Lstat: `os.SameFile(fi, now)` | the pin red at that `os.SameFile`; the rest green | as predicted: `:826`, naming `serve_crashed_install.go:262:77` |
 | P3 | the handle kept, then `identity = fi` after the early compare | the pin red at its count of bindings; the rest green | as predicted: `:814`, "identity is bound 2 times … (serve_crashed_install.go:152:2, …:163:2)" |
 
+The controls' command lines were not recorded. The selector the table's words give, the pin and the
+eight lock tests, the nine tests the file defines at `d91bad24`, is
+`-run '^(TestTheCrashRollbackFixesTheBackupsIdentityThroughAHandle|TestTheCrashRollbackAsksItsBackupBeforeItTakesTheMarkersLock|TestABackupChangedWhileItWasCheckedIsNotPutBack|TestTheBackupIsNotPutBackOverSettingsItDidNotCheck|TestTheCrashRollbackDecidesAgainOnTheMarkerItReadsUnderTheLock|TestAStopAroundTheBackupsChecksWritesNothing|TestTheCrashRollbackFollowsAnInstallMadeWhileItsBackupWasChecked|TestARefusalBeforeTheLockIsNotRecordedOverAnotherReplacedVersion|TestARefusalBeforeTheLockIsSaidAndRecordedNowhereWhileTheLockIsHeld)$'`.
+Bridge lows 10's record gives its rerun of P1 with its command line.
+
 ### Runs
 
 At `d91bad24`, in one build-slot session (the slot free at once), 58 tests ran under `-race`,
-each named in the selector:
+each named in the selector, which was not recorded verbatim:
 - the 53 that `-list 'CrashRollback|Rollback'` lists in cmd/bridge;
 - the three B894 tests whose names hold neither word;
 - the two new ones, which hold neither either.
 
-Twenty runs of each came from one race binary (`go test -c -race`, the release tags, the pinned
-toolchain), as four lanes of `-test.count=5`, started 20 s apart, each lane with its TMPDIR on
-disk. Result: 1,160 top-level passes of 1,160, none failed or skipped, and no data race. Each lane
-took 853-856 s, the session 943 s.
+Twenty runs of each came from one race binary, built by `go test -c -race` with the release tags,
+`-tags ts_omit_webclient,ts_omit_debugeventbus` (`Makefile:9`'s `GO_TAGS`), and the pinned
+toolchain, `go.mod`'s go1.27.3. The binary was run directly, as four lanes of `-test.count=5`,
+started 20 s apart, each lane with its TMPDIR on disk; the lanes' timeout (`-test.timeout`) was
+not recorded. Result: 1,160 top-level passes of 1,160, none failed or skipped, and no data race.
+Each lane took 853-856 s, the session 943 s. These were this record's runs. Bridge lows 10's
+record gives its own reruns, each command line verbatim: through `go test` (`-race`, four
+concurrent lanes of `-count=5 -timeout 30m`), selecting by these words (`CrashRollback|Rollback`,
+the three B894 names anchored, the two new ones by their shared prefix) at its base, where they
+select more tests.
 
-The gate on the branch is in its report: `make fmt vet docs-check`, `go vet` of `./cmd/bridge/`
-for windows and darwin, and `make fmt vet test build-all`. A record holds no run made on its own
-commit.
+The gate on the branch, which this record named as `make fmt vet docs-check`, `go vet` of
+`./cmd/bridge/` for windows and darwin, and `make fmt vet test build-all`, is in no record and in
+no PR body: its command lines and results were not recorded. A record holds no run made on its
+own commit.
 
 ### What stays open
 
