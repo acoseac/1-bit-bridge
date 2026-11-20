@@ -42,6 +42,13 @@ type RuntimeConfig struct {
 	// it in (file), whatever its save then does, and nothing but a restart,
 	// a new holder, forgets one. Under mu.
 	outside []string
+	// outsideEnv is the same record for the settings a BRIDGE_* variable set
+	// at the start (Config.envSet), sorted: B761's rule writes them
+	// (filedEnvValues, filedSwitches), so they serve the conflict check alone,
+	// never fileOutside, the deployment refusal or the log line saying a
+	// change takes effect at the next start, which the variable makes false
+	// (B535's round 2). Under mu.
+	outsideEnv []string
 	// changedMu guards changed, the channel the next Store closes
 	// (Changed), nil until someone asks for it.
 	changedMu sync.Mutex
@@ -183,6 +190,9 @@ func (r *RuntimeConfig) RecordFile(file BootFile, raw []byte) {
 	defer r.mu.Unlock()
 	r.file, r.fileKnown = append([]byte(nil), raw...), true
 	r.target, r.unresolved = file.target, !file.resolved
+	// The snapshot was read from raw: what was recorded against other bytes
+	// is a record of another read (backlog B535).
+	r.outside, r.outsideEnv = nil, nil
 }
 
 // Changed returns a channel that the next Store closes, the Store an
@@ -259,18 +269,20 @@ func (r *RuntimeConfig) Clone() *Config {
 // holder read (RecordFile: a name whose link was repointed since resolves to
 // another file), and over a file another writer changed since (a library add,
 // init, a restore or an edit beside the running bridge) it merges (backlog
-// B535, compareTurn): the turn's bytes and the ones this holder last read or
-// wrote are read as Load reads a file for its settings, every setting the two
-// set differently is recorded until a restart, and every save writes each
-// recorded setting as the turn's file holds it, beside its own change, while
-// the snapshot it publishes is its own: nothing of the other writer's goes
-// live, and the bridge loads it when it next starts. Nothing is saved or
-// stored, and a *ChangedOutsideError says why, for a file gone, a name the
-// turn finds repointed, a file that does not decode, a recorded deployment
-// setting, a change of a recorded setting (the save made it from a value it
-// never read), and a file the save would write that the next start would
-// refuse (loadsAtNextStart): the file keeps that writer's change, and nothing
-// reloads it now. The save compares once more before each attempt at its
+// B535, compareTurn): the turn's bytes and the ones this holder last recorded
+// (read at the boot or at a turn that found them, or written) are read as Load
+// reads a file for its settings, every setting the two set differently is
+// recorded, at the turn that finds it and until a restart, and every save
+// writes each recorded setting as the turn's file holds it, beside its own
+// change, but one a BRIDGE_* variable set at the start, which B761's rule
+// writes, while the snapshot it publishes is its own: nothing of the other
+// writer's goes live, and the bridge loads it when it next starts. Nothing is
+// saved or stored, and a *ChangedOutsideError says why, for a file gone, a
+// name the turn finds repointed, a file that does not decode, a recorded
+// deployment setting, a change of a recorded setting, a variable's included
+// (the save made it from a value it never read), and a file the save would
+// write that the next start would refuse (loadsAtNextStart): the file keeps
+// that writer's change, and nothing reloads it now. The save compares once more before each attempt at its
 // rename (Save's own comparison), so a writer that takes no turns landing in
 // the turn is refused too (a *ChangedOutsideError, OutsideInTurn), and the
 // next save merges what it left. A name repointed while the save waited for

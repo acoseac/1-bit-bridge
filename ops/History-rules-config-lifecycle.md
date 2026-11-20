@@ -506,7 +506,9 @@ Windows-runner check, distinct from portable race-test results.
   (`TestAWriterThatWritesOutDefaultsChangesOnlyWhatItChanged`), a rename
   beside an unread player block and beside a serial another writer changed,
   a switch's flip beside an edit of its leaf while `BRIDGE_ENRICH_ENABLED`
-  is set, in both orders (`TestASettingAVariableSetIsNoOtherWritersChange`),
+  is set, in both orders (`…ASettingAVariableSetIsNoOtherWritersChange`,
+  which round 2 turned round and renamed
+  `TestAChangeOfAVariablesSettingAnotherWriterChangedIsRefused`, below),
   a root add beside a rename
   (`TestARootAddedBesideAnotherWritersChangeKeepsIt`, 500 for 201), and
   serve's settings PATCH beside an append

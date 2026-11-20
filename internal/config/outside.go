@@ -33,19 +33,22 @@ var (
 
 // compareTurn compares the config file a turn found (found, and ok whether
 // there was one; target, the file the config's name opened) with the bytes
-// this holder last read or wrote, before the turn's change runs. A holder told
-// nothing compares nothing. A file gone, and a name that opens another file
-// than the one this holder read, are refused. Where the bytes differ, each is
-// read as Load reads a file for its settings (readSettings), and each setting
-// they set differently (settingsChanged) joins the record (outside), logged
-// once, the turn's bytes then the ones the record is kept against, whatever
-// the save does next; a setting a BRIDGE_* variable set at the start never
-// joins it, since B761's rule writes it, the file's value where the save left
-// it and the change where it made one (filedEnvValues, filedSwitches). A turn's
-// file that does not decode is refused, the record as it was. Then, whatever
-// the bytes, a recorded deployment setting refuses the save: the console
-// decides what it may change from its live copy of the posture and the
-// managed lists.
+// this holder last recorded (read at the boot or at a turn that found another
+// writer's change, or written by its own save), before the turn's change runs.
+// A holder told nothing compares nothing. A file gone, and a name that opens
+// another file than the one this holder read, are refused. Where the bytes
+// differ, each is read as Load reads a file for its settings (readSettings),
+// and each setting they set differently (settingsChanged) joins the record
+// (outside), logged once, the turn's bytes then the ones the record is kept
+// against, whatever the save does next. A setting a BRIDGE_* variable set at
+// the start joins a record of its own instead (outsideEnv), for the conflict
+// check alone (refuseMerge), unlogged: B761's rule writes it, the file's value
+// where the save left it and the change where it made one (filedEnvValues,
+// filedSwitches), and the variable sets it again at the next start (B535's
+// round 2). A turn's file that does not decode is refused, the record as it
+// was. Then, whatever the bytes, a recorded deployment setting refuses the
+// save: the console decides what it may change from its live copy of the
+// posture and the managed lists.
 func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, before *Config) error {
 	if !r.fileKnown {
 		return nil
@@ -63,13 +66,18 @@ func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, 
 			return &ChangedOutsideError{Path: path, Kind: OutsideUndecodable}
 		}
 		for _, setting := range settingsChanged(was, now) {
-			if slices.Contains(before.envSet, setting) || slices.Contains(r.outside, setting) {
-				continue
+			switch {
+			case slices.Contains(before.envSet, setting):
+				if !slices.Contains(r.outsideEnv, setting) {
+					r.outsideEnv = append(r.outsideEnv, setting)
+				}
+			case !slices.Contains(r.outside, setting):
+				r.outside = append(r.outside, setting)
+				validateLogger.Info(outsideSettingMessage, "setting", setting)
 			}
-			r.outside = append(r.outside, setting)
-			validateLogger.Info(outsideSettingMessage, "setting", setting)
 		}
 		slices.Sort(r.outside)
+		slices.Sort(r.outsideEnv)
 		r.file = found
 	}
 	if deployment := settingsUnder(r.outside, deploymentSettings); len(deployment) > 0 {
@@ -83,25 +91,32 @@ func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, 
 // check fn asks before work of its own. A setting next changes, against
 // before, that another writer changed, or that holds or is held by one (a
 // player block and its fields), is refused (OutsideConflict, naming the
-// recorded settings it meets): the change was made from a value the console
-// never read, and saving it would lose that writer's in silence. Then the file
-// the save would write (fileSaved over a copy of next) is loaded as the next
-// start loads it (loadsAtNextStart), and one it would not load is refused
+// recorded settings it meets), a setting a variable set (outsideEnv) as any
+// other: the change was made from a value the console never read, and saving
+// it would lose that writer's in silence, whatever value it writes. Then,
+// while a setting no variable set is recorded, the file the save would write
+// (fileSaved over a copy of next) is loaded as the next start loads it
+// (loadsAtNextStart), and one it would not load is refused
 // (OutsideUnloadable). With nothing recorded it asks nothing: the save is the
-// one the holder made before B535.
+// one the holder made before B535; with the variables' settings alone, the
+// one B761's rule made.
 func (r *RuntimeConfig) refuseMerge(path string, before, next *Config, found []byte) error {
-	if len(r.outside) == 0 {
+	if len(r.outside) == 0 && len(r.outsideEnv) == 0 {
 		return nil
 	}
 	changed := settingsChanged(before, next)
 	var conflict []string
-	for _, setting := range r.outside {
+	for _, setting := range slices.Concat(r.outside, r.outsideEnv) {
 		if slices.ContainsFunc(changed, func(c string) bool { return overlap(setting, c) }) {
 			conflict = append(conflict, setting)
 		}
 	}
 	if len(conflict) > 0 {
+		slices.Sort(conflict)
 		return &ChangedOutsideError{Path: path, Kind: OutsideConflict, Settings: conflict}
+	}
+	if len(r.outside) == 0 {
+		return nil
 	}
 	merged := *next
 	r.fileSaved(&merged, before, found)
@@ -229,7 +244,8 @@ func loadsAtNextStart(path string, data []byte) error {
 
 // settingsChanged is the yaml path of each setting a and b hold differently,
 // sorted: every exported field yaml writes, reached through the structs that
-// hold it, a setting of its own, compared by sameValue; a list one setting
+// hold it, a setting of its own, compared by sameValue, and an opt-out by what
+// it turns on (switchOn); a list one setting
 // whatever it holds (upnpUpstream.servers among them), never walked by its
 // entries; a struct that writes itself as one value (usbid.Serial, whose one
 // field is unexported) one setting; and a player block that did not read, on
@@ -257,6 +273,10 @@ func walkSettings(a, b reflect.Value, prefix string, out *[]string) {
 		}
 		fa, fb := a.Field(i), b.Field(i)
 		switch {
+		case switchEnvPaths[path]:
+			if switchOn(fa) != switchOn(fb) {
+				*out = append(*out, path)
+			}
 		case f.Type == playerConfigType && (unreadBlock(fa) || unreadBlock(fb)):
 			if !sameKeptBlock(fa.Interface().(PlayerConfig), fb.Interface().(PlayerConfig)) {
 				*out = append(*out, path)
@@ -267,6 +287,14 @@ func walkSettings(a, b reflect.Value, prefix string, out *[]string) {
 			*out = append(*out, path)
 		}
 	}
+}
+
+// switchOn is what an opt-out (switchEnvPaths), a *bool, turns on: no value is
+// on, as no key in the file is (EffectiveEnabled and its kin), so a switch
+// written true is the same setting as one left out, and a save that sets a
+// switch to what it was changes nothing (B535's round 2).
+func switchOn(v reflect.Value) bool {
+	return v.IsNil() || v.Elem().Bool()
 }
 
 // settingKey is the key yaml writes f under: its tag's, or its name in lower

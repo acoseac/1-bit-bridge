@@ -134,7 +134,8 @@ its constants, `ChangedOutsideError`'s `Kind`, `Settings` and `Err`, `settingsCh
   `TestAWriterThatWritesOutDefaultsChangesOnlyWhatItChanged` both cases (R3 and review 1's R3),
   `TestASaveKeepsAPlayerBlockThatDoesNotReadAsAnotherWriterLeftIt` (R4),
   `TestASaveKeepsASerialAnotherWriterChanged` (review 1's R2), both cases of
-  `TestASettingAVariableSetIsNoOtherWritersChange` (S4), `TestEachSettingIsFoundToDifferAlone` (R6,
+  `…ASettingAVariableSetIsNoOtherWritersChange` (S4; renamed in round 2, below, which now refuses
+  what it let through), `TestEachSettingIsFoundToDifferAlone` (R6,
   126 settings found as nothing through the shim) and the name case of
   `TestUpdateRefusesAFileAnotherWriterChanged` on its naming assertion alone (R2); green as
   predicted: `TestAMergedSaveTheNextStartWouldRefuseIsRefused` (R5 and S3, refused by the bytes),

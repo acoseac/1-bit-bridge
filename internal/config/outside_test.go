@@ -360,39 +360,141 @@ func TestADeploymentSettingAnotherWriterChangedRefusesEverySave(t *testing.T) {
 	}
 }
 
-// TestASettingAVariableSetIsNoOtherWritersChange: a setting a BRIDGE_*
-// variable set at the start is written by B761's rule (the file's own value
-// where the save left it, the change where it made one), so another writer's
-// change of it is never recorded as a change the console's must not meet: a
-// console flip of enrichment, under BRIDGE_ENRICH_ENABLED, lands after another
-// writer wrote enrich.enabled, and after a flip of its own too.
-func TestASettingAVariableSetIsNoOtherWritersChange(t *testing.T) {
+// TestAChangeOfAVariablesSettingAnotherWriterChangedIsRefused: a setting a
+// BRIDGE_* variable set at the start that another writer changed in the file
+// is recorded for the conflict check alone (outsideEnv), so a console change
+// of it is refused, naming it, with the file as that writer left it and the
+// live value as it was: until round 2 of B535 such a change landed, and B761's
+// rule then wrote the console's value over the other writer's. A change is
+// refused whatever value it writes, as for every setting another writer
+// changed: the second case's flip writes off where the other writer wrote off
+// too.
+func TestAChangeOfAVariablesSettingAnotherWriterChangedIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		flipFirst bool
 	}{
 		{"another writer's edit, then the console's flip", false},
-		{"the console's flip, another writer's edit, then a flip", true},
+		{"the console's flip, another writer's edit, then a flip to the value it wrote", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("BRIDGE_ENRICH_ENABLED", "false")
 			path := envSaveConfig(t, "libraryName: Home\n")
 			rc := bootHolder(t, path)
-			flip := func(on bool) {
-				t.Helper()
-				if err := rc.Update(path, func(c *Config) error { c.Enrich.Enabled = &on; return nil }); err != nil {
-					t.Fatalf("the console's flip of enrichment to %v: %v", on, err)
-				}
-				if got := rc.Load().Enrich.EffectiveEnabled(); got != on {
-					t.Errorf("after the flip the live switch is %v, want %v", got, on)
-				}
+			flip := func(on bool) error {
+				return rc.Update(path, func(c *Config) error { c.Enrich.Enabled = &on; return nil })
 			}
 			if tc.flipFirst {
-				flip(true)
+				if err := flip(true); err != nil {
+					t.Fatalf("the console's first flip of enrichment, with nothing changed outside: %v", err)
+				}
 			}
 			appendToConfig(t, path, "enrich:\n  enabled: false\n")
-			flip(!tc.flipFirst)
+			edited, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			live := rc.Load().Enrich.EffectiveEnabled()
+			err = flip(!live)
+			var outside *ChangedOutsideError
+			if !errors.As(err, &outside) || outside.Kind != OutsideConflict || !slices.Equal(outside.Settings, []string{"enrich.enabled"}) {
+				t.Errorf("the console's flip of enrichment to %v after another writer wrote it = %v, want a conflict naming enrich.enabled", !live, err)
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(after, edited) {
+				t.Errorf("the refused flip wrote the file:\n%s", after)
+			}
+			if got := rc.Load().Enrich.EffectiveEnabled(); got != live {
+				t.Errorf("the refused flip stored enrichment %v, want %v", got, live)
+			}
 		})
+	}
+}
+
+// TestASaveOfAnotherSettingKeepsAVariablesSettingAnotherWriterChanged: a save
+// of another setting beside another writer's change of a setting a variable
+// set lands, and writes that setting as the file holds it (B761's rule), the
+// live value staying the variable's; and it logs no line saying the change
+// takes effect at the next start, which the variable makes false while it is
+// set.
+func TestASaveOfAnotherSettingKeepsAVariablesSettingAnotherWriterChanged(t *testing.T) {
+	t.Setenv("BRIDGE_SCAN_INTERVAL_SEC", "120")
+	logs := loggingtest.Record(t)
+	path := envSaveConfig(t, "libraryName: Home\n")
+	rc := bootHolder(t, path)
+	appendToConfig(t, path, "scanIntervalSec: 7200\n")
+	if err := rc.Update(path, func(c *Config) error { c.LibraryName = "Renamed"; return nil }); err != nil {
+		t.Fatalf("a rename beside another writer's change of a variable's setting: %v", err)
+	}
+	if got, there := fileLeaf(t, path, "scanIntervalSec"); !there || got != 7200 {
+		t.Errorf("the file holds scanIntervalSec %#v (there %v), want the other writer's 7200", got, there)
+	}
+	if got := rc.Load().ScanIntervalSec; got != 120 {
+		t.Errorf("the live scanIntervalSec is %d, want the variable's 120", got)
+	}
+	if lines := logs.Lines(outsideSettingMessage); len(lines) != 0 {
+		t.Errorf("logged %q for a setting a variable sets", lines)
+	}
+}
+
+// TestAnUnrelatedSaveLandsBesideAVariablesDeploymentSettingAnotherWriterChanged:
+// a deployment setting a variable set is recorded for the conflict check
+// alone, never as a deployment setting another writer changed, which would
+// refuse every save: a save of another setting lands beside another writer's
+// change of deployment.managedControls under BRIDGE_DEPLOYMENT_MANAGED_CONTROLS,
+// and the file keeps that writer's list (B761's rule).
+func TestAnUnrelatedSaveLandsBesideAVariablesDeploymentSettingAnotherWriterChanged(t *testing.T) {
+	t.Setenv("BRIDGE_DEPLOYMENT_MANAGED_CONTROLS", "restart")
+	path := envSaveConfig(t, "libraryName: Home\n")
+	rc := bootHolder(t, path)
+	appendToConfig(t, path, "deployment:\n  managedControls:\n    - updates\n")
+	if err := rc.Update(path, func(c *Config) error { c.LibraryName = "Renamed"; return nil }); err != nil {
+		t.Fatalf("a rename beside another writer's change of a variable's deployment setting: %v", err)
+	}
+	if got, there := fileLeaf(t, path, "deployment.managedControls"); !there || !reflect.DeepEqual(got, []any{"updates"}) {
+		t.Errorf("the file holds deployment.managedControls %#v (there %v), want the other writer's [updates]", got, there)
+	}
+	if got := rc.Load().Deployment.ManagedControls; !slices.Equal(got, []string{"restart"}) {
+		t.Errorf("the live deployment.managedControls is %q, want the variable's [restart]", got)
+	}
+}
+
+// TestASwitchIsComparedByWhatItTurnsOn: the three opt-outs (enrich.enabled,
+// enrich.deezerEnabled, update.checkEnabled) write on as no key or as true,
+// so they are compared by what they turn on, never by their pointers: a
+// switch written true is no change of one left out, and a save that sets a
+// switch to what it already was changes nothing, so it lands beside another
+// writer's change of that switch, which the file keeps.
+func TestASwitchIsComparedByWhatItTurnsOn(t *testing.T) {
+	on, off := true, false
+	for _, sw := range []struct {
+		path string
+		set  func(c *Config, v *bool)
+	}{
+		{"enrich.enabled", func(c *Config, v *bool) { c.Enrich.Enabled = v }},
+		{"enrich.deezerEnabled", func(c *Config, v *bool) { c.Enrich.DeezerEnabled = v }},
+		{"update.checkEnabled", func(c *Config, v *bool) { c.Update.CheckEnabled = v }},
+	} {
+		none, written, turnedOff := &Config{}, &Config{}, &Config{}
+		sw.set(written, &on)
+		sw.set(turnedOff, &off)
+		if got := settingsChanged(none, written); len(got) != 0 {
+			t.Errorf("%s written true is found to differ from none in %q", sw.path, got)
+		}
+		if got := settingsChanged(none, turnedOff); !slices.Equal(got, []string{sw.path}) {
+			t.Errorf("%s written false is found as %q, want it alone", sw.path, got)
+		}
+	}
+	path := envSaveConfig(t, "libraryName: Home\n")
+	rc := bootHolder(t, path)
+	appendToConfig(t, path, "enrich:\n  enabled: false\n")
+	if err := rc.Update(path, func(c *Config) error { c.Enrich.Enabled = &on; return nil }); err != nil {
+		t.Fatalf("a save that sets enrichment on where it was on, beside another writer's off: %v", err)
+	}
+	if got, there := fileLeaf(t, path, "enrich.enabled"); !there || got != false {
+		t.Errorf("the file holds enrich.enabled %#v (there %v), want the other writer's false", got, there)
+	}
+	if !rc.Load().Enrich.EffectiveEnabled() {
+		t.Error("the live switch is off, want it on as it was")
 	}
 }
 
