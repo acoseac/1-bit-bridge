@@ -149,36 +149,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   after an update, over a display name.
 - **…and every stored name is one a pairing code can CARRY** (#1046). **The cap, `config.MaxLibraryNameLength`, is 256 RUNES. Refuse what the operator types, repair what is already stored** (`config.CheckLibraryName`, `config.RepairLibraryName`). **Don't count bytes, cut a typed name in the PATCH, or give the console's name box a `maxlength`.** → History-rules-config-lifecycle.md
 - **…and a library name loses its control characters, the runes U+0000 to U+001F, U+007F and U+0080 to U+009F read after decoding, wherever it is set: what is typed (`config.CleanTypedLibraryName`: init's `--name` and its prompt, the console's save) after the refusal of bytes that are not UTF-8 and before its length is counted, and what loads (`RepairLibraryName`: the file, `BRIDGE_LIBRARY_NAME`, a prior install's name, with the repair's WARN), so a name served live is the name served after a restart; the Bonjour instance strips by the same definition (`config.WithoutControlCharacters`)** (2026-11-07, backlog B744). **Don't strip bytes rather than runes, strip before the UTF-8 refusal, count a typed name's length before its controls are gone, or give an entry a strip of its own.** → History-rules-config-lifecycle.md
-- **A configured URL is named in every refusal and warning by its field,
-  its scheme and its host, never its value** (backlog B54). #1074 gave the
-  WARNINGS that rule (`urlOriginForLog`, under DLNA) and left the two
-  REFUSALS that stop the bridge from starting: `normalizeBaseURL`'s and
-  `Validate`'s harvest pin quoted the value (`got
-  "ftp://user:password@mirror/ws/2"`), which serve prints, `bridge doctor`
-  puts on its config-file line and the console's PATCH answers, and an
-  enrich base may legitimately carry a mirror's password (net/http sends
-  userinfo as Basic auth). `urlFieldForLog` is the one naming
-  (`enrich.musicbrainzBaseURL (ftp://mirror.example)`), and the message says
-  what the value may not carry, since it is not shown. **A URL with no host
-  part renders as NOTHING, scheme included**: `user:password@host`, written
-  without a scheme, parses with the USER NAME as its scheme, and #1074's own
-  custom-endpoint warning quoted it twice (`(s3cret-pw:)`, `got
-  "s3cret-pw"`). **Search for a leaked secret without regard to case**:
-  `url.Parse` LOWERCASES a scheme, which is how #1074's test, searching for
-  `s3cret-Pw`, passed over that leak.
-  `TestNoStartupErrorCarriesAURLsCredentials` (every shape, through Load,
-  Validate and the environment) and
-  `TestAStartupRefusalNamesAURLWithoutItsCredential` (serve and doctor).
-  The enricher's own request errors are covered too, by keeping the
-  credential out of every request URL (the bullet on a configured base URL's
-  user information under **Enrichment**, backlog B69): net/http's
-  `*url.Error` names a request URL with its password masked (`user:***@`)
-  and a token written as the user name whole. So are `autocert.domain`'s
-  two warnings (the field, and its scheme and the host it is served as), a
-  manual upstream's control URL, whose user information goes in a header,
-  and the manual poller's Debug lines (backlog B66: the `autocert.domain`
-  bullet under **The wire contract**, and the manual-URL one under **DLNA,
-  UPnP and discovery**).
+- **A configured URL is named in every refusal and warning by its field, its scheme and its host, never its value** (backlog B54). **A URL with no host part renders as NOTHING, scheme included.** **Search for a leaked secret without regard to case.** → History-rules-config-lifecycle.md
 - **When a change cannot take effect, say so** — but only when the outcome
   depended on THIS bridge's runtime state (a Tailscale mode's transition;
   applied-but-inert because a toolchain is missing; no sweeper wired, which

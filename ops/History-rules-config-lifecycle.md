@@ -4546,6 +4546,37 @@ two ids. B898's other follow-ups stay as they were. The record is
   `TestInContainerKeepsTheChecksItsOperatorCanActOn` and
   `TestDoctorAndInitCarryTheContainerVerdict`.
 
+- **A configured URL is named in every refusal and warning by its field,
+  its scheme and its host, never its value** (backlog B54). #1074 gave the
+  WARNINGS that rule (`urlOriginForLog`, under DLNA) and left the two
+  REFUSALS that stop the bridge from starting: `normalizeBaseURL`'s and
+  `Validate`'s harvest pin quoted the value (`got
+  "ftp://user:password@mirror/ws/2"`), which serve prints, `bridge doctor`
+  puts on its config-file line and the console's PATCH answers, and an
+  enrich base may legitimately carry a mirror's password (net/http sends
+  userinfo as Basic auth). `urlFieldForLog` is the one naming
+  (`enrich.musicbrainzBaseURL (ftp://mirror.example)`), and the message says
+  what the value may not carry, since it is not shown. **A URL with no host
+  part renders as NOTHING, scheme included**: `user:password@host`, written
+  without a scheme, parses with the USER NAME as its scheme, and #1074's own
+  custom-endpoint warning quoted it twice (`(s3cret-pw:)`, `got
+  "s3cret-pw"`). **Search for a leaked secret without regard to case**:
+  `url.Parse` LOWERCASES a scheme, which is how #1074's test, searching for
+  `s3cret-Pw`, passed over that leak.
+  `TestNoStartupErrorCarriesAURLsCredentials` (every shape, through Load,
+  Validate and the environment) and
+  `TestAStartupRefusalNamesAURLWithoutItsCredential` (serve and doctor).
+  The enricher's own request errors are covered too, by keeping the
+  credential out of every request URL (the bullet on a configured base URL's
+  user information under **Enrichment**, backlog B69): net/http's
+  `*url.Error` names a request URL with its password masked (`user:***@`)
+  and a token written as the user name whole. So are `autocert.domain`'s
+  two warnings (the field, and its scheme and the host it is served as), a
+  manual upstream's control URL, whose user information goes in a header,
+  and the manual poller's Debug lines (backlog B66: the `autocert.domain`
+  bullet under **The wire contract**, and the manual-URL one under **DLNA,
+  UPnP and discovery**).
+
 ## Every stored name is one a pairing code can carry (#1046)
 
 - **…and every stored name is one a pairing code can CARRY** (#1046). The
