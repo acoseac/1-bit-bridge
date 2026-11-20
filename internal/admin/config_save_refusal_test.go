@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -67,30 +68,36 @@ func TestAConfigSaveRefusalSaysWhatToDoAndNamesNoPath(t *testing.T) {
 		remedy string
 		// names are the settings the message names, by their yaml paths.
 		names []string
+		// never is what the message must not say: a file another writer left
+		// that would not load is corrected, never restarted over.
+		never string
 	}{
-		{"another writer holds the lock", &config.BusyError{Path: cfgPath, Wait: config.LockWait}, "try again", nil},
+		{"another writer holds the lock", &config.BusyError{Path: cfgPath, Wait: config.LockWait}, "try again", nil, ""},
 		{"the filesystem gave no lock", &config.NoLockManagerError{Path: cfgPath, Wait: config.LockWait,
 			Err: &fs.PathError{Op: "flock", Path: filepath.Join(root, ".bridge.yaml.lock"), Err: errors.New("no locks available")}},
-			"lock manager", nil},
-		{"another writer changed the file", &config.ChangedOutsideError{Path: cfgPath}, "restart the bridge", nil},
+			"lock manager", nil, ""},
+		{"another writer changed the file", &config.ChangedOutsideError{Path: cfgPath}, "restart the bridge", nil, ""},
 		{"another writer changed a setting the save changes", outside(config.OutsideConflict, "libraryName", "scanIntervalSec"),
-			"restart the bridge", []string{"libraryName", "scanIntervalSec"}},
+			"restart the bridge", []string{"libraryName", "scanIntervalSec"}, ""},
 		{"another writer changed a deployment setting", outside(config.OutsideDeployment, "deployment.managedSettings"),
-			"restart the bridge", []string{"deployment.managedSettings"}},
-		{"the file removed", outside(config.OutsideRemoved), "restart the bridge", nil},
-		{"the name opened another file", outside(config.OutsideRepointed), "restart the bridge", nil},
-		{"the file does not decode", outside(config.OutsideUndecodable), "restart the bridge", nil},
+			"restart the bridge", []string{"deployment.managedSettings"}, ""},
+		{"the file removed", outside(config.OutsideRemoved), "restart the bridge", nil, ""},
+		{"the name opened another file", outside(config.OutsideRepointed), "restart the bridge", nil, ""},
+		{"the file does not decode", outside(config.OutsideUndecodable), "restart the bridge", nil, ""},
 		{"a file the next start would refuse", &config.ChangedOutsideError{Path: cfgPath, Kind: config.OutsideUnloadable,
 			Settings: []string{"libraryRoots"}, Err: fmt.Errorf("read %s: upscale.variantsDir: must not be under a library root, libraryRoots[1]", cfgPath)},
-			"restart the bridge", []string{"libraryRoots"}},
-		{"the file changed in the turn", &config.ChangedInTurnError{Path: cfgPath}, "restart the bridge", nil},
-		{"the name opens another file", &config.NameMovedError{Path: cfgPath}, "restart the bridge", nil},
-		{"the boot read resolved no file", &config.BootUnresolvedError{Path: cfgPath}, "restart the bridge", nil},
-		{"the UPnP writer's wrap of a refusal", fmt.Errorf("save bridge.yaml: %w", &config.ChangedOutsideError{Path: cfgPath}), "restart the bridge", nil},
+			"restart the bridge", []string{"libraryRoots"}, ""},
+		{"a file another writer left that would not load", &config.ChangedOutsideError{Path: cfgPath, Kind: config.OutsideLeftUnloadable,
+			Err: fmt.Errorf("read %s: upscale.variantsDir: must not be under a library root, libraryRoots[0]", cfgPath)},
+			"correct it", nil, "restart"},
+		{"the file changed in the turn", &config.ChangedInTurnError{Path: cfgPath}, "restart the bridge", nil, ""},
+		{"the name opens another file", &config.NameMovedError{Path: cfgPath}, "restart the bridge", nil, ""},
+		{"the boot read resolved no file", &config.BootUnresolvedError{Path: cfgPath}, "restart the bridge", nil, ""},
+		{"the UPnP writer's wrap of a refusal", fmt.Errorf("save bridge.yaml: %w", &config.ChangedOutsideError{Path: cfgPath}), "restart the bridge", nil, ""},
 		{"the UPnP writer's wrap of a conflict", fmt.Errorf("save bridge.yaml: %w", outside(config.OutsideConflict, "upnpUpstream.servers")),
-			"restart the bridge", []string{"upnpUpstream.servers"}},
+			"restart the bridge", []string{"upnpUpstream.servers"}, ""},
 		{"a save that failed otherwise", fmt.Errorf("save %s: %w", cfgPath,
-			&fs.PathError{Op: "open", Path: filepath.Join(root, ".bridge.yaml.tmp-1"), Err: fs.ErrPermission}), "log", nil},
+			&fs.PathError{Op: "open", Path: filepath.Join(root, ".bridge.yaml.tmp-1"), Err: fs.ErrPermission}), "log", nil, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,6 +111,9 @@ func TestAConfigSaveRefusalSaysWhatToDoAndNamesNoPath(t *testing.T) {
 				if !strings.Contains(body.Message, setting) {
 					t.Errorf("the refused save's message %q does not name %s", body.Message, setting)
 				}
+			}
+			if tc.never != "" && strings.Contains(body.Message, tc.never) {
+				t.Errorf("the refused save's message %q says %q", body.Message, tc.never)
 			}
 		})
 	}
@@ -174,8 +184,9 @@ func TestTheConsolesSavesAnswerARefusalWithoutThePath(t *testing.T) {
 	}
 	// Each kind of refusal the holder makes once another writer has changed
 	// the file serve read (backlog B535), through the real holder: its answer
-	// says to restart, names no path, and names the settings it is about by
-	// their yaml paths.
+	// says to restart, or, for a file that writer left that would not load,
+	// to correct it and nothing of a restart, names no path, and names the
+	// settings it is about by their yaml paths.
 	for _, tc := range []struct {
 		name string
 		// outside is what another writer did once serve read the file.
@@ -184,18 +195,21 @@ func TestTheConsolesSavesAnswerARefusalWithoutThePath(t *testing.T) {
 		method, path string
 		req          map[string]any
 		names        string
+		// remedy is what the answer says to do where it is not to restart,
+		// "" for a restart.
+		remedy string
 	}{
 		{"a deployment setting another writer changed", func(t *testing.T, _ *Server, cfgPath string) {
 			appendToConfigFile(t, cfgPath, "deployment:\n  managedSettings:\n    - libraryName\n")
-		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, "deployment.managedSettings"},
+		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, "deployment.managedSettings", ""},
 		{"the file removed", func(t *testing.T, _ *Server, cfgPath string) {
 			if err := os.Remove(cfgPath); err != nil {
 				t.Fatal(err)
 			}
-		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, ""},
+		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, "", ""},
 		{"a file that does not decode", func(t *testing.T, _ *Server, cfgPath string) {
 			appendToConfigFile(t, cfgPath, "noSuchSetting: 1\n")
-		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, ""},
+		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, "", ""},
 		{"a name that opens another file than serve read", func(t *testing.T, srv *Server, cfgPath string) {
 			twin := filepath.Join(filepath.Dir(cfgPath), "twin", "bridge.yaml")
 			if err := os.MkdirAll(filepath.Dir(twin), 0o755); err != nil {
@@ -205,7 +219,7 @@ func TestTheConsolesSavesAnswerARefusalWithoutThePath(t *testing.T) {
 				t.Fatal(err)
 			}
 			recordBootRead(t, srv, twin)
-		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, ""},
+		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, "", ""},
 		{"a file the next start would refuse", func(t *testing.T, _ *Server, cfgPath string) {
 			extra := filepath.Join(filepath.Dir(cfgPath), "Extra")
 			if err := os.MkdirAll(extra, 0o755); err != nil {
@@ -217,7 +231,7 @@ func TestTheConsolesSavesAnswerARefusalWithoutThePath(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-		}, http.MethodPost, "/api/upscale/variants-dir", nil, "libraryRoots"},
+		}, http.MethodPost, "/api/upscale/variants-dir", nil, "libraryRoots", ""},
 		{"another writer's change in the save's own turn", func(t *testing.T, _ *Server, cfgPath string) {
 			raw := readFileOrNil(cfgPath)
 			stop := config.OnSaveStagedForTest(cfgPath, func() {
@@ -226,7 +240,11 @@ func TestTheConsolesSavesAnswerARefusalWithoutThePath(t *testing.T) {
 				}
 			})
 			t.Cleanup(stop)
-		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, ""},
+		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, "", ""},
+		{"a file another writer left that would not load", func(t *testing.T, srv *Server, cfgPath string) {
+			root := srv.deps.CfgHolder.Load().LibraryRoots[0]
+			appendToConfigFile(t, cfgPath, "upscale:\n  variantsDir: "+strconv.Quote(filepath.Join(root, "variants"))+"\n")
+		}, http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, "", "correct it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := loggingtest.Record(t)
@@ -239,7 +257,14 @@ func TestTheConsolesSavesAnswerARefusalWithoutThePath(t *testing.T) {
 			}
 			var body saveRefusalBody
 			code := doJSON(t, srv.Handler(), tc.method, tc.path, req, &body)
-			requireSaveRefusal(t, logs, code, body, filepath.Dir(cfgPath), "restart the bridge")
+			remedy := "restart the bridge"
+			if tc.remedy != "" {
+				remedy = tc.remedy
+				if strings.Contains(body.Message, "restart") {
+					t.Errorf("the refused save's message %q says to restart", body.Message)
+				}
+			}
+			requireSaveRefusal(t, logs, code, body, filepath.Dir(cfgPath), remedy)
 			if !strings.Contains(body.Message, tc.names) {
 				t.Errorf("the refused save's message %q does not name %s", body.Message, tc.names)
 			}

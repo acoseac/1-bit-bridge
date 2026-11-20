@@ -684,6 +684,18 @@ func (e *OpenHomePortClashError) Error() string {
 // save while the opt-in is on, each refusing the save over a clash, so the
 // next start finds none.
 func (c *Config) OpenHomePortClash() error {
+	if clashes := c.openHomePortClashes(); len(clashes) > 0 {
+		return &OpenHomePortClashError{Setting: clashes[0]}
+	}
+	return nil
+}
+
+// openHomePortClashes is the setting of each other listener of serve whose
+// port is the OpenHome surface's, in the order OpenHomePortClash asks them,
+// which refuses for the first: the live holder compares the ones a merged
+// save would have with the ones the file another writer left has, and
+// refuses only one the save adds (B535's round 2).
+func (c *Config) openHomePortClashes() []string {
 	port := c.Output.Player.EffectiveOpenHomePort()
 	if port == 0 {
 		return nil
@@ -695,20 +707,20 @@ func (c *Config) OpenHomePortClash() error {
 	if admin == "" {
 		admin = DefaultAdminAddress
 	}
-	clash := func(setting string) error { return &OpenHomePortClashError{Setting: setting} }
+	var clashes []string
 	for _, other := range []struct{ setting, addr string }{
 		{"listenAddress", listen},
 		{"adminAddress", admin},
 		{"dlna.listenAddress", c.DLNA.EffectiveDLNAListenAddress()},
 	} {
 		if p, ok := namedPort(other.addr); ok && p == port {
-			return clash(other.setting)
+			clashes = append(clashes, other.setting)
 		}
 	}
 	if c.Output.EffectiveLoopbackPort() == port {
-		return clash("output.loopbackPort")
+		clashes = append(clashes, "output.loopbackPort")
 	}
-	return nil
+	return clashes
 }
 
 // namedPort is the port a host:port address names, false for none: one

@@ -49,6 +49,16 @@ type RuntimeConfig struct {
 	// change takes effect at the next start, which the variable makes false
 	// (B535's round 2). Under mu.
 	outsideEnv []string
+	// leftErr is why the file another writer left, the bytes file holds once
+	// a turn has found that writer's change, would not load as the next start
+	// loads it (loadsAtNextStart), nil where it would: every save is then
+	// refused (OutsideLeftUnloadable), since no save made that file. leftClashes
+	// is the setting of each listener whose port that file's OpenHome surface
+	// sits on (openHomeClashes), which a save may keep and may not add to.
+	// Both are taken once, at the turn that finds the bytes, and again from the
+	// file a save writes; never per save (B535's round 2). Under mu.
+	leftErr     error
+	leftClashes []string
 	// changedMu guards changed, the channel the next Store closes
 	// (Changed), nil until someone asks for it.
 	changedMu sync.Mutex
@@ -89,12 +99,17 @@ const (
 	OutsideConflict
 	// OutsideUnloadable: the file the save would write, the settings
 	// another writer changed beside the save's, would not load as it is at
-	// the next start.
+	// the next start, where the file that writer left would: the save's own
+	// change makes it so (a new OpenHome port clash among them).
 	OutsideUnloadable
+	// OutsideLeftUnloadable: the file another writer left would not load as
+	// it is at the next start, whatever the save changes: the file is to be
+	// corrected, since a restart would fail on it (B535's round 2).
+	OutsideLeftUnloadable
 )
 
 // ChangedOutsideError is the live holder's refusal of a save over a config
-// file another writer changed since the holder last read or wrote it, of one
+// file another writer changed since the holder last recorded its bytes, of one
 // gone, or of one whose name now opens another file than the one the holder
 // read, a link repointed; Kind says which. It names the file, the settings it
 // is about by their yaml paths, and nothing the file holds.
@@ -106,11 +121,12 @@ type ChangedOutsideError struct {
 	// Settings are the yaml paths of the settings it is about, sorted: the
 	// settings another writer changed that the save changes too (a
 	// conflict), the deployment settings another writer changed, and every
-	// setting another writer changed beside a file the next start would
-	// refuse.
+	// setting another writer changed beside a file the save would leave that
+	// the next start would refuse.
 	Settings []string
 	// Err is why the next start would refuse the file the save would write
-	// (OutsideUnloadable), as Load says it, which names no value.
+	// (OutsideUnloadable) or the one another writer left
+	// (OutsideLeftUnloadable), as Load says it, which names no value.
 	Err error
 }
 
@@ -140,6 +156,9 @@ func (e *ChangedOutsideError) Error() string {
 		return fmt.Sprintf("this change, beside the settings another writer changed in %s (%s), would leave a file this "+
 			"bridge would not load at its next start (%v), so it was not saved, and the file keeps what that writer left: %s",
 			e.Path, settings, e.Err, restart)
+	case OutsideLeftUnloadable:
+		return fmt.Sprintf("%s, as another writer left it, would not load at this bridge's next start (%v), so this change "+
+			"was not saved: correct the file", e.Path, e.Err)
 	}
 	return fmt.Sprintf("%s was changed by another writer while this save had its turn at it (an edit, or a bridge "+
 		"older than the config's lock), so this change was not saved, and the file keeps what that writer left: make the "+
@@ -193,6 +212,7 @@ func (r *RuntimeConfig) RecordFile(file BootFile, raw []byte) {
 	// The snapshot was read from raw: what was recorded against other bytes
 	// is a record of another read (backlog B535).
 	r.outside, r.outsideEnv = nil, nil
+	r.leftErr, r.leftClashes = nil, nil
 }
 
 // Changed returns a channel that the next Store closes, the Store an
@@ -279,11 +299,14 @@ func (r *RuntimeConfig) Clone() *Config {
 // writer's goes live, and the bridge loads it when it next starts. Nothing is
 // saved or stored, and a *ChangedOutsideError says why, for a file gone, a
 // name the turn finds repointed, a file that does not decode, a recorded
-// deployment setting, a change of a recorded setting, a variable's included
-// (the save made it from a value it never read), and a file the save would
-// write that the next start would refuse (loadsAtNextStart): the file keeps
-// that writer's change, and nothing reloads it now. The save compares once more before each attempt at its
-// rename (Save's own comparison), so a writer that takes no turns landing in
+// deployment setting, a file that writer left that the next start would
+// refuse (loadsAtNextStart: to be corrected, a restart failing on it), a
+// change of a recorded setting, a variable's included (the save made it from
+// a value it never read), and a file the save would write that the next start
+// would refuse where the one that writer left would not, an OpenHome port
+// clash the save adds among them: the file keeps that writer's change, and
+// nothing reloads it now. The save compares once more before each attempt at
+// its rename (Save's own comparison), so a writer that takes no turns landing in
 // the turn is refused too (a *ChangedOutsideError, OutsideInTurn), and the
 // next save merges what it left. A name repointed while the save waited for
 // the lock, at fn's check or while the save staged is a *ChangedOutsideError
@@ -363,12 +386,14 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 		if err := changedOutside(path, l.Check()); err != nil {
 			return err
 		}
-		return r.refuseMerge(path, before, next, found)
+		_, err := r.refuseMerge(path, before, next, found)
+		return err
 	}
 	if err := fn(next, check); err != nil {
 		return err
 	}
-	if err := r.refuseMerge(path, before, next, found); err != nil {
+	clashes, err := r.refuseMerge(path, before, next, found)
+	if err != nil {
 		return err
 	}
 	// The snapshot, with the three opt-outs, every other leaf a variable set
@@ -381,6 +406,10 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 		return changedOutside(path, err)
 	}
 	r.file, r.fileKnown, r.target = written, true, l.target
+	// The file as this save left it: it loads (a merged save's was loaded
+	// just now, and refused otherwise), and its clashes are the merged
+	// file's, none where nothing was merged.
+	r.leftErr, r.leftClashes = nil, clashes
 	r.Store(next)
 	return nil
 }

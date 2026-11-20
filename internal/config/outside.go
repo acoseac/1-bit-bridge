@@ -46,9 +46,14 @@ var (
 // where the save left it and the change where it made one (filedEnvValues,
 // filedSwitches), and the variable sets it again at the next start (B535's
 // round 2). A turn's file that does not decode is refused, the record as it
-// was. Then, whatever the bytes, a recorded deployment setting refuses the
-// save: the console decides what it may change from its live copy of the
-// posture and the managed lists.
+// was. The turn's file is then loaded as the next start loads it
+// (loadsAtNextStart), once for those bytes (leftErr, leftClashes). Then,
+// whatever the bytes, a recorded deployment setting refuses the save: the
+// console decides what it may change from its live copy of the posture and the
+// managed lists; and a file that writer left that would not load refuses it as
+// that file's (OutsideLeftUnloadable), not as one the save would make: no save
+// made it, and the remedy is to correct it, never a start that would fail on
+// it.
 func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, before *Config) error {
 	if !r.fileKnown {
 		return nil
@@ -79,9 +84,18 @@ func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, 
 		slices.Sort(r.outside)
 		slices.Sort(r.outsideEnv)
 		r.file = found
+		// The file as that writer left it, loaded as the next start loads
+		// it, once for these bytes: whether it loads at all, and the
+		// OpenHome clashes it has (which Load turns the player off over,
+		// refusing nothing).
+		left, err := loadsAtNextStart(path, found)
+		r.leftErr, r.leftClashes = err, openHomeClashes(left)
 	}
 	if deployment := settingsUnder(r.outside, deploymentSettings); len(deployment) > 0 {
 		return &ChangedOutsideError{Path: path, Kind: OutsideDeployment, Settings: deployment}
+	}
+	if r.leftErr != nil {
+		return &ChangedOutsideError{Path: path, Kind: OutsideLeftUnloadable, Err: r.leftErr}
 	}
 	return nil
 }
@@ -96,13 +110,18 @@ func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, 
 // it would lose that writer's in silence, whatever value it writes. Then,
 // while a setting no variable set is recorded, the file the save would write
 // (fileSaved over a copy of next) is loaded as the next start loads it
-// (loadsAtNextStart), and one it would not load is refused
-// (OutsideUnloadable). With nothing recorded it asks nothing: the save is the
-// one the holder made before B535; with the variables' settings alone, the
-// one B761's rule made.
-func (r *RuntimeConfig) refuseMerge(path string, before, next *Config, found []byte) error {
+// (loadsAtNextStart): the file that writer left loads (compareTurn refused
+// the save before fn otherwise), so a failure is the save's own change, and is
+// refused (OutsideUnloadable), and so is an OpenHome port clash the merged
+// file has and the file that writer left has not (leftClashes), the only one
+// the save adds: one that writer left alone refuses nothing, as Load turns the
+// player off over it and starts. It answers the merged file's clashes, which
+// the file a landed save leaves has. With nothing recorded it asks nothing:
+// the save is the one the holder made before B535; with the variables'
+// settings alone, the one B761's rule made.
+func (r *RuntimeConfig) refuseMerge(path string, before, next *Config, found []byte) ([]string, error) {
 	if len(r.outside) == 0 && len(r.outsideEnv) == 0 {
-		return nil
+		return nil, nil
 	}
 	changed := settingsChanged(before, next)
 	var conflict []string
@@ -113,21 +132,29 @@ func (r *RuntimeConfig) refuseMerge(path string, before, next *Config, found []b
 	}
 	if len(conflict) > 0 {
 		slices.Sort(conflict)
-		return &ChangedOutsideError{Path: path, Kind: OutsideConflict, Settings: conflict}
+		return nil, &ChangedOutsideError{Path: path, Kind: OutsideConflict, Settings: conflict}
 	}
 	if len(r.outside) == 0 {
-		return nil
+		return nil, nil
 	}
 	merged := *next
 	r.fileSaved(&merged, before, found)
 	data, err := merged.marshal()
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	if err := loadsAtNextStart(path, data); err != nil {
-		return &ChangedOutsideError{Path: path, Kind: OutsideUnloadable, Settings: slices.Clone(r.outside), Err: err}
+	loaded, err := loadsAtNextStart(path, data)
+	if err != nil {
+		return nil, &ChangedOutsideError{Path: path, Kind: OutsideUnloadable, Settings: slices.Clone(r.outside), Err: err}
 	}
-	return nil
+	clashes := openHomeClashes(loaded)
+	for _, setting := range clashes {
+		if !slices.Contains(r.leftClashes, setting) {
+			return nil, &ChangedOutsideError{Path: path, Kind: OutsideUnloadable, Settings: slices.Clone(r.outside),
+				Err: &OpenHomePortClashError{Setting: setting}}
+		}
+	}
+	return clashes, nil
 }
 
 // fileSaved sets, in saved, a copy of an update's next, every setting the
@@ -212,34 +239,42 @@ func (c *Config) normalizeSettings() {
 	}
 }
 
-// loadsAtNextStart answers nil where data, the file a save would write as the
-// config at path, loads as the next start loads it: Load's own steps in Load's
-// order, decoded, its defaults given, the BRIDGE_* variables applied, its
-// relative paths resolved against the directory Load takes from path, then
-// normalized and validated, all without a word, so a refused candidate neither
-// logs nor moves the player-off reason (NormalizeAndValidateQuiet); and, with
-// its OpenHome surface on, at a port no other listener of serve binds
-// (OpenHomePortClash), which a start turns the player off over rather than
-// refuse, and the settings save refuses. Its error says why, naming no value.
-func loadsAtNextStart(path string, data []byte) error {
+// loadsAtNextStart is data, a config file's bytes (the file a save would
+// write, or the one another writer left) as the config at path, loaded as the
+// next start loads it: Load's own steps in Load's order, decoded, its defaults
+// given, the BRIDGE_* variables applied, its relative paths resolved against
+// the directory Load takes from path, then normalized and validated, all
+// without a word, so a refused candidate neither logs nor moves the player-off
+// reason (NormalizeAndValidateQuiet). An OpenHome surface on a port another
+// listener of serve binds is taken, as Load takes it, turning the player off
+// over it (openHomeClashes says which). Its error says why, naming no value.
+func loadsAtNextStart(path string, data []byte) (*Config, error) {
 	var c Config
 	if err := DecodeFile(data, &c); err != nil {
-		return ValueFreeYAMLError(err)
+		return nil, ValueFreeYAMLError(err)
 	}
 	c.applyDefaultsAs(false)
 	c.applyEnvOverridesAs(false)
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return fmt.Errorf("abs config path: %w", err)
+		return nil, fmt.Errorf("abs config path: %w", err)
 	}
 	c.resolvePaths(filepath.Dir(abs))
 	if err := c.NormalizeAndValidateQuiet(); err != nil {
-		return err
+		return nil, err
 	}
-	if c.Output.Player.OpenHome {
-		return c.OpenHomePortClash()
+	return &c, nil
+}
+
+// openHomeClashes is the setting of each other listener of serve whose port
+// c's OpenHome surface sits on, while the surface is on (openHomePortClashes),
+// and none for a config that did not load. Load turns the player off over such
+// a clash and starts; the console's own switch and settings save refuse one.
+func openHomeClashes(c *Config) []string {
+	if c == nil || !c.Output.Player.OpenHome {
+		return nil
 	}
-	return nil
+	return c.openHomePortClashes()
 }
 
 // settingsChanged is the yaml path of each setting a and b hold differently,

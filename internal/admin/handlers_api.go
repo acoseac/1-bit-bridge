@@ -110,6 +110,8 @@ var (
 		"at it repointed), so this change was not saved: " + errMsgRestartToLoad
 	errMsgSaveConfigUndecodable = "the config file does not read as a bridge config as another writer left it, so this " +
 		"change was not saved: correct the file, then " + errMsgRestartToLoad
+	errMsgSaveConfigLeftUnloadable = "the config file another writer left would not load at the bridge's next start (the " +
+		"bridge's log says why), so this change was not saved: correct it, and then make the change again"
 	errMsgSaveConfigBootUnresolved = "this bridge could not resolve the file its config's name opens when it started, " +
 		"so it cannot say which file its settings were read from, and this change was not saved: restart the bridge " +
 		"once that name resolves, then make the change again"
@@ -127,10 +129,11 @@ const errMsgRestartToLoad = "restart the bridge to load the file, then make the 
 // writer's lock, repair the lock manager, and, of a file changed outside the
 // holder, by its kind (changedOutsideRefusal: a change of a setting another
 // writer changed, a deployment setting changed, a file gone, repointed, that
-// does not decode or that the next start would refuse, a change in the save's
-// own turn, each restarted past), restart once the name resolves, fix a link
-// to no file, or, for any other failure, read the log. It never calls the
-// error's Error, which names the config file.
+// does not decode or that the save would leave one the next start refuses, a
+// change in the save's own turn, each restarted past; a file that writer left
+// that the next start would refuse, corrected, never restarted over), restart
+// once the name resolves, fix a link to no file, or, for any other failure,
+// read the log. It never calls the error's Error, which names the config file.
 func saveConfigRefusal(err error) string {
 	var outside *config.ChangedOutsideError
 	switch {
@@ -179,6 +182,8 @@ func changedOutsideRefusal(e *config.ChangedOutsideError) string {
 		return "this change, beside the settings another writer changed in the config file (" + settings + "), would " +
 			"leave a file this bridge would not load at its next start (the bridge's log says why), so it was not saved, " +
 			"and the file keeps what that writer left: " + errMsgRestartToLoad
+	case config.OutsideLeftUnloadable:
+		return errMsgSaveConfigLeftUnloadable
 	}
 	return errMsgSaveConfigInTurn
 }

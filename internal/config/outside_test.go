@@ -222,13 +222,13 @@ func TestASaveKeepsASerialAnotherWriterChanged(t *testing.T) {
 
 // TestAMergedSaveTheNextStartWouldRefuseIsRefused: the file a merged save
 // would write is loaded as the next start loads it, the variables applied,
-// before its rename, and one that would not load, or that the next start
-// would give an OpenHome surface on a port another listener binds, is refused
-// with nothing written or stored. Each change is one its own writer's checks
-// take, on the live config: a variants folder below a root another writer
-// added, which the console's check against the live roots cannot see, and the
-// OpenHome surface turned on beside a listen address another writer moved
-// onto its port.
+// before its rename, and one that would not load, or whose OpenHome surface
+// would sit on a port another listener binds where the file another writer
+// left had no such clash, is refused with nothing written or stored. Each
+// change is one its own writer's checks take, on the live config: a variants
+// folder below a root another writer added, which the console's check against
+// the live roots cannot see, and the OpenHome surface turned on beside a
+// listen address another writer moved onto its port.
 func TestAMergedSaveTheNextStartWouldRefuseIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -290,7 +290,9 @@ func TestAMergedSaveTheNextStartWouldRefuseIsRefused(t *testing.T) {
 // refuses, the BRIDGE_* variables applied, and says nothing either way: not
 // the default a public config's Tailscale mode is given, not a variable that
 // does not read, not why the player is off, and the player-off reason it
-// leaves is the one it found.
+// leaves is the one it found. Load takes an OpenHome surface on a port
+// another listener binds, turning the player off over it, and so does
+// loadsAtNextStart: whether a save adds such a clash is refuseMerge's to say.
 func TestTheMergedFileIsLoadedAsTheNextStartLoadsItWithoutAWord(t *testing.T) {
 	t.Setenv("BRIDGE_SMART_PLAYLISTS_ENABLED", "now and then")
 	for _, tc := range []struct {
@@ -301,6 +303,8 @@ func TestTheMergedFileIsLoadedAsTheNextStartLoadsItWithoutAWord(t *testing.T) {
 		{"a public config whose Tailscale mode is the default", "deployment:\n  mode: public\n  adminTLSTerminatedByProxy: true\n" +
 			"adminAddress: 127.0.0.1:7789\nautocert:\n  domain: bridge.example.com\n", true},
 		{"a player block that does not read", "output:\n  player:\n    enabled: true\n    noSuchSetting: 1\n", true},
+		{"an OpenHome surface on a port a listener binds", "listenAddress: ':7792'\noutput:\n  player:\n    enabled: true\n" +
+			"    openhome: true\n", true},
 		{"a whole number written as a fraction", "scanIntervalSec: 2.5\n", false},
 		{"a variants folder below a library root", "upscale:\n  variantsDir: {lib}\n", false},
 		{"a setting this release does not know", "noSuchSetting: 1\n", false},
@@ -313,7 +317,7 @@ func TestTheMergedFileIsLoadedAsTheNextStartLoadsItWithoutAWord(t *testing.T) {
 			}
 			forgetPlayerOffReason(t)
 			logs := loggingtest.Record(t)
-			err = loadsAtNextStart(path, raw)
+			_, err = loadsAtNextStart(path, raw)
 			if lines := logs.All(); len(lines) != 0 {
 				t.Errorf("the merged load said %q", lines)
 			}
@@ -325,6 +329,111 @@ func TestTheMergedFileIsLoadedAsTheNextStartLoadsItWithoutAWord(t *testing.T) {
 			}
 			if _, loadErr := Load(path); (loadErr == nil) != tc.loads || (err == nil) != tc.loads {
 				t.Errorf("Load answers %v and the merged load %v, want both to load: %v", loadErr, err, tc.loads)
+			}
+		})
+	}
+}
+
+// TestASaveOverAFileAnotherWriterLeftUnloadableIsRefusedSayingToCorrectIt: a
+// file another writer left that the next start would refuse on its own (a
+// variants folder below a library root) refuses every console save, a rename
+// included, as the file left so (OutsideLeftUnloadable), not as a save that
+// would leave such a file: its words say to correct the file, never to
+// restart, which would fail on that file. Nothing is written or stored, and
+// once that writer has corrected the file the next save lands.
+func TestASaveOverAFileAnotherWriterLeftUnloadableIsRefusedSayingToCorrectIt(t *testing.T) {
+	path := envSaveConfig(t, "libraryName: Home\n")
+	rc := bootHolder(t, path)
+	booted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendToConfig(t, path, "upscale:\n  variantsDir: "+yamlStr(filepath.Join(rc.Load().LibraryRoots[0], "variants"))+"\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("premise: the file the other writer left loads")
+	}
+	edited, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rename := func(c *Config) error { c.LibraryName = "Renamed"; return nil }
+	err = rc.Update(path, rename)
+	var outside *ChangedOutsideError
+	if !errors.As(err, &outside) || outside.Kind != OutsideLeftUnloadable {
+		t.Fatalf("a rename over a file another writer left unloadable = %v, want an OutsideLeftUnloadable refusal", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "correct the file") || strings.Contains(msg, "restart") {
+		t.Errorf("refusal %q: want it to say to correct the file, and nothing of a restart", msg)
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(after, edited) {
+		t.Errorf("the refused rename wrote the file:\n%s", after)
+	}
+	if got := rc.Load().LibraryName; got != "Home" {
+		t.Errorf("the refused rename stored libraryName %q", got)
+	}
+	if err := os.WriteFile(path, booted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Update(path, rename); err != nil {
+		t.Fatalf("a rename once the other writer corrected the file: %v", err)
+	}
+	if got := loadAt(t, path).LibraryName; got != "Renamed" {
+		t.Errorf("the file loads libraryName %q, want the rename", got)
+	}
+}
+
+// TestAnOpenHomeClashAnotherWriterLeftRefusesOnlyASaveThatAddsOne: Load takes
+// a file whose OpenHome surface sits on a port another listener binds, and
+// turns the player off over it, so a clash another writer left in the file
+// refuses nothing on its own: a save of another setting lands, and so does
+// one that moves another listener to a port of its own, each keeping that
+// writer's listen address. A save that brings a second listener onto the
+// OpenHome port adds a clash the file did not have, and is refused
+// (OutsideUnloadable, its reason naming that listener's setting), with
+// nothing written or stored.
+func TestAnOpenHomeClashAnotherWriterLeftRefusesOnlyASaveThatAddsOne(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*Config)
+		// refused is the setting the refusal's clash names, "" for a save
+		// that lands.
+		refused string
+	}{
+		{"a save of another setting", func(c *Config) { c.LibraryName = "Renamed" }, ""},
+		{"another listener moved to a port of its own", func(c *Config) { c.AdminAddress = "127.0.0.1:7799" }, ""},
+		{"a second listener moved onto the OpenHome port", func(c *Config) { c.AdminAddress = "127.0.0.1:7792" }, "adminAddress"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := envSaveConfig(t, "libraryName: Home\noutput:\n  player:\n    openhome: true\n")
+			rc := bootHolder(t, path)
+			appendToConfig(t, path, "listenAddress: ':7792'\n")
+			if _, err := Load(path); err != nil {
+				t.Fatalf("premise: Load refuses the clash the other writer left: %v", err)
+			}
+			edited, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = rc.Update(path, func(c *Config) error { tc.change(c); return nil })
+			if tc.refused == "" {
+				if err != nil {
+					t.Fatalf("%s beside the clash another writer left: %v", tc.name, err)
+				}
+				if got := loadAt(t, path).ListenAddress; got != ":7792" {
+					t.Errorf("the file loads listenAddress %q, want the other writer's", got)
+				}
+				return
+			}
+			var outside *ChangedOutsideError
+			var clash *OpenHomePortClashError
+			if !errors.As(err, &outside) || outside.Kind != OutsideUnloadable || !errors.As(outside.Err, &clash) || clash.Setting != tc.refused {
+				t.Errorf("%s = %v, want an OutsideUnloadable refusal over the clash of %s", tc.name, err, tc.refused)
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(after, edited) {
+				t.Errorf("the refused save wrote the file:\n%s", after)
+			}
+			if got := rc.Load().AdminAddress; got == "127.0.0.1:7792" {
+				t.Error("the refused save stored its change")
 			}
 		})
 	}
