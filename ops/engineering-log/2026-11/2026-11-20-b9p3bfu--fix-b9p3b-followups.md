@@ -236,14 +236,28 @@ before this PR, and fixed while here. `coalesced` keeps one work, the last
 asked (`dsd_work.go`, `ask`), and a run skipped while its own context had
 ended. Serve's supervisor asks on its `work` context
 (`cmd/bridge/serve_player.go:624`), which `endWork` ends as the supervisor
-returns (`:621`, `:631`): a tick that replaced a write's kept refresh while
-another refresh was held left that refresh unmade, the write's mark
-(`choiceRefresh`) and the force set, and `ChoiceRefreshed` never run. Two more ways out lost it
-too. `askChoiceRefresh` sets its mark before its ask sets the force, so a run
-that began between the two took the write's refresh unforced and the idle
-rule (`dsd_policy.go:578-584`) skipped it, the seam said all the same; and a
-refresh that panicked out of `RefreshDSD` skipped the seam, the goroutine's
-own recover ending the run.
+returns (`:621`, `:631`). A tick that replaced a write's kept refresh while
+another refresh was held made that refresh, forced, where `work` was live as
+its run began; where `work` had ended by then, the run skipped, the refresh
+unmade, the write's mark (`choiceRefresh`) and the force left set, and
+`ChoiceRefreshed` never run. Two more ways said its end wrongly or not at
+all. `askChoiceRefresh` sets its mark before its ask sets the force, so a run
+that began between the two took the mark unforced: the idle rule
+(`dsd_policy.go:578-584`) could skip its reading, and the seam was said all
+the same, while the write's own run, kept behind it, made the refresh,
+forced; and a refresh that panicked out of `RefreshDSD` skipped the seam, the
+goroutine's own recover ending the run. The mark drove that seam alone,
+which production leaves unset, so the flag left set was nothing a user could
+see. The refresh the first way skipped was a real reading and publication of
+the policy, skipped only once the supervisor had ended, after which no
+refresh it asks runs: a later run on a live context took both flags and made
+it, forced, and where none came, what it would have published stayed
+unpublished. (Corrected in place on 2026-11-20 by bridge lows 12: this said
+that a tick's replacement alone left the refresh unmade, and that the run
+between the marks lost it. The lines before the fix are `dsd_work.go`'s at
+`cb763203`, the commit before `61018df8`: `ask` keeps the last work at `:36`,
+the run's check of its context and its take of the mark are `:128-129`, the
+mark and the ask `:142-143`; the fix is `dsd_work.go:131-139` at `6ee6102a`.)
 
 - **The fix** (`61018df8`): the run takes the mark first. Where it holds
   it, the refresh is made whatever the run's own context says, forced
