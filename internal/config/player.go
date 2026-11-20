@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -160,6 +161,11 @@ type PlayerConfig struct {
 	// unread is why the block did not read, naming the field and its line
 	// and never quoting a value.
 	unread string
+	// source is a digest of the block as the file writes it, set where it did
+	// not read (blockSource): what tells two such blocks apart, since one
+	// whose aliases copy too much keeps no text to compare (B535's round 2).
+	// A digest, never the text, which can hold a serial.
+	source [sha256.Size]byte
 }
 
 // PlayerDevice is output.player.device: the binding that says which DAC the
@@ -388,11 +394,52 @@ func (p *PlayerConfig) UnmarshalYAML(n *yaml.Node) error {
 		return nil
 	}
 	if kept, ok := keepable(n); ok {
-		*p = PlayerConfig{written: kept, unread: r.problem}
+		*p = PlayerConfig{written: kept, unread: r.problem, source: blockSource(n)}
 	} else {
-		*p = PlayerConfig{unread: r.problem + notKept}
+		*p = PlayerConfig{unread: r.problem + notKept, source: blockSource(n)}
 	}
 	return nil
+}
+
+// blockSource is a digest of the block n as the file writes it: every node of
+// the block, and of each node an alias in it names (the anchors it rests on,
+// wherever they stand), by kind, tag, style, anchor, value, comments and
+// children, in the order they come; never by where it stands in the file, so
+// a line added above it changes nothing. Each node is written once, a node met
+// again written as such, and an alias is never expanded, so an alias bomb
+// costs the file's size and no more.
+func blockSource(n *yaml.Node) [sha256.Size]byte {
+	h := sha256.New()
+	seen := map[*yaml.Node]bool{}
+	queue := []*yaml.Node{n}
+	var write func(m *yaml.Node)
+	write = func(m *yaml.Node) {
+		if seen[m] {
+			fmt.Fprintf(h, "again\n")
+			return
+		}
+		seen[m] = true
+		fmt.Fprintf(h, "%d %q %d %q %q %q %q %q %d\n", m.Kind, m.Tag, m.Style, m.Anchor, m.Value,
+			m.HeadComment, m.LineComment, m.FootComment, len(m.Content))
+		if m.Kind == yaml.AliasNode {
+			if m.Alias != nil {
+				queue = append(queue, m.Alias)
+			}
+			return
+		}
+		for _, c := range m.Content {
+			write(c)
+		}
+	}
+	for len(queue) > 0 {
+		m := queue[0]
+		queue = queue[1:]
+		fmt.Fprintf(h, "tree\n")
+		write(m)
+	}
+	var sum [sha256.Size]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
 }
 
 // The bounds on what the aliases of a block kept as written may copy

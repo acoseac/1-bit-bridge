@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -186,6 +187,53 @@ func TestASaveKeepsAPlayerBlockThatDoesNotReadAsAnotherWriterLeftIt(t *testing.T
 	}
 	if got, _ := textLeaf(t, raw, "libraryName"); got != "Renamed" {
 		t.Errorf("the file's libraryName is %#v, want the rename", got)
+	}
+}
+
+// TestAnUnreadPlayerBlockIsComparedByItsSource: a player block that does not
+// read, on both sides, is one setting compared by its source, the block's own
+// text and that of each anchor its aliases name, never by the text a save
+// would write back, which a block whose alias copies more than 1024 nodes
+// keeps none of (notKept): such a block's change is found, and so is a change
+// of the anchor its alias names, while a comment added elsewhere in the file
+// is no change of it. Until B535's round 2 two such blocks compared alike
+// whatever their text.
+func TestAnUnreadPlayerBlockIsComparedByItsSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.yaml")
+	roots := func(first string) string {
+		var b strings.Builder
+		b.WriteString("libraryRoots: &roots\n  - /music/" + first + "\n")
+		for i := 1; i < 1100; i++ {
+			fmt.Fprintf(&b, "  - /music/%d\n", i)
+		}
+		return b.String()
+	}
+	block := func(enabled string) string {
+		return "output:\n  player:\n    enabled: " + enabled + "\n    noSuchSetting: *roots\n"
+	}
+	read := func(text string) *Config {
+		t.Helper()
+		c, err := readSettings(path, []byte(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Output.Player.Unread() == nil || c.Output.Player.written != nil {
+			t.Fatalf("premise: the block reads, or keeps text a save would write: %v", c.Output.Player.Unread())
+		}
+		return c
+	}
+	was := read(roots("0") + block("true"))
+	for _, tc := range []struct {
+		name, text string
+		want       []string
+	}{
+		{"the block's own text changed", roots("0") + block("false"), []string{"output.player"}},
+		{"the anchor its alias names changed", roots("zero") + block("true"), []string{"libraryRoots", "output.player"}},
+		{"a comment added elsewhere", "# a note\n" + roots("0") + block("true"), nil},
+	} {
+		if got := settingsChanged(was, read(tc.text)); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: found as %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

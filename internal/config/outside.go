@@ -280,11 +280,11 @@ func openHomeClashes(c *Config) []string {
 // settingsChanged is the yaml path of each setting a and b hold differently,
 // sorted: every exported field yaml writes, reached through the structs that
 // hold it, a setting of its own, compared by sameValue, and an opt-out by what
-// it turns on (switchOn); a list one setting
-// whatever it holds (upnpUpstream.servers among them), never walked by its
-// entries; a struct that writes itself as one value (usbid.Serial, whose one
-// field is unexported) one setting; and a player block that did not read, on
-// either side, one setting, output.player, compared by the text it keeps,
+// it turns on (switchOn); a list one setting whatever it holds
+// (upnpUpstream.servers among them), never walked by its entries; a struct
+// that writes itself as one value (usbid.Serial, whose one field is
+// unexported) one setting; and a player block that did not read, on either
+// side, one setting, output.player, compared by its source (sameUnreadBlock),
 // since its fields read nothing.
 func settingsChanged(a, b *Config) []string {
 	var out []string
@@ -313,7 +313,7 @@ func walkSettings(a, b reflect.Value, prefix string, out *[]string) {
 				*out = append(*out, path)
 			}
 		case f.Type == playerConfigType && (unreadBlock(fa) || unreadBlock(fb)):
-			if !sameKeptBlock(fa.Interface().(PlayerConfig), fb.Interface().(PlayerConfig)) {
+			if !sameUnreadBlock(fa.Interface().(PlayerConfig), fb.Interface().(PlayerConfig)) {
 				*out = append(*out, path)
 			}
 		case f.Type.Kind() == reflect.Struct && !oneValue(f.Type):
@@ -357,28 +357,17 @@ func unreadBlock(v reflect.Value) bool {
 	return v.Interface().(PlayerConfig).unread != ""
 }
 
-// sameKeptBlock reports whether a and b, player blocks one of which did not
-// read, are one setting: both did not read, and keep one text (the block as
-// the file held it, which a save writes back), or keep none.
-func sameKeptBlock(a, b PlayerConfig) bool {
+// sameUnreadBlock reports whether a and b, player blocks one of which did not
+// read, are one setting: both did not read, and their source is one (the
+// block's own text and the anchors its aliases name, blockSource). Until
+// B535's round 2 they were compared by the text a save writes back, which a
+// block whose aliases copy too much keeps none of, so two such blocks
+// compared alike whatever they held.
+func sameUnreadBlock(a, b PlayerConfig) bool {
 	if (a.unread == "") != (b.unread == "") {
 		return false
 	}
-	return bytes.Equal(keptText(a), keptText(b))
-}
-
-// keptText is the text a player block that did not read keeps, as a save
-// writes it back, nil for none (a block a save drops, or one no save could
-// write, whose save fails all the same).
-func keptText(p PlayerConfig) []byte {
-	if p.written == nil {
-		return nil
-	}
-	text, err := yaml.Marshal(p.written)
-	if err != nil {
-		return nil
-	}
-	return text
+	return a.source == b.source
 }
 
 // settingValue is the field of c the yaml path names, settable through c, and
