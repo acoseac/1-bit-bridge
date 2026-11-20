@@ -823,6 +823,151 @@ func TestTheBootRollbackKeepsItsMarkerWhereTheBackupCannotBeInspected(t *testing
 	}
 }
 
+// TestTheBootRollbackWritesNothingForAStopOnceItsBackupHasAnswered: a stop
+// that lands once the backup has said the install's PreviousVersion, after the
+// probe's last look at the context (updater.ProbeVersionWithin's, made before
+// its answer is read) and before anything is written, leaves the install as it
+// is (backlog B951): the housekeeping, its backup asked through the production
+// probe and parked where the answer is heard (bootSeams.answered) while the
+// case stops it, answers the stop's error and says the stop's line, the
+// marker, the binary and the backup as they were byte for byte, the restore
+// never called. runServe acts on that answer no further (it acts on
+// updater.ErrBinaryMissing alone): its own select sees the stop and ends the
+// start. Until then such a stop went on to the veto's write and the restore
+// during serve's stop.
+func TestTheBootRollbackWritesNothingForAStopOnceItsBackupHasAnswered(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	r.marker.TargetVersion = "9.9.9"
+	r.saveMarker(t, r.dataDir)
+	files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
+	ctx, stop := context.WithCancel(t.Context())
+	defer stop()
+	parked, release, ended := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var letGoOnce sync.Once
+	letGo := func() { letGoOnce.Do(func() { close(release) }) }
+	var (
+		why        string
+		unanswered error
+		restored   int
+		err        error
+		stderr     bytes.Buffer
+	)
+	go func() {
+		defer close(ended)
+		err = bootHousekeepingWith(ctx, &stderr, r.dataDir, r.bin, previousVersion, bootSeams{
+			restore: func(dst, ext string) error {
+				restored++
+				return updater.RollbackBinary(dst, ext)
+			},
+			answered: func(w string, u error) {
+				why, unanswered = w, u
+				close(parked)
+				<-release
+			},
+			probeBound: testBackupProbeTimeout})
+	}()
+	t.Cleanup(func() {
+		letGo()
+		select {
+		case <-ended:
+		case <-time.After(time.Minute):
+			t.Error("the housekeeping did not return within a minute of its release")
+		}
+	})
+	select {
+	case <-parked:
+	case <-ended:
+		t.Fatalf("the housekeeping = %v before the backup's answer was heard; stderr=%s", err, stderr.String())
+	case <-time.After(testBackupProbeTimeout + time.Minute):
+		t.Fatal("the backup's answer was not heard within its probe's bound and a minute")
+	}
+	if why != "" || unanswered != nil {
+		t.Fatalf("the premise: the backup answered %q, %v; want the install's PreviousVersion said", why, unanswered)
+	}
+	stop()
+	letGo()
+	select {
+	case <-ended:
+	case <-time.After(time.Minute):
+		t.Fatal("the housekeeping did not return within a minute of the stop")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("the housekeeping = %v, want the stop's error; stderr=%s", err, stderr.String())
+	}
+	files.requireUnchanged(t)
+	if restored != 0 {
+		t.Errorf("the backup was put back %d time(s), want never", restored)
+	}
+	if said := stderr.String(); !strings.Contains(said, "updater: stopped as the backup said its version; the install is left as it is, for a later start") ||
+		strings.Contains(said, "rolling back to .bak") {
+		t.Errorf("the housekeeping did not say the stop's line alone; stderr=%s", said)
+	}
+}
+
+// TestTheBootRollbackSaysItsWindowEndedWhereTheBackupsAskOutlastedIt: a boot
+// rollback that decided within the window (bootSeams.now, the housekeeping's
+// clock, a minute before the window's end) and whose backup did not say its
+// version until the window had ended (its ask moving that clock past the end)
+// keeps the marker at this start all the same, nothing written or renamed, and
+// says that the window has ended, when, and that the next start of the running
+// version clears the install as abandoned without asking the backup, leaving
+// the backup where it is (backlog B951): the line promises no later ask, and
+// no refusal of an install until a time that has passed. The next start, its
+// clock past the window, does that: the marker cleared, the backup asked
+// nothing and left as it was. Until then the line said what it says within the
+// window, whatever the clock read once the backup's ask had ended.
+func TestTheBootRollbackSaysItsWindowEndedWhereTheBackupsAskOutlastedIt(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	r.marker.TargetVersion = "9.9.9"
+	r.marker.AttemptedAt = time.Date(2026, time.November, 20, 3, 4, 5, 0, time.UTC)
+	r.saveMarker(t, r.dataDir)
+	end := r.marker.AttemptedAt.Add(updater.RecencyWindow())
+	clock := end.Add(-time.Minute)
+	files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
+	silent := errors.New("it did not answer within 2m0s")
+	asked, restored := 0, 0
+	seams := bootSeams{
+		restore: func(string, string) error { restored++; return nil },
+		now:     func() time.Time { return clock },
+		probeVersion: func(context.Context, string, time.Duration) (string, error) {
+			asked++
+			clock = end.Add(time.Second)
+			return "", silent
+		},
+		probeBound: testBackupProbeTimeout}
+	var stderr bytes.Buffer
+	if err := bootHousekeepingWith(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, seams); err != nil {
+		t.Fatalf("the housekeeping = %v, want nil; stderr=%s", err, stderr.String())
+	}
+	want := fmt.Sprintf("updater: install of 9.9.9 did not reach the expected version (running %s); not rolling back to %s.bak at this start, "+
+		"since the backup did not say its version: %v; the install's marker is kept by this start, but its window ended at %s while the "+
+		"backup was asked: the next start of %s clears the install as abandoned, without asking the backup, and leaves the backup where it is\n",
+		previousVersion, r.bin, silent, end.Format(time.RFC3339), previousVersion)
+	if got := stderr.String(); got != want {
+		t.Errorf("the housekeeping said\n%q\nwant\n%q", got, want)
+	}
+	files.requireUnchanged(t)
+	if asked != 1 || restored != 0 {
+		t.Errorf("the backup was asked its version %d time(s) and put back %d, want once and never", asked, restored)
+	}
+	// The next start, past the window: the install cleared as abandoned, the
+	// backup asked nothing and left where it is.
+	binaries := watch(t, r.bin, r.bak)
+	clock = end.Add(time.Minute)
+	asked = 0
+	stderr.Reset()
+	if err := bootHousekeepingWith(t.Context(), &stderr, r.dataDir, r.bin, previousVersion, seams); err != nil {
+		t.Fatalf("the next start's housekeeping = %v, want nil; stderr=%s", err, stderr.String())
+	}
+	binaries.requireUnchanged(t)
+	if asked != 0 || restored != 0 {
+		t.Errorf("the next start asked the backup its version %d time(s) and put it back %d, want neither", asked, restored)
+	}
+	if st := markerOf(t, r.dataDir); updater.InstallArmed(st) {
+		t.Errorf("the marker after the next start = %+v, want the install cleared as abandoned; stderr=%s", st, stderr.String())
+	}
+}
+
 // TestAServeWithoutItsDataDirsLockRollsBackAtItsBoot: a serve that could not
 // take its data dir's lock (a lock that fails, which serve starts without)
 // runs its boot's rollback all the same, which stops no service manager's
