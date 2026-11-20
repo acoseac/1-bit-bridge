@@ -474,28 +474,30 @@ Windows-runner check, distinct from portable race-test results.
   start never joins the record, B761's rule writing it. Every save writes
   each recorded leaf from the turn's bytes (`fileOutside`: `DecodeFile`,
   assigned on the saved copy, a field of Config's own left out at its zero
-  value through `filed`; no nested leaf's tag writes its zero value but
-  inside a list written whole, `upnpUpstream.servers[].name`,
-  `TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel`) and publishes the snapshot
-  it changed, so nothing of the other writer's goes live; equal bytes skip
-  only the discovery, so a turn that finds the holder's own merged file
-  writes the recorded leaves again. What the record cannot merge is refused,
-  nothing saved or stored, each kind with console words of its own and the
-  status and code unchanged: a file gone, a name repointed or a file that
-  does not decode, as before; a recorded `deployment` leaf, every save,
-  since the console decides what it may change from its live posture and
-  managed lists; a change of a recorded leaf (`OutsideConflict`, naming the
-  leaves), since the console made it from a value it never read, and the
-  console's winning would lose the other writer's in silence; and a merged
-  file the next start would not load (`loadsAtNextStart`: Load's steps in
-  Load's order, quietly, the variables applied, and the OpenHome port clash
-  the settings PATCH refuses and `Load` leaves to the player), at the save's
-  `check` and again once `fn` returns, for every writer. A live reload was
-  weighed and not taken: it would publish settings no subsystem applied
-  (roots without `SetRoots` and the wipe between one root and several, the
-  listeners, the data dir), and the player's watcher would follow a hand
-  edit at once. Red at the base, `d4c5d062`, each refused by the bytes: a
-  rename and a second save beside another writer's `scanIntervalSec: 7200`
+  value through `filed`; a scan of Config's type finds no nested leaf whose
+  tag writes its zero value as a key but one inside a list written whole,
+  `upnpUpstream.servers[].name`, and B761's
+  `TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel` holds every leaf a variable
+  sets to that) and publishes the snapshot it changed, so nothing of the
+  other writer's goes live; equal bytes skip only the discovery, so a turn
+  that finds the holder's own merged file writes the recorded leaves again.
+  What the record cannot merge is refused, nothing saved or stored, each
+  kind with console words of its own and the status and code unchanged: a
+  file gone, a name repointed or a file that does not decode, as before; a
+  recorded `deployment` leaf, every save, since the console decides what it
+  may change from its live posture and managed lists; a change of a recorded
+  leaf (`OutsideConflict`, naming the leaves), since the console made it
+  from a value it never read, and the console's winning would lose the other
+  writer's in silence; and a merged file the next start would not load
+  (`loadsAtNextStart`: Load's steps in Load's order, quietly, the variables
+  applied, and the OpenHome port clash the settings PATCH refuses and `Load`
+  leaves to the player), at the save's `check` and again once `fn` returns,
+  for every writer. A live reload was weighed and not taken: it would
+  publish settings no subsystem applied (roots without `SetRoots` and the
+  wipe between one root and several, the listeners, the data dir), and the
+  player's watcher would follow a hand edit at once. Red at the base,
+  `d4c5d062`, each refused by the bytes: a rename and a second save beside
+  another writer's `scanIntervalSec: 7200`
   (`TestASaveKeepsASettingAnotherWriterChanged`), a save after one that
   refused itself
   (`TestASettingAnotherWriterChangedIsKeptPastASaveThatDidNotLand`), a
