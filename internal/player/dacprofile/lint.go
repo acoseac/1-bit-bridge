@@ -45,6 +45,11 @@ var (
 	reKernelRef = regexp.MustCompile(`^sound/usb/quirks\.c at v\d+\.\d+$`)
 	// reIOSRef is a row of the iOS registry at a commit, the row its group.
 	reIOSRef = regexp.MustCompile(`^DACProfile\.swift ([a-z0-9]+(?:[.-][a-z0-9]+)+) at iOS [0-9a-f]{7,40}$`)
+	// reSubmitted is an ios line's text for a row added past the registry
+	// (B944): the dated wizard submission it came from, its date its group,
+	// then the text's end, ", " or " (" and free text. No commit of the
+	// registry holds such a row, so the line cites none.
+	reSubmitted = regexp.MustCompile(`^wizard submission (\d{4}-\d{2}-\d{2})(?:$|, | \()`)
 	// reNeverSaid are the words never used of DSD on the bridge's player (the
 	// design's section 1.3), with their inflections: no note claims a DAC
 	// decodes DSD. It reads caveat notes and a family's sibling note, never
@@ -366,6 +371,8 @@ func (l *linter) dop(who string, p *Profile) {
 	case SourceIOSRegistry:
 		if !ownRow(d.Source.Ref, p.ID) {
 			l.add("%s: the DoP claim's source is the profile's own row of the iOS registry, \"DACProfile.swift %s at iOS <commit>\"", who, p.ID)
+		} else if fromSubmission(p) {
+			l.add("%s: the DoP claim cites the iOS registry, and the profile's ios line names a submission: a row added past the registry has no row there to cite", who)
 		}
 	case SourceListening, SourceMaker:
 		if !hasDate(d.Source.Ref) || strings.Contains(d.Source.Ref, "@") {
@@ -901,7 +908,8 @@ func knownClaim(name string) bool {
 
 // provenance checks that each claim p makes has a line, "<claim>: …", naming
 // a dated or versioned source, that no line names another claim, and that
-// an ios line names the profile's own registry row.
+// an ios line names the profile's own registry row, or for a row added past
+// the registry the dated wizard submission it came from (B944).
 func (l *linter) provenance(who string, p *Profile) {
 	made := claimsOf(p)
 	lined := map[string]bool{}
@@ -913,8 +921,8 @@ func (l *linter) provenance(who string, p *Profile) {
 			l.add("%s names no claim (identity, native, dop, timing, caveat <code> or ios)", lw)
 		case !slices.Contains(made, claim):
 			l.add("%s is for a %s claim the profile does not make", lw, claim)
-		case claim == "ios" && !ownRow(text, p.ID):
-			l.add("%s is the profile's own registry row, \"ios: DACProfile.swift %s at iOS <commit>\"", lw, p.ID)
+		case claim == "ios" && !ownRow(text, p.ID) && !submitted(text):
+			l.add("%s is the profile's own registry row, \"ios: DACProfile.swift %s at iOS <commit>\", or for a row added past the registry its dated wizard submission, \"ios: wizard submission <date>\"", lw, p.ID)
 		default:
 			lined[claim] = true
 			l.sourced(lw, text)
@@ -944,6 +952,22 @@ func (l *linter) sourced(who, text string) {
 func ownRow(ref, id string) bool {
 	m := reIOSRef.FindStringSubmatch(ref)
 	return m != nil && m[1] == id
+}
+
+// submitted reports whether text, an ios line's after "ios: ", names the
+// wizard submission a row added past the registry came from, on a date that
+// is one.
+func submitted(text string) bool {
+	m := reSubmitted.FindStringSubmatch(text)
+	return m != nil && hasDate(m[1])
+}
+
+// fromSubmission reports whether one of p's ios lines names a submission.
+func fromSubmission(p *Profile) bool {
+	return slices.ContainsFunc(p.Provenance, func(line string) bool {
+		text, ok := strings.CutPrefix(line, "ios: ")
+		return ok && submitted(text)
+	})
 }
 
 // hasDate reports whether text holds a date, YYYY-MM-DD, that is one.

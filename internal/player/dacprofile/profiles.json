@@ -62,7 +62,23 @@
     "iFi GO link Max",
     "iFi GO link 2 Max",
     "ONIX XI1",
-    "Onix Alpha XI1"
+    "Onix Alpha XI1",
+    "Fosi Audio ZD3",
+    "Fosi Audio K7",
+    "Fosi Audio DS1",
+    "Fosi Audio DS2",
+    "Fosi Audio SK02",
+    "Fosi Audio GR40",
+    "Fosi Audio ZH1",
+    "Fosi Audio Q6",
+    "Fosi Audio DS3",
+    "Fosi Audio MD3",
+    "Fosi Audio K5 Pro",
+    "Fosi Audio Q4",
+    "Fosi Audio C1",
+    "Fosi Audio C3",
+    "Fosi Audio MC331",
+    "Fosi Audio MC351"
   ],
   "profiles": [
     {
@@ -2450,6 +2466,66 @@
       "provenance": [
         "dop: heard DSD64, DSD128, DSD256: submission 2026-11-17; refused DSD512: submission 2026-11-17 (its carrier refused); stated DSD to DSD512: maker (iOS 3145606a: the maker's DSD512 is native USB DSD, a figure that names no DoP)",
         "ios: DACProfile.swift onix.betaxi2 at iOS 3145606a"
+      ]
+    },
+    {
+      "id": "fosiaudio.zh3",
+      "name": "Fosi Audio ZH3",
+      "match": [],
+      "native": null,
+      "dop": {
+        "heardBitRates": [
+          2822400
+        ],
+        "statedMaxBitRate": 0,
+        "statedWithoutDoP": {
+          "kind": "dsd",
+          "maxBitRate": 22579200
+        },
+        "refusedBitRates": [
+          22579200
+        ],
+        "analogVolumeControls": [],
+        "unityAtRawMax": [],
+        "source": {
+          "kind": "listening",
+          "ref": "wizard submission 2026-11-19 (app 2.2 (17), iOS 27.3)"
+        }
+      },
+      "timing": null,
+      "caveats": [],
+      "ios": {
+        "order": 22,
+        "maker": "Fosi Audio",
+        "legacyPatterns": [
+          "Fosi Audio ZH3"
+        ],
+        "legacyCeilingBitRate": 2822400,
+        "portNames": [
+          "Fosi Audio ZH3"
+        ],
+        "nameTokens": [
+          "Fosi Audio ZH3"
+        ],
+        "excludedTokens": [],
+        "nameScope": "model",
+        "siblingNote": null,
+        "pcm": {
+          "maxRateHz": 768000,
+          "bitDepth": 32
+        },
+        "volumeTopology": "unknown",
+        "timing": {
+          "ioBufferMs": null,
+          "dsdResyncMs": null,
+          "pcmEntryResyncMs": null,
+          "coldStartExtraMs": null,
+          "transitionCushionMs": null
+        }
+      },
+      "provenance": [
+        "dop: heard DSD64: submission 2026-11-19 (a click, then the tone, at iOS volume 0.3); DSD128 and DSD256 held the lock proxy on 3 of 3 attempts each, the listening not sure: submission 2026-11-19, neither heard nor failed; refused DSD512: submission 2026-11-19 (no DSD512 attempt: the PCM sweep asked its 1411.2 kHz carrier and 768 kHz was negotiated); stated DSD to DSD512: maker 2026-11-19 (the specifications of its ZH3 page, USB: PCM 32bit/768kHz, DSD512, a figure that names no transport)",
+        "ios: wizard submission 2026-11-19 (app 2.2 (17), iOS 27.3): the name iOS reported for its port, Fosi Audio ZH3 (USBAudio, not as headphones), as its legacy pattern, port name and token; DSD64, the one rate heard, as its legacy ceiling; PCM negotiated exactly at every rate from 44.1 to 768 kHz and 1411.2 kHz renegotiated to 768 kHz, so 768 kHz, at 32 bits, the submitter's figure and the maker's for USB (its ZH3 page, read 2026-11-19: PCM 32bit/768kHz); the volume unknown, since the answers give it a volume control of its own that the iOS slider does not move while DoP held with the tone heard below iOS maximum; and every time null, the transition cushion as on every row but the Chord ones: the IO buffer not granted at 768 kHz (1.3 ms), no settle rung clean (a click at 150, 250, 400 and 700 ms, silence at 1000 ms), no cold-start rung clean (a click at +0, +300, +600 and +1000 ms), the PCM entry not tested, and soft clicks heard across PCM 44.1 kHz, DSD64, PCM 96 kHz and DSD64"
       ]
     }
   ]

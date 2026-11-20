@@ -69,7 +69,8 @@ KA3's token is `FiiO KA3`, not `KA3`), its scope (`model`, or `family`, whose
 siblings' results are its sibling note's alone), its PCM ceiling, its volume
 topology and its times in whole milliseconds; `iosGenericNames` are the names
 that name no model, and `iosKnownSiblings` iOS PR 1's known siblings, models
-with no row of their own, as the registry's baseline lists them: the lint
+with no row of their own, as the registry's baseline lists them, then those
+a row added past the baseline brings (B944): the lint
 refuses a catalog whose keys answer one of them with a model row through the
 strict matcher, by a port name, matched exactly before any token and never
 ruled out by an excluded token, or by a token none of the row's excluded
@@ -98,6 +99,18 @@ export's tests hold it to its golden and to the iOS registry's baseline,
 registry's objects at iOS 3145606a, pinned by its SHA-256, an input never
 derived from the catalog. A parity failure is fixed in the catalog, never in
 the baseline.
+
+The baseline cannot grow with the catalog, so a row added past it (B944: a
+row from a wizard submission, which no registry held) is held to its
+declaration in the test instead: `additions` in `ios-export/main_test.go`,
+its rows in the export's shape and in order after the baseline's, the names
+its unit reported and the known siblings it brings, each name with the
+answers both matchers must give it. A declaration is written by hand from
+the row's submission and its maker's figures, never copied from the catalog
+or the export, and changes only with what it was written from. The parity
+keeps every check of the baseline and replays its corpus over the whole
+export, the added rows included, since a row added last in order can still
+take a corpus name no earlier row holds.
 
 ### DoP evidence, rate by rate
 
@@ -148,4 +161,7 @@ the statement, and the export reads that clause's head alone as the entry's
 source (`fieldLog`, `2026-06-21`). A source names a kind and a date, never a
 person. A DoP claim's `source` is its own row of the registry
 ("DACProfile.swift <row> at iOS <commit>"), a dated listening or a dated
-maker's document.
+maker's document. A row added past the registry's baseline, which no commit
+of the registry holds as a row, names in its `ios` line the dated wizard
+submission it came from (`ios: wizard submission 2026-11-19`), and its DoP
+claim then cites no registry row (B944).
