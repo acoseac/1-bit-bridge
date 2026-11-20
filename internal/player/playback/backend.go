@@ -203,6 +203,14 @@ type Seams struct {
 	// before the write lets go of its lease and its turn (B728 B9 PR 3): a
 	// test holds the write there while a refresh publishes. It may block.
 	ChoiceAnswered func()
+	// ChoiceRefreshed runs on the refreshes' goroutine once the refresh a
+	// choice's write asked as its hold of its reading ended (askChoiceRefresh:
+	// one owed meanwhile, a state written since its decision, or its
+	// publication contained) has returned or panicked, the first that goroutine
+	// runs after the ask, made forced whatever that run's own context says,
+	// whatever it published, nothing included, with no lock of the refreshes'
+	// held. It must not block or call the backend.
+	ChoiceRefreshed func()
 	// DACTokenKey, when set, is the key the backend mints the DAC's token
 	// under (dacToken), read once by New, in place of the 32 random bytes it
 	// draws (B728 B9 PR 3): 32 bytes, else New refuses it. The read side's
@@ -558,10 +566,14 @@ type Backend struct {
 	// decided under too (takeProbe, round 3).
 	starts atomic.Uint64
 
-	// The supervisor's refresh (RequestRefreshDSD, B762): its goroutine, and a
-	// forced refresh asked while one ran.
+	// The supervisor's refresh (RequestRefreshDSD, B762): its goroutine, a
+	// forced refresh asked while one ran, and a refresh a choice's write asked
+	// that no run has taken since (askChoiceRefresh), which the run that takes
+	// it makes forced whatever that run's context, the ChoiceRefreshed seam at
+	// its end.
 	refreshRun    coalesced
 	refreshForced atomic.Bool
+	choiceRefresh atomic.Bool
 
 	// The goroutines the backend started and that have not returned; those of
 	// them that write the player's DSD state, or may start a write

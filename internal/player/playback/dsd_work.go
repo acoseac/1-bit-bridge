@@ -13,9 +13,12 @@ import (
 // hold that goroutine alone: the supervisor's loop asks and goes on, so a live
 // disable, a new snapshot and the engine's end reach it as they come. The
 // asker's context ends what it asked, and a run asked for an ended context is
-// not made; each run is counted among the backend's goroutines from the ask on
-// (Wait), and the probe's among the writes of the player's DSD state too
-// (DSDWrites), since it may record what the DAC accepted.
+// not made, but for the refresh a choice's write asks (askChoiceRefresh): the
+// run that takes its mark makes it, forced, whatever that run's own context
+// says, since a later ask replaces the work kept (coalesced) and its context
+// may have ended. Each run is counted among the backend's goroutines from the
+// ask on (Wait), and the probe's among the writes of the player's DSD state
+// too (DSDWrites), since it may record what the DAC accepted.
 
 // coalesced runs the work it is asked for on a goroutine of its own, one at
 // a time: work asked while one runs is kept, the latest replacing any kept
@@ -110,7 +113,10 @@ func (b *Backend) ProbeDSDPending() bool {
 // joined with every force asked meanwhile, and run once that one has
 // returned, so an input that changed while a reading was held is read again.
 // The refreshes publish one at a time, in the order their readings were taken
-// (refreshDSD's lock), whichever goroutine reads.
+// (refreshDSD's lock), whichever goroutine reads. The first run after a
+// choice's write asked one (askChoiceRefresh) makes that refresh, forced,
+// whatever its own context says, and runs the ChoiceRefreshed seam as it
+// ends, a panic's way out included.
 func (b *Backend) RequestRefreshDSD(ctx context.Context, force bool) {
 	if b.cfg.DSD == nil {
 		return
@@ -123,10 +129,25 @@ func (b *Backend) RequestRefreshDSD(ctx context.Context, force bool) {
 		return true
 	}
 	b.refreshRun.ask(spawn, func(r any) { b.logPanic("the effective DSD policy's refresh", r) }, func() {
-		if ctx.Err() == nil {
-			b.RefreshDSD(b.refreshForced.Swap(false))
+		asked := b.choiceRefresh.Swap(false)
+		if asked {
+			defer b.choiceRefreshed()
+		}
+		if ctx.Err() == nil || asked {
+			b.RefreshDSD(b.refreshForced.Swap(false) || asked)
 		}
 	})
+}
+
+// askChoiceRefresh asks the refresh a choice's write owes once its hold of
+// its reading has ended (publishChoice, endChoiceReading): forced, on a
+// context its request's end does not end. Its mark (choiceRefresh), set first,
+// is what the run that takes it reads forced by, so neither a later ask that
+// replaces the write's run, on a context that has ended, nor a run that
+// begins before the ask sets its force, makes the refresh lost or unforced.
+func (b *Backend) askChoiceRefresh(ctx context.Context) {
+	b.choiceRefresh.Store(true)
+	b.RequestRefreshDSD(context.WithoutCancel(ctx), true)
 }
 
 // DSDWrites is closed once no write of the player's DSD state runs, nor the
