@@ -940,9 +940,10 @@ func TestTheIOSNameKeysLint(t *testing.T) {
 // E30 II Lite's name given to the E30 II as a port name, which the matcher
 // takes before any token and no excluded token rules out, the E30 II's
 // excluded token Lite dropped, which lets the Lite's names reach it by its
-// tokens, a Fosi sibling's name given to the ZH3 as a port name, and the
-// ZH3's token widened to its maker's name, which every Fosi sibling holds, are
-// each refused.
+// tokens, a Fosi sibling's name given to the ZH3 as a port name, the ZH3's
+// token widened to its maker's name, which every Fosi sibling holds, and the
+// same two for the Magic-ARC, an iKKO sibling's name as its port name and its
+// token widened to the iKKO name every iKKO sibling holds, are each refused.
 func TestNoKnownSiblingReachesAModelRow(t *testing.T) {
 	for _, tc := range []struct {
 		name, id, sibling string
@@ -961,6 +962,12 @@ func TestNoKnownSiblingReachesAModelRow(t *testing.T) {
 		{"the ZH3's token widened to its maker's name", "fosiaudio.zh3", "Fosi Audio ZD3",
 			func(x *IOS) { x.NameTokens = []string{"Fosi Audio"} },
 			`"Fosi Audio ZD3" reaches this model row through the strict matcher, by its token`},
+		{"an iKKO sibling's name as the Magic-ARC's port name", "ikko.magicarc", "Ikko Zerda ITM01",
+			func(x *IOS) { x.PortNames = append(x.PortNames, "Ikko Zerda ITM01") },
+			`"Ikko Zerda ITM01" reaches this model row through the strict matcher, by its port name`},
+		{"the Magic-ARC's token widened to its maker's name", "ikko.magicarc", "Ikko Zerda ITM02",
+			func(x *IOS) { x.NameTokens = []string{"Ikko"} },
+			`"Ikko Zerda ITM02" reaches this model row through the strict matcher, by its token`},
 	} {
 		db := mustDefault(t)
 		i := slices.IndexFunc(db.Profiles, func(p Profile) bool { return p.ID == tc.id })
