@@ -97,6 +97,7 @@ type (
 		seq uint64
 	}
 	msgMaintExpiry    struct{ seq uint64 }
+	msgCheckStops     struct{ m *maintHold } // the deadline of the Stops m's check parked
 	msgReserveDone    struct{ err error }
 	msgReserveOverdue struct{ seq uint64 }
 	msgPersisted      struct {
@@ -207,6 +208,9 @@ func (e *Engine) handle(m any) {
 	case msgMaintExpiry:
 		what = "maintenance expiry"
 		e.maintenanceExpiry(m.seq)
+	case msgCheckStops:
+		what = "check stops"
+		e.checkStopsDue(m.m)
 	case msgReserveDone:
 		what = "reservation"
 		e.reserveDone(m.err)

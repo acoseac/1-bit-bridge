@@ -16,7 +16,9 @@
 // admitted yet, and the owner refuses it in turn); one whose context ends
 // after its admission may have run, and its refusal does not wrap it, but for
 // a configuration reservation, whose grant the method lets go again ("The
-// configuration reservation" below). Once admitted its effect is applied, or
+// configuration reservation" below), and the DSD check's hold, whose caller
+// waits for the owner's answer whatever its context does ("Maintenance"
+// below). Once admitted its effect is applied, or
 // recorded as the pending
 // intent while a release is under way, and its reply is sent once that
 // effect is decided, which can be after a backend call. The reply is sent
@@ -47,7 +49,7 @@
 // report that stops playback, answers the transport commands still waiting
 // as it runs (a Pause nil, the rest
 // ReasonOvertaken or the output's reason: none of them ran, so none changed
-// anything), and EnterMaintenance refuses every waiting command.
+// anything), and EnterMaintenance and EnterCheck refuse every waiting command.
 //
 // After every change the owner publishes an immutable Snapshot, which reads
 // take without waiting on the owner; its accessors copy. The generation
@@ -69,7 +71,7 @@
 //	          stopped          playing, starting   paused               paused, no session  releasing             maintenance
 //	Play      start (1)        nothing             resume (2)           start (1)           pending: play         refused
 //	Pause     nothing          pause               nothing              nothing             nothing               refused
-//	Stop      nothing          release, stop       release, stop        stop                pending: stop         nothing
+//	Stop      nothing          release, stop       release, stop        stop                pending: stop         nothing (7)
 //	Next (3)  next, start      next, release,      next, release,       next, start         next, pending:        refused
 //	                           play                play                                     play
 //	Previous  previous, start  previous, release,  previous, release,   previous, start     previous, pending:    refused
@@ -93,7 +95,10 @@
 // occurrence heard. (6) The target of a seek no session plays yet (the
 // release the seek made, or the transport paused at its target with no
 // session) moves, with no call; any other release, or a pause with no
-// session no seek made, refuses. In every state Play, PlayID, PlayIndex,
+// session no seek made, refuses. (7) Under the DSD check's hold (EnterCheck)
+// a Stop ends the check: it waits until the hold has ended, or
+// ReleaseTimeout has passed, and answers success ("Maintenance" below). In
+// every state Play, PlayID, PlayIndex,
 // Next, Previous and a seek that plays are refused while a release is
 // unconfirmed; whatever starts a session, or will (Next and Previous with it,
 // past the end aside), is refused while the output is unknown or unavailable
@@ -128,7 +133,8 @@
 // while the release before the next session is under way and moves the
 // pending target (one naming the entry already pending shares that session).
 // Pause and a resume answer with the backend's answer; Stop and
-// EnterMaintenance once the release is confirmed or its deadline passed.
+// EnterMaintenance once the release is confirmed or its deadline passed, and
+// EnterCheck once it is confirmed, refused past its deadline.
 //
 // The selection is what a controller reads as the current ID. During
 // playback it moves on the backend's audible report, never on a hand-off;
@@ -172,8 +178,8 @@
 // The output's availability is an input (ReportOutput, OutputReport). It
 // starts unknown. Its going away, or the bound unit changing, stops
 // playback and freezes the position; while nothing plays it drops a pending
-// play and what the backend prepared (Backend.Discard). Its return plays
-// nothing.
+// play and what the backend prepared (Backend.Discard); and it ends the DSD
+// check's hold ("Maintenance" below). Its return plays nothing.
 //
 // # Seeks
 //
@@ -341,6 +347,34 @@
 // Config.MaintenanceTTL unless renewed (RenewMaintenance), which also ends
 // one whose holder left before the reply.
 //
+// EnterCheck is the hold of the player's DSD listening check (B728 B12), a
+// maintenance hold whose reason reads "check" (a snapshot reads maintenance,
+// OpenHome's TransportState Stopped). The owner decides it in the one step
+// that grants it, refusing it while a hold is held (ReasonMaintenance), a
+// configuration reservation is held (ReasonConfiguring; a reservation under
+// any hold is refused ReasonMaintenance), a release is unconfirmed
+// (ReasonReleaseUnconfirmed) or the output is unknown or unavailable, and,
+// without interrupt, while the transport is anything but stopped with nothing
+// under way (ReasonNotStopped, the reservation's predicate: a session
+// starting, playing, paused or releasing, or paused with no session, at a
+// seek's target too). Granted, it closes the engine as EnterMaintenance does,
+// a seek's target and its track dropped, and answers its Hold once the
+// release it made or waits for is confirmed; otherwise its hold ends first and
+// it is refused, so its caller holds nothing: a release past its deadline
+// ReasonReleaseUnconfirmed, a Stop before the answer ReasonStopped, the expiry
+// ReasonLease, the output gone or changed its reason. Its stop signal
+// (Hold.Stop) closes at its first end (its exit, its expiry, the output gone
+// or changed, which end it, the shutdown) or its first Stop. Under it a Stop
+// waits, in a list of the hold's own, until the hold ends, or ReleaseTimeout
+// after the first parked (the hold's own timer, whose message no later hold
+// takes), then answers success, a later one at once; the shutdown answers
+// them ReasonClosed. Every other mutation is refused ReasonMaintenance, and
+// the exit leaves the transport stopped. Its command carries its caller's
+// context: ended before the owner admits it, it stops nothing
+// (ErrNotAdmitted); once admitted its caller waits for the answer, which
+// always comes, and exits a hold its context outlived before it answers
+// ReasonCancelled, without ErrNotAdmitted.
+//
 // # The configuration reservation
 //
 // A write that must not run beside playback, the DAC's DSD choice being the
@@ -360,9 +394,11 @@
 // the snapshot it publishes, never a message a later Play could overtake. The
 // lease is its holder's alone, in no snapshot (Snapshot.ConfigurationReserved
 // says whether one is held), and has no expiry: the holder lets it go once its
-// write has returned. EnterMaintenance is not refused while one is held, a
-// residual: only the harness's bridge output play enters maintenance, and it
-// holds none.
+// write has returned. The DSD check's hold, serve's one hold, is refused while
+// one is held (ReasonConfiguring), and a reservation under any hold
+// ReasonMaintenance. EnterMaintenance is not refused while one is held, a
+// residual of the harness's bridge output play alone, which enters it on an
+// engine of its own and holds none.
 //
 // # OpenHome
 //

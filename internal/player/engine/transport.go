@@ -770,8 +770,9 @@ func (e *Engine) releaseDeadline(s *session) {
 	if o.maint == nil {
 		o.state = Stopped
 	} else if m := o.maint; m.waiter != nil {
-		e.answer(m.waiter, reply{hold: Hold{Lease: m.lease, Expires: m.expires, ReleaseConfirmed: false}})
-		m.waiter = nil
+		// Entered, release unconfirmed: a check's grant is refused so, its
+		// hold ended (deliver).
+		e.deliver(m)
 	}
 	e.visible()
 }
@@ -814,8 +815,7 @@ func (e *Engine) acked(s *session) {
 		if m := o.maint; m != nil {
 			m.confirmed = o.unconfirmed == nil
 			if m.waiter != nil {
-				e.answer(m.waiter, reply{hold: Hold{Lease: m.lease, Expires: m.expires, ReleaseConfirmed: m.confirmed}})
-				m.waiter = nil
+				e.deliver(m)
 			}
 		}
 		e.afterRelease()

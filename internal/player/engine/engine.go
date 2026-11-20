@@ -539,10 +539,32 @@ func (e *Engine) ReportOutput(ctx context.Context, r OutputReport) error {
 // (Hold.ReleaseConfirmed false: entered, release unconfirmed). The lease is
 // the caller's alone. A second enter is refused with ReasonMaintenance. A
 // configuration reservation held does not refuse it (ReserveConfiguration),
-// which is a residual: only the harness's bridge output play enters
-// maintenance, and it holds no reservation.
+// a residual of the harness's bridge output play alone, which enters it on an
+// engine of its own and holds no reservation: serve's one hold is the DSD
+// check's (EnterCheck), which a reservation refuses.
 func (e *Engine) EnterMaintenance(ctx context.Context, want Generation, reason string) (Hold, error) {
 	r := e.do(&command{op: opEnterMaint, ctx: ctx, want: want, reason: reason})
+	return r.hold, r.err
+}
+
+// EnterCheck holds the engine for the player's DSD listening check (B728
+// B12): a maintenance hold whose reason is "check", decided in the one owner
+// step that grants it, exited and renewed as any hold, whose stop signal
+// (Hold.Stop) closes at its first end or Stop. The package
+// documentation's "Maintenance" says what refuses it, what it answers and
+// what a Stop does under it. The grant is never lost to its caller: the
+// command carries ctx, so one whose ctx ends before the owner admits it does
+// not run, nothing stopped (ErrNotAdmitted); once admitted, its caller waits
+// for the owner's answer whatever ctx does, and exits a hold ctx outlived
+// before it answers ReasonCancelled, without ErrNotAdmitted: it ran, and what
+// it stopped stays stopped.
+func (e *Engine) EnterCheck(ctx context.Context, interrupt bool) (Hold, error) {
+	r := e.do(&command{op: opEnterCheck, ctx: ctx, on: interrupt, kept: true})
+	if err := ctx.Err(); err != nil && r.err == nil {
+		_ = e.ExitMaintenance(context.Background(), r.hold.Lease)
+		return Hold{}, &Error{Reason: ReasonCancelled, Op: opEnterCheck.String(),
+			Detail: "the context ended as the hold was granted: it was exited, and what it stopped stays stopped", Err: err}
+	}
 	return r.hold, r.err
 }
 
@@ -633,11 +655,12 @@ const (
 	opSeekRelative
 	opReserveConfig
 	opReleaseConfig
+	opEnterCheck
 )
 
 var opNames = [...]string{"play", "pause", "stop", "next", "previous", "play id", "play index", "insert", "delete", "delete all",
 	"set repeat", "set shuffle", "report output", "enter maintenance", "renew maintenance", "exit maintenance",
-	"seek absolute", "seek relative", "reserve configuration", "release configuration"}
+	"seek absolute", "seek relative", "reserve configuration", "release configuration", "enter check"}
 
 func (o op) String() string { return opNames[o] }
 
@@ -663,6 +686,10 @@ type command struct {
 	seconds int64
 	// config is the lease a configuration reservation's release lets go.
 	config ConfigLease
+	// kept is a command whose caller, once the owner has admitted it, waits
+	// for its reply whatever its context does (do): EnterCheck's, whose reply
+	// can hand over a hold.
+	kept bool
 
 	reply   chan reply
 	replied bool
@@ -695,7 +722,8 @@ type reply struct {
 // refusal wraps ErrNotAdmitted: before the owner takes it, and once taken
 // and not yet admitted, where do abandons it (command.admission), so the
 // owner refuses it in turn; one that ends after the owner admitted c means
-// c may run and its reply is dropped. After shutdown every command is
+// c may run and its reply is dropped, but for a kept command, whose reply do
+// waits for still, or the engine's end. After shutdown every command is
 // answered ReasonClosed at once. c holds nothing of the caller's once it is
 // sent: do copies the conditions here, and InsertAfter the metadata, so a
 // caller that returns early may reuse its slices while the owner still runs
@@ -719,27 +747,34 @@ func (e *Engine) do(c *command) reply {
 	case <-e.done:
 		return reply{err: refuse(name, ReasonClosed, "the engine has shut down")}
 	}
-	select {
-	case r := <-c.reply:
-		return r
-	case <-c.ctx.Done():
+	done := c.ctx.Done()
+	for {
 		select {
 		case r := <-c.reply:
 			return r
-		default:
+		case <-done:
+			select {
+			case r := <-c.reply:
+				return r
+			default:
+			}
+			if c.admission.CompareAndSwap(admissionPending, admissionAbandoned) {
+				// The owner has taken c and not admitted it, and now never will.
+				return reply{err: notAdmitted(name, c.ctx.Err())}
+			}
+			if c.kept {
+				done = nil
+				continue
+			}
+			return reply{err: &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended while the command ran: it may have taken effect", Err: c.ctx.Err()}}
+		case <-e.done:
+			select {
+			case r := <-c.reply:
+				return r
+			default:
+			}
+			return reply{err: refuse(name, ReasonClosed, "the engine has shut down")}
 		}
-		if c.admission.CompareAndSwap(admissionPending, admissionAbandoned) {
-			// The owner has taken c and not admitted it, and now never will.
-			return reply{err: notAdmitted(name, c.ctx.Err())}
-		}
-		return reply{err: &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended while the command ran: it may have taken effect", Err: c.ctx.Err()}}
-	case <-e.done:
-		select {
-		case r := <-c.reply:
-			return r
-		default:
-		}
-		return reply{err: refuse(name, ReasonClosed, "the engine has shut down")}
 	}
 }
 

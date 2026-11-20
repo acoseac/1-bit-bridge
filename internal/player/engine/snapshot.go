@@ -26,7 +26,9 @@ const (
 	// Releasing has asked a session to release and waits for the
 	// acknowledgement; Snapshot.Pending is what follows it.
 	Releasing
-	// Maintenance is held (EnterMaintenance): every mutation is refused.
+	// Maintenance is held (EnterMaintenance, or EnterCheck for the DSD
+	// check): every mutation is refused but a Stop, which does nothing, or
+	// under the check's hold ends the check.
 	Maintenance
 )
 
@@ -103,8 +105,8 @@ type Cond struct{ gen Generation }
 // command is refused with ReasonConflict and changes nothing.
 func IfGeneration(g Generation) Cond { return Cond{gen: g} }
 
-// Lease is what EnterMaintenance hands its caller, and only its caller:
-// no snapshot holds it, so no reader can exit or renew a hold.
+// Lease is what EnterMaintenance and EnterCheck hand their caller, and only
+// their caller: no snapshot holds it, so no reader can exit or renew a hold.
 type Lease struct{ b [16]byte }
 
 // String is the lease as ParseLease reads it.
@@ -130,13 +132,16 @@ func ParseLease(s string) (Lease, error) {
 // reservation is held), so no reader can let a reservation go.
 type ConfigLease struct{ b [16]byte }
 
-// Hold is what EnterMaintenance answers: the lease, the hold's expiry, and
-// whether the release it asked for was confirmed (false: entered, release
-// unconfirmed).
+// Hold is what EnterMaintenance and EnterCheck answer: the lease, the hold's
+// expiry, and whether the release it asked for was confirmed (false: entered,
+// release unconfirmed; always true of the check's, which is refused instead).
 type Hold struct {
 	Lease            Lease
 	Expires          time.Time
 	ReleaseConfirmed bool
+	// Stop is the DSD check's stop signal (EnterCheck), closed once the hold
+	// ends, whatever ends it, or a Stop comes; nil for EnterMaintenance's.
+	Stop <-chan struct{}
 }
 
 // Audible is the occurrence whose content is being heard.

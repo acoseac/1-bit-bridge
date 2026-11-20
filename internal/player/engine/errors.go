@@ -30,7 +30,8 @@ const (
 	// enter.
 	ReasonMaintenance Reason = "maintenance"
 	// ReasonLease is an exit or a renewal with a lease that is not the
-	// hold's: wrong, stale, or of a hold that has expired.
+	// hold's: wrong, stale, or of a hold that has expired; and the DSD
+	// check's hold that expired before its grant was answered (EnterCheck).
 	ReasonLease Reason = "lease_invalid"
 	// ReasonIDNotFound is an ID the queue does not hold (OpenHome fault
 	// 800).
@@ -74,14 +75,15 @@ const (
 	// a session's release is unconfirmed: two of the engine's own sessions
 	// never hold or race for the device.
 	ReasonReleaseUnconfirmed Reason = "release_unconfirmed"
-	// ReasonNotStopped is a configuration reservation asked while the
-	// transport is not stopped with nothing under way: a session starting,
-	// playing, paused or releasing, or a release unconfirmed
-	// (ReserveConfiguration, B728 B9 PR 3).
+	// ReasonNotStopped is a configuration reservation, or the DSD check's
+	// hold without interrupt, asked while the transport is not stopped with
+	// nothing under way: a session starting, playing, paused or releasing, or
+	// a release unconfirmed (ReserveConfiguration, B728 B9 PR 3; EnterCheck,
+	// B728 B12).
 	ReasonNotStopped Reason = "not_stopped"
-	// ReasonConfiguring is a command that would start a session while a
-	// configuration reservation is held: nothing starts until it is let go
-	// (ReserveConfiguration, B728 B9 PR 3).
+	// ReasonConfiguring is a command that would start a session, or the DSD
+	// check's hold, while a configuration reservation is held: nothing starts
+	// until it is let go (ReserveConfiguration, B728 B9 PR 3).
 	ReasonConfiguring Reason = "configuring"
 	// ReasonBackend is a backend call that failed, for a reason the
 	// backend's error carries (a busy device, the identity check, …).
