@@ -229,3 +229,223 @@ record's commit are in the report that carries it.
   console then refuses a change of it until the restart.
 - The console says nothing of a recorded leaf before a save meets it: the Info line in the log is
   all, and the Settings page shows the live value, not the file's.
+
+### Round 2: a variable's setting can conflict, and a save is refused only for what it changes
+
+Round 2 took the brief's four findings (F1 to F4) and a hardening (item 5), with its first
+review's R1 to R6 and its second's C1 to C4, on the branch at `3877461a`. Seven commits, each
+item's tests and fix in one:
+- `01ebfe02` (F1): a change of a variable's setting another writer changed is refused, and the
+  opt-outs are compared by what they turn on;
+- `bfaae559` (F2): the file another writer left is loaded once, at the turn that finds it, and a
+  save is refused as unloadable only for a file it makes so;
+- `30030386` (F3): two unread player blocks are compared by a digest of their source;
+- `b57d8557` (F4): the player test names the setting each route meets;
+- `162772a7` (item 5): a refusal of `normalize` with no URL to blame refuses the turn;
+- `e7527ef5`: the records (the config lock's rule and its long form, the History's round 2
+  paragraph with round 1's two corrections, admin-console.md's B604 bullet, and the doc
+  comments that said the holder compares the bytes it last read or wrote);
+- this record, with the History's sentence on the base's record (below).
+
+This clone has no `origin`; `git merge-tree --write-tree` of main's tip in it, `2f965cd4`
+(#1527), and `e7527ef5` reported no conflict, so nothing was merged. On that merged tree
+`config-lifecycle.md` is 99,865 bytes and `admin-console.md` 97,599, under their budget of
+100 KB. Every command ran as round 1's did, and each red and each control was predicted in
+writing before it ran.
+
+#### What changed, and why
+
+**A variable's setting** (F1; R2, R3, C3). Round 1 left a leaf a `BRIDGE_*` variable set at the
+start out of the record (`before.envSet`), so the conflict check never saw another writer's
+change of it, and B761's rule (`filedSwitches`, `filedEnvValues`), which writes such a leaf as
+the file holds it unless the save changed it, wrote the console's change over that writer's:
+with `BRIDGE_ENRICH_ENABLED=false`, an edit writing `enrich.enabled: false` was lost to a
+console flip on, and enrichment came on against it once the variable was unset. Such a leaf now
+joins a record of its own (`outsideEnv`, under `mu`, sorted, emptied by `RecordFile`), which
+`refuseMerge`'s conflict check reads beside `outside`, and nothing else does (R3, C3): not
+`fileOutside`, since B761's rule writes it; not the deployment refusal, which would refuse every
+save (an unrelated save lands beside such a change of a deployment leaf:
+`TestAnUnrelatedSaveLandsBesideAVariablesDeploymentSettingAnotherWriterChanged`); not the
+merged load, which a save with such leaves alone recorded skips, writing what B761's rule wrote
+before B535, nor the settings an `OutsideUnloadable` refusal names; and not the Info line, which
+says the change takes effect at the next start, false while the variable is set
+(`TestASaveOfAnotherSettingKeepsAVariablesSettingAnotherWriterChanged`). A change of it is
+refused whatever value it writes, one to the value the other writer wrote included (R2,
+decided: a convergent change is refused): round 1 refuses a change of any recorded leaf so, one
+rule for every recorded leaf; the console made the change from a value it never read; and two
+of `TestAPlayerWriteOverAnEditedConfigIsRefused`'s three routes write what its edit wrote (the
+player on, the opt-in on), so an exemption by value would let them land. Both cases of
+`TestAChangeOfAVariablesSettingAnotherWriterChangedIsRefused` (round 1's
+`…ASettingAVariableSetIsNoOtherWritersChange`, renamed) expect the refusal: the brief's case 1,
+another writer's edit and then the console's flip, and case 2, a flip to the value that writer
+wrote. The three opt-outs (`switchEnvPaths`: `enrich.enabled`, `enrich.deezerEnabled`,
+`update.checkEnabled`, each a `*bool` that no value turns on) are compared by what they turn on
+(`switchOn`), never by their pointers: a switch written `true` is no change of one left out, and
+a save that sets a switch to what it was is no conflict (`TestASwitchIsComparedByWhatItTurnsOn`).
+
+**A file another writer left that would not load** (F2; R1, C1, C2, C4). Round 1 loaded the
+merged file without asking whether the file the other writer left failed on its own: one that
+decoded and failed `Validate` (a variants folder below a library root) refused every save, a
+rename included, as one the save would leave (`OutsideUnloadable`), in words that sent the
+operator to a restart that would fail on that file; and an OpenHome port clash that writer left
+(`listenAddress: ':7792'` beside the opt-in), which `Load` takes by turning the player off,
+refused every unrelated save until a restart, B535's own symptom again. The turn that finds
+another writer's bytes now loads them as the next start does (`loadsAtNextStart`: `DecodeFile`,
+`applyDefaultsAs(false)`, `applyEnvOverridesAs(false)`, `resolvePaths`,
+`NormalizeAndValidateQuiet`, and no longer the clash, which `Load` takes: C2) and keeps the
+answer beside those bytes (`leftErr`, `leftClashes`, until the next discovery: C1). A file left
+that would not load refuses every save at the turn, after the deployment check and before `fn`,
+as a kind of its own (C4): `OutsideLeftUnloadable`, whose error names the file and the load's
+reason, `<path>, as another writer left it, would not load at this bridge's next start (<err>),
+so this change was not saved: correct the file`, and says nothing of a restart; the console
+answers it, in `changedOutsideRefusal`'s branch for the kind, with words of its own
+(`errMsgSaveConfigLeftUnloadable`: "the config file another writer left would not load at the
+bridge's next start (the bridge's log says why), so this change was not saved: correct it, and
+then make the change again") at the status and code `OutsideUnloadable` answers, 500
+`save-config`. `OutsideUnloadable` is the save's own change alone: a merged file that fails
+where the file left loads, or that has an OpenHome clash the file left has not (R1;
+`openHomePortClashes`, every listener on the surface's port, in the order `OpenHomePortClash`
+asks them, which answers the first as before). A landed save takes its merged file's clashes as
+the file's and empties `leftErr`. So a save still costs one quiet load, the merged file's, and a
+discovery one more, the file left's: the brief's stop on a second full load per save did not
+arise.
+
+**Two unread player blocks** (F3, R5). Round 1 compared two blocks that do not read by the text
+a save writes back (`keptText`, `sameKeptBlock`), which a block whose aliases copy more than
+1024 nodes keeps none of (`notKept`), so two such blocks compared alike whatever they held. Each
+unread block now carries a digest of its source (`PlayerConfig.source`, SHA-256, never the text,
+which can hold a serial; `blockSource`), and `sameUnreadBlock` compares the digests: every node
+of the block and of each node an alias in it names, by kind, tag, style, anchor, value, comments
+and number of children, the aliases' targets taken in turn, each node written once and a node
+met again written as such, no alias expanded, so the digest costs the file's size whatever the
+aliases copy; never by line or column, so a line added above the block changes nothing. No
+whole-file fallback (R5): a comment added elsewhere is no change of the block, and a change of
+the anchor its alias names is one (`TestAnUnreadPlayerBlockIsComparedByItsSource`'s three
+cases).
+
+**The player test** (F4, R4). `TestAPlayerWriteOverAnEditedConfigIsRefused` asserts that each
+route's refusal names the setting it meets (`output.player.enabled`, `output.player.openhome`,
+`output.player.device.binding`). Its fixture's boot read and its edit needed no change (R4).
+
+**`normalizeSettings`** (item 5, R6: hardening). Where `normalize` refused, it set the two base
+URLs aside, normalized again and discarded what that second pass answered; it now returns that
+refusal, which `readSettings` returns and the turn refuses as a file that does not read
+(`OutsideUndecodable`), rather than compare settings left unnormalized. `normalize` refuses
+nothing but those URLs today, so no file reaches it, and `TestNormalizeRefusesNothingButABaseURL`
+holds the invariant: a config whose every setting is set and every string setting holds a word
+no setting takes (empty, white space, control characters, a scheme with no host, text with
+tabs and newlines, 4 KiB) normalizes once the URLs are blank.
+
+**Where round 1's sections above no longer hold.** A leaf a variable set now joins
+`outsideEnv`, for the conflict check (S4's two cases are refused, and X6's mutation is K2's);
+an unread block is compared by its source's digest, not by the text it keeps;
+`loadsAtNextStart` takes the OpenHome clash, which `refuseMerge` refuses only where the save
+adds one (X8's mutation is round 2's `loadsAtNextStart`); and the console says to correct a file
+another writer left that would not load, never to restart.
+
+**Two corrections to round 1's record.** The record and the bytes it is compared with advance
+at the turn that discovers a change, whatever its save then does, as `compareTurn` has done
+since round 1 took its S1, not only when a save lands: the rules line, its long form and the doc
+comments said the holder compared the turn's file with the one it last read or wrote, and now
+say the bytes it last recorded (its boot read, a turn that found them, its save); the History's
+one sentence on the base's record, that only a landed save moved it, now says so of the base
+alone. And not every case went red first: R5, R7, R8 and R11, and S2's and S3's checks, were
+green at the base, which refused them by the bytes, and are proven by controls (round 1's reds
+above list them green as predicted; the History now says so too).
+
+#### The reds
+
+Each at its fix's parent, by `go test -overlay` (no tracked file written), as predicted:
+- F1 at `3877461a`, round 1's `runtime.go` and `outside.go` (the new tests use no new name):
+  both cases of `TestAChangeOfAVariablesSettingAnotherWriterChangedIsRefused`, each at three
+  assertions (the flip answered `<nil>` where a conflict naming `enrich.enabled` is wanted, the
+  file written, the value stored), and `TestASwitchIsComparedByWhatItTurnsOn` at its three
+  "written true" lines and at the save that sets a switch to what it was, refused as a conflict
+  naming `enrich.enabled`; green as predicted, since round 1 left a variable's leaf out:
+  `TestASaveOfAnotherSettingKeepsAVariablesSettingAnotherWriterChanged` and
+  `TestAnUnrelatedSaveLandsBesideAVariablesDeploymentSettingAnotherWriterChanged` (K2 proves
+  them).
+- F2 at `01ebfe02`, with a names-only shim (`OutsideLeftUnloadable` appended to the kinds,
+  `loadsAtNextStart` answering a config beside its error, its clash refusal and every behaviour
+  as they were): the clash row of `TestTheMergedFileIsLoadedAsTheNextStartLoadsItWithoutAWord`
+  (`Load` takes it, the merged load refused it);
+  `TestASaveOverAFileAnotherWriterLeftUnloadableIsRefusedSayingToCorrectIt` at its kind
+  (`OutsideUnloadable`); the three cases of
+  `TestAnOpenHomeClashAnotherWriterLeftRefusesOnlyASaveThatAddsOne`, the first two refused over
+  the clash left, the third naming `listenAddress` where `adminAddress` is wanted; the new row of
+  `TestAConfigSaveRefusalSaysWhatToDoAndNamesNoPath` and the new case of
+  `TestTheConsolesSavesAnswerARefusalWithoutThePath`, each at its remedy and at "restart"; green
+  as predicted: `TestAMergedSaveTheNextStartWouldRefuseIsRefused` (K6 proves its OpenHome case).
+- F3 at `bfaae559`: `TestAnUnreadPlayerBlockIsComparedByItsSource` at its block's own text and
+  at the anchor (found as `[]` and as `[libraryRoots]`), its comment case green.
+- F4 at `bfaae559`: green, as predicted (the conflict named each route's setting already); C2r
+  proves it.
+- Item 5: its test holds `normalize`, which item 5 does not change, so it is green at its
+  parent; K10 proves it.
+
+#### Controls
+
+Each laid over the committed files by `go test -overlay` after its item's commit, with
+`-count=1 -timeout 30m -vet=off -v`, `git status` clean after each. CONFIG is the whole
+`internal/config` package; ADMIN_WORDS is `TestAConfigSaveRefusalSaysWhatToDoAndNamesNoPath`
+and `TestTheConsolesSavesAnswerARefusalWithoutThePath`; ADMIN_PLAYER is
+`TestAPlayerWriteOverAnEditedConfigIsRefused`. F3's K8 and K9 ran at `162772a7`, after F4's and
+item 5's commits, so that no control ran beside an uncommitted change. Every row went as
+predicted, and every test a row's runs ran and the row does not name stayed green.
+
+| | mutation | at | runs | predicted and seen |
+| --- | --- | --- | --- | --- |
+| K1 | the brief's: a variable's leaves left out of the record again | `01ebfe02` | CONFIG | the variable test red in both cases at its three assertions |
+| K2 | a variable's leaf recorded in `outside`, as any other | `01ebfe02` | CONFIG | the save of another setting red at its log line alone (`scanIntervalSec`); the deployment case's rename refused as a deployment setting another writer changed; the variable test green |
+| K3 | the opt-outs compared by their pointers again | `01ebfe02` | CONFIG | the switch test red at its three "written true" lines and at the save that sets a switch to what it was |
+| K4 | the brief's (i): every OpenHome clash of the merged file refused, the file left's included | `bfaae559` | CONFIG | the clash test red in its three cases, the first two, (b)'s unrelated save among them, refused over `listenAddress`, the third naming it where `adminAddress` is wanted |
+| K5 | the brief's (ii): no `OutsideLeftUnloadable`, the merged load refusing in its place | `bfaae559` | CONFIG, ADMIN_WORDS | the left-unloadable test red at its kind; (a)'s words case, the console's new case, at "restart" and at its remedy; the words table green (its row builds the error itself) |
+| K6 | no clash is a new one | `bfaae559` | CONFIG | the clash test's third case red at its refusal (`<nil>`), the file written and the change stored; `TestAMergedSaveTheNextStartWouldRefuseIsRefused`'s OpenHome case at the same three |
+| K7 | `loadsAtNextStart` refuses the clash again, as round 1's did | `bfaae559` | CONFIG | the parity test's clash row; the clash test's three cases, each refused as a file left unloadable; `TestAMergedSaveTheNextStartWouldRefuseIsRefused` green |
+| K8 | the brief's: two unread blocks compared by the text a save writes back | `162772a7` | CONFIG | F3's test red at its block's own text and at the anchor; its comment case and round 1's R4 green |
+| K9 | the digest leaves out the nodes the block's aliases name | `162772a7` | CONFIG | F3's test red at the anchor alone |
+| C2r | round 1's C2 on round 2's `refuseMerge`: the conflict refusal off | `162772a7` | ADMIN_PLAYER | the player test red in its three routes, each write answered 200 |
+| K10 | `normalize` given a third refusal, a library name of 4 KiB of `x` | `162772a7` | CONFIG | `TestNormalizeRefusesNothingButABaseURL` red at its 4 KiB row alone |
+
+#### Runs
+
+At `e7527ef5`, with `GOTOOLCHAIN=go1.27.3` (`go version go1.27.3 linux/amd64`), outside the
+build slot, one package at a time:
+- `go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/config/ ./internal/admin/
+  ./cmd/bridge/` for linux/amd64, windows, darwin and linux/386: exit 0, nothing said;
+- the pinned gofmt (`go run cmd/gofmt -l`) over the nine Go files round 2 changed: nothing
+  listed;
+- the suites without race, `go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1
+  -timeout 30m`: `internal/admin` ok in 274.6 s, `cmd/bridge` 585.4 s, `internal/config` 9.9 s,
+  `internal/updater` 25.2 s, `internal/api` 38.8 s;
+- with `-race -count=20 -timeout 30m -v`: `internal/config`'s 21 tests (the 11 round 2 added or
+  changed, a doc comment counted with the function it heads, and 10 beside them), 420 of 420
+  top-level runs and 480 subtests passed in 13.6 s; `internal/admin`'s 11 (round 2's 3 and 8
+  beside them), 220 of 220 and 1,040 subtests in 630.4 s; `cmd/bridge`'s 4 (round 1's; round 2
+  changed a comment there and no test), 80 of 80 in 76.2 s. None failed, and no data race.
+
+The build-slot session at `e7527ef5`, the slot free at once: `make fmt vet docs-check`, exit 0 in
+3.5 s, the tree unchanged after it; then `make fmt vet test build-all` at its defaults but
+`TMPDIR` (below the checkout's `.tmp/`), whose test step is `go test -tags
+"ts_omit_webclient,ts_omit_debugeventbus" -p 4 -race -timeout 30m ./...`: exit 0 in 2,094.2 s,
+the tree unchanged after it. Its test step: 91 packages ok (33 of them answered from the test
+cache, their inputs unchanged), 15 with no test files, none failed and no data race; `cmd/bridge`
+1,727.6 s of its 30 minutes, `internal/manifest` 1,599.4 s, `internal/admin` 1,239.6 s,
+`internal/backup` 661.5 s, `internal/config` 17.0 s. Its `build-all`: check-build-tags OK, the
+six release binaries built.
+
+A record holds no run made on its own commit: `make docs-check` and the citation guard on this
+record's commit are in the report that carries it.
+
+#### What stays open
+
+- A console save writes the live snapshot's `--addr` into the file, as before (round 1's first
+  open item), so under an `--addr` on the OpenHome port, with the opt-in on, a save beside
+  another writer's change finds in the merged file a clash the file left has not, `--addr`'s,
+  and is refused for it as its own; with nothing recorded the save lands and writes that clash,
+  as before B535.
+- A file another writer left that would not load refuses every console save until it is
+  corrected: the console's words name no setting, and the bridge's log line
+  (`writeSaveConfigErr`) carries the load's reason.
+- Round 1's open items above stand, a variable's leaf in `outsideEnv` among them: it stays
+  recorded until a restart.

@@ -452,36 +452,37 @@ Windows-runner check, distinct from portable race-test results.
   (2026-11-20, backlog B535). The refusal held every console save, whatever
   it changed, from any other write to `bridge.yaml` beside a running serve
   (an edit that only added a comment, `bridge init`, an offline `library
-  add` or `remove`, a bridge older than the lock) until a restart: only a
-  landed save moved the bytes the holder compared, and nothing reloads the
-  file. The reasons above hold of the live snapshot set against the file,
-  which differ by `--addr`, the defaults, the resolved paths, the overrides
-  and an unread block's reason. They do not hold of the turn's file set
-  against the bytes the holder last recorded, which, each read as Load reads
-  a file for its settings (`readSettings`: `DecodeFile`, the defaults, the
-  relative paths resolved against the directory Load takes from the name,
-  and `Normalize`'s forms, all quietly, and no `BRIDGE_*` variable), differ
-  by the other writer's changes alone: a writer that writes out a default, a
-  resolved path or the name `Normalize` gives (`config.Edit` writes all
-  three) has changed nothing. So the record of every setting the two
-  disagree on is the other writer's leaves alone (`settingsChanged`: every
-  exported field yaml writes, through the structs that hold it, by
-  `sameValue`; a list one leaf, never walked by its entries, nil and empty
-  alike; a type with a `MarshalYAML` of its own one leaf, `usbid.Serial`,
-  whose one field is unexported; a player block that did not read, on either
-  side, one leaf, `output.player`, by the text it keeps, its fields reading
-  nothing). A leaf joins the record (`outside`) at the turn that finds it,
-  logged once at Info by its yaml path and no value, with the bytes it was
-  found in, whatever that save then does: a refused or failed save that kept
-  neither would find the change again at the next turn, but one that kept
-  the bytes alone would find nothing and write the snapshot over the other
-  writer's. Only a restart forgets a leaf, and one a variable set at the
-  start never joins the record, B761's rule writing it. Every save writes
-  each recorded leaf from the turn's bytes (`fileOutside`: `DecodeFile`,
-  assigned on the saved copy, a field of Config's own left out at its zero
-  value through `filed`; a scan of Config's type finds no nested leaf whose
-  tag writes its zero value as a key but one inside a list written whole,
-  `upnpUpstream.servers[].name`, and B761's
+  add` or `remove`, a bridge older than the lock) until a restart: at the
+  base only a landed save moved the bytes the holder compared (since B535
+  the turn that finds a change moves them, whatever its save then does), and
+  nothing reloads the file. The reasons above hold of the live snapshot set
+  against the file, which differ by `--addr`, the defaults, the resolved
+  paths, the overrides and an unread block's reason. They do not hold of the
+  turn's file set against the bytes the holder last recorded, which, each
+  read as Load reads a file for its settings (`readSettings`: `DecodeFile`,
+  the defaults, the relative paths resolved against the directory Load takes
+  from the name, and `Normalize`'s forms, all quietly, and no `BRIDGE_*`
+  variable), differ by the other writer's changes alone: a writer that
+  writes out a default, a resolved path or the name `Normalize` gives
+  (`config.Edit` writes all three) has changed nothing. So the record of
+  every setting the two disagree on is the other writer's leaves alone
+  (`settingsChanged`: every exported field yaml writes, through the structs
+  that hold it, by `sameValue`; a list one leaf, never walked by its
+  entries, nil and empty alike; a type with a `MarshalYAML` of its own one
+  leaf, `usbid.Serial`, whose one field is unexported; a player block that
+  did not read, on either side, one leaf, `output.player`, by the text it
+  keeps, its fields reading nothing). A leaf joins the record (`outside`) at
+  the turn that finds it, logged once at Info by its yaml path and no value,
+  with the bytes it was found in, whatever that save then does: a refused or
+  failed save that kept neither would find the change again at the next
+  turn, but one that kept the bytes alone would find nothing and write the
+  snapshot over the other writer's. Only a restart forgets a leaf, and one a
+  variable set at the start never joins the record, B761's rule writing it.
+  Every save writes each recorded leaf from the turn's bytes (`fileOutside`:
+  `DecodeFile`, assigned on the saved copy, a field of Config's own left out
+  at its zero value through `filed`; a scan of Config's type finds no nested
+  leaf whose tag writes its zero value as a key but one inside a list
+  written whole, `upnpUpstream.servers[].name`, and B761's
   `TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel` holds every leaf a variable
   sets to that) and publishes the snapshot it changed, so nothing of the
   other writer's goes live; equal bytes skip only the discovery, so a turn
