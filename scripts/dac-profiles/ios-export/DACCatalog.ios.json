@@ -1247,6 +1247,84 @@
         },
         "siblingNote": null
       }
+    },
+    {
+      "id": "ikko.magicarc",
+      "name": "iKKO LOT Magic-ARC",
+      "maker": "iKKO",
+      "legacyPatterns": [
+        "Ikko Magic-Arc"
+      ],
+      "legacyCeiling": "none",
+      "pcm": {
+        "maxRateHz": 48000,
+        "bitDepth": 24
+      },
+      "volumeTopology": "unknown",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "Ikko Magic-Arc"
+        ],
+        "tokens": [
+          "Ikko Magic-Arc"
+        ],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [],
+        "failed": [
+          {
+            "rate": "dsd64",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-19"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-19"
+            }
+          },
+          {
+            "rate": "dsd256",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-19"
+            }
+          },
+          {
+            "rate": "dsd512",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-19"
+            }
+          }
+        ],
+        "statement": {
+          "case": "noDSD",
+          "upTo": null,
+          "source": {
+            "kind": "pcmCeiling",
+            "date": "2026-11-19"
+          }
+        },
+        "siblingNote": null
+      }
     }
   ]
 }

@@ -78,7 +78,14 @@
     "Fosi Audio C1",
     "Fosi Audio C3",
     "Fosi Audio MC331",
-    "Fosi Audio MC351"
+    "Fosi Audio MC351",
+    "Ikko Zerda ITM01",
+    "Ikko Zerda ITM02",
+    "Ikko Milestone ITM07",
+    "Ikko Heimdallr ITB03",
+    "Ikko ITX05",
+    "Ikko Zerda ITM03",
+    "Ikko Music Patch ITM05"
   ],
   "profiles": [
     {
@@ -2526,6 +2533,67 @@
       "provenance": [
         "dop: heard DSD64: submission 2026-11-19 (a click, then the tone, at iOS volume 0.3); DSD128 and DSD256 held the lock proxy on 3 of 3 attempts each, the listening not sure: submission 2026-11-19, neither heard nor failed; refused DSD512: submission 2026-11-19 (no DSD512 attempt: the PCM sweep asked its 1411.2 kHz carrier and 768 kHz was negotiated); stated DSD to DSD512: maker 2026-11-19 (the specifications of its ZH3 page, USB: PCM 32bit/768kHz, DSD512, a figure that names no transport)",
         "ios: wizard submission 2026-11-19 (app 2.2 (17), iOS 27.3): the name iOS reported for its port, Fosi Audio ZH3 (USBAudio, not as headphones), as its legacy pattern, port name and token; DSD64, the one rate heard, as its legacy ceiling; PCM negotiated exactly at every rate from 44.1 to 768 kHz and 1411.2 kHz renegotiated to 768 kHz, so 768 kHz, at 32 bits, the submitter's figure and the maker's for USB (its ZH3 page, read 2026-11-19: PCM 32bit/768kHz); the volume unknown, since the answers give it a volume control of its own that the iOS slider does not move while DoP held with the tone heard below iOS maximum; and every time null, the transition cushion as on every row but the Chord ones: the IO buffer not granted at 768 kHz (1.3 ms), no settle rung clean (a click at 150, 250, 400 and 700 ms, silence at 1000 ms), no cold-start rung clean (a click at +0, +300, +600 and +1000 ms), the PCM entry not tested, and soft clicks heard across PCM 44.1 kHz, DSD64, PCM 96 kHz and DSD64"
+      ]
+    },
+    {
+      "id": "ikko.magicarc",
+      "name": "iKKO LOT Magic-ARC",
+      "match": [],
+      "native": null,
+      "dop": {
+        "heardBitRates": [],
+        "statedMaxBitRate": 0,
+        "statedWithoutDoP": {
+          "kind": "none",
+          "maxBitRate": 0
+        },
+        "refusedBitRates": [
+          2822400,
+          5644800,
+          11289600,
+          22579200
+        ],
+        "analogVolumeControls": [],
+        "unityAtRawMax": [],
+        "source": {
+          "kind": "listening",
+          "ref": "wizard submission 2026-11-19 (app 2.2 (17), iOS 27.2.1)"
+        }
+      },
+      "timing": null,
+      "caveats": [],
+      "ios": {
+        "order": 23,
+        "maker": "iKKO",
+        "legacyPatterns": [
+          "Ikko Magic-Arc"
+        ],
+        "legacyCeilingBitRate": 0,
+        "portNames": [
+          "Ikko Magic-Arc"
+        ],
+        "nameTokens": [
+          "Ikko Magic-Arc"
+        ],
+        "excludedTokens": [],
+        "nameScope": "model",
+        "siblingNote": null,
+        "pcm": {
+          "maxRateHz": 48000,
+          "bitDepth": 24
+        },
+        "volumeTopology": "unknown",
+        "timing": {
+          "ioBufferMs": null,
+          "dsdResyncMs": null,
+          "pcmEntryResyncMs": null,
+          "coldStartExtraMs": null,
+          "transitionCushionMs": null
+        }
+      },
+      "provenance": [
+        "dop: refused DSD64, DSD128, DSD256: submission 2026-11-19 (each carrier, 176.4, 352.8 and 705.6 kHz, not negotiated on any of 3 attempts, the lock proxy never reached and nothing played, the listening answered silence); refused DSD512: submission 2026-11-19 (no DSD512 attempt: the PCM sweep asked its 1411.2 kHz carrier and 48 kHz was negotiated); stated no DSD: pcm ceiling 2026-11-19 (the 48 kHz ceiling the submission measured carries no DoP carrier, DSD64's being 176.4 kHz, and nor does the 24bit/96kHz iKKO states, beside which it gives no DSD figure)",
+        "ios: wizard submission 2026-11-19 (app 2.2 (17), iOS 27.2.1): the name iOS reported for its port, Ikko Magic-Arc, classed as Headphones (with that classification off the name may differ), as its legacy pattern, port name and token, iKKO's name and the model's, which iKKO sold as the iKKO LOT Magic-ARC (its store page as archived 2023-02-19), the UID's manufacturer field, GHW Micro, naming no chip or board maker found; no rate heard, so no legacy ceiling; 48 kHz alone negotiated exactly, every other PCM rate asked from 44.1 to 1411.2 kHz, 44.1 kHz below it included, renegotiated to 48 kHz, so 48 kHz as measured, which may be iOS's, if it holds a port it classes as Headphones there (no run with the classification off was made), or the DAC's: iKKO's page stated 16bits/48kHz (as archived 2022-05-29), then 24bit/96kHz (as archived 2023-02-19), its box 96kHz and the submitter 96 kHz, a figure recorded and not adopted, since no run negotiated it; 24 bits, the submitter's figure and iKKO's later one; the volume unknown: the answers say it has no volume control of its own and that the iOS volume changes its level, which does not say whether iOS scales the samples or sets a gain in the DAC, and no DoP attempt played; and every time null: the IO buffer unset, as on every PCM-only row, a 40 ms request granted at 48 kHz; no settle rung run; the PCM entry not tested; the cold start undetermined, no try counted, 44.1 kHz negotiated as 48 kHz on all 3; and the transition cushion unset, as on every row but the Chord ones"
       ]
     }
   ]

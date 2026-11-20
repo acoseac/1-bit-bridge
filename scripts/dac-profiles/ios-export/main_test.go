@@ -364,21 +364,59 @@ var additions = declared{
 			Failed:    []failed{{Rate: "dsd512", Failure: "carrierRefused", Source: source{Kind: "submission", Date: ptr("2026-11-19")}}},
 			Statement: statement{Case: "dsdWithoutDoPStatement", UpTo: ptr("dsd512"), Source: &source{Kind: "maker", Date: ptr("2026-11-19")}},
 		},
+	}, {
+		// The iKKO LOT Magic-ARC (B958), from its wizard submission of
+		// 2026-11-19 (app 2.2 (17), iOS 27.2.1, its port classed as
+		// Headphones) by the iOS procedure's rules, and iKKO's store page for
+		// it as archived: DSD64, DSD128 and DSD256 refused on every attempt,
+		// their carriers not negotiated, and DSD512, never attempted, its
+		// 1411.2 kHz carrier asked in the PCM sweep and 48 kHz negotiated,
+		// refused; no rate heard, so no legacy ceiling, and no DSD stated by
+		// its PCM ceiling, which carries no DoP carrier, since iKKO states no
+		// DSD figure; every PCM rate from 44.1 to 1411.2 kHz negotiated as
+		// 48 kHz, so 48 kHz, at 24 bits, the submitter's figure and iKKO's
+		// last (24bit/96kHz, after 16bits/48kHz); no volume control of its
+		// own and the iOS volume changing its level, which does not say how,
+		// so the volume unknown; and no time a step measured, the 40 ms IO
+		// buffer it granted left unset, as on every PCM-only row.
+		ID: "ikko.magicarc", Name: "iKKO LOT Magic-ARC", Maker: "iKKO", LegacyPatterns: []string{"Ikko Magic-Arc"},
+		LegacyCeiling: "none", PCM: dacprofile.IOSPCM{MaxRateHz: 48000, BitDepth: 24}, VolumeTopology: "unknown",
+		NameKeys: nameKeys{PortNames: []string{"Ikko Magic-Arc"}, Tokens: []string{"Ikko Magic-Arc"}, ExcludedTokens: []string{}, Scope: "model"},
+		Evidence: evidence{
+			Heard: []heard{},
+			Failed: []failed{
+				{Rate: "dsd64", Failure: "carrierRefused", Source: source{Kind: "submission", Date: ptr("2026-11-19")}},
+				{Rate: "dsd128", Failure: "carrierRefused", Source: source{Kind: "submission", Date: ptr("2026-11-19")}},
+				{Rate: "dsd256", Failure: "carrierRefused", Source: source{Kind: "submission", Date: ptr("2026-11-19")}},
+				{Rate: "dsd512", Failure: "carrierRefused", Source: source{Kind: "submission", Date: ptr("2026-11-19")}},
+			},
+			Statement: statement{Case: "noDSD", Source: &source{Kind: "pcmCeiling", Date: ptr("2026-11-19")}},
+		},
 	}},
-	// The name iOS reported for the ZH3's port, verbatim, with a trailing
-	// space and in two other cases.
+	// The name iOS reported for each added row's port, verbatim, with a
+	// trailing space and in two other cases: the ZH3's, and the Magic-ARC's.
 	names: []corpusName{
 		{Name: "Fosi Audio ZH3", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "exact")},
 		{Name: "Fosi Audio ZH3 ", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "exact")},
 		{Name: "fosi audio zh3", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "token")},
 		{Name: "FOSI AUDIO ZH3", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "token")},
+		{Name: "Ikko Magic-Arc", Live: ptr("ikko.magicarc"), Strict: known("ikko.magicarc", "exact")},
+		{Name: "Ikko Magic-Arc ", Live: ptr("ikko.magicarc"), Strict: known("ikko.magicarc", "exact")},
+		{Name: "ikko magic-arc", Live: ptr("ikko.magicarc"), Strict: known("ikko.magicarc", "token")},
+		{Name: "IKKO MAGIC-ARC", Live: ptr("ikko.magicarc"), Strict: known("ikko.magicarc", "token")},
 	},
 	// Fosi Audio's products that take USB audio from a host, as its store
-	// listed them on 2026-11-19, each named as the ZH3 names itself: no row
-	// may reach one, by either matcher.
-	siblings: noMatch("Fosi Audio ZD3", "Fosi Audio K7", "Fosi Audio DS1", "Fosi Audio DS2", "Fosi Audio SK02",
-		"Fosi Audio GR40", "Fosi Audio ZH1", "Fosi Audio Q6", "Fosi Audio DS3", "Fosi Audio MD3", "Fosi Audio K5 Pro",
-		"Fosi Audio Q4", "Fosi Audio C1", "Fosi Audio C3", "Fosi Audio MC331", "Fosi Audio MC351"),
+	// listed them on 2026-11-19, each named as the ZH3 names itself; then
+	// iKKO's, as its store listed them on 2026-11-20 and, for the ITM line's
+	// earlier two, as it listed them before, each named as the Magic-ARC names
+	// itself: no row may reach one, by either matcher.
+	siblings: slices.Concat(
+		noMatch("Fosi Audio ZD3", "Fosi Audio K7", "Fosi Audio DS1", "Fosi Audio DS2", "Fosi Audio SK02",
+			"Fosi Audio GR40", "Fosi Audio ZH1", "Fosi Audio Q6", "Fosi Audio DS3", "Fosi Audio MD3", "Fosi Audio K5 Pro",
+			"Fosi Audio Q4", "Fosi Audio C1", "Fosi Audio C3", "Fosi Audio MC331", "Fosi Audio MC351"),
+		noMatch("Ikko Zerda ITM01", "Ikko Zerda ITM02", "Ikko Milestone ITM07", "Ikko Heimdallr ITB03", "Ikko ITX05",
+			"Ikko Zerda ITM03", "Ikko Music Patch ITM05"),
+	),
 }
 
 // ptr is a pointer to v.
