@@ -852,6 +852,16 @@ func TestTheBootRollbackWritesNothingForAStopOnceItsBackupHasAnswered(t *testing
 		err        error
 		stderr     bytes.Buffer
 	)
+	// The drain is registered first and the park's release after it, so the
+	// cleanups run the release first: a case that fails while the
+	// housekeeping is parked lets it go, and the drain then cancels the
+	// housekeeping and waits for its end, until just before the test's
+	// deadline, before the fixture's directories are removed (drainLoopOnCleanup).
+	// Both are registered before the housekeeping starts, so no check made
+	// once it has started can leave it unwatched. Its error and its words are
+	// the case's to read once it has ended.
+	drainLoopOnCleanup(t, stop, ended, "the boot's housekeeping")
+	t.Cleanup(letGo)
 	go func() {
 		defer close(ended)
 		err = bootHousekeepingWith(ctx, &stderr, r.dataDir, r.bin, previousVersion, bootSeams{
@@ -866,14 +876,6 @@ func TestTheBootRollbackWritesNothingForAStopOnceItsBackupHasAnswered(t *testing
 			},
 			probeBound: testBackupProbeTimeout})
 	}()
-	// The drain is registered first and the park's release after it, so the
-	// cleanups run the release first: a case that fails while the
-	// housekeeping is parked lets it go, and the drain then cancels the
-	// housekeeping and waits for its end, until just before the test's
-	// deadline, before the fixture's directories are removed (drainLoopOnCleanup).
-	// Its error and its words are the case's to read once it has ended.
-	drainLoopOnCleanup(t, stop, ended, "the boot's housekeeping")
-	t.Cleanup(letGo)
 	select {
 	case <-parked:
 	case <-ended:
