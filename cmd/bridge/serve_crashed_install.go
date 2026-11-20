@@ -426,15 +426,20 @@ var inspectionRefusals = []string{
 // whose own inspection of the backup failed, so the auto-installer's hold
 // asks the backup's lookup again; a refusal of any other cause stands. The
 // install marker's lock is the caller's, and st the marker read again under
-// it, of the install the backup was checked for. A clear that cannot be
-// written is said.
+// it, of the install the backup was checked for. A clear whose write answers
+// an error is said as attempted, its durability not confirmed (backlog
+// B951): updater.SaveState publishes the marker by its rename before its
+// directory's barrier, so a barrier that fails leaves the clear in place, and
+// only an error before the rename leaves the refusal recorded. Until then the
+// line said the refusal was still recorded, whatever the error.
 func clearInspectionRefusal(dataDir string, st updater.State, save func(string, updater.State) error, stderr io.Writer) {
 	if !slices.Contains(inspectionRefusals, st.RollbackRefused) {
 		return
 	}
 	st.RollbackRefused = ""
 	if err := save(dataDir, st); err != nil {
-		fmt.Fprintf(stderr, "updater: the install marker still records a backup that could not be inspected as a refused rollback: %v\n", err)
+		fmt.Fprintf(stderr, "updater: the clear of the install marker's refusal recorded for a backup that could not be inspected "+
+			"was attempted, and its durability is unconfirmed: %v\n", err)
 	}
 }
 
