@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"net/http"
@@ -894,13 +895,16 @@ func (absentUnitLocator) Locate(context.Context) (playback.Unit, error) {
 // PR 3b beside B601): the console's test tone takes the backend's device slot
 // while a refresh, parked in its reading of the DAC, holds the refreshes'
 // lock, and is held there, having opened nothing (Seams.ToneAdmitted); the
-// engine's transport is stopped. GET /v1/outputs answers the player stopped,
-// the refresh let go publishes the token GET published before, and a PUT made
-// from that dsdDAC is granted the engine's reservation and refused by the
-// backend's lease: 409 playback_not_stopped with the four members, its dsdDAC
-// GET's, nothing written, and the reservation let go as it answers. The tone
-// let go gives the slot back, and a Play is admitted, its Start coming past
-// the lease to the content.
+// engine's transport is stopped. The tone is active, the backend's status
+// saying it plays on both sides of a GET /v1/outputs, and that GET's element
+// of kind bridge reads as it did before the tone: its state stopped and no
+// playback observation, since the tone runs outside the engine and publishes
+// none. The refresh let go publishes the token GET published before, and a
+// PUT made from that dsdDAC is granted the engine's reservation and refused by
+// the backend's lease: 409 playback_not_stopped with the four members, its
+// dsdDAC GET's, nothing written, and the reservation let go as it answers.
+// The tone let go gives the slot back, and a Play is admitted, its Start
+// coming past the lease to the content.
 func TestAWriteBesideTheConsolesToneIsRefusedAndLetsTheReservationGo(t *testing.T) {
 	box := &parkedChoiceBox{Box: playbacktest.NewBox(5), came: make(chan struct{}), gate: make(chan struct{})}
 	store := playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeNative))
@@ -919,7 +923,19 @@ func TestAWriteBesideTheConsolesToneIsRefusedAndLetsTheReservationGo(t *testing.
 	backend.RefreshDSD(true)
 	r := newChoiceRig(t, backend)
 	queue(t, r.eng, 0, someReference(t, "a"))
-	before := r.dac(t)
+	// GET /v1/outputs' element of kind bridge before the tone: its transport
+	// stopped, no occurrence ever observed.
+	member := func(obj map[string]json.RawMessage, key string) string {
+		if raw, ok := obj[key]; ok {
+			return string(raw)
+		}
+		return "absent"
+	}
+	idle := r.bridge(t)
+	if st, pb := member(idle, "state"), member(idle, "playback"); st != `"stopped"` || pb != "absent" {
+		t.Fatalf("GET /v1/outputs before the tone: state %s, playback %s; want stopped, absent", st, pb)
+	}
+	before := dsdDACOf(t, idle)
 	box.armed.Store(true)
 	refreshed := make(chan struct{})
 	go func() {
@@ -951,10 +967,23 @@ func TestAWriteBesideTheConsolesToneIsRefusedAndLetsTheReservationGo(t *testing.
 	case <-serveGiveUp(t):
 		t.Fatal("the refresh never ended once let go")
 	}
-	if st := string(r.bridge(t)["state"]); st != `"stopped"` {
-		t.Fatalf("GET /v1/outputs while the tone holds the slot: state %s, want stopped", st)
+	// The tone plays, as the backend's status says on both sides of the GET:
+	// admitted to the slot and not ended.
+	if st := backend.ToneStatus(); st.State != playback.ToneStatePlaying {
+		t.Fatalf("the tone's status before GET /v1/outputs: %+v; want playing", st)
 	}
-	if d := r.dac(t); d.DACKey != before.DACKey || d.DACToken != before.DACToken {
+	sounding := r.bridge(t)
+	if st := backend.ToneStatus(); st.State != playback.ToneStatePlaying {
+		t.Fatalf("the tone's status after GET /v1/outputs: %+v; want playing", st)
+	}
+	// The tone runs outside the engine and publishes no observation: the
+	// element's transport and its playback observation read as before it.
+	for _, key := range []string{"state", "playback"} {
+		if got, was := member(sounding, key), member(idle, key); got != was {
+			t.Errorf("GET /v1/outputs while the tone plays: %s %s; want %s, as before the tone", key, got, was)
+		}
+	}
+	if d := dsdDACOf(t, sounding); d.DACKey != before.DACKey || d.DACToken != before.DACToken {
 		t.Fatalf("the refresh beside the tone published %s %s, want the DAC GET published before, %s %s", d.DACKey, d.DACToken, before.DACKey, before.DACToken)
 	}
 	obj := wantAnswer(t, "the write beside the tone", r.put(t, choiceBody(t, before, dsdstate.ModeConvert)), http.StatusConflict, "playback_not_stopped", 4)
