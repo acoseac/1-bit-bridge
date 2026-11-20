@@ -95,11 +95,29 @@ func (h *harness) granted(what string, interrupt bool) Hold {
 
 // refusedCheck requires EnterCheck asked now, with interrupt or without, to be
 // refused for reason, changing nothing: the state and the generation as they
-// were.
+// were. A grant the owner publishes instead fails it at once, whether or not
+// that grant is answered.
 func refusedCheck(t *testing.T, h *harness, what string, interrupt bool, reason Reason) {
 	t.Helper()
 	before := h.snap()
-	a := h.checkResult(what, h.checkAsync(bg, interrupt))
+	_, held := before.Maintenance()
+	ch := h.checkAsync(bg, interrupt)
+	timer := time.NewTimer(*watchdog)
+	defer timer.Stop()
+	var a checkAnswer
+	for answered := false; !answered; {
+		changed := h.eng.Changed()
+		if m, ok := h.snap().Maintenance(); ok && !held && m.Reason == "check" {
+			t.Fatalf("%s: the owner granted the check's hold, want a refusal %q", what, reason)
+		}
+		select {
+		case a = <-ch:
+			answered = true
+		case <-changed:
+		case <-timer.C:
+			t.Fatalf("waited %v for %s to answer", *watchdog, what)
+		}
+	}
 	if got := ReasonOf(a.err); got != reason {
 		t.Fatalf("%s: %v (reason %q), want a refusal %q", what, a.err, got, reason)
 	}
@@ -566,7 +584,13 @@ func TestAStopUnderACheckHoldSignalsItAndAnswersAtItsExit(t *testing.T) {
 		hold := h.granted("the check's hold", false)
 		mark := h.appliedMark()
 		first := async(func() error { return h.eng.Stop(bg) })
-		waitClosed(t, "the hold's stop signal at a Stop", hold.Stop)
+		select {
+		case <-hold.Stop:
+		case err := <-first:
+			t.Fatalf("a Stop under the check's hold was answered (%v) and its stop signal is open", err)
+		case <-time.After(*watchdog):
+			t.Fatalf("waited %v for the hold's stop signal at a Stop", *watchdog)
+		}
 		second := async(func() error { return h.eng.Stop(bg) })
 		h.waitAppliedTimes("stop", mark, 2)
 		if h.repliedSince("stop", mark) {

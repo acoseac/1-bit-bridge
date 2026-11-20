@@ -42,6 +42,8 @@ func TestAnOpenHomeStopEndsTheCheckThroughTheEngine(t *testing.T) {
 	waits.wait(t, 1)
 	select {
 	case <-hold.Stop:
+	case res := <-stop.res:
+		t.Fatalf("the Stop answered %d and the check's stop signal is open", res.StatusCode)
 	case <-time.After(testWait):
 		t.Fatalf("waited %v for the check's stop signal at an OpenHome Stop", testWait)
 	}
