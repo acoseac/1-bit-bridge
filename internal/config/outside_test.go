@@ -18,13 +18,15 @@ import (
 
 // A console save over a config file another writer changed since serve read
 // it (backlog B535). The live holder reads the file its save's turn finds and
-// the bytes it last read or wrote as Load reads a file for its settings,
-// records each setting the two set differently until a restart, and every save
-// then writes those settings as the file holds them beside its own change,
-// publishing its own snapshot. A change of such a setting, a deployment
-// setting changed, and a merged file the next start would refuse are refused.
-// Until B535 every save over a changed file was refused, whatever it changed,
-// until a restart.
+// the bytes it last recorded (read at boot or found at a turn, or written) as
+// Load reads a file for its settings, records each setting the two set
+// differently until a restart, and every save then writes those settings as
+// the file holds them beside its own change, publishing its own snapshot. A
+// change of such a setting (a variable's included), a deployment setting
+// changed, a file that writer left that the next start would refuse, and a
+// merged file the next start would refuse where the one left would not are
+// refused. Until B535 every save over a changed file was refused, whatever it
+// changed, until a restart.
 
 // appendToConfig appends text to the config file at path, as an edit or a
 // writer that takes no lock leaves it.

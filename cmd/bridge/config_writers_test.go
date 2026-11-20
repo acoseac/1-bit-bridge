@@ -98,8 +98,9 @@ var turnReadHelpers = map[string]bool{"configChangedSinceRead": true, "configSti
 // once configStillAsRead has found that file to be the one its caller read;
 // and the live holder's UpdateChecked saves its snapshot, read at boot or
 // last written by it, only once compareTurn has compared Found's bytes with
-// the ones it last read or wrote, refusing a file it cannot merge into (gone,
-// repointed, undecodable, a deployment setting changed), and then writes each
+// the ones it last recorded (read, found at a turn, or written), refusing a
+// file it cannot merge into (gone, repointed, undecodable, a deployment
+// setting changed, one the next start would refuse), and then writes each
 // setting another writer changed since as the turn's bytes hold it (backlog
 // B535).
 // RuntimeConfig.Update saves through UpdateChecked and is no writer of the

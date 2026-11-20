@@ -24,13 +24,15 @@ type RuntimeConfig struct {
 	// silently drop the other's fields from both bridge.yaml and the
 	// final live snapshot (2026-07-21 review finding M13).
 	mu sync.Mutex
-	// file is the config file's bytes as this holder last read them for
-	// the live snapshot (RecordFile) or wrote them (Update), and fileKnown
-	// whether it has either; target is that file, as a turn resolves its
-	// name (the target of a link at its last element), and unresolved that
-	// serve's boot read could resolve the name at none of its reads, so
-	// that there is no file the holder may save into (target is never ""
-	// once fileKnown, unless unresolved). All under mu.
+	// file is the config file's bytes as this holder last recorded them:
+	// read for the live snapshot (RecordFile), found by a turn whose bytes
+	// differ, whatever its save then does (compareTurn, backlog B535), or
+	// written by a save (Update); fileKnown whether it has any; target is
+	// that file, as a turn resolves its name (the target of a link at its
+	// last element), and unresolved that serve's boot read could resolve the
+	// name at none of its reads, so that there is no file the holder may save
+	// into (target is never "" once fileKnown, unless unresolved). All under
+	// mu.
 	file       []byte
 	fileKnown  bool
 	target     string

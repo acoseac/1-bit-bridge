@@ -335,7 +335,7 @@ func TestEditSavesOnlyOverTheFileItRead(t *testing.T) {
 }
 
 // TestARefusedUpdateRunsNoneOfItsChange: Update takes its turn and compares
-// the file with what it last read or wrote before it runs fn, so a save it
+// the file with the bytes it last recorded before it runs fn, so a save it
 // refuses there (the file removed, its name opening another file, a file that
 // does not decode, a deployment setting another writer changed) runs nothing
 // of the caller's change; and a change of a setting another writer changed,
