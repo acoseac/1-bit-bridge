@@ -866,14 +866,14 @@ func TestTheBootRollbackWritesNothingForAStopOnceItsBackupHasAnswered(t *testing
 			},
 			probeBound: testBackupProbeTimeout})
 	}()
-	t.Cleanup(func() {
-		letGo()
-		select {
-		case <-ended:
-		case <-time.After(time.Minute):
-			t.Error("the housekeeping did not return within a minute of its release")
-		}
-	})
+	// The drain is registered first and the park's release after it, so the
+	// cleanups run the release first: a case that fails while the
+	// housekeeping is parked lets it go, and the drain then cancels the
+	// housekeeping and waits for its end, until just before the test's
+	// deadline, before the fixture's directories are removed (drainLoopOnCleanup).
+	// Its error and its words are the case's to read once it has ended.
+	drainLoopOnCleanup(t, stop, ended, "the boot's housekeeping")
+	t.Cleanup(letGo)
 	select {
 	case <-parked:
 	case <-ended:
