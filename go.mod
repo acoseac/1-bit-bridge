@@ -25,7 +25,7 @@ require (
 	golang.org/x/time v0.16.0
 	gonum.org/v1/gonum v0.17.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/libc v1.80.1
+	modernc.org/libc v1.81.2
 	modernc.org/sqlite v1.62.0
 	tailscale.com v1.104.5
 )
