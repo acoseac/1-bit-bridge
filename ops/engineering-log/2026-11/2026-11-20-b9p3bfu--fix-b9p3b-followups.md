@@ -204,3 +204,107 @@ Makefile's tags, in one build-slot session (the slot free at once):
   targets, 34.1 s.
 - The controls above, without `-race`: item 1's five in 56 s, item 3's four
   in 36 s, item 2's seven in 136 s.
+
+### Round 2
+
+The branch at `3c8ec1e0`; main at `fb8706d8` merges into it with no conflict
+(`git merge-tree --write-tree`), so it is not merged. `cb763203` the test of
+the second item, red; `61018df8` its fix; `60ea9859` the protocol's words and
+the rules; then this section.
+
+**1. The tone itself changes neither the transport nor the observation.**
+Round 1's three sites said that from the tone's start until it has let the
+DAC go, `state` reads `stopped`. A play can begin while the tone still holds
+its DAC: the engine publishes `Playing`, a session starting, before it calls
+the backend's Start (`internal/player/engine/transport.go:634-649`), the Start
+ends the tone and waits for its close
+(`internal/player/playback/backend.go:980-994`), and GET reads `playing`
+meanwhile (`cmd/bridge/serve_player_output.go:403`). The three sites now say
+that the tone itself changes neither `state` nor `playback`, keep the PUT's
+409 `playback_not_stopped` while it holds the DAC (`takeLease`'s
+`b.toning != nil`, `dsd_choice.go:601`, answered at
+`outputs_dsd_choice.go:216-217`), and the transport line adds that a play
+ends the tone and reads playing from its start. `output.md`'s route bullet,
+its long form's bold line and the adapter's paragraph say the same.
+`PROTOCOL.md`'s SHA-256 at `60ea9859` is
+`3a33325254351973e1ba25ee3536de5b015fd8cb5298f1e6540f7116023c8b93`, which the
+iOS mirror's copy pins; round 1's above is superseded. Round 1's test of the
+tone (item 3) holds as it was: it makes no play beside the tone.
+
+**2. The refresh a write asks is made whatever replaces its run.** Present
+before this PR, and fixed while here. `coalesced` keeps one work, the last
+asked (`dsd_work.go`, `ask`), and a run skipped while its own context had
+ended. Serve's supervisor asks on its `work` context
+(`cmd/bridge/serve_player.go:624`), which `endWork` ends as the supervisor
+returns (`:621`, `:631`): a tick that replaced a write's kept refresh while
+another refresh was held left that refresh unmade, the write's mark
+(`choiceRefresh`) and the force set, and `ChoiceRefreshed` never run. Two more ways out lost it
+too. `askChoiceRefresh` sets its mark before its ask sets the force, so a run
+that began between the two took the write's refresh unforced and the idle
+rule (`dsd_policy.go:578-584`) skipped it, the seam said all the same; and a
+refresh that panicked out of `RefreshDSD` skipped the seam, the goroutine's
+own recover ending the run.
+
+- **The fix** (`61018df8`): the run takes the mark first. Where it holds
+  it, the refresh is made whatever the run's own context says, forced
+  (`refreshForced.Swap(false) || asked`), and `ChoiceRefreshed` is deferred,
+  so a panic's way out runs it too. A run that takes no mark is as before.
+  The file's doc names the exception, and the seam's and
+  `askChoiceRefresh`'s docs say what holds. `output.md`'s write bullet
+  records it, since it loads with `dsd_work.go` (`player.md`, the other,
+  stands at its budget), and its long form says why.
+- **Red first** (`cb763203`):
+  `TestTheRefreshAWriteAsksIsMadeForcedAndHeardEnding`
+  (`internal/player/playback/dsd_choice_publish_internal_test.go`), three
+  cases, each red at the closure before the fix for its own reason: a later
+  ask on a context that has ended replaces the write's run while a refresh is
+  held in its read of the card's controls ("the end of the refresh the write
+  asked was never said", after 10 s); a run begun between the ask's two
+  marks, the mark set as the ask's first store leaves it and its force not
+  yet, read nothing ("left native published; want the state set before it
+  ran, convert"); and a refresh that panics past its own containment never
+  said its end (10 s). No seam of the backend's makes `RefreshDSD` itself
+  panic, since `refreshDSD` contains a reading's panic: the case panics the
+  reading (the fixture box's stream read) and then, once, the containment's
+  own log line, through the test's log hook (`hookedLog`). Green at the fix.
+- **The controls**, each predicted in writing before it ran, laid over
+  `61018df8` with `go test -overlay`, each as predicted, each red in one case
+  alone with one failure line:
+
+  | Control | Red |
+  | --- | --- |
+  | R2-C1 the force from the mark dropped (`RefreshDSD(b.refreshForced.Swap(false))`) | the case between the marks: native left published (`:289`) |
+  | R2-C2 the seam run inline after `RefreshDSD`, not deferred | the panic's case: the end never said (`:304`) |
+  | R2-C3 the run skipping for its own ended context although it holds the mark | the replaced case: the seam said, nothing read (`:274`) |
+
+**3. Round 1's control gap.** No control of round 1 turned the
+answer-publication equality red
+(`dsd_choice_publish_internal_test.go:123-124`; `:122-123` at round 1's
+head, the import this round added moving it). R2-C4, `publishChoice`'s
+answer carrying the publication count standing before its store, predicted
+in writing: the case where the pair was stored fails with that line alone
+("publication 3 once the containment's refresh returned; want the write's
+own, 2, standing", `:124`), the other passes.
+
+**What stays.** B601's long form of the tone's level bullet
+(`ops/History-rules-output.md`, "The tone is PCM alone") still says GET reads
+the player stopped while the tone sounds: true of the tone itself, and a play
+that preempts it reads playing before the tone's close. It is outside this
+round's budget, and is named in the PR's report as a follow-up.
+
+**The runs**, on Linux at `60ea9859`, `GOTOOLCHAIN=go1.27.3` exported to
+every step, `make`'s included, the Makefile's tags, in one build-slot session
+(the slot free at once):
+
+- `-race -count=20 -timeout 30m` of the two tests this round touches, each
+  case passing 20 times, 1.1 s.
+- `GOOS=windows` and `GOOS=darwin` `go vet -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./internal/player/playback/
+  ./cmd/bridge/`: clean.
+- `make fmt` (the tree unchanged), `make vet` and `make docs-check`: clean;
+  `output.md` 97,998 bytes.
+- `make fmt vet test build-all P=8 TEST_PKGS='-count=1 -timeout 45m ./...'`:
+  `make test` 1,775.4 s, 91 packages ok, none failed (`cmd/bridge`
+  1,752.6 s, `internal/manifest` 1,650.1 s, `internal/admin` 1,270.8 s);
+  `build-all` 23.8 s.
+- The controls: R2-C1 to R2-C4 in 15 s, the red-first run 21 s.
