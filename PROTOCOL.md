@@ -949,7 +949,7 @@ Its `id` is `bridge:` and the player's UUID, the one its OpenHome UDN carries; i
 | `maintenance` | maintenance holds it |
 | `release_unconfirmed` | the release of its DAC was not confirmed in time, and it opens nothing until it is |
 
-When none holds, `state` is the transport's: `playing` (a track that is starting included), `paused` or `stopped`, and while the player releases its DAC, what follows the release. The admin console's test tone, which the operator plays through the player's DAC, is no transport: from its start until it has let the DAC go, `state` reads `stopped`, `playback` is as it was before it, and `PUT /v1/outputs/{id}/dsd` answers `409` `playback_not_stopped`.
+When none holds, `state` is the transport's: `playing` (a track that is starting included), `paused` or `stopped`, and while the player releases its DAC, what follows the release. The admin console's test tone, which the operator plays through the player's DAC, is no transport: the tone itself changes neither `state` nor `playback`, and while it holds the DAC `PUT /v1/outputs/{id}/dsd` answers `409` `playback_not_stopped`. A play ends the tone, and `state` reads that play from its start, before the tone has let the DAC go.
 
 **`lastError`** is `device_busy` while the last attempt to play (a start, or a resume after a pause let the DAC go) failed because another process holds the DAC, MPD most often, and no later attempt has succeeded; `null` otherwise. It is independent of `state`: a busy start leaves the player `stopped`. The next attempt replaces it, whichever way it goes.
 
@@ -1297,7 +1297,7 @@ The checks run in this order, and the first that fails answers:
 | 5 | the body | `400` `bad_request` |
 | 6 | its words: `mode`, `maxBitRate` and a `dacToken` of the forms above | `400` `bad_request` |
 | 7 | the player runs | `409` `dac_unavailable` |
-| 8 | the player is stopped: nothing plays, starts, pauses or releases, no release is unconfirmed, and the admin console's test tone does not hold the DAC, which `GET /v1/outputs` reads as `stopped` | `409` `playback_not_stopped` |
+| 8 | the player is stopped: nothing plays, starts, pauses or releases, no release is unconfirmed, and the admin console's test tone does not hold the DAC (the tone itself changes neither `state` nor `playback` in `GET /v1/outputs`) | `409` `playback_not_stopped` |
 | 9 | the bound DAC is read | `409` `dac_unavailable` |
 | 10 | it is the DAC the write was made for: `dacKey` and `dacToken` are those of the reading | `409` `dac_changed` |
 | 11 | the player's DSD state opened | `409` `state_unreadable` |
@@ -2498,7 +2498,7 @@ Errors are JSON, with the exceptions listed under the table:
 |    404 | `harvest_not_supported`  | `POST /v1/atlas-harvest/credential` on a bridge that takes no harvest credential (harvest needs both `atlas.enabled` and `atlas.harvestEnabled`); the `DELETE` answers `204` there |
 |    409 | `stale`                  | PUT `/v1/playlists/{id}` (no `baseLastModifiedAt`) or a whole-document PUT `/v1/favorites` (a bridge without `favoritesRevisions`) carried a `lastModifiedAt` strictly older than the stored copy, or a revisioned PUT `/v1/favorites` carried a `baseRevision` that is not the stored revision with a different body; body includes the full server copy when the bridge can re-read it (a tombstoned playlist has none). A playlist client accepts this and does not replace the row. `PUT /v1/outputs/{id}/dsd`: `baseRevision` is not the revision of the DAC's choice now |
 |    409 | `base_mismatch`          | PUT `/v1/playlists/{id}` carried a `baseLastModifiedAt` that is not the stored stamp, and the body differs. An identical body is `200` and writes nothing. The bridge did not write. `server` is the stored playlist, possibly a tombstoned row; `server.deleted` is `true` then. Distinct from `stale` by the `error` string |
-|    409 | `playback_not_stopped`   | `PUT /v1/outputs/{id}/dsd` while the bridge's player is not stopped: something plays, starts, pauses or releases, a release is unconfirmed, or the admin console's test tone holds the DAC, which `GET /v1/outputs` reads as `stopped` |
+|    409 | `playback_not_stopped`   | `PUT /v1/outputs/{id}/dsd` while the bridge's player is not stopped: something plays, starts, pauses or releases, a release is unconfirmed, or the admin console's test tone holds the DAC (the tone itself changes neither `state` nor `playback` in `GET /v1/outputs`) |
 |    409 | `dac_unavailable`        | `PUT /v1/outputs/{id}/dsd` while the bridge's player does not run, or no DAC it is bound to can be read |
 |    409 | `dac_changed`            | `PUT /v1/outputs/{id}/dsd`: `dacKey` or `dacToken` is not the DAC the bridge reads now (another model, maker, firmware or unit, or a token from before the bridge's player restarted) |
 |    409 | `mode_not_offered`       | `PUT /v1/outputs/{id}/dsd`: the DAC offers the mode at no rate |
