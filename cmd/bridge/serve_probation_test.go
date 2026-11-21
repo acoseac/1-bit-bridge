@@ -712,13 +712,17 @@ func healthAnswersAtOnce(h http.Handler) http.Handler {
 
 // TestAStoreThatDoesNotAnswerIsNotReady: a store read that does not answer
 // within the round is not a ready answer. A round's context, its 300 ms, starts
-// before its accept probe and its /v1/health, and the handler's own first
-// /v1/health, an endpoint walk and the store's readiness probes, which take no
-// cancel, outlasted the round's whole bound (300 ms and roundGrace) on a loaded
-// runner (B972): here /v1/health answers at once. The store records whether
-// each read was entered with its round's context live and what ended it, and
-// the case judges the first round whose read was: a round whose setup outran
-// its context reached the store with nothing left to wait for.
+// before its accept probe and its /v1/health. On a loaded runner a round went
+// unanswered for its whole bound (300 ms and roundGrace, B972): the handler's
+// own first /v1/health runs the store's readiness probes and the roots'
+// reachability probe, which the round's end does not end (the fixture's port
+// 0 leaves it no endpoint walk), so that is a /v1/health that took more than
+// a second, or a round left unscheduled as long. Here /v1/health answers at
+// once. The store records whether each read was entered with its round's
+// context live and what ended it, and the case judges the first round whose
+// read was, whenever it comes: a round whose setup outran its context reached
+// the store with nothing left to wait for, and is passed over until the test
+// binary's deadline (serveGiveUpTime, waitForCount's own bound).
 func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	store := &unansweredStore{}
@@ -726,7 +730,7 @@ func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 		round: 300 * time.Millisecond})
 	seams.storeRead = store.read
 	sb := r.bootWith(t, serveOpts{probation: seams, wrapAPIHandler: healthAnswersAtOnce})
-	deadline := time.Now().Add(withinTheTest)
+	giveUp := serveGiveUpTime(t)
 	for n := 1; ; n++ {
 		round := events.waitForCount(t, probationRound, n)
 		if round.ready {
@@ -739,9 +743,9 @@ func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 			}
 			break
 		}
-		t.Logf("round %d (%s) waited on no read entered live: passed over", n, round.why)
-		if time.Now().After(deadline) {
-			t.Fatalf("no round waited on a read entered live within %v; the rounds: %+v", withinTheTest, events.events())
+		t.Logf("round %d (%s) named no read entered live: passed over", n, round.why)
+		if !giveUp.IsZero() && time.Now().After(giveUp) {
+			t.Fatalf("no round named a read entered live by the test binary's deadline; the %d rounds passed over are logged above", n)
 		}
 	}
 	stopServed(t, sb)
