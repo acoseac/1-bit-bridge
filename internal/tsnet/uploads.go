@@ -243,11 +243,12 @@ var disableLogtail = logtail.Disable
 // abandonUploads turns the uploads off for the rest of the process, for a
 // start Server.AbandonStart found abandoned, as upstream's own setter does
 // for the coordination server's DisableLogTail message: logtail's switch,
-// which the uploader asks before each upload (so a transport the stalled
-// start built uploads nothing more), and NoLogsEnv set true through envknob,
-// which also keeps the network flow logs off and which every later
-// application of the policy sets again; the record keeps the abandonment, so
-// every node's status reads it (Server.Uploads).
+// which the uploader asks before each upload (so no new upload starts after
+// it, and one already under way may finish within the 45 seconds logtail
+// gives an upload), and NoLogsEnv set true through envknob, which also keeps
+// the network flow logs off and which every later application of the policy
+// sets again; the record keeps the abandonment, so every node's status reads
+// it (Server.Uploads).
 func abandonUploads() {
 	policyRecord.Lock()
 	defer policyRecord.Unlock()

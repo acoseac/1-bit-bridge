@@ -108,8 +108,9 @@ What the bridge does now.
   so no test process turns the switch for real.
 
 Red first. At bc3c4457 (the tests, `AbandonStart` doing nothing, `AbandonedOff` set by nothing, stop
-handing the node nothing), run with HEAD's bytes overlaid on the two files the fix's comments had
-touched: every row of `TestAStopThatGivesUpOnAStartThatAllowedTheUploadsTurnsThemOff` failed ("turned
+handing the node nothing), run with bc3c4457's own bytes overlaid on `cmd/bridge/tsnet.go` and
+`internal/admin/admin.go`, whose comment edits for the fix were already in the worktree, so that the
+run was bc3c4457's tree byte for byte: every row of `TestAStopThatGivesUpOnAStartThatAllowedTheUploadsTurnsThemOff` failed ("turned
 logtail's switch 0 time(s), want once", the variable unset after the stop, the stalled and the earlier
 node's status without `AbandonedOff`, no line, the later node's status and words empty);
 `TestAStopThatRunsOutOfGraceHandsTheNodeItsStart` and `TestServeGivesUpOnAWedgedTsnetStartAfterTheGrace`
@@ -203,3 +204,11 @@ metadata read; B828's section goes back to main's open items; and *The abandoned
 sentence names B830, and why B829 stays open. This entry's opening, its B829 section and *The
 records* are corrected, the case called "the case 19bb8e63 added", since its name is retired and the
 citation guard reads every entry.
+
+The Lows, each a comment or a record. `abandonUploads`'s doc said that logtail's switch leaves a
+transport the stalled start built uploading "nothing more", more than the claim allows; it now says
+what `AbandonStart`'s doc says: no new upload starts, and one already under way may finish within the
+45 seconds logtail gives an upload. `TestAStopWhoseGoroutineEndedInTimeHandsTheNodeNoStart` joins the
+rule line's and its twin's pins: it holds the Don't against turning the uploads off for a stop whose
+goroutine ended in time on stop's side. And B830's red-first sentence names the two files it overlaid,
+and why.
