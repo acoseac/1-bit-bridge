@@ -276,13 +276,17 @@ func repeated(p []byte, r int) []byte {
 // TestTheChimeIsModulatedAtItsOwnRate: no rate's chime is a lower rate's
 // with each of its samples repeated (a zero-order hold, which moves 0x69's
 // idle tone toward the band and shifts its offset): against each lower
-// rate's so repeated, about half its samples differ, as two streams
-// modulated apart do, where a repetition would differ in none. Through the
-// player's converter each tone is its frequency to within 1 Hz and its
-// level, −36.02 dBFS, to within 0.5 dB, and the channel that is silent
-// meanwhile lies 60 dB or more under it: its in-band power, its DC taken
-// off, against the tone's, on the chain TestTheChimesInBandResidualIsUnderItsFloor
-// measures by.
+// rate's so repeated, about half the samples of each channel's tone section
+// differ, as two streams modulated apart do, where a repeated section would
+// differ in none. Only the sections are counted: the pads and each tone's
+// other channel, 70.8 % of a plane, are 0x69 at every rate
+// (TestTheChimeHasItsShapeAtEveryRate), and 0x69 differs from itself
+// repeated in half its bits, so they would read half whatever the sections
+// held. Through the player's converter each tone is its frequency to within
+// 1 Hz and its level, −36.02 dBFS, to within 0.5 dB, and the channel that is
+// silent meanwhile lies 60 dB or more under it: its in-band power, its DC
+// taken off, against the tone's, on the chain
+// TestTheChimesInBandResidualIsUnderItsFloor measures by.
 func TestTheChimeIsModulatedAtItsOwnRate(t *testing.T) {
 	chimes := map[int]Chime{}
 	for _, rate := range chimeRates {
@@ -293,20 +297,22 @@ func TestTheChimeIsModulatedAtItsOwnRate(t *testing.T) {
 		chimes[rate] = c
 	}
 	for _, hi := range chimeRates {
+		bpf := hi / 44100 / 8
 		for _, lo := range chimeRates {
 			if lo >= hi {
 				continue
 			}
 			for ch := range 2 {
 				held := repeated(chimes[lo].planes[ch], hi/lo)
+				at, n := (padFrames+ch*sectionFrames)*bpf, sectionFrames*bpf
 				differ := 0
-				for i, b := range chimes[hi].planes[ch] {
-					differ += bits.OnesCount8(b ^ held[i])
+				for i := at; i < at+n; i++ {
+					differ += bits.OnesCount8(chimes[hi].planes[ch][i] ^ held[i])
 				}
-				share := float64(differ) / float64(8*len(held))
-				t.Logf("%s channel %d against %s's samples repeated: %.3f of the samples differ", rateName(hi), ch, rateName(lo), share)
+				share := float64(differ) / float64(8*n)
+				t.Logf("%s channel %d's section against %s's samples repeated: %.4f of its samples differ", rateName(hi), ch, rateName(lo), share)
 				if share < 0.4 {
-					t.Errorf("%s channel %d: only %.3f of its samples differ from %s's repeated", rateName(hi), ch, share, rateName(lo))
+					t.Errorf("%s channel %d: only %.4f of its section's samples differ from %s's repeated", rateName(hi), ch, share, rateName(lo))
 				}
 			}
 		}
