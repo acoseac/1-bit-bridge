@@ -4753,6 +4753,32 @@ two ids. B898's other follow-ups stay as they were. The record is
   bullet under **The wire contract**, and the manual-URL one under **DLNA,
   UPnP and discovery**).
 
+- **…and a loop whose cadence is 0 parks BEFORE its boot pass: starting it
+  unconditionally must not run it once** (2026-10-02, backlog B209).
+  `runSweepLoop` swept after its settle delay and read the interval after, and
+  #769 started the backup ticker on every bridge so that 0 → N had a loop to
+  notice, so `backup.intervalHours: 0` wrote a snapshot and pruned the backups
+  to `backup.keep` at every boot (measured through the real serve: the
+  snapshot on disk 0.15 s into the test), while the config doc, runServe's
+  comment and the settings matrix all said 0 parks it; the matrix test
+  passed, since it checks the REPORT. The loop reads the interval first and
+  takes the boot pass only when it is on; a nudge from the settle window is
+  drained only by a boot pass that covers it, and served otherwise. **Each
+  pass is told whether it is the boot pass** (`sweep func(boot bool)`): the
+  backup ticker's startup snapshot skips when one exists within 24 h, and a
+  flag of its own ("the first call") took the first scheduled pass after a
+  dormant boot and a 0 → N rearm for the startup one. **A dormant cadence is
+  off, not "a loop with no tick"**: `TestSweepLoopDormantIntervalIsResumable`
+  asserted the boot pass at 0 ("want 1 (the initial one only)"), and the
+  auto-optimize nudge test used an interval of 0 to mean nudge-only, a shape
+  no production cadence has (only the backup ticker's can be 0: analysis and
+  auto-optimize follow `scanIntervalSec`, 1 s or more, and fingerprinting and
+  smart mixes read 0 as their default); a test that wants no tick uses an
+  hour. Pinned by `TestServeWithBackupsOffTakesNoSnapshotAndFollowsItsCadenceLive`
+  (the consumer, through the PATCH, not the report),
+  `TestABackupTickerWhoseCadenceIsOffTakesNoPassUntilItIsSwitchedOn` and
+  `TestSweepLoopDormantServesANudgeFromTheSettleWindow`.
+
 ## Every stored name is one a pairing code can carry (#1046)
 
 - **…and every stored name is one a pairing code can CARRY** (#1046). The
