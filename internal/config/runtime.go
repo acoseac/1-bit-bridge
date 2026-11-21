@@ -53,12 +53,13 @@ type RuntimeConfig struct {
 	outsideEnv []string
 	// leftErr is why the file another writer left, the bytes file holds once
 	// a turn has found that writer's change, would not load as the next start
-	// loads it (loadsAtNextStart), nil where it would: every save is then
-	// refused (OutsideLeftUnloadable), since no save made that file. leftClashes
-	// is the setting of each listener whose port that file's OpenHome surface
-	// sits on (openHomeClashes), which a save may keep and may not add to.
-	// Both are taken once, at the turn that finds the bytes, and again from the
-	// file a save writes; never per save (B535's round 2). Under mu.
+	// would load it, with this process's environment (loadsAtNextStart), nil
+	// where it would: every save is then refused (OutsideLeftUnloadable),
+	// since no save made that file. leftClashes is the setting of each
+	// listener whose port that file's OpenHome surface sits on
+	// (openHomeClashes), which a save may keep and may not add to. Both are
+	// taken once, at the turn that finds the bytes, and again from the merged
+	// file a save writes; never per save (B535's rounds 2 and 3). Under mu.
 	leftErr     error
 	leftClashes []string
 	// changedMu guards changed, the channel the next Store closes
@@ -408,9 +409,13 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 		return changedOutside(path, err)
 	}
 	r.file, r.fileKnown, r.target = written, true, l.target
-	// The file as this save left it: it loads (a merged save's was loaded
-	// just now, and refused otherwise), and its clashes are the merged
-	// file's, none where nothing was merged.
+	// The file as this save left it, the one the next turn compares with: it
+	// loads (a merged save's was loaded just now, with this process's
+	// environment as the file another writer left is, and refused
+	// otherwise), and its clashes are that load's, so the cache holds the
+	// merged file's load; none where nothing was merged, which no save
+	// reads before a turn that finds a change takes both again (B535's
+	// round 3).
 	r.leftErr, r.leftClashes = nil, clashes
 	r.Store(next)
 	return nil

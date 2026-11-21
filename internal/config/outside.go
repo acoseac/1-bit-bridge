@@ -56,22 +56,26 @@ var (
 // save left it and the change where it made one (filedEnvValues,
 // filedSwitches), and the variable sets it again at the next start (B535's
 // round 2). A turn's file that does not decode is refused, the record as it
-// was. The turn's file is loaded as the next start loads it
-// (loadsAtNextStart), once for those bytes (leftErr, leftClashes), and so a
-// turn moves the holder between two states (B535's round 3). Where the bytes
-// it finds would not load, the record and the bytes it is kept against
-// advance as at every turn that finds a change, the error is kept (leftErr)
-// and logged once (leftUnloadableMessage), and the settings it records are
-// said by no line, since none takes effect at a start the file refuses. Where
-// a later turn finds bytes that load, the error is cleared, and the settings
-// newly changed join the record and are said as any are; those recorded while
-// the file did not load are said by no line then either. Then, whatever the
-// bytes, a file that writer left that would not load refuses the save as that
-// file's (OutsideLeftUnloadable), not as one the save would make: no save made
-// it, and the remedy is to correct it, never a start that would fail on it. So
-// it is asked first (B535's round 3), before a recorded deployment setting,
-// which refuses the save too, saying to restart: the console decides what it
-// may change from its live copy of the posture and the managed lists.
+// was. The turn's file is loaded as the next start would load it, with this
+// process's environment (loadsAtNextStart), once for those bytes (leftErr,
+// leftClashes): the question is whether this bridge loads that file when it
+// next starts, with the variables it was started with, so a variable that
+// gives what the file leaves out, or sets a value the file holds, counts as
+// it will then. A turn so moves the holder between two states (B535's round
+// 3). Where the bytes it finds would not load, the record and the bytes it is
+// kept against advance as at every turn that finds a change, the error is
+// kept (leftErr) and logged once (leftUnloadableMessage), and the settings it
+// records are said by no line, since none takes effect at a start the file
+// refuses. Where a later turn finds bytes that load, the error is cleared,
+// and the settings newly changed join the record and are said as any are;
+// those recorded while the file did not load are said by no line then
+// either. Then, whatever the bytes, a file that writer left that would not
+// load refuses the save as that file's (OutsideLeftUnloadable), not as one
+// the save would make: no save made it, and the remedy is to correct it,
+// never a start that would fail on it. So it is asked first (B535's round 3),
+// before a recorded deployment setting, which refuses the save too, saying to
+// restart: the console decides what it may change from its live copy of the
+// posture and the managed lists.
 func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, before *Config) error {
 	if !r.fileKnown {
 		return nil
@@ -273,13 +277,19 @@ func (c *Config) normalizeSettings() error {
 
 // loadsAtNextStart is data, a config file's bytes (the file a save would
 // write, or the one another writer left) as the config at path, loaded as the
-// next start loads it: Load's own steps in Load's order, decoded, its defaults
-// given, the BRIDGE_* variables applied, its relative paths resolved against
-// the directory Load takes from path, then normalized and validated, all
-// without a word, so a refused candidate neither logs nor moves the player-off
-// reason (NormalizeAndValidateQuiet). An OpenHome surface on a port another
-// listener of serve binds is taken, as Load takes it, turning the player off
-// over it (openHomeClashes says which). Its error says why, naming no value.
+// next start would load it, with this process's environment: Load's own steps
+// in Load's order, decoded, its defaults given, the BRIDGE_* variables this
+// process was started with applied, its relative paths resolved against the
+// directory Load takes from path, then normalized and validated, all without
+// a word, so a refused candidate neither logs nor moves the player-off reason
+// (NormalizeAndValidateQuiet). The next start reads those variables too, so a
+// variable that gives what the file leaves out (BRIDGE_LIBRARY_ROOTS's roots)
+// or sets a value the file holds counts here as it will then: without them, a
+// file whose roots a variable gives would never load (B535's round 3). An
+// OpenHome surface on a port another listener of serve binds is taken, as
+// Load takes it, turning the player off over it (openHomeClashes says which),
+// and the file another writer left and the merged file are loaded alike, so
+// their clashes compare like for like. Its error says why, naming no value.
 func loadsAtNextStart(path string, data []byte) (*Config, error) {
 	var c Config
 	if err := DecodeFile(data, &c); err != nil {

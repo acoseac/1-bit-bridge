@@ -628,6 +628,72 @@ func TestAnOpenHomeClashAnotherWriterLeftRefusesOnlyASaveThatAddsOne(t *testing.
 	}
 }
 
+// TestAFileWhoseRootsAVariableGivesTakesAnotherWritersComment: the file
+// another writer left is loaded as the next start would load it, with this
+// process's environment (loadsAtNextStart), whose variables that start reads
+// too: a bridge whose library roots a variable gives, its file naming none,
+// takes another writer's comment and lands an unrelated save, though the file
+// alone, with no root, would not load. B535's round 3 kept the variables in
+// that load: read without them, such a file would refuse every save after any
+// other write, a comment's included.
+func TestAFileWhoseRootsAVariableGivesTakesAnotherWritersComment(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	if err := os.Mkdir(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BRIDGE_LIBRARY_ROOTS", lib)
+	path := writeConfigFile(t, dir, "dataDir: "+yamlStr(filepath.Join(dir, "data"))+"\nlibraryName: Home\n")
+	rc := bootHolder(t, path)
+	if got := rc.Load().LibraryRoots; len(got) != 1 {
+		t.Fatalf("premise: the live roots are %q, want the variable's one", got)
+	}
+	withoutVariables(t, map[string]string{"BRIDGE_LIBRARY_ROOTS": lib}, func() {
+		if _, err := Load(path); err == nil {
+			t.Fatal("premise: the file loads without the variable that gives its roots")
+		}
+	})
+	appendToConfig(t, path, "# a note\n")
+	if err := rc.Update(path, func(c *Config) error { c.LibraryName = "Renamed"; return nil }); err != nil {
+		t.Fatalf("a rename after another writer's comment, the roots a variable's: %v", err)
+	}
+	if got := loadAt(t, path).LibraryName; got != "Renamed" {
+		t.Errorf("the file loads libraryName %q, want the rename", got)
+	}
+}
+
+// TestAClashAVariableMakesIsNoNewClashOfASave: the file another writer left
+// and the file a save would write are loaded alike, with this process's
+// environment, so an OpenHome port clash only a variable makes
+// (BRIDGE_LISTEN_ADDRESS on the OpenHome port) is the file left's: unrelated
+// saves land beside it, one after another, the holder taking the clashes
+// again from each landed save's merged load, and a save that brings another
+// listener onto that port is refused for the clash it adds.
+func TestAClashAVariableMakesIsNoNewClashOfASave(t *testing.T) {
+	t.Setenv("BRIDGE_LISTEN_ADDRESS", ":7792")
+	path := envSaveConfig(t, "libraryName: Home\noutput:\n  player:\n    openhome: true\n")
+	rc := bootHolder(t, path)
+	var clash *OpenHomePortClashError
+	if err := rc.Load().OpenHomePortClash(); !errors.As(err, &clash) || clash.Setting != "listenAddress" {
+		t.Fatalf("premise: the live config's clash is %v, want the listen address the variable sets", err)
+	}
+	appendToConfig(t, path, "scanIntervalSec: 7200\n")
+	for i, name := range []string{"Renamed", "Renamed again"} {
+		if err := rc.Update(path, func(c *Config) error { c.LibraryName = name; return nil }); err != nil {
+			t.Fatalf("save %d beside the clash the variable makes: %v", i+1, err)
+		}
+	}
+	err := rc.Update(path, func(c *Config) error { c.AdminAddress = "127.0.0.1:7792"; return nil })
+	var outside *ChangedOutsideError
+	if !errors.As(err, &outside) || outside.Kind != OutsideUnloadable || !errors.As(outside.Err, &clash) || clash.Setting != "adminAddress" {
+		t.Errorf("a save that brings the admin listener onto the OpenHome port = %v, want an OutsideUnloadable refusal over the clash of adminAddress", err)
+	}
+	if after := loadAt(t, path); after.LibraryName != "Renamed again" || after.ScanIntervalSec != 7200 {
+		t.Errorf("the file loads libraryName %q and scanIntervalSec %d, want the second rename and the other writer's 7200",
+			after.LibraryName, after.ScanIntervalSec)
+	}
+}
+
 // TestADeploymentSettingAnotherWriterChangedRefusesEverySave: the console
 // decides what it may change from its live copy of the posture and the
 // managed lists, so once another writer changes a deployment setting every
