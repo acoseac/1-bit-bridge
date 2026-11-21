@@ -87,6 +87,22 @@ func pcmOf(t *testing.T, rate int) [2][]float64 {
 	return out
 }
 
+// The listening tests are not held to chime.go's arithmetic: they call libm
+// (math.Sin, math.Cos, math.Log10, cmplx.Exp, cmplx.Abs), and the compiler
+// may fuse their products into a multiply-add (on arm64, or on amd64 at
+// GOAMD64=v3), so pinning the products would still leave the libm calls.
+// What they read is exact everywhere: the bits measured are the goldens'
+// (TestTheChimeIsTheSameOnEveryArchitecture), the joins' offsets integer
+// sums and a division, the own-rate share a count. Their dB figures are
+// float, and the margins those keep are observed, not a bound: the
+// smallest, the DSD64 1320 Hz join the tail search chose, 1.6 dB inside its
+// −101 (−102.6 dB SA-CD at 1.9 s); the closest candidate the search
+// rejected, DSD128's 1320 Hz with no tail, 2.5 dB outside it (−98.5); and
+// the DSD64 1320 Hz residual, 2.26 dB over its floor of 35. On linux/386
+// every figure is linux/amd64's bit for bit, an amd64 build that fuses
+// (GOAMD64=v3) moved them by 8.6e-11 dB at most, and the gate's arm64 leg,
+// test (macos-latest), which fuses, passed them on #1538.
+
 // fft is an in-place radix-2 transform, len(x) a power of two (dsdconv's
 // test helper, which another package's test cannot share).
 func fft(x []complex128) {

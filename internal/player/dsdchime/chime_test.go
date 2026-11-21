@@ -346,7 +346,10 @@ func TestTheLoopRefusesToLeaveItsBounds(t *testing.T) {
 
 // TestTheChimeIsPacked: a build allocates its two planes, eight samples a
 // byte, and little else: one uncached build's bytes are at most the planes'
-// size and 64 KiB.
+// size and 64 KiB. The bytes are runtime.MemStats.TotalAlloc's, which
+// counts what every goroutine of the process allocates (testing.AllocsPerRun
+// counts allocations, not bytes), so the count holds only while no test in
+// the package runs in parallel or leaves a goroutine running.
 func TestTheChimeIsPacked(t *testing.T) {
 	for _, rate := range chimeRates {
 		planes := uint64(2 * chimeFrames * (rate / 44100 / 8))
