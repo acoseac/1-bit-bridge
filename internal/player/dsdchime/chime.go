@@ -27,8 +27,11 @@
 //     65,536 samples and once more before it publishes, and a build it ended
 //     publishes nothing: the next caller builds again;
 //   - a caller waiting for another's build stops with its own context, which
-//     ends nothing but its wait;
-//   - no caller can change the audio: a Chime is read by copying (ReadAt).
+//     ends nothing but its wait, and a chime kept is answered whatever the
+//     caller's context;
+//   - each caller is answered a Chime of its own, a copy of the one kept (the
+//     zero Chime with an error), and a Chime is read by copying (ReadAt), so
+//     no caller can change the audio another reads.
 //
 // Nothing calls it yet but its tests: the player's check will.
 package dsdchime
@@ -98,6 +101,9 @@ var (
 	errRate = errors.New("dsdchime: the chime is made at DSD64, DSD128 and DSD256")
 	// errBounds ends a modulation whose loop left its bounds.
 	errBounds = errors.New("dsdchime: the modulator left its bounds")
+	// errNoChime answers a build that made neither a chime nor an error,
+	// which build never does.
+	errNoChime = errors.New("dsdchime: the build made no chime")
 )
 
 // bound is the largest magnitude an integrator may reach. The loop holds a
@@ -115,7 +121,7 @@ type Chime struct {
 
 // Format is the chime's stream: its rate, two channels and its samples a
 // channel. It names no container: the chime is made, not demuxed.
-func (c *Chime) Format() format.NativeDSD {
+func (c Chime) Format() format.NativeDSD {
 	return format.NativeDSD{BitRateHz: c.bitRate, Channels: 2, Frames: 8 * int64(len(c.planes[0]))}
 }
 
@@ -123,7 +129,7 @@ func (c *Chime) Format() format.NativeDSD {
 // two planes of one length, as many as they hold and the chime has left,
 // and answers how many, with io.EOF when that is fewer than they hold. It
 // changes nothing, so any number of callers may read at once.
-func (c *Chime) ReadAt(dst [][]byte, off int64) (int, error) {
+func (c Chime) ReadAt(dst [][]byte, off int64) (int, error) {
 	switch {
 	case len(dst) != 2 || len(dst[0]) != len(dst[1]):
 		return 0, errors.New("dsdchime: dst is not two planes of one length")
@@ -155,8 +161,18 @@ type cache struct {
 var chimes = &cache{build: build}
 
 // Get is the chime at bitRateHz, DSD64, DSD128 or DSD256, built on the
-// rate's first use (the package's contract).
-func Get(ctx context.Context, bitRateHz int) (*Chime, error) { return chimes.get(ctx, bitRateHz) }
+// rate's first use (the package's contract): a copy of the one kept, or the
+// zero Chime and the error that left none.
+func Get(ctx context.Context, bitRateHz int) (Chime, error) {
+	c, err := chimes.get(ctx, bitRateHz)
+	if err != nil {
+		return Chime{}, err
+	}
+	if c == nil {
+		return Chime{}, errNoChime
+	}
+	return *c, nil
+}
 
 func (c *cache) get(ctx context.Context, bitRateHz int) (*Chime, error) {
 	i, err := rateIndex(bitRateHz)

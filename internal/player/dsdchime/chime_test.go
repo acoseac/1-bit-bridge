@@ -33,7 +33,7 @@ var goldens = map[int]string{
 	4 * format.DSD64RateHz: "306d45e3967e47e51c71f6da579d76977f89a428f69bac3c1cb8bbf4d0a1c314",
 }
 
-func digest(c *Chime) string {
+func digest(c Chime) string {
 	h := sha256.New()
 	h.Write(c.planes[0])
 	h.Write(c.planes[1])
@@ -293,7 +293,7 @@ func TestTheChimeStopsWithItsContext(t *testing.T) {
 		t.Fatal("a build whose context ended published")
 	}
 	c, err := cc.get(context.Background(), format.DSD64RateHz)
-	if err != nil || builds != 2 || c == nil || digest(c) != goldens[format.DSD64RateHz] {
+	if err != nil || builds != 2 || c == nil || digest(*c) != goldens[format.DSD64RateHz] {
 		t.Fatalf("after a build its context ended, the next caller has %v and %d builds", err, builds)
 	}
 }
@@ -606,6 +606,50 @@ func TestEachCallerHasAChimeOfItsOwn(t *testing.T) {
 	want := format.NativeDSD{BitRateHz: format.DSD64RateHz, Channels: 2, Frames: int64(format.DSD64RateHz) * 24 / 10}
 	if f := next.Format(); f != want {
 		t.Errorf("after a caller wrote over its chime, the next caller's is %+v, want %+v", f, want)
+	}
+}
+
+// coldCache stands a fresh cache, whose build is b, in for the package's,
+// which Get asks, and puts the package's back in the test's cleanup.
+func coldCache(t *testing.T, b func(context.Context, int) (*Chime, error)) {
+	t.Helper()
+	kept := chimes
+	chimes = &cache{build: b}
+	t.Cleanup(func() { chimes = kept })
+}
+
+// TestGetOnAnEndedContextIsTheChimeKeptOrNothing: through Get, a caller
+// whose context has ended is answered, on a cold cache, its context's error
+// and the zero Chime, the cache keeping nothing, so the next caller builds;
+// once a rate's chime is kept, such a caller is answered that chime.
+func TestGetOnAnEndedContextIsTheChimeKeptOrNothing(t *testing.T) {
+	coldCache(t, build)
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	c, err := Get(ended, format.DSD64RateHz)
+	if !errors.Is(err, context.Canceled) || c.bitRate != 0 || c.planes[0] != nil || c.planes[1] != nil {
+		t.Errorf("Get on a cold cache with its context ended answered %+v, %v; want the zero Chime and context.Canceled", c.Format(), err)
+	}
+	if s := chimes.slots[0]; s.chime != nil || s.flight != nil {
+		t.Fatal("Get on a cold cache with its context ended left a chime or a build in the cache")
+	}
+	if c, err := Get(context.Background(), format.DSD64RateHz); err != nil || digest(c) != goldens[format.DSD64RateHz] {
+		t.Fatalf("the next caller had %v and a chime hashing to %s", err, digest(c))
+	}
+	c, err = Get(ended, format.DSD64RateHz)
+	if err != nil || digest(c) != goldens[format.DSD64RateHz] {
+		t.Errorf("a caller whose context has ended, the chime kept, had %v and a chime hashing to %s; want the chime kept", err, digest(c))
+	}
+}
+
+// TestGetAnswersNoChimeWhereItsBuildMadeNone: a build that answers neither a
+// chime nor an error, which build never does, leaves Get's caller the zero
+// Chime and errNoChime, and Get dereferences nothing.
+func TestGetAnswersNoChimeWhereItsBuildMadeNone(t *testing.T) {
+	coldCache(t, func(context.Context, int) (*Chime, error) { return nil, nil })
+	c, err := Get(context.Background(), format.DSD64RateHz)
+	if !errors.Is(err, errNoChime) || c.bitRate != 0 || c.planes[0] != nil || c.planes[1] != nil {
+		t.Errorf("Get over a build that made no chime answered %+v, %v; want the zero Chime and errNoChime", c.Format(), err)
 	}
 }
 

@@ -17,7 +17,7 @@ import (
 // chimeSource is a decode.DSDDecoder over a chime, read through its ReadAt,
 // as the player's check will hand the chime to its DSD path.
 type chimeSource struct {
-	c   *Chime
+	c   Chime
 	off int64
 }
 
@@ -284,7 +284,7 @@ func repeated(p []byte, r int) []byte {
 // off, against the tone's, on the chain TestTheChimesInBandResidualIsUnderItsFloor
 // measures by.
 func TestTheChimeIsModulatedAtItsOwnRate(t *testing.T) {
-	chimes := map[int]*Chime{}
+	chimes := map[int]Chime{}
 	for _, rate := range chimeRates {
 		c, err := Get(context.Background(), rate)
 		if err != nil {
