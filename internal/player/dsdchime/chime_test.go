@@ -587,6 +587,28 @@ func TestNoCallerCanChangeTheChime(t *testing.T) {
 	}
 }
 
+// TestEachCallerHasAChimeOfItsOwn: a caller that writes over the chime Get
+// answered it, its rate and its planes, leaves the next caller's as it was.
+// The case puts back what it wrote in its cleanup, which, where Get answers
+// the chime the cache keeps, puts the cache's back.
+func TestEachCallerHasAChimeOfItsOwn(t *testing.T) {
+	c, err := Get(context.Background(), format.DSD64RateHz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rate, planes := c.bitRate, c.planes
+	t.Cleanup(func() { c.bitRate, c.planes = rate, planes })
+	c.bitRate, c.planes = 0, [2][]byte{}
+	next, err := Get(context.Background(), format.DSD64RateHz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := format.NativeDSD{BitRateHz: format.DSD64RateHz, Channels: 2, Frames: int64(format.DSD64RateHz) * 24 / 10}
+	if f := next.Format(); f != want {
+		t.Errorf("after a caller wrote over its chime, the next caller's is %+v, want %+v", f, want)
+	}
+}
+
 // BenchmarkChimeDSD64, DSD128 and DSD256 time a chime's build and Get's
 // answer from the cache. build is a whole build each iteration: run alone
 // in a fresh process with -benchtime 1x it is that process's first build
