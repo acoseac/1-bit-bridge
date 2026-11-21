@@ -655,17 +655,94 @@ func TestAHealthAnswerOfAnotherVersionIsNotReady(t *testing.T) {
 	stopServed(t, sb)
 }
 
+// unansweredStore is a store whose read never answers: each read waits until
+// its round's context ends, and its answer names the read, so a round's why
+// says which read it waited on. It records, read by read, whether the read was
+// entered with that context live and what ended it.
+type unansweredStore struct {
+	mu    sync.Mutex
+	reads []unansweredRead
+}
+
+// unansweredRead is one read of an unansweredStore.
+type unansweredRead struct {
+	live  bool  // entered with its round's context live
+	ended error // the context's error once it ended
+}
+
+func (s *unansweredStore) read(ctx context.Context) error {
+	s.mu.Lock()
+	n := len(s.reads)
+	s.reads = append(s.reads, unansweredRead{live: ctx.Err() == nil})
+	s.mu.Unlock()
+	<-ctx.Done()
+	s.mu.Lock()
+	s.reads[n].ended = ctx.Err()
+	s.mu.Unlock()
+	return fmt.Errorf("read #%d: %w", n+1, ctx.Err())
+}
+
+// readOf is the read a round's why names, and false where it names none: a
+// round that did not reach the store, or whose answer came past its bound.
+func (s *unansweredStore) readOf(why string) (unansweredRead, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, read := range s.reads {
+		if strings.Contains(why, fmt.Sprintf("read #%d: ", i+1)) {
+			return read, true
+		}
+	}
+	return unansweredRead{}, false
+}
+
+// healthAnswersAtOnce is a serveOpts.wrapAPIHandler that answers GET
+// /v1/health as this version at once, in place of the API handler's.
+func healthAnswersAtOnce(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/v1/health" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(struct {
+				ServerVersion string `json:"serverVersion"`
+			}{version.ServerVersion})
+			return
+		}
+		h.ServeHTTP(w, req)
+	})
+}
+
 // TestAStoreThatDoesNotAnswerIsNotReady: a store read that does not answer
-// within the round is not a ready answer.
+// within the round is not a ready answer. A round's context, its 300 ms, starts
+// before its accept probe and its /v1/health, and the handler's own first
+// /v1/health, an endpoint walk and the store's readiness probes, which take no
+// cancel, outlasted the round's whole bound (300 ms and roundGrace) on a loaded
+// runner (B972): here /v1/health answers at once. The store records whether
+// each read was entered with its round's context live and what ended it, and
+// the case judges the first round whose read was: a round whose setup outran
+// its context reached the store with nothing left to wait for.
 func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 	r := newRefusedInstall(t, "")
-	round, sb := firstRoundOf(t, r, probationTiming{window: time.Hour, ask: 20 * time.Millisecond, retry: 20 * time.Millisecond,
-		round: 300 * time.Millisecond}, serveOpts{probation: &probationSeams{storeRead: func(ctx context.Context) error {
-		<-ctx.Done()
-		return ctx.Err()
-	}}})
-	if round.ready || !strings.Contains(round.why, "the store did not answer") {
-		t.Errorf("the first round over a store that does not answer = %+v, want not ready, the store named", round)
+	store := &unansweredStore{}
+	events, seams := newProbationWatch(probationTiming{window: time.Hour, ask: 20 * time.Millisecond, retry: 20 * time.Millisecond,
+		round: 300 * time.Millisecond})
+	seams.storeRead = store.read
+	sb := r.bootWith(t, serveOpts{probation: seams, wrapAPIHandler: healthAnswersAtOnce})
+	deadline := time.Now().Add(withinTheTest)
+	for n := 1; ; n++ {
+		round := events.waitForCount(t, probationRound, n)
+		if round.ready {
+			t.Fatalf("round %d over a store that does not answer = %+v, want not ready", n, round)
+		}
+		if read, ok := store.readOf(round.why); ok && read.live {
+			if !strings.Contains(round.why, "the store did not answer") || !errors.Is(read.ended, context.DeadlineExceeded) {
+				t.Errorf("round %d, the first whose store read was entered live = %+v, the read ended by %v; "+
+					"want not ready, the store named, the read ended by the round's deadline", n, round, read.ended)
+			}
+			break
+		}
+		t.Logf("round %d (%s) waited on no read entered live: passed over", n, round.why)
+		if time.Now().After(deadline) {
+			t.Fatalf("no round waited on a read entered live within %v; the rounds: %+v", withinTheTest, events.events())
+		}
 	}
 	stopServed(t, sb)
 }
