@@ -93,16 +93,25 @@ func (d *dsdRig) playingPCM() {
 	d.k.Await(d.t, "the PCM writer waiting on the DAC", runningAndWaiting)
 }
 
-// playingDSD plays a second of DSD64, native, and waits for its sink.
+// playingDSD plays a second of DSD64, native, and waits for its sink and for
+// the driver_accepted its open records. d.play is synchronous, the engine's
+// Play answering on the session's Audible, so playback is past Playing when it
+// returns; but a successful play does not wait for that record, which the
+// backend writes on a goroutine of its own (noteDriverAccepted): a case that
+// counted the state's writes from here took it for its own write's (B972).
 func (d *dsdRig) playingDSD() {
 	d.t.Helper()
 	d.files.add("a", dsd(playbacktest.DSD64, 1))
 	d.insert("a")
 	d.play()
 	d.waitSnap("playing", func(s *engine.Snapshot) bool { return s.State() == engine.Playing })
-	if f := d.openFormats(); len(f) != 1 {
+	f := d.openFormats()
+	if len(f) != 1 {
 		d.t.Fatalf("the native sinks opened: %v; want one, the DSD64 track's", f)
 	}
+	d.waitState("the open's driver_accepted", func(st dsdstate.State) bool {
+		return playbacktest.Evidence(st, dsdstate.TransportNative, string(f[0]), playbacktest.DSD64) != nil
+	})
 }
 
 // TestEachStateThePlayerIsNotStoppedInRefusesTheWrite (B728 B9 PR 2): a
