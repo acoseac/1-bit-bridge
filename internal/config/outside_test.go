@@ -458,6 +458,66 @@ func TestASaveOverAFileAnotherWriterLeftUnloadableIsRefusedSayingToCorrectIt(t *
 	}
 }
 
+// TestAFileThatDoesNotLoadIsSaidOnceAndItsSettingsAreKept: a turn that finds
+// another writer's file the next start would refuse records the settings that
+// writer changed all the same, one beside the setting that fails included, and
+// logs once, naming the file and no value, that the file does not load and is
+// to be corrected, writing none of the lines that say a change takes effect at
+// the next start, which would not start. Saves are refused, their changes
+// never run, until that writer corrects the setting that fails; then a save
+// lands and writes every setting that writer changed as the file holds it,
+// none of them published, and nothing more is said of the file.
+func TestAFileThatDoesNotLoadIsSaidOnceAndItsSettingsAreKept(t *testing.T) {
+	path := envSaveConfig(t, "libraryName: Home\n")
+	rc := bootHolder(t, path)
+	booted := rc.Load().ScanIntervalSec
+	logs := loggingtest.Record(t)
+	inRoot := filepath.Join(rc.Load().LibraryRoots[0], "another-writers-variants")
+	appendToConfig(t, path, "scanIntervalSec: 7200\nupscale:\n  variantsDir: "+yamlStr(inRoot)+"\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("premise: the file the other writer left loads")
+	}
+	ran := 0
+	rename := func(c *Config) error { ran++; c.LibraryName = "Renamed"; return nil }
+	for i := 1; i <= 2; i++ {
+		var outside *ChangedOutsideError
+		if err := rc.Update(path, rename); !errors.As(err, &outside) || outside.Kind != OutsideLeftUnloadable {
+			t.Fatalf("save %d over a file another writer left that does not load = %v, want an OutsideLeftUnloadable refusal", i, err)
+		}
+	}
+	if ran != 0 {
+		t.Errorf("the refused saves ran their change %d times", ran)
+	}
+	if said := logs.Lines(leftUnloadableMessage); len(said) != 1 || !strings.Contains(said[0], "path="+path) {
+		t.Errorf("said %q, want one line naming the file", said)
+	}
+	if said := logs.Lines(outsideSettingMessage); len(said) != 0 {
+		t.Errorf("said %q of a file the next start would refuse, want no line that its changes take effect then", said)
+	}
+	if carrying := logs.Carrying("another-writers-variants"); len(carrying) != 0 {
+		t.Errorf("a line carries the variants folder another writer set: %q", carrying)
+	}
+	corrected := filepath.Join(filepath.Dir(path), "Variants")
+	replaceInConfig(t, path, yamlStr(inRoot), yamlStr(corrected))
+	if err := rc.Update(path, rename); err != nil {
+		t.Fatalf("a save once the other writer corrected the variants folder: %v", err)
+	}
+	if ran != 1 {
+		t.Errorf("the save ran its change %d times, want once", ran)
+	}
+	if after := loadAt(t, path); after.LibraryName != "Renamed" || after.ScanIntervalSec != 7200 || after.Upscale.VariantsDir != corrected {
+		t.Errorf("the file loads libraryName %q, scanIntervalSec %d and upscale.variantsDir %q, want the rename and "+
+			"the other writer's 7200 and corrected folder", after.LibraryName, after.ScanIntervalSec, after.Upscale.VariantsDir)
+	}
+	if live := rc.Load(); live.ScanIntervalSec != booted || live.Upscale.VariantsDir != "" {
+		t.Errorf("the save published scanIntervalSec %d and upscale.variantsDir %q, want %d and none, the ones serve loaded",
+			live.ScanIntervalSec, live.Upscale.VariantsDir, booted)
+	}
+	if said := logs.Lines(leftUnloadableMessage); len(said) != 1 {
+		t.Errorf("said %q once the file loads, want the one line of before", said)
+	}
+}
+
 // TestAnOpenHomeClashAnotherWriterLeftRefusesOnlyASaveThatAddsOne: Load takes
 // a file whose OpenHome surface sits on a port another listener binds, and
 // turns the player off over it, so a clash another writer left in the file
