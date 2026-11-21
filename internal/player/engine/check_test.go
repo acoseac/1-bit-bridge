@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1263,4 +1265,156 @@ func TestTheCheckHoldNeverAutoplays(t *testing.T) {
 	if sn := h.snap(); sn.State() != Stopped || h.be.starts() != 2 || h.be.count("resume") != 0 {
 		t.Errorf("after the second exit %s with %d sessions and %d resumes; want stopped, two, none", sn.State(), h.be.starts(), h.be.count("resume"))
 	}
+}
+
+// sessionsWatch looks, on the owner's goroutine, before each command the
+// owner admits and after each step it notes, at what the check's hold relies
+// on where it answers at once, its release confirmed, because no session holds
+// the device (B728 B12: grantHold with interrupt): the transport's session
+// (o.sess) is one of the sessions whose release is owed (o.sessions), and
+// with none held every session still owed is the one whose release is
+// unconfirmed (o.unconfirmed), which refuses the hold. It reads the owner's
+// fields and sets none.
+type sessionsWatch struct {
+	h  *harness
+	mu sync.Mutex
+	// bad is what each look found wrong; owed counts the looks that found no
+	// session held and the unconfirmed release owed.
+	bad  []string
+	owed int
+}
+
+// look looks at the owner's sessions, at where.
+func (w *sessionsWatch) look(where string) {
+	o := &w.h.eng.o
+	var bad string
+	owed := false
+	switch u := o.unconfirmed; {
+	case o.sess != nil && o.sessions[o.sess.id] != o.sess:
+		bad = fmt.Sprintf("session %d held and not among the sessions owed", o.sess.id)
+	case o.sess == nil && len(o.sessions) > 0:
+		if u == nil || len(o.sessions) != 1 || o.sessions[u.Session] == nil {
+			bad = fmt.Sprintf("no session held, %d owed, the unconfirmed release %+v", len(o.sessions), u)
+		} else {
+			owed = true
+		}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if bad != "" {
+		w.bad = append(w.bad, where+": "+bad)
+	}
+	if owed {
+		w.owed++
+	}
+}
+
+// owedSeen is the number of looks that found the unconfirmed release owed.
+func (w *sessionsWatch) owedSeen() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.owed
+}
+
+// watchedHarness is checkHarness with a sessionsWatch on its owner, whose
+// findings fail t once the engine and its harness have stopped.
+func watchedHarness(t *testing.T) (*harness, *sessionsWatch) {
+	t.Helper()
+	w := &sessionsWatch{}
+	// Registered before the harness's, so it runs after them: the steps of
+	// the shutdown are looked at too.
+	t.Cleanup(func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, b := range w.bad {
+			t.Error(b)
+		}
+	})
+	h := newHarness(t)
+	w.h = h
+	h.tweak = func(c *Config) {
+		c.seams.replying = func(op string, _ reply, _ *Snapshot) { h.noteApplied("replied " + op) }
+		admitted, applied, handled := c.seams.admitted, c.seams.applied, c.seams.handled
+		c.seams.admitted = func(cmd *command) { w.look("admitting " + cmd.op.String()); admitted(cmd) }
+		c.seams.applied = func(op string) { w.look("applied " + op); applied(op) }
+		c.seams.handled = func(what string) { w.look("handled " + what); handled(what) }
+	}
+	return h.boot(), w
+}
+
+// TestASessionLeavesTheSessionsInTheStepItsReleaseEnds pins, through the
+// engine's own transitions, the invariant by which the check's hold, asked
+// with interrupt, is answered at once with its release confirmed when no
+// session holds the device (B728 B12): no release is owed then but one left
+// unconfirmed, which refuses the hold. A release acknowledged in time takes
+// its session from the sessions owed in the step in which the transport lets
+// it go; a release past its deadline is let go by the transport in the step
+// that leaves it unconfirmed; and its late acknowledgement takes it from the
+// sessions as it clears the unconfirmed release. A watch on the owner
+// (sessionsWatch) looks before each command and after each step: through a
+// Stop, a Next released to play, a release past its deadline and acknowledged
+// late (where it sees the release owed, unconfirmed), the check's hold
+// interrupting playback and its exit, the output going away and a fault, and
+// the shutdown after each.
+func TestASessionLeavesTheSessionsInTheStepItsReleaseEnds(t *testing.T) {
+	t.Run("a Stop", func(t *testing.T) {
+		h, _ := watchedHarness(t)
+		h.playing(0, "a", "b")
+		h.must("stop", h.eng.Stop(bg))
+		h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
+	})
+	t.Run("a Next released to play", func(t *testing.T) {
+		h, _ := watchedHarness(t)
+		h.playing(0, "a", "b")
+		h.must("next", h.eng.Next(bg))
+		h.be.nth(2)
+	})
+	t.Run("a release past its deadline, acknowledged late", func(t *testing.T) {
+		h, w := watchedHarness(t)
+		mark := h.appliedMark()
+		_, s := h.playing(0, "a", "b")
+		// The clock is moved past the release's deadline, and so past the
+		// successor's Prepare's: its answer is the owner's first.
+		h.waitApplied("handled call prepare", mark)
+		never := newGate()
+		letGoAtEnd(t, never)
+		h.be.script(func() {
+			h.be.onRelease = func(ctx context.Context, _ *fakeSession) error { return never.wait(ctx, h.be, true) }
+		})
+		stop := async(func() error { return h.eng.Stop(bg) })
+		h.be.waitFor("the stop's release", func() bool { return s.releaseAsked })
+		h.clk.Advance(ReleaseTimeout)
+		h.must("the stop past its release's deadline", h.result("stop", stop))
+		h.waitSnap("the release unconfirmed", func(sn *Snapshot) bool {
+			_, ok := sn.ReleaseUnconfirmed()
+			return ok && sn.State() == Stopped
+		})
+		mark = h.appliedMark()
+		s.releasedLater()
+		h.waitApplied("handled released", mark)
+		if _, ok := h.snap().ReleaseUnconfirmed(); ok {
+			t.Fatal("the late acknowledgement left the release unconfirmed")
+		}
+		if w.owedSeen() == 0 {
+			t.Error("the watch never saw the release owed, unconfirmed, with no session held")
+		}
+	})
+	t.Run("the check's hold interrupting playback", func(t *testing.T) {
+		h, _ := watchedHarness(t)
+		h.playing(0, "a", "b")
+		hold := h.granted("the check's hold, interrupting what plays", true)
+		h.must("its exit", h.eng.ExitMaintenance(bg, hold.Lease))
+	})
+	t.Run("the output going away", func(t *testing.T) {
+		h, _ := watchedHarness(t)
+		h.playing(0, "a", "b")
+		h.report(OutputReport{Available: false, Reason: "device_missing"})
+		h.waitSnap("stopped once the output went", func(sn *Snapshot) bool { return sn.State() == Stopped })
+	})
+	t.Run("a fault", func(t *testing.T) {
+		h, _ := watchedHarness(t)
+		_, s := h.playing(0, "a", "b")
+		s.fault(Fault{Reason: ReasonXrun, Occurrence: s.first.ID})
+		h.waitSnap("stopped by the fault", func(sn *Snapshot) bool { return sn.State() == Stopped })
+	})
 }
