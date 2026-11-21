@@ -108,7 +108,7 @@ type Config struct {
 
 // Seams are the engine's test seams for the packages above it (B470 PR 5a4,
 // round 2: the OpenHome surface's edit gate is tested against an engine held
-// in a reservation write). Each runs on the goroutine that reaches it, and
+// in a reservation write). A func runs on the goroutine that reaches it, and
 // may block there; a nil field, like a nil Seams, changes nothing.
 type Seams struct {
 	// ReserveWrite runs before each reservation write, on the goroutine that
@@ -119,6 +119,11 @@ type Seams struct {
 	// a write lets it go before the engine stops: Run's shutdown waits for a
 	// reservation write under way.
 	ReserveWrite func() error
+	// Clock is the engine's time in place of the time package's: every
+	// deadline, expiry and delay of the engine's runs on it (B728 B12 PR 2:
+	// the OpenHome surface's Stop under the DSD check's hold, on a clock that
+	// does not move, which the check's exit alone answers).
+	Clock Clock
 }
 
 // seams is what the tests replace on one engine: the clock, the file
@@ -252,6 +257,9 @@ func New(cfg Config) (*Engine, error) {
 		cfg.Log = logging.Component("player")
 	}
 	sm := cfg.seams
+	if s := cfg.Seams; s != nil && s.Clock != nil {
+		sm.clock = s.Clock
+	}
 	if sm.clock == nil {
 		sm.clock = realClock{}
 	}

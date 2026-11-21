@@ -5,26 +5,54 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
 
 // The player's DSD check through the surface (B728 B12 PR 2): while the check
 // holds the engine (engine.EnterCheck), the surface's Stop is the engine's,
 // which ends the check and answers once the check has let go, and every other
 // write that reaches the engine is 501, as in maintenance; the surface asks
-// nothing of the check, and starts nothing when it ends. The engine runs on the
-// real clock, so a Stop the check holds is answered at the latest
-// engine.ReleaseTimeout (2 s) after it parks: the test makes its checks inside
-// that window, as the Stops' tests do.
+// nothing of the check, and starts nothing when it ends. The Stop's case runs
+// its engine on a clock that does not move (stillClock), so the deadline of the
+// Stops the check holds, engine.ReleaseTimeout after the first parks, never
+// answers one there.
+
+// stillClock is an engine's time that does not move (engine.Config.Seams.Clock):
+// Now is the instant it holds, and a timer armed for a later instant never
+// fires, so no deadline of the engine's comes while the test runs; one armed
+// for that instant or before fires at once, as engine.Clock's At promises.
+type stillClock struct{ at time.Time }
+
+func (c stillClock) Now() time.Time { return c.at }
+
+func (c stillClock) AfterFunc(d time.Duration, f func()) engine.Timer { return c.At(c.at.Add(d), f) }
+
+func (c stillClock) At(t time.Time, f func()) engine.Timer {
+	if t.After(c.at) {
+		return stillTimer{}
+	}
+	go f()
+	return stillTimer{fired: true}
+}
+
+// stillTimer is a stillClock's timer, stopped by Stop unless it has fired.
+type stillTimer struct{ fired bool }
+
+func (t stillTimer) Stop() bool { return !t.fired }
 
 // TestAnOpenHomeStopEndsTheCheckThroughTheEngine pins the Stop's one
-// interception, through the SOAP layer: with an entry playing, the check's
-// hold interrupts it, and TransportState reads Stopped (maintenance). A Stop
-// then gives its request's slot back once the engine has admitted it, the
-// hold's stop signal closes, and the Stop waits; once the check lets go (its
-// exit) the Stop answers success, the transport Stopped and no session
-// started.
+// interception, through the SOAP layer, its engine's clock still: with an
+// entry playing, the check's hold interrupts it, and TransportState reads
+// Stopped (maintenance). A Stop then gives its request's slot back once the
+// engine has admitted it, and the hold's stop signal closes; once the check
+// lets go (its exit) the Stop answers success, with no deadline of the
+// engine's come, the transport Stopped and no session started. That the
+// Stop is not answered before the exit is the engine's to show, from the
+// replies its owner sends (TestAStopUnderACheckHoldSignalsItAndAnswersAtItsExit):
+// the HTTP answer not come yet, read here, would prove nothing.
 func TestAnOpenHomeStopEndsTheCheckThroughTheEngine(t *testing.T) {
-	p := newTestPlayer(t)
+	p := newTestPlayerWith(t, func(p *testPlayer) { p.clock = stillClock{at: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)} })
 	waits := newWaitingStops()
 	h := p.handler("")
 	h.seams = &Seams{StopWaiting: waits.seam}
@@ -46,9 +74,6 @@ func TestAnOpenHomeStopEndsTheCheckThroughTheEngine(t *testing.T) {
 		t.Fatalf("the Stop answered %d and the check's stop signal is open", res.StatusCode)
 	case <-time.After(testWait):
 		t.Fatalf("waited %v for the check's stop signal at an OpenHome Stop", testWait)
-	}
-	if !stop.pending() {
-		t.Fatal("the Stop answered before the check let go")
 	}
 	must(t, "the check lets go", p.eng.ExitMaintenance(bg, hold.Lease))
 	if r := stop.answer(t); r.status != http.StatusOK {
