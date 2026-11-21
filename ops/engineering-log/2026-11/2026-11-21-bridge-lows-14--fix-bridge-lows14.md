@@ -179,8 +179,9 @@ R1 replaced the brief's correction of the record: the cutoff goes. `TestAStoreTh
 failed once a round it passed over came after 20 s (`withinTheTest`), though the next round could
 have been entered live. `49e7c5a2` removed it and gave the loop a give-up of its own at
 `serveGiveUpTime`, its message saying that rounds that keep coming never let `waitForCount` give up;
-a control showed otherwise, and `a1582b68` removed that check again (below), so `waitForCount`, which
-gives up at the test binary's deadline less `serveWaitReserve`, bounds the retries, as R1 asked. A
+a control showed otherwise, and `a1582b68` removed that check again (below), so `waitForCount`
+bounds the retries, as R1 asked, once it hands out no round past the test binary's deadline less
+`serveWaitReserve`, rounds already queued included, which round 2 made it do (below). A
 round passed over "named no read entered live" (item 11: one whose answer came past its bound may
 have waited on a live read), and the case's comment says what the handler's first `/v1/health` runs
 in this fixture (item 10: the store's readiness probes and the roots' reachability probe, which the
@@ -198,9 +199,12 @@ writing:
 - no round's read ever entered live, `-timeout 90s`: the case failed at 60.05 s, the binary's
   deadline less 30 s, at `waitForCount`'s give-up ("the confirmation's round never came 187
   time(s)"), with the loop's own check (`49e7c5a2`) and without it, where a panic at 90 s had been
-  predicted: the loop always waits in `waitForCount` for its next round, whose timer is the
-  deadline, so its own check could fire only in the moment between a round's arrival and that
-  deadline. `a1582b68` removed it, and the case's run without it (`a1582b68`) failed the same way;
+  predicted: in these runs the loop waited in `waitForCount` for each next round, whose timer is the
+  deadline. `a1582b68` removed the check, and the case's run without it (`a1582b68`) failed the same
+  way (corrected in round 2: this said the loop always waits there, so its own check could fire
+  only in the moment between a round's arrival and that deadline; it does not always wait, since
+  rounds that queued up while the loop fell behind were returned by the scan before the deadline was
+  read, and the loop could take them past it, which round 2 closes in `waitForCount` itself);
 - a round that ignores its store read's error (`serve_probation.go`'s `r.store` answer dropped): the
   old case and the new failed at round 1, "round 1 over a store that does not answer =
   {kind:1 ready:true why:}, want not ready".

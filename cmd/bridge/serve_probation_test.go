@@ -72,7 +72,8 @@ func (w *probationWatch) waitFor(t *testing.T, kind probationEventKind) probatio
 
 // waitForCount returns the nth event of kind, waiting for it until the test's
 // deadline (serveGiveUpTime), or two minutes in a binary with none, and fails
-// the test with awaitCount's error.
+// the test with awaitCount's error: past the deadline it returns no event,
+// one already buffered included.
 func (w *probationWatch) waitForCount(t *testing.T, kind probationEventKind, n int) probationEvent {
 	t.Helper()
 	giveUp := serveGiveUpTime(t)
@@ -88,13 +89,17 @@ func (w *probationWatch) waitForCount(t *testing.T, kind probationEventKind, n i
 
 // awaitCount is waitForCount's wait, its deadline given: the nth event of
 // kind, or an error naming the kind, the count and the events once giveUp
-// has passed.
+// has passed, asked before an event the scan found is returned, so a caller
+// that fell behind while events queued up is handed none past the deadline.
 func (w *probationWatch) awaitCount(kind probationEventKind, n int, giveUp time.Time) (probationEvent, error) {
 	for {
 		seen := 0
 		for _, e := range w.events() {
 			if e.kind == kind {
 				if seen++; seen == n {
+					if time.Now().After(giveUp) {
+						return probationEvent{}, fmt.Errorf("the confirmation's %v was not taken %d time(s) before the test's deadline; it did %+v", kind, n, w.events())
+					}
 					return e, nil
 				}
 			}
@@ -733,9 +738,12 @@ func healthAnswersAtOnce(h http.Handler) http.Handler {
 // once. The store records whether each read was entered with its round's
 // context live and what ended it, and the case judges the first round whose
 // read was, whenever it comes: a round whose setup outran its context reached
-// the store with nothing left to wait for, and is passed over. The case waits
-// for each next round in waitForCount, so the test binary's deadline, at which
-// that wait gives up (serveGiveUpTime), bounds it.
+// the store with nothing left to wait for, and is passed over. The case takes
+// each next round from waitForCount, which hands out none once the test
+// binary's deadline less serveWaitReserve (serveGiveUpTime) has passed, rounds
+// already queued included, so that deadline bounds it: a loop that fell
+// behind while unusable rounds queued up would otherwise go on taking them
+// past it.
 func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	store := &unansweredStore{}

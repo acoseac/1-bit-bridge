@@ -900,6 +900,27 @@
   Lengthening `probeTimeout` would hold `bridge doctor` on a wedged mount,
   and the timeout-contract tests leave the default so they still end at 2s.
 
+- **…and past that deadline a wait hands out no event, one already buffered
+  included** (2026-11-21, bridge lows 14's round 2). `waitForCount`
+  (serve_probation_test.go) scanned the events serve's confirmation had
+  buffered and returned the nth before it read its deadline
+  (`serveGiveUpTime`), which its `select` alone consulted, so the store
+  case's retry loop (`TestAStoreThatDoesNotAnswerIsNotReady`, which passes
+  unusable rounds over), once it had fallen behind while rounds queued up,
+  went on taking them past the deadline and into the cleanups' reserve. Its
+  wait is `awaitCount` now, the deadline an input (`waitForCount` computes
+  it, its two-minute fallback for a binary with no deadline included, and
+  keeps the `Fatal`), which refuses, naming the kind, the count and the
+  events, once the deadline has passed, before it returns an event its scan
+  found. `TestAWaitPastItsDeadlineHandsOutNoBufferedRound` queues five
+  unusable rounds and asks for each next one with a deadline already past:
+  the wait as it was handed out all five, its first refusal the sixth ask's;
+  now none, the first ask refused. **Don't return an event a wait's scan
+  finds once its deadline has passed: a loop that fell behind while events
+  queued up would take them into the cleanups' reserve.** The record:
+  `ops/engineering-log/2026-11/2026-11-21-bridge-lows-14--fix-bridge-lows14.md`,
+  its round 2.
+
 - **…and a watcher test waits for the watcher's walk, a watch and a row
   the same way** (2026-09-29, backlog B104). The watcher tests slept 100
   or 150 ms for Run's initial walk and gave the row 3 s, and a file created
