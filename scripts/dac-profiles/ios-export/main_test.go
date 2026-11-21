@@ -439,10 +439,45 @@ var additions = declared{
 			},
 			Statement: statement{Case: "noDSD", Source: &source{Kind: "pcmCeiling", Date: ptr("2026-11-19")}},
 		},
+	}, {
+		// The Kiwi Ears AD1 (B976), from its wizard submission of 2026-11-21
+		// (app 2.2 (17), iOS 27.2.1, its port classed as Headphones) by the
+		// iOS procedure's rules, and Kiwi Ears' pages read that day: DSD64 and
+		// DSD128 heard, every attempt at the lock proxy, at iOS volume 0.3;
+		// DSD256 refused on every attempt, its 705.6 kHz carrier not
+		// negotiated; DSD512, never attempted, its 1411.2 kHz carrier asked in
+		// the PCM sweep and 384 kHz negotiated, refused; so DSD128 its legacy
+		// ceiling; every PCM rate from 44.1 to 384 kHz negotiated exactly, so
+		// 384 kHz, the submitter's 32 bits Kiwi Ears' USB figure too
+		// (32Bit/384kHz); no volume control of its own and the iOS volume
+		// changing its level, with DoP heard below iOS maximum, so the volume
+		// host-synced; every time null, each clean at or within its iOS
+		// default; no DSD figure from Kiwi Ears, so no statement; and its port
+		// name, AD1, which lies inside its sibling's, AD1 Pro, and is too short
+		// for a token, so no legacy pattern and no token: strict-only.
+		ID: "kiwiears.ad1", Name: "Kiwi Ears AD1", Maker: "Kiwi Ears", LegacyPatterns: []string{},
+		LegacyCeiling: "dsd128", PCM: dacprofile.IOSPCM{MaxRateHz: 384000, BitDepth: 32}, VolumeTopology: "hostSyncedDACGain",
+		NameKeys: nameKeys{PortNames: []string{"AD1"}, Tokens: []string{}, ExcludedTokens: []string{}, Scope: "model"},
+		Evidence: evidence{
+			Heard: []heard{
+				{Rate: "dsd64", Source: source{Kind: "submission", Date: ptr("2026-11-21")}},
+				{Rate: "dsd128", Source: source{Kind: "submission", Date: ptr("2026-11-21")}},
+			},
+			Failed: []failed{
+				{Rate: "dsd256", Failure: "carrierRefused", Source: source{Kind: "submission", Date: ptr("2026-11-21")}},
+				{Rate: "dsd512", Failure: "carrierRefused", Source: source{Kind: "submission", Date: ptr("2026-11-21")}},
+			},
+			Statement: statement{Case: "unrecorded"},
+		},
 	}},
 	// The name iOS reported for each added row's port, verbatim, with a
-	// trailing space and in two other cases: the ZH3's, and the Magic-ARC's.
-	names: []corpusName{
+	// trailing space and in two other cases: the ZH3's, and the Magic-ARC's;
+	// then the AD1's, verbatim and with a trailing space, which the strict
+	// matcher, trimming a name and keeping its case, answers with its row
+	// and the live matcher, which the row gives no pattern, with none, the
+	// disagreement its strict-only declaration permits; in three other cases;
+	// and its siblings' names, which neither matcher answers with a row.
+	names: slices.Concat([]corpusName{
 		{Name: "Fosi Audio ZH3", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "exact")},
 		{Name: "Fosi Audio ZH3 ", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "exact")},
 		{Name: "fosi audio zh3", Live: ptr("fosiaudio.zh3"), Strict: known("fosiaudio.zh3", "token")},
@@ -451,20 +486,34 @@ var additions = declared{
 		{Name: "Ikko Magic-Arc ", Live: ptr("ikko.magicarc"), Strict: known("ikko.magicarc", "exact")},
 		{Name: "ikko magic-arc", Live: ptr("ikko.magicarc"), Strict: known("ikko.magicarc", "token")},
 		{Name: "IKKO MAGIC-ARC", Live: ptr("ikko.magicarc"), Strict: known("ikko.magicarc", "token")},
-	},
+		{Name: "AD1", Strict: known("kiwiears.ad1", "exact"), Exception: true},
+		{Name: "AD1 ", Strict: known("kiwiears.ad1", "exact"), Exception: true},
+	}, noMatch("ad1", "Ad1", "aD1"), kiwiEarsSiblings),
 	// Fosi Audio's products that take USB audio from a host, as its store
 	// listed them on 2026-11-19, each named as the ZH3 names itself; then
 	// iKKO's, as its store listed them on 2026-11-20 and, for the ITM line's
 	// earlier two, as it listed them before, each named as the Magic-ARC names
-	// itself: no row may reach one, by either matcher.
+	// itself; then Kiwi Ears' (kiwiEarsSiblings): no row may reach one, by
+	// either matcher.
 	siblings: slices.Concat(
 		noMatch("Fosi Audio ZD3", "Fosi Audio K7", "Fosi Audio DS1", "Fosi Audio DS2", "Fosi Audio SK02",
 			"Fosi Audio GR40", "Fosi Audio ZH1", "Fosi Audio Q6", "Fosi Audio DS3", "Fosi Audio MD3", "Fosi Audio K5 Pro",
 			"Fosi Audio Q4", "Fosi Audio C1", "Fosi Audio C3", "Fosi Audio MC331", "Fosi Audio MC351"),
 		noMatch("Ikko Zerda ITM01", "Ikko Zerda ITM02", "Ikko Milestone ITM07", "Ikko Heimdallr ITB03", "Ikko ITX05",
 			"Ikko Zerda ITM03", "Ikko Music Patch ITM05"),
+		kiwiEarsSiblings,
 	),
+	strictOnly: []strictOnly{{"kiwiears.ad1", "a port name too short for a legacy pattern that leaves its sibling out"}},
 }
+
+// kiwiEarsSiblings are Kiwi Ears' other products that take USB audio from a
+// host (B976), read on 2026-11-21, each named as the AD1 names itself: as
+// Kiwi Ears' equalizer app names the units it programs (the AD1 there is
+// "KT-0211L AD1", the name its port reported after the chip's), and by its
+// model alone where the app lists none, the original Allegro by its model as
+// archived. No row may reach one, by either matcher.
+var kiwiEarsSiblings = noMatch("AD1 Pro", "Allegro", "Allegro Mini", "Allegro Nano", "Allegro Pro", "Allegro BAL",
+	"Kiwi Ears Coda", "Kiwi Ears Stardust", "B-Media Chorus", "Belle", "S-link", "S-Link-Typec-0.78-Mic")
 
 // ptr is a pointer to v.
 func ptr[T any](v T) *T { return &v }
