@@ -560,6 +560,9 @@ func TestTheCheckHoldsGrantIsNeverLostToItsCaller(t *testing.T) {
 	mark := h.appliedMark()
 	check := h.checkAsync(ctx, true)
 	waitClosed(t, "the check's admission", admission)
+	// The fake records the release, on its call's goroutine, before the step
+	// that granted the hold has published it.
+	h.waitSnap("the check's hold granted", func(sn *Snapshot) bool { m, ok := sn.Maintenance(); return ok && m.Reason == "check" })
 	h.be.waitFor("the check's release", func() bool { return s.releaseAsked })
 	cancel()
 	a := h.checkResult("the check's hold whose caller left during its release", check)
