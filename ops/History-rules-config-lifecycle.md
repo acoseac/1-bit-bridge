@@ -2685,6 +2685,28 @@ window (`BootInstallFailed`, refused on the record) or past it
 refuses. That holds where the version put back carries B705: an older
 release's housekeeping clears the marker by its own rule.
 
+*A release from before B705 put back by hand* (backlog B708, 2026-11-21: no
+code, the runbook's line). The case the paragraph above leaves needs a
+release from before the record and B705, which first shipped together in
+0.2.3, put back by hand (0.2.2 or older), and then a newer version started
+by hand over the same data dir: the old release clears the marker by its own
+rule (its window read before the version), its writes drop
+`DataDirOpenedBy`, `.bak` can stay, and the newer version's Roll back is
+then not refused. An install records again at its first start
+(`AdmitBoot`), so reaching the newer version with `bridge update` closes it.
+Deriving the record again at a start was not taken. The store cannot say:
+it records no version, only `PRAGMA user_version`, and a build knows only
+the top of its own ladder (`manifest.LadderTop`). A backup can say its
+version (`ProbeVersion`), but a record made from it at a start with no
+install armed would be a new writer at serve's admission, which the crash
+rollback keeps short by asking its backup before it takes the marker's lock
+(`statelock.go`'s wait), and it would refuse the Roll back that the
+abandoned clear (`BootClearAbandoned`) leaves to the operator on purpose;
+which rollbacks run is the owner's decision, not a Low. So the runbook says,
+after its B705 paragraph, what such a release does to the record, to remove
+`.bak` or to reach the newer version with `bridge update` before starting it
+by hand over that data dir, and where to read the record.
+
 *The other paths that can clear an install marker while its version runs*
 (the brief's item 3):
 - the restamp before a deferred auto-install restart
@@ -3964,7 +3986,8 @@ lands within one retry (`stateLockRetry`, 50 ms) of the marker's arming
 keeps the 503; and a marker another process armed and left (a `bridge
 update` killed before its swap, or a swap that stopped nothing, waiting for
 its restart) refuses, beside any other holder of the lock (a migrating store
-open, a start's housekeeping), an off that would have landed, until a start
+open, a start's housekeeping, this process's own install or rollback before
+it writes its marker), an off that would have landed, until a start
 resolves that marker. `TestAnOffBehindAnotherProcesssInstallOnTheWindowsServiceIsRefusedAtOnce`,
 `TestAnOffBehindTheInstallMarkersLockWaitsWhereItIsNoOtherProcesssInstall`,
 `TestAStopBeforeTheOffsRefusalKeepsItsError`,
