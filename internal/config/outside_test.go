@@ -167,9 +167,9 @@ func TestAWriterThatWritesOutDefaultsChangesOnlyWhatItChanged(t *testing.T) {
 }
 
 // TestASaveKeepsAPlayerBlockThatDoesNotReadAsAnotherWriterLeftIt: a player
-// block that does not read is one setting, compared by the text it keeps
-// (PlayerConfig.written), since its fields read nothing: another writer's
-// change of its text is kept by a save of another setting.
+// block that does not read is one setting, compared by what its source holds
+// (PlayerConfig.source), since its fields read nothing: another writer's
+// change of a value in it is kept by a save of another setting.
 func TestASaveKeepsAPlayerBlockThatDoesNotReadAsAnotherWriterLeftIt(t *testing.T) {
 	path := writePlayerConfig(t, "  player:\n    enabled: true\n    noSuchSetting: 1\n")
 	rc := bootHolder(t, path)
@@ -193,8 +193,8 @@ func TestASaveKeepsAPlayerBlockThatDoesNotReadAsAnotherWriterLeftIt(t *testing.T
 }
 
 // TestAnUnreadPlayerBlockIsComparedByItsSource: a player block that does not
-// read, on both sides, is one setting compared by its source, the block's own
-// text and that of each anchor its aliases name, never by the text a save
+// read, on both sides, is one setting compared by its source, what the block
+// holds and what each anchor its aliases name holds, never by the text a save
 // would write back, which a block whose alias copies more than 1024 nodes
 // keeps none of (notKept): such a block's change is found, and so is a change
 // of the anchor its alias names, while a comment added elsewhere in the file
@@ -235,6 +235,59 @@ func TestAnUnreadPlayerBlockIsComparedByItsSource(t *testing.T) {
 	} {
 		if got := settingsChanged(was, read(tc.text)); !slices.Equal(got, tc.want) {
 			t.Errorf("%s: found as %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestAnUnreadPlayerBlocksDigestLeavesOutHowItIsWritten: the digest of an
+// unread player block (blockSource) is of what the block holds, never of how
+// the file writes it: a comment on a line of the sequence its alias names, a
+// comment inside the block and an anchor renamed with its alias change
+// nothing, while a value, an alias moved to another anchor and a tree of
+// another shape each change it. Every alias is followed to its node, a node
+// met again is written as a reference to the order it was first met in, and
+// every token and list of children is framed by its length: [&a {k: 1}, *a],
+// whose second element is a reference to its first, and [&a {k: 1}, {k: 1}],
+// whose second element is a node of its own, differ, and so do [[a], b] and
+// [[a, b]]. Until B535's round 3 the digest took the comments, the style and
+// the anchors' names.
+func TestAnUnreadPlayerBlocksDigestLeavesOutHowItIsWritten(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.yaml")
+	read := func(text string) *Config {
+		t.Helper()
+		c, err := readSettings(path, []byte(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Output.Player.Unread() == nil {
+			t.Fatalf("premise: the block reads:\n%s", text)
+		}
+		return c
+	}
+	const roots = "libraryRoots: &roots\n  - /music/a\n  - /music/b\n"
+	block := func(lines string) string { return "output:\n  player:\n" + lines }
+	aliased := roots + block("    enabled: true\n    noSuchSetting: *roots\n")
+	for _, tc := range []struct {
+		name, was, now string
+		differs        bool
+	}{
+		{"a line comment inside the anchored sequence", aliased,
+			"libraryRoots: &roots\n  - /music/a # the first\n  - /music/b\n" + block("    enabled: true\n    noSuchSetting: *roots\n"), false},
+		{"a comment inside the block", aliased,
+			roots + block("    # the player's own note\n    enabled: true\n    noSuchSetting: *roots\n"), false},
+		{"an anchor renamed with its alias", aliased, strings.NewReplacer("&roots", "&songs", "*roots", "*songs").Replace(aliased), false},
+		{"a value inside the block", aliased, roots + block("    enabled: false\n    noSuchSetting: *roots\n"), true},
+		{"an alias moved to another anchor", block("    x: &x 1\n    y: &y 1\n    noSuchSetting: *x\n"),
+			block("    x: &x 1\n    y: &y 1\n    noSuchSetting: *y\n"), true},
+		{"a reference against a copy", block("    noSuchSetting: [&a {k: 1}, *a]\n"), block("    noSuchSetting: [&a {k: 1}, {k: 1}]\n"), true},
+		{"a list inside a list against one beside it", block("    noSuchSetting: [[a], b]\n"), block("    noSuchSetting: [[a, b]]\n"), true},
+	} {
+		var want []string
+		if tc.differs {
+			want = []string{"output.player"}
+		}
+		if got := settingsChanged(read(tc.was), read(tc.now)); !slices.Equal(got, want) {
+			t.Errorf("%s: found as %q, want %q", tc.name, got, want)
 		}
 	}
 }

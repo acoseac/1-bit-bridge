@@ -316,8 +316,8 @@ func openHomeClashes(c *Config) []string {
 // (upnpUpstream.servers among them), never walked by its entries; a struct
 // that writes itself as one value (usbid.Serial, whose one field is
 // unexported) one setting; and a player block that did not read, on either
-// side, one setting, output.player, compared by its source (sameUnreadBlock),
-// since its fields read nothing.
+// side, one setting, output.player, compared by what its source holds
+// (sameUnreadBlock), since its fields read nothing.
 func settingsChanged(a, b *Config) []string {
 	var out []string
 	walkSettings(reflect.ValueOf(a).Elem(), reflect.ValueOf(b).Elem(), "", &out)
@@ -390,11 +390,12 @@ func unreadBlock(v reflect.Value) bool {
 }
 
 // sameUnreadBlock reports whether a and b, player blocks one of which did not
-// read, are one setting: both did not read, and their source is one (the
-// block's own text and the anchors its aliases name, blockSource). Until
-// B535's round 2 they were compared by the text a save writes back, which a
-// block whose aliases copy too much keeps none of, so two such blocks
-// compared alike whatever they held.
+// read, are one setting: both did not read, and their sources hold the same
+// (the block's nodes and those its aliases name, by what they hold and never
+// how they are written, blockSource). Until B535's round 2 they were compared
+// by the text a save writes back, which a block whose aliases copy too much
+// keeps none of, so two such blocks compared alike whatever they held; until
+// its round 3, by their comments, style and anchor names too.
 func sameUnreadBlock(a, b PlayerConfig) bool {
 	if (a.unread == "") != (b.unread == "") {
 		return false

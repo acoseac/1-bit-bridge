@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -161,10 +162,11 @@ type PlayerConfig struct {
 	// unread is why the block did not read, naming the field and its line
 	// and never quoting a value.
 	unread string
-	// source is a digest of the block as the file writes it, set where it did
-	// not read (blockSource): what tells two such blocks apart, since one
-	// whose aliases copy too much keeps no text to compare (B535's round 2).
-	// A digest, never the text, which can hold a serial.
+	// source is a digest of what the block holds, never of how the file
+	// writes it, set where it did not read (blockSource): what tells two such
+	// blocks apart, since one whose aliases copy too much keeps no text to
+	// compare (B535's rounds 2 and 3). A digest, never the text, which can
+	// hold a serial.
 	source [sha256.Size]byte
 }
 
@@ -401,41 +403,55 @@ func (p *PlayerConfig) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
-// blockSource is a digest of the block n as the file writes it: every node of
-// the block, and of each node an alias in it names (the anchors it rests on,
-// wherever they stand), by kind, tag, style, anchor, value, comments and
-// children, in the order they come; never by where it stands in the file, so
-// a line added above it changes nothing. Each node is written once, a node met
-// again written as such, and an alias is never expanded, so an alias bomb
-// costs the file's size and no more.
+// blockSource is a digest of what the block n holds, never of how the file
+// writes it (B535's round 3): each node by its kind, its resolved tag
+// (ShortTag), its value and its children, in the order they come, and never
+// by its comments, its style, its anchor's name or where it stands in the
+// file. An alias is followed to the node it names, wherever that stands, and
+// a node met again is written as a reference to the order it was first met
+// in, so an alias moved to another anchor changes the digest and an anchor
+// renamed with its aliases does not. Each token starts with its type, and its
+// strings and its list of children are framed by their lengths, so no two
+// trees write alike. Each node is written once and each alias where it
+// stands, as its node the first time and as a reference after, so an alias
+// bomb costs the file's size and no more; the walk keeps a stack of its own,
+// meeting the nodes in the order a walk down from the block does.
 func blockSource(n *yaml.Node) [sha256.Size]byte {
 	h := sha256.New()
-	seen := map[*yaml.Node]bool{}
-	queue := []*yaml.Node{n}
-	var write func(m *yaml.Node)
-	write = func(m *yaml.Node) {
-		if seen[m] {
-			fmt.Fprintf(h, "again\n")
-			return
-		}
-		seen[m] = true
-		fmt.Fprintf(h, "%d %q %d %q %q %q %q %q %d\n", m.Kind, m.Tag, m.Style, m.Anchor, m.Value,
-			m.HeadComment, m.LineComment, m.FootComment, len(m.Content))
-		if m.Kind == yaml.AliasNode {
-			if m.Alias != nil {
-				queue = append(queue, m.Alias)
-			}
-			return
-		}
-		for _, c := range m.Content {
-			write(c)
-		}
+	var token []byte
+	framed := func(s string) {
+		token = binary.AppendUvarint(token, uint64(len(s)))
+		token = append(token, s...)
 	}
-	for len(queue) > 0 {
-		m := queue[0]
-		queue = queue[1:]
-		fmt.Fprintf(h, "tree\n")
-		write(m)
+	order := map[*yaml.Node]uint64{}
+	stack := []*yaml.Node{n}
+	for len(stack) > 0 {
+		m := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		token = token[:0]
+		if m.Kind == yaml.AliasNode {
+			if m.Alias == nil {
+				h.Write(append(token, 'a'))
+				continue
+			}
+			m = m.Alias
+		}
+		if first, met := order[m]; met {
+			token = append(token, 'r')
+			token = binary.AppendUvarint(token, first)
+			h.Write(token)
+			continue
+		}
+		order[m] = uint64(len(order))
+		token = append(token, 'n')
+		token = binary.AppendUvarint(token, uint64(m.Kind))
+		framed(m.ShortTag())
+		framed(m.Value)
+		token = binary.AppendUvarint(token, uint64(len(m.Content)))
+		h.Write(token)
+		for i := len(m.Content) - 1; i >= 0; i-- {
+			stack = append(stack, m.Content[i])
+		}
 	}
 	var sum [sha256.Size]byte
 	copy(sum[:], h.Sum(nil))
