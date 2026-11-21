@@ -4,15 +4,17 @@ The two follow-ups the embedded Tailscale node's B749 work left open, on `fix/br
 main `af8f9a72`: B829, a registered node's name read under the keys upstream itself writes, and
 B830, a consenting node's log uploads outliving a stop that gave up on its start. Both premises were
 read again at that base and in tailscale.com v1.104.5, the version `go.mod` pins (the backlog
-entries were written against v1.104.2), and both held. B829 adds a test of code that already did
-what it says, so it has no red; B830's tests were committed before its fix with the names they need
+entries were written against v1.104.2). B830's held, and B830 lands. B829's case, a test of code
+that already did what it says and so with no red, can contact a link-local metadata service
+through upstream's start, so round 2 took it out and B829 stays open (### Round 2). B830's tests were
+committed before its fix with the names they need
 and today's behaviour, and run red at that commit. The rule changed is `cli-serve.md`'s tsnet entry,
 condensed to its bold title, its Don'ts and its tests (its whole line, edited, is its History twin
 in `ops/History-rules-cli-serve.md`'s B749 section), with the long form in the same commit.
 
-### B829: the keys upstream writes (commit 19bb8e63)
+### B829: the keys upstream writes (commit 19bb8e63, taken out in round 2)
 
-`TestTheStateUpstreamWritesForARegisteredNodeReadsAsRegistered` (`internal/tsnet`) registers a node
+The case 19bb8e63 added (`internal/tsnet`, gone since round 2) registers a node
 with upstream's own `tsnet.Server`, built as `startUnlocked` builds the bridge's (its state dir of
 its own, upstream's file store, not ephemeral) but for its control server: an in-process
 `tstest/integration/testcontrol.Server` on an `httptest` listener on loopback, which registers any
@@ -21,8 +23,10 @@ its local client (`WatchIPNBus` with `NotifyInitialState`) until its state is St
 every wait on a context that ends at the test binary's deadline less 30 s, or less half of what is
 left when that is less; closes the node; and asks `readNodeState`, which answers registered, with
 the hostname the server was given. A start of the bridge's over that state then keeps the name.
-Upstream wrote `_current-profile`, `_machinekey`, `_profiles` and `profile-<id>` on Linux; CI's
-windows-latest and macos-latest jobs run the case there, which is the Windows check B829 asked for.
+Upstream wrote `_current-profile`, `_machinekey`, `_profiles` and `profile-<id>` on Linux. At
+e90f3f07 CI's `test (windows-latest)` and `test (macos-latest)` jobs passed `internal/tsnet` with the
+case in it: a reading made once, not the standing check B829 asked for, since round 2 took the case
+out.
 
 - **Starting, not Running.** The case gives the control server a DERP map with no region, so the
   node dials no relay and sends no STUN probe, and ipnlocal moves a node from Starting to Running
@@ -32,7 +36,7 @@ windows-latest and macos-latest jobs run the case there, which is the Windows ch
   `setControlClientStatusLocked` writes the profile (local.go, 2006) before it moves the state
   machine (2161). upstream's own in-process DERP and STUN servers (`tstest/integration`'s
   `RunDERPAndSTUN`) need modules the build's module graph does not hold, so the case uses none.
-- **Nothing beyond loopback.** Upstream's `startLogger` returns at once in a test binary
+- **Not loopback alone (corrected in round 2).** Upstream's `startLogger` returns at once in a test binary
   (tsnet/tsnet.go, 1101 to 1103), so no log transport is built. The portmapper would probe the LAN's
   gateway: its knob is registered (net/portmapper/portmapper.go, 45 and 87 to 95), so the case sets
   `TS_DISABLE_PORTMAPPER` through `envknob.SetenvForTest`, which restores it. An auth key of the
@@ -41,12 +45,14 @@ windows-latest and macos-latest jobs run the case there, which is the Windows ch
   `strace -f -qq -e trace=connect,sendto,sendmsg,sendmmsg,bind` the test binary connected and sent
   only to loopback, unix and netlink sockets; the same case built without the knob
   (`go test -c -overlay`) sent four NAT-PMP and PCP probes to the LAN's gateway on port 5351. One
-  upstream read the case cannot turn off: on a Linux host whose DMI names a Hyper-V or an old GCE
-  machine, `hostinfo` asks the link-local metadata address once per process, with a 2 s bound
-  (util/cloudenv/cloudenv.go, 133 to 237), as the production binary does; the case reads nothing of
-  its answer. The host these runs were made on is not such a machine, so the audit saw none.
-- **Runs.** `go test -race -count=20 -run '^TestTheStateUpstreamWritesForARegisteredNodeReadsAsRegistered$'
-  ./internal/tsnet/`: 20 passes in 4.9 s, and the whole package under `-race` beside it. Two negative
+  upstream read the case cannot turn off, which round 1 took for acceptable: on a Linux guest whose
+  DMI names Hyper-V, Azure or an old GCE machine, `hostinfo.New` can send an HTTP PUT to the
+  link-local metadata address, bounded at 2 s (util/cloudenv/cloudenv.go, 133 to 237), as the
+  production binary does; the case reads nothing of its answer. The host these runs were made on is
+  not such a machine, so the audit saw none; but the case did not enforce loopback confinement, which
+  is why round 2 took it out.
+- **Runs.** `go test -race -count=20 -run '<the case 19bb8e63 added>' ./internal/tsnet/`: 20 passes
+  in 4.9 s, and the whole package under `-race` beside it. Two negative
   controls by `go test -overlay`, each predicted before it ran, went red at the case's
   `readNodeState` assertion and nowhere else: the current profile read under
   `ipn.ServerModeStartKey`, the key a start that is not OS-neutral would take (`registered:false`),
@@ -141,13 +147,59 @@ a held start's join). The gate's runs are made on this entry's own commit, so th
 
 `cli-serve.md`'s tsnet entry held 5,719 bytes of a file at 99,825 of its 100,000, and
 `move_entry.py --largest` offered one candidate, which it refuses (a 729-character Don't sentence).
-The entry's line is now its bold title (which gains the stop), its date (which names B829's check and
-B830), its bolded Don't sentence (which gains the stop's Don'ts), its tests and its evidence, 3,176
-bytes; its whole line, edited, is its History twin, where the long form gains *The abandoned start*
-and B829's check, and B828's section no longer names B829 as open. The sentences that said B830 stays
+The entry's line is now its bold title (which gains the stop), its date (which named B829's check and
+B830, and since round 2 names B830 alone), its bolded Don't sentence (which gains the stop's Don'ts),
+its tests and its evidence, 3,176 bytes in round 1; its whole line, edited, is its History twin,
+where the long form gains *The abandoned start*. Round 1 also gave the long form B829's check and
+took B829 out of B828's section's open items; round 2 undid both. The sentences that said B830 stays
 open (`internal/tsnet/uploads.go`, `internal/config/config.go`, the console's Settings help, the
 README, `ops/settings-apply-semantics.md` and the v0.2.4 release notes draft) now say the stop.
 `NoLogsEnv`'s doc and the History's *What uploaded.* said the transport is a no-op "while" the
 variable reads true, "live": upstream chooses it as it is built (logpolicy/logpolicy.go, 894 to
 897), which is why the stop turns logtail's switch and not the variable alone, and both now say so,
 in a commit after the gate's run, of comments and records alone.
+
+### Round 2: part A stops, part B lands as it is
+
+No item of this round changes what the code does, so none has a red.
+
+The finding, read by line at e90f3f07 in tailscale.com v1.104.5. The case 19bb8e63 added ran
+upstream's real start, whose backend start (tsnet/tsnet.go, 1001) calls `hostinfo.New`
+(ipn/ipnlocal/local.go, 3120), and `hostinfo.New` reads `cloudenv.Get` with no test guard
+(hostinfo/hostinfo.go, 66). On Linux `cloudenv` reads the machine's DMI: a `product_name` of "Virtual
+Machine" or a `bios_vendor` of "Microsoft Corporation" (a Hyper-V or Azure guest), or a `product_name`
+of "Google" (an old GCE one), makes it send an HTTP PUT to `169.254.169.254`, bounded at 2 s
+(util/cloudenv/cloudenv.go, 139 to 164 and 178 to 202); on Windows and macOS it never asks (135 to 138,
+166 to 172). It caches its answer with a separate atomic load and store (113 to 126), not a once-only
+initializer, so callers that come first together can each ask, and later ones read the cache. CI's
+`test -race (rest)` shard runs `internal/tsnet` on ubuntu-latest (`.github/workflows/gate.yml`, 186 to
+240), whose job log for this PR (run 44948886440) names its machine an Azure one, which does not by
+itself establish the DMI values `cloudenv` reads. So the case can contact the metadata service, and
+it does not enforce loopback confinement.
+
+Why part A stopped. The brief bound part A to loopback, nothing dialling beyond it, and its exit
+condition stops part A where its case needs more; a stop in part A stops part A alone, part B still
+landing, and the records close only what the PR closes. Upstream v1.104.5 offers no way to keep
+`hostinfo.New` from asking in a test binary built with the repository's tags: no knob, no setter, no
+test guard, the cache unexported, and the one hook, `hostinfo.RegisterHostinfoNewHook`, runs after the
+read (hostinfo.go, 40 to 42 and 70 to 72). The one off switch is the `ts_omit_cloud` build tag, which
+the Makefile's fixed `GO_TAGS` does not carry. A skip by OS or by DMI, a build tag of the case's own,
+or anything set in the environment for it would each be another fix, the owner's to choose. So the
+case went (78d7a12c, its helpers with it, nothing else using them), and B829 stays open. What part A
+needs: a way upstream offers to keep `hostinfo.New` from asking the metadata address in a test binary
+built with the repository's tags.
+
+What the case showed before it went, a reading made once and no standing check: on Linux upstream
+wrote `_current-profile`, `_machinekey`, `_profiles` and `profile-<id>` for the node it registered,
+which `readNodeState` read as registered with the hostname the server was given; and at e90f3f07 CI's
+`test (windows-latest)` and `test (macos-latest)` jobs passed `internal/tsnet` with the case in it (run
+44948886440; not read again from the host this round ran on, whose reads of GitHub's API were
+refused).
+
+The records. The rule line and its History twin drop B829's date clause, the twin's clause on the keys
+upstream writes, and the case's name from both pin lists; B830's text stays. The long form's *The
+name* goes back to main's "What stays open of the reading is backlog B829", with one sentence on the
+metadata read; B828's section goes back to main's open items; and *The abandoned start*'s record
+sentence names B830, and why B829 stays open. This entry's opening, its B829 section and *The
+records* are corrected, the case called "the case 19bb8e63 added", since its name is retired and the
+citation guard reads every entry.
