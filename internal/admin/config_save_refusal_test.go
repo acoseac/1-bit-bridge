@@ -26,8 +26,11 @@ type saveRefusalBody struct {
 // requireSaveRefusal fails the test unless the response is the console's 500
 // save-config, its message saying remedy and naming nothing below root (the
 // config file's directory, which holds the lock file and the staged save
-// too), and the log holds the refusal itself, at Error, so the operator
-// still learns which file and why.
+// too), and the log holds the console's line for the refusal, at Error,
+// which carries the refusal itself (but for a file another writer left that
+// would not load, which the holder says once:
+// TestALeftUnloadableRefusalIsSaidOnceAndTheOthersKeepTheirReasons), so the
+// operator still learns which file and why.
 func requireSaveRefusal(t *testing.T, logs *loggingtest.Recorder, status int, body saveRefusalBody, root, remedy string) {
 	t.Helper()
 	if status != http.StatusInternalServerError || body.Error != errCodeSaveConfig {

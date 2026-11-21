@@ -44,6 +44,11 @@ type RuntimeConfig struct {
 	// it in (file), whatever its save then does, and nothing but a restart,
 	// a new holder, forgets one. Under mu.
 	outside []string
+	// unsaid are the settings of outside recorded at a turn that found a file
+	// the next start would not load (leftErr), which no line said then: the
+	// turn that next finds the file loading says each once, and empties it
+	// (backlog B974). Under mu.
+	unsaid []string
 	// outsideEnv is the same record for the settings a BRIDGE_* variable set
 	// at the start (Config.envSet), sorted: B761's rule writes them
 	// (filedEnvValues, filedSwitches), so they serve the conflict check alone,
@@ -214,7 +219,7 @@ func (r *RuntimeConfig) RecordFile(file BootFile, raw []byte) {
 	r.target, r.unresolved = file.target, !file.resolved
 	// The snapshot was read from raw: what was recorded against other bytes
 	// is a record of another read (backlog B535).
-	r.outside, r.outsideEnv = nil, nil
+	r.outside, r.unsaid, r.outsideEnv = nil, nil, nil
 	r.leftErr, r.leftClashes = nil, nil
 }
 

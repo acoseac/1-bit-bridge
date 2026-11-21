@@ -191,10 +191,26 @@ func changedOutsideRefusal(e *config.ChangedOutsideError) string {
 // writeSaveConfigErr answers a save of the config file that was refused or
 // failed: 500 save-config, with what to do in words (saveConfigRefusal), and
 // the error itself in the log, where the config file may be named (the
-// bridge's own files in fault lines).
+// bridge's own files in fault lines). The one refusal whose error the line
+// leaves out is the holder's of a file another writer left that would not
+// load at the next start (leftUnloadable): the holder says why once for the
+// bytes it found, naming the file and no value, and refuses every save after
+// with the error it kept, which the line would repeat at each (backlog B974).
 func writeSaveConfigErr(w http.ResponseWriter, err error) {
-	logger.Error("admin: the config file was not saved", "err", err)
+	if leftUnloadable(err) {
+		logger.Error("admin: the config file was not saved", "why", "the file another writer left would not load at the bridge's next start, as the config's line said once when it was found")
+	} else {
+		logger.Error("admin: the config file was not saved", "err", err)
+	}
 	writeError(w, http.StatusInternalServerError, errCodeSaveConfig, saveConfigRefusal(err))
+}
+
+// leftUnloadable reports whether err, wrapped or not, is the holder's refusal
+// of a save over a file another writer left that would not load at the next
+// start (config.OutsideLeftUnloadable).
+func leftUnloadable(err error) bool {
+	var outside *config.ChangedOutsideError
+	return errors.As(err, &outside) && outside.Kind == config.OutsideLeftUnloadable
 }
 
 // --- response shapes ---
