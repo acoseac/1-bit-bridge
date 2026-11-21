@@ -3696,10 +3696,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// The bytes the config is read from, and the file its name opened for
 	// that read, resolved at the read (config.LoadFileAt), are kept for the
 	// live holder (RecordFile, below): a console save then writes only into
-	// that file, only over a file that still holds them, and refuses one
-	// another writer changed since, or a name repointed to another file. A
-	// name no resolution could follow at the read boots on the read through
-	// the name, and every console save is refused until a restart.
+	// that file, refuses a name repointed to another file, and, over a file
+	// another writer changed since, keeps each setting that writer changed as
+	// the file holds it (backlog B535). A name no resolution could follow at
+	// the read boots on the read through the name, and every console save is
+	// refused until a restart.
 	cfg, cfgFile, cfgRead, cfgBootFile, err := loadServeConfigFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
@@ -4968,11 +4969,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// The live holder is told the bytes its snapshot was read from, and the
 	// file the config's name opened for that read, resolved at the read and
 	// not here, before anything can save through it: a console save then
-	// writes only into that file, only over a file that still holds those
-	// bytes or that it wrote itself, and refuses one another writer changed
-	// meanwhile, or a name a link repointed since (config.RuntimeConfig.Update,
-	// backlog B506; resolved here, a link repointed during the boot above
-	// would have the holder record a file serve never read).
+	// writes only into that file, refuses a name a link repointed since, and
+	// over a file another writer changed meanwhile writes each setting that
+	// writer changed as the file holds it, refusing a change of one of them
+	// (config.RuntimeConfig.Update, backlogs B506 and B535; resolved here, a
+	// link repointed during the boot above would have the holder record a
+	// file serve never read).
 	apiSrv.ConfigHolder().RecordFile(cfgBootFile, cfgRead)
 	// Demo mode (read-only public demo bridge): the three user-data
 	// stores + the device registrar are deliberately NOT wired, so

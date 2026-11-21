@@ -242,33 +242,64 @@ func TestBindKeepsALibraryAddThatLandsInItsWindow(t *testing.T) {
 	}
 }
 
-// TestServeRefusesASettingsSaveOverAConfigAnotherWriterChanged: a console
-// save of a running serve reads bridge.yaml again under the lock, and when
-// another writer changed it since serve read it (a library add whose probe
-// found no bridge a moment before serve started, init, an edit), the save is
-// refused and the file is left as that writer left it. Until B506 the
-// console wrote its own copy over it.
-func TestServeRefusesASettingsSaveOverAConfigAnotherWriterChanged(t *testing.T) {
-	b := startConsoleBridge(t, "libraryName: Before\n", nil)
-	cfgPath := filepath.Join(filepath.Dir(b.dataDir), "bridge.yaml")
+// appendToConfigFile appends text to the config file at cfgPath, as an edit
+// beside a running serve does.
+func appendToConfigFile(t *testing.T, cfgPath, text string) {
+	t.Helper()
 	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString("scanIntervalSec: 7200\n"); err != nil {
+	if _, err := f.WriteString(text); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestServeMergesASettingsSaveIntoAConfigAnotherWriterChanged: a console
+// save of a running serve reads bridge.yaml again under the lock, and when
+// another writer changed it since serve read it (a library add whose probe
+// found no bridge a moment before serve started, init, an edit), the save
+// lands and keeps that writer's change beside its own, which the next start
+// loads (backlog B535). Until B506 the console wrote its own copy over it,
+// and until B535 the save was refused until a restart, whatever it changed.
+func TestServeMergesASettingsSaveIntoAConfigAnotherWriterChanged(t *testing.T) {
+	b := startConsoleBridge(t, "libraryName: Before\n", nil)
+	cfgPath := filepath.Join(filepath.Dir(b.dataDir), "bridge.yaml")
+	appendToConfigFile(t, cfgPath, "scanIntervalSec: 7200\n")
+
+	if status, body := patchSettings(t, b, `{"libraryName":"After"}`); status != http.StatusOK {
+		t.Errorf("the console's save over another writer's change of another setting: %d %s", status, body)
+	}
+	after, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LibraryName != "After" || after.ScanIntervalSec != 7200 {
+		t.Errorf("the file loads libraryName %q and scanIntervalSec %d, want the console's name and the other writer's 7200",
+			after.LibraryName, after.ScanIntervalSec)
+	}
+}
+
+// TestServeRefusesASettingsSaveOfASettingAnotherWriterChanged: a console save
+// of a setting another writer changed in bridge.yaml since serve read it is
+// refused: the console made its change from a value it never read, so the
+// file is left as that writer left it, and the answer names the setting and
+// says to restart, to load the file, before making the change again.
+func TestServeRefusesASettingsSaveOfASettingAnotherWriterChanged(t *testing.T) {
+	b := startConsoleBridge(t, "libraryName: Before\n", nil)
+	cfgPath := filepath.Join(filepath.Dir(b.dataDir), "bridge.yaml")
+	appendToConfigFile(t, cfgPath, "scanIntervalSec: 7200\n")
 	edited := readBytes(t, cfgPath)
 
-	status, body := patchSettings(t, b, `{"libraryName":"After"}`)
+	status, body := patchSettings(t, b, `{"scanIntervalSec":60}`)
 	if status == http.StatusOK {
-		t.Errorf("the console's save went through over a file another writer changed: %s", body)
+		t.Errorf("the console's save of a setting another writer changed went through: %s", body)
 	}
-	if !strings.Contains(body, "changed") || !strings.Contains(body, "restart") {
-		t.Errorf("the refusal does not say the file changed and what to do: %d %s", status, body)
+	if !strings.Contains(body, "scanIntervalSec") || !strings.Contains(body, "restart the bridge") || strings.Contains(body, "7200") {
+		t.Errorf("the refusal does not name the setting and say what to do, or carries its value: %d %s", status, body)
 	}
 	if after := readBytes(t, cfgPath); !bytes.Equal(after, edited) {
 		t.Errorf("the console wrote over the other writer's change; the file is\n%s", after)

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -160,6 +162,12 @@ type PlayerConfig struct {
 	// unread is why the block did not read, naming the field and its line
 	// and never quoting a value.
 	unread string
+	// source is a digest of what the block holds, never of how the file
+	// writes it, set where it did not read (blockSource): what tells two such
+	// blocks apart, since one whose aliases copy too much keeps no text to
+	// compare (B535's rounds 2 and 3). A digest, never the text, which can
+	// hold a serial.
+	source [sha256.Size]byte
 }
 
 // PlayerDevice is output.player.device: the binding that says which DAC the
@@ -388,11 +396,66 @@ func (p *PlayerConfig) UnmarshalYAML(n *yaml.Node) error {
 		return nil
 	}
 	if kept, ok := keepable(n); ok {
-		*p = PlayerConfig{written: kept, unread: r.problem}
+		*p = PlayerConfig{written: kept, unread: r.problem, source: blockSource(n)}
 	} else {
-		*p = PlayerConfig{unread: r.problem + notKept}
+		*p = PlayerConfig{unread: r.problem + notKept, source: blockSource(n)}
 	}
 	return nil
+}
+
+// blockSource is a digest of what the block n holds, never of how the file
+// writes it (B535's round 3): each node by its kind, its resolved tag
+// (ShortTag), its value and its children, in the order they come, and never
+// by its comments, its style, its anchor's name or where it stands in the
+// file. An alias is followed to the node it names, wherever that stands, and
+// a node met again is written as a reference to the order it was first met
+// in, so an alias moved to another anchor changes the digest and an anchor
+// renamed with its aliases does not. Each token starts with its type, and its
+// strings and its list of children are framed by their lengths, so no two
+// trees write alike. Each node is written once and each alias where it
+// stands, as its node the first time and as a reference after, so an alias
+// bomb costs the file's size and no more; the walk keeps a stack of its own,
+// meeting the nodes in the order a walk down from the block does.
+func blockSource(n *yaml.Node) [sha256.Size]byte {
+	h := sha256.New()
+	var token []byte
+	framed := func(s string) {
+		token = binary.AppendUvarint(token, uint64(len(s)))
+		token = append(token, s...)
+	}
+	order := map[*yaml.Node]uint64{}
+	stack := []*yaml.Node{n}
+	for len(stack) > 0 {
+		m := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		token = token[:0]
+		if m.Kind == yaml.AliasNode {
+			if m.Alias == nil {
+				h.Write(append(token, 'a'))
+				continue
+			}
+			m = m.Alias
+		}
+		if first, met := order[m]; met {
+			token = append(token, 'r')
+			token = binary.AppendUvarint(token, first)
+			h.Write(token)
+			continue
+		}
+		order[m] = uint64(len(order))
+		token = append(token, 'n')
+		token = binary.AppendUvarint(token, uint64(m.Kind))
+		framed(m.ShortTag())
+		framed(m.Value)
+		token = binary.AppendUvarint(token, uint64(len(m.Content)))
+		h.Write(token)
+		for i := len(m.Content) - 1; i >= 0; i-- {
+			stack = append(stack, m.Content[i])
+		}
+	}
+	var sum [sha256.Size]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
 }
 
 // The bounds on what the aliases of a block kept as written may copy
@@ -684,6 +747,18 @@ func (e *OpenHomePortClashError) Error() string {
 // save while the opt-in is on, each refusing the save over a clash, so the
 // next start finds none.
 func (c *Config) OpenHomePortClash() error {
+	if clashes := c.openHomePortClashes(); len(clashes) > 0 {
+		return &OpenHomePortClashError{Setting: clashes[0]}
+	}
+	return nil
+}
+
+// openHomePortClashes is the setting of each other listener of serve whose
+// port is the OpenHome surface's, in the order OpenHomePortClash asks them,
+// which refuses for the first: the live holder compares the ones a merged
+// save would have with the ones the file another writer left has, and
+// refuses only one the save adds (B535's round 2).
+func (c *Config) openHomePortClashes() []string {
 	port := c.Output.Player.EffectiveOpenHomePort()
 	if port == 0 {
 		return nil
@@ -695,20 +770,20 @@ func (c *Config) OpenHomePortClash() error {
 	if admin == "" {
 		admin = DefaultAdminAddress
 	}
-	clash := func(setting string) error { return &OpenHomePortClashError{Setting: setting} }
+	var clashes []string
 	for _, other := range []struct{ setting, addr string }{
 		{"listenAddress", listen},
 		{"adminAddress", admin},
 		{"dlna.listenAddress", c.DLNA.EffectiveDLNAListenAddress()},
 	} {
 		if p, ok := namedPort(other.addr); ok && p == port {
-			return clash(other.setting)
+			clashes = append(clashes, other.setting)
 		}
 	}
 	if c.Output.EffectiveLoopbackPort() == port {
-		return clash("output.loopbackPort")
+		clashes = append(clashes, "output.loopbackPort")
 	}
-	return nil
+	return clashes
 }
 
 // namedPort is the port a host:port address names, false for none: one

@@ -1,11 +1,11 @@
 package config
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -24,17 +24,44 @@ type RuntimeConfig struct {
 	// silently drop the other's fields from both bridge.yaml and the
 	// final live snapshot (2026-07-21 review finding M13).
 	mu sync.Mutex
-	// file is the config file's bytes as this holder last read them for
-	// the live snapshot (RecordFile) or wrote them (Update), and fileKnown
-	// whether it has either; target is that file, as a turn resolves its
-	// name (the target of a link at its last element), and unresolved that
-	// serve's boot read could resolve the name at none of its reads, so
-	// that there is no file the holder may save into (target is never ""
-	// once fileKnown, unless unresolved). All under mu.
+	// file is the config file's bytes as this holder last recorded them:
+	// read for the live snapshot (RecordFile), found by a turn whose bytes
+	// differ, whatever its save then does (compareTurn, backlog B535), or
+	// written by a save (Update); fileKnown whether it has any; target is
+	// that file, as a turn resolves its name (the target of a link at its
+	// last element), and unresolved that serve's boot read could resolve the
+	// name at none of its reads, so that there is no file the holder may save
+	// into (target is never "" once fileKnown, unless unresolved). All under
+	// mu.
 	file       []byte
 	fileKnown  bool
 	target     string
 	unresolved bool
+	// outside is the yaml path of each setting another writer changed in the
+	// file since the holder's snapshot was read, sorted (backlog B535): every
+	// save writes these as the file holds them, and refuses a change of one
+	// of its own. The turn that finds one records it, with the bytes it found
+	// it in (file), whatever its save then does, and nothing but a restart,
+	// a new holder, forgets one. Under mu.
+	outside []string
+	// outsideEnv is the same record for the settings a BRIDGE_* variable set
+	// at the start (Config.envSet), sorted: B761's rule writes them
+	// (filedEnvValues, filedSwitches), so they serve the conflict check alone,
+	// never fileOutside, the deployment refusal or the log line saying a
+	// change takes effect at the next start, which the variable makes false
+	// (B535's round 2). Under mu.
+	outsideEnv []string
+	// leftErr is why the file another writer left, the bytes file holds once
+	// a turn has found that writer's change, would not load as the next start
+	// would load it, with this process's environment (loadsAtNextStart), nil
+	// where it would: every save is then refused (OutsideLeftUnloadable),
+	// since no save made that file. leftClashes is the setting of each
+	// listener whose port that file's OpenHome surface sits on
+	// (openHomeClashes), which a save may keep and may not add to. Both are
+	// taken once, at the turn that finds the bytes, and again from the merged
+	// file a save writes; never per save (B535's rounds 2 and 3). Under mu.
+	leftErr     error
+	leftClashes []string
 	// changedMu guards changed, the channel the next Store closes
 	// (Changed), nil until someone asks for it.
 	changedMu sync.Mutex
@@ -44,20 +71,101 @@ type RuntimeConfig struct {
 // ErrChangedOutside is what a *ChangedOutsideError matches.
 var ErrChangedOutside = errors.New("config: the config file changed outside this holder")
 
-// ChangedOutsideError is Update's refusal of a save over a config file that
-// no longer holds what the holder last read or wrote, another writer saved it
-// since, or of one whose name now opens another file than the one the holder
-// read, a link repointed. It names the file and nothing it holds.
+// OutsideKind is what made the live holder refuse a save of the config file
+// once another writer had changed it, or its name had moved
+// (ChangedOutsideError.Kind). A change another writer made to a setting the
+// save does not change refuses nothing on its own (backlog B535): the save
+// writes it as the file holds it.
+type OutsideKind int
+
+// The refusals of a *ChangedOutsideError.
+const (
+	// OutsideInTurn: another writer changed the file while the save had its
+	// turn (a writer that takes no turns: an edit, a bridge older than the
+	// lock), as the save's comparison before its rename or a check found.
+	// A save made again merges it.
+	OutsideInTurn OutsideKind = iota
+	// OutsideRemoved: the file the holder read is gone.
+	OutsideRemoved
+	// OutsideRepointed: the config's name opens another file than the one
+	// the holder read (a link repointed), at the turn or within it.
+	OutsideRepointed
+	// OutsideUndecodable: the file another writer left does not decode as
+	// Load decodes it.
+	OutsideUndecodable
+	// OutsideDeployment: another writer changed a deployment setting, which
+	// decides what the console may change: every save is refused until a
+	// restart.
+	OutsideDeployment
+	// OutsideConflict: the save changes a setting another writer changed,
+	// from a value it never read.
+	OutsideConflict
+	// OutsideUnloadable: the file the save would write, the settings
+	// another writer changed beside the save's, would not load as it is at
+	// the next start, where the file that writer left would: the save's own
+	// change makes it so (a new OpenHome port clash among them).
+	OutsideUnloadable
+	// OutsideLeftUnloadable: the file another writer left would not load as
+	// it is at the next start, whatever the save changes: the file is to be
+	// corrected, since a restart would fail on it (B535's round 2).
+	OutsideLeftUnloadable
+)
+
+// ChangedOutsideError is the live holder's refusal of a save over a config
+// file another writer changed since the holder last recorded its bytes, of one
+// gone, or of one whose name now opens another file than the one the holder
+// read, a link repointed; Kind says which. It names the file, the settings it
+// is about by their yaml paths, and nothing the file holds.
 type ChangedOutsideError struct {
 	// Path is the config file.
 	Path string
+	// Kind is what refused the save.
+	Kind OutsideKind
+	// Settings are the yaml paths of the settings it is about, sorted: the
+	// settings another writer changed that the save changes too (a
+	// conflict), the deployment settings another writer changed, and every
+	// setting another writer changed beside a file the save would leave that
+	// the next start would refuse.
+	Settings []string
+	// Err is why the next start would refuse the file the save would write
+	// (OutsideUnloadable) or the one another writer left
+	// (OutsideLeftUnloadable), as Load says it, which names no value.
+	Err error
 }
 
 func (e *ChangedOutsideError) Error() string {
-	return fmt.Sprintf("%s was changed or removed by another writer since this bridge read it "+
-		"(a bridge command such as library add or init, or an edit), or now opens another file (a link at it repointed), "+
-		"so this change was not saved, and the file keeps what that writer left: restart the bridge to load the file, "+
-		"then make the change again", e.Path)
+	settings, them := strings.Join(e.Settings, ", "), "it"
+	if len(e.Settings) > 1 {
+		them = "them"
+	}
+	const restart = "restart the bridge to load the file, then make the change again"
+	switch e.Kind {
+	case OutsideRemoved:
+		return fmt.Sprintf("%s was removed since this bridge read it, so this change was not saved: put the file back, "+
+			"then %s", e.Path, restart)
+	case OutsideRepointed:
+		return fmt.Sprintf("%s now opens another file than the one this bridge read (a link at it repointed), so this "+
+			"change was not saved: %s", e.Path, restart)
+	case OutsideUndecodable:
+		return fmt.Sprintf("%s does not read as a bridge config as another writer left it, so this change was not saved: "+
+			"correct the file, then %s", e.Path, restart)
+	case OutsideDeployment:
+		return fmt.Sprintf("another writer changed the deployment settings in %s (%s), which decide what this console may "+
+			"change, so this change was not saved, and the file keeps what that writer left: %s", e.Path, settings, restart)
+	case OutsideConflict:
+		return fmt.Sprintf("another writer changed %s in %s since this bridge read it, and this change changes %s too, so "+
+			"it was not saved, and the file keeps what that writer left: %s", settings, e.Path, them, restart)
+	case OutsideUnloadable:
+		return fmt.Sprintf("this change, beside the settings another writer changed in %s (%s), would leave a file this "+
+			"bridge would not load at its next start (%v), so it was not saved, and the file keeps what that writer left: %s",
+			e.Path, settings, e.Err, restart)
+	case OutsideLeftUnloadable:
+		return fmt.Sprintf("%s, as another writer left it, would not load at this bridge's next start (%v), so this change "+
+			"was not saved: correct the file", e.Path, e.Err)
+	}
+	return fmt.Sprintf("%s was changed by another writer while this save had its turn at it (an edit, or a bridge "+
+		"older than the config's lock), so this change was not saved, and the file keeps what that writer left: make the "+
+		"change again, or restart the bridge to load the file first", e.Path)
 }
 
 // Is makes a *ChangedOutsideError match ErrChangedOutside.
@@ -104,6 +212,10 @@ func (r *RuntimeConfig) RecordFile(file BootFile, raw []byte) {
 	defer r.mu.Unlock()
 	r.file, r.fileKnown = append([]byte(nil), raw...), true
 	r.target, r.unresolved = file.target, !file.resolved
+	// The snapshot was read from raw: what was recorded against other bytes
+	// is a record of another read (backlog B535).
+	r.outside, r.outsideEnv = nil, nil
+	r.leftErr, r.leftClashes = nil, nil
 }
 
 // Changed returns a channel that the next Store closes, the Store an
@@ -178,27 +290,44 @@ func (r *RuntimeConfig) Clone() *Config {
 // and before fn runs, and in it the file is read again: the snapshot was
 // read before the turn, so it is changed and saved only into the file this
 // holder read (RecordFile: a name whose link was repointed since resolves to
-// another file), only while it still holds the bytes this holder last read or
-// wrote, and the save compares once more before each attempt at its rename
-// (Save's own comparison). Over a file another writer changed since (a
-// library add, init, a restore or an edit beside the running bridge), nothing
-// is saved or stored and a *ChangedOutsideError says so: the file keeps that
-// writer's change, which the bridge loads when it next starts, and nothing
-// reloads it now. So does a name the turn finds repointed, a *NameMovedError
-// (the link moved while the save waited for the lock, before fn's check, or
-// while the save staged), and nothing is tried again on the file the name
-// opens now. A lock another writer holds past LockWait is a *BusyError. A
-// holder whose boot read resolved the config's name at none of its reads
-// (RecordFile of no file) cannot say which file its snapshot came from, and
-// refuses every save with a *BootUnresolvedError before it takes a turn,
-// until a restart reads the file again; a CLI writer's own turn, which
-// resolves the name itself, is not the holder's and is not refused.
-// Each refusal comes before fn runs, so a caller that changes something
-// besides the config in fn (the console's root changes change the library
-// index there) changes nothing when the save is refused before it, and such a
-// caller asks the turn's comparison again just before that change
-// (UpdateChecked); only a writer that takes no turns landing during that
-// change itself, or the save's staging, is refused after it has run.
+// another file), and over a file another writer changed since (a library add,
+// init, a restore or an edit beside the running bridge) it merges (backlog
+// B535, compareTurn): the turn's bytes and the ones this holder last recorded
+// (read at the boot or at a turn that found them, or written) are read as Load
+// reads a file for its settings, every setting the two set differently is
+// recorded, at the turn that finds it and until a restart, and every save
+// writes each recorded setting as the turn's file holds it, beside its own
+// change, but one a BRIDGE_* variable set at the start, which B761's rule
+// writes, while the snapshot it publishes is its own: nothing of the other
+// writer's goes live, and the bridge loads it when it next starts. Nothing is
+// saved or stored, and a *ChangedOutsideError says why, for a file gone, a
+// name the turn finds repointed, a file that does not decode, a recorded
+// deployment setting, a file that writer left that the next start would
+// refuse (loadsAtNextStart: to be corrected, a restart failing on it), a
+// change of a recorded setting, a variable's included (the save made it from
+// a value it never read), and a file the save would write that the next start
+// would refuse where the one that writer left would not, an OpenHome port
+// clash the save adds among them: the file keeps that writer's change, and
+// nothing reloads it now. The save compares once more before each attempt at
+// its rename (Save's own comparison), so a writer that takes no turns landing in
+// the turn is refused too (a *ChangedOutsideError, OutsideInTurn), and the
+// next save merges what it left. A name repointed while the save waited for
+// the lock, at fn's check or while the save staged is a *ChangedOutsideError
+// too, and nothing is tried again on the file the name opens now. A lock
+// another writer holds past LockWait is a *BusyError. A holder whose boot read
+// resolved the config's name at none of its reads (RecordFile of no file)
+// cannot say which file its snapshot came from, and refuses every save with a
+// *BootUnresolvedError before it takes a turn, until a restart reads the file
+// again; a CLI writer's own turn, which resolves the name itself, is not the
+// holder's and is not refused. Each refusal of the file comes before fn runs,
+// so a caller that changes something besides the config in fn (the console's
+// root changes change the library index there) changes nothing when the save
+// is refused before it, and such a caller sets every setting its change makes
+// on the clone first and asks the turn's check just before that change
+// (UpdateChecked), which refuses a change of a recorded setting and a file the
+// next start would refuse too; only a writer that takes no turns landing
+// during that change itself, or the save's staging, is refused after it has
+// run.
 //
 // When fn returns an error the clone is discarded: nothing is saved
 // or stored, and fn's error is returned verbatim. A Save failure
@@ -211,13 +340,25 @@ func (r *RuntimeConfig) Update(path string, fn func(*Config) error) error {
 	return r.UpdateChecked(path, func(next *Config, _ func() error) error { return fn(next) })
 }
 
-// UpdateChecked is Update, handing fn as well the turn's comparison of the
-// config file, asked again when called (check, FileLock.Check): fn calls it
-// just before work of its own that a refusal of the save after it would leave
-// done, as the console's root changes do before their library index change,
-// so that a file a writer that takes no turns changed since the turn read it
-// refuses the change before that work. A check that finds the file changed is
-// a *ChangedOutsideError, which fn returns, and Update returns as it is.
+// UpdateChecked is Update, handing fn as well the turn's check, asked again
+// when called (check): the file read again and its name resolved again
+// (FileLock.Check), then, while settings another writer changed are recorded,
+// a change next has made so far of one of them, and the file the save would
+// write as the next start loads it (refuseMerge). fn calls it just before work
+// of its own that a refusal of the save after it would leave done, every
+// setting its change makes set on next first, as the console's root changes
+// set the root list before their library index change, so that a file a
+// writer that takes no turns changed since the turn read it, a change of a
+// setting another writer changed, and a merged file the next start would
+// refuse each refuse the change before that work. A check that refuses is a
+// *ChangedOutsideError, which fn returns, and Update returns as it is. The
+// change and the merged file are checked again once fn returns, before the
+// save, for every writer, whether or not it asked check. No other console
+// writer does work outside the clone in fn (the settings PATCH, the variants
+// folder, the UPnP servers and the Player page change the clone alone, the
+// Player page reading the box and the player): a writer that does takes the
+// root changes' rule, its settings set on next and check asked before that
+// work.
 func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check func() error) error) error {
 	if r == nil {
 		return errors.New("config: Update on nil RuntimeConfig")
@@ -236,26 +377,46 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 	}
 	defer l.Unlock()
 	found, ok := l.Found()
-	if r.fileKnown && (l.target != r.target || !ok || !bytes.Equal(found, r.file)) {
-		return &ChangedOutsideError{Path: path}
-	}
 	before := r.Load()
+	// The turn's bytes compared with the ones this holder last read or
+	// wrote: the settings another writer changed since are recorded, and a
+	// file the save cannot merge into is refused before fn runs.
+	if err := r.compareTurn(path, l.target, found, ok, before); err != nil {
+		return err
+	}
 	next := Clone(before)
-	check := func() error { return changedOutside(path, l.Check()) }
+	check := func() error {
+		if err := changedOutside(path, l.Check()); err != nil {
+			return err
+		}
+		_, err := r.refuseMerge(path, before, next, found)
+		return err
+	}
 	if err := fn(next, check); err != nil {
 		return err
 	}
-	// The snapshot, with the three opt-outs and every other leaf a variable
-	// set as the file is to hold them; the live values are what is
-	// published.
+	clashes, err := r.refuseMerge(path, before, next, found)
+	if err != nil {
+		return err
+	}
+	// The snapshot, with the three opt-outs, every other leaf a variable set
+	// and every setting another writer changed as the file is to hold them;
+	// the live values are what is published.
 	saved := *next
-	filedSwitches(&saved, before, found)
-	filedEnvValues(&saved, before, found)
+	r.fileSaved(&saved, before, found)
 	written, err := saved.save(l, nil)
 	if err != nil {
 		return changedOutside(path, err)
 	}
 	r.file, r.fileKnown, r.target = written, true, l.target
+	// The file as this save left it, the one the next turn compares with: it
+	// loads (a merged save's was loaded just now, with this process's
+	// environment as the file another writer left is, and refused
+	// otherwise), and its clashes are that load's, so the cache holds the
+	// merged file's load; none where nothing was merged, which no save
+	// reads before a turn that finds a change takes both again (B535's
+	// round 3).
+	r.leftErr, r.leftClashes = nil, clashes
 	r.Store(next)
 	return nil
 }
@@ -271,9 +432,8 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 // a start without the variable finds what the operator chose; a switch the
 // update changed is written as the change, off as false and on as no key.
 // The snapshot published is next, the live values. Every other leaf a
-// variable set is filedEnvValues' (B761). Only these three fields of saved
-// are set: what is saved is the snapshot the holder compared with the turn's
-// bytes.
+// variable set is filedEnvValues' (B761), and every setting another writer
+// changed fileOutside's (B535). Only these three fields of saved are set here.
 func filedSwitches(saved, before *Config, file []byte) {
 	var own struct {
 		Enrich struct {
@@ -326,9 +486,8 @@ func filedSwitch(now, was bool, filed *bool) *bool {
 // start without the variable finds what the file said. A leaf the update
 // changed is written as the change: saved, published, and set by the variable
 // again at the next start. The snapshot published is next, the live values.
-// Only those leaves of saved are set, each by assignment to its own field,
-// never through a pointer next holds; what is saved is still the snapshot the
-// holder compared with the turn's bytes.
+// Only those leaves of saved are set here, each by assignment to its own
+// field, never through a pointer next holds.
 func filedEnvValues(saved, before *Config, file []byte) {
 	if len(before.envSet) == 0 {
 		return
@@ -358,20 +517,42 @@ func filedEnvValues(saved, before *Config, file []byte) {
 	}
 }
 
-// sameValue reports whether a and b, two values of a leaf envBindings names,
-// are one setting: a list by its entries, so that an empty list is the same as
-// none (a BRIDGE_* list of separators alone loads as an empty list, and Clone
-// makes none of it), and any other leaf as reflect.DeepEqual compares it, a
-// pointer by what it points to.
+// sameValue reports whether a and b, two values of one setting (a leaf
+// envBindings names, or one settingsChanged compares), are one setting: a list
+// by its entries, so that an empty list is the same as none (a BRIDGE_* list
+// of separators alone loads as an empty list, Clone makes none of it, and Load
+// reads `[]` as it reads no key), an entry the same way, a struct whose fields
+// are all exported (an upstream server's entry) field by field, and any other
+// value as reflect.DeepEqual compares it, a pointer by what it points to.
 func sameValue(a, b reflect.Value) bool {
-	if a.Kind() != reflect.Slice {
-		return reflect.DeepEqual(a.Interface(), b.Interface())
+	switch a.Kind() {
+	case reflect.Slice:
+		if a.Len() != b.Len() {
+			return false
+		}
+		for i := range a.Len() {
+			if !sameValue(a.Index(i), b.Index(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Struct:
+		if allExported(a.Type()) {
+			for i := range a.NumField() {
+				if !sameValue(a.Field(i), b.Field(i)) {
+					return false
+				}
+			}
+			return true
+		}
 	}
-	if a.Len() != b.Len() {
-		return false
-	}
-	for i := range a.Len() {
-		if !reflect.DeepEqual(a.Index(i).Interface(), b.Index(i).Interface()) {
+	return reflect.DeepEqual(a.Interface(), b.Interface())
+}
+
+// allExported reports whether every field of t, a struct type, is exported.
+func allExported(t reflect.Type) bool {
+	for i := range t.NumField() {
+		if !t.Field(i).IsExported() {
 			return false
 		}
 	}
@@ -382,11 +563,14 @@ func sameValue(a, b reflect.Value) bool {
 // file at path, as the holder says it: a file another writer changed in the
 // turn (ErrChangedInTurn) and a name that opens another file than the turn
 // locked (ErrNameMoved), whether found when the turn is taken, at a check or
-// at the save's rename, are each a *ChangedOutsideError; any other error is
-// returned as it is.
+// at the save's rename, are each a *ChangedOutsideError (OutsideInTurn,
+// OutsideRepointed); any other error is returned as it is.
 func changedOutside(path string, err error) error {
-	if errors.Is(err, ErrChangedInTurn) || errors.Is(err, ErrNameMoved) {
-		return &ChangedOutsideError{Path: path}
+	switch {
+	case errors.Is(err, ErrNameMoved):
+		return &ChangedOutsideError{Path: path, Kind: OutsideRepointed}
+	case errors.Is(err, ErrChangedInTurn):
+		return &ChangedOutsideError{Path: path, Kind: OutsideInTurn}
 	}
 	return err
 }

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -98,12 +99,18 @@ func TestTheSettingsCarryTheUpdateCheckSwitch(t *testing.T) {
 	if code, _ := patch(map[string]any{"updateCheckEnabled": true, "updateCheckIntervalHours": -1}); code != http.StatusBadRequest {
 		t.Errorf("PATCH with an invalid cadence = %d, want 400", code)
 	}
-	// ...and at its save (the file changed outside the holder).
-	if err := os.WriteFile(cfgPath, append(mustRead(t, cfgPath), []byte("# edited outside\n")...), 0o600); err != nil {
+	// ...and at its save (another writer changed the switch in the file
+	// since: backlog B535 refuses a save of a setting another writer
+	// changed).
+	raw := mustRead(t, cfgPath)
+	if n := bytes.Count(raw, []byte("checkEnabled: false")); n != 1 {
+		t.Fatalf("premise: the file writes the switch off %d times, want once:\n%s", n, raw)
+	}
+	if err := os.WriteFile(cfgPath, bytes.Replace(raw, []byte("checkEnabled: false"), []byte("checkEnabled: true"), 1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if code, _ := patch(map[string]any{"updateCheckEnabled": true}); code == http.StatusOK {
-		t.Errorf("PATCH over a file changed outside = %d, want it refused", code)
+		t.Errorf("PATCH of a switch another writer changed in the file = %d, want it refused", code)
 	}
 	if len(told) != 1 || srv.deps.CfgHolder.Load().Update.EffectiveCheckEnabled() {
 		t.Errorf("failed PATCHes told the updater %v and left checks on %v; want neither", told, srv.deps.CfgHolder.Load().Update.EffectiveCheckEnabled())

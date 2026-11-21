@@ -996,17 +996,31 @@ func TestThePlayerWritesAreGuardedAgainstAnotherOrigin(t *testing.T) {
 	}
 }
 
-// TestAPlayerWriteOverAnEditedConfigIsRefused: a write over a config file
-// another writer changed since serve read it is refused by the holder, as
-// every console save is, and the file keeps that writer's change.
+// TestAPlayerWriteOverAnEditedConfigIsRefused: a write of a player setting
+// another writer changed in the config file since serve read it (the switch,
+// the OpenHome opt-in, the binding) is refused by the holder as a conflict,
+// naming that setting, as every console save of such a setting is (backlog
+// B535), and the file keeps that writer's change.
 func TestAPlayerWriteOverAnEditedConfigIsRefused(t *testing.T) {
+	leaf := map[string]string{
+		"/api/output/player/enabled":  "output.player.enabled",
+		"/api/output/player/openhome": "output.player.openhome",
+		"/api/output/player/dac":      "output.player.device.binding",
+	}
 	for _, route := range playerWriteRoutes {
 		t.Run(route.path, func(t *testing.T) {
 			srv, _, cfgPath := newPlayerTestServer(t)
-			edited := editConfigBesideTheConsole(t, srv, cfgPath)
+			edited := append(readFileOrNil(cfgPath), "output:\n  player:\n    enabled: true\n    openhome: true\n"+
+				"    device:\n      binding: port\n      port: platform-xhci-hcd.1/usb2-2\n"...)
+			if err := os.WriteFile(cfgPath, edited, 0o600); err != nil {
+				t.Fatal(err)
+			}
 			code, body := playerRequest(t, srv.Handler(), http.MethodPost, route.path, route.body, nil)
 			if code != http.StatusInternalServerError || errorCode(body) != errCodeSaveConfig {
 				t.Fatalf("a write over an edited config = %d: %s; want 500 %s", code, body, errCodeSaveConfig)
+			}
+			if want := leaf[route.path]; want == "" || !strings.Contains(body, want) {
+				t.Errorf("the refusal %s does not name %q, the setting the write changes that the other writer changed", body, want)
 			}
 			unchangedConfig(t, srv, cfgPath, edited, config.PlayerConfig{}, "the refused write")
 		})

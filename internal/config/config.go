@@ -3011,10 +3011,10 @@ func Load(path string) (*Config, error) {
 }
 
 // LoadFile is Load, and the bytes it read: what serve hands its live config
-// holder (RuntimeConfig.RecordFile), so that a console save can tell the
-// file another writer changed since from the one serve read. A name that is a
-// symbolic link to no file says so, and what to do, as a turn of the file's
-// lock refuses it.
+// holder (RuntimeConfig.RecordFile), so that a console save can tell what
+// another writer changed in the file since serve read it, setting by setting
+// (backlog B535). A name that is a symbolic link to no file says so, and what
+// to do, as a turn of the file's lock refuses it.
 func LoadFile(path string) (*Config, []byte, error) {
 	data, err := readConfigFile(path)
 	if err != nil {
@@ -3231,7 +3231,13 @@ func loadData(path string, data []byte) (*Config, error) {
 // Path-typed values (DataDir, LibraryRoots) still go through
 // `resolvePaths` afterwards so a relative path inherits the same
 // "relative-to-config-dir" semantics as a YAML field.
-func (c *Config) applyDefaults() {
+func (c *Config) applyDefaults() { c.applyDefaultsAs(true) }
+
+// applyDefaultsAs is applyDefaults, saying the one default it gives with a
+// word (public mode's tailscale.mode) only where warn: the live holder reads
+// a file's settings, and the file a save would write, without one (backlog
+// B535).
+func (c *Config) applyDefaultsAs(warn bool) {
 	if c.ListenAddress == "" {
 		c.ListenAddress = DefaultListenAddress
 	}
@@ -3255,7 +3261,9 @@ func (c *Config) applyDefaults() {
 	// resolves to TailscaleModeCLI in EffectiveMode).
 	if strings.TrimSpace(c.Tailscale.Mode) == "" && c.IsPublic() {
 		c.Tailscale.Mode = string(TailscaleModeDisabled)
-		validateLogger.Warn("tailscale.mode defaulted to disabled in public mode (no implicit CLI probe on the public bridge)")
+		if warn {
+			validateLogger.Warn("tailscale.mode defaulted to disabled in public mode (no implicit CLI probe on the public bridge)")
+		}
 	}
 	if c.DataDir == "" {
 		c.DataDir = DefaultDataDir
