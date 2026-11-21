@@ -1351,10 +1351,11 @@ type TailscaleStatus struct {
 
 	// UploadsHeldOff says, in tsnet mode, what holds the embedded node's
 	// diagnostic-log uploads off where tailscale.uploadDiagnosticLogs allows
-	// them (the launch environment, this process earlier, or something else
-	// in it), and what makes the setting apply; empty where the setting does
-	// not allow them or nothing holds them off. A line of its own in the
-	// tile, so a node the tailnet accepted keeps its badge (backlog B749).
+	// them (the launch environment, this process earlier, a stop that gave
+	// up on a stalled start, or something else in it), and what makes the
+	// setting apply; empty where the setting does not allow them or nothing
+	// holds them off. A line of its own in the tile, so a node the tailnet
+	// accepted keeps its badge (backlog B749, B830).
 	UploadsHeldOff string `json:"uploadsHeldOff,omitempty"`
 }
 

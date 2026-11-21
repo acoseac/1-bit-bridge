@@ -185,10 +185,14 @@ func mustNotBeStarted(t *testing.T, s *Server) {
 	}
 }
 
-// fakeNode is an upstream node whose Up runs the test's up func, and which
-// records how it was closed.
+// fakeNode is an upstream node whose Start and Up run the test's start and up
+// funcs, and which records how it was closed.
 type fakeNode struct {
-	up func(context.Context) (*ipnstate.Status, error) // nil: Up answers at once, as the real one does for a node already up
+	// start is the part of upstream's start that takes no context, which a
+	// test holds unreturned to stand for a start stalled after it built the
+	// node's log transport. Nil: Start returns at once.
+	start func() error
+	up    func(context.Context) (*ipnstate.Status, error) // nil: Up answers at once, as the real one does for a node already up
 
 	mu      sync.Mutex
 	builds  int  // times newNode handed this node to a start
@@ -228,6 +232,9 @@ func (n *fakeNode) Start() error {
 	n.mu.Lock()
 	n.starts++
 	n.mu.Unlock()
+	if n.start != nil {
+		return n.start()
+	}
 	return nil
 }
 

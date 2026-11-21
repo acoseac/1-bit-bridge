@@ -128,6 +128,7 @@ const (
 	heldByEnv                 // the environment the process was launched with
 	heldByLatch               // this process turned them off earlier, and they stay off
 	heldByOther               // something else in this process turned them off
+	heldByAbandon             // a stop gave up on a start that allowed them, and they stay off
 )
 
 // readsOff is NoLogsEnv's value as Tailscale's code reads it
@@ -389,13 +390,21 @@ func mustSayWhatHoldsTheUploadsOff(t *testing.T, status, words string, h held, e
 		if strings.Contains(status, "next launch") {
 			t.Errorf("the status promises the next launch for uploads something else in the process turned off: %q", status)
 		}
+	case heldByAbandon:
+		for _, want := range []string{"this process turned them off when the bridge stopped", "start stalled",
+			"no new upload starts after that", "one already under way may finish", "45 seconds", "until it exits",
+			"a new launch of the bridge turns them back on", "launch it again"} {
+			if !strings.Contains(status, want) {
+				t.Errorf("the status does not say %q: %q", want, status)
+			}
+		}
 	}
-	if h == heldByLatch || h == heldByOther {
+	if h == heldByLatch || h == heldByOther || h == heldByAbandon {
 		if strings.Contains(status, NoLogsEnv) {
 			t.Errorf("the status tells the operator to remove a variable the launch environment did not hold: %q", status)
 		}
 	}
-	if h == heldByEnv || h == heldByLatch || h == heldByOther {
+	if h == heldByEnv || h == heldByLatch || h == heldByOther || h == heldByAbandon {
 		if !strings.Contains(words, status) {
 			t.Errorf("the refusal does not say what the status says.\nstatus: %q\nrefusal: %q", status, words)
 		}

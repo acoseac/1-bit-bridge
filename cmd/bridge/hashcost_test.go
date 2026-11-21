@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -16,6 +17,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
+	"github.com/acoseac/1-bit-bridge/internal/tsnet"
 )
 
 // TestMain lowers the bcrypt work factor for this package's suite, guards
@@ -46,6 +48,11 @@ import (
 // nothing. Nor does one ask the host's own DAC nodes: hostDACNodes, which the
 // doctor's player-dac line stats and asks faccessat2 of, refuses and records
 // here, as the guard records an open, and the binary fails on either.
+//
+// Nor does a test turn logtail off for real: logtail.Disable lasts the
+// process, so the switch a real node's AbandonStart turns (backlog B830) is a
+// stand-in here that counts, a test that means to turn it puts one of its own
+// in place for its length, and the binary fails on anything else reaching it.
 func TestMain(m *testing.M) {
 	// The fingerprint stand-in re-execs this binary as fpcalc, and the
 	// updater's tests as the bridge itself (runAsBridge). Each must return
@@ -88,11 +95,19 @@ func TestMain(m *testing.M) {
 	// stands in for its host (standInForInitHost), and one that reaches it
 	// otherwise is refused and recorded.
 	initHost = refusingInitHost()
+	var logtailTurned atomic.Int32
+	restoreLogtail := tsnet.SetLogtailDisableForTest(func() { logtailTurned.Add(1) })
 	code := m.Run()
+	restoreLogtail()
 	stopControls()
 	stopReads()
 	stopOpens()
 	_ = os.RemoveAll(treesDir)
+	if n := logtailTurned.Load(); n > 0 {
+		fmt.Fprintf(os.Stderr, "the suite turned logtail's switch %d time(s) with no stand-in of a test's own, which no "+
+			"test may: logtail.Disable lasts the process\n", n)
+		code = 1
+	}
 	if opened := nodeOpens(); len(opened) > 0 {
 		fmt.Fprintf(os.Stderr, "the suite opened PCM nodes, or asked the doctor's probe of them, which no test may: %q\n", opened)
 		code = 1

@@ -9,12 +9,16 @@ import (
 
 	"tailscale.com/envknob"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/logtail"
 )
 
 // NoLogsEnv is the variable Tailscale's code reads, live, to decide whether
 // the node uploads its diagnostic logs (envknob.NoLogsNoSupport): the
-// logtail transport the upstream start builds is a no-op while it is true,
-// and so are the network flow logs a tailnet can ask for. Its name is
+// logtail transport the upstream start builds is the no-op one where it reads
+// true as the transport is built (logpolicy's TransportOptions.New), so a true
+// set later stops no transport already built (logtail's switch does:
+// Server.AbandonStart), and the network flow logs a tailnet can ask for start
+// only where it reads false as the engine is configured. Its name is
 // upstream's (envknob.SetNoLogsNoSupport sets it), which
 // TestTheNoLogsVariableIsUpstreams holds this constant to.
 const NoLogsEnv = "TS_NO_LOGS_NO_SUPPORT"
@@ -65,6 +69,14 @@ type Uploads struct {
 	// that, until the process exits, so the setting applies at the bridge's
 	// next launch.
 	LatchedOff bool
+	// AbandonedOff is whether this process turned the uploads off when a stop
+	// gave up waiting for a node whose start, which allowed them, had not
+	// returned (Server.AbandonStart), where the config allows them now: no new
+	// upload starts after that, one already under way may finish within the
+	// 45 seconds logtail gives an upload, and they stay off until the process
+	// exits, so a new launch of the bridge turns them back on. Read live
+	// (Server.Uploads), so every node says it from then on.
+	AbandonedOff bool
 	// OtherOff is whether something else in this process turned the uploads
 	// off where the config allows them: the variable reads true, and neither
 	// the launch environment nor this process's policy set it (upstream's own
@@ -73,7 +85,17 @@ type Uploads struct {
 }
 
 // Off reports whether the node uploads nothing.
-func (u Uploads) Off() bool { return !u.Allowed || u.EnvOff || u.LatchedOff || u.OtherOff }
+func (u Uploads) Off() bool {
+	return !u.Allowed || u.EnvOff || u.LatchedOff || u.AbandonedOff || u.OtherOff
+}
+
+// abandonedUploads is what a stop that gave up on a start the uploads were
+// allowed for leaves of them (Server.AbandonStart), in the words the
+// abandonment's line and Uploads.HeldOff give it: logtail's uploader asks its
+// process-wide switch before each upload, and an upload it has begun is
+// bounded by its own 45 seconds.
+const abandonedUploads = "no new upload starts after that, and one already under way may finish within the 45 " +
+	"seconds Tailscale gives an upload"
 
 // relaunch is what makes a change of the setting, or of the launch
 // environment, apply once this process has turned the uploads off: a new
@@ -85,7 +107,9 @@ const relaunch = "quit the bridge, its menu included, and launch it again, or re
 // HeldOff says what holds the uploads off where the config allows them, in
 // the words the console's tile and a tailnet's refusal give it, or "" where
 // the config does not allow them or nothing holds them off. The launch
-// environment comes first, since a new launch alone does not undo it.
+// environment comes first, since a new launch alone does not undo it; then
+// this process's own two latches, a node built without the setting before a
+// stop that gave up on a stalled start; then anything else in the process.
 func (u Uploads) HeldOff() string {
 	switch {
 	case !u.Allowed:
@@ -96,6 +120,10 @@ func (u Uploads) HeldOff() string {
 	case u.LatchedOff:
 		return "this process turned them off when it built a node without the setting, and they stay off until it " +
 			"exits: the setting applies at the bridge's next launch, so " + relaunch
+	case u.AbandonedOff:
+		return "this process turned them off when the bridge stopped with its node's start stalled (" +
+			abandonedUploads + "), and they stay off until it exits: a new launch of the bridge turns them back on, " +
+			"so " + relaunch
 	case u.OtherOff:
 		return "something in this process turned them off (Tailscale's coordination server can), and a new launch " +
 			"of the bridge may turn them back on: " + relaunch
@@ -140,13 +168,13 @@ func (u Uploads) HeldOff() string {
 // call, the variable reads as the write left it. Nothing hands the variable
 // back or unsets it, and upstream's own setter, which the coordination
 // server's DisableLogTail message calls, also disables logtail for the rest of
-// the process (logtail.Disable). What stays open is backlog B830.
+// the process (logtail.Disable). So does a stop that gave up on a start which
+// allowed the uploads (Server.AbandonStart, abandonUploads), and every later
+// application then sets the variable again too, and says why (AbandonedOff).
 func applyUploadPolicy(allow bool) (Uploads, error) {
 	policyRecord.Lock()
 	defer policyRecord.Unlock()
-	if !policyRecord.recorded {
-		policyRecord.inherited, policyRecord.recorded = os.Getenv(NoLogsEnv), true
-	}
+	policyRecord.recordInherited()
 	inheritedOff, ok := noLogsOff(policyRecord.inherited)
 	if !ok {
 		return Uploads{}, ErrNoLogsEnvUnreadable
@@ -156,9 +184,10 @@ func applyUploadPolicy(allow bool) (Uploads, error) {
 		policyRecord.set = true
 		return Uploads{EnvOff: inheritedOff}, nil
 	}
-	if policyRecord.set {
+	if policyRecord.set || policyRecord.abandoned {
 		envknob.SetNoLogsNoSupport()
-		return Uploads{Allowed: true, EnvOff: inheritedOff, LatchedOff: true}, nil
+		return Uploads{Allowed: true, EnvOff: inheritedOff, LatchedOff: policyRecord.set,
+			AbandonedOff: policyRecord.abandoned}, nil
 	}
 	now, ok := noLogsOff(os.Getenv(NoLogsEnv))
 	if !ok {
@@ -179,13 +208,23 @@ func noLogsOff(v string) (off, ok bool) {
 }
 
 // noLogsRecord is what the process's policy knows of NoLogsEnv: whether it
-// has read what the process inherited, that value, and whether the policy
-// has set the variable, which it then sets again at every application until
-// the process exits.
+// has read what the process inherited, that value, whether the policy has
+// set the variable, which it then sets again at every application until the
+// process exits, and whether a stop gave up on a start that allowed the
+// uploads (abandonUploads), which latches them off the same way.
 type noLogsRecord struct {
 	recorded  bool
 	inherited string
 	set       bool
+	abandoned bool
+}
+
+// recordInherited reads what the process inherited, once, before anything
+// the policy does sets the variable. The caller holds policyRecord's lock.
+func (r *noLogsRecord) recordInherited() {
+	if !r.recorded {
+		r.inherited, r.recorded = os.Getenv(NoLogsEnv), true
+	}
 }
 
 // policyRecord is the process's noLogsRecord, which every application of the
@@ -195,13 +234,60 @@ var policyRecord struct {
 	noLogsRecord
 }
 
+// disableLogtail is logtail's process-wide switch, which abandonUploads turns:
+// logtail.Disable, which nothing undoes for the rest of the process,
+// everywhere but a test binary, whose suite puts a stand-in in its place
+// (SetLogtailDisableForTest). Read and written under policyRecord's lock.
+var disableLogtail = logtail.Disable
+
+// abandonUploads turns the uploads off for the rest of the process, for a
+// start Server.AbandonStart found abandoned, as upstream's own setter does
+// for the coordination server's DisableLogTail message: logtail's switch,
+// which the uploader asks before each upload (so no new upload starts after
+// it, and one already under way may finish within the 45 seconds logtail
+// gives an upload), and NoLogsEnv set true through envknob, which also keeps
+// the network flow logs off and which every later application of the policy
+// sets again; the record keeps the abandonment, so every node's status reads
+// it (Server.Uploads).
+func abandonUploads() {
+	policyRecord.Lock()
+	defer policyRecord.Unlock()
+	policyRecord.recordInherited()
+	disableLogtail()
+	envknob.SetNoLogsNoSupport()
+	policyRecord.abandoned = true
+}
+
+// SetLogtailDisableForTest puts f in the place of logtail.Disable, which
+// Server.AbandonStart turns, and returns what puts the switch back as it
+// was: logtail.Disable lasts the process, so no test turns it for real.
+// Tests only.
+func SetLogtailDisableForTest(f func()) (restore func()) {
+	policyRecord.Lock()
+	prev := disableLogtail
+	disableLogtail = f
+	policyRecord.Unlock()
+	return func() {
+		policyRecord.Lock()
+		disableLogtail = prev
+		policyRecord.Unlock()
+	}
+}
+
 // Uploads is the policy's status for this node, read now: what NewServer's
-// policy found, and, where the config allows the uploads and that found
-// nothing holding them off, whether something in this process has turned
-// them off since (the coordination server's DisableLogTail message can,
-// while the node runs). It reads the environment and nothing else.
+// policy found; where the config allows the uploads, whether a stop has given
+// up on a start that allowed them since (Server.AbandonStart), this node's
+// own included; and, where nothing found so holds them off, whether something
+// in this process has turned them off since (the coordination server's
+// DisableLogTail message can, while the node runs). It reads the policy's
+// record and the environment, and nothing else.
 func (s *Server) Uploads() Uploads {
 	u := s.uploads
+	if u.Allowed {
+		policyRecord.Lock()
+		u.AbandonedOff = u.AbandonedOff || policyRecord.abandoned
+		policyRecord.Unlock()
+	}
 	if u.Allowed && !u.Off() {
 		if now, ok := noLogsOff(os.Getenv(NoLogsEnv)); ok && now {
 			u.OtherOff = true
@@ -211,10 +297,10 @@ func (s *Server) Uploads() Uploads {
 }
 
 // ForgetUploadPolicyForTest makes the policy forget what it knows of
-// NoLogsEnv in this process, so that a test case starts as a process that
-// has built no node and reads the variable as one it inherited (a test
-// binary's cases share one process); restore puts the record back. Tests
-// only.
+// NoLogsEnv in this process, an abandonment included, so that a test case
+// starts as a process that has built no node and reads the variable as one it
+// inherited (a test binary's cases share one process); restore puts the record
+// back. Tests only.
 func ForgetUploadPolicyForTest() (restore func()) {
 	policyRecord.Lock()
 	saved := policyRecord.noLogsRecord
