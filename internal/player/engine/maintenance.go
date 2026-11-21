@@ -29,8 +29,12 @@ type maintHold struct {
 // (MaintenanceInfo.Reason): a snapshot reads maintenance during a check.
 const checkReason = "check"
 
-// stoppedBeforeGrant is why a check's grant a Stop came before is refused.
-const stoppedBeforeGrant = "a Stop came before the hold was handed over"
+// stoppedBeforeGrant is why a check's grant a Stop came before is refused,
+// and expiredBeforeGrant why one whose hold expired first is.
+const (
+	stoppedBeforeGrant = "a Stop came before the hold was handed over"
+	expiredBeforeGrant = "the hold expired before it was handed over"
+)
 
 // checkHold is what the DSD check's hold adds to a maintenance hold (B728
 // B12): its stop signal (Hold.Stop), closed at the hold's first end of any
@@ -147,9 +151,11 @@ func (e *Engine) grantHold(c *command, reason string, k *checkHold) {
 
 // deliver answers the enter m holds for, its release settled or past its
 // deadline: a plain hold's caller its Hold, confirmed or not; a check's its
-// Hold only with that release confirmed and no Stop come first, and otherwise
-// why, the hold ended first, so an error leaves its caller nothing to let go:
-// ReasonReleaseUnconfirmed, which outranks a Stop, or ReasonStopped. A check
+// Hold only with that release confirmed, no Stop come first and its expiry
+// not come, and otherwise why, the hold ended first, so an error leaves its
+// caller nothing to let go: ReasonReleaseUnconfirmed, which outranks a Stop,
+// ReasonStopped, which outranks the expiry, as endMaintenance ranks them, or
+// ReasonLease, the expiry come and its own message not taken yet. A check
 // whose caller has given up waiting (checkGrant) is answered nothing, and the
 // hold it would have been handed is ended here, as its exit ends it.
 func (e *Engine) deliver(m *maintHold) {
@@ -165,6 +171,11 @@ func (e *Engine) deliver(m *maintHold) {
 		return
 	case k.stopped:
 		e.answer(c, reply{err: refuse(c.op.String(), ReasonStopped, stoppedBeforeGrant)})
+		e.endMaintenance("", "")
+		return
+	case !e.clk.Now().Before(m.expires):
+		e.logExpiry(m)
+		e.answer(c, reply{err: refuse(c.op.String(), ReasonLease, expiredBeforeGrant)})
 		e.endMaintenance("", "")
 		return
 	default:
@@ -226,9 +237,14 @@ func (e *Engine) maintenanceExpiry(seq uint64) {
 	if m == nil || seq != m.seq || e.clk.Now().Before(m.expires) {
 		return
 	}
+	e.logExpiry(m)
+	e.endMaintenance(ReasonLease, expiredBeforeGrant)
+}
+
+// logExpiry says that m has expired, the transport stopped.
+func (e *Engine) logExpiry(m *maintHold) {
 	e.log.Warn("player: maintenance hold expired; the transport is stopped", "reason", m.reason,
 		"held_for", fmt.Sprint(e.clk.Now().Sub(m.since)))
-	e.endMaintenance(ReasonLease, "the hold expired before it was handed over")
 }
 
 // endMaintenance ends the hold: the transport stopped, never resumed. A grant

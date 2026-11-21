@@ -1072,6 +1072,56 @@ func TestACheckHoldThatExpiresBeforeItsGrantIsNeverHandedOver(t *testing.T) {
 	}
 }
 
+// TestACheckHoldExpiredAsItsReleaseSettlesIsNeverHandedOver pins an expiry
+// the owner has not heard of yet (B728 B12): with a hold of a second
+// (MaintenanceTTL's floor), the check's hold asked with interrupt while a
+// session plays and its release parked, the clock is moved past the hold's
+// expiry without its timer firing (fakeClock.Skip: its goroutine late), and
+// the release is then acknowledged, before its own deadline. The caller is
+// answered ReasonLease, or ReasonStopped where a Stop came first, the order
+// the expiry's own message keeps (the test before), never a hold whose lease
+// has expired: no hold stands, the Stop is answered, nothing starts, and a
+// later check's hold is granted.
+func TestACheckHoldExpiredAsItsReleaseSettlesIsNeverHandedOver(t *testing.T) {
+	for _, stopFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no Stop", true: "a Stop first"}[stopFirst], func(t *testing.T) {
+			h := checkHarness(t, func(c *Config) { c.MaintenanceTTL = time.Second })
+			mark := h.appliedMark()
+			_, s := h.playing(0, "a", "b")
+			h.waitApplied("handled call prepare", mark)
+			g := holdReleases(h)
+			letGoAtEnd(t, g)
+			mark = h.appliedMark()
+			check := h.grantWaits(s)
+			var stop <-chan error
+			want := ReasonLease
+			if stopFirst {
+				stop = async(func() error { return h.eng.Stop(bg) })
+				h.waitApplied("stop", mark)
+				want = ReasonStopped
+			}
+			h.clk.Skip(time.Second)
+			g.open()
+			a := h.checkResult("the check's hold that expired as its release settled", check)
+			h.refused("the check's hold that expired as its release settled", a.err, want)
+			if a.hold != (Hold{}) {
+				t.Errorf("the check's hold that expired was handed over: %+v", a.hold)
+			}
+			if sn := h.snap(); func() bool { _, held := sn.Maintenance(); return held }() || sn.State() != Stopped {
+				t.Fatalf("after the refused grant: %s; want no hold, stopped", sn.State())
+			}
+			if stopFirst {
+				h.must("the Stop that came first", h.result("stop", stop))
+			}
+			if n := h.be.starts(); n != 1 {
+				t.Errorf("%d sessions started, want the first alone", n)
+			}
+			hold := h.granted("a later check's hold", false)
+			h.must("its exit", h.eng.ExitMaintenance(bg, hold.Lease))
+		})
+	}
+}
+
 // TestACheckHoldNeedsItsDACAndEndsWithIt pins the output (B728 B12): the
 // check's hold is refused while the output is unknown or unavailable; and a
 // report that takes the output away, or names another unit, ends a held check

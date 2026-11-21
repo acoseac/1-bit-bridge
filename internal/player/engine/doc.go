@@ -362,7 +362,9 @@
 // release it made or waits for is confirmed; otherwise its hold ends first and
 // it is refused, so its caller holds nothing: a release past its deadline
 // ReasonReleaseUnconfirmed, a Stop before the answer ReasonStopped, the expiry
-// ReasonLease, the output gone or changed its reason. Its stop signal
+// ReasonLease, ranked in that order (an expiry whose own message has not
+// reached the owner as the release settles refuses it all the same), the
+// output gone or changed its reason. Its stop signal
 // (Hold.Stop) closes at its first end (its exit, its expiry, the output gone
 // or changed, which end it, the shutdown) or its first Stop. Under it a Stop
 // waits, in a list of the hold's own, until the hold ends, or ReleaseTimeout
