@@ -545,6 +545,54 @@ func TestADeploymentSettingAnotherWriterChangedRefusesEverySave(t *testing.T) {
 	}
 }
 
+// TestAFileAnotherWriterLeftUnloadableIsRefusedBeforeItsDeploymentChange: the
+// turn refuses a file another writer left that the next start would refuse as
+// that file's (OutsideLeftUnloadable) before it refuses a deployment setting
+// that writer changed (OutsideDeployment): a deployment mode the next start
+// refuses is both, and the refusal says to correct the file, never to restart
+// into a start that fails on it. A deployment change the next start takes
+// keeps its refusal. Until B535's round 3 the deployment refusal came first.
+func TestAFileAnotherWriterLeftUnloadableIsRefusedBeforeItsDeploymentChange(t *testing.T) {
+	for _, tc := range []struct {
+		name, edit string
+		kind       OutsideKind
+		// says is what the refusal tells the operator to do.
+		says string
+	}{
+		{"a deployment mode the next start refuses", "deployment:\n  mode: sideways\n", OutsideLeftUnloadable, "correct the file"},
+		{"a deployment change the next start takes", "deployment:\n  managedSettings:\n    - libraryName\n", OutsideDeployment,
+			"restart the bridge"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := envSaveConfig(t, "libraryName: Home\n")
+			rc := bootHolder(t, path)
+			appendToConfig(t, path, tc.edit)
+			edited, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ran := false
+			err = rc.Update(path, func(c *Config) error { ran = true; c.LibraryName = "Renamed"; return nil })
+			var outside *ChangedOutsideError
+			if !errors.As(err, &outside) || outside.Kind != tc.kind {
+				t.Fatalf("a rename after %s = %v, want a refusal of kind %d", tc.name, err, tc.kind)
+			}
+			if msg := err.Error(); !strings.Contains(msg, tc.says) || tc.kind == OutsideLeftUnloadable && strings.Contains(msg, "restart") {
+				t.Errorf("refusal %q: want it to say %q, and nothing of a restart for a file the next start refuses", msg, tc.says)
+			}
+			if ran {
+				t.Error("the refused rename ran its change")
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(after, edited) {
+				t.Errorf("the refused rename wrote the file:\n%s", after)
+			}
+			if got := rc.Load().LibraryName; got != "Home" {
+				t.Errorf("the refused rename stored libraryName %q", got)
+			}
+		})
+	}
+}
+
 // TestAChangeOfAVariablesSettingAnotherWriterChangedIsRefused: a setting a
 // BRIDGE_* variable set at the start that another writer changed in the file
 // is recorded for the conflict check alone (outsideEnv), so a console change

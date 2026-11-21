@@ -48,12 +48,13 @@ var (
 // round 2). A turn's file that does not decode is refused, the record as it
 // was. The turn's file is then loaded as the next start loads it
 // (loadsAtNextStart), once for those bytes (leftErr, leftClashes). Then,
-// whatever the bytes, a recorded deployment setting refuses the save: the
+// whatever the bytes, a file that writer left that would not load refuses the
+// save as that file's (OutsideLeftUnloadable), not as one the save would make:
+// no save made it, and the remedy is to correct it, never a start that would
+// fail on it. So it is asked first (B535's round 3), before a recorded
+// deployment setting, which refuses the save too, saying to restart: the
 // console decides what it may change from its live copy of the posture and the
-// managed lists; and a file that writer left that would not load refuses it as
-// that file's (OutsideLeftUnloadable), not as one the save would make: no save
-// made it, and the remedy is to correct it, never a start that would fail on
-// it.
+// managed lists.
 func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, before *Config) error {
 	if !r.fileKnown {
 		return nil
@@ -91,11 +92,11 @@ func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, 
 		left, err := loadsAtNextStart(path, found)
 		r.leftErr, r.leftClashes = err, openHomeClashes(left)
 	}
-	if deployment := settingsUnder(r.outside, deploymentSettings); len(deployment) > 0 {
-		return &ChangedOutsideError{Path: path, Kind: OutsideDeployment, Settings: deployment}
-	}
 	if r.leftErr != nil {
 		return &ChangedOutsideError{Path: path, Kind: OutsideLeftUnloadable, Err: r.leftErr}
+	}
+	if deployment := settingsUnder(r.outside, deploymentSettings); len(deployment) > 0 {
+		return &ChangedOutsideError{Path: path, Kind: OutsideDeployment, Settings: deployment}
 	}
 	return nil
 }
