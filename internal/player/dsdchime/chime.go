@@ -23,9 +23,10 @@
 // A chime is built on its rate's first use and kept for the process:
 // 1,693,440, 3,386,880 and 6,773,760 bytes. Get's contract:
 //   - concurrent first callers of a rate cause one build and one publication;
-//   - the build runs on the context of the caller that began it, asks it every
-//     65,536 samples and once more before it publishes, and a build it ended
-//     publishes nothing: the next caller builds again;
+//   - the build runs on the context of the caller that began it, asks it
+//     before it allocates anything, every 65,536 samples and once more before
+//     it publishes, and a build it ended publishes nothing: the next caller
+//     builds again;
 //   - a caller waiting for another's build stops with its own context, which
 //     ends nothing but its wait, and a chime kept is answered whatever the
 //     caller's context;
@@ -236,10 +237,14 @@ func rateIndex(bitRateHz int) (int, error) {
 	return 0, fmt.Errorf("%w: not %d Hz", errRate, bitRateHz)
 }
 
-// build makes the chime at bitRateHz: the pads, then each tone's section.
+// build makes the chime at bitRateHz: the pads, then each tone's section,
+// once ctx, asked before anything is allocated, has not ended.
 func build(ctx context.Context, bitRateHz int) (*Chime, error) {
 	i, err := rateIndex(bitRateHz)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	bpf := bitRateHz / 44100 / 8
