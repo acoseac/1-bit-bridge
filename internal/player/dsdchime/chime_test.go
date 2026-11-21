@@ -259,10 +259,11 @@ func (c *askCounter) Err() error {
 	return nil
 }
 
-// TestTheChimeStopsWithItsContext: a build asks its context every 65,536
-// samples of each tone's section, from its first, and a build whose
-// context ends stops at its next ask with the context's error; through
-// Get, it publishes nothing, and the next caller builds again.
+// TestTheChimeStopsWithItsContext: a build asks its context once before it
+// allocates anything and then every 65,536 samples of each tone's section,
+// from its first, and a build whose context ends stops at its next ask with
+// the context's error; through Get, it publishes nothing, and the next
+// caller builds again.
 func TestTheChimeStopsWithItsContext(t *testing.T) {
 	for _, rate := range chimeRates {
 		ctx := &askCounter{Context: context.Background()}
@@ -270,8 +271,8 @@ func TestTheChimeStopsWithItsContext(t *testing.T) {
 			t.Fatalf("%s: %v", rateName(rate), err)
 		}
 		samples := 8 * sectionFrames * (rate / 44100 / 8)
-		if want := 2 * ((samples + 0xFFFF) / 0x10000); ctx.asks != want {
-			t.Errorf("%s: a build asked its context %d times, every 65,536 samples is %d", rateName(rate), ctx.asks, want)
+		if want := 1 + 2*((samples+0xFFFF)/0x10000); ctx.asks != want {
+			t.Errorf("%s: a build asked its context %d times, once and then every 65,536 samples is %d", rateName(rate), ctx.asks, want)
 		}
 		ctx = &askCounter{Context: context.Background(), after: 5}
 		if c, err := build(ctx, rate); !errors.Is(err, context.Canceled) || c != nil {
@@ -295,6 +296,24 @@ func TestTheChimeStopsWithItsContext(t *testing.T) {
 	c, err := cc.get(context.Background(), format.DSD64RateHz)
 	if err != nil || builds != 2 || c == nil || digest(*c) != goldens[format.DSD64RateHz] {
 		t.Fatalf("after a build its context ended, the next caller has %v and %d builds", err, builds)
+	}
+}
+
+// TestABuildOnAnEndedContextAllocatesNothing: a build asks its context
+// before it allocates anything, so one whose context has ended answers the
+// context's error having allocated nothing. testing.AllocsPerRun counts
+// every allocation the process makes, so the count holds only while no test
+// in the package runs in parallel or leaves a goroutine running.
+func TestABuildOnAnEndedContextAllocatesNothing(t *testing.T) {
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	var err error
+	allocs := testing.AllocsPerRun(10, func() { _, err = build(ended, format.DSD64RateHz) })
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("a build on an ended context answered %v, want context.Canceled", err)
+	}
+	if allocs != 0 {
+		t.Errorf("a build on an ended context allocated %v times, want none", allocs)
 	}
 }
 
