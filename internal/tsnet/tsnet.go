@@ -339,6 +339,10 @@ func (s *Server) LastStartError() error {
 	return s.lastStartErr
 }
 
+// AbandonStart is what a caller that has given up waiting for this server's
+// Start calls (backlog B830). It does nothing yet.
+func (s *Server) AbandonStart() {}
+
 // startUnlocked does the I/O-heavy parts of Start without holding
 // lifecycleMu. Returns the constructed node (or nil on
 // pre-construction error) so Start can clean up under the lock.

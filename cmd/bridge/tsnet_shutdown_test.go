@@ -238,6 +238,11 @@ func TestServeGivesUpOnAWedgedTsnetStartAfterTheGrace(t *testing.T) {
 	if n := node.closeCount(); n != 1 {
 		t.Errorf("the node was closed %d time(s), want once: a wedged start must not keep it open", n)
 	}
+	// The node judges what the start it was left with costs (B830).
+	if n, late := node.abandonCount(); n != 1 || late {
+		t.Errorf("serve handed the node the start it gave up on %d time(s) (after closing it: %v), want once, "+
+			"before closing it", n, late)
+	}
 }
 
 // TestServeClosesATailnetListenerThatOpensAfterAnErrorExit: serve exits on
@@ -425,6 +430,9 @@ func TestServeStillReportsATailnetHTTP3BindThatFails(t *testing.T) {
 	if s := stderr.String(); strings.Contains(s, msgTsnetGaveUp) {
 		t.Errorf("an ordinary shutdown gave up on the tailnet goroutine; stderr=%s", s)
 	}
+	if n, _ := node.abandonCount(); n != 0 {
+		t.Errorf("an ordinary shutdown handed the node a start %d time(s), want none", n)
+	}
 	node.mustHaveBeenClosedOnceAfterUse(t)
 }
 
@@ -510,6 +518,8 @@ type fakeTsnetNode struct {
 	late     []string // methods called after Close
 	lis      *watchedListener
 	conns    []*watchedConn
+	abandons int  // AbandonStart calls
+	lateHand bool // an AbandonStart came after a Close
 }
 
 func newFakeTsnetNode() *fakeTsnetNode {
@@ -563,6 +573,17 @@ func (n *fakeTsnetNode) Close() error {
 		_ = c.Close()
 	}
 	return n.closeErr
+}
+
+// AbandonStart records that stop handed the node the start it gave up on,
+// and whether it did so after closing the node.
+func (n *fakeTsnetNode) AbandonStart() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.abandons++
+	if n.closes > 0 {
+		n.lateHand = true
+	}
 }
 
 func (n *fakeTsnetNode) Status(context.Context) (*ipnstate.Status, error) {
@@ -630,6 +651,14 @@ func (n *fakeTsnetNode) closeCount() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.closes
+}
+
+// abandonCount is how many times stop handed the node the start it gave up
+// on, and whether one came after the node was closed.
+func (n *fakeTsnetNode) abandonCount() (count int, afterClose bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.abandons, n.lateHand
 }
 
 func (n *fakeTsnetNode) bindCount() int {
@@ -863,6 +892,43 @@ func TestAServerPublishedAfterStopBeganIsRefused(t *testing.T) {
 	}
 	if f.publishHTTP3([]tsnetH3Listener{{srv: &http3.Server{}}}) {
 		t.Error("HTTP/3 servers published after stop began were accepted, with nothing left to shut them down")
+	}
+}
+
+// TestAStopThatRunsOutOfGraceHandsTheNodeItsStart: stop's wait for the
+// goroutine runs out (its done stays open past the grace), and stop hands the
+// node the start it gave up on (tsnetNode.AbandonStart, which a real node
+// judges: tsnet.Server's turns the diagnostic-log uploads off for the process
+// where a start that allowed them has not returned, B830), once and before
+// it closes the node, and says it gave up.
+func TestAStopThatRunsOutOfGraceHandsTheNodeItsStart(t *testing.T) {
+	node := newFakeTsnetNode()
+	f := &tsnetFront{node: node, stderr: &safeBuffer{}, cancel: func() {}, done: make(chan struct{})}
+	stopWithin(f, 50*time.Millisecond)
+	if n, late := node.abandonCount(); n != 1 || late {
+		t.Errorf("stop handed the node the start it gave up on %d time(s) (after closing it: %v), want once, "+
+			"before closing it", n, late)
+	}
+	if n := node.closeCount(); n != 1 {
+		t.Errorf("the node was closed %d time(s), want once", n)
+	}
+	if s := f.stderr.(*safeBuffer).String(); !strings.Contains(s, msgTsnetGaveUp) {
+		t.Errorf("stop gave up on its goroutine without saying so; stderr=%q", s)
+	}
+}
+
+// TestAStopWhoseGoroutineEndedInTimeHandsTheNodeNoStart is the twin: a
+// goroutine that ended before the grace ran out leaves stop nothing to hand
+// the node, and the node is closed once.
+func TestAStopWhoseGoroutineEndedInTimeHandsTheNodeNoStart(t *testing.T) {
+	node := newFakeTsnetNode()
+	f := stoppableFront(t, node)
+	stopWithin(f, time.Second)
+	if n, _ := node.abandonCount(); n != 0 {
+		t.Errorf("stop handed the node a start %d time(s) after its goroutine had ended, want none", n)
+	}
+	if n := node.closeCount(); n != 1 {
+		t.Errorf("the node was closed %d time(s), want once", n)
 	}
 }
 

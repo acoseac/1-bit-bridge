@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -810,6 +811,84 @@ func TestTheTileReadsWhatHoldsTheUploadsOffWhenItAsks(t *testing.T) {
 		}
 	}
 	mustSayWhatHoldsTheUploadsOffInTheTile(t, refused.UploadsHeldOff, says, false)
+}
+
+// TestAServeWhoseTsnetStartStalledPastItsStopTurnsTheUploadsOff (backlog
+// B830): serve's node, its config allowing the uploads, is held in its start
+// past serve's stop (in the hook just before its upstream start: the start
+// has not returned), so the stop's wait for its goroutine runs out. The real
+// node then turns logtail's switch once (a stand-in of the test's,
+// tsnet.SetLogtailDisableForTest) and the variable true, and says so on
+// serve's output; a node built after it in the process whose config allows
+// the uploads starts with them off, over a false written since, and the
+// console's tile says why in the abandonment's words.
+func TestAServeWhoseTsnetStartStalledPastItsStopTurnsTheUploadsOff(t *testing.T) {
+	inheritNoLogsEnv(t, noLogsUnset)
+	var turned atomic.Int32
+	t.Cleanup(tsnet.SetLogtailDisableForTest(func() { turned.Add(1) }))
+	entered, left := make(chan struct{}), make(chan struct{})
+	release := newGate()
+	var enter sync.Once
+	prev := tsnetBeforeStart
+	tsnetBeforeStart = func(*upstreamtsnet.Server) error {
+		defer close(left)
+		enter.Do(func() { close(entered) })
+		release.wait()
+		return errStoppedBeforeTheUpstreamStart
+	}
+	t.Cleanup(func() { tsnetBeforeStart = prev })
+	cfgPath, _ := tsnetTestConfig{mode: "tsnet", key: "true"}.write(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	stderr := &safeBuffer{}
+	done := make(chan int, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		done <- runServe(ctx, serveOpts{configPath: cfgPath, addrOverride: "127.0.0.1:0"}, &safeBuffer{}, stderr)
+	}()
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
+	// Registered after the drain, so it runs before it.
+	t.Cleanup(release.open)
+
+	waitForServe(t, entered, "its tsnet start", exited, done, stderr)
+	cancel()
+	if code := waitServeExit(t, exited, done, stderr); code != 0 {
+		t.Errorf("serve exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stderr.String()
+	for _, want := range []string{msgTsnetGaveUp, "so this process turned Tailscale's diagnostic log uploads off"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("serve's output does not say %q; stderr=%s", want, out)
+		}
+	}
+	if n := turned.Load(); n != 1 {
+		t.Errorf("serve's stop turned logtail's switch %d time(s) for a start it gave up on, want once", n)
+	}
+	if got := noLogsEnvNow(); !readsOff(t, got) {
+		t.Errorf("after the stop TS_NO_LOGS_NO_SUPPORT=%q reads the uploads on, want it set true for the process", got)
+	}
+	release.open()
+	select {
+	case <-left:
+	case <-serveGiveUp(t):
+		t.Fatalf("the start serve gave up on did not return once let go; serve's goroutines:\n%s", serveStacks())
+	}
+
+	t.Setenv(tsnet.NoLogsEnv, "false")
+	laterCfg, _ := tsnetTestConfig{mode: "tsnet", key: "true"}.write(t, "")
+	later := buildTsnetNode(t, laterCfg)
+	if got := noLogsEnvNow(); !readsOff(t, got) {
+		t.Errorf("a later node with the key starts over TS_NO_LOGS_NO_SUPPORT=%q, which reads the uploads on", got)
+	}
+	if got := later.Uploads(); got != (tsnet.Uploads{Allowed: true, AbandonedOff: true}) {
+		t.Errorf("the later node's status is %+v, want the uploads allowed and held off by the abandonment", got)
+	}
+	tile := tsnetAdminStatus(context.Background(), runningTsnetNode{Server: later, st: &ipnstate.Status{BackendState: "Running"}})
+	mustSayWhatHoldsTheUploadsOffInTheTile(t, tile.UploadsHeldOff, []string{"when the bridge stopped",
+		"start stalled", "no new upload starts after that", "45 seconds", "turns them back on", "launch it again"}, false)
+	if n := turned.Load(); n != 1 {
+		t.Errorf("logtail's switch was turned %d time(s) in all, want once", n)
+	}
 }
 
 // mustSayWhatHoldsTheUploadsOffInTheTile fails the test unless the tile's

@@ -9,6 +9,7 @@ import (
 
 	"tailscale.com/envknob"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/logtail"
 )
 
 // NoLogsEnv is the variable Tailscale's code reads, live, to decide whether
@@ -65,6 +66,9 @@ type Uploads struct {
 	// that, until the process exits, so the setting applies at the bridge's
 	// next launch.
 	LatchedOff bool
+	// AbandonedOff is whether a stop that gave up on a start which allowed
+	// the uploads turned them off (backlog B830). Nothing sets it yet.
+	AbandonedOff bool
 	// OtherOff is whether something else in this process turned the uploads
 	// off where the config allows them: the variable reads true, and neither
 	// the launch environment nor this process's policy set it (upstream's own
@@ -74,6 +78,29 @@ type Uploads struct {
 
 // Off reports whether the node uploads nothing.
 func (u Uploads) Off() bool { return !u.Allowed || u.EnvOff || u.LatchedOff || u.OtherOff }
+
+// abandonedUploads is what a stop that gave up on a start the uploads were
+// allowed for leaves of them (backlog B830).
+const abandonedUploads = "no new upload starts after that, and one already under way may finish within the 45 " +
+	"seconds Tailscale gives an upload"
+
+// disableLogtail is logtail's process-wide switch (backlog B830). Nothing
+// turns it yet.
+var disableLogtail = logtail.Disable
+
+// SetLogtailDisableForTest puts f in the place of logtail.Disable and returns
+// what puts the switch back as it was. Tests only.
+func SetLogtailDisableForTest(f func()) (restore func()) {
+	policyRecord.Lock()
+	prev := disableLogtail
+	disableLogtail = f
+	policyRecord.Unlock()
+	return func() {
+		policyRecord.Lock()
+		disableLogtail = prev
+		policyRecord.Unlock()
+	}
+}
 
 // relaunch is what makes a change of the setting, or of the launch
 // environment, apply once this process has turned the uploads off: a new

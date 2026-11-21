@@ -28,6 +28,9 @@ import (
 type tsnetNode interface {
 	Start(context.Context) error
 	Close() error
+	// AbandonStart is the node's to call once stop has given up waiting
+	// for the goroutine (backlog B830). Nothing calls it yet.
+	AbandonStart()
 	Status(context.Context) (*ipnstate.Status, error)
 	CertDomains() []string
 	// The admin tile's reads of a tailnet's refusal and of the upload
