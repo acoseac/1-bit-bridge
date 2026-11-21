@@ -208,45 +208,47 @@ Windows-runner check, distinct from portable race-test results.
   B535, `compareTurn`): each leaf the two files set differently, both read
   as Load reads a file, its defaults, resolved paths and `Normalize`'s forms
   given, quietly and with no `BRIDGE_*` variable (`readSettings`; a list, a
-  type that marshals itself and an unread player block, by its source, a
-  leaf each, an opt-out by what it turns on), joins the holder's record
-  (`outside`; one a variable set at the start `outsideEnv`, for the conflict
-  alone, its write B761's) at the turn that finds it, whatever its save
-  does, until a restart, and every save writes each recorded leaf as the
-  turn's bytes hold it (`fileOutside`) and publishes its own snapshot; a
-  file that does not decode, a recorded `deployment` leaf and a file that
-  writer left the next start would refuse (`OutsideLeftUnloadable`: correct
-  it, never restart) refuse at the turn, and a change of a recorded leaf,
-  whatever value it writes, and a merged file the next start would refuse
-  where the one left would not (`loadsAtNextStart`: quiet, the variables
-  applied; an OpenHome port clash only one the save adds) at `check` and
-  once `fn` returns, so a change of its own a late refusal would leave done
-  sets its leaves on the clone and asks `check` just before it; what is left
-  is the window between the turn's final check and the rename, a writer that
-  takes no lock, and the time between a check and the work it authorizes**
-  (2026-10-24, backlog B506; the second round, the same day, took the first
-  round's reviews, the third the second's, the fourth the third's, the fifth
-  the fourth's, and the sixth, the next day, the fifth's, below; the merge,
-  2026-11-20, backlog B535, and its round 2, below). Until then several
-  writers read the file, changed it and wrote it back, and nothing made them
-  take turns: `bridge library add` and `remove` (their offline path) and
-  `bridge init`'s save took no lock at all; `bridge output dac bind` held
-  the data dir's lock and saved through `SaveIf`, whose comparison of the
-  file's bytes with what it read narrowed the window to the instant before
-  its rename and could not close it, since no rename can be made conditional
-  on the file it replaces; `bridge restore` copied a snapshot's
-  `bridge.yaml` over the file; serve's `--init-if-missing` seed wrote one
-  after a stat; and a running serve's console saves (the settings PATCH,
-  roots add and remove, the variants directory, UPnP server CRUD, every one
-  through `RuntimeConfig.Update`) wrote the live snapshot, read at boot,
-  over whatever the file held. Two writers could each lose the other's
-  update. Measured on main with the tests named below: a settings save that
-  landed between library add's read and its save was gone (`libraryName
-  "Test Library"`), and so for remove; a library add that landed in bind's
-  window made bind refuse its binding ("changed after bind read it"); a
-  console save over a file another writer had changed answered 200 `live`
-  and wrote serve's copy over it; each CLI writer went through in 18 to 149
-  ms while another open held the lock.
+  type that marshals itself and an unread player block, by what its source
+  holds, a leaf each, an opt-out by what it turns on), joins the holder's
+  record (`outside`; one a variable set at the start `outsideEnv`, for the
+  conflict alone, its write B761's) at the turn that finds it, whatever its
+  save does, until a restart, and every save writes each recorded leaf as
+  the turn's bytes hold it (`fileOutside`) and publishes its own snapshot; a
+  file that does not decode, a file that writer left the next start would
+  refuse (`OutsideLeftUnloadable`: correct it, never restart; said once, the
+  leaves it records unsaid) and then a recorded `deployment` leaf refuse at
+  the turn, and a change of a recorded leaf, whatever value it writes, and a
+  merged file the next start would refuse where the one left would not
+  (`loadsAtNextStart`: the file as the next start would load it, with this
+  process's environment, both files alike, quiet; an OpenHome port clash
+  only one the save adds) at `check` and once `fn` returns, so a change of
+  its own a late refusal would leave done sets its leaves on the clone and
+  asks `check` just before it; what is left is the window between the turn's
+  final check and the rename, a writer that takes no lock, and the time
+  between a check and the work it authorizes** (2026-10-24, backlog B506;
+  the second round, the same day, took the first round's reviews, the third
+  the second's, the fourth the third's, the fifth the fourth's, and the
+  sixth, the next day, the fifth's, below; the merge, 2026-11-20, backlog
+  B535, and its rounds 2 and 3, below). Until then several writers read the
+  file, changed it and wrote it back, and nothing made them take turns:
+  `bridge library add` and `remove` (their offline path) and `bridge init`'s
+  save took no lock at all; `bridge output dac bind` held the data dir's
+  lock and saved through `SaveIf`, whose comparison of the file's bytes with
+  what it read narrowed the window to the instant before its rename and
+  could not close it, since no rename can be made conditional on the file it
+  replaces; `bridge restore` copied a snapshot's `bridge.yaml` over the
+  file; serve's `--init-if-missing` seed wrote one after a stat; and a
+  running serve's console saves (the settings PATCH, roots add and remove,
+  the variants directory, UPnP server CRUD, every one through
+  `RuntimeConfig.Update`) wrote the live snapshot, read at boot, over
+  whatever the file held. Two writers could each lose the other's update.
+  Measured on main with the tests named below: a settings save that landed
+  between library add's read and its save was gone (`libraryName "Test
+  Library"`), and so for remove; a library add that landed in bind's window
+  made bind refuse its binding ("changed after bind read it"); a console
+  save over a file another writer had changed answered 200 `live` and wrote
+  serve's copy over it; each CLI writer went through in 18 to 149 ms while
+  another open held the lock.
 
   **The lock** is an exclusive kernel lock (`fsutil.TryLock`: flock on
   unix, LockFileEx on Windows) on `config.LockFileName(path)`, a dot, the
@@ -471,25 +473,28 @@ Windows-runner check, distinct from portable race-test results.
   entries, nil and empty alike; a type with a `MarshalYAML` of its own one
   leaf, `usbid.Serial`, whose one field is unexported; a player block that
   did not read, on either side, one leaf, `output.player`, by the text it
-  keeps, its fields reading nothing). A leaf joins the record (`outside`) at
-  the turn that finds it, logged once at Info by its yaml path and no value,
+  keeps (by its source since round 2, and by what that holds since round 3,
+  below), its fields reading nothing). A leaf joins the record (`outside`)
+  at the turn that finds it, logged once at Info by its yaml path and no
+  value (since round 3 only where the file that writer left loads, below),
   with the bytes it was found in, whatever that save then does: a refused or
   failed save that kept neither would find the change again at the next
   turn, but one that kept the bytes alone would find nothing and write the
   snapshot over the other writer's. Only a restart forgets a leaf, and one a
-  variable set at the start never joins the record, B761's rule writing it.
-  Every save writes each recorded leaf from the turn's bytes (`fileOutside`:
-  `DecodeFile`, assigned on the saved copy, a field of Config's own left out
-  at its zero value through `filed`; a scan of Config's type finds no nested
-  leaf whose tag writes its zero value as a key but one inside a list
-  written whole, `upnpUpstream.servers[].name`, and B761's
-  `TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel` holds every leaf a variable
-  sets to that) and publishes the snapshot it changed, so nothing of the
-  other writer's goes live; equal bytes skip only the discovery, so a turn
-  that finds the holder's own merged file writes the recorded leaves again.
-  What the record cannot merge is refused, nothing saved or stored, each
-  kind with console words of its own and the status and code unchanged: a
-  file gone, a name repointed or a file that does not decode, as before; a
+  variable set at the start never joins the record, B761's rule writing it
+  (since round 2 one joins a record of its own, for the conflict check
+  alone, below). Every save writes each recorded leaf from the turn's bytes
+  (`fileOutside`: `DecodeFile`, assigned on the saved copy, a field of
+  Config's own left out at its zero value through `filed`; a scan of
+  Config's type finds no nested leaf whose tag writes its zero value as a
+  key but one inside a list written whole, `upnpUpstream.servers[].name`,
+  and B761's `TestEveryLeafWhoseZeroIsAKeyIsAtTheTopLevel` holds every leaf
+  a variable sets to that) and publishes the snapshot it changed, so nothing
+  of the other writer's goes live; equal bytes skip only the discovery, so a
+  turn that finds the holder's own merged file writes the recorded leaves
+  again. What the record cannot merge is refused, nothing saved or stored,
+  each kind with console words of its own and the status and code unchanged:
+  a file gone, a name repointed or a file that does not decode, as before; a
   recorded `deployment` leaf, every save, since the console decides what it
   may change from its live posture and managed lists; a change of a recorded
   leaf (`OutsideConflict`, naming the leaves), since the console made it
@@ -579,6 +584,63 @@ Windows-runner check, distinct from portable race-test results.
   `TestTheConsolesSavesAnswerARefusalWithoutThePath`, and
   `TestAnUnreadPlayerBlockIsComparedByItsSource`; the controls are in the
   B535 entry's round 2.
+
+  **Round 3: the file left first, said once, read as the next start reads
+  it** (2026-11-21, backlog B535's round 3). Round 2's record of a
+  variable's settings, its cache of the file another writer left and the
+  clashes it has, and the player block's comparison by its source were found
+  sound; two places refused or said the wrong thing, and one compared too
+  much. The turn asked a recorded deployment setting before the cached load
+  of the file left, so a deployment mode that writer set to a word the next
+  start refuses answered every save as a deployment change, saying to
+  restart into a start that fails on the file: the file left is now refused
+  first (`OutsideLeftUnloadable`), and a deployment change the next start
+  takes keeps its refusal. A turn that found a file the next start refuses
+  logged, for each setting that writer changed, that it takes effect at the
+  next start, which would not start: such a turn still records them, the
+  record and its bytes advancing as at every turn that finds a change (round
+  1's S1), so a setting changed beside the one that fails is kept once that
+  one is corrected, and logs once for those bytes, at Info under the config
+  component, that the file does not load and is to be corrected
+  (`leftUnloadableMessage`: the file's path and `loadsAtNextStart`'s error,
+  whose decode error has been through `ValueFreeYAMLError` and whose
+  validation names no value; passed through `ValueFreeYAMLError` again, a
+  validation's reason would read as a YAML line), in place of those lines. A
+  later turn that finds bytes that load clears the error, and the settings
+  newly changed join the record and are said as any are; those recorded
+  while the file did not load are said by no line then either. An unread
+  player block's digest took each node's comments, style and anchor name, so
+  a comment on a line of a sequence the block's alias names, a comment
+  inside the block or an anchor renamed with its alias read as a change of
+  `output.player`, and every later player write was refused as a conflict
+  until a restart: `blockSource` now takes each node's kind, its resolved
+  tag (`ShortTag`), its value and its children alone, follows each alias to
+  its node, writes a node met again as a reference to the order it was first
+  met in, so an alias moved to another anchor still differs while a rename
+  does not, and `[&a {k: 1}, *a]` differs from `[&a {k: 1}, {k: 1}]`, and
+  frames every token and list of children by its length, so `[[a], b]`
+  differs from `[[a, b]]`; each node is written once, on a stack of the
+  walk's own. Round 3's brief also asked that the load of the file left
+  apply no `BRIDGE_*` variable, since one can set a value the file holds
+  that would not load; its review reversed that, and the code keeps them:
+  the load asks whether this bridge loads the file at its next start, which
+  reads the variables it was started with, so a variable over another
+  writer's invalid value is that start's own semantics, the file loading
+  there with the same environment, and a load without them would refuse
+  every save over a bridge whose library roots a variable gives, its file
+  naming none, after any other write, a comment's included. Both files are
+  loaded so, the file left and the merged one, and their OpenHome clashes
+  compare like for like, a clash only a variable makes the file left's; and
+  a landed save leaves the cache holding its merged file's load. Red before
+  their fixes, each at its parent commit: the first case of
+  `TestAFileAnotherWriterLeftUnloadableIsRefusedBeforeItsDeploymentChange`,
+  the log assertions of
+  `TestAFileThatDoesNotLoadIsSaidOnceAndItsSettingsAreKept`, and the three
+  cases of `TestAnUnreadPlayerBlocksDigestLeavesOutHowItIsWritten` that must
+  compare alike; green before, pinned and proven by controls:
+  `TestAFileWhoseRootsAVariableGivesTakesAnotherWritersComment` and
+  `TestAClashAVariableMakesIsNoNewClashOfASave`. The controls are in the
+  B535 entry's round 3.
 
   **The turn and the comparison come before `fn`** (the second round; the
   Claude review's finding 2 and Codex's 3). The first round cloned, ran
@@ -1348,13 +1410,17 @@ Windows-runner check, distinct from portable race-test results.
   pointer, write a merged file the next start would refuse, refuse a save
   for a file another writer left unloadable as one it made or say to restart
   over that file, leave a variable's leaf out of the conflict check or let
-  it refuse every save as a deployment leaf, read the boot config through
-  its name once it resolved it, take a resolution that failed for a file or
-  compare `""` as one, resolve the holder's file anywhere but at that read,
-  change anything besides the config before calling `Update` (do it in `fn`,
-  after the comparison, asking `check` just before), run a caller's own work
-  before `check` has checked the leaves it set, or add a writer of
-  `bridge.yaml` that `configWriters` does not name.**
+  it refuse every save as a deployment leaf, load the file left or the
+  merged one without this process's environment, refuse a file left
+  unloadable as a deployment change, say that a leaf of a file the next
+  start refuses takes effect then, hash how an unread player block is
+  written, read the boot config through its name once it resolved it, take a
+  resolution that failed for a file or compare `""` as one, resolve the
+  holder's file anywhere but at that read, change anything besides the
+  config before calling `Update` (do it in `fn`, after the comparison,
+  asking `check` just before), run a caller's own work before `check` has
+  checked the leaves it set, or add a writer of `bridge.yaml` that
+  `configWriters` does not name.**
 
 ## atomicwrite.ReplaceDurable: replacing an entry a rename cannot replace (B539, 2026-10-28)
 
