@@ -327,6 +327,9 @@ func (e *Engine) beginShutdown() {
 		if o.maint.waiter != nil {
 			e.answer(o.maint.waiter, reply{err: closing(o.maint.waiter)})
 		}
+		if k := o.maint.check; k != nil {
+			e.releaseStops(k, closing)
+		}
 		o.maint.timer.Stop()
 		o.maint = nil
 		e.visible()
@@ -446,6 +449,11 @@ func (e *Engine) admit(c *command) {
 		return
 	}
 	noteAdmission(c)
+	if g := c.grant; g != nil {
+		// Its caller's bound counts from now (checkGrant).
+		g.at = e.clk.Now()
+		close(g.admitted)
+	}
 	if !e.o.closing && e.waits(c) {
 		e.o.parked = append(e.o.parked, c)
 		return
@@ -576,12 +584,16 @@ func (e *Engine) dispatch(c *command) {
 		e.reportOutput(c)
 	case c.op == opEnterMaint:
 		e.enterMaintenance(c)
+	case c.op == opEnterCheck:
+		e.enterCheck(c)
 	case c.op == opRenewMaint:
 		e.renewMaintenance(c)
 	case c.op == opExitMaint:
 		e.exitMaintenance(c)
 	case o.maint != nil:
-		if c.op == opStop {
+		if c.op == opStop && o.maint.check != nil {
+			e.checkStop(c)
+		} else if c.op == opStop {
 			e.answer(c, reply{})
 		} else {
 			e.answer(c, reply{err: refuse(name, ReasonMaintenance, "maintenance is held: "+o.maint.reason)})
@@ -612,24 +624,17 @@ func (e *Engine) dispatch(c *command) {
 }
 
 // reserveConfiguration grants a configuration reservation in this one step
-// when the transport is stopped with nothing under way: no session starting,
-// live, paused or releasing (o.sess), none whose release is not acknowledged
-// (o.sessions), and no release unconfirmed; maintenance and the shutdown were
-// dispatch's to refuse. A backend call of no session (a Discard) holds no
-// device and refuses nothing. A refusal changes nothing; a grant moves no
-// generation, since it changes nothing a controller reads, and draws a lease
-// that is not zero and not held already.
+// when the transport is stopped with nothing under way (unsettled): no session
+// starting, live, paused or releasing (o.sess), none whose release is not
+// acknowledged (o.sessions), and no release unconfirmed; maintenance and the
+// shutdown were dispatch's to refuse. A backend call of no session (a
+// Discard) holds no device and refuses nothing. A refusal changes nothing; a
+// grant moves no generation, since it changes nothing a controller reads, and
+// draws a lease that is not zero and not held already.
 func (e *Engine) reserveConfiguration(c *command) {
 	o := &e.o
-	if o.state != Stopped || o.sess != nil || len(o.sessions) > 0 || o.unconfirmed != nil {
-		detail := "the player is " + o.state.String()
-		switch u := o.unconfirmed; {
-		case u != nil:
-			detail = fmt.Sprintf("session %d's release is not confirmed", u.Session)
-		case o.state == Stopped:
-			detail = "a session's release is not acknowledged yet"
-		}
-		e.answer(c, reply{err: refuse(c.op.String(), ReasonNotStopped, detail+": a configuration is written only while the player is stopped with nothing under way")})
+	if why := e.unsettled(); why != "" {
+		e.answer(c, reply{err: refuse(c.op.String(), ReasonNotStopped, why+": a configuration is written only while the player is stopped with nothing under way")})
 		return
 	}
 	var l ConfigLease
@@ -653,6 +658,24 @@ func (e *Engine) releaseConfiguration(c *command) {
 		e.touched()
 	}
 	e.answer(c, reply{})
+}
+
+// unsettled is why the transport is not stopped with nothing under way, the
+// one predicate a configuration reservation, and a check's hold without
+// interrupt, are granted by: a state but Stopped, a session (o.sess), one
+// whose release is not acknowledged (o.sessions) or a release unconfirmed;
+// "" when it is.
+func (e *Engine) unsettled() string {
+	o := &e.o
+	switch u := o.unconfirmed; {
+	case o.state == Stopped && o.sess == nil && len(o.sessions) == 0 && u == nil:
+		return ""
+	case u != nil:
+		return fmt.Sprintf("session %d's release is not confirmed", u.Session)
+	case o.state == Stopped:
+		return "a session's release is not acknowledged yet"
+	}
+	return "the player is " + o.state.String()
 }
 
 // generation is the generation as published, with the changes of this step

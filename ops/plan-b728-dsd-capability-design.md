@@ -1165,13 +1165,25 @@ safety half the app needs is on the bridge before the app's I4 ships.
   tuple outside the set is refused, `check_unavailable` with the set's reason. So the check cannot
   play anything an ordinary track could not. To check native on an unknown DAC, the user first
   chooses native, with its acknowledgement, which makes native the set's for this DAC.
-- If something is playing, the request needs `interrupt: true`, or it gets 409 `would_interrupt`.
-- The bridge prepares the chime (below) before it stops anything.
-- It stops the engine and waits for the release's acknowledgement.
-- It enters maintenance: the engine's own hold, which closes mutations; exit leaves the transport
-  stopped and never autoplays (the maintenance bullet in `.claude/rules/player.md`).
+- **The hold comes first** (amended 2026-11-20, B12 PR 2). The engine's owner decides the check in
+  the one step that grants its hold (`EnterCheck`): a choice's write in flight (its configuration
+  reservation), another hold, an unconfirmed release and a DAC that is not there refuse it; and if
+  anything starts, plays, is paused or releases, the request needs `interrupt: true`, or it gets
+  409 `would_interrupt`, decided by the reservation's own predicate in that step, never before the
+  preparation, where a Play could come between the decision and the stop. Granted, the hold closes
+  the engine to mutations, releases what holds the device and answers once that release is
+  acknowledged; a release left unconfirmed, a Stop, the hold's expiry or the DAC going away before
+  then ends the hold, and nothing is opened.
+- The hold is the engine's own maintenance, of a kind of its own: it closes mutations, and its exit
+  leaves the transport stopped and never autoplays (the maintenance bullet in
+  `.claude/rules/player.md`; the check's hold in `.claude/rules/output.md`).
+- The backend then reads the DAC afresh, admits the tuple against that reading and takes the device
+  slot (B12 PR 3); the route answers 202 only after all of that (B12 PR 4).
+- The bridge prepares the chime (below) after that, under the hold (`preparing`), so the preparation
+  competes with no playback for the CPU; a play it interrupted is silent for at most the
+  preparation's bound, and not at all for a chime made already.
 - It plays the chime through the transport and rate under test, with that tuple's plan.
-- It drains, releases and exits maintenance.
+- It drains, releases and exits the hold.
 - The whole check is bounded at 10 s of wall clock, the harness's own bound for a contact
   (`ops/b470-native-qualification.md:33`).
 
@@ -1201,13 +1213,17 @@ the time on a Pi 4.
 
 ### 6.3 Stop paths
 
-Every Stop ends the check, bounded by the sink's release deadline (2 s):
+Every Stop ends the check, bounded by the sink's release deadline (2 s). One interception, in the
+engine, serves every Stop surface (amended 2026-11-20, B12 PR 2): under the check's hold the
+engine's owner closes the hold's stop signal, which the check stops on, and answers the Stop once
+the check has let go (the hold's end) or `ReleaseTimeout` (2 s) has passed. No surface asks the
+player first.
 
 - the app's DELETE;
-- an OpenHome Stop: the surface asks the player first, since maintenance answers writes with 501
-  (`.claude/rules/openhome.md`);
-- the console's Stop;
-- the DAC unplugged (the sink's ENODEV fault);
+- an OpenHome Stop, the engine's own command; its other writes that reach the engine answer 501
+  under the hold, as in maintenance (`.claude/rules/openhome.md`);
+- the console's Stop, once the console has one (B13): the engine's Stop, the same path;
+- the DAC unplugged (the sink's ENODEV fault; the output's report ends the engine's hold too);
 - a fault;
 - the 10 s bound;
 - serve's shutdown.

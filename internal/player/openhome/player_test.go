@@ -369,6 +369,8 @@ type testPlayer struct {
 	// reserveWrite, when set, runs before each of the engine's reservation
 	// writes (engine.Config.Seams.ReserveWrite; hangReservations).
 	reserveWrite func() error
+	// clock, when set, is the engine's time (engine.Config.Seams.Clock).
+	clock engine.Clock
 }
 
 // newTestPlayer starts an engine. The engine keeps its IDs and tokens
@@ -423,8 +425,8 @@ func (p *testPlayer) start() error {
 		reserve = filepath.Join(p.dir, p.reserve)
 	}
 	var seams *engine.Seams
-	if p.reserveWrite != nil {
-		seams = &engine.Seams{ReserveWrite: p.reserveWrite}
+	if p.reserveWrite != nil || p.clock != nil {
+		seams = &engine.Seams{ReserveWrite: p.reserveWrite, Clock: p.clock}
 	}
 	eng, err := engine.New(engine.Config{PlayerUUID: p.uuid, Backend: p.be, QueuePath: filepath.Join(p.dir, p.queue), ReservePath: reserve, DataDir: p.dir,
 		Seams: seams})

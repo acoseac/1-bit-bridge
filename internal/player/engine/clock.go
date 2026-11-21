@@ -22,6 +22,13 @@ type timer interface {
 	Stop() bool
 }
 
+// Clock and Timer are clock and timer as a package above the engine names
+// them, giving the engine its time in that package's tests (Seams.Clock).
+type (
+	Clock = clock
+	Timer = timer
+)
+
 // realClock is the time package's.
 type realClock struct{}
 

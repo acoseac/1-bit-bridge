@@ -311,7 +311,9 @@ func (e *Engine) reserveDone(err error) {
 // reportOutput is ReportOutput: a report not newer than the last applied is
 // discarded. The output going away, or its unit changing, stops playback
 // and freezes the position; while nothing plays it drops what the backend
-// prepared. Its return changes nothing: never autoplay.
+// prepared; and it ends the DSD check's hold, whose DAC it was (EnterCheck),
+// so the check stops on its signal. Its return changes nothing: never
+// autoplay.
 func (e *Engine) reportOutput(c *command) {
 	o := &e.o
 	r := c.report
@@ -330,6 +332,9 @@ func (e *Engine) reportOutput(c *command) {
 		why := ReasonOutputUnavailable
 		if r.Available {
 			why = ReasonUnitChanged
+		}
+		if m := o.maint; m != nil && m.check != nil {
+			e.endMaintenance(why, r.Reason)
 		}
 		e.outputGone(why, r.Reason)
 	}
