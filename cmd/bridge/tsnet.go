@@ -312,9 +312,10 @@ type tsnetStatusSource interface {
 //
 // What holds the node's diagnostic-log uploads off where the config allows
 // them (tsnet.Uploads.HeldOff: the launch environment, this process
-// earlier, or something else in it) is said in UploadsHeldOff, a line of
-// its own, for a node the tailnet accepted as for one it refused, so a
-// running node's badge, backend state and endpoints stay as they are.
+// earlier, a stop that gave up on a start which allowed them, or something
+// else in it) is said in UploadsHeldOff, a line of its own, for a node the
+// tailnet accepted as for one it refused, so a running node's badge,
+// backend state and endpoints stay as they are.
 func tsnetAdminStatus(ctx context.Context, s tsnetStatusSource) admin.TailscaleStatus {
 	out := admin.TailscaleStatus{
 		// CLIAvailable lights the "I can talk to tailscale" indicator

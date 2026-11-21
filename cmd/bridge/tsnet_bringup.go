@@ -28,8 +28,11 @@ import (
 type tsnetNode interface {
 	Start(context.Context) error
 	Close() error
-	// AbandonStart is the node's to call once stop has given up waiting
-	// for the goroutine (backlog B830). Nothing calls it yet.
+	// AbandonStart is what stop calls once its wait for the goroutine has
+	// run out, just before it closes the node: the node decides what a start
+	// left running past serve's stop costs (tsnet.Server.AbandonStart, which
+	// turns the diagnostic-log uploads off for the process where a start that
+	// allowed them has not returned; backlog B830).
 	AbandonStart()
 	Status(context.Context) (*ipnstate.Status, error)
 	CertDomains() []string
@@ -431,7 +434,12 @@ func (f *tsnetFront) publishHTTPS(srv *http.Server) bool {
 // when the grace is out (a start stuck in the part of upstream's start
 // that takes no context, or a listen) costs a line, never a hung exit; the
 // node is then closed under it, and the wrapper stops a start that Close
-// lands on, while tsnetListen closes a listener that lands after it.
+// lands on, while tsnetListen closes a listener that lands after it. A
+// goroutine still running then is the node's to judge first
+// (tsnetNode.AbandonStart), since Close does not wait for a start: one that
+// allowed the diagnostic-log uploads and has not returned could upload past
+// the stop, so the node turns them off for the process (backlog B830). stop
+// decides nothing of it, and asks nothing where the goroutine ended in time.
 //
 // The drains get http3ForceCloseAllowance past the grace (drainedWithin).
 // The Close that Shutdown calls at the deadline writes each connection's
@@ -473,6 +481,7 @@ func (f *tsnetFront) stop(ctx context.Context) {
 		}
 		if !closedWithin(ctx, f.done) {
 			fmt.Fprintln(f.stderr, "shutdown: the tsnet goroutine did not stop within grace; closing its node anyway")
+			f.node.AbandonStart()
 		}
 		if err := f.node.Close(); err != nil {
 			fmt.Fprintf(f.stderr, "tsnet close: %v\n", err)

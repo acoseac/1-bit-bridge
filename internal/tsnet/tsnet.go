@@ -116,6 +116,11 @@ type Server struct {
 	// once one has succeeded: what the console's tile says after a start
 	// the tailnet refused, when Status has no node to ask.
 	lastStartErr error
+	// upstreamReturned is whether the Start in flight has had its call to
+	// the node's Start, the part of upstream's start that takes no context,
+	// return (startUpstream). Until then that start may yet build the
+	// node's log transport, or has built it, which AbandonStart reads.
+	upstreamReturned bool
 
 	// authMu protects authURL ONLY. Held briefly by userLogf
 	// (background goroutine, write) and AuthURL() (caller, read).
@@ -188,10 +193,11 @@ type Config struct {
 	// every later NewServer sets it again until the process exits; true
 	// leaves the environment as it is until then, so a node built after one
 	// without the key starts with the uploads off all the same, and says why
-	// (Server.Uploads). Upstream reads the variable as the node starts and
-	// the logtail transport is chosen then, so a change takes a new launch of
-	// the bridge's process: the menu's "Start now" runs serve again in its
-	// own.
+	// (Server.Uploads), as does one built after a stop that gave up on a
+	// start which allowed them (Server.AbandonStart). Upstream reads the
+	// variable as the node starts and the logtail transport is chosen then,
+	// so a change takes a new launch of the bridge's process: the menu's
+	// "Start now" runs serve again in its own.
 	UploadDiagnosticLogs bool
 	// BeforeStart, when set, runs on the upstream server startUnlocked
 	// built, just before its Start, and an error from it ends the start
@@ -282,6 +288,7 @@ func (s *Server) Start(ctx context.Context) error {
 	defer cancel()
 	s.starting = true
 	s.cancelStart = cancel
+	s.upstreamReturned = false
 	s.lifecycleMu.Unlock()
 
 	// Phase 2: do the actual work without holding the mutex —
@@ -339,10 +346,6 @@ func (s *Server) LastStartError() error {
 	return s.lastStartErr
 }
 
-// AbandonStart is what a caller that has given up waiting for this server's
-// Start calls (backlog B830). It does nothing yet.
-func (s *Server) AbandonStart() {}
-
 // startUnlocked does the I/O-heavy parts of Start without holding
 // lifecycleMu. Returns the constructed node (or nil on
 // pre-construction error) so Start can clean up under the lock.
@@ -399,13 +402,52 @@ func (s *Server) startUnlocked(ctx context.Context) (node, error) {
 		}
 	}
 
-	if err := server.Start(); err != nil {
+	if err := s.startUpstream(server); err != nil {
 		return server, fmt.Errorf("tsnet: server start: %w", err)
 	}
 	if _, err := server.Up(ctx); err != nil {
 		return server, fmt.Errorf("tsnet: bring node up: %w", err)
 	}
 	return server, nil
+}
+
+// startUpstream runs the node's Start, the part of upstream's start that
+// takes no context (it builds the node, its log transport first), and records
+// that it has returned, which AbandonStart reads.
+func (s *Server) startUpstream(server node) error {
+	err := server.Start()
+	s.lifecycleMu.Lock()
+	s.upstreamReturned = true
+	s.lifecycleMu.Unlock()
+	return err
+}
+
+// AbandonStart is what a caller that has given up waiting for this server's
+// Start calls: serve's stop of its tailnet side, once its wait for the
+// goroutine that starts the node has run out (backlog B830). A Start still in
+// flight whose call to upstream's start has not returned may have built the
+// node's log transport, or may yet build it, and Close does not wait for that
+// start, so its uploads could outlive the stop, and run while a later node
+// whose config withdrew the consent runs. Where the config allows the uploads
+// and such a Start is in flight, AbandonStart turns them off for the rest of
+// the process, as upstream's own setter does (abandonUploads): logtail's
+// process-wide switch, which the uploader asks before each upload, and
+// NoLogsEnv set true, which every later NewServer sets again; every node's
+// status says so from then on (Uploads.AbandonedOff). No new upload starts
+// after it, and one already under way may finish within the 45 seconds
+// logtail gives an upload. A Start whose call to upstream's start has
+// returned (its node built, or failed and closed), a server not starting, and
+// a node whose config does not allow the uploads change nothing.
+func (s *Server) AbandonStart() {
+	s.lifecycleMu.Lock()
+	stalled := s.starting && !s.upstreamReturned
+	s.lifecycleMu.Unlock()
+	if !stalled || !s.uploads.Allowed {
+		return
+	}
+	abandonUploads()
+	s.log.Warn("tsnet: the node's start had not returned when the bridge stopped, so this process turned " +
+		"Tailscale's diagnostic log uploads off for the rest of its life: " + abandonedUploads)
 }
 
 // ListenTLS returns an HTTPS listener with auto-renewing Let's
