@@ -98,6 +98,7 @@ type (
 	}
 	msgMaintExpiry    struct{ seq uint64 }
 	msgCheckStops     struct{ m *maintHold } // the deadline of the Stops m's check parked
+	msgCheckGone      struct{ c *command }   // a check's grant its caller gave back (giveBack)
 	msgReserveDone    struct{ err error }
 	msgReserveOverdue struct{ seq uint64 }
 	msgPersisted      struct {
@@ -211,6 +212,9 @@ func (e *Engine) handle(m any) {
 	case msgCheckStops:
 		what = "check stops"
 		e.checkStopsDue(m.m)
+	case msgCheckGone:
+		what = "check gone"
+		e.checkGone(m.c)
 	case msgReserveDone:
 		what = "reservation"
 		e.reserveDone(m.err)

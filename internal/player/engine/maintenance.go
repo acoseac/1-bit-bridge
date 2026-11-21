@@ -17,6 +17,9 @@ type maintHold struct {
 	seq            uint64
 	// waiter is the enter, answered once its release settles (deliver).
 	waiter *command
+	// grantee is the enter the hold was granted to, whose caller may give the
+	// grant back (checkGone).
+	grantee *command
 	// check is what the DSD check's hold adds (EnterCheck), nil for
 	// EnterMaintenance's.
 	check *checkHold
@@ -108,7 +111,7 @@ func (e *Engine) grantHold(c *command, reason string, k *checkHold) {
 		e.sm.random(l.b[:])
 	}
 	now := e.clk.Now()
-	m := &maintHold{lease: l, reason: reason, since: now, expires: now.Add(e.cfg.MaintenanceTTL), check: k}
+	m := &maintHold{lease: l, reason: reason, since: now, expires: now.Add(e.cfg.MaintenanceTTL), grantee: c, check: k}
 	o.maint = m
 	e.armMaintenance()
 	for _, w := range o.waiters {
@@ -146,7 +149,9 @@ func (e *Engine) grantHold(c *command, reason string, k *checkHold) {
 // deadline: a plain hold's caller its Hold, confirmed or not; a check's its
 // Hold only with that release confirmed and no Stop come first, and otherwise
 // why, the hold ended first, so an error leaves its caller nothing to let go:
-// ReasonReleaseUnconfirmed, which outranks a Stop, or ReasonStopped.
+// ReasonReleaseUnconfirmed, which outranks a Stop, or ReasonStopped. A check
+// whose caller has given up waiting (checkGrant) is answered nothing, and the
+// hold it would have been handed is ended here, as its exit ends it.
 func (e *Engine) deliver(m *maintHold) {
 	c := m.waiter
 	m.waiter = nil
@@ -165,7 +170,9 @@ func (e *Engine) deliver(m *maintHold) {
 	default:
 		h.Stop = k.stop
 	}
-	e.answer(c, reply{hold: h})
+	if !e.answer(c, reply{hold: h}) {
+		e.endMaintenance("", "")
+	}
 }
 
 // armMaintenance arms the hold's expiry, replacing the timer before it.
@@ -204,6 +211,15 @@ func (e *Engine) exitMaintenance(c *command) {
 	e.answer(c, reply{})
 }
 
+// checkGone is the grant of c given back by its caller, who did not take it
+// (giveBack): the hold granted to c is ended, as its exit would end it, if it
+// stands still; one ended already, or another's, changes nothing.
+func (e *Engine) checkGone(c *command) {
+	if m := e.o.maint; m != nil && m.grantee == c {
+		e.endMaintenance("", "")
+	}
+}
+
 // maintenanceExpiry ends a hold whose expiry has come.
 func (e *Engine) maintenanceExpiry(seq uint64) {
 	m := e.o.maint
@@ -218,8 +234,9 @@ func (e *Engine) maintenanceExpiry(seq uint64) {
 // endMaintenance ends the hold: the transport stopped, never resumed. A grant
 // not answered yet is answered: a plain hold's entered, its release
 // unconfirmed; a check's with why (its expiry, its output gone), or
-// ReasonStopped once a Stop came first, never with a lease already gone. A
-// check's hold lets its Stops go (releaseStops).
+// ReasonStopped once a Stop came first, never with a lease already gone, and
+// not at all once its caller has given up (answer). A check's hold lets its
+// Stops go (releaseStops).
 func (e *Engine) endMaintenance(why Reason, detail string) {
 	o := &e.o
 	m := o.maint

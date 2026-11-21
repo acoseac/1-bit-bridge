@@ -16,9 +16,9 @@
 // admitted yet, and the owner refuses it in turn); one whose context ends
 // after its admission may have run, and its refusal does not wrap it, but for
 // a configuration reservation, whose grant the method lets go again ("The
-// configuration reservation" below), and the DSD check's hold, whose caller
-// waits for the owner's answer whatever its context does ("Maintenance"
-// below). Once admitted its effect is applied, or
+// configuration reservation" below); the DSD check's hold its caller stopped
+// waiting for, whose wait has a bound of its own too, is exited by the owner
+// ("Maintenance" below). Once admitted its effect is applied, or
 // recorded as the pending
 // intent while a release is under way, and its reply is sent once that
 // effect is decided, which can be after a backend call. The reply is sent
@@ -371,9 +371,16 @@
 // them ReasonClosed. Every other mutation is refused ReasonMaintenance, and
 // the exit leaves the transport stopped. Its command carries its caller's
 // context: ended before the owner admits it, it stops nothing
-// (ErrNotAdmitted); once admitted its caller waits for the answer, which
-// always comes, and exits a hold its context outlived before it answers
-// ReasonCancelled, without ErrNotAdmitted.
+// (ErrNotAdmitted). Once admitted it runs, and its caller waits for the answer
+// at most ReleaseTimeout and checkMargin (500 ms, the owner's time to take the
+// release's deadline and answer) from the admission, on the engine's clock:
+// that bound, or its context's end, answers ReasonCancelled at once, without
+// ErrNotAdmitted, and what the check stopped stays stopped. One
+// compare-and-swap decides whether the owner answers that caller: a hold the
+// owner would hand over to a caller that has given up it ends itself,
+// answering nobody, and a grant answered and not taken, sent too late or not
+// yet sent, is given back and ended by the owner in a later step; never by
+// the caller, and never twice.
 //
 // # The configuration reservation
 //

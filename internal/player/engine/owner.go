@@ -449,6 +449,11 @@ func (e *Engine) admit(c *command) {
 		return
 	}
 	noteAdmission(c)
+	if g := c.grant; g != nil {
+		// Its caller's bound counts from now (checkGrant).
+		g.at = e.clk.Now()
+		close(g.admitted)
+	}
 	if !e.o.closing && e.waits(c) {
 		e.o.parked = append(e.o.parked, c)
 		return

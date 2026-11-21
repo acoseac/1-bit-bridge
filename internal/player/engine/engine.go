@@ -146,6 +146,10 @@ type seams struct {
 	// newest revision it has seen.
 	replying    func(op string, r reply, s *Snapshot)
 	writerWaits func(seen uint64)
+	// checkWaits sees EnterCheck's caller at each turn of its wait for the
+	// owner's answer (awaitGrant), on the caller's goroutine, before it
+	// selects, so a test can make two of the wait's arms ready together.
+	checkWaits func(c *command)
 	// exiting sees each goroutine the engine started at its end, its last
 	// message handed over and nothing of it counted any more, so a test can
 	// hold it there.
@@ -552,20 +556,155 @@ func (e *Engine) EnterMaintenance(ctx context.Context, want Generation, reason s
 // step that grants it, exited and renewed as any hold, whose stop signal
 // (Hold.Stop) closes at its first end or Stop. The package
 // documentation's "Maintenance" says what refuses it, what it answers and
-// what a Stop does under it. The grant is never lost to its caller: the
-// command carries ctx, so one whose ctx ends before the owner admits it does
-// not run, nothing stopped (ErrNotAdmitted); once admitted, its caller waits
-// for the owner's answer whatever ctx does, and exits a hold ctx outlived
-// before it answers ReasonCancelled, without ErrNotAdmitted: it ran, and what
-// it stopped stays stopped.
+// what a Stop does under it. The command carries ctx, so one whose ctx ends
+// before the owner admits it does not run, nothing stopped (ErrNotAdmitted).
+// Once admitted it runs, and its caller waits for the owner's answer at most
+// ReleaseTimeout and checkMargin from the admission, on the engine's clock:
+// that bound, or ctx's end, answers ReasonCancelled without ErrNotAdmitted at
+// once, and what the check stopped stays stopped. The grant is never lost:
+// one compare-and-swap decides whether the owner answers the caller
+// (checkGrant), so the owner exits a hold it would have handed over to a
+// caller that gave up first, answering nobody, and a grant the caller does
+// not take, sent too late or not yet sent, is given back for the owner to
+// exit (giveBack). The owner exits it, once; a refusal it sent first is the
+// answer.
 func (e *Engine) EnterCheck(ctx context.Context, interrupt bool) (Hold, error) {
-	r := e.do(&command{op: opEnterCheck, ctx: ctx, on: interrupt, kept: true})
-	if err := ctx.Err(); err != nil && r.err == nil {
-		_ = e.ExitMaintenance(context.Background(), r.hold.Lease)
-		return Hold{}, &Error{Reason: ReasonCancelled, Op: opEnterCheck.String(),
-			Detail: "the context ended as the hold was granted: it was exited, and what it stopped stays stopped", Err: err}
+	c := &command{op: opEnterCheck, ctx: ctx, on: interrupt, grant: &checkGrant{admitted: make(chan struct{})}}
+	if r, sent := e.send(c); !sent {
+		return r.hold, r.err
 	}
-	return r.hold, r.err
+	return e.awaitGrant(c)
+}
+
+// checkMargin is how long past ReleaseTimeout from its admission EnterCheck's
+// caller waits for the owner's answer. The grant is answered once the release
+// it makes, or finds under way, is acknowledged or past its deadline, which
+// comes ReleaseTimeout from the admission at the latest, on the engine's
+// clock; the margin is the owner's own time to take that message and send its
+// answer. An owner that has not answered by then is taken for stalled: its
+// caller answers ReasonCancelled, and the owner exits the hold once it runs.
+const checkMargin = 500 * time.Millisecond
+
+// checkGrant is EnterCheck's handoff between its caller and the owner (B728
+// B12). The owner sets at, the instant the caller's bound counts from, and
+// closes admitted as it admits the command; state is decided once, by one
+// compare-and-swap, between the owner answering the caller (answer) and the
+// caller giving up, past its bound or at its context's end (giveUp).
+type checkGrant struct {
+	admitted chan struct{}
+	at       time.Time
+	state    atomic.Int32
+}
+
+// A check's handoff (checkGrant.state).
+const (
+	grantWaiting int32 = iota
+	grantAnswered
+	grantGone
+)
+
+// awaitGrant waits for the owner's answer to c, an EnterCheck sent to it.
+// Before the owner admits c its context's end abandons it, as do's does;
+// once admitted, the wait ends at the answer, at its context's end or at
+// ReleaseTimeout and checkMargin from the admission, on the engine's clock,
+// where its caller gives up (giveUp), or with the engine.
+func (e *Engine) awaitGrant(c *command) (Hold, error) {
+	g := c.grant
+	name := c.op.String()
+	admitted := g.admitted
+	var bound <-chan struct{}
+	var t timer
+	defer func() {
+		if t != nil {
+			t.Stop()
+		}
+	}()
+	for {
+		if e.sm.checkWaits != nil {
+			e.sm.checkWaits(c)
+		}
+		select {
+		case r := <-c.reply:
+			return e.takeGrant(c, r)
+		case <-admitted:
+			expired := make(chan struct{})
+			t = e.clk.At(g.at.Add(ReleaseTimeout+checkMargin), func() { close(expired) })
+			admitted, bound = nil, expired
+		case <-bound:
+			return e.giveUp(c, &Error{Reason: ReasonCancelled, Op: name, Err: context.DeadlineExceeded,
+				Detail: "the owner did not answer within ReleaseTimeout and its margin: what the check stopped stays stopped, and the owner exits any hold it granted once it runs"})
+		case <-c.ctx.Done():
+			if c.admission.CompareAndSwap(admissionPending, admissionAbandoned) {
+				// The owner has taken c and not admitted it, and now never will.
+				return Hold{}, notAdmitted(name, c.ctx.Err())
+			}
+			return e.giveUp(c, checkCancelled(name, c.ctx.Err()))
+		case <-e.done:
+			select {
+			case r := <-c.reply:
+				return e.takeGrant(c, r)
+			default:
+			}
+			return Hold{}, refuse(name, ReasonClosed, "the engine has shut down")
+		}
+	}
+}
+
+// checkCancelled is the answer of a check whose caller's context ended, with
+// err, after the owner admitted it.
+func checkCancelled(name string, err error) error {
+	return &Error{Reason: ReasonCancelled, Op: name, Err: err,
+		Detail: "the context ended after the owner admitted the check: what it stopped stays stopped, and the owner exits any hold it granted"}
+}
+
+// giveUp ends a wait for c's answer that its caller will not finish, and
+// answers why. Its compare-and-swap won, the owner has not answered c and
+// never will, and exits a hold it grants c itself (deliver). Lost, the owner
+// has answered: a refusal already sent is the answer, and any other answer,
+// sent or not yet sent, is given back for the owner to exit (giveBack).
+func (e *Engine) giveUp(c *command, why error) (Hold, error) {
+	if c.grant.state.CompareAndSwap(grantWaiting, grantGone) {
+		return Hold{}, why
+	}
+	select {
+	case r := <-c.reply:
+		if r.err != nil {
+			return Hold{}, r.err
+		}
+	default:
+	}
+	e.giveBack(c)
+	return Hold{}, why
+}
+
+// takeGrant is the owner's answer r as c's caller reads it: a refusal as it
+// is, and a Hold read once its caller's context has ended given back for the
+// owner to exit (giveBack), as giveUp gives it back, so no hold is handed to
+// a caller whose context has ended.
+func (e *Engine) takeGrant(c *command, r reply) (Hold, error) {
+	if r.err != nil {
+		return Hold{}, r.err
+	}
+	if err := c.ctx.Err(); err != nil {
+		e.giveBack(c)
+		return Hold{}, checkCancelled(c.op.String(), err)
+	}
+	return r.hold, nil
+}
+
+// giveBack hands the owner the grant of c, whose caller does not take it
+// (msgCheckGone), never waiting: into the owner's queue, or, that queue full,
+// on a goroutine of its own until the owner takes it or has ended. The owner
+// takes it in a later step than the one that answered c, and exits the hold
+// granted to c if it still stands (checkGone).
+func (e *Engine) giveBack(c *command) {
+	m := msgCheckGone{c: c}
+	select {
+	case e.msgs <- m:
+	case <-e.done:
+	default:
+		go e.post(m)
+	}
 }
 
 // RenewMaintenance extends the hold to MaintenanceTTL from now and returns
@@ -686,10 +825,9 @@ type command struct {
 	seconds int64
 	// config is the lease a configuration reservation's release lets go.
 	config ConfigLease
-	// kept is a command whose caller, once the owner has admitted it, waits
-	// for its reply whatever its context does (do): EnterCheck's, whose reply
-	// can hand over a hold.
-	kept bool
+	// grant is EnterCheck's handoff (checkGrant), nil for every other
+	// command.
+	grant *checkGrant
 
 	reply   chan reply
 	replied bool
@@ -717,64 +855,67 @@ type reply struct {
 	config  ConfigLease
 }
 
-// do hands c to the owner and waits for its reply. A context that has
+// do hands c to the owner (send) and waits for its reply. A context that has
 // ended, or ends before the owner admits c, means c does not run, and the
 // refusal wraps ErrNotAdmitted: before the owner takes it, and once taken
 // and not yet admitted, where do abandons it (command.admission), so the
 // owner refuses it in turn; one that ends after the owner admitted c means
-// c may run and its reply is dropped, but for a kept command, whose reply do
-// waits for still, or the engine's end. After shutdown every command is
-// answered ReasonClosed at once. c holds nothing of the caller's once it is
-// sent: do copies the conditions here, and InsertAfter the metadata, so a
-// caller that returns early may reuse its slices while the owner still runs
-// the command.
+// c may run and its reply is dropped. After shutdown every command is
+// answered ReasonClosed at once.
 func (e *Engine) do(c *command) reply {
+	if r, sent := e.send(c); !sent {
+		return r
+	}
+	name := c.op.String()
+	select {
+	case r := <-c.reply:
+		return r
+	case <-c.ctx.Done():
+		select {
+		case r := <-c.reply:
+			return r
+		default:
+		}
+		if c.admission.CompareAndSwap(admissionPending, admissionAbandoned) {
+			// The owner has taken c and not admitted it, and now never will.
+			return reply{err: notAdmitted(name, c.ctx.Err())}
+		}
+		return reply{err: &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended while the command ran: it may have taken effect", Err: c.ctx.Err()}}
+	case <-e.done:
+		select {
+		case r := <-c.reply:
+			return r
+		default:
+		}
+		return reply{err: refuse(name, ReasonClosed, "the engine has shut down")}
+	}
+}
+
+// send hands c to the owner, making its reply channel, and reports whether
+// it did: not, with c's answer, when c's context had ended, or the engine had
+// shut down, before the owner took it. c holds nothing of the caller's once it
+// is sent: send copies the conditions here, and InsertAfter the metadata, so
+// a caller that returns early may reuse its slices while the owner still runs
+// the command.
+func (e *Engine) send(c *command) (reply, bool) {
 	c.conds = slices.Clone(c.conds)
 	name := c.op.String()
 	if err := c.ctx.Err(); err != nil {
-		return reply{err: notAdmitted(name, err)}
+		return reply{err: notAdmitted(name, err)}, false
 	}
 	select {
 	case <-e.done:
-		return reply{err: refuse(name, ReasonClosed, "the engine has shut down")}
+		return reply{err: refuse(name, ReasonClosed, "the engine has shut down")}, false
 	default:
 	}
 	c.reply = make(chan reply, 1)
 	select {
 	case e.cmds <- c:
+		return reply{}, true
 	case <-c.ctx.Done():
-		return reply{err: notAdmitted(name, c.ctx.Err())}
+		return reply{err: notAdmitted(name, c.ctx.Err())}, false
 	case <-e.done:
-		return reply{err: refuse(name, ReasonClosed, "the engine has shut down")}
-	}
-	done := c.ctx.Done()
-	for {
-		select {
-		case r := <-c.reply:
-			return r
-		case <-done:
-			select {
-			case r := <-c.reply:
-				return r
-			default:
-			}
-			if c.admission.CompareAndSwap(admissionPending, admissionAbandoned) {
-				// The owner has taken c and not admitted it, and now never will.
-				return reply{err: notAdmitted(name, c.ctx.Err())}
-			}
-			if c.kept {
-				done = nil
-				continue
-			}
-			return reply{err: &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended while the command ran: it may have taken effect", Err: c.ctx.Err()}}
-		case <-e.done:
-			select {
-			case r := <-c.reply:
-				return r
-			default:
-			}
-			return reply{err: refuse(name, ReasonClosed, "the engine has shut down")}
-		}
+		return reply{err: refuse(name, ReasonClosed, "the engine has shut down")}, false
 	}
 }
 
@@ -820,15 +961,22 @@ func notAdmitted(name string, err error) error {
 		Err: fmt.Errorf("%w: %w", ErrNotAdmitted, err)}
 }
 
-// answer gives c its reply, once. The reply is sent when the step that
-// decided it has published its snapshot, so a caller reads its own change
-// as soon as its command returns; replies never block the owner.
-func (e *Engine) answer(c *command, r reply) {
+// answer gives c its reply, once, and reports whether it did. The reply is
+// sent when the step that decided it has published its snapshot, so a caller
+// reads its own change as soon as its command returns; replies never block
+// the owner. A check's reply is given only by the compare-and-swap that finds
+// its caller still waiting (checkGrant): false, nobody answered, once that
+// caller has given up.
+func (e *Engine) answer(c *command, r reply) bool {
 	if c.replied {
-		return
+		return false
 	}
 	c.replied = true
+	if g := c.grant; g != nil && !g.state.CompareAndSwap(grantWaiting, grantAnswered) {
+		return false
+	}
 	e.o.outbox = append(e.o.outbox, answered{c: c, r: r})
+	return true
 }
 
 // answered is a reply waiting for its step's snapshot.

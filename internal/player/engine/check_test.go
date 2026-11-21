@@ -429,8 +429,10 @@ func TestACheckHoldIsRefusedWhileAReleaseIsUnconfirmed(t *testing.T) {
 // hold has ended (no maintenance, the transport stopped, the release shown
 // unconfirmed), so its caller holds nothing, and a Play and another check's
 // hold are refused ReasonReleaseUnconfirmed, nothing started. A caller whose
-// context ended during that release's wait gets the same answer, not a
-// cancellation, and no hold stands after it.
+// context ended during that release's wait is answered at once, before the
+// deadline, ReasonCancelled without ErrNotAdmitted; the owner ends the hold at
+// the deadline all the same, answering nobody, and the rest is as for the
+// caller that waited.
 func TestAnInterruptWhoseReleaseIsNotConfirmedSaysSo(t *testing.T) {
 	for _, gone := range []bool{false, true} {
 		t.Run(map[bool]string{false: "its caller waiting", true: "its caller gone during the wait"}[gone], func(t *testing.T) {
@@ -446,26 +448,36 @@ func TestAnInterruptWhoseReleaseIsNotConfirmedSaysSo(t *testing.T) {
 			base, cancel := context.WithCancel(bg)
 			defer cancel()
 			ctx, admission := WithAdmission(base)
+			replied := h.appliedMark()
 			check := h.checkAsync(ctx, true)
 			waitClosed(t, "the check's admission", admission)
 			h.be.waitFor("the check's release", func() bool { return s.releaseAsked })
 			if gone {
 				cancel()
+				a := h.checkResult("the check's hold whose caller left during its release", check)
+				if ReasonOf(a.err) != ReasonCancelled || errors.Is(a.err, ErrNotAdmitted) || !errors.Is(a.err, context.Canceled) || a.hold != (Hold{}) {
+					t.Fatalf("the check's hold whose caller left during its release: %+v, %v; want no hold, and a cancellation of a command that ran", a.hold, a.err)
+				}
 			}
 			h.clk.Advance(ReleaseTimeout)
-			a := h.checkResult("the check's hold whose release is not confirmed", check)
-			h.refused("the check's hold whose release is not confirmed", a.err, ReasonReleaseUnconfirmed)
-			if errors.Is(a.err, ErrNotAdmitted) || a.hold != (Hold{}) {
-				t.Errorf("the check's hold whose release is not confirmed: %+v, %v; want no hold, and an answer of a command that ran", a.hold, a.err)
+			if !gone {
+				a := h.checkResult("the check's hold whose release is not confirmed", check)
+				h.refused("the check's hold whose release is not confirmed", a.err, ReasonReleaseUnconfirmed)
+				if errors.Is(a.err, ErrNotAdmitted) || a.hold != (Hold{}) {
+					t.Errorf("the check's hold whose release is not confirmed: %+v, %v; want no hold, and an answer of a command that ran", a.hold, a.err)
+				}
 			}
-			sn := h.snap()
-			if _, held := sn.Maintenance(); held || sn.State() != Stopped {
-				t.Fatalf("after the refused grant: held %v, %s; want no hold, stopped", held, sn.State())
-			}
+			sn := h.waitSnap("the hold ended past its release's deadline", func(sn *Snapshot) bool {
+				_, held := sn.Maintenance()
+				return !held && sn.State() == Stopped
+			})
 			if _, ok := sn.ReleaseUnconfirmed(); !ok {
 				t.Fatal("the snapshot calls the check's release confirmed")
 			}
 			h.refused("a play after the check's unconfirmed release", h.eng.Play(bg), ReasonReleaseUnconfirmed)
+			if gone && h.repliedSince(checkOp, replied) {
+				t.Error("the owner answered a caller that had given up")
+			}
 			refusedCheck(t, h, "another check's hold", true, ReasonReleaseUnconfirmed)
 			if n := h.be.starts(); n != 1 {
 				t.Errorf("%d sessions started, want the first alone", n)
@@ -529,13 +541,14 @@ func TestACheckHoldAskedByAGoneCallerStopsNothing(t *testing.T) {
 	}
 }
 
-// TestTheCheckHoldsGrantIsNeverLostToItsCaller pins the grant kept for its
-// caller (B728 B12): the check's hold asked with interrupt while a session
-// plays, admitted, its release parked, and its caller's context ended there.
-// The caller waits for the owner's answer all the same; once the release is
-// acknowledged it exits the hold the owner granted and answers ReasonCancelled
-// without ErrNotAdmitted (it ran): no hold stands, the transport is stopped,
-// what it interrupted is not started again, and a new hold is granted at once.
+// TestTheCheckHoldsGrantIsNeverLostToItsCaller pins the grant its caller left
+// (B728 B12): the check's hold asked with interrupt while a session plays,
+// admitted, its release parked, and its caller's context ended there. The
+// caller is answered at once, the release still parked and the hold held,
+// ReasonCancelled without ErrNotAdmitted (it ran); once the release is
+// acknowledged, the owner ends the hold it would have handed over and answers
+// nobody: no hold stands, the transport is stopped, what the check
+// interrupted is not started again, and a new hold is granted at once.
 func TestTheCheckHoldsGrantIsNeverLostToItsCaller(t *testing.T) {
 	h := checkHarness(t, nil)
 	_, s := h.playing(0, "a", "b")
@@ -544,11 +557,11 @@ func TestTheCheckHoldsGrantIsNeverLostToItsCaller(t *testing.T) {
 	base, cancel := context.WithCancel(bg)
 	defer cancel()
 	ctx, admission := WithAdmission(base)
+	mark := h.appliedMark()
 	check := h.checkAsync(ctx, true)
 	waitClosed(t, "the check's admission", admission)
 	h.be.waitFor("the check's release", func() bool { return s.releaseAsked })
 	cancel()
-	g.open()
 	a := h.checkResult("the check's hold whose caller left during its release", check)
 	if ReasonOf(a.err) != ReasonCancelled || errors.Is(a.err, ErrNotAdmitted) || !errors.Is(a.err, context.Canceled) {
 		t.Fatalf("the check's hold whose caller left during its release: %v; want a cancellation of a command that ran", a.err)
@@ -556,15 +569,265 @@ func TestTheCheckHoldsGrantIsNeverLostToItsCaller(t *testing.T) {
 	if a.hold != (Hold{}) {
 		t.Errorf("the check's hold whose caller left was answered with a hold %+v", a.hold)
 	}
-	sn := h.snap()
-	if _, held := sn.Maintenance(); held || sn.State() != Stopped {
-		t.Fatalf("once the caller that left was answered: held %v, %s; want no hold, stopped", held, sn.State())
+	if m, ok := h.snap().Maintenance(); !ok || m.Reason != "check" || s.isAcked() {
+		t.Fatalf("as the caller that left was answered: hold %+v %v, release acknowledged %v; want the check's hold held, its release parked", m, ok, s.isAcked())
+	}
+	g.open()
+	h.waitSnap("the hold its caller left, ended by the owner", func(sn *Snapshot) bool {
+		_, held := sn.Maintenance()
+		return !held && sn.State() == Stopped
+	})
+	h.barrier()
+	if h.repliedSince(checkOp, mark) {
+		t.Error("the owner answered a caller that had given up")
 	}
 	if !s.isAcked() || h.be.starts() != 1 {
 		t.Errorf("the session the check stopped: acknowledged %v, %d sessions; want released, the one", s.isAcked(), h.be.starts())
 	}
 	hold := h.granted("a check's hold at once after", false)
 	h.must("the check's exit", h.eng.ExitMaintenance(bg, hold.Lease))
+}
+
+// TestAGrantItsCallerGaveUpAsItWasSentIsEndedByTheOwner pins the handoff of a
+// grant decided and not yet sent (B728 B12): the owner held at the replying
+// seam, the check's grant decided (at once, the player stopped; or once the
+// release it waits for is let go), and the caller giving up there, at its
+// bound (ReleaseTimeout and checkMargin from the admission, on the engine's
+// clock) or at its context's end, the clock not moved. The caller is answered
+// at once, the owner still held and the hold still held, ReasonCancelled
+// without ErrNotAdmitted; once let go, the owner sends the grant nobody reads
+// and then ends the hold the caller gave back, answering nothing more: its
+// stop signal closed, its lease refused, no hold, the expiry never reached;
+// and a later check's hold is granted.
+func TestAGrantItsCallerGaveUpAsItWasSentIsEndedByTheOwner(t *testing.T) {
+	for _, settles := range []bool{false, true} {
+		for _, bound := range []bool{true, false} {
+			name := map[bool]string{false: "granted at once", true: "granted once its release settles"}[settles] +
+				map[bool]string{true: ", given up at its bound", false: ", given up at its context's end"}[bound]
+			t.Run(name, func(t *testing.T) {
+				var armed atomic.Bool
+				reached, release := make(chan reply, 1), newGate()
+				h := checkHarness(t, func(c *Config) {
+					replying := c.seams.replying
+					c.seams.replying = func(op string, r reply, sn *Snapshot) {
+						if op == checkOp && armed.CompareAndSwap(true, false) {
+							reached <- r
+							<-release
+						}
+						replying(op, r, sn)
+					}
+				})
+				letGoAtEnd(t, release)
+				var s *fakeSession
+				g := newGate()
+				if settles {
+					mark := h.appliedMark()
+					_, s = h.playing(0, "a", "b")
+					// The clock may move past the successor's Prepare's deadline:
+					// its answer is the owner's first.
+					h.waitApplied("handled call prepare", mark)
+					g = holdReleases(h)
+				} else {
+					h.insert("a")
+					h.available()
+				}
+				letGoAtEnd(t, g)
+				ctx, cancel := context.WithCancel(bg)
+				defer cancel()
+				at := h.clk.Now()
+				mark := h.appliedMark()
+				armed.Store(true)
+				check := h.checkAsync(ctx, settles)
+				if settles {
+					h.waitSnap("the check's hold granted", func(sn *Snapshot) bool { m, ok := sn.Maintenance(); return ok && m.Reason == "check" })
+					h.be.waitFor("the release the check waits for", func() bool { return s.releaseAsked })
+					h.waitApplied("handled call discard", mark)
+					g.open()
+				}
+				var sent reply
+				select {
+				case sent = <-reached:
+				case <-time.After(*watchdog):
+					t.Fatalf("waited %v for the owner to send the check's answer", *watchdog)
+				}
+				if sent.err != nil || sent.hold.Lease.IsZero() || sent.hold.Stop == nil {
+					t.Fatalf("the owner's answer %+v, %v; want a grant", sent.hold, sent.err)
+				}
+				want := context.Canceled
+				if bound {
+					h.clk.Advance(ReleaseTimeout + checkMargin)
+					want = context.DeadlineExceeded
+				} else {
+					cancel()
+				}
+				a := h.checkResult("the check whose caller gave up as its grant was sent", check)
+				if ReasonOf(a.err) != ReasonCancelled || errors.Is(a.err, ErrNotAdmitted) || !errors.Is(a.err, want) || a.hold != (Hold{}) {
+					t.Fatalf("the check whose caller gave up as its grant was sent: %+v, %v; want no hold, a cancellation of a command that ran (%v)", a.hold, a.err, want)
+				}
+				if m, ok := h.snap().Maintenance(); !ok || m.Reason != "check" {
+					t.Fatal("the hold ended as its caller gave up, the owner held")
+				}
+				release.open()
+				h.waitApplied("handled check gone", mark)
+				if _, held := h.snap().Maintenance(); held || h.snap().State() != Stopped {
+					t.Fatalf("once the owner took the grant given back: held %v, %s; want no hold, stopped", held, h.snap().State())
+				}
+				if !signalled(sent.hold.Stop) {
+					t.Error("the hold given back left its stop signal open")
+				}
+				h.refused("the exit of the hold given back", h.eng.ExitMaintenance(bg, sent.hold.Lease), ReasonLease)
+				if !bound && !h.clk.Now().Equal(at) {
+					t.Errorf("the clock moved from %v to %v", at, h.clk.Now())
+				}
+				if n := h.be.starts(); settles && n != 1 {
+					t.Errorf("%d sessions started, want the first alone", n)
+				}
+				hold := h.granted("a later check's hold", false)
+				h.must("its exit", h.eng.ExitMaintenance(bg, hold.Lease))
+			})
+		}
+	}
+}
+
+// TestACheckWhoseOwnerStallsIsAnsweredAtItsBound pins the caller's own bound
+// (B728 B12): the check's hold asked with interrupt while a session plays, the
+// owner then stalled in a step of its own (held as it admits a barrier), the
+// release acknowledged in time, stamped before its deadline, and the engine's
+// clock moved to ReleaseTimeout and checkMargin from the admission. The caller
+// is answered there, ReasonCancelled without ErrNotAdmitted, wrapping
+// context.DeadlineExceeded, the owner still stalled and the hold still held;
+// once the owner runs, it takes the acknowledgement, ends the hold it would
+// have handed over and answers nobody: no hold, the transport stopped, the
+// release confirmed; and a later check's hold is granted.
+func TestACheckWhoseOwnerStallsIsAnsweredAtItsBound(t *testing.T) {
+	var armed atomic.Bool
+	reached, release := make(chan struct{}, 1), newGate()
+	h := checkHarness(t, func(c *Config) {
+		admitted := c.seams.admitted
+		c.seams.admitted = func(cmd *command) {
+			admitted(cmd)
+			if cmd.op == opSetShuffle && armed.CompareAndSwap(true, false) {
+				reached <- struct{}{}
+				<-release
+			}
+		}
+	})
+	letGoAtEnd(t, release)
+	mark := h.appliedMark()
+	_, s := h.playing(0, "a", "b")
+	h.waitApplied("handled call prepare", mark)
+	never := newGate()
+	letGoAtEnd(t, never)
+	h.be.script(func() {
+		h.be.onRelease = func(ctx context.Context, _ *fakeSession) error { return never.wait(ctx, h.be, true) }
+	})
+	replied := h.appliedMark()
+	check := h.grantWaits(s)
+	// The clock moves past the grant's Discard's deadline: its answer is the
+	// owner's first.
+	h.waitApplied("handled call discard", replied)
+	armed.Store(true)
+	stall := async(func() error { return h.eng.SetShuffle(bg, false) })
+	waitClosed(t, "the owner stalled at the barrier", reached)
+	// Acknowledged as a backend's Events.Released acknowledges, stamped now,
+	// before the release's deadline, and taken once the owner runs.
+	s.ack()
+	s.ev.Released(s.id)
+	h.clk.Advance(ReleaseTimeout + checkMargin)
+	a := h.checkResult("the check whose owner stalled", check)
+	if ReasonOf(a.err) != ReasonCancelled || errors.Is(a.err, ErrNotAdmitted) || !errors.Is(a.err, context.DeadlineExceeded) || a.hold != (Hold{}) {
+		t.Fatalf("the check whose owner stalled: %+v, %v; want no hold, a cancellation of a command that ran at its bound", a.hold, a.err)
+	}
+	select {
+	case err := <-stall:
+		t.Fatalf("the barrier was answered (%v): the owner was not stalled", err)
+	default:
+	}
+	if m, ok := h.snap().Maintenance(); !ok || m.Reason != "check" {
+		t.Fatal("the hold ended with the owner stalled")
+	}
+	release.open()
+	h.refused("the barrier under the hold", h.result("the barrier", stall), ReasonMaintenance)
+	sn := h.waitSnap("the hold its caller gave up, ended by the owner", func(sn *Snapshot) bool {
+		_, held := sn.Maintenance()
+		return !held && sn.State() == Stopped
+	})
+	if _, ok := sn.ReleaseUnconfirmed(); ok {
+		t.Error("the release acknowledged in time is shown unconfirmed")
+	}
+	h.barrier()
+	if h.repliedSince(checkOp, replied) {
+		t.Error("the owner answered a caller that had given up")
+	}
+	if n := h.be.starts(); n != 1 {
+		t.Errorf("%d sessions started, want the first alone", n)
+	}
+	hold := h.granted("a later check's hold", false)
+	h.must("its exit", h.eng.ExitMaintenance(bg, hold.Lease))
+}
+
+// TestAGrantReadAfterItsCallersContextEndedIsGivenBack pins the handoff of a
+// grant sent and not yet read (B728 B12): the caller held at its wait's first
+// turn (the checkWaits seam) until the owner has sent its grant, the player
+// stopped, and its context has ended, so its wait finds the grant and the
+// context's end ready together, and takes either. Whichever it takes, it is
+// answered ReasonCancelled without ErrNotAdmitted, no hold, and the owner ends
+// the hold given back: its stop signal closed, its lease refused, no hold,
+// the clock never moved.
+func TestAGrantReadAfterItsCallersContextEndedIsGivenBack(t *testing.T) {
+	var armed atomic.Bool
+	var sent atomic.Pointer[reply]
+	held, letGo := make(chan struct{}, 1), newGate()
+	h := checkHarness(t, func(c *Config) {
+		c.seams.checkWaits = func(*command) {
+			if armed.CompareAndSwap(true, false) {
+				held <- struct{}{}
+				<-letGo
+			}
+		}
+		replying := c.seams.replying
+		c.seams.replying = func(op string, r reply, sn *Snapshot) {
+			if op == checkOp {
+				sent.Store(&r)
+			}
+			replying(op, r, sn)
+		}
+	})
+	letGoAtEnd(t, letGo)
+	h.insert("a")
+	h.available()
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	at := h.clk.Now()
+	mark := h.appliedMark()
+	armed.Store(true)
+	check := h.checkAsync(ctx, false)
+	waitClosed(t, "the caller held at its wait", held)
+	// The owner notes the step it applied once it has sent the step's replies.
+	h.waitApplied(checkOp, mark)
+	cancel()
+	letGo.open()
+	a := h.checkResult("the check whose grant was read after its context ended", check)
+	if ReasonOf(a.err) != ReasonCancelled || errors.Is(a.err, ErrNotAdmitted) || !errors.Is(a.err, context.Canceled) || a.hold != (Hold{}) {
+		t.Fatalf("the check whose grant was read after its context ended: %+v, %v; want no hold, a cancellation of a command that ran", a.hold, a.err)
+	}
+	h.waitApplied("handled check gone", mark)
+	r := sent.Load()
+	if r == nil || r.err != nil || r.hold.Lease.IsZero() {
+		t.Fatalf("the owner's answer %+v; want a grant", r)
+	}
+	if _, held := h.snap().Maintenance(); held || h.snap().State() != Stopped {
+		t.Fatalf("once the owner took the grant given back: held %v, %s; want no hold, stopped", held, h.snap().State())
+	}
+	if !signalled(r.hold.Stop) {
+		t.Error("the hold given back left its stop signal open")
+	}
+	h.refused("the exit of the hold given back", h.eng.ExitMaintenance(bg, r.hold.Lease), ReasonLease)
+	if !h.clk.Now().Equal(at) {
+		t.Errorf("the clock moved from %v to %v", at, h.clk.Now())
+	}
+	hold := h.granted("a later check's hold", false)
+	h.must("its exit", h.eng.ExitMaintenance(bg, hold.Lease))
 }
 
 // TestAStopUnderACheckHoldSignalsItAndAnswersAtItsExit pins the Stop's one
