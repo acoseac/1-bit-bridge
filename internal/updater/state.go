@@ -313,6 +313,24 @@ func LoadState(dataDir string) (State, error) {
 	return st, nil
 }
 
+// markerAsSeen is the install marker in dataDir as a read without its lock
+// finds it, quietly, for a wait that reads it at every retry (an off's behind
+// another process's install, ChecksOffWait): every write of the marker is a
+// rename (SaveState), so the read finds one whole marker or another, and a
+// marker that is not there, does not parse or cannot be read is no install, a
+// zero State, said nowhere (LoadState warns of one that does not parse).
+func markerAsSeen(dataDir string) State {
+	raw, err := os.ReadFile(StatePath(dataDir))
+	if err != nil {
+		return State{}
+	}
+	var st State
+	if json.Unmarshal(raw, &st) != nil {
+		return State{}
+	}
+	return st
+}
+
 // markerWritten, nil in production, hears each write of the install marker,
 // with its data dir (SetMarkerWriteObserverForTest).
 var markerWritten atomic.Pointer[func(dataDir string)]

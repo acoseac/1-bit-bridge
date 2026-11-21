@@ -794,8 +794,9 @@
           of an install that failed, the status and an update past its decision
           still work. This switch applies at once; turned back on, the next check
           comes a full interval later. An off waits for a <code>bridge update</code>
-          that is swapping a new version in, and is saved once the swap is done.
-          What stays open here, for the bridge's Windows service, is backlog B831.
+          that is swapping a new version in, and is saved once the swap is done;
+          on the bridge's Windows service, which that swap stops, it is refused at
+          once instead: turn this switch off again once the bridge answers.
           A release from before this switch does not start with the key an
           off writes: before rolling back to one, turn this switch on, which takes
           the key out of bridge.yaml, and while a new version is on probation over

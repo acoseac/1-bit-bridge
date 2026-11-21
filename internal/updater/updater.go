@@ -341,6 +341,13 @@ type Updater struct {
 	// stand-in for a write that is under way when a stop lands.
 	restampSave func(dataDir string, st State) error
 
+	// armed is every install marker this updater armed, by its identity
+	// (noteArmed, Armed; backlog B831), which an off's wait for the install
+	// marker's lock asks of a hold of it. A handful a process: one an install
+	// and one a restamp of it. Guarded by armedMu.
+	armedMu sync.Mutex
+	armed   []armedMarker
+
 	// checkEnabled is Options.CheckEnabled, the update check's switch
 	// (checksEnabled reads it).
 	checkEnabled func() bool
@@ -370,13 +377,42 @@ type Updater struct {
 	after func(time.Duration) <-chan time.Time
 }
 
-// Armed reports whether st is an install marker this updater armed (backlog
-// B831). A nil updater armed none.
-func (u *Updater) Armed(st State) bool { return false }
+// armedMarker is an install marker's identity: its target and the time its
+// arming, or a restamp of it, wrote (State.AttemptedAt, which every install
+// takes from its own clock as it arms).
+type armedMarker struct {
+	target string
+	at     time.Time
+}
+
+// Armed reports whether st is an install marker this updater armed: one
+// whose target and time are those of a marker its Install wrote, or its
+// restamp wrote over one of those (backlog B831). Told by that identity,
+// never by a flag: installInFlight covers a download, during which another
+// process may arm an install of its own, and swapPending says a swap landed
+// and not which. A nil updater armed none.
+func (u *Updater) Armed(st State) bool {
+	if u == nil || st.Status != "installing" {
+		return false
+	}
+	u.armedMu.Lock()
+	defer u.armedMu.Unlock()
+	for _, a := range u.armed {
+		if a.target == normalizeTag(st.TargetVersion) && a.at.Equal(st.AttemptedAt) {
+			return true
+		}
+	}
+	return false
+}
 
 // noteArmed records st, an install marker this updater is about to write, as
-// one it armed.
-func (u *Updater) noteArmed(st State) {}
+// one it armed: before the write, so that no read of the marker finds it
+// written and not yet this updater's.
+func (u *Updater) noteArmed(st State) {
+	u.armedMu.Lock()
+	defer u.armedMu.Unlock()
+	u.armed = append(u.armed, armedMarker{target: normalizeTag(st.TargetVersion), at: st.AttemptedAt})
+}
 
 // NoteArmedForTest takes st for an install marker u armed, as Install takes
 // the marker it writes just before writing it, for a test in another package
@@ -1058,7 +1094,13 @@ func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) error {
 	if err != nil || st.Status != "installing" {
 		return nil
 	}
+	// A marker this updater armed stays its own under its new time (Armed);
+	// another process's does not become its own.
+	own := u.Armed(st)
 	st.AttemptedAt = time.Now().UTC()
+	if own {
+		u.noteArmed(st)
+	}
 	save := u.restampSave
 	if save == nil {
 		save = SaveState
