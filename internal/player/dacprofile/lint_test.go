@@ -941,9 +941,12 @@ func TestTheIOSNameKeysLint(t *testing.T) {
 // takes before any token and no excluded token rules out, the E30 II's
 // excluded token Lite dropped, which lets the Lite's names reach it by its
 // tokens, a Fosi sibling's name given to the ZH3 as a port name, the ZH3's
-// token widened to its maker's name, which every Fosi sibling holds, and the
+// token widened to its maker's name, which every Fosi sibling holds, the
 // same two for the Magic-ARC, an iKKO sibling's name as its port name and its
-// token widened to the iKKO name every iKKO sibling holds, are each refused.
+// token widened to the iKKO name every iKKO sibling holds, and for the AD1,
+// which has no token, a Kiwi Ears sibling's name as its port name and Kiwi
+// Ears' name given it as a token, which two Kiwi Ears siblings' names hold,
+// are each refused.
 func TestNoKnownSiblingReachesAModelRow(t *testing.T) {
 	for _, tc := range []struct {
 		name, id, sibling string
@@ -968,6 +971,12 @@ func TestNoKnownSiblingReachesAModelRow(t *testing.T) {
 		{"the Magic-ARC's token widened to its maker's name", "ikko.magicarc", "Ikko Zerda ITM02",
 			func(x *IOS) { x.NameTokens = []string{"Ikko"} },
 			`"Ikko Zerda ITM02" reaches this model row through the strict matcher, by its token`},
+		{"a Kiwi Ears sibling's name as the AD1's port name", "kiwiears.ad1", "AD1 Pro",
+			func(x *IOS) { x.PortNames = append(x.PortNames, "AD1 Pro") },
+			`"AD1 Pro" reaches this model row through the strict matcher, by its port name`},
+		{"the AD1 given its maker's name as a token", "kiwiears.ad1", "Kiwi Ears Coda",
+			func(x *IOS) { x.NameTokens = []string{"Kiwi Ears"} },
+			`"Kiwi Ears Coda" reaches this model row through the strict matcher, by its token`},
 	} {
 		db := mustDefault(t)
 		i := slices.IndexFunc(db.Profiles, func(p Profile) bool { return p.ID == tc.id })
@@ -977,6 +986,40 @@ func TestNoKnownSiblingReachesAModelRow(t *testing.T) {
 		tc.mutate(db.Profiles[i].IOS)
 		if problems := db.Lint(); !lintSays(problems, "profile "+tc.id, tc.words) {
 			t.Errorf("%s: the lint says %v, want a problem saying %q", tc.name, problems, tc.words)
+		}
+	}
+}
+
+// TestARowWithNoPatternOrTokenIsMatchedByItsExactPortNameAlone: the Kiwi
+// Ears AD1's row (B976), whose port name, AD1, lies inside its sibling's, AD1
+// Pro, and is too short for a token, holds no legacy pattern and no token,
+// and the lint takes it; the strict matcher the lint holds the known
+// siblings to (strictHits) answers AD1, and AD1 with a trailing space, with
+// that row by its port name, the name trimmed and its case kept, and answers
+// ad1, Ad1, aD1 and AD1 Pro with no row.
+func TestARowWithNoPatternOrTokenIsMatchedByItsExactPortNameAlone(t *testing.T) {
+	db := mustDefault(t)
+	var rows []*Profile
+	for i := range db.Profiles {
+		if db.Profiles[i].IOS != nil {
+			rows = append(rows, &db.Profiles[i])
+		}
+	}
+	i := slices.IndexFunc(rows, func(p *Profile) bool { return p.ID == "kiwiears.ad1" })
+	if i < 0 {
+		t.Fatal("the embedded database holds no kiwiears.ad1 row")
+	}
+	if x := rows[i].IOS; len(x.LegacyPatterns) > 0 || len(x.NameTokens) > 0 || !slices.Equal(x.PortNames, []string{"AD1"}) {
+		t.Fatalf("the AD1's keys are the legacy patterns %q, the tokens %q and the port names %q, want AD1's port name alone", x.LegacyPatterns, x.NameTokens, x.PortNames)
+	}
+	for _, name := range []string{"AD1", "AD1 "} {
+		if hits, key := strictHits(name, db.IOSGenericNames, rows); len(hits) != 1 || hits[0].ID != "kiwiears.ad1" || key != "port name" {
+			t.Errorf("%q: the strict matcher finds %d rows by its %q, want the AD1's by its port name", name, len(hits), key)
+		}
+	}
+	for _, name := range []string{"ad1", "Ad1", "aD1", "AD1 Pro"} {
+		if hits, key := strictHits(name, db.IOSGenericNames, rows); len(hits) > 0 {
+			t.Errorf("%q: the strict matcher finds %s by its %s, want no row", name, hits[0].ID, key)
 		}
 	}
 }

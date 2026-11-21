@@ -105,9 +105,16 @@ row from a wizard submission, which no registry held) is held to its
 declaration in the test instead: `additions` in `ios-export/main_test.go`,
 its rows in the export's shape and in order after the baseline's, the names
 its unit reported and the known siblings it brings, each name with the
-answers both matchers must give it. A declaration is written by hand from
-the row's submission and its maker's figures, never copied from the catalog
-or the export, and changes only with what it was written from. The parity
+answers both matchers must give it, and the rows declared strict-only
+(B976): a row whose port name is too short for a legacy pattern that
+leaves its sibling out (the Kiwi Ears AD1's `AD1`, inside its sibling's
+`AD1 Pro`) has none, the live matcher answers its names with no row, and
+the two matchers may answer apart its exact port names alone, as
+declared; no other check is waived, and a declaration naming no row, or
+a row so declared with a legacy pattern, is refused. A declaration is
+written by hand from the row's submission and its maker's figures, never
+copied from the catalog or the export, and changes only with what it was
+written from. The parity
 keeps every check of the baseline and replays its corpus over the whole
 export, the added rows included, since a row added last in order can still
 take a corpus name no earlier row holds.

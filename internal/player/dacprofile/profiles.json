@@ -85,7 +85,19 @@
     "Ikko Heimdallr ITB03",
     "Ikko ITX05",
     "Ikko Zerda ITM03",
-    "Ikko Music Patch ITM05"
+    "Ikko Music Patch ITM05",
+    "AD1 Pro",
+    "Allegro",
+    "Allegro Mini",
+    "Allegro Nano",
+    "Allegro Pro",
+    "Allegro BAL",
+    "Kiwi Ears Coda",
+    "Kiwi Ears Stardust",
+    "B-Media Chorus",
+    "Belle",
+    "S-link",
+    "S-Link-Typec-0.78-Mic"
   ],
   "profiles": [
     {
@@ -2594,6 +2606,61 @@
       "provenance": [
         "dop: refused DSD64, DSD128, DSD256: submission 2026-11-19 (each carrier, 176.4, 352.8 and 705.6 kHz, not negotiated on any of 3 attempts, the lock proxy never reached and nothing played, the listening answered silence); refused DSD512: submission 2026-11-19 (no DSD512 attempt: the PCM sweep asked its 1411.2 kHz carrier and 48 kHz was negotiated); stated no DSD: pcm ceiling 2026-11-19 (the 48 kHz ceiling the submission measured carries no DoP carrier, DSD64's being 176.4 kHz, and nor does the 24bit/96kHz iKKO states, beside which it gives no DSD figure)",
         "ios: wizard submission 2026-11-19 (app 2.2 (17), iOS 27.2.1): the name iOS reported for its port, Ikko Magic-Arc, classed as Headphones (with that classification off the name may differ), as its legacy pattern, port name and token, iKKO's name and the model's, which iKKO sold as the iKKO LOT Magic-ARC (its store page as archived 2023-02-19), the UID's manufacturer field, GHW Micro, naming no chip or board maker found; no rate heard, so no legacy ceiling; 48 kHz alone negotiated exactly, every other PCM rate asked from 44.1 to 1411.2 kHz, 44.1 kHz below it included, renegotiated to 48 kHz, so 48 kHz as measured, which may be iOS's, if it holds a port it classes as Headphones there (no run with the classification off was made), or the DAC's: iKKO's page stated 16bits/48kHz (as archived 2022-05-29), then 24bit/96kHz (as archived 2023-02-19), its box 96kHz and the submitter 96 kHz, a figure recorded and not adopted, since no run negotiated it; 24 bits, the submitter's figure and iKKO's later one; the volume unknown: the answers say it has no volume control of its own and that the iOS volume changes its level, which does not say whether iOS scales the samples or sets a gain in the DAC, and no DoP attempt played; and every time null: the IO buffer unset, as on every PCM-only row, a 40 ms request granted at 48 kHz; no settle rung run; the PCM entry not tested; the cold start undetermined, no try counted, 44.1 kHz negotiated as 48 kHz on all 3; and the transition cushion unset, as on every row but the Chord ones"
+      ]
+    },
+    {
+      "id": "kiwiears.ad1",
+      "name": "Kiwi Ears AD1",
+      "match": [],
+      "native": null,
+      "dop": {
+        "heardBitRates": [
+          2822400,
+          5644800
+        ],
+        "statedMaxBitRate": 0,
+        "statedWithoutDoP": null,
+        "refusedBitRates": [
+          11289600,
+          22579200
+        ],
+        "analogVolumeControls": [],
+        "unityAtRawMax": [],
+        "source": {
+          "kind": "listening",
+          "ref": "wizard submission 2026-11-21 (app 2.2 (17), iOS 27.2.1)"
+        }
+      },
+      "timing": null,
+      "caveats": [],
+      "ios": {
+        "order": 24,
+        "maker": "Kiwi Ears",
+        "legacyPatterns": [],
+        "legacyCeilingBitRate": 5644800,
+        "portNames": [
+          "AD1"
+        ],
+        "nameTokens": [],
+        "excludedTokens": [],
+        "nameScope": "model",
+        "siblingNote": null,
+        "pcm": {
+          "maxRateHz": 384000,
+          "bitDepth": 32
+        },
+        "volumeTopology": "hostSyncedDACGain",
+        "timing": {
+          "ioBufferMs": null,
+          "dsdResyncMs": null,
+          "pcmEntryResyncMs": null,
+          "coldStartExtraMs": null,
+          "transitionCushionMs": null
+        }
+      },
+      "provenance": [
+        "dop: heard DSD64, DSD128: submission 2026-11-21 (3 of 3 attempts at each at the lock proxy, at iOS volume 0.3, and a clean tone heard); refused DSD256: submission 2026-11-21 (its 705.6 kHz carrier not negotiated on any of 3 attempts, the lock proxy never reached, and silence heard); refused DSD512: submission 2026-11-21 (no DSD512 attempt: the PCM sweep asked its 1411.2 kHz carrier and 384 kHz was negotiated); Kiwi Ears gives no DSD figure: its AD1 page states PCM alone, up to 32-bit / 384 kHz (read 2026-11-21, and PCM Specifications 32Bit/384kHz as archived 2026-06-04), so no statement",
+        "ios: wizard submission 2026-11-21 (app 2.2 (17), iOS 27.2.1): the name iOS reported for its port, AD1, classed as Headphones (with that classification off the name may differ), verbatim as its port name, its one key: Kiwi Ears' own model name, which its store sells as the Kiwi Ears AD1 (read 2026-11-21), and no chip's or board's default string (its chip the KT02H20 by its page, the UID's manufacturer field Kiwi Ears); no legacy pattern, since AD1 lies inside its sibling's name, AD1 Pro, so no pattern takes the AD1 and leaves the AD1 Pro out, and no token, AD1 being shorter than four characters: the iOS builds that match by a legacy pattern alone know no row for it, as before, and iOS's strict matcher (B730 PR 3b) matches AD1 exactly, its case kept, and the AD1 Pro to no row; DSD128, the highest rate heard, as its legacy ceiling; PCM negotiated exactly at every rate from 44.1 to 384 kHz and 705.6, 768 and 1411.2 kHz renegotiated to 384 kHz, so 384 kHz, at 32 bits, the submitter's figure and Kiwi Ears' for USB (its AD1 page, read 2026-11-21: digital audio support, PCM up to 32-bit / 384 kHz); the volume host-synced: the answers give it no volume control of its own and the iOS volume changing its level, and DoP held with the tone heard at iOS volume 0.3, below maximum, so iOS did not scale the samples and the DAC applies the level; and every time null: the IO buffer on the iOS default, a 40 ms request granted at 44.1 kHz and 2.7 ms at 384 kHz; the DSD settle clean at 150 ms, within the 400 ms DSD default; PCM after DoP and a PCM rate change each clean at 150 ms, within the 150 ms PCM default; the cold start clean on one DSD64 try 1.0 s after a replug, with no extra wait; and the transition cushion unset, no clicks heard across PCM 44.1 kHz, DSD64, PCM 96 kHz and DSD64, as on every row but the Chord ones"
       ]
     }
   ]
