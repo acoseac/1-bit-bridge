@@ -163,7 +163,10 @@ Windows-runner check, distinct from portable race-test results.
   OneDrive or container folder being a directory (`checkResolvedDir`); a
   link at the last element followed to its target, whose name the lock
   takes, `.actual.yaml.lock` for `alias.yaml` → `actual.yaml`), a lock file
-  a root writer makes taking the config's owner (`fsutil.OpenLockFileLike`);
+  a root writer makes taking the config's owner (`fsutil.OpenLockFileLike`),
+  and one there that this user may not open to read and write refused,
+  nothing written, naming both files and both ways out
+  (`*config.LockInaccessibleError`, B537 item 2);
   the name is resolved again after every read a decision of the turn rests
   on, last: once the turn has made its own read, before each attempt at a
   rename after the byte comparison and a writer's own comparison in
@@ -317,6 +320,51 @@ Windows-runner check, distinct from portable race-test results.
   Run as root with a single owner, the lock is still among the files given
   the install's owner (`TestSaveAsRootKeepsTheConfigOwner`,
   `TestSnapshotAndRestoreAsRootKeepTheInstallOwner`).
+
+  **A lock file there that this user may not open is refused, saying what
+  to do** (2026-11-21, backlog B537 item 2). A lock file already there is
+  opened as it is, so a `sudo bridge init` in a directory root owns left
+  `.bridge.yaml.lock` root's 0600 once bridge.yaml was given to the
+  service's user later, and every writer running as that user, the
+  console's saves included, failed with `open the lock beside <config>:
+  openat .bridge.yaml.lock: permission denied`, while the console said only
+  that the log says why. An open refused for a permission
+  (`fs.ErrPermission`) over a regular file at the lock's name, by an
+  `os.Lstat` that follows no link, is now a `*config.LockInaccessibleError`
+  (`config.ErrLockInaccessible`, `lockInaccessible`; its cause the open's
+  error), whose words name the config file and the lock file and give the
+  two ways out: give the lock file the config file's owner and let that
+  owner read and write it, or remove it while the bridge is stopped and no
+  bridge command runs, since only the lock taken on it means anything and
+  the next writer makes it again. A file whose mode was taken away is the
+  same case, since the open asks to read and write whoever owns the file
+  (the brief's review). The refusal comes before `linkIntoReadOnly`'s
+  remedy, which stays for a lock file that is not there, and every other
+  failure keeps its words: no lock file in a directory this user cannot
+  write, anything but a regular file at the lock's name (a directory, a
+  link), and an Lstat that answers an error of its own. Nothing is chowned
+  or removed, and no value of the config is in the words. The console
+  answers it in words of its own that name no path
+  (`errMsgSaveConfigLockInaccessible`), 500 `save-config` as every other
+  class. `TestALockFileThisUserCannotOpenSaysWhatToDo` (config.Edit and the
+  holder's Update; mode 0 stands for another user's file, the only owner a
+  test that is not root can give one, and the refusal reads the open's
+  answer and the entry's kind, never its owner; each way out then lets the
+  save land), `TestAConfigSaveRefusalSaysWhatToDoAndNamesNoPath`'s row and
+  `TestAConsoleSaveBesideALockFileItCannotOpenSaysWhatToDo` pin it, each red
+  before the fix, which answered in the open's words alone.
+
+  **The console's status for a refused save stays 500 `save-config`**
+  (backlog B537 item 3, not taken: the orchestrator's decision of
+  2026-11-21). A busy lock could answer 503 and a file changed outside the
+  holder 409, and every known client would take either: the console's
+  script turns any status but a 2xx into an error carrying its message, and
+  `bridge library add` and `remove` beside a running bridge print any status
+  from 400. No one asked for the change, though, and the scripts
+  self-hosters run against the console cannot be known
+  (`ops/settings-apply-semantics.md` is what a control plane builds
+  against), so the status, the code and the tests that pin 500 stay as they
+  are.
 
   **It is held around one read-modify-write, never for a process's life**:
   init's turn is its final check and save (`saveInitConfig`), never its
@@ -1446,7 +1494,8 @@ Windows-runner check, distinct from portable race-test results.
   opens, resolve the name before a read a decision rests on rather than
   after it, or retry on the file it opens now, stage a save anywhere but
   where its rename lands, make a root writer's lock file root's beside
-  another owner's config, wait for it without a bound, take ENOLCK or any
+  another owner's config, chown or remove a lock file a writer did not
+  make, wait for it without a bound, take ENOLCK or any
   failure but a definitive no-locks answer for an unlocked turn, rename an
   attempt without the turn's comparison, retry past its refusal or rename
   once the save's window has ended, put a value of the file in a refusal,

@@ -281,13 +281,16 @@ type FileLock struct {
 // the same wait, since that answer does not say the filesystem keeps no
 // locks, and a wait whose every try was answered so ends in a
 // *NoLockManagerError, never in a turn without the lock; one in which any try
-// found the lock held is a *BusyError. An error opening the lock file (a
-// directory this user cannot write, which Save could not write in either), or
-// reading the config, is returned as it is. A filesystem whose lock says it
-// keeps none (fsutil.KeepsNoLocks's EOPNOTSUPP and ENOTSUP, a platform with
-// none, Windows' ERROR_NOT_SUPPORTED and ERROR_INVALID_FUNCTION) is not a
-// refusal: the turn is taken without the lock, said once per file in the log,
-// and there nothing keeps another writer out of it but the comparison below.
+// found the lock held is a *BusyError. A lock file there that this user may
+// not open to read and write is a *LockInaccessibleError, which says what to
+// do (lockInaccessible, backlog B537 item 2). Any other error opening the
+// lock file (a directory this user cannot write, which Save could not write
+// in either), or reading the config, is returned as it is. A filesystem
+// whose lock says it keeps none (fsutil.KeepsNoLocks's EOPNOTSUPP and
+// ENOTSUP, a platform with none, Windows' ERROR_NOT_SUPPORTED and
+// ERROR_INVALID_FUNCTION) is not a refusal: the turn is taken without the
+// lock, said once per file in the log, and there nothing keeps another
+// writer out of it but the comparison below.
 // Any other failure to take the lock is returned, and no turn is taken. The
 // turn's read, and every comparison's, is asked again within atomicwrite's
 // bounded schedule while Windows answers that another process holds the file
@@ -334,6 +337,9 @@ func lockFile(path string, try func(*os.File) error, wait time.Duration) (*FileL
 	l := &FileLock{path: path, dir: dir, target: filepath.Join(dir, name)}
 	f, err := fsutil.OpenLockFileLike(dir, LockFileName(l.target), l.target)
 	if err != nil {
+		if refusal := lockInaccessible(path, filepath.Join(dir, LockFileName(l.target)), err); refusal != nil {
+			return nil, refusal
+		}
 		return nil, linkIntoReadOnly(path, fmt.Errorf("open the lock beside %s: %w", path, err))
 	}
 	deadline := time.Now().Add(wait)
@@ -623,6 +629,23 @@ func CheckName(path string) error {
 		return &linkToNothingError{path: path, err: err}
 	}
 	return nil
+}
+
+// lockInaccessible is LockFile's refusal of the lock file at lock, beside the
+// config file at path, whose open answered err: a *LockInaccessibleError where
+// the open was refused for a permission and a regular file stands at lock (by
+// os.Lstat, which follows no link), and nil otherwise, for the open's own
+// words: no lock file there (in a directory this user cannot write, with what
+// to do where the config's name is a link, linkIntoReadOnly), anything else at
+// its name, or an Lstat that answers an error of its own.
+func lockInaccessible(path, lock string, err error) error {
+	if !errors.Is(err, fs.ErrPermission) {
+		return nil
+	}
+	if info, lerr := os.Lstat(lock); lerr != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	return &LockInaccessibleError{Path: path, Lock: lock, Err: err}
 }
 
 // linkIntoReadOnly is err, a failure to make the lock file or a save's staged
