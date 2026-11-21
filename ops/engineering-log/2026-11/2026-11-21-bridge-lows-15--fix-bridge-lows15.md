@@ -147,3 +147,7 @@ bytes; its whole line, edited, is its History twin, where the long form gains *T
 and B829's check, and B828's section no longer names B829 as open. The sentences that said B830 stays
 open (`internal/tsnet/uploads.go`, `internal/config/config.go`, the console's Settings help, the
 README, `ops/settings-apply-semantics.md` and the v0.2.4 release notes draft) now say the stop.
+`NoLogsEnv`'s doc and the History's *What uploaded.* said the transport is a no-op "while" the
+variable reads true, "live": upstream chooses it as it is built (logpolicy/logpolicy.go, 894 to
+897), which is why the stop turns logtail's switch and not the variable alone, and both now say so,
+in a commit after the gate's run, of comments and records alone.

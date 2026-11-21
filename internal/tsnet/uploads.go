@@ -14,8 +14,11 @@ import (
 
 // NoLogsEnv is the variable Tailscale's code reads, live, to decide whether
 // the node uploads its diagnostic logs (envknob.NoLogsNoSupport): the
-// logtail transport the upstream start builds is a no-op while it is true,
-// and so are the network flow logs a tailnet can ask for. Its name is
+// logtail transport the upstream start builds is the no-op one where it reads
+// true as the transport is built (logpolicy's TransportOptions.New), so a true
+// set later stops no transport already built (logtail's switch does:
+// Server.AbandonStart), and the network flow logs a tailnet can ask for start
+// only where it reads false as the engine is configured. Its name is
 // upstream's (envknob.SetNoLogsNoSupport sets it), which
 // TestTheNoLogsVariableIsUpstreams holds this constant to.
 const NoLogsEnv = "TS_NO_LOGS_NO_SUPPORT"

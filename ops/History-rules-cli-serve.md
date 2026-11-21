@@ -4120,9 +4120,12 @@ round 3.
 *What uploaded.* tailscale.com v1.104.2's `tsnet.Server.Start` runs
 `startLogger` outside a test binary: it writes `tailscaled.log.conf` and a
 filch buffer in the state dir and builds a logtail logger whose transport
-(`logpolicy.NewLogtailTransport(logtail.DefaultHost, …)`) is a no-op only
-while `envknob.NoLogsNoSupport()` reads `TS_NO_LOGS_NO_SUPPORT` true, live,
-through `os.Getenv`. Network flow logs (`feature/netlog`, linked into the
+(`logpolicy.NewLogtailTransport(logtail.DefaultHost, …)`) is the no-op one
+only where `envknob.NoLogsNoSupport()`, which reads `TS_NO_LOGS_NO_SUPPORT`
+through `os.Getenv`, answers true as the transport is built (v1.104.5's
+logpolicy/logpolicy.go, 894 to 897; until backlog B830 this said "while" it
+reads true, "live", which reads as a check at each upload: a true set later
+stops no transport already built). Network flow logs (`feature/netlog`, linked into the
 bridge) run only while it is false, and `hostinfo.New` tells the
 coordination server which it is. The bridge never set the variable, so every
 tsnet-mode bridge uploaded its node's logs to `log.tailscale.com`; and it
