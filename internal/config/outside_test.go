@@ -704,8 +704,9 @@ func TestTheMergedFileIsLoadedWithTheVariablesThisBridgeStartedWith(t *testing.T
 // changes a setting that loads and one that does not (scanIntervalSec, and a
 // variants folder inside a library root), two saves it refuses, saying
 // nothing of either; that writer's correction of the failing one alone, and
-// the save after it, which says each once; then a save that says neither
-// again. No line carries the value either setting was given.
+// the save after it, which says each once; then a save over a comment that
+// writer added, whose turn finds bytes that differ and load, which says
+// neither again. No line carries the value either setting was given.
 func TestTheSettingsRecordedWhileTheFileDidNotLoadAreSaidOnceItLoads(t *testing.T) {
 	path := envSaveConfig(t, "libraryName: Home\n")
 	rc := bootHolder(t, path)
@@ -742,11 +743,12 @@ func TestTheSettingsRecordedWhileTheFileDidNotLoadAreSaidOnceItLoads(t *testing.
 			t.Errorf("once the file loads, %s was said %d times, want once: %q", setting, n, logs.Lines(outsideSettingMessage))
 		}
 	}
+	appendToConfig(t, path, "# another writer's note\n")
 	if err := rc.Update(path, rename("Renamed again")); err != nil {
-		t.Fatalf("the save after: %v", err)
+		t.Fatalf("the save after another writer's comment: %v", err)
 	}
 	if lines := logs.Lines(outsideSettingMessage); len(lines) != 2 {
-		t.Errorf("after the save that followed, said %q, want the two lines of before and no more", lines)
+		t.Errorf("after the save over another writer's comment, said %q, want the two lines of before and no more", lines)
 	}
 	if after := loadAt(t, path); after.LibraryName != "Renamed again" || after.ScanIntervalSec != 7200 || after.Upscale.VariantsDir != corrected {
 		t.Errorf("the file loads libraryName %q, scanIntervalSec %d and upscale.variantsDir %q, want the last rename and the other writer's values",
