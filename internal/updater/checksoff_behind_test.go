@@ -362,7 +362,7 @@ func TestAnOffBehindTheInstallMarkersLockWaitsWhereItIsNoOtherProcesssInstall(t 
 			if a.err != nil || !a.lock.Held() {
 				t.Fatalf("the off once the lock was let go = %v (a lock %v), want it to take the lock", a.err, a.lock != nil)
 			}
-			if lines := logs.Lines("malformed update-state.json"); len(lines) != 0 {
+			if lines := logs.Carrying("update-state.json"); len(lines) != 0 {
 				t.Errorf("the off's wait logged its reads of the marker: %q", lines)
 			}
 		})
