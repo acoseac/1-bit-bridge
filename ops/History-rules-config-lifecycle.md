@@ -215,8 +215,9 @@ Windows-runner check, distinct from portable race-test results.
   save does, until a restart, and every save writes each recorded leaf as
   the turn's bytes hold it (`fileOutside`) and publishes its own snapshot; a
   file that does not decode, a file that writer left the next start would
-  refuse (`OutsideLeftUnloadable`: correct it, never restart; said once, the
-  leaves it records unsaid) and then a recorded `deployment` leaf refuse at
+  refuse (`OutsideLeftUnloadable`: correct it, never restart; said once; the
+  leaves it records said once each by the turn that finds it loading, B974)
+  and then a recorded `deployment` leaf refuse at
   the turn, and a change of a recorded leaf, whatever value it writes, and a
   merged file the next start would refuse where the one left would not
   (`loadsAtNextStart`: the file as the next start would load it, with this
@@ -641,6 +642,52 @@ Windows-runner check, distinct from portable race-test results.
   `TestAFileWhoseRootsAVariableGivesTakesAnotherWritersComment` and
   `TestAClashAVariableMakesIsNoNewClashOfASave`. The controls are in the
   B535 entry's round 3.
+
+  **Its follow-up Lows: what the recovery says, one line for the error, and
+  two guards** (2026-11-21, Bridge lows 13, backlog B974). Round 3 left the
+  settings a turn records while the file another writer left would not load
+  said by no line, then and ever after: a setting changed beside a failing
+  one, kept by every save once that one was corrected, went unannounced. The
+  holder now keeps them (`unsaid`) and says none while the file would not
+  load, and the turn that next finds bytes that load says each once, with
+  the ordinary line, which is true by then; a turn whose bytes still would
+  not load says none, and `RecordFile` forgets them with the record. Every
+  setting recorded then is said, the failing one's corrected value too. The
+  console's line for a save refused over such a file
+  (`OutsideLeftUnloadable`, wrapped or not: `errors.As`) carries no error:
+  the holder said why once for those bytes, value-free, naming the file, and
+  every later refusal returns the error it kept, so the line repeated the
+  diagnostic at each save; every other refusal and failure keeps its reason
+  on the line (a merged file the next start would refuse, which
+  `refuseMerge` says nowhere, and a lock or a filesystem failure, said
+  nowhere else either). The walk compares an opt-out by what it turns on
+  only where the field is what `switchOn` reads, a pointer to a bool
+  (`isSwitch`, its element's kind read from the type, so a nil pointer
+  answers too): an entry of `switchEnvPaths` of another type, which a future
+  one could be, is compared by value, where `switchOn` panicked on it
+  (reflect's `IsNil` of a bool); `filedSwitches` needs no such guard, reading
+  the three switches through a struct of `*bool` fields of its own. And
+  `fileOutside` copies a recorded leaf from the decoded file with no guard
+  on its source: `settingValue` answers by `Config`'s type alone, so the
+  decoded config has the field wherever the saved copy does, which a test
+  pins rather than a guard no input reaches. An unread player block's digest
+  (`blockSource`) keeps hashing a scalar as it is written: two spellings of
+  one number are no single value to this block's reader, which reads a
+  scalar as its string (`playerReader.text`: `room: 0x10` and `room: 16` are
+  two room names) and refuses a leading zero another spelling of the same
+  number passes (`playerReader.whole`), so a canonical form would let
+  `sameUnreadBlock` miss a real change inside an unread block. Red before
+  their fixes, at their parent commit:
+  `TestTheSettingsRecordedWhileTheFileDidNotLoadAreSaidOnceItLoads`,
+  `TestASwitchPathOfAnotherTypeIsComparedByValue` and
+  `TestALeftUnloadableRefusalIsSaidOnceAndTheOthersKeepTheirReasons`; green
+  before, pins: the diagnostic's `err` attribute in
+  `TestAFileThatDoesNotLoadIsSaidOnceAndItsSettingsAreKept`,
+  `TestTheMergedFileIsLoadedWithTheVariablesThisBridgeStartedWith` (the
+  comment of `TestAFileWhoseRootsAVariableGivesTakesAnotherWritersComment`
+  records no setting, so the merged load ran in no case) and
+  `TestEverySettingPathNamesAFieldOfEveryConfigAlike`. The controls are in
+  `ops/engineering-log/2026-11/2026-11-21-bridge-lows-13--fix-bridge-lows13.md`.
 
   **The turn and the comparison come before `fn`** (the second round; the
   Claude review's finding 2 and Codex's 3). The first round cloned, ran

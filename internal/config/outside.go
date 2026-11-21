@@ -27,8 +27,9 @@ const outsideSettingMessage = "config: another writer changed a setting in the c
 // the file's path and why, in the words loadsAtNextStart gives, which name no
 // value (its decode's through ValueFreeYAMLError, Validate's naming none),
 // and never a setting's value. The settings that turn records are said by no
-// outsideSettingMessage: none takes effect at a start the file refuses
-// (B535's round 3).
+// outsideSettingMessage while the file does not load: none takes effect at a
+// start the file refuses (B535's round 3). The turn that finds the file
+// loading again says each of them once (RuntimeConfig.unsaid, backlog B974).
 const leftUnloadableMessage = "config: the config file another writer left would not load at the bridge's next start; the console's saves are refused until it is corrected"
 
 // deploymentSettings is the yaml path of the deployment block, whose
@@ -65,17 +66,18 @@ var (
 // 3). Where the bytes it finds would not load, the record and the bytes it is
 // kept against advance as at every turn that finds a change, the error is
 // kept (leftErr) and logged once (leftUnloadableMessage), and the settings it
-// records are said by no line, since none takes effect at a start the file
-// refuses. Where a later turn finds bytes that load, the error is cleared,
-// and the settings newly changed join the record and are said as any are;
-// those recorded while the file did not load are said by no line then
-// either. Then, whatever the bytes, a file that writer left that would not
-// load refuses the save as that file's (OutsideLeftUnloadable), not as one
-// the save would make: no save made it, and the remedy is to correct it,
-// never a start that would fail on it. So it is asked first (B535's round 3),
-// before a recorded deployment setting, which refuses the save too, saying to
-// restart: the console decides what it may change from its live copy of the
-// posture and the managed lists.
+// records are said by no line while it would not, since none takes effect at
+// a start the file refuses (unsaid). Where a later turn finds bytes that
+// load, the error is cleared, the settings newly changed join the record and
+// are said as any are, and those recorded while the file did not load are
+// said then, once each, the line being true by then (backlog B974); a turn
+// whose bytes still would not load says none. Then, whatever the bytes, a
+// file that writer left that would not load refuses the save as that file's
+// (OutsideLeftUnloadable), not as one the save would make: no save made it,
+// and the remedy is to correct it, never a start that would fail on it. So it
+// is asked first (B535's round 3), before a recorded deployment setting, which
+// refuses the save too, saying to restart: the console decides what it may
+// change from its live copy of the posture and the managed lists.
 func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, before *Config) error {
 	if !r.fileKnown {
 		return nil
@@ -105,10 +107,21 @@ func (r *RuntimeConfig) compareTurn(path, target string, found []byte, ok bool, 
 				}
 			case !slices.Contains(r.outside, setting):
 				r.outside = append(r.outside, setting)
-				if leftErr == nil {
+				if leftErr != nil {
+					r.unsaid = append(r.unsaid, setting)
+				} else {
 					validateLogger.Info(outsideSettingMessage, "setting", setting)
 				}
 			}
+		}
+		if leftErr == nil {
+			// The file loads again: what was recorded while it did not is said
+			// now, once, the line being true by then.
+			slices.Sort(r.unsaid)
+			for _, setting := range r.unsaid {
+				validateLogger.Info(outsideSettingMessage, "setting", setting)
+			}
+			r.unsaid = nil
 		}
 		slices.Sort(r.outside)
 		slices.Sort(r.outsideEnv)
@@ -215,6 +228,8 @@ func (r *RuntimeConfig) fileOutside(saved *Config, found []byte) {
 		if !ok {
 			continue
 		}
+		// There whenever dst is: settingValue answers by Config's type alone
+		// (TestEverySettingPathNamesAFieldOfEveryConfigAlike).
 		src, _ := settingValue(&own, setting)
 		dst.Set(src)
 		saved.filed = append(saved.filed, setting)
@@ -350,7 +365,7 @@ func walkSettings(a, b reflect.Value, prefix string, out *[]string) {
 		}
 		fa, fb := a.Field(i), b.Field(i)
 		switch {
-		case switchEnvPaths[path]:
+		case switchEnvPaths[path] && isSwitch(f.Type):
 			if switchOn(fa) != switchOn(fb) {
 				*out = append(*out, path)
 			}
@@ -369,9 +384,19 @@ func walkSettings(a, b reflect.Value, prefix string, out *[]string) {
 // switchOn is what an opt-out (switchEnvPaths), a *bool, turns on: no value is
 // on, as no key in the file is (EffectiveEnabled and its kin), so a switch
 // written true is the same setting as one left out, and a save that sets a
-// switch to what it was changes nothing (B535's round 2).
+// switch to what it was changes nothing (B535's round 2). It reads a *bool
+// alone, which its one caller asks of the field's type first (isSwitch).
 func switchOn(v reflect.Value) bool {
 	return v.IsNil() || v.Elem().Bool()
+}
+
+// isSwitch reports whether t is what switchOn reads, a pointer to a bool, its
+// element's kind read from the type, so a nil pointer answers too: an entry of
+// switchEnvPaths of any other type, which a future one could be, is compared
+// by value as any setting is (walkSettings), never read as a pointer, which
+// panicked (reflect's IsNil of a bool; backlog B974).
+func isSwitch(t reflect.Type) bool {
+	return t.Kind() == reflect.Pointer && t.Elem().Kind() == reflect.Bool
 }
 
 // settingKey is the key yaml writes f under: its tag's, or its name in lower

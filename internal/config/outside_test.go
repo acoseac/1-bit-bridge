@@ -541,8 +541,9 @@ func TestAFileThatDoesNotLoadIsSaidOnceAndItsSettingsAreKept(t *testing.T) {
 	if ran != 0 {
 		t.Errorf("the refused saves ran their change %d times", ran)
 	}
-	if said := logs.Lines(leftUnloadableMessage); len(said) != 1 || !strings.Contains(said[0], "path="+path) {
-		t.Errorf("said %q, want one line naming the file", said)
+	if said := logs.Lines(leftUnloadableMessage); len(said) != 1 || !strings.Contains(said[0], "path="+path) ||
+		!strings.Contains(said[0], "err=upscale.variantsDir: must not be under a library root") {
+		t.Errorf("said %q, want one line naming the file and, as its err, why the next start would refuse it", said)
 	}
 	if said := logs.Lines(outsideSettingMessage); len(said) != 0 {
 		t.Errorf("said %q of a file the next start would refuse, want no line that its changes take effect then", said)
@@ -659,6 +660,157 @@ func TestAFileWhoseRootsAVariableGivesTakesAnotherWritersComment(t *testing.T) {
 	}
 	if got := loadAt(t, path).LibraryName; got != "Renamed" {
 		t.Errorf("the file loads libraryName %q, want the rename", got)
+	}
+}
+
+// TestTheMergedFileIsLoadedWithTheVariablesThisBridgeStartedWith: the file a
+// merged save would write is loaded as the next start would load it, with this
+// process's environment (refuseMerge's loadsAtNextStart), as the file another
+// writer left is (TestAFileWhoseRootsAVariableGivesTakesAnotherWritersComment,
+// whose comment records no setting and so merges nothing): a bridge whose
+// library roots a variable gives, its file naming none, lands a rename beside
+// another writer's change of a setting, which the merged file writes as that
+// writer left it, though that file alone, with no root, would not load
+// (backlog B974).
+func TestTheMergedFileIsLoadedWithTheVariablesThisBridgeStartedWith(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "Music")
+	if err := os.Mkdir(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BRIDGE_LIBRARY_ROOTS", lib)
+	path := writeConfigFile(t, dir, "dataDir: "+yamlStr(filepath.Join(dir, "data"))+"\nlibraryName: Home\n")
+	rc := bootHolder(t, path)
+	appendToConfig(t, path, "scanIntervalSec: 7200\n")
+	withoutVariables(t, map[string]string{"BRIDGE_LIBRARY_ROOTS": lib}, func() {
+		if _, err := Load(path); err == nil {
+			t.Fatal("premise: the other writer's file loads without the variable that gives its roots")
+		}
+	})
+	if err := rc.Update(path, func(c *Config) error { c.LibraryName = "Renamed"; return nil }); err != nil {
+		t.Fatalf("a rename beside another writer's change, the roots a variable's: %v", err)
+	}
+	if after := loadAt(t, path); after.LibraryName != "Renamed" || after.ScanIntervalSec != 7200 {
+		t.Errorf("the file loads libraryName %q and scanIntervalSec %d, want the rename and the other writer's 7200",
+			after.LibraryName, after.ScanIntervalSec)
+	}
+}
+
+// TestTheSettingsRecordedWhileTheFileDidNotLoadAreSaidOnceItLoads: the
+// settings a turn records while the file another writer left would not load
+// at the next start are said by no line while it would not (B535's round 3),
+// and each is said once, by the ordinary line, by the turn that finds the file
+// loading again, the line being true by then (backlog B974): an edit that
+// changes a setting that loads and one that does not (scanIntervalSec, and a
+// variants folder inside a library root), two saves it refuses, saying
+// nothing of either; that writer's correction of the failing one alone, and
+// the save after it, which says each once; then a save over a comment that
+// writer added, whose turn finds bytes that differ and load, which says
+// neither again. No line carries the value either setting was given.
+func TestTheSettingsRecordedWhileTheFileDidNotLoadAreSaidOnceItLoads(t *testing.T) {
+	path := envSaveConfig(t, "libraryName: Home\n")
+	rc := bootHolder(t, path)
+	logs := loggingtest.Record(t)
+	inRoot := filepath.Join(rc.Load().LibraryRoots[0], "another-writers-variants")
+	appendToConfig(t, path, "scanIntervalSec: 7200\nupscale:\n  variantsDir: "+yamlStr(inRoot)+"\n")
+	rename := func(name string) func(*Config) error {
+		return func(c *Config) error { c.LibraryName = name; return nil }
+	}
+	said := func(setting string) int {
+		n := 0
+		for _, line := range logs.Lines(outsideSettingMessage) {
+			if strings.Contains(line, "setting="+setting) {
+				n++
+			}
+		}
+		return n
+	}
+	for i := 1; i <= 2; i++ {
+		if err := rc.Update(path, rename("Refused")); !errors.Is(err, ErrChangedOutside) {
+			t.Fatalf("save %d over the file another writer left that would not load = %v, want it refused", i, err)
+		}
+		if lines := logs.Lines(outsideSettingMessage); len(lines) != 0 {
+			t.Fatalf("after refused save %d said %q, want nothing of a setting the next start would not load", i, lines)
+		}
+	}
+	corrected := filepath.Join(filepath.Dir(path), "Another Writers Variants")
+	replaceInConfig(t, path, yamlStr(inRoot), yamlStr(corrected))
+	if err := rc.Update(path, rename("Renamed")); err != nil {
+		t.Fatalf("a save once the other writer corrected the failing setting: %v", err)
+	}
+	for _, setting := range []string{"scanIntervalSec", "upscale.variantsDir"} {
+		if n := said(setting); n != 1 {
+			t.Errorf("once the file loads, %s was said %d times, want once: %q", setting, n, logs.Lines(outsideSettingMessage))
+		}
+	}
+	appendToConfig(t, path, "# another writer's note\n")
+	if err := rc.Update(path, rename("Renamed again")); err != nil {
+		t.Fatalf("the save after another writer's comment: %v", err)
+	}
+	if lines := logs.Lines(outsideSettingMessage); len(lines) != 2 {
+		t.Errorf("after the save over another writer's comment, said %q, want the two lines of before and no more", lines)
+	}
+	if after := loadAt(t, path); after.LibraryName != "Renamed again" || after.ScanIntervalSec != 7200 || after.Upscale.VariantsDir != corrected {
+		t.Errorf("the file loads libraryName %q, scanIntervalSec %d and upscale.variantsDir %q, want the last rename and the other writer's values",
+			after.LibraryName, after.ScanIntervalSec, after.Upscale.VariantsDir)
+	}
+	if carrying := logs.Carrying("another-writers-variants", "Another Writers Variants", "7200"); len(carrying) != 0 {
+		t.Errorf("a line carries a value another writer set: %q", carrying)
+	}
+}
+
+// TestASwitchPathOfAnotherTypeIsComparedByValue: an entry of switchEnvPaths
+// is compared by what it turns on only where it is what switchOn reads, a
+// *bool (backlog B974): a future entry of another type, a bool or a whole
+// number here, is compared by value as any setting is, never read as a
+// pointer, which panicked (reflect's IsNil of a bool).
+func TestASwitchPathOfAnotherTypeIsComparedByValue(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		set  func(c *Config)
+	}{
+		{"library.allowDelete", func(c *Config) { c.Library.AllowDelete = true }},
+		{"scanIntervalSec", func(c *Config) { c.ScanIntervalSec = 7200 }},
+	} {
+		switchEnvPaths[tc.path] = true
+		t.Cleanup(func() { delete(switchEnvPaths, tc.path) })
+		a, b := &Config{}, &Config{}
+		tc.set(b)
+		got, same, panicked := func() (got, same []string, panicked any) {
+			defer func() { panicked = recover() }()
+			return settingsChanged(a, b), settingsChanged(a, Clone(a)), nil
+		}()
+		if panicked != nil || !slices.Equal(got, []string{tc.path}) || len(same) != 0 {
+			t.Errorf("with %s listed as an opt-out, a change of it is found as %q and a clone as %q (panicked %v), want it alone and none",
+				tc.path, got, same, panicked)
+		}
+	}
+}
+
+// TestEverySettingPathNamesAFieldOfEveryConfigAlike: settingValue answers by
+// Config's type alone, never by what a config holds, so a setting
+// fileOutside finds in the config a save writes it finds in the one decoded
+// from the file too, and its copy has a source wherever it has a destination
+// (backlog B974): every setting's yaml path names a field of a zero config and
+// of one with every setting set, alike, and a path that names none (a key no
+// setting has, one below a leaf) names none in either.
+func TestEverySettingPathNamesAFieldOfEveryConfigAlike(t *testing.T) {
+	filled := &Config{}
+	fillNonZero(reflect.ValueOf(filled).Elem())
+	census := settingCensus(reflect.TypeFor[Config](), "", nil)
+	paths := []string{"noSuchSetting", "scanIntervalSec.below", "output.player.device.serial.below", "output.noSuchSetting"}
+	for _, s := range census {
+		paths = append(paths, s.path)
+	}
+	for _, p := range paths {
+		dst, okDst := settingValue(filled, p)
+		src, okSrc := settingValue(&Config{}, p)
+		if okDst != okSrc || okDst && dst.Type() != src.Type() {
+			t.Errorf("%s names a field of a config with every setting set (%v) and of a zero one (%v) unalike", p, okDst, okSrc)
+		}
+		if want := !strings.Contains(p, "noSuchSetting") && !strings.HasSuffix(p, ".below"); okDst != want {
+			t.Errorf("%s names a field: %v, want %v", p, okDst, want)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package openhome
 import (
 	"net/http"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,18 +22,36 @@ import (
 // stillClock is an engine's time that does not move (engine.Config.Seams.Clock):
 // Now is the instant it holds, and a timer armed for a later instant never
 // fires, so no deadline of the engine's comes while the test runs; one armed
-// for that instant or before fires at once, as engine.Clock's At promises.
-type stillClock struct{ at time.Time }
+// for that instant or before fires at once, as engine.Clock's At promises, on
+// a goroutine of its own that the clock counts (wg), never inside At, whose
+// caller may hold what the timer's function takes.
+type stillClock struct {
+	at time.Time
+	wg sync.WaitGroup
+}
 
-func (c stillClock) Now() time.Time { return c.at }
+// newStillClock is a stillClock at at whose timers' goroutines tb's cleanup
+// waits for (B971). Made before the player's engine starts, as
+// newTestPlayerWith's set runs, its cleanup runs after the engine's stop.
+func newStillClock(tb testing.TB, at time.Time) *stillClock {
+	c := &stillClock{at: at}
+	tb.Cleanup(c.wg.Wait)
+	return c
+}
 
-func (c stillClock) AfterFunc(d time.Duration, f func()) engine.Timer { return c.At(c.at.Add(d), f) }
+func (c *stillClock) Now() time.Time { return c.at }
 
-func (c stillClock) At(t time.Time, f func()) engine.Timer {
+func (c *stillClock) AfterFunc(d time.Duration, f func()) engine.Timer { return c.At(c.at.Add(d), f) }
+
+func (c *stillClock) At(t time.Time, f func()) engine.Timer {
 	if t.After(c.at) {
 		return stillTimer{}
 	}
-	go f()
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		f()
+	}()
 	return stillTimer{fired: true}
 }
 
@@ -52,7 +71,7 @@ func (t stillTimer) Stop() bool { return !t.fired }
 // replies its owner sends (TestAStopUnderACheckHoldSignalsItAndAnswersAtItsExit):
 // the HTTP answer not come yet, read here, would prove nothing.
 func TestAnOpenHomeStopEndsTheCheckThroughTheEngine(t *testing.T) {
-	p := newTestPlayerWith(t, func(p *testPlayer) { p.clock = stillClock{at: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)} })
+	p := newTestPlayerWith(t, func(p *testPlayer) { p.clock = newStillClock(t, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)) })
 	waits := newWaitingStops()
 	h := p.handler("")
 	h.seams = &Seams{StopWaiting: waits.seam}

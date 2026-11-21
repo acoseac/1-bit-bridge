@@ -26,8 +26,11 @@ type saveRefusalBody struct {
 // requireSaveRefusal fails the test unless the response is the console's 500
 // save-config, its message saying remedy and naming nothing below root (the
 // config file's directory, which holds the lock file and the staged save
-// too), and the log holds the refusal itself, at Error, so the operator
-// still learns which file and why.
+// too), and the log holds the console's line for the refusal, at Error,
+// which carries the refusal itself (but for a file another writer left that
+// would not load, which the holder says once:
+// TestALeftUnloadableRefusalIsSaidOnceAndTheOthersKeepTheirReasons), so the
+// operator still learns which file and why.
 func requireSaveRefusal(t *testing.T, logs *loggingtest.Recorder, status int, body saveRefusalBody, root, remedy string) {
 	t.Helper()
 	if status != http.StatusInternalServerError || body.Error != errCodeSaveConfig {
@@ -270,6 +273,82 @@ func TestTheConsolesSavesAnswerARefusalWithoutThePath(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestALeftUnloadableRefusalIsSaidOnceAndTheOthersKeepTheirReasons pins the
+// console's line for a save of the config file the holder refused because the
+// file another writer left would not load at the next start (backlog B974):
+// the holder says why once for the bytes it found (config's diagnostic: the
+// file, and the load's words, which name no value), and answers every save
+// after it with the error it kept, so the console's line carries no error for
+// that refusal, wrapped or not: through two refused saves the log holds one
+// line with the load's words. A merged file the next start would refuse, which
+// the holder says nowhere, and a save that failed otherwise keep their reasons
+// on the console's line. No setting's value reaches a line.
+func TestALeftUnloadableRefusalIsSaidOnceAndTheOthersKeepTheirReasons(t *testing.T) {
+	const why = "must not be under a library root"
+	t.Run("a file another writer left that would not load", func(t *testing.T) {
+		logs := loggingtest.Record(t)
+		srv, _, cfgPath := newTestServer(t)
+		recordBootRead(t, srv, cfgPath)
+		root := srv.deps.CfgHolder.Load().LibraryRoots[0]
+		appendToConfigFile(t, cfgPath, "upscale:\n  variantsDir: "+strconv.Quote(filepath.Join(root, "another-writers-variants"))+"\n")
+		for i, step := range []string{"the first refusal", "a refusal the holder answers with the error it kept"} {
+			var body saveRefusalBody
+			code := doJSON(t, srv.Handler(), http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, &body)
+			requireSaveRefusal(t, logs, code, body, filepath.Dir(cfgPath), "correct it")
+			if said := logs.Carrying(why); len(said) != 1 {
+				t.Errorf("after %s %d lines carry the load's words, want the holder's one: %q", step, len(said), said)
+			}
+			if lines := logs.Lines(configNotSavedLine); len(lines) != i+1 || strings.Contains(lines[i], "err=") {
+				t.Errorf("after %s the console's lines are %q, want %d, the last with no error", step, lines, i+1)
+			}
+		}
+		if carrying := logs.Carrying("another-writers-variants"); len(carrying) != 0 {
+			t.Errorf("a line carries the variants folder another writer set: %q", carrying)
+		}
+	})
+	t.Run("a wrapped one", func(t *testing.T) {
+		logs := loggingtest.Record(t)
+		rec := httptest.NewRecorder()
+		writeCfgUpdateErr(rec, fmt.Errorf("save bridge.yaml: %w", &config.ChangedOutsideError{Path: "bridge.yaml",
+			Kind: config.OutsideLeftUnloadable, Err: errors.New("upscale.variantsDir: " + why)}))
+		if lines := logs.Lines(configNotSavedLine); len(lines) != 1 || strings.Contains(lines[0], why) || strings.Contains(lines[0], "err=") {
+			t.Errorf("the console's lines are %q, want one with no error", lines)
+		}
+	})
+	t.Run("a merged file the next start would refuse", func(t *testing.T) {
+		logs := loggingtest.Record(t)
+		srv, _, cfgPath := newTestServer(t)
+		recordBootRead(t, srv, cfgPath)
+		extra := filepath.Join(filepath.Dir(cfgPath), "Extra")
+		if err := os.MkdirAll(extra, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.Edit(cfgPath, func(c *config.Config) (bool, error) {
+			c.LibraryRoots = append(c.LibraryRoots, extra)
+			return true, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var body saveRefusalBody
+		code := doJSON(t, srv.Handler(), http.MethodPost, "/api/upscale/variants-dir", map[string]any{"path": filepath.Join(extra, "merged-variants")}, &body)
+		requireSaveRefusal(t, logs, code, body, filepath.Dir(cfgPath), "restart the bridge")
+		if lines := logs.Lines(configNotSavedLine); len(lines) != 1 || !strings.Contains(lines[0], why) {
+			t.Errorf("the console's lines are %q, want one with the load's words", lines)
+		}
+		if carrying := logs.Carrying("merged-variants"); len(carrying) != 0 {
+			t.Errorf("a line carries the variants folder the save asked for: %q", carrying)
+		}
+	})
+	t.Run("a save that failed otherwise", func(t *testing.T) {
+		logs := loggingtest.Record(t)
+		rec := httptest.NewRecorder()
+		writeCfgUpdateErr(rec, fmt.Errorf("save bridge.yaml: %w", &fs.PathError{Op: "open", Path: ".bridge.yaml.tmp-1", Err: fs.ErrPermission}))
+		if lines := logs.Lines(configNotSavedLine); len(lines) != 1 || !strings.Contains(lines[0], "permission denied") {
+			t.Errorf("the console's lines are %q, want one with the save's error", lines)
+		}
+	})
 }
 
 // appendToConfigFile appends text to the config file at path, as an edit
