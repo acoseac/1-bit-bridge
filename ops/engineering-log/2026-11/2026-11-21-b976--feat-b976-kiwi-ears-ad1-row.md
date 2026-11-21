@@ -108,9 +108,12 @@ link.
   under the four characters a token needs, and a token is taken from a reported port name, never
   seeded from a pattern or a display name (`Kiwi Ears AD1` is one). This is an exception to step
   7's "and a token of at least four characters", for a port name too short to give one, which the
-  iOS re-pin records in section 6. Collisions, both ways: no catalog key, generic name, known
-  sibling or corpus name lies inside `AD1` or holds it, at the base and with the row
-  (`TestAnAddedRowAndEveryOtherRowKeepTheirOwnNames`, and the lint).
+  iOS re-pin records in section 6. Collisions, both ways, as the matchers answer: no known
+  sibling resolves to the row through either matcher, at the base and with the row
+  (`TestAnAddedRowAndEveryOtherRowKeepTheirOwnNames`, and the lint). (Corrected in place on
+  2026-11-21 by bridge lows 14: this said no catalog key, generic name, known sibling or corpus
+  name lies inside `AD1` or holds it; the declared sibling `AD1 Pro` holds it, which is why the row
+  matches by its exact port name alone.)
 - So today's iOS builds, whose live matcher (`DACProfileRegistry.profile(matching:)`) matches by a
   legacy pattern alone, know no row for the AD1, as now, and iOS 2.3's strict matcher (B730 PR 3b,
   `DACRouteResolver`: an exact port name, then a token one row alone holds) matches `AD1` exactly,

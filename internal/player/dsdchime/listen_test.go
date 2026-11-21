@@ -17,7 +17,7 @@ import (
 // chimeSource is a decode.DSDDecoder over a chime, read through its ReadAt,
 // as the player's check will hand the chime to its DSD path.
 type chimeSource struct {
-	c   *Chime
+	c   Chime
 	off int64
 }
 
@@ -86,6 +86,22 @@ func pcmOf(t *testing.T, rate int) [2][]float64 {
 	converted[rate] = out
 	return out
 }
+
+// The listening tests are not held to chime.go's arithmetic: they call libm
+// (math.Sin, math.Cos, math.Log10, cmplx.Exp, cmplx.Abs), and the compiler
+// may fuse their products into a multiply-add (on arm64, or on amd64 at
+// GOAMD64=v3), so pinning the products would still leave the libm calls.
+// What they read is exact everywhere: the bits measured are the goldens'
+// (TestTheChimeIsTheSameOnEveryArchitecture), the joins' offsets integer
+// sums and a division, the own-rate share a count. Their dB figures are
+// float, and the margins those keep are observed, not a bound: the
+// smallest, the DSD64 1320 Hz join the tail search chose, 1.6 dB inside its
+// −101 (−102.6 dB SA-CD at 1.9 s); the closest candidate the search
+// rejected, DSD128's 1320 Hz with no tail, 2.5 dB outside it (−98.5); and
+// the DSD64 1320 Hz residual, 2.26 dB over its floor of 35. On linux/386
+// every figure is linux/amd64's bit for bit, an amd64 build that fuses
+// (GOAMD64=v3) moved them by 8.6e-11 dB at most, and the gate's arm64 leg,
+// test (macos-latest), which fuses, passed them on #1538.
 
 // fft is an in-place radix-2 transform, len(x) a power of two (dsdconv's
 // test helper, which another package's test cannot share).
@@ -276,15 +292,19 @@ func repeated(p []byte, r int) []byte {
 // TestTheChimeIsModulatedAtItsOwnRate: no rate's chime is a lower rate's
 // with each of its samples repeated (a zero-order hold, which moves 0x69's
 // idle tone toward the band and shifts its offset): against each lower
-// rate's so repeated, about half its samples differ, as two streams
-// modulated apart do, where a repetition would differ in none. Through the
-// player's converter each tone is its frequency to within 1 Hz and its
-// level, −36.02 dBFS, to within 0.5 dB, and the channel that is silent
-// meanwhile lies 60 dB or more under it: its in-band power, its DC taken
-// off, against the tone's, on the chain TestTheChimesInBandResidualIsUnderItsFloor
-// measures by.
+// rate's so repeated, about half the samples of each channel's tone section
+// differ, as two streams modulated apart do, where a repeated section would
+// differ in none. Only the sections are counted: the pads and each tone's
+// other channel, 70.8 % of a plane, are 0x69 at every rate
+// (TestTheChimeHasItsShapeAtEveryRate), and 0x69 differs from itself
+// repeated in half its bits, so they would read half whatever the sections
+// held. Through the player's converter each tone is its frequency to within
+// 1 Hz and its level, −36.02 dBFS, to within 0.5 dB, and the channel that is
+// silent meanwhile lies 60 dB or more under it: its in-band power, its DC
+// taken off, against the tone's, on the chain
+// TestTheChimesInBandResidualIsUnderItsFloor measures by.
 func TestTheChimeIsModulatedAtItsOwnRate(t *testing.T) {
-	chimes := map[int]*Chime{}
+	chimes := map[int]Chime{}
 	for _, rate := range chimeRates {
 		c, err := Get(context.Background(), rate)
 		if err != nil {
@@ -293,20 +313,22 @@ func TestTheChimeIsModulatedAtItsOwnRate(t *testing.T) {
 		chimes[rate] = c
 	}
 	for _, hi := range chimeRates {
+		bpf := hi / 44100 / 8
 		for _, lo := range chimeRates {
 			if lo >= hi {
 				continue
 			}
 			for ch := range 2 {
 				held := repeated(chimes[lo].planes[ch], hi/lo)
+				at, n := (padFrames+ch*sectionFrames)*bpf, sectionFrames*bpf
 				differ := 0
-				for i, b := range chimes[hi].planes[ch] {
-					differ += bits.OnesCount8(b ^ held[i])
+				for i := at; i < at+n; i++ {
+					differ += bits.OnesCount8(chimes[hi].planes[ch][i] ^ held[i])
 				}
-				share := float64(differ) / float64(8*len(held))
-				t.Logf("%s channel %d against %s's samples repeated: %.3f of the samples differ", rateName(hi), ch, rateName(lo), share)
+				share := float64(differ) / float64(8*n)
+				t.Logf("%s channel %d's section against %s's samples repeated: %.4f of its samples differ", rateName(hi), ch, rateName(lo), share)
 				if share < 0.4 {
-					t.Errorf("%s channel %d: only %.3f of its samples differ from %s's repeated", rateName(hi), ch, share, rateName(lo))
+					t.Errorf("%s channel %d: only %.4f of its section's samples differ from %s's repeated", rateName(hi), ch, share, rateName(lo))
 				}
 			}
 		}
@@ -330,8 +352,9 @@ func TestTheChimeIsModulatedAtItsOwnRate(t *testing.T) {
 	}
 }
 
-// floors are the in-band residual each rate's tones must lie under, in dB
-// under the tone, with a margin under what the loop gives: its noise
+// floors are the in-band residual each rate's tones, and the largest
+// in-band component of each of their edges, must lie under, in dB under the
+// tone, with a margin under what the loop gives: its noise
 // transfer function's five zeros all sit at DC, so the noise it shapes
 // rises toward 20 kHz, where it is 36.8 dB down at DSD64, 64.3 at DSD128
 // and 93.6 at DSD256.
@@ -345,11 +368,12 @@ var floors = map[int]float64{format.DSD64RateHz: 35, 2 * format.DSD64RateHz: 65,
 // away; the residual windowed (four-term Blackman-Harris) and zero-padded
 // to 2^17 points, each bin's power normalised by the window's energy, and
 // the bins from 20 Hz to 20 kHz summed. Each tone's residual lies under its
-// rate's floor, and its level is −36.02 dBFS within 0.5 dB. It reports, as
-// a measurement, the largest in-band component of each 20 ms edge, where
-// the input nears zero and an undithered loop can fall into an idle
-// pattern: the edge's samples less the intended programme, windowed and
-// transformed the same way over 2^16 points.
+// rate's floor, and its level is −36.02 dBFS within 0.5 dB. Each 20 ms
+// edge, where the input nears zero and an undithered loop can fall into an
+// idle pattern, leaves its largest in-band component under the same floor:
+// the edge's samples less the intended programme, windowed and transformed
+// the same way over 2^16 points, the largest bin read as a sine's amplitude
+// and taken in dB under the tone.
 func TestTheChimesInBandResidualIsUnderItsFloor(t *testing.T) {
 	want := 20 * math.Log10(level)
 	for i, rate := range chimeRates {
@@ -385,7 +409,11 @@ func TestTheChimesInBandResidualIsUnderItsFloor(t *testing.T) {
 					edge[k] = x[ch][from+k] - ideal(from+k)
 				}
 				power, spur := inBand(edge, pcmRate, 1<<16)
-				t.Logf("%s %.0f Hz %s: the residual %.2f dBFS in band, its largest component %.2f dBFS, %.1f dB under the tone", rateName(rate), toneHz[ch], name, db(2*power), 20*math.Log10(spur), m.level-20*math.Log10(spur))
+				under := m.level - 20*math.Log10(spur)
+				t.Logf("%s %.0f Hz %s: the residual %.2f dBFS in band, its largest component %.2f dBFS, %.1f dB under the tone (floor %.0f)", rateName(rate), toneHz[ch], name, db(2*power), 20*math.Log10(spur), under, floors[rate])
+				if !(under >= floors[rate]) {
+					t.Errorf("%s: the %.0f Hz tone's %s leaves its largest in-band component %.1f dB under the tone, not %.0f", rateName(rate), toneHz[ch], name, under, floors[rate])
+				}
 			}
 		}
 	}
