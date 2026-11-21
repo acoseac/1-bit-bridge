@@ -270,3 +270,47 @@ of the nine paths the branch changes is among `GuardedPaths` or under `guardedPr
 - A record holds no run made on its own commit: the vets for linux, darwin and windows, `make fmt
   vet docs-check`, the citation test with the release tags and `make fmt vet test build-all` on this
   record's commit are in its PR's body.
+
+### Round 2: past its deadline a wait hands out no buffered event
+
+From `6b1d658e`, three commits, this record the last:
+- `af4b1503`, red first: the store case's wait split, as it was, and the case that counts what it
+  hands out past its deadline;
+- `f75cc986`: the wait asks its deadline before it returns an event it found; the rule; the records
+  corrected in place;
+- this record.
+
+The finding, read again by line at `6b1d658e`: `waitForCount` (`serve_probation_test.go:75-96`)
+scanned the events the confirmation had buffered and returned the nth before it read its deadline,
+which only its `select` consulted (`serveGiveUpTime`), so the store case's retry loop, which takes
+each next round from it and passes unusable ones over (`:735`), could, once it had fallen behind
+while rounds queued up, go on taking them past the deadline and into the cleanups' reserve. Round 1
+said the loop always waits in `waitForCount` for its next round; it did in round 1's runs (it kept
+up with serve), and does not where rounds have queued: corrected in place above, in the store case's
+comment, and in the B972 entry's correction, which said the binary's deadline bounds the case.
+
+- Red first (`af4b1503`): the wait moved into `awaitCount`, which takes the deadline as an input and
+  answers an error where `waitForCount` failed the test, `waitForCount` computing the deadline (its
+  two-minute fallback for a binary with no deadline included) and keeping the `Fatal`, so a case can
+  watch a refusal without failing; the wait itself as it was. `TestAWaitPastItsDeadlineHandsOutNoBufferedRound`
+  queues five unusable rounds and asks for each next one with a deadline a second past, counting
+  what it is handed. Predicted in writing, and seen: it failed at `serve_probation_test.go:787`, "past
+  its deadline the wait handed the retry loop 5 of the 5 rounds queued, want none: [...]", and
+  `:790`, "the first ask past the deadline answered the confirmation's round never came 6 time(s);
+  it did [...], want a refusal naming the round and its count, 1": the sixth ask was the first
+  refused, by the timer, once the queue was drained. The store case passed beside it.
+- The fix (`f75cc986`): `awaitCount` asks its deadline before it returns an event its scan found,
+  and past it answers "the confirmation's round was not taken 1 time(s) before the test's deadline;
+  it did [...]". The case is green, none handed out and the first ask refused. The rule is
+  `.claude/rules/build-ci-tests.md:160`, beside B63's serve-test deadline, its long form
+  `ops/History-rules-build-ci-tests.md:903`, after B63's, naming this record.
+- Every caller takes the new behaviour: `waitFor` delegates to `waitForCount`, and 26 cmd/bridge tests
+  reach one or the other, directly or through `firstRoundOf` (a closure over the package's test
+  functions' bodies). Those 26 and the new case ran under `-race` once (64.1 s, all passing), then 20
+  times each from one race test binary (`go test -c -race`) in four lanes started 2 s apart from the
+  package's folder (`-test.count 20 -test.timeout 45m -test.v`): 540 passes, none failed, no race
+  reported, 311 to 357 s a lane.
+- Also before this record: the pinned gofmt on the file, `go vet` of cmd/bridge, `make docs-check`,
+  and cmd/bridge's four source guards, all clean. The vets for linux, darwin and windows, `make fmt
+  vet docs-check`, the citation test and `make fmt vet test build-all` on this record's commit are in
+  the PR's body.
