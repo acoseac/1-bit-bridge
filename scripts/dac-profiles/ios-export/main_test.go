@@ -332,17 +332,64 @@ func readBaseline(t *testing.T) baseline {
 
 // declared is what the catalog holds past the baseline (B944): its rows in
 // the export's own shape, in order after the baseline's; the names their
-// units reported; and the known siblings they bring, after the baseline's,
-// each name with the answers both matchers must give it.
+// units reported; the known siblings they bring, after the baseline's, each
+// name with the answers both matchers must give it; and the rows among them
+// that match by their exact port name alone (B976).
 type declared struct {
 	rows            []row
 	names, siblings []corpusName
+	strictOnly      []strictOnly
+}
+
+// strictOnly declares a row past the baseline that has no legacy pattern, so
+// the live matcher answers its names with no row and the strict matcher alone
+// matches it, by its exact port name, and says why it has none (B976). It
+// exempts the row from two checks and no other: namesApart's ask that the
+// live matcher answer its names with it, and the parity's refusal of a
+// declared name the two matchers answer apart, for its exact port names alone.
+type strictOnly struct {
+	id, why string
+}
+
+// clone is add with each of its lists copied, so a case's change to one
+// reaches no other.
+func (add declared) clone() declared {
+	return declared{rows: slices.Clone(add.rows), names: slices.Clone(add.names), siblings: slices.Clone(add.siblings),
+		strictOnly: slices.Clone(add.strictOnly)}
+}
+
+// strict reports whether add declares the row id strict-only.
+func (add declared) strict(id string) bool {
+	return slices.ContainsFunc(add.strictOnly, func(s strictOnly) bool { return s.id == id })
+}
+
+// unpermitted is why add does not let the two matchers answer c, a name it
+// declares, apart, or "" where it does: only a strict-only row's exact port
+// name may be answered so (B976), its live answer no row, its strict answer
+// that row's exact match, and the name, trimmed with its case kept, a port
+// name the row is declared with.
+func (add declared) unpermitted(c corpusName) string {
+	var a struct{ Known *struct{ ID, Tier string } }
+	switch {
+	case c.Live != nil:
+		return fmt.Sprintf("its live answer is %q, not no row", *c.Live)
+	case json.Unmarshal(c.Strict, &a) != nil || a.Known == nil || a.Known.Tier != "exact":
+		return fmt.Sprintf("its strict answer %s is no row's exact match", c.Strict)
+	case !add.strict(a.Known.ID):
+		return fmt.Sprintf("%s is not declared strict-only", a.Known.ID)
+	}
+	i := slices.IndexFunc(add.rows, func(r row) bool { return r.ID == a.Known.ID })
+	if i < 0 || !slices.ContainsFunc(add.rows[i].NameKeys.PortNames, func(p string) bool { return strings.TrimSpace(p) == strings.TrimSpace(c.Name) }) {
+		return fmt.Sprintf("it is no port name %s is declared with", a.Known.ID)
+	}
+	return ""
 }
 
 // additions are the catalog's rows, names and known siblings past the
-// baseline, declared in this file by hand from each row's submission and its
-// maker's figures, never from the catalog or the export, so the export is
-// held to them as it is to the baseline.
+// baseline, and which of those rows are strict-only, declared in this file by
+// hand from each row's submission and its maker's figures, never from the
+// catalog or the export, so the export is held to them as it is to the
+// baseline.
 var additions = declared{
 	rows: []row{{
 		// The Fosi Audio ZH3 (B944), from its wizard submission of 2026-11-19
@@ -461,11 +508,15 @@ func asMap(v any) map[string]any {
 // matcher's answer over its keys, both over the whole export, the rows added
 // past the baseline included, so a regression they bring is seen; for names
 // two rows' patterns hold, the first hit the baseline's rows give; and the
-// corpus names the two matchers answer apart, exactly the four iOS PR 1
-// declares and never a declared name: an added row's names answer the same
-// through both matchers (namesApart asks both to name its row), so a declared
-// name the two answer apart is refused, and so is one whose Exception says
-// they do.
+// names the two matchers answer apart, exactly the four corpus names iOS PR 1
+// declares and the exact port names of the rows declared strict-only: an
+// added row's names answer the same through both matchers (namesApart asks
+// both to name its row), but for a strict-only row's, which the live matcher
+// gives no row (B976), so a declared name the two answer apart is refused
+// unless it is one of those port names, declared with its Exception set, its
+// live answer no row and its strict answer that row's exact match, and a
+// declared name whose Exception is set is refused unless the declarations
+// permit it and the two do answer it apart.
 func parity(base baseline, add declared, exported []byte, siblings []string) []string {
 	var problems []string
 	say := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
@@ -554,9 +605,21 @@ func parity(base baseline, add declared, exported []byte, siblings []string) []s
 			apart = append(apart, fold(c.Name))
 		}
 	}
+	permitted := []string{"brooklyn", "brooklyn dac", "ka3", "topping e30"}
+	for _, c := range add.names {
+		if !c.Exception {
+			continue
+		}
+		if why := add.unpermitted(c); why != "" {
+			say("%q: its declaration says the strict and live answers differ, which only a strict-only row's exact port name may, and %s", c.Name, why)
+		} else if !slices.Contains(permitted, fold(c.Name)) {
+			permitted = append(permitted, fold(c.Name))
+		}
+	}
 	slices.Sort(apart)
-	if want := []string{"brooklyn", "brooklyn dac", "ka3", "topping e30"}; !slices.Equal(apart, want) {
-		say("the corpus names the strict and live matchers answer apart are %q, iOS PR 1 declares %q", apart, want)
+	slices.Sort(permitted)
+	if !slices.Equal(apart, permitted) {
+		say("the names the strict and live matchers answer apart are %q, the four corpus names iOS PR 1 declares and the strict-only rows' exact port names %q", apart, permitted)
 	}
 	return problems
 }
@@ -697,8 +760,8 @@ func TestAnAdditionIsHeldToItsDeclaration(t *testing.T) {
 			t.Fatal(err)
 		}
 		db.Profiles = append(db.Profiles, added())
-		add := declared{rows: append(slices.Clone(additions.rows), addedRow()), names: slices.Clone(additions.names),
-			siblings: slices.Clone(additions.siblings)}
+		add := additions.clone()
+		add.rows = append(add.rows, addedRow())
 		if mutate != nil {
 			mutate(db, &add)
 		}
@@ -762,10 +825,12 @@ func TestAnAdditionIsHeldToItsDeclaration(t *testing.T) {
 // lies inside another row's names (its port names, patterns and tokens, and
 // the corpus names either matcher gives it) or a generic name, all folded,
 // each said as the kind of key it is; the live matcher's first hit and the
-// strict matcher's answer for each of the added row's names is that row, and
-// for each of another row's names never is; and every known sibling declared
-// with it is reached by no row: by no legacy pattern, which the live matcher
-// takes it by and no excluded token rules out, and by neither matcher.
+// strict matcher's answer for each of the added row's names is that row, but
+// for a row add declares strict-only (B976), whose names the live matcher
+// gives no row, and for each of another row's names never is; and every known
+// sibling declared with it is reached by no row: by no legacy pattern, which
+// the live matcher takes it by and no excluded token rules out, and by
+// neither matcher.
 func namesApart(corpus []corpusName, add declared, x export) []string {
 	var problems []string
 	say := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
@@ -793,7 +858,10 @@ func namesApart(corpus []corpusName, add declared, x export) []string {
 		a := x.Rows[i]
 		own := namesOf(a)
 		for _, n := range own {
-			if got := firstHit(n, ids, patterns); got != a.ID {
+			switch got := firstHit(n, ids, patterns); {
+			case add.strict(a.ID) && got != "":
+				say("%s: its name %q is the live matcher's %q, and the live matcher gives a row declared strict-only none of its names", a.ID, n, got)
+			case !add.strict(a.ID) && got != a.ID:
 				say("%s: its name %q is the live matcher's %q", a.ID, n, got)
 			}
 			if got := strictKnown(strictMatch(n, x)); got != a.ID {
@@ -854,6 +922,63 @@ func namesApart(corpus []corpusName, add declared, x export) []string {
 		}
 		if got := strictMatch(s.Name, x); !jsonEqual(got, json.RawMessage(`{"unknown":"noMatch"}`)) {
 			say("the sibling %q is the strict matcher's %s", s.Name, got)
+		}
+	}
+	return problems
+}
+
+// strictOnlyProblems is every way add's strict-only declarations fail to
+// hold (B976), a sentence each: a declaration naming no row declared past the
+// baseline, naming one twice or giving no reason; a row so declared that its
+// declaration or the export gives a legacy pattern, which the live matcher
+// would take its names and its siblings' by, that the export does not hold,
+// that is declared with no port name, or one of whose declared port names the
+// strict matcher over the export does not answer with that row's exact
+// match; and a row declared past the baseline that the export gives no legacy
+// pattern and no declaration says is strict-only.
+func strictOnlyProblems(add declared, x export) []string {
+	var problems []string
+	say := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+	seen := map[string]bool{}
+	for _, s := range add.strictOnly {
+		if seen[s.id] {
+			say("%s is declared strict-only twice", s.id)
+		}
+		seen[s.id] = true
+		if strings.TrimSpace(s.why) == "" {
+			say("%s is declared strict-only with no reason", s.id)
+		}
+		i := slices.IndexFunc(add.rows, func(r row) bool { return r.ID == s.id })
+		if i < 0 {
+			say("the strict-only declaration %q names no row declared past the baseline", s.id)
+			continue
+		}
+		d := add.rows[i]
+		if len(d.LegacyPatterns) > 0 {
+			say("%s is declared strict-only, and its declaration gives it the legacy patterns %q", s.id, d.LegacyPatterns)
+		}
+		if len(d.NameKeys.PortNames) == 0 {
+			say("%s is declared strict-only, and its declaration gives it no port name to match exactly", s.id)
+		}
+		j := slices.IndexFunc(x.Rows, func(r row) bool { return r.ID == s.id })
+		if j < 0 {
+			say("%s is declared strict-only and not in the export", s.id)
+			continue
+		}
+		if ps := x.Rows[j].LegacyPatterns; len(ps) > 0 {
+			say("%s is declared strict-only, and the export gives it the legacy patterns %q", s.id, ps)
+		}
+		exact := json.RawMessage(fmt.Sprintf(`{"known":{"id":%q,"scope":%q,"tier":"exact"}}`, s.id, d.NameKeys.Scope))
+		for _, p := range d.NameKeys.PortNames {
+			if got := strictMatch(p, x); !jsonEqual(got, exact) {
+				say("%s is declared strict-only, and the strict matcher over the export answers its declared port name %q with %s, not its exact match", s.id, p, got)
+			}
+		}
+	}
+	for _, d := range add.rows {
+		j := slices.IndexFunc(x.Rows, func(r row) bool { return r.ID == d.ID })
+		if j >= 0 && len(x.Rows[j].LegacyPatterns) == 0 && !add.strict(d.ID) {
+			say("%s has no legacy pattern, and no declaration says it is strict-only", d.ID)
 		}
 	}
 	return problems
@@ -943,6 +1068,178 @@ func TestALegacyPatternSharedWithAnAddedRowIsACollision(t *testing.T) {
 				t.Errorf("namesApart says %q, want %q among them", problems, tc.want)
 			}
 		})
+	}
+}
+
+// TestEveryStrictOnlyDeclarationHoldsItsRow: each row the declarations past
+// the baseline say is strict-only is a declared row, declared once, with its
+// reason, given no legacy pattern by its declaration or the export, and
+// answered with its exact match by the strict matcher over the export for
+// each port name it is declared with; and every declared row the export gives
+// no legacy pattern is declared strict-only (strictOnlyProblems, B976).
+func TestEveryStrictOnlyDeclarationHoldsItsRow(t *testing.T) {
+	var x export
+	if err := json.Unmarshal(fresh(t), &x); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range strictOnlyProblems(additions, x) {
+		t.Error(p)
+	}
+}
+
+// TestAStrictOnlyRowIsExemptFromTheLiveMatcherAlone: a row declared past the
+// baseline with no legacy pattern and no token, matched by its exact port
+// name alone and declared strict-only (B976), is held as every added row is
+// but for the two exemptions its declaration gives: the live matcher answers
+// its names with no row, and its exact port names alone are names the two
+// matchers may answer apart. A fixture row, fixture.strict, its one port name
+// FX1, which its sibling FX1 Pro holds, added to the catalog at the next
+// order and declared so, lints and passes the parity, namesApart and
+// strictOnlyProblems, FX1 and FX1 with a trailing space answered with it and
+// FX1 in three other cases with no row, by either matcher; and each of these
+// is refused: the row exported and not declared strict-only; declared so with
+// a legacy pattern, in the catalog and its declaration or in the catalog
+// alone; a declaration naming no row, which nothing else refuses, or the
+// row's ID misspelt; its strict exact match broken, its port name in the
+// catalog not the one its unit reported; a declaration with no reason, or
+// given twice; and a lower-case name, or a name the row's token matches,
+// declared as a disagreement the declaration permits.
+func TestAStrictOnlyRowIsExemptFromTheLiveMatcherAlone(t *testing.T) {
+	base := readBaseline(t)
+	exact := known("fixture.strict", "exact")
+	setup := func() (*dacprofile.Database, declared) {
+		t.Helper()
+		db, err := dacprofile.Default()
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.Profiles = append(db.Profiles, dacprofile.Profile{ID: "fixture.strict", Name: "Fixture Strict", Match: []dacprofile.Match{},
+			Caveats: []dacprofile.Caveat{}, IOS: &dacprofile.IOS{Order: len(base.Rows) + len(additions.rows) + 1, Maker: "Fixture",
+				LegacyPatterns: []string{}, LegacyCeilingBitRate: 5644800, PortNames: []string{"FX1"}, NameTokens: []string{},
+				ExcludedTokens: []string{}, NameScope: "model", PCM: dacprofile.IOSPCM{MaxRateHz: 384000, BitDepth: 32},
+				VolumeTopology: "unknown"},
+			Provenance: []string{"ios: wizard submission 2026-11-21"}})
+		db.IOSKnownSiblings = append(db.IOSKnownSiblings, "FX1 Pro")
+		add := additions.clone()
+		add.rows = append(add.rows, row{ID: "fixture.strict", Name: "Fixture Strict", Maker: "Fixture", LegacyPatterns: []string{},
+			LegacyCeiling: "dsd128", PCM: dacprofile.IOSPCM{MaxRateHz: 384000, BitDepth: 32}, VolumeTopology: "unknown",
+			NameKeys: nameKeys{PortNames: []string{"FX1"}, Tokens: []string{}, ExcludedTokens: []string{}, Scope: "model"},
+			Evidence: evidence{Heard: []heard{}, Failed: []failed{}, Statement: statement{Case: "unrecorded"}}})
+		add.names = slices.Concat(add.names, []corpusName{{Name: "FX1", Strict: exact, Exception: true},
+			{Name: "FX1 ", Strict: exact, Exception: true}}, noMatch("fx1", "Fx1", "fX1"))
+		add.siblings = slices.Concat(add.siblings, noMatch("FX1 Pro"))
+		add.strictOnly = append(add.strictOnly, strictOnly{"fixture.strict", "a port name too short for a legacy pattern that leaves its sibling out"})
+		return db, add
+	}
+	run := func(db *dacprofile.Database, add declared) (fromParity, fromNamesApart, fromDeclaration []string) {
+		t.Helper()
+		exported, err := build(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var x export
+		if err := json.Unmarshal(exported, &x); err != nil {
+			t.Fatal(err)
+		}
+		return parity(base, add, exported, db.IOSKnownSiblings), namesApart(base.ParityCorpus, add, x), strictOnlyProblems(add, x)
+	}
+	db, add := setup()
+	if problems := db.Lint(); len(problems) > 0 {
+		t.Fatalf("the catalog with a row of no legacy pattern and no token lints as %v", problems)
+	}
+	if p, n, d := run(db, add); len(p)+len(n)+len(d) > 0 {
+		t.Fatalf("a strict-only fixture row declared past the baseline is refused: %q, %q, %q", p, n, d)
+	}
+	strictRow := func(db *dacprofile.Database) *dacprofile.IOS { return db.Profiles[len(db.Profiles)-1].IOS }
+	declaredRow := func(add *declared) *row { return &add.rows[len(add.rows)-1] }
+	declaration := func(add *declared) *strictOnly { return &add.strictOnly[len(add.strictOnly)-1] }
+	name := func(add *declared, n string) *corpusName {
+		return &add.names[slices.IndexFunc(add.names, func(c corpusName) bool { return c.Name == n })]
+	}
+	const apart = "its declaration says the strict and live answers differ, which only a strict-only row's exact port name may, and "
+	for _, tc := range []struct {
+		name                            string
+		mutate                          func(db *dacprofile.Database, add *declared)
+		parity, namesApart, declaration []string // the words a problem of each check says
+		alone                           bool     // and no check with no words says anything
+	}{
+		{name: "exported and not declared strict-only",
+			mutate:      func(_ *dacprofile.Database, add *declared) { add.strictOnly = add.strictOnly[:len(add.strictOnly)-1] },
+			parity:      []string{`"FX1": ` + apart + "fixture.strict is not declared strict-only"},
+			namesApart:  []string{`fixture.strict: its name "FX1" is the live matcher's ""`},
+			declaration: []string{"fixture.strict has no legacy pattern, and no declaration says it is strict-only"}},
+		{name: "declared strict-only with a legacy pattern in the catalog and its declaration",
+			mutate: func(db *dacprofile.Database, add *declared) {
+				strictRow(db).LegacyPatterns, declaredRow(add).LegacyPatterns = []string{"FX1"}, []string{"FX1"}
+			},
+			parity: []string{`"FX1": the export's first hit is "fixture.strict", its declared live answer ""`},
+			namesApart: []string{`fixture.strict: its name "FX1" is the live matcher's "fixture.strict", and the live matcher gives a row declared strict-only none of its names`,
+				`the sibling "FX1 Pro" holds fixture.strict's legacy pattern "FX1", which the live matcher takes it by`},
+			declaration: []string{`fixture.strict is declared strict-only, and its declaration gives it the legacy patterns ["FX1"]`,
+				`fixture.strict is declared strict-only, and the export gives it the legacy patterns ["FX1"]`}},
+		{name: "declared strict-only with a legacy pattern in the catalog alone",
+			mutate:      func(db *dacprofile.Database, _ *declared) { strictRow(db).LegacyPatterns = []string{"FX1"} },
+			parity:      []string{"(fixture.strict), legacyPatterns: the export's [FX1], the declaration's []"},
+			namesApart:  []string{`the sibling "FX1 Pro" holds fixture.strict's legacy pattern "FX1", which the live matcher takes it by`},
+			declaration: []string{`fixture.strict is declared strict-only, and the export gives it the legacy patterns ["FX1"]`}},
+		{name: "a declaration naming no row, which nothing else refuses",
+			mutate: func(_ *dacprofile.Database, add *declared) {
+				add.strictOnly = append(add.strictOnly, strictOnly{"fixture.none", "a port name too short for a legacy pattern that leaves its sibling out"})
+			},
+			declaration: []string{`the strict-only declaration "fixture.none" names no row declared past the baseline`}, alone: true},
+		{name: "the row's ID misspelt in its declaration",
+			mutate:     func(_ *dacprofile.Database, add *declared) { declaration(add).id = "fixture.strikt" },
+			parity:     []string{`"FX1": ` + apart + "fixture.strict is not declared strict-only"},
+			namesApart: []string{`fixture.strict: its name "FX1" is the live matcher's ""`},
+			declaration: []string{`the strict-only declaration "fixture.strikt" names no row declared past the baseline`,
+				"fixture.strict has no legacy pattern, and no declaration says it is strict-only"}},
+		{name: "its strict exact match broken, its port name in the catalog not the one its unit reported",
+			mutate:      func(db *dacprofile.Database, _ *declared) { strictRow(db).PortNames = []string{"FX 1"} },
+			parity:      []string{`"FX1": the strict matcher over the export's keys answers {"unknown":"noMatch"}, its declared strict answer`},
+			namesApart:  []string{`fixture.strict: its name "FX1" is the strict matcher's ""`},
+			declaration: []string{`fixture.strict is declared strict-only, and the strict matcher over the export answers its declared port name "FX1" with {"unknown":"noMatch"}, not its exact match`}},
+		{name: "a declaration with no reason",
+			mutate:      func(_ *dacprofile.Database, add *declared) { declaration(add).why = " " },
+			declaration: []string{"fixture.strict is declared strict-only with no reason"}, alone: true},
+		{name: "a row declared strict-only twice",
+			mutate: func(_ *dacprofile.Database, add *declared) {
+				add.strictOnly = append(add.strictOnly, *declaration(add))
+			},
+			declaration: []string{"fixture.strict is declared strict-only twice"}, alone: true},
+		{name: "a lower-case name declared a match the declaration permits",
+			mutate: func(_ *dacprofile.Database, add *declared) {
+				*name(add, "fx1") = corpusName{Name: "fx1", Strict: exact, Exception: true}
+			},
+			parity: []string{`"fx1": the strict matcher over the export's keys answers {"unknown":"noMatch"}, its declared strict answer`,
+				`"fx1": ` + apart + "it is no port name fixture.strict is declared with"},
+			namesApart: []string{`fixture.strict: its name "fx1" is the strict matcher's ""`}},
+		{name: "a lower-case name declared answered apart",
+			mutate: func(_ *dacprofile.Database, add *declared) { name(add, "Fx1").Exception = true },
+			parity: []string{`"Fx1": the strict and live answers differ false, and its declaration says they differ true`,
+				`"Fx1": ` + apart + `its strict answer {"unknown":"noMatch"} is no row's exact match`}, alone: true},
+		{name: "a name the row's token matches declared a disagreement the declaration permits",
+			mutate: func(db *dacprofile.Database, add *declared) {
+				strictRow(db).NameTokens, declaredRow(add).NameKeys.Tokens = []string{"FX1"}, []string{"FX1"}
+				*name(add, "fx1") = corpusName{Name: "fx1", Strict: known("fixture.strict", "token"), Exception: true}
+			},
+			parity: []string{`"fx1": ` + apart + `its strict answer {"known":{"id":"fixture.strict","scope":"model","tier":"token"}} is no row's exact match`}},
+	} {
+		db, add := setup()
+		tc.mutate(db, &add)
+		p, n, d := run(db, add)
+		for _, c := range []struct {
+			check     string
+			got, want []string
+		}{{"the parity", p, tc.parity}, {"namesApart", n, tc.namesApart}, {"strictOnlyProblems", d, tc.declaration}} {
+			for _, words := range c.want {
+				if !slices.ContainsFunc(c.got, func(s string) bool { return strings.Contains(s, words) }) {
+					t.Errorf("%s: %s says %q, want a problem saying %q", tc.name, c.check, c.got, words)
+				}
+			}
+			if tc.alone && len(c.want) == 0 && len(c.got) > 0 {
+				t.Errorf("%s: %s says %q, want nothing", tc.name, c.check, c.got)
+			}
+		}
 	}
 }
 
