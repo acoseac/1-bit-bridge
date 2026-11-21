@@ -214,6 +214,10 @@ type Enricher struct {
 	done    atomic.Int64
 	skipped atomic.Int64
 
+	// onOutcome, nil in production, hears each track's outcome once its
+	// pass has made the outcome's writes (SetOnOutcomeForTest).
+	onOutcome func(path string, o Outcome)
+
 	// skipReasons counts markSkipped calls per bounded reason key. The
 	// keys are the skipReason* constants ONLY — never a formatted error
 	// string, which would make the map unbounded in cardinality (a
@@ -1159,6 +1163,44 @@ func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) s
 	return skipReasonNoFingerprintMatch
 }
 
+// Outcome is how the enricher's pass over one track ended, as
+// SetOnOutcomeForTest reports it. A pass that records nothing has none: one
+// the shutdown or the switch stopped, one that left the row for the next
+// batch (a transient upstream error), and a stamp over a row that changed
+// since its batch read it.
+type Outcome uint8
+
+const (
+	// OutcomeDone is a track stamped enriched: its row committed, and the
+	// track counted done.
+	OutcomeDone Outcome = iota + 1
+	// OutcomeSkipped is a track stamped as skipped: its row committed, and
+	// the skip counted under its reason.
+	OutcomeSkipped
+	// OutcomeFailed is a stamp the store refused with an error that is no
+	// stop: logged, and the row left at enriched_at = 0 (a skip whose stamp
+	// failed is still counted under its reason, as markSkipped says).
+	OutcomeFailed
+)
+
+// SetOnOutcomeForTest makes fn hear each track's outcome, on the worker's
+// goroutine, once the pass has made that outcome's writes: every artwork
+// write before the stamp has returned, and the stamp has committed, or been
+// refused for OutcomeFailed. A test waits on it for what the enricher has
+// finished, never on the wall clock (backlog B952). Production code MUST NOT
+// call it. A test sets it before Run starts, which reads it unsynchronised,
+// and fn must not block: the pass waits for it.
+func (e *Enricher) SetOnOutcomeForTest(fn func(path string, o Outcome)) {
+	e.onOutcome = fn
+}
+
+// noteOutcome tells the seam, when a test set one, how the pass over t ended.
+func (e *Enricher) noteOutcome(t *manifest.Track, o Outcome) {
+	if e.onOutcome != nil {
+		e.onOutcome(t.Path, o)
+	}
+}
+
 // stampEnriched commits the track and counts it done.
 //
 // Shared by every success exit — the ordinary path, the fingerprint-recovered
@@ -1191,10 +1233,12 @@ func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
 		}
 		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
 			logger.Error("mark enriched", "path", t.Path, "err", failure)
+			e.noteOutcome(t, OutcomeFailed)
 		}
 		return
 	}
 	e.done.Add(1)
+	e.noteOutcome(t, OutcomeDone)
 }
 
 // noteChangedWhileEnriched says, at Debug, that a stamp found its row
@@ -1233,6 +1277,7 @@ func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, d
 	if !e.stampAdmitted(ctx) {
 		return
 	}
+	outcome := OutcomeSkipped
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		if errors.Is(err, manifest.ErrTrackChanged) {
 			noteChangedWhileEnriched(t)
@@ -1243,6 +1288,7 @@ func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, d
 			return
 		}
 		logger.Error("mark skipped", "path", t.Path, "err", failure)
+		outcome = OutcomeFailed
 	}
 	e.skipped.Add(1)
 	e.skipReasonsMu.Lock()
@@ -1256,6 +1302,7 @@ func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, d
 	// train operators to ignore the log.
 	logger.Info("enrichment skipped", "path", t.Path, "reason", reason,
 		"detail", detail, "artist", t.Artist, "album", t.Album)
+	e.noteOutcome(t, outcome)
 }
 
 // SkipReasons returns a copy of the per-reason skip counts accumulated

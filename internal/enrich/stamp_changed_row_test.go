@@ -45,33 +45,16 @@ func rewriteOnFirstSearch(t *testing.T, storeRef **manifest.Store, path, body st
 	}
 }
 
-// runUntilStamped runs e until the row at path has left the unenriched set
-// (a stamp landed: after the refused one, the next batch's) or 3 s pass, and
-// joins the run before it returns, so every count and line the run makes is
-// in by then. The join is registered as a cleanup too, for a test that fails
-// on the way.
-func runUntilStamped(t *testing.T, e *Enricher, store *manifest.Store, path string) {
+// runUntilStamped runs e until one stamp of the kind want has landed (after
+// the refused one, the next batch's), and joins the run before it returns,
+// so every count and line the run makes is in by then. The join is
+// registered as a cleanup too, for a test that fails on the way.
+func runUntilStamped(t *testing.T, e *Enricher, want Outcome) {
 	t.Helper()
-	join := startEnricherForTest(e, 3*time.Second)
-	t.Cleanup(join)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		pending, err := store.UnenrichedTracks(context.Background(), 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		stamped := true
-		for _, p := range pending {
-			if p.Path == path {
-				stamped = false
-			}
-		}
-		if stamped {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	join()
+	run := startEnricherForTest(e)
+	t.Cleanup(run.join)
+	run.wait(t, want, 1, "the rewritten row was never stamped")
+	run.join()
 }
 
 // requireOneRefusalAndNoFailure asserts that the run met the refused stamp
@@ -160,7 +143,7 @@ func TestAStampOverARowThatChangedMidEnrichmentIsNotCounted(t *testing.T) {
 	t.Cleanup(caaSrv.Close)
 	e := changedRowEnricher(t, &store, path, mbSrv, caaSrv)
 
-	runUntilStamped(t, e, store, path)
+	runUntilStamped(t, e, OutcomeDone)
 
 	if got := e.Done(); got != 1 {
 		t.Errorf("Done() = %d, want 1: the refused stamp counted as a track done", got)
@@ -189,7 +172,7 @@ func TestASkipOverARowThatChangedMidEnrichmentIsNotCounted(t *testing.T) {
 	t.Cleanup(caaSrv.Close)
 	e := changedRowEnricher(t, &store, path, mbSrv, caaSrv)
 
-	runUntilStamped(t, e, store, path)
+	runUntilStamped(t, e, OutcomeSkipped)
 
 	if got := e.skipped.Load(); got != 1 {
 		t.Errorf("skipped = %d, want 1: the refused stamp counted as a skip", got)

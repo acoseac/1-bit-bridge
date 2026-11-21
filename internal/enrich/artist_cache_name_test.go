@@ -112,14 +112,9 @@ func TestArtistCacheHitUsesCanonicalNameForDeezer(t *testing.T) {
 		filepath.Join(dir, "artwork"))
 	e.DeezerMinInterval = 0
 
-	defer startEnricherForTest(e, 5*time.Second)()
-	deadline := time.Now().Add(4 * time.Second)
-	for time.Now().Before(deadline) && e.Done() < 2 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.Done() < 2 {
-		t.Fatalf("only enriched %d of 2 tracks", e.Done())
-	}
+	run := startEnricherForTest(e)
+	defer run.join()
+	run.wait(t, OutcomeDone, 2, "the two tracks were not both enriched")
 
 	mu.Lock()
 	got := append([]string(nil), searchQueries...)

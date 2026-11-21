@@ -3,6 +3,7 @@ package enrich
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,10 +44,44 @@ func TestTruncateForLog(t *testing.T) {
 	}
 }
 
-// startEnricherForTest launches e.Run on its own goroutine with a
-// timeout-bounded ctx and returns a join func the caller MUST defer at
-// the call site (`defer startEnricherForTest(e, …)()`). The join
-// cancels the ctx and BLOCKS until Run has fully returned.
+// enricherWaitBound bounds a test's wait on what the enricher does, from
+// above alone: it is the failure's own bound, never a guess at how long the
+// work takes. It is generous because a loaded runner is slower than a quiet
+// one by more than any small figure allows: windows-latest failed waits of
+// two seconds on work that takes about 50 ms on a quiet Linux host (backlog
+// B952).
+const enricherWaitBound = 30 * time.Second
+
+// enricherRunLifetime is how long a run lives unless it is joined first:
+// past enricherWaitBound by a margin, so a wait ends with its outcomes or at
+// its own bound, and a Run that returns before either fails the wait as such.
+const enricherRunLifetime = enricherWaitBound + 10*time.Second
+
+// enricherRun is an enricher's Run on a goroutine of its own
+// (startEnricherForTest), and each track's outcome as the run reports it
+// (Enricher.SetOnOutcomeForTest), in order.
+type enricherRun struct {
+	start  time.Time
+	cancel context.CancelFunc
+	exited chan struct{}
+
+	mu       sync.Mutex
+	outcomes []trackOutcome
+	// changed has room for one send, made after each outcome without
+	// blocking, so the worker never waits on a test that is not reading.
+	changed chan struct{}
+}
+
+// trackOutcome is one track's outcome as the run reported it.
+type trackOutcome struct {
+	path string
+	o    Outcome
+}
+
+// startEnricherForTest launches e.Run on its own goroutine and returns the
+// run, whose join the caller MUST defer at the call site
+// (`defer run.join()`). The join cancels the run and BLOCKS until Run has
+// fully returned.
 //
 // The defer ordering is load-bearing: registering the join AFTER the
 // test's `defer store.Close()` / server-close defers means it runs
@@ -55,7 +91,11 @@ func TestTruncateForLog(t *testing.T) {
 // in-flight at test return kept writing artwork into the TempDir while
 // RemoveAll walked it, failing the suite with "directory not empty"
 // (flaky under -race full-suite runs, 2026-06-10).
-func startEnricherForTest(e *Enricher, timeout time.Duration) (join func()) {
+//
+// The run lives enricherRunLifetime, past every wait on it: the two- and
+// three-second lifetimes the callers passed until backlog B952 would have
+// ended the work under a wait any longer than that.
+func startEnricherForTest(e *Enricher) *enricherRun {
 	// Every test wants the same pacing posture: no upstream-politeness
 	// gaps (the upstreams are local httptest servers) and a fast poll
 	// so the worker picks up the fixture rows promptly. Centralised
@@ -65,27 +105,160 @@ func startEnricherForTest(e *Enricher, timeout time.Duration) (join func()) {
 	e.CAAMinInterval = 0
 	e.DeezerMinInterval = 0
 	e.PollInterval = 5 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	done := make(chan struct{})
+	r := &enricherRun{start: time.Now(), exited: make(chan struct{}), changed: make(chan struct{}, 1)}
+	// Before Run starts, which reads the seam unsynchronised.
+	e.SetOnOutcomeForTest(r.record)
+	ctx, cancel := context.WithTimeout(context.Background(), enricherRunLifetime)
+	r.cancel = cancel
 	go func() {
-		defer close(done)
+		defer close(r.exited)
 		e.Run(ctx)
 	}()
-	return func() {
-		cancel()
-		<-done
+	return r
+}
+
+// join cancels the run and waits until Run has returned. A second call
+// returns at once.
+func (r *enricherRun) join() {
+	r.cancel()
+	<-r.exited
+}
+
+// record is the run's seam: it keeps the outcome and wakes a waiter.
+func (r *enricherRun) record(path string, o Outcome) {
+	r.mu.Lock()
+	r.outcomes = append(r.outcomes, trackOutcome{path: path, o: o})
+	r.mu.Unlock()
+	select {
+	case r.changed <- struct{}{}:
+	default:
 	}
 }
 
-// waitEnricherDone polls until e.Done() reaches want or the timeout
-// elapses, returning the final count — the shared shape of every
-// "did the worker get to my fixture rows" wait in this package.
-func waitEnricherDone(e *Enricher, want int64, timeout time.Duration) int64 {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) && e.Done() < want {
-		time.Sleep(10 * time.Millisecond)
+// wait waits until n tracks have reached want, which the run reports once
+// that outcome's writes have landed: the shared shape of every "did the
+// worker get to my fixture rows" wait in this package. It fails the test
+// with why, the site's own words, and what the run reported, at once when a
+// track reaches another outcome or Run returns first, and once
+// enricherWaitBound has passed since the run started.
+func (r *enricherRun) wait(t *testing.T, want Outcome, n int, why string) {
+	t.Helper()
+	timer := time.NewTimer(time.Until(r.start.Add(enricherWaitBound)))
+	defer timer.Stop()
+	ended := ""
+	for {
+		got, other, seen := r.tally(want)
+		switch {
+		case other != "":
+			t.Fatalf("%s: %s, where %d %s were awaited; the run reported %s", why, other, n, outcomeName(want), seen)
+		case got >= n:
+			return
+		case ended != "":
+			t.Fatalf("%s: %d of %d tracks %s when %s; the run reported %s", why, got, n, outcomeName(want), ended, seen)
+		}
+		select {
+		case <-r.changed:
+		case <-r.exited:
+			// Run reported every outcome before it returned: tally once more.
+			ended = "the enricher's Run returned"
+		case <-timer.C:
+			ended = enricherWaitBound.String() + " had passed"
+		}
 	}
-	return e.Done()
+}
+
+// tally counts the tracks the run reported as want, names the first it
+// reported as anything else (empty when none did), and lists every outcome
+// it reported, for a failure to show.
+func (r *enricherRun) tally(want Outcome) (got int, other, seen string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	all := make([]string, 0, len(r.outcomes))
+	for _, oc := range r.outcomes {
+		all = append(all, oc.path+" "+outcomeName(oc.o))
+		switch {
+		case oc.o == want:
+			got++
+		case other == "":
+			other = oc.path + " was " + outcomeName(oc.o)
+		}
+	}
+	return got, other, "[" + strings.Join(all, ", ") + "]"
+}
+
+// outcomeName is o as a failure names it.
+func outcomeName(o Outcome) string {
+	switch o {
+	case OutcomeDone:
+		return "done"
+	case OutcomeSkipped:
+		return "skipped"
+	case OutcomeFailed:
+		return "failed"
+	}
+	return fmt.Sprintf("outcome %d", o)
+}
+
+// TestTheOutcomeSeamHearsEachStampOnceItsWriteHasAnswered pins the seam every
+// wait above stands on (SetOnOutcomeForTest, backlog B952): a stamp is heard
+// as done and a skip as skipped, each only once its row has committed, a
+// stamp the store refuses as failed, the skip's included, and a stamp the
+// shutdown stopped, which records nothing, not at all.
+func TestTheOutcomeSeamHearsEachStampOnceItsWriteHasAnswered(t *testing.T) {
+	// listen has e's seam note each outcome it hears, and whether the
+	// track's row was still waiting for the enricher as it heard it.
+	listen := func(e *Enricher, store *manifest.Store) *[]string {
+		heard := &[]string{}
+		e.SetOnOutcomeForTest(func(path string, o Outcome) {
+			row := "stamped"
+			pending, err := store.UnenrichedTracks(context.Background(), 100)
+			if err != nil {
+				row = "unread"
+			}
+			for _, p := range pending {
+				if p.Path == path {
+					row = "pending"
+				}
+			}
+			*heard = append(*heard, path+" "+outcomeName(o)+" "+row)
+		})
+		return heard
+	}
+	t.Run("a stamp and a skip that commit", func(t *testing.T) {
+		e, store := newOfflineEnricher(t, nil)
+		tuneForTest(e)
+		heard := listen(e, store)
+		done, skipped := stampableTrack(t, store), skippableTrack(t, store)
+		e.enrichOne(context.Background(), &done)
+		e.enrichOne(context.Background(), &skipped)
+		want := done.Path + " done stamped; " + skipped.Path + " skipped stamped"
+		if got := strings.Join(*heard, "; "); got != want {
+			t.Errorf("the seam heard %q, want %q", got, want)
+		}
+	})
+	t.Run("a stamp and a skip the store refuses", func(t *testing.T) {
+		e, store := newOfflineEnricher(t, nil)
+		tuneForTest(e)
+		heard := listen(e, store)
+		done, skipped := stampableTrack(t, store), skippableTrack(t, store)
+		_ = store.Close()
+		e.enrichOne(context.Background(), &done)
+		e.enrichOne(context.Background(), &skipped)
+		want := done.Path + " failed unread; " + skipped.Path + " failed unread"
+		if got := strings.Join(*heard, "; "); got != want {
+			t.Errorf("the seam heard %q, want %q", got, want)
+		}
+	})
+	t.Run("a stamp the shutdown stopped", func(t *testing.T) {
+		e, store, ctx := enricherStoppedInThePortraitFetch(t, true)
+		heard := listen(e, store)
+		track := stampableTrack(t, store)
+		e.enrichOne(ctx, &track)
+		if len(*heard) != 0 {
+			t.Errorf("the seam heard %q from a stamp that recorded nothing", *heard)
+		}
+		mustStillBeUnenriched(t, store, track.Path)
+	})
 }
 
 // --- MusicBrainz client ---
@@ -700,12 +873,11 @@ func TestEnricherProcessesTracksEndToEnd(t *testing.T) {
 		nil, // no Deezer in this test — artist-image fallback path tested separately
 		filepath.Join(dir, "artwork"),
 	)
-	defer startEnricherForTest(e, 3*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
 	// Wait for both to be enriched.
-	if got := waitEnricherDone(e, 2, 2*time.Second); got < 2 {
-		t.Fatalf("enriched %d, want 2 (skipped=%d)", got, e.skipped.Load())
-	}
+	run.wait(t, OutcomeDone, 2, "the two tracks were not both enriched")
 
 	// Verify both tracks have ArtworkMBID set.
 	all, _ := store.ListTracks(context.Background(), nil)
@@ -779,11 +951,10 @@ func TestEnrichOneRejectsNonUUIDEmbeddedAlbumMBID(t *testing.T) {
 		NewMusicBrainzClient(mbSrv.URL, "test", nil, onSwitches),
 		NewCoverArtClient(caaSrv.URL, "test", nil, onSwitches),
 		nil, cacheDir)
-	defer startEnricherForTest(e, 3*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	if got := waitEnricherDone(e, 1, 2*time.Second); got < 1 {
-		t.Fatalf("enriched %d, want 1 (bad MBID must degrade to search, not skip; skipped=%d)", got, e.skipped.Load())
-	}
+	run.wait(t, OutcomeDone, 1, "a bad embedded MBID must degrade to search, not skip")
 
 	// Core security assertion: the escaped path must NOT exist.
 	escaped := ArtworkCachePath(cacheDir, maliciousMBID, 500)
@@ -840,11 +1011,10 @@ func TestEnricherDeduplicatesAlbumLookups(t *testing.T) {
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
-	defer startEnricherForTest(e, 3*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	if got := waitEnricherDone(e, 3, 2*time.Second); got < 3 {
-		t.Fatalf("only enriched %d of 3", got)
-	}
+	run.wait(t, OutcomeDone, 3, "the three tracks were not all enriched")
 	if mbReleaseCalls != 1 {
 		t.Errorf("MB /release/ called %d times, want 1 (sibling-track dedup broken)", mbReleaseCalls)
 	}
@@ -868,15 +1038,10 @@ func TestEnricherSkipsUnsearchableTracks(t *testing.T) {
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
-	defer startEnricherForTest(e, 2*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	deadline := time.Now().Add(1500 * time.Millisecond)
-	for time.Now().Before(deadline) && e.skipped.Load() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.skipped.Load() == 0 {
-		t.Error("unsearchable track never marked skipped")
-	}
+	run.wait(t, OutcomeSkipped, 1, "unsearchable track never marked skipped")
 
 	// Track's enriched_at should be non-zero so the worker doesn't spin.
 	remaining, _ := store.UnenrichedTracks(context.Background(), 100)
@@ -910,11 +1075,10 @@ func TestEnricherSkipsNetworkCallIfCoverAlreadyCached(t *testing.T) {
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, artDir)
-	defer startEnricherForTest(e, 2*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	if waitEnricherDone(e, 1, 1500*time.Millisecond) == 0 {
-		t.Fatal("track never enriched")
-	}
+	run.wait(t, OutcomeDone, 1, "track never enriched")
 	if caaCalls != 0 {
 		t.Errorf("CAA called %d times despite pre-cached file", caaCalls)
 	}
@@ -998,11 +1162,10 @@ func TestEnricherSkipsArtworkFetchForLocalMBID(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		nil, artDir,
 	).WithITunes(NewITunesClient(itunesSrv.URL, "t", nil, onSwitches))
-	defer startEnricherForTest(e, 2*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	if waitEnricherDone(e, 1, 1500*time.Millisecond) == 0 {
-		t.Fatal("track never enriched (the bypass should still mark it done)")
-	}
+	run.wait(t, OutcomeDone, 1, "track never enriched (the bypass should still mark it done)")
 	if got := caaCalls.Load(); got != 0 {
 		t.Errorf("CAA called %d times for local-prefix track; want 0", got)
 	}
@@ -1069,11 +1232,10 @@ func TestEnricherFallthroughForLocalPrefixWithoutMBMatch(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		nil, artDir,
 	)
-	defer startEnricherForTest(e, 2*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	if waitEnricherDone(e, 1, 1500*time.Millisecond) == 0 {
-		t.Fatal("local-prefix track without MB match was never enriched (bailout regression)")
-	}
+	run.wait(t, OutcomeDone, 1, "local-prefix track without MB match was never enriched (bailout regression)")
 	if got := caaCalls.Load(); got != 0 {
 		t.Errorf("CAA called %d times despite albumMBID==\"\" + local prefix; want 0", got)
 	}

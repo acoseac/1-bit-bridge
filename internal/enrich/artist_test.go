@@ -164,14 +164,9 @@ func TestEnricherFetchesAndCachesArtistImage(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		deezerClient,
 		filepath.Join(dir, "artwork"))
-	defer startEnricherForTest(e, 3*time.Second)()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && e.Done() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.Done() == 0 {
-		t.Fatal("track never enriched")
-	}
+	run := startEnricherForTest(e)
+	defer run.join()
+	run.wait(t, OutcomeDone, 1, "track never enriched")
 
 	// Verify Track has ArtistMBID set.
 	got, _ := store.GetTrack(context.Background(), "Artist/Album/01.flac")
@@ -279,14 +274,9 @@ func TestEnricherDeduplicatesArtistLookups(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		deezerClient,
 		filepath.Join(dir, "artwork"))
-	defer startEnricherForTest(e, 3*time.Second)()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && e.Done() < 3 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.Done() < 3 {
-		t.Fatalf("only enriched %d of 3", e.Done())
-	}
+	run := startEnricherForTest(e)
+	defer run.join()
+	run.wait(t, OutcomeDone, 3, "the three tracks were not all enriched")
 	if mbArtistCalls != 1 {
 		t.Errorf("MB artist called %d times, want 1 (sibling dedup broken)", mbArtistCalls)
 	}
@@ -431,14 +421,9 @@ func TestCAAReleaseGroupFallbackSalvagesArtwork(t *testing.T) {
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		nil, // no Deezer — artist-image path not exercised here
 		filepath.Join(dir, "artwork"))
-	defer startEnricherForTest(e, 3*time.Second)()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && e.Done() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.Done() == 0 {
-		t.Fatal("track never enriched")
-	}
+	run := startEnricherForTest(e)
+	defer run.join()
+	run.wait(t, OutcomeDone, 1, "track never enriched")
 
 	// The release-MBID-keyed path must contain the bytes the
 	// release-group endpoint served (transparent to iOS).
