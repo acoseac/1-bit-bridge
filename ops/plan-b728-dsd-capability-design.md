@@ -1187,29 +1187,48 @@ safety half the app needs is on the bridge before the app's I4 ships.
 - The whole check is bounded at 10 s of wall clock, the harness's own bound for a contact
   (`ops/b470-native-qualification.md:33`).
 
-**The chime:**
+**The chime** (amended 2026-11-21, B12 PR 1: `internal/player/dsdchime`, inert until the
+backend's check, B12 PR 3, calls it):
 
 - 0.5 s of DSD silence;
 - 0.7 s of 880 Hz on the left;
 - 0.7 s of 1320 Hz on the right;
 - 0.5 s of DSD silence;
-- 20 ms raised-cosine edges, and a peak of −30 dBFS of the one-bit full scale, the harness's
-  listening level (`ops/b470-native-qualification.md:20-21`).
+- 20 ms raised-cosine edges inside each tone's 0.7 s, which opens with 10 ms of zero input and
+  closes with a tail of zero input, so each tone joins the silence on either side cleanly;
+- a peak of 0.5 × 10^(−30/20) of the one-bit range, the harness's listening level
+  (`ops/b470-native-qualification.md:20-21`, and `scripts/qualification/listening-assets/sdm.c`'s
+  paragraph on levels): −36.0206 dBFS through the bridge's own conversion, which reads a level
+  against the full one-bit range, so 6.02 dB below −30 dBFS of the one-bit full scale; a DAC that
+  maps 50 % modulation to full scale plays it at −30 dBFS.
 
-The two tones are modulated natively at the check's rate, by B725's modulator, which will be in a
-production package by then. `internal/dsdtone` is first-order, with a −45 dBFS noise floor, and is
-for tests only (`internal/dsdtone/dsdtone.go:1-14`).
+The two tones are modulated at the check's rate by the fifth-order CIFF loop of the bridge's DSD
+fixtures (`internal/transcode/testdata/gen/dsd_fixtures.py`), held to that generator's digest, its
+oscillators rotations with no libm call: the owner's decision of 2026-11-20. B725's modulator,
+`scripts/qualification/listening-assets/sdm.c`, stays the qualification's C program, in no
+production package, and no comparison with it decides anything. The loop's in-band floor is
+measured instead: a tone's residual lies 39.1 and 37.3 dB under it at DSD64 (880 and 1320 Hz), 70.6
+and 68.8 at DSD128 and 100.7 and 102.9 at DSD256. `internal/dsdtone` is first-order, with a
+−45 dBFS noise floor, and is for tests only (`internal/dsdtone/dsdtone.go:1-14`).
+
+The owner's listening pass, 2026-11-20: a blind A/B set of the chime, this CIFF loop against
+`sdm.c`'s OSR-64 design on the same programme, played through the owner's DAC over DoP. DSD64: both
+clear. DSD128: both clear. DSD256: converted to PCM by the app on that DAC, so it was not heard over
+DoP. The pass came before B12 PR 1 chose the chime's lead-in and tails, so a listen to the chime as
+built is still owed before any route exposes the check.
 
 The silent channel during each tone, and the two pads, are `0x69` bytes at that rate. Nothing is
 repeated bit for bit. Repetition is a zero-order hold in the one-bit domain: `0x69` with each bit
 doubled reads `00111100…`, which moves the silence's idle tone down toward the audio band and
 raises its local offset (Argon).
 
-Modulating 0.7 s of one channel at DSD256 is about 7.9 M modulator steps. At an estimated
-20–50 ns a step in scalar Go on a Pi 4, the two tones take 0.3–0.8 s. Each rate's chime is made once
-per process and kept in memory (DSD256: 2.4 s of stereo, about 6.8 MB). Nothing is embedded in the
-binary. The check reports `preparing` until the chime is ready, bounded at 2 s, and B12 measures
-the time on a Pi 4.
+Modulating 0.7 s of one channel at DSD256 is about 7.9 M modulator steps. Measured on the build
+host (amd64, an AMD Ryzen 9 6900HX, 2026-11-21, B12 PR 1): 7.8 ns a step, a whole chime built in 31,
+62 and 123 ms at DSD64, DSD128 and DSD256, cold or warm. The Pi 4 is not measured: its 20–50 ns a
+step, 0.3–0.8 s for DSD256's two tones, is an estimate still, and so is the `preparing` bound of 2 s
+that rests on it, until B12 measures the time on a Pi 4. Each rate's chime is made once per process
+and kept in memory: 1,693,440, 3,386,880 and 6,773,760 bytes of stereo. Nothing is embedded in the
+binary. The check reports `preparing` until the chime is ready.
 
 ### 6.3 Stop paths
 
@@ -1904,7 +1923,7 @@ Each PR is about a day of worker time. Tests marked red first fail on the tree b
 | B11 | bridge | Conversion in the player: `native.go`'s DSD open branches for a convert plan; continuous, abutting and reopen joins (DSD64 then DSD128 on one sink included); the join window held back and recomputed on a cut; the observation and Details from the plan (§4.1, §4.7, §4.8); the next free version at its merge; the rules at CLAUDE.md:91, `jobs.md:132`, `player.md:133-135` and `output.md`, and the claims bullet | B7, B10 | `TestAnUnknownDACPlaysDSDConverted`, `TestConvertedDSDReachesTheDACPackedByTheTable`, `TestConvertedTracksJoinContinuouslyAtOneRate`, `TestDSD64ThenDSD128ConvertedShareTheSink` (no reopen), `TestDeletingOrReplacingAPreparedConvertedSuccessor` (the three moments of §4.7, against the oracle), `TestStopDuringConversionIsBounded`, `TestTheClaimsAreThePlans` (a 44.1 kHz, 16-bit DAC is said to get 16 bits, 20 kHz and TPDF), `TestAConvertedTrackIsNotLossless`, `TestNoConvertedStreamIsServed` | player, hardware (CPU and xruns on a Pi 4 and a Pi 5, §4.6; a listening pass) |
 | B8 | bridge | The read side (§7.1): `dsdDAC` with first use and its `bitRates`, `evidence`, `converted` with each plan, `refused`, `warnings` (migration failures and a damaged state), the `converted` playback token and plan; no health flag yet; PROTOCOL.md; fixtures; the `wire.md` DSD bullet | B11 | `TestTheBridgeElementCarriesTheDACChoice`, `TestDSDOutputProtocolMembers` and `TestDSDOutputProtocolTokens` (new rows), `TestAConvertedEntryCarriesItsPlan`, `TestAMigrationFailureIsPublished`, `TestADamagedStateIsPublishedWithNoDAC`, `TestNoHealthFlagBeforeItsRoute`, `TestNoDACKeyOrModelCarriesASerialOrAPort`, the fixture exporter | standard, mirror (I1) |
 | B9 | bridge | The choice's write, made only while the player is stopped (the owner, 2026-11-10: "Stop playback to change DSD"), in three PRs. PR 1 (#1448, merged): #1434's native lifecycle fixes. PR 2: the backend's write (`ChooseDSD`: the configuration lease and `playback_not_stopped`, CAS, key binding, confirmation, acknowledgement, durable write, read-back, a landed write's intersection), and B853's refusal word. PR 3: `PUT /v1/outputs/{id}/dsd` (§7.2), the engine owner's stopped check and reservation, `dsd_choice_uncertain` on the wire, the `bridgeDSDChoice` flag, PROTOCOL.md and the `wire.md` bullet, paired with I4's mirror | B8 | PR 2: `TestEachStateThePlayerIsNotStoppedInRefusesTheWrite`, `TestAStartDuringAWritePlaysByTheChoiceItWrote`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestTwoWritesOfOneRevisionLandOnce`, `TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay`, `TestDoPOnAnUnknownDACNeedsConfirmation`, `TestNativeOrDoPNeedsFirstUseAcknowledged`, `TestChoosingARejectedTransportAgainClearsTheRejection`, `TestAnAcknowledgementWidensAMigratedChoiceToEveryRate`, `TestAWriteClearsItsDACsWarnings`, `TestADSDEntryAfterAnOrdinaryRevocationIsRefusedForIt`; PR 3: `TestTheAnswerIsTheEffectiveChoice`, `TestTheChoiceFlagArrivesWithItsRoute`, a Play parked between the owner's check and its backend registration, the route classification and error-table guards | standard, mirror (I4) |
-| B12 | bridge | The check (§6.2, §7.2): admission by the effective policy, the chime modulated at its own rate, the `preparing` state, the answer, the `bridgeDSDCheck` flag; an OpenHome Stop ends a check; PROTOCOL.md; the next free version at its merge; the `openhome.md` rule and the check's bullet | B9, B11, B725's modulator in a production package | `TestTheCheckAdmitsOnlyWhatTheSetPlays` (red before: an offered tuple with first use unacknowledged, and unconfirmed DoP), `TestTheChimeIsModulatedAtItsOwnRate` (no repeated bits; the pads are `0x69`), `TestEveryStopEndsTheCheckWithinItsBound`, `TestTheCheckNeverAutoplays`, `TestOnlyACompleteCheckIsAnswered`, `TestANoiseAnswerRefusesTheTransportInEveryMode`, `TestTheCheckFlagArrivesWithItsRoute` | player, hardware (the owner hears the chime on a real DAC), mirror (I5) |
+| B12 | bridge | The check (§6.2, §7.2): admission by the effective policy, the chime modulated at its own rate, the `preparing` state, the answer, the `bridgeDSDCheck` flag; an OpenHome Stop ends a check; PROTOCOL.md; the next free version at its merge; the `openhome.md` rule and the check's bullet | B9, B11, and the chime, B12 PR 1 (`internal/player/dsdchime`: the fixtures' CIFF loop, inert, depending on nothing; amended 2026-11-21) | `TestTheCheckAdmitsOnlyWhatTheSetPlays` (red before: an offered tuple with first use unacknowledged, and unconfirmed DoP), `TestTheChimeIsModulatedAtItsOwnRate` (B12 PR 1: no repeated bits; the pads are `0x69`), `TestEveryStopEndsTheCheckWithinItsBound`, `TestTheCheckNeverAutoplays`, `TestOnlyACompleteCheckIsAnswered`, `TestANoiseAnswerRefusesTheTransportInEveryMode`, `TestTheCheckFlagArrivesWithItsRoute` | player, hardware (the owner hears the chime on a real DAC), mirror (I5) |
 | B13 | bridge | The console's Player page shows and sets the per-DAC choice and evidence, with the same first-use sheet (`cmd/bridge/serve_player_console.go:517-559`, the wording at `:532`) | B9 | the console's view and write tests for each state | standard |
 | I1 | iOS | Mirror of B8: PROTOCOL.md copied; DTOs for `dsdDAC` with first use and its `bitRates`, `evidence`, `converted` with its plan, `refused`, `warnings`, and the `converted` playback token; fixtures | B8 | decode tests: a malformed new member withholds only its own object (I1's rule); `converted` reads as its own token | full suite |
 | I2 | iOS | R12 admits converted rates; the refusal copy (§7.6) | I1 | `testAConvertedRateIsEligibleUnderAFreshGrant`, `testAConvertedEntryFromAnotherEpochAdmitsNothing`, `testNoConvertedEntryKeepsTheRateRefused`, `testARefusedRateSaysItsReason` | full suite |
