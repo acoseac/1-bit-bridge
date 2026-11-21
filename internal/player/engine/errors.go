@@ -31,7 +31,8 @@ const (
 	ReasonMaintenance Reason = "maintenance"
 	// ReasonLease is an exit or a renewal with a lease that is not the
 	// hold's: wrong, stale, or of a hold that has expired; and the DSD
-	// check's hold that expired before its grant was answered (EnterCheck).
+	// check's hold that expired before its grant was answered, or read by
+	// its caller (EnterCheck).
 	ReasonLease Reason = "lease_invalid"
 	// ReasonIDNotFound is an ID the queue does not hold (OpenHome fault
 	// 800).

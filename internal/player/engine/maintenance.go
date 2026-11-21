@@ -224,11 +224,19 @@ func (e *Engine) exitMaintenance(c *command) {
 
 // checkGone is the grant of c given back by its caller, who did not take it
 // (giveBack): the hold granted to c is ended, as its exit would end it, if it
-// stands still; one ended already, or another's, changes nothing.
+// stands still; one ended already, or another's, changes nothing. A hold
+// whose expiry has come is said to have expired as its own message says it
+// (maintenanceExpiry), which then finds it ended and says nothing: the line
+// is written once, by whichever of the two the owner takes first (B971).
 func (e *Engine) checkGone(c *command) {
-	if m := e.o.maint; m != nil && m.grantee == c {
-		e.endMaintenance("", "")
+	m := e.o.maint
+	if m == nil || m.grantee != c {
+		return
 	}
+	if !e.clk.Now().Before(m.expires) {
+		e.logExpiry(m)
+	}
+	e.endMaintenance("", "")
 }
 
 // maintenanceExpiry ends a hold whose expiry has come.

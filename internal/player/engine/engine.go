@@ -160,8 +160,8 @@ type seams struct {
 	// each of the wait's arms whatever else is ready (B971).
 	checkArm func(c *command) grantArm
 	// gaveBack sees the goroutine giveBack starts, when the owner's queue is
-	// full, at its end, once its post has returned, so a test can hold it
-	// there.
+	// full, at its end, once its post has returned and while it still counts
+	// (Engine.wg), so a test can hold it there.
 	gaveBack func()
 	// exiting sees each goroutine the engine started at its end, its last
 	// message handed over and nothing of it counted any more, so a test can
@@ -202,8 +202,8 @@ type Engine struct {
 
 	// live counts the goroutines the engine started and has not joined,
 	// each joined by its last message (spawn), wg those that have not
-	// returned, abandoned the backend calls Run gave up on (the tests read
-	// them).
+	// returned, giveBack's own among them, which live never counts,
+	// abandoned the backend calls Run gave up on (the tests read them).
 	wg        sync.WaitGroup
 	live      atomic.Int64
 	abandoned atomic.Int64
@@ -581,9 +581,9 @@ func (e *Engine) EnterMaintenance(ctx context.Context, want Generation, reason s
 // one compare-and-swap decides whether the owner answers the caller
 // (checkGrant), so the owner exits a hold it would have handed over to a
 // caller that gave up first, answering nobody, and a grant the caller does
-// not take, sent too late or not yet sent, is given back for the owner to
-// exit (giveBack). The owner exits it, once; a refusal it sent first is the
-// answer.
+// not take, sent too late or not yet sent, or reads once its expiry has come
+// (refused ReasonLease), is given back for the owner to exit (giveBack). The
+// owner exits it, once; a refusal it sent first is the answer.
 func (e *Engine) EnterCheck(ctx context.Context, interrupt bool) (Hold, error) {
 	c := &command{op: opEnterCheck, ctx: ctx, on: interrupt, grant: &checkGrant{admitted: make(chan struct{})}}
 	if r, sent := e.send(c); !sent {
@@ -738,9 +738,13 @@ func (e *Engine) giveUp(c *command, why error) (Hold, error) {
 }
 
 // takeGrant is the owner's answer r as c's caller reads it: a refusal as it
-// is, and a Hold read once its caller's context has ended given back for the
+// is; a Hold read once its caller's context has ended given back for the
 // owner to exit (giveBack), as giveUp gives it back, so no hold is handed to
-// a caller whose context has ended.
+// a caller whose context has ended; and a Hold read once its expiry has come,
+// on the engine's clock, given back and refused ReasonLease, as the owner
+// refuses a grant whose expiry comes before it answers (deliver), so no hold
+// is handed over expired, whichever of the expiry's message and the answer
+// the owner took first (B971).
 func (e *Engine) takeGrant(c *command, r reply) (Hold, error) {
 	if r.err != nil {
 		return Hold{}, r.err
@@ -749,21 +753,30 @@ func (e *Engine) takeGrant(c *command, r reply) (Hold, error) {
 		e.giveBack(c)
 		return Hold{}, checkCancelled(c.op.String(), err)
 	}
+	if !e.clk.Now().Before(r.hold.Expires) {
+		e.giveBack(c)
+		return Hold{}, refuse(c.op.String(), ReasonLease, expiredBeforeGrant)
+	}
 	return r.hold, nil
 }
 
 // giveBack hands the owner the grant of c, whose caller does not take it
 // (msgCheckGone), never waiting: into the owner's queue, or, that queue full,
-// on a goroutine of its own until the owner takes it or has ended. The owner
-// takes it in a later step than the one that answered c, and exits the hold
-// granted to c if it still stands (checkGone).
+// on a goroutine of its own until the owner takes it or has ended (post). The
+// owner takes it in a later step than the one that answered c, and exits the
+// hold granted to c if it still stands (checkGone). That goroutine counts in
+// wg alone, which the tests' join waits on, and never in live, the goroutines
+// the owner joins by their last messages: it sends the owner none of its own,
+// and Run waits on wg nowhere (B971).
 func (e *Engine) giveBack(c *command) {
 	m := msgCheckGone{c: c}
 	select {
 	case e.msgs <- m:
 	case <-e.done:
 	default:
+		e.wg.Add(1)
 		go func() {
+			defer e.wg.Done()
 			e.post(m)
 			if e.sm.gaveBack != nil {
 				e.sm.gaveBack()
