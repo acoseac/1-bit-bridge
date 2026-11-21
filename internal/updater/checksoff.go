@@ -75,6 +75,32 @@ func (e *ChecksOffLockError) Is(target error) bool { return target == ErrChecksO
 
 func (e *ChecksOffLockError) Unwrap() error { return e.cause }
 
+// ErrChecksOffBehindAnInstall is what the cause of a *ChecksOffLockError
+// matches where the off was refused at once behind another process's install
+// on the bridge's Windows service (ChecksOffWait, backlog B831).
+var ErrChecksOffBehindAnInstall = errors.New("another process's install holds the install marker's lock, and its swap can stop this service")
+
+// ChecksOffWait is what an off-save's wait for the install marker's lock asks
+// while another open holds it, at its first answer and at every retry
+// (LockForChecksOff, backlog B831): whether that hold is another process's
+// install, whose swap stops the bridge's Windows service and the save with it.
+// The zero value waits as every taker of the lock does.
+type ChecksOffWait struct {
+	// Service says this process is the bridge's Windows service, which another
+	// process's swap stops through the SCM before it moves the binary
+	// (swap_windows.go's stopServiceIfRunning).
+	Service bool
+	// Current is the running version.
+	Current string
+	// Updater is this process's own: an install marker it armed (Armed) is
+	// never another process's install.
+	Updater *Updater
+
+	// read stands in for the marker's read without the lock in a test; nil in
+	// production.
+	read func(dataDir string) State
+}
+
 // LockForChecksOff takes the install marker's lock in dataDir for a save of
 // the settings that turns update checks off, first of the locks it takes
 // (the order above), and answers the hold, which its caller lets go once the
@@ -101,7 +127,7 @@ func (e *ChecksOffLockError) Unwrap() error { return e.cause }
 // *ChecksOffLockError, and a stop in the wait is ctx's error: either way
 // nothing may be saved. A taker whose ctx ended once the lock is taken lets
 // it go and answers ctx's error.
-func LockForChecksOff(ctx context.Context, dataDir string) (*StateLock, error) {
+func LockForChecksOff(ctx context.Context, dataDir string, w ChecksOffWait) (*StateLock, error) {
 	lock, err := LockState(ctx, dataDir)
 	if err != nil {
 		var refused *StateLockError

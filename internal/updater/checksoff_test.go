@@ -43,7 +43,7 @@ func TestTheOffSaveHoldsTheInstallMarkersLock(t *testing.T) {
 	shortStateLockWait(t, 200*time.Millisecond)
 	t.Run("a free lock is held until it is let go", func(t *testing.T) {
 		dir := t.TempDir()
-		lock, err := LockForChecksOff(context.Background(), dir)
+		lock, err := LockForChecksOff(context.Background(), dir, ChecksOffWait{})
 		if err != nil || !lock.Held() {
 			t.Fatalf("LockForChecksOff = %+v, %v; want the lock held", lock, err)
 		}
@@ -65,7 +65,7 @@ func TestTheOffSaveHoldsTheInstallMarkersLock(t *testing.T) {
 			t.Fatalf("hold the lock: %+v, %v", holder, err)
 		}
 		defer holder.Release()
-		lock, err := LockForChecksOff(context.Background(), dir)
+		lock, err := LockForChecksOff(context.Background(), dir, ChecksOffWait{})
 		if lock != nil || !errors.Is(err, ErrChecksOffLocked) || !errors.Is(err, ErrStateLockHeld) {
 			t.Fatalf("LockForChecksOff behind a holder past the wait = %+v, %v; want ErrChecksOffLocked, held", lock, err)
 		}
@@ -90,7 +90,7 @@ func TestTheOffSaveHoldsTheInstallMarkersLock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stubStateTryLock(t, tc.answer)
 			dir := t.TempDir()
-			lock, err := LockForChecksOff(context.Background(), dir)
+			lock, err := LockForChecksOff(context.Background(), dir, ChecksOffWait{})
 			if !tc.refused {
 				if err != nil || lock == nil || lock.Held() || lock.Unheld() == nil {
 					t.Fatalf("LockForChecksOff = %+v, %v; want a hold that is not held, saying why, and no error", lock, err)
@@ -122,7 +122,7 @@ func TestTheOffSaveHoldsTheInstallMarkersLock(t *testing.T) {
 		defer cancel()
 		got := make(chan error, 1)
 		go func() {
-			lock, err := LockForChecksOff(ctx, dir)
+			lock, err := LockForChecksOff(ctx, dir, ChecksOffWait{})
 			lock.Release()
 			got <- err
 		}()
@@ -147,7 +147,7 @@ func TestTheOffSaveHoldsTheInstallMarkersLock(t *testing.T) {
 		dir := t.TempDir()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		lock, err := LockForChecksOff(ctx, dir)
+		lock, err := LockForChecksOff(ctx, dir, ChecksOffWait{})
 		if lock != nil || !errors.Is(err, context.Canceled) {
 			t.Fatalf("LockForChecksOff on a context that had ended = %+v, %v; want the context's error", lock, err)
 		}

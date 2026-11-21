@@ -13,7 +13,9 @@ import (
 // updateChecksOffSave is serve's admin.Deps.UpdateChecksOffSave (backlog B761's
 // round 3): for a console save that turns update checks off, the install
 // marker's lock in dataDir (updater.LockForChecksOff, first of the locks the
-// save takes) and, holding it, the decision whether the off may be saved
+// save takes, its wait behind another open's hold as wait says: serve's own,
+// whether it is the bridge's Windows service, its version and its updater,
+// backlog B831) and, holding it, the decision whether the off may be saved
 // (updater.ChecksOffRefused, over the binary serve runs as, binaryPath, and
 // the settings it loaded, configPath, its backup's checks within within, 0
 // being updater.ChecksOffWithin). The release it answers is the lock's, which
@@ -21,9 +23,9 @@ import (
 // refusal lets it go at once and wraps the console's sentinel for it. On a
 // filesystem that keeps no locks the off is saved without the decision: no
 // install commits there and no crash rollback acts there either.
-func updateChecksOffSave(dataDir, binaryPath, configPath string, within time.Duration) func(context.Context) (func(), error) {
+func updateChecksOffSave(dataDir, binaryPath, configPath string, within time.Duration, wait updater.ChecksOffWait) func(context.Context) (func(), error) {
 	return func(ctx context.Context) (func(), error) {
-		lock, err := updater.LockForChecksOff(ctx, dataDir)
+		lock, err := updater.LockForChecksOff(ctx, dataDir, wait)
 		if err != nil {
 			return nil, consoleChecksOffError(err)
 		}
@@ -52,6 +54,17 @@ func updateChecksOffSave(dataDir, binaryPath, configPath string, within time.Dur
 		}
 		return lock.Release, nil
 	}
+}
+
+// asWindowsService reports whether serve is the bridge's Windows service, for
+// the console's off of update checks (updater.ChecksOffWait.Service):
+// o.windowsService where a boot test stands in for it, isWindowsService
+// otherwise.
+func (o serveOpts) asWindowsService() bool {
+	if o.windowsService != nil {
+		return o.windowsService()
+	}
+	return isWindowsService()
 }
 
 // consoleRefusal is a refusal of the updater's, err, as the console takes it:

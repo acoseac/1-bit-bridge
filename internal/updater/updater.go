@@ -370,6 +370,21 @@ type Updater struct {
 	after func(time.Duration) <-chan time.Time
 }
 
+// Armed reports whether st is an install marker this updater armed (backlog
+// B831). A nil updater armed none.
+func (u *Updater) Armed(st State) bool { return false }
+
+// noteArmed records st, an install marker this updater is about to write, as
+// one it armed.
+func (u *Updater) noteArmed(st State) {}
+
+// NoteArmedForTest takes st for an install marker u armed, as Install takes
+// the marker it writes just before writing it, for a test in another package
+// that stands in for an install of this process's own (backlog B831): there
+// no install can be made, the release it downloads being on GitHub's hosts
+// alone (ValidateUpdaterAssetURL). Production code MUST NOT call it.
+func (u *Updater) NoteArmedForTest(st State) { u.noteArmed(st) }
+
 // ErrUpdateChecksOff means update checks are off (update.checkEnabled,
 // backlog B761): the check or the install asked for was refused before
 // anything was asked of GitHub, or one under way was stopped as they were

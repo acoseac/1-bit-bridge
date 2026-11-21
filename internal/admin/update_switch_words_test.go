@@ -141,6 +141,94 @@ func TestASwapThatStopsTheWindowsServiceIsNamedOnlyAsB831(t *testing.T) {
 	}
 }
 
+// offSwapTexts are the texts that say what an off the console saves does
+// while another process's `bridge update` swaps a new version in, flattened:
+// README's paragraph, PROTOCOL's, the Settings page's hint,
+// updateChecksOffLost's comment, the docs of the 503's writer and of
+// updater.LockForChecksOff, and the settings matrix's row; and the words of
+// writeUpdateChecksOffRefusal's answers.
+func offSwapTexts(t *testing.T) (texts map[string]string, refusalWords string) {
+	t.Helper()
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	readme := flat(readConsoleJS(t, filepath.Join("..", "..", "README.md")))
+	i := strings.Index(readme, "swapping a new version in")
+	if i < 0 {
+		t.Fatal("README no longer says what an off does while a `bridge update` swaps a new version in")
+	}
+	readme = readme[max(0, i-400):min(len(readme), i+400)]
+	var protocol string
+	for _, line := range strings.Split(readConsoleJS(t, filepath.Join("..", "..", "PROTOCOL.md")), "\n") {
+		if strings.HasPrefix(line, "**What goes out, and the off switch.**") {
+			protocol = line
+		}
+	}
+	page := readConsoleJS(t, filepath.Join("templates", "settings.html"))
+	j := strings.Index(page, `name="updateCheckEnabled"`)
+	if j < 0 || protocol == "" {
+		t.Fatal("the Settings page's update check switch or PROTOCOL's paragraph on it is gone")
+	}
+	page = flat(page[j : j+strings.Index(page[j:], "</small>")])
+	js := readConsoleJS(t, filepath.Join("static", "app.js"))
+	k := strings.Index(js, "// updateChecksOffLost is")
+	if k < 0 {
+		t.Fatal("updateChecksOffLost's comment is gone")
+	}
+	lostDoc := flat(strings.ReplaceAll(js[k:strings.Index(js, "function updateChecksOffLost(")], "\n//", "\n"))
+	refusalDoc, refusalWords := goFuncSource(t, "handlers_api.go", "writeUpdateChecksOffRefusal")
+	lockDoc, _ := goFuncSource(t, filepath.Join("..", "updater", "checksoff.go"), "LockForChecksOff")
+	var matrix string
+	for _, line := range strings.Split(readConsoleJS(t, filepath.Join("..", "..", "ops", "settings-apply-semantics.md")), "\n") {
+		if strings.HasPrefix(line, "| `updateCheckEnabled` |") {
+			matrix = line
+		}
+	}
+	if matrix == "" {
+		t.Fatal("the settings matrix has no row for updateCheckEnabled")
+	}
+	return map[string]string{
+		"README": readme, "PROTOCOL.md": protocol, "the Settings page's hint": page,
+		"updateChecksOffLost's comment": lostDoc, "writeUpdateChecksOffRefusal's doc": flat(refusalDoc),
+		"updater.LockForChecksOff's doc": flat(lockDoc), "the settings matrix's row": matrix,
+	}, refusalWords
+}
+
+// TestEveryTextSaysTheWindowsServiceRefusesAnOffBehindAnotherProcesssSwap: an
+// off the console saves while a `bridge update` of another process holds the
+// install marker's lock waits for the install's swap and is saved after it,
+// but on the bridge's Windows service, which that swap stops first, it is
+// refused at once (backlog B831). Each of the texts that named what stayed
+// open there (offSwapTexts) says so of the bridge's Windows service, none says
+// it of Windows as a whole, and none names B831 as open: a sentence that names
+// it says nothing of it staying open. The words a failed save answers (the
+// 503's, updateChecksOffLost's) claim no cause, since a stop does not say what
+// stopped it.
+func TestEveryTextSaysTheWindowsServiceRefusesAnOffBehindAnotherProcesssSwap(t *testing.T) {
+	texts, refusalWords := offSwapTexts(t)
+	onWindows := regexp.MustCompile(`(?i)\bon windows\b`)
+	open := regexp.MustCompile(`(?i)\b(open|stays|remains|left|unfixed)\b`)
+	for where, text := range texts {
+		for _, says := range []string{"Windows service", "refused at once"} {
+			if !strings.Contains(text, says) {
+				t.Errorf("%s does not say %q of an off behind another process's swap on the bridge's Windows service:\n%s",
+					where, says, text)
+			}
+		}
+		if m := onWindows.FindString(text); m != "" || strings.Contains(text, "lost with the stop") {
+			t.Errorf("%s says of Windows as a whole what the bridge's Windows service does:\n%s", where, text)
+		}
+		for _, sentence := range sentenceEnd.Split(text, -1) {
+			if strings.Contains(sentence, "B831") && open.MatchString(sentence) {
+				t.Errorf("%s names backlog B831 as open: %q", where, sentence)
+			}
+		}
+	}
+	for _, claim := range []string{"Windows", "SCM", "swap", "B831"} {
+		if strings.Contains(refusalWords, claim) {
+			t.Errorf("writeUpdateChecksOffRefusal's words claim %q, which a stopped wait does not show: %q", claim, refusalWords)
+		}
+	}
+}
+
 // sentenceEnd is where one sentence of flattened text ends: a period, a
 // question mark or an exclamation mark before white space or the text's end.
 // A semicolon or a colon joins clauses of one sentence.
