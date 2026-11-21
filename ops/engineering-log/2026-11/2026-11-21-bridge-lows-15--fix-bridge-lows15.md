@@ -212,3 +212,10 @@ what `AbandonStart`'s doc says: no new upload starts, and one already under way 
 rule line's and its twin's pins: it holds the Don't against turning the uploads off for a stop whose
 goroutine ended in time on stop's side. And B830's red-first sentence names the two files it overlaid,
 and why.
+
+Runs of round 2 before the gate: `go test -tags ts_omit_webclient,ts_omit_debugeventbus -race -count=20
+-timeout 20m ./internal/tsnet/` (43 s), and cmd/bridge's citation and docblock guards with the same tags
+after each records commit. 78d7a12c alone leaves the citation guard red, the records naming the case
+until ec55bf7e. The gate's runs (vet for linux, windows and darwin, `make fmt vet docs-check`, the
+citation test, `make fmt vet test build-all`) are made on this entry's own commit, so the PR records
+them.
