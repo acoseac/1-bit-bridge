@@ -449,3 +449,158 @@ record's commit are in the report that carries it.
   (`writeSaveConfigErr`) carries the load's reason.
 - Round 1's open items above stand, a variable's leaf in `outsideEnv` among them: it stays
   recorded until a restart.
+
+### Round 3: the file left is refused first, said once, and read as the next start reads it
+
+Round 3 took the brief's five items, with its first review's R1 to R4 and its second's C1 to C4,
+on the branch at `fe05bc03`. R1 reversed the first item: the load of the file another writer left
+keeps this process's environment. Seven commits:
+- `328cee84` (item 2): the file left that would not load is refused before a recorded deployment
+  setting;
+- `50598f63` (item 3): such a file is said once, and its settings are recorded without the
+  next-start line;
+- `37f8f969` (item 4): an unread player block's digest is of what it holds;
+- `ae7cb2a5` (R1, R2): the notes that both loads read this process's environment, and the two
+  cases that pin it;
+- `b48c9210`: room in `config-lifecycle.md` (the zero-cadence loop's entry, B209, moved verbatim
+  to its History file, proven by `verify_moves.py --base HEAD`);
+- `d188f39d`: the records (the config lock's rule and its long form, the History's round 3
+  paragraph, and round 1's paragraph pointing its changed clauses to rounds 2 and 3, item 5);
+- this record.
+
+This clone has no `origin`; `git merge-tree --write-tree` of main's newest tip in it, `d1c1515a`
+(#1528), and `d188f39d` reported no conflict, so nothing was merged. On that merged tree
+`config-lifecycle.md` is 98,558 bytes and `admin-console.md` 97,599, under their budget of
+100 KB. Every command ran as round 1's did, and each red and each control was predicted in
+writing before it ran.
+
+#### What changed, and why
+
+**The file left is refused first** (item 2). The turn asked a recorded deployment setting before
+the cached load of the file another writer left, so a deployment mode that writer set to a word
+the next start refuses (`deployment.mode: sideways`) answered every save as a deployment change,
+saying to restart into a start that fails on the file. The cached error is now asked first
+(`OutsideLeftUnloadable`, "correct the file"), and a deployment change the next start takes keeps
+its refusal and its words.
+
+**Said once, the settings kept** (item 3; R4, C3, C4). A turn that found a file the next start
+refuses logged a next-start line for each setting that writer changed. It now records those
+settings as before (the record and its bytes advance at the turn that finds them, round 1's S1),
+writes none of those lines, and logs once for those bytes `leftUnloadableMessage` at Info under
+the config component (the pattern of `outsideSettingMessage`), with the key `path` and the key
+`err`: "config: the config file another writer left would not load at the bridge's next start;
+the console's saves are refused until it is corrected". A probe (an overlay-only test) printed
+`err=upscale.variantsDir: must not be under a library root, libraryRoots[0] (variants would tangle
+with source files)` and, for a second failing edit, `err=deployment.mode: that value is not
+loopback or public`. The transitions are `compareTurn`'s note (C4): where the bytes a turn finds
+would not load, the record and its bytes advance, the error is kept and logged once, and its
+settings are said by no line; where a later turn finds bytes that load, the error is cleared, and
+the settings newly changed join the record and are said as any are. The diagnostic is per turn
+that finds failing bytes, as C4 states it, so a second failing edit logs a second line. The `err`
+is `loadsAtNextStart`'s error as it returns it, whose decode error has been through
+`ValueFreeYAMLError` and whose validation names no value; passing the whole error through
+`ValueFreeYAMLError` again, as C3's words could be read, would replace a validation's reason with
+"yaml: a value does not read as its setting", since that function replaces any error that is not
+yaml.v3's.
+
+**The digest without presentation** (item 4; R3, C2). `blockSource` hashed each node's comments,
+style and anchor name. It now hashes each node's kind, its resolved tag (`ShortTag`), its value
+and its children alone. Each alias is followed to its node; a node met again is written as a
+reference to the order it was first met in (R3), so an alias moved to another anchor still
+differs and an anchor renamed with its aliases does not. Every token starts with its type, its
+strings and its list of children are framed by their lengths (C2), and each node is written once,
+on a stack of the walk's own. C2's case: `[&a {k: 1}, *a]` gives a node and then a reference to
+it, `[&a {k: 1}, {k: 1}]` two nodes, so the two differ; and `[[a], b]` differs from `[[a, b]]` by
+the child counts alone.
+
+**The environment kept** (item 1 as R1 decided; R2, C1). The brief's first item asked that the
+load of the file left apply no `BRIDGE_*` variable, since `BRIDGE_UPSCALE_VARIANTS_DIR` can set a
+valid folder over another writer's invalid `upscale.variantsDir`. Its review reversed that, and
+the code keeps the variables: the load asks whether this bridge loads the file at its next start,
+which reads the variables it was started with, so the variable over the invalid value is that
+start's own semantics, and a load without them would refuse every save over a bridge whose
+library roots `BRIDGE_LIBRARY_ROOTS` gives, its file naming none, after any other write, a
+comment's included (K19 below shows it). The notes of `compareTurn`, `loadsAtNextStart` and the
+cache say "the file as the next start would load it, with this process's environment", and that
+a landed save leaves the cache holding its merged file's load (R2). Both loads read the
+variables, so a clash only a variable makes is the file left's and stays so through repeated
+saves. C1's stop, a rule against the environment in that load, did not arise: the rules say the
+comparison of settings reads no variable (`readSettings`) and the loads read them, as before.
+
+**Item 5.** Round 1's History paragraph now points to rounds 2 and 3 where they changed it: a
+block compared by its kept text, a variable's leaf never recorded, and every recorded leaf
+logged. The room round 3's wording needed in the rules file came from moving the B209 entry's long
+form out (`b48c9210`).
+
+#### The reds
+
+Each at its fix's parent, the new test in the tree:
+- item 2 at `fe05bc03`: `TestAFileAnotherWriterLeftUnloadableIsRefusedBeforeItsDeploymentChange`
+  red in its first case at Fatalf (`OutsideDeployment`), its second case green, as predicted;
+- item 3 at `328cee84`, with a names-only shim (`leftUnloadableMessage`) by `-overlay`:
+  `TestAFileThatDoesNotLoadIsSaidOnceAndItsSettingsAreKept` red at three lines, one more than
+  predicted: the diagnostic absent, two next-start lines (`scanIntervalSec`,
+  `upscale.variantsDir`), and the test's last check, the same absent diagnostic counted once the
+  file loads, which the written prediction overlooked; every other assertion green, as predicted;
+- item 4 at `50598f63`: `TestAnUnreadPlayerBlocksDigestLeavesOutHowItIsWritten` red at the three
+  cases that must compare alike (the line comment, the comment in the block, the rename), its four
+  that must differ green, as predicted;
+- R1 and R2 at `37f8f969`: `TestAFileWhoseRootsAVariableGivesTakesAnotherWritersComment` and
+  `TestAClashAVariableMakesIsNoNewClashOfASave` green, as predicted (the code applied the
+  variables already); K19 and K20 prove them.
+
+#### Controls
+
+Each laid over the committed files by `go test -overlay` after its item's commit, run on the whole
+`internal/config` package with `-count=1 -timeout 30m -vet=off -v`, `git status` clean after
+each. Every row went as predicted, and every test the row does not name stayed green. K14's
+predicted value was amended before its run, from 0 to 21600, the booted default; no K18 was run.
+
+| | mutation | at | predicted and seen |
+| --- | --- | --- | --- |
+| K11 | the brief's item 2 control: the deployment refusal before the cached error again | `328cee84` | item 2's first case red at Fatalf (`OutsideDeployment`), its second green |
+| K12 | the next-start line written whatever the load | `50598f63` | item 3's test red at its next-start assertion alone |
+| K13 | the diagnostic not logged | `50598f63` | item 3's test red at its two diagnostic checks alone |
+| K14 | no setting recorded while the load fails | `50598f63` | item 3's test red at the landed file alone: `scanIntervalSec` 21600, the booted default, over the other writer's 7200 |
+| K15 | the brief's item 4 control: `LineComment` hashed again | `37f8f969` | the digest test red at its line-comment case alone |
+| K16 | a node met again written as one marker, without its order | `37f8f969` | the digest test red at the alias moved to another anchor alone |
+| K17 | no child count in a node's token | `37f8f969` | the digest test red at `[[a], b]` against `[[a, b]]` alone |
+| K19 | `loadsAtNextStart` applies no variable | `ae7cb2a5` | the roots test red (`libraryRoots: must have at least one entry`); the clash test green |
+| K20 | the file left's load alone without the variables | `ae7cb2a5` | the roots test red; the clash test red at its first save, refused over `listenAddress` |
+
+#### Runs
+
+At `d188f39d`, with `GOTOOLCHAIN=go1.27.3` (`go version go1.27.3 linux/amd64`), outside the
+build slot, one package at a time:
+- `go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/config/ ./internal/admin/
+  ./cmd/bridge/` for linux/amd64, windows, darwin and linux/386: exit 0, nothing said;
+- the pinned gofmt (`go run cmd/gofmt -l`) over the four Go files round 3 changed: nothing
+  listed;
+- the suites without race, `go test -tags ts_omit_webclient,ts_omit_debugeventbus -count=1
+  -timeout 30m`: `internal/config` ok in 10.0 s, `internal/admin` 274.5 s, `cmd/bridge` 587.2 s,
+  `internal/updater` 25.3 s, `internal/api` 39.0 s;
+- with `-race -count=20 -timeout 30m -v`: `internal/config`'s 26 tests (the 11 round 3's diff
+  touches, a doc comment counted with its function, and 15 earlier B535 tests), 520 of 520
+  top-level runs and 520 subtests passed in 14.9 s; `internal/admin`'s 11 that drive the holder,
+  220 of 220 and 1,040 subtests in 630.7 s; `cmd/bridge`'s 4, 80 of 80 in 76.4 s. None failed,
+  and no data race.
+
+The build-slot session at `d188f39d`, the slot free at once: `make fmt vet docs-check`, exit 0 in
+3.5 s, the tree unchanged after it; then `make fmt vet test build-all` at its defaults but
+`TMPDIR` (below the checkout's `.tmp/`): exit 0 in 2,097.2 s, the tree unchanged after it. Its
+test step: 91 packages ok (33 of them answered from the test cache, their inputs unchanged), 15
+with no test files, none failed and no data race; `cmd/bridge` 1,731.9 s of its 30 minutes,
+`internal/manifest` 1,604.4 s, `internal/admin` 1,242.1 s, `internal/backup` 662.5 s,
+`internal/config` 17.1 s. Its `build-all`: check-build-tags OK, the six release binaries built.
+
+A record holds no run made on its own commit: `make docs-check` and the citation guard on this
+record's commit are in the report that carries it.
+
+#### What stays open
+
+- The settings recorded while the file left did not load get no next-start line, then or once it
+  loads (C4's transitions); the one line said the file did not load.
+- An alias to an anchor outside the block that no other alias reaches hashes as its node, as a
+  copy of that node written in its place would: only a node met again is a reference.
+- The diagnostic is per turn that finds failing bytes, so each failing edit adds a line.
+- The earlier rounds' open items stand.
