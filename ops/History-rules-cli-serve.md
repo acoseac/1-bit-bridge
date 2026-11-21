@@ -4316,7 +4316,7 @@ tsnet passes `controlclient.LocalBackendStartKeyOSNeutral`, which
 `newProfileManagerWithGOOS`, so `readAutoStartKey` takes
 `ipn.CurrentProfileStateKey` on Windows too. Until round 2 this said that
 Windows starts from `ipn.ServerModeStartKey`, from `readAutoStartKey` read
-without tsnet's flag (Codex on #1445). Backlog B829 checked it with the
+without tsnet's flag (a review of #1445). Backlog B829 checked it with the
 keys upstream itself writes (2026-11-21):
 `TestTheStateUpstreamWritesForARegisteredNodeReadsAsRegistered` registers
 a node through upstream's own `tsnet.Server`, its state dir of its own,
