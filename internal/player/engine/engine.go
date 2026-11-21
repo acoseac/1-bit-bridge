@@ -155,6 +155,14 @@ type seams struct {
 	// owner's answer (awaitGrant), on the caller's goroutine, before it
 	// selects, so a test can make two of the wait's arms ready together.
 	checkWaits func(c *command)
+	// checkArm, asked at each turn of that wait after checkWaits, fixes the
+	// one arm the turn's select can take (grantWait.only), so a test reaches
+	// each of the wait's arms whatever else is ready (B971).
+	checkArm func(c *command) grantArm
+	// gaveBack sees the goroutine giveBack starts, when the owner's queue is
+	// full, at its end, once its post has returned, so a test can hold it
+	// there.
+	gaveBack func()
 	// exiting sees each goroutine the engine started at its end, its last
 	// message handed over and nothing of it counted any more, so a test can
 	// hold it there.
@@ -611,6 +619,46 @@ const (
 	grantGone
 )
 
+// grantArm is an arm of EnterCheck's wait for the owner's answer
+// (awaitGrant), for a test that fixes which one a turn of it takes
+// (seams.checkArm).
+type grantArm int
+
+const (
+	// grantArmAny is the wait's select over every arm, production's.
+	grantArmAny grantArm = iota
+	// grantArmReply is the owner's answer.
+	grantArmReply
+	// grantArmContext is the end of the caller's context.
+	grantArmContext
+	// grantArmDone is the engine's end.
+	grantArmDone
+)
+
+// grantWait is a turn of EnterCheck's wait for the owner's answer
+// (awaitGrant): the channel each of its arms receives from.
+type grantWait struct {
+	replies                              <-chan reply
+	admitted, bound, cancelled, finished <-chan struct{}
+}
+
+// only is w with every arm but a nil, so never ready: the arm a test fixed
+// for the turn (seams.checkArm); grantArmAny leaves them all.
+func (w grantWait) only(a grantArm) grantWait {
+	var fixed grantWait
+	switch a {
+	case grantArmAny:
+		return w
+	case grantArmReply:
+		fixed.replies = w.replies
+	case grantArmContext:
+		fixed.cancelled = w.cancelled
+	case grantArmDone:
+		fixed.finished = w.finished
+	}
+	return fixed
+}
+
 // awaitGrant waits for the owner's answer to c, an EnterCheck sent to it.
 // Before the owner admits c its context's end abandons it, as do's does;
 // once admitted, the wait ends at the answer, at its context's end or at
@@ -631,23 +679,27 @@ func (e *Engine) awaitGrant(c *command) (Hold, error) {
 		if e.sm.checkWaits != nil {
 			e.sm.checkWaits(c)
 		}
+		w := grantWait{replies: c.reply, admitted: admitted, bound: bound, cancelled: c.ctx.Done(), finished: e.done}
+		if pick := e.sm.checkArm; pick != nil {
+			w = w.only(pick(c))
+		}
 		select {
-		case r := <-c.reply:
+		case r := <-w.replies:
 			return e.takeGrant(c, r)
-		case <-admitted:
+		case <-w.admitted:
 			expired := make(chan struct{})
 			t = e.clk.At(g.at.Add(ReleaseTimeout+checkMargin), func() { close(expired) })
 			admitted, bound = nil, expired
-		case <-bound:
+		case <-w.bound:
 			return e.giveUp(c, &Error{Reason: ReasonCancelled, Op: name, Err: context.DeadlineExceeded,
 				Detail: "the owner did not answer within ReleaseTimeout and its margin: what the check stopped stays stopped, and the owner exits any hold it granted once it runs"})
-		case <-c.ctx.Done():
+		case <-w.cancelled:
 			if c.admission.CompareAndSwap(admissionPending, admissionAbandoned) {
 				// The owner has taken c and not admitted it, and now never will.
 				return Hold{}, notAdmitted(name, c.ctx.Err())
 			}
 			return e.giveUp(c, checkCancelled(name, c.ctx.Err()))
-		case <-e.done:
+		case <-w.finished:
 			select {
 			case r := <-c.reply:
 				return e.takeGrant(c, r)
@@ -711,7 +763,12 @@ func (e *Engine) giveBack(c *command) {
 	case e.msgs <- m:
 	case <-e.done:
 	default:
-		go e.post(m)
+		go func() {
+			e.post(m)
+			if e.sm.gaveBack != nil {
+				e.sm.gaveBack()
+			}
+		}()
 	}
 }
 

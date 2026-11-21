@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -771,68 +772,313 @@ func TestACheckWhoseOwnerStallsIsAnsweredAtItsBound(t *testing.T) {
 	h.must("its exit", h.eng.ExitMaintenance(bg, hold.Lease))
 }
 
+// grantPick fixes the arm of the next turn of a check's wait (seams.checkArm):
+// set, it answers that arm once, then grantArmAny.
+type grantPick struct{ next atomic.Int32 }
+
+// set fixes a for the next turn.
+func (p *grantPick) set(a grantArm) { p.next.Store(int32(a)) }
+
+// pick is the seam: the arm set, once, else grantArmAny.
+func (p *grantPick) pick(*command) grantArm { return grantArm(p.next.Swap(int32(grantArmAny))) }
+
+// heldGrant is a check's grant the owner has sent and its caller has not read
+// yet: the caller held at its wait's first turn (the checkWaits seam) until
+// the test lets it go, and the owner's answer as the owner sent it.
+type heldGrant struct {
+	armed atomic.Bool
+	held  chan struct{}
+	letGo gate
+	sent  atomic.Pointer[reply]
+}
+
+// newHeldGrant is a heldGrant whose caller is let go at the test's end, if
+// the test has not.
+func newHeldGrant(t *testing.T) *heldGrant {
+	g := &heldGrant{held: make(chan struct{}, 1), letGo: newGate()}
+	letGoAtEnd(t, g.letGo)
+	return g
+}
+
+// hook sets g's seams on c: the caller's hold, and the owner's answer kept.
+func (g *heldGrant) hook(c *Config) {
+	c.seams.checkWaits = func(*command) {
+		if g.armed.CompareAndSwap(true, false) {
+			g.held <- struct{}{}
+			<-g.letGo
+		}
+	}
+	replying := c.seams.replying
+	c.seams.replying = func(op string, r reply, sn *Snapshot) {
+		if op == checkOp {
+			g.sent.Store(&r)
+		}
+		if replying != nil {
+			replying(op, r, sn)
+		}
+	}
+}
+
+// ask asks EnterCheck on ctx, the player stopped, and returns once the owner
+// has sent its grant and its caller is held before reading it, with the
+// grant sent and where the caller's answer goes.
+func (g *heldGrant) ask(h *harness, ctx context.Context) (reply, <-chan checkAnswer) {
+	h.t.Helper()
+	mark := h.appliedMark()
+	g.armed.Store(true)
+	check := h.checkAsync(ctx, false)
+	waitClosed(h.t, "the caller held at its wait", g.held)
+	// The owner notes the step it applied once it has sent the step's replies.
+	h.waitApplied(checkOp, mark)
+	r := g.sent.Load()
+	if r == nil || r.err != nil || r.hold.Lease.IsZero() {
+		h.t.Fatalf("the owner's answer %+v; want a grant", r)
+	}
+	return *r, check
+}
+
 // TestAGrantReadAfterItsCallersContextEndedIsGivenBack pins the handoff of a
 // grant sent and not yet read (B728 B12): the caller held at its wait's first
 // turn (the checkWaits seam) until the owner has sent its grant, the player
-// stopped, and its context has ended, so its wait finds the grant and the
-// context's end ready together, and takes either. Whichever it takes, it is
-// answered ReasonCancelled without ErrNotAdmitted, no hold, and the owner ends
-// the hold given back: its stop signal closed, its lease refused, no hold,
-// the clock never moved.
+// stopped, and its context has ended, so its wait finds the grant, the
+// context's end and the admission ready together. Each arm that answers is
+// fixed for that turn in a case of its own (the checkArm seam, B971): the
+// owner's answer, read through takeGrant; the context's end, whose giveUp
+// loses the handoff's compare-and-swap to the answer and reads it; and the
+// engine's end, the engine shut down first, whose turn reads the answer
+// through takeGrant too; and a case leaves the turn to the select. Whichever
+// it takes, the caller is answered ReasonCancelled without ErrNotAdmitted, no
+// hold, and the hold given back ends, its stop signal closed and its lease
+// refused, the clock never moved: while the engine runs the owner ends it,
+// taking the grant given back, and a later check's hold is granted; the
+// shutdown ended it before.
 func TestAGrantReadAfterItsCallersContextEndedIsGivenBack(t *testing.T) {
-	var armed atomic.Bool
-	var sent atomic.Pointer[reply]
-	held, letGo := make(chan struct{}, 1), newGate()
-	h := checkHarness(t, func(c *Config) {
-		c.seams.checkWaits = func(*command) {
-			if armed.CompareAndSwap(true, false) {
-				held <- struct{}{}
-				<-letGo
+	for _, tc := range []struct {
+		name string
+		arm  grantArm
+	}{
+		{"through the owner's answer", grantArmReply},
+		{"through the context's end", grantArmContext},
+		{"through the engine's end", grantArmDone},
+		{"through either, as the select picks", grantArmAny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newHeldGrant(t)
+			var pick grantPick
+			h := checkHarness(t, func(c *Config) {
+				g.hook(c)
+				c.seams.checkArm = pick.pick
+			})
+			h.insert("a")
+			h.available()
+			ctx, cancel := context.WithCancel(bg)
+			defer cancel()
+			at := h.clk.Now()
+			mark := h.appliedMark()
+			r, check := g.ask(h, ctx)
+			cancel()
+			if tc.arm == grantArmDone {
+				h.shutdown()
 			}
-		}
-		replying := c.seams.replying
-		c.seams.replying = func(op string, r reply, sn *Snapshot) {
-			if op == checkOp {
-				sent.Store(&r)
+			pick.set(tc.arm)
+			g.letGo.open()
+			a := h.checkResult("the check whose grant was read after its context ended", check)
+			if ReasonOf(a.err) != ReasonCancelled || errors.Is(a.err, ErrNotAdmitted) || !errors.Is(a.err, context.Canceled) || a.hold != (Hold{}) {
+				t.Fatalf("the check whose grant was read after its context ended: %+v, %v; want no hold, a cancellation of a command that ran", a.hold, a.err)
 			}
-			replying(op, r, sn)
-		}
-	})
-	letGoAtEnd(t, letGo)
-	h.insert("a")
-	h.available()
-	ctx, cancel := context.WithCancel(bg)
-	defer cancel()
-	at := h.clk.Now()
-	mark := h.appliedMark()
-	armed.Store(true)
-	check := h.checkAsync(ctx, false)
-	waitClosed(t, "the caller held at its wait", held)
-	// The owner notes the step it applied once it has sent the step's replies.
-	h.waitApplied(checkOp, mark)
+			if tc.arm == grantArmDone {
+				if !signalled(r.hold.Stop) {
+					t.Error("the hold the shutdown ended left its stop signal open")
+				}
+				h.refused("the exit of the hold the shutdown ended", h.eng.ExitMaintenance(bg, r.hold.Lease), ReasonClosed)
+				return
+			}
+			h.waitApplied("handled check gone", mark)
+			if _, held := h.snap().Maintenance(); held || h.snap().State() != Stopped {
+				t.Fatalf("once the owner took the grant given back: held %v, %s; want no hold, stopped", held, h.snap().State())
+			}
+			if !signalled(r.hold.Stop) {
+				t.Error("the hold given back left its stop signal open")
+			}
+			h.refused("the exit of the hold given back", h.eng.ExitMaintenance(bg, r.hold.Lease), ReasonLease)
+			if !h.clk.Now().Equal(at) {
+				t.Errorf("the clock moved from %v to %v", at, h.clk.Now())
+			}
+			hold := h.granted("a later check's hold", false)
+			h.must("its exit", h.eng.ExitMaintenance(bg, hold.Lease))
+		})
+	}
+}
+
+// expiredLine is the warning the owner logs for a hold that expired
+// (logExpiry).
+const expiredLine = "player: maintenance hold expired"
+
+// TestAGrantReadAfterItsHoldExpiredIsGivenBack pins the caller's own look at
+// the grant's expiry (B971): with a hold of a second (MaintenanceTTL's floor),
+// the check's hold granted at once, the player stopped, and its caller held
+// at its wait's first turn (the checkWaits seam) while the clock moves 1.5 s,
+// the caller reads the grant once its expiry has come, gives it back and is
+// answered ReasonLease (expiredBeforeGrant), no hold, whichever of the two the
+// owner takes first: the hold's own expiry (fakeClock.Advance, its message
+// taken before the caller is let go), or the grant given back (fakeClock.Skip:
+// no timer fires, and the give-back's end of the hold stops the expiry's).
+// Either way the owner ends the hold once (its stop signal closed, its lease
+// refused, no hold, the transport stopped), says once that it expired (the
+// check's, logExpiry), and grants a later check's hold.
+func TestAGrantReadAfterItsHoldExpiredIsGivenBack(t *testing.T) {
+	for _, expiryFirst := range []bool{true, false} {
+		name := map[bool]string{true: "the hold's own expiry taken first", false: "the grant given back taken first"}[expiryFirst]
+		t.Run(name, func(t *testing.T) {
+			g := newHeldGrant(t)
+			h := checkHarness(t, func(c *Config) {
+				c.MaintenanceTTL = time.Second
+				g.hook(c)
+			})
+			h.insert("a")
+			h.available()
+			mark := h.appliedMark()
+			r, check := g.ask(h, bg)
+			if expiryFirst {
+				due := h.appliedMark()
+				h.clk.Advance(1500 * time.Millisecond)
+				h.waitApplied("handled maintenance expiry", due)
+			} else {
+				h.clk.Skip(1500 * time.Millisecond)
+			}
+			g.letGo.open()
+			a := h.checkResult("the check whose grant was read past its hold's expiry", check)
+			h.refused("the check whose grant was read past its hold's expiry", a.err, ReasonLease)
+			var e *Error
+			if !errors.As(a.err, &e) || e.Detail != expiredBeforeGrant || errors.Is(a.err, ErrNotAdmitted) || a.hold != (Hold{}) {
+				t.Fatalf("the check whose grant was read past its hold's expiry: %+v, %v; want no hold, the expiry's refusal (%q)", a.hold, a.err, expiredBeforeGrant)
+			}
+			// The give-back taken first ends the hold and stops its expiry's
+			// timer, so no message of the expiry's comes after it.
+			h.waitApplied("handled check gone", mark)
+			if _, held := h.snap().Maintenance(); held || h.snap().State() != Stopped {
+				t.Fatalf("once the hold read past its expiry was given back: held %v, %s; want no hold, stopped", held, h.snap().State())
+			}
+			if !signalled(r.hold.Stop) {
+				t.Error("the hold given back left its stop signal open")
+			}
+			h.refused("the exit of the hold given back", h.eng.ExitMaintenance(bg, r.hold.Lease), ReasonLease)
+			if n := h.logs.count(expiredLine); n != 1 {
+				t.Errorf("the hold's expiry was said %d times, want once: %q", n, h.logs.all())
+			} else if h.logs.count("reason=check") != 1 {
+				t.Errorf("the expiry said is not the check's hold's: %q", h.logs.all())
+			}
+			hold := h.granted("a later check's hold", false)
+			h.must("its exit", h.eng.ExitMaintenance(bg, hold.Lease))
+		})
+	}
+}
+
+// TestTakeGrantAnswersWhatItsCallerMayHold pins takeGrant, where every turn of
+// a check's wait reads the owner's answer (B971), on an engine built and not
+// run, so a grant given back stays in the owner's queue for the test to read:
+// a refusal is answered as it is, its caller's context ended or not, nothing
+// given back; a grant whose caller's context has ended is given back and
+// answered ReasonCancelled; one read at or past its hold's expiry is given
+// back and answered ReasonLease (expiredBeforeGrant); and one read before its
+// expiry, its caller's context alive, is handed over, nothing given back.
+func TestTakeGrantAnswersWhatItsCallerMayHold(t *testing.T) {
+	h := newHarness(t).build()
+	ended, cancel := context.WithCancel(bg)
 	cancel()
-	letGo.open()
-	a := h.checkResult("the check whose grant was read after its context ended", check)
-	if ReasonOf(a.err) != ReasonCancelled || errors.Is(a.err, ErrNotAdmitted) || !errors.Is(a.err, context.Canceled) || a.hold != (Hold{}) {
-		t.Fatalf("the check whose grant was read after its context ended: %+v, %v; want no hold, a cancellation of a command that ran", a.hold, a.err)
+	var l Lease
+	l.b[0] = 1
+	now := h.clk.Now()
+	grant := func(expires time.Time) reply {
+		return reply{hold: Hold{Lease: l, Expires: expires, ReleaseConfirmed: true, Stop: make(chan struct{})}}
 	}
-	h.waitApplied("handled check gone", mark)
-	r := sent.Load()
-	if r == nil || r.err != nil || r.hold.Lease.IsZero() {
-		t.Fatalf("the owner's answer %+v; want a grant", r)
+	refusal := refuse(checkOp, ReasonNotStopped, "the player is playing")
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		r    reply
+		// reason is the answer's, "" for the hold handed over.
+		reason   Reason
+		gaveBack bool
+	}{
+		{"a refusal", bg, reply{err: refusal}, ReasonNotStopped, false},
+		{"a refusal read after its caller's context ended", ended, reply{err: refusal}, ReasonNotStopped, false},
+		{"a grant read after its caller's context ended", ended, grant(now.Add(time.Minute)), ReasonCancelled, true},
+		{"a grant read at its hold's expiry", bg, grant(now), ReasonLease, true},
+		{"a grant read past its hold's expiry", bg, grant(now.Add(-time.Second)), ReasonLease, true},
+		{"a grant read before its hold's expiry", bg, grant(now.Add(time.Nanosecond)), "", false},
+	} {
+		c := &command{op: opEnterCheck, ctx: tc.ctx, grant: &checkGrant{admitted: make(chan struct{})}}
+		hold, err := h.eng.takeGrant(c, tc.r)
+		switch {
+		case tc.reason == "" && (err != nil || hold != tc.r.hold):
+			t.Errorf("%s: %+v, %v; want the hold handed over", tc.name, hold, err)
+		case tc.reason != "" && (ReasonOf(err) != tc.reason || hold != (Hold{})):
+			t.Errorf("%s: %+v, %v; want no hold, refused %q", tc.name, hold, err, tc.reason)
+		case tc.reason == ReasonLease:
+			if e := (*Error)(nil); !errors.As(err, &e) || e.Detail != expiredBeforeGrant {
+				t.Errorf("%s: %v; want the expiry's refusal (%q)", tc.name, err, expiredBeforeGrant)
+			}
+		}
+		var back []any
+		for drained := false; !drained; {
+			select {
+			case m := <-h.eng.msgs:
+				back = append(back, m)
+			default:
+				drained = true
+			}
+		}
+		if want := map[bool]int{false: 0, true: 1}[tc.gaveBack]; len(back) != want || want == 1 && back[0] != (msgCheckGone{c: c}) {
+			t.Errorf("%s: the owner's queue holds %#v, want the grant given back %v", tc.name, back, tc.gaveBack)
+		}
 	}
-	if _, held := h.snap().Maintenance(); held || h.snap().State() != Stopped {
-		t.Fatalf("once the owner took the grant given back: held %v, %s; want no hold, stopped", held, h.snap().State())
+}
+
+// TestACheckWhoseReleaseIsUnconfirmedPastItsExpiryIsRefusedForTheRelease pins
+// the order of deliver's refusals (B971): with a hold of a second
+// (MaintenanceTTL's floor), the check's hold asked with interrupt while a
+// session plays and its release parked, the clock is moved past both the
+// hold's expiry and the release's deadline without a timer firing
+// (fakeClock.Skip), and the release is then acknowledged, stamped there
+// (Events.Released), so the deadline's policy runs first (ackAt) and settles
+// the grant's release unconfirmed with its expiry come: the grant is refused
+// ReasonReleaseUnconfirmed, which outranks the expiry, never ReasonLease; no
+// hold stands, the expiry is not said, and nothing starts.
+func TestACheckWhoseReleaseIsUnconfirmedPastItsExpiryIsRefusedForTheRelease(t *testing.T) {
+	h := checkHarness(t, func(c *Config) { c.MaintenanceTTL = time.Second })
+	mark := h.appliedMark()
+	_, s := h.playing(0, "a", "b")
+	// The clock is moved past the successor's Prepare's deadline: its answer
+	// is the owner's first.
+	h.waitApplied("handled call prepare", mark)
+	never := newGate()
+	letGoAtEnd(t, never)
+	h.be.script(func() {
+		h.be.onRelease = func(ctx context.Context, _ *fakeSession) error { return never.wait(ctx, h.be, true) }
+	})
+	replied := h.appliedMark()
+	check := h.grantWaits(s)
+	// The clock moves past the grant's Discard's deadline: its answer is the
+	// owner's first.
+	h.waitApplied("handled call discard", replied)
+	h.clk.Skip(ReleaseTimeout)
+	s.ack()
+	s.ev.Released(s.id)
+	a := h.checkResult("the check whose release is unconfirmed past its hold's expiry", check)
+	h.refused("the check whose release is unconfirmed past its hold's expiry", a.err, ReasonReleaseUnconfirmed)
+	if a.hold != (Hold{}) || errors.Is(a.err, ErrNotAdmitted) {
+		t.Errorf("the check whose release is unconfirmed past its hold's expiry: %+v, %v; want no hold, an answer of a command that ran", a.hold, a.err)
 	}
-	if !signalled(r.hold.Stop) {
-		t.Error("the hold given back left its stop signal open")
+	if sn := h.snap(); func() bool { _, held := sn.Maintenance(); return held }() || sn.State() != Stopped {
+		t.Errorf("after the refused grant: %s; want no hold, stopped", sn.State())
 	}
-	h.refused("the exit of the hold given back", h.eng.ExitMaintenance(bg, r.hold.Lease), ReasonLease)
-	if !h.clk.Now().Equal(at) {
-		t.Errorf("the clock moved from %v to %v", at, h.clk.Now())
+	if n := h.logs.count(expiredLine); n != 0 {
+		t.Errorf("the hold's expiry was said %d times beside the unconfirmed release's refusal: %q", n, h.logs.all())
 	}
-	hold := h.granted("a later check's hold", false)
-	h.must("its exit", h.eng.ExitMaintenance(bg, hold.Lease))
+	if n := h.be.starts(); n != 1 {
+		t.Errorf("%d sessions started, want the first alone", n)
+	}
 }
 
 // TestAStopUnderACheckHoldSignalsItAndAnswersAtItsExit pins the Stop's one
@@ -1354,8 +1600,10 @@ func watchedHarness(t *testing.T) (*harness, *sessionsWatch) {
 // (sessionsWatch) looks before each command and after each step: through a
 // Stop, a Next released to play, a release past its deadline and acknowledged
 // late (where it sees the release owed, unconfirmed), the check's hold
-// interrupting playback and its exit, the output going away and a fault, and
-// the shutdown after each.
+// interrupting playback and its exit, the output going away and a fault, a
+// paused session's own release of the device (onDeviceReleased), and that
+// release overdue (pauseOverdue) and then reported late (B971), and the
+// shutdown after each.
 func TestASessionLeavesTheSessionsInTheStepItsReleaseEnds(t *testing.T) {
 	t.Run("a Stop", func(t *testing.T) {
 		h, _ := watchedHarness(t)
@@ -1417,4 +1665,166 @@ func TestASessionLeavesTheSessionsInTheStepItsReleaseEnds(t *testing.T) {
 		s.fault(Fault{Reason: ReasonXrun, Occurrence: s.first.ID})
 		h.waitSnap("stopped by the fault", func(sn *Snapshot) bool { return sn.State() == Stopped })
 	})
+	t.Run("a paused session's own release of the device", func(t *testing.T) {
+		h, _ := watchedHarness(t)
+		_, s := h.playing(0, "a")
+		h.must("pause", h.eng.Pause(bg))
+		mark := h.appliedMark()
+		s.deviceReleased()
+		h.waitApplied("handled device released", mark)
+		if sn := h.snap(); !sn.DeviceReleased() || sn.State() != Paused {
+			t.Fatalf("after the pause's own release: device released %v, %s; want released, paused", sn.DeviceReleased(), sn.State())
+		}
+	})
+	t.Run("a paused session's release overdue, then reported late", func(t *testing.T) {
+		h, _ := watchedHarness(t)
+		mark := h.appliedMark()
+		_, s := h.playing(0, "a")
+		// The session's Prepare (nothing follows a) answers at once; the clock
+		// moves past its deadline only once the owner has taken that answer.
+		h.waitApplied("handled call prepare", mark)
+		h.must("pause", h.eng.Pause(bg))
+		mark = h.appliedMark()
+		h.clk.Advance(DefaultPauseRelease + ReleaseTimeout)
+		h.waitApplied("handled pause overdue", mark)
+		if info, ok := h.snap().ReleaseUnconfirmed(); !ok || !info.Paused || info.Session != s.id {
+			t.Fatalf("after the pause's release overdue: unconfirmed %+v %v; want the paused session's", info, ok)
+		}
+		mark = h.appliedMark()
+		s.deviceReleased()
+		h.waitApplied("handled device released", mark)
+		if _, ok := h.snap().ReleaseUnconfirmed(); ok {
+			t.Fatal("the pause's release reported late left it unconfirmed")
+		}
+	})
+}
+
+// TestAGrantGivenBackPastAFullQueueIsJoined pins the goroutine giveBack starts
+// when the owner's queue is full (B971): with the owner held as it admits a
+// barrier and its queue filled, a check's grant given back, its caller's
+// context ended as the grant was sent, cannot be put in the queue, so giveBack
+// hands it to that goroutine and returns, the caller answered while the owner
+// is held and the queue full. The goroutine's post leaves when the engine
+// ends, whichever way: the owner let go and the engine shut down, the owner
+// taking the grant given back on its way; or the owner panicking (abandon),
+// its queue never read again, the post answered by Done. Held at its end once
+// the engine has ended (the gaveBack seam), the goroutine is what the wait the
+// harness's join makes (joined, Engine.wg.Wait) still waits for once every
+// other goroutine of the test's bubble is blocked (testing/synctest), and
+// that wait returns once it is let go; it is no goroutine the owner joins by
+// its last message (Engine.live).
+func TestAGrantGivenBackPastAFullQueueIsJoined(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		name := map[bool]string{false: "the engine shut down", true: "the owner panicking"}[panics]
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) { joinsAGrantGivenBackPastAFullQueue(t, panics) })
+		})
+	}
+}
+
+// joinsAGrantGivenBackPastAFullQueue is a case of
+// TestAGrantGivenBackPastAFullQueueIsJoined, run in its bubble: the engine
+// ends by its shutdown, or by a panic on the owner where panics.
+func joinsAGrantGivenBackPastAFullQueue(t *testing.T, panics bool) {
+	g := newHeldGrant(t)
+	var stallArmed atomic.Bool
+	stalled, letOwnerGo := make(chan struct{}, 1), newGate()
+	ended, letEnd := make(chan struct{}, 1), newGate()
+	h := newHarness(t)
+	h.tweak = func(c *Config) {
+		g.hook(c)
+		admitted := c.seams.admitted
+		c.seams.admitted = func(cmd *command) {
+			admitted(cmd)
+			if cmd.op == opSetShuffle && stallArmed.CompareAndSwap(true, false) {
+				stalled <- struct{}{}
+				<-letOwnerGo
+				if panics {
+					panic(panicValue)
+				}
+			}
+		}
+		c.seams.gaveBack = func() {
+			ended <- struct{}{}
+			<-letEnd
+		}
+	}
+	h.build()
+	ctx, cancel := context.WithCancel(bg)
+	ran := make(chan struct{})
+	var recovered any
+	go func() {
+		defer close(ran)
+		defer func() { recovered = recover() }()
+		_ = h.eng.Run(ctx)
+	}()
+	// Cleanups run last-registered first: every gate opened, then the engine
+	// stopped, before the harness's join (build's) waits on what they hold.
+	t.Cleanup(func() {
+		cancel()
+		h.drive(ran)
+	})
+	letGoAtEnd(t, letOwnerGo)
+	letGoAtEnd(t, letEnd)
+	h.insert("a")
+	h.available()
+	checkCtx, checkCancel := context.WithCancel(bg)
+	defer checkCancel()
+	_, check := g.ask(h, checkCtx)
+	stallArmed.Store(true)
+	barrier := async(func() error { return h.eng.SetShuffle(bg, false) })
+	waitClosed(t, "the owner held as it admits a barrier", stalled)
+	for full := false; !full; {
+		select {
+		case h.eng.msgs <- msgMaintExpiry{}:
+		default:
+			full = true
+		}
+	}
+	checkCancel()
+	g.letGo.open()
+	a := h.checkResult("the check whose grant was given back past a full queue", check)
+	if ReasonOf(a.err) != ReasonCancelled || errors.Is(a.err, ErrNotAdmitted) || a.hold != (Hold{}) {
+		t.Fatalf("the check whose grant was given back past a full queue: %+v, %v; want no hold, a cancellation of a command that ran", a.hold, a.err)
+	}
+	select {
+	case err := <-barrier:
+		t.Fatalf("the barrier was answered (%v): the owner was not held as the grant was given back", err)
+	default:
+	}
+	if n := len(h.eng.msgs); n != cap(h.eng.msgs) {
+		t.Fatalf("the owner's queue holds %d of %d: the grant given back was not left to giveBack's own goroutine", n, cap(h.eng.msgs))
+	}
+	if !panics {
+		cancel()
+	}
+	letOwnerGo.open()
+	want := ReasonMaintenance
+	if panics {
+		want = ReasonClosed
+	}
+	h.refused("the barrier", h.result("the barrier", barrier), want)
+	h.drive(ran)
+	if want := map[bool]any{false: nil, true: panicValue}[panics]; recovered != want {
+		t.Fatalf("Run's caller recovered %v, want %v", recovered, want)
+	}
+	waitClosed(t, "giveBack's own goroutine at its end", ended)
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		h.eng.wg.Wait()
+	}()
+	// Every other goroutine of the bubble has ended or is blocked: the
+	// engine's own have returned, abandoned or not.
+	synctest.Wait()
+	select {
+	case <-joined:
+		t.Fatal("the wait the harness's join makes returned while giveBack's own goroutine was under way")
+	default:
+	}
+	if n := h.eng.live.Load(); n != 0 {
+		t.Errorf("%d goroutines counted for the owner to join once the engine's own had ended, want none: giveBack's own is not one", n)
+	}
+	letEnd.open()
+	waitClosed(t, "the wait the harness's join makes, once giveBack's own goroutine ended", joined)
 }
