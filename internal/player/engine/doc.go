@@ -381,8 +381,9 @@
 // compare-and-swap decides whether the owner answers that caller: a hold the
 // owner would hand over to a caller that has given up it ends itself,
 // answering nobody, and a grant answered and not taken, sent too late or not
-// yet sent, is given back and ended by the owner in a later step; never by
-// the caller, and never twice.
+// yet sent, or read by its caller once its expiry has come (refused
+// ReasonLease, B971), is given back and ended by the owner in a later step;
+// never by the caller, and never twice.
 //
 // # The configuration reservation
 //
