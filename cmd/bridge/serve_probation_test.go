@@ -71,26 +71,43 @@ func (w *probationWatch) waitFor(t *testing.T, kind probationEventKind) probatio
 }
 
 // waitForCount returns the nth event of kind, waiting for it until the test's
-// deadline (serveGiveUpTime), or two minutes in a binary with none.
+// deadline (serveGiveUpTime), or two minutes in a binary with none, and fails
+// the test with awaitCount's error: past the deadline it returns no event,
+// one already buffered included.
 func (w *probationWatch) waitForCount(t *testing.T, kind probationEventKind, n int) probationEvent {
 	t.Helper()
 	giveUp := serveGiveUpTime(t)
 	if giveUp.IsZero() {
 		giveUp = time.Now().Add(2 * time.Minute)
 	}
+	e, err := w.awaitCount(kind, n, giveUp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// awaitCount is waitForCount's wait, its deadline given: the nth event of
+// kind, or an error naming the kind, the count and the events once giveUp
+// has passed, asked before an event the scan found is returned, so a caller
+// that fell behind while events queued up is handed none past the deadline.
+func (w *probationWatch) awaitCount(kind probationEventKind, n int, giveUp time.Time) (probationEvent, error) {
 	for {
 		seen := 0
 		for _, e := range w.events() {
 			if e.kind == kind {
 				if seen++; seen == n {
-					return e
+					if time.Now().After(giveUp) {
+						return probationEvent{}, fmt.Errorf("the confirmation's %v was not taken %d time(s) before the test's deadline; it did %+v", kind, n, w.events())
+					}
+					return e, nil
 				}
 			}
 		}
 		select {
 		case <-w.signal:
 		case <-time.After(time.Until(giveUp)):
-			t.Fatalf("the confirmation's %v never came %d time(s); it did %+v", kind, n, w.events())
+			return probationEvent{}, fmt.Errorf("the confirmation's %v never came %d time(s); it did %+v", kind, n, w.events())
 		}
 	}
 }
@@ -712,13 +729,21 @@ func healthAnswersAtOnce(h http.Handler) http.Handler {
 
 // TestAStoreThatDoesNotAnswerIsNotReady: a store read that does not answer
 // within the round is not a ready answer. A round's context, its 300 ms, starts
-// before its accept probe and its /v1/health, and the handler's own first
-// /v1/health, an endpoint walk and the store's readiness probes, which take no
-// cancel, outlasted the round's whole bound (300 ms and roundGrace) on a loaded
-// runner (B972): here /v1/health answers at once. The store records whether
-// each read was entered with its round's context live and what ended it, and
-// the case judges the first round whose read was: a round whose setup outran
-// its context reached the store with nothing left to wait for.
+// before its accept probe and its /v1/health. On a loaded runner a round went
+// unanswered for its whole bound (300 ms and roundGrace, B972): the handler's
+// own first /v1/health runs the store's readiness probes and the roots'
+// reachability probe, which the round's end does not end (the fixture's port
+// 0 leaves it no endpoint walk), so that is a /v1/health that took more than
+// a second, or a round left unscheduled as long. Here /v1/health answers at
+// once. The store records whether each read was entered with its round's
+// context live and what ended it, and the case judges the first round whose
+// read was, whenever it comes: a round whose setup outran its context reached
+// the store with nothing left to wait for, and is passed over. The case takes
+// each next round from waitForCount, which hands out none once the test
+// binary's deadline less serveWaitReserve (serveGiveUpTime) has passed, rounds
+// already queued included, so that deadline bounds it: a loop that fell
+// behind while unusable rounds queued up would otherwise go on taking them
+// past it.
 func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	store := &unansweredStore{}
@@ -726,7 +751,6 @@ func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 		round: 300 * time.Millisecond})
 	seams.storeRead = store.read
 	sb := r.bootWith(t, serveOpts{probation: seams, wrapAPIHandler: healthAnswersAtOnce})
-	deadline := time.Now().Add(withinTheTest)
 	for n := 1; ; n++ {
 		round := events.waitForCount(t, probationRound, n)
 		if round.ready {
@@ -739,12 +763,40 @@ func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 			}
 			break
 		}
-		t.Logf("round %d (%s) waited on no read entered live: passed over", n, round.why)
-		if time.Now().After(deadline) {
-			t.Fatalf("no round waited on a read entered live within %v; the rounds: %+v", withinTheTest, events.events())
-		}
+		t.Logf("round %d (%s) named no read entered live: passed over", n, round.why)
 	}
 	stopServed(t, sb)
+}
+
+// TestAWaitPastItsDeadlineHandsOutNoBufferedRound: once the test's deadline
+// has passed, the wait waitForCount makes hands out no event, whether or not
+// it has come. Five unusable rounds are queued, as they queue while the store
+// case's retry loop has fallen behind, and the loop asks for each next round
+// with its deadline already past: it is handed none of them, and its first
+// ask is refused, naming the kind and the count.
+func TestAWaitPastItsDeadlineHandsOutNoBufferedRound(t *testing.T) {
+	events, _ := newProbationWatch(probationTiming{})
+	const queued = 5
+	for i := 1; i <= queued; i++ {
+		events.observe(probationEvent{kind: probationRound, why: fmt.Sprintf("the store did not answer a read: read #%d: %v", i, context.DeadlineExceeded)})
+	}
+	past := time.Now().Add(-time.Second)
+	var handed []probationEvent
+	var refusal error
+	for n := 1; n <= queued+1; n++ {
+		round, err := events.awaitCount(probationRound, n, past)
+		if err != nil {
+			refusal = err
+			break
+		}
+		handed = append(handed, round)
+	}
+	if len(handed) != 0 {
+		t.Errorf("past its deadline the wait handed the retry loop %d of the %d rounds queued, want none: %+v", len(handed), queued, handed)
+	}
+	if refusal == nil || !strings.Contains(refusal.Error(), "round") || !strings.Contains(refusal.Error(), " 1 time(s)") {
+		t.Errorf("the first ask past the deadline answered %v, want a refusal naming the round and its count, 1", refusal)
+	}
 }
 
 // TestAHealthCallThatNeverReturnsIsNotReadyAndDoesNotHoldTheStop: GET
