@@ -5,6 +5,7 @@ package config
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,6 +263,131 @@ func TestALinkIntoADirectoryThisUserCannotWriteSaysWhatToDo(t *testing.T) {
 			requireLink(t, link, target)
 		})
 	}
+}
+
+// TestALockFileThisUserCannotOpenSaysWhatToDo: a lock file that is there and
+// that this user may not open to read and write (backlog B537 item 2: root's
+// 0600 one beside a config file a `sudo bridge init` made and the service's
+// user was given later, or one whose mode was taken away, which mode 0 stands
+// for here, a test's user being the only owner it can give a file) refuses
+// config.Edit and the holder's Update alike, matching ErrLockInaccessible, in
+// words that name the config file and its lock file and give both ways out,
+// writing nothing; each way out, the lock file given back its owner's read and
+// write or removed, lets the next save land. A directory at the lock's name,
+// and no lock file in a directory this user cannot write, keep their words.
+func TestALockFileThisUserCannotOpenSaysWhatToDo(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a file's mode does not stop root")
+	}
+	rename := func(c *Config) (bool, error) { c.LibraryName = "After"; return true, nil }
+	// inaccessible writes a config that loads and a lock file of mode 0 beside
+	// it, and returns the config's path, the lock file's and the config's
+	// bytes.
+	inaccessible := func(t *testing.T) (cfgPath, lock string, before []byte) {
+		t.Helper()
+		cfgPath, _ = loadableConfig(t, realTempDir(t), "Before")
+		lock = filepath.Join(filepath.Dir(cfgPath), LockFileName(cfgPath))
+		if err := os.WriteFile(lock, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(lock, 0); err != nil {
+			t.Fatal(err)
+		}
+		if f, err := os.OpenFile(lock, os.O_RDWR, 0); !errors.Is(err, fs.ErrPermission) {
+			_ = f.Close()
+			t.Fatalf("premise: this user opens the lock file of mode 0 (%v)", err)
+		}
+		before, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfgPath, lock, before
+	}
+	requireRefusal := func(t *testing.T, err error, cfgPath, lock string, before []byte) {
+		t.Helper()
+		if !errors.Is(err, ErrLockInaccessible) {
+			t.Fatalf("a save beside a lock file this user cannot open = %v, want ErrLockInaccessible", err)
+		}
+		for _, says := range []string{cfgPath, lock, "give the lock file the config file's owner", "read and write it",
+			"or remove it while the bridge is stopped and no bridge command runs"} {
+			if !strings.Contains(err.Error(), says) {
+				t.Errorf("refusal %q: want it to say %q", err, says)
+			}
+		}
+		if got, _ := os.ReadFile(cfgPath); !bytes.Equal(got, before) {
+			t.Errorf("the refused save wrote the config file:\n%s", got)
+		}
+	}
+	requireRenamed := func(t *testing.T, cfgPath string) {
+		t.Helper()
+		if cfg, err := Load(cfgPath); err != nil || cfg.LibraryName != "After" {
+			t.Errorf("the config after the way out = %+v, %v; want libraryName After", cfg, err)
+		}
+	}
+	t.Run("config.Edit, then the lock file given back its owner's read and write", func(t *testing.T) {
+		cfgPath, lock, before := inaccessible(t)
+		requireRefusal(t, Edit(cfgPath, rename), cfgPath, lock, before)
+		if err := os.Chmod(lock, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := Edit(cfgPath, rename); err != nil {
+			t.Fatalf("a save once the lock file is its owner's to read and write again: %v", err)
+		}
+		requireRenamed(t, cfgPath)
+	})
+	t.Run("the holder's Update, then the lock file removed", func(t *testing.T) {
+		cfgPath, lock, before := inaccessible(t)
+		cfg, raw, read, err := LoadFileAt(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc := NewRuntimeConfig(cfg)
+		rc.RecordFile(read, raw)
+		ran := false
+		requireRefusal(t, rc.Update(cfgPath, func(c *Config) error { ran = true; c.LibraryName = "After"; return nil }),
+			cfgPath, lock, before)
+		if ran || rc.Load().LibraryName != "Before" {
+			t.Errorf("the refused save ran its change (%v) or published it (%q)", ran, rc.Load().LibraryName)
+		}
+		if err := os.Remove(lock); err != nil {
+			t.Fatal(err)
+		}
+		if err := rc.Update(cfgPath, func(c *Config) error { c.LibraryName = "After"; return nil }); err != nil {
+			t.Fatalf("a save once the lock file is removed: %v", err)
+		}
+		requireRenamed(t, cfgPath)
+		if info, err := os.Lstat(lock); err != nil || !info.Mode().IsRegular() {
+			t.Errorf("the lock file after the save = %v, %v; want the save to have made it again", info, err)
+		}
+	})
+	// keepsItsWords requires err to be the lock's open failure as it was said
+	// before B537 item 2, and no refusal of a lock file this user cannot open.
+	keepsItsWords := func(t *testing.T, err error, cfgPath string) {
+		t.Helper()
+		if err == nil || errors.Is(err, ErrLockInaccessible) || !strings.Contains(err.Error(), "open the lock beside "+cfgPath) {
+			t.Errorf("the save = %v, want the lock's open failure in its own words", err)
+		}
+	}
+	t.Run("a directory at the lock's name", func(t *testing.T) {
+		cfgPath, _ := loadableConfig(t, realTempDir(t), "Before")
+		if err := os.Mkdir(filepath.Join(filepath.Dir(cfgPath), LockFileName(cfgPath)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		keepsItsWords(t, Edit(cfgPath, rename), cfgPath)
+	})
+	t.Run("no lock file in a directory this user cannot write", func(t *testing.T) {
+		cfgPath, _ := loadableConfig(t, realTempDir(t), "Before")
+		dir := filepath.Dir(cfgPath)
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		err := Edit(cfgPath, rename)
+		keepsItsWords(t, err, cfgPath)
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("the save = %v, want the open's permission error kept", err)
+		}
+	})
 }
 
 // TestARepointedLinkRefusesTheHoldersSave: serve's holder saves only into the

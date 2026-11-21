@@ -102,6 +102,39 @@ func (e *NoLockManagerError) Is(target error) bool { return target == ErrNoLockM
 // Unwrap is the lock's last answer.
 func (e *NoLockManagerError) Unwrap() error { return e.Err }
 
+// ErrLockInaccessible is what a *LockInaccessibleError matches.
+var ErrLockInaccessible = errors.New("config: the lock file beside the config file is there and this user may not open it")
+
+// LockInaccessibleError is LockFile's refusal of a lock file that is there,
+// a regular file, and that this user may not open to read and write
+// (backlog B537 item 2): one another user made, root's from a `sudo bridge
+// init` beside a config file given to the service's user later, or one whose
+// mode was taken away. A root writer gives a lock file it makes the config
+// file's owner and opens one already there as it is
+// (fsutil.OpenLockFileLike), and nothing here chowns or removes one, so the
+// way out is the operator's. It names the config file, the lock file and the
+// two ways out, and nothing the config file holds.
+type LockInaccessibleError struct {
+	// Path is the config file, as its writer named it; Lock is the lock
+	// file, beside the file the config's name opens.
+	Path, Lock string
+	// Err is the open's answer.
+	Err error
+}
+
+func (e *LockInaccessibleError) Error() string {
+	return fmt.Sprintf("%s, the lock file beside %s, is there and this user may not open it to read and write it (%s), "+
+		"so nothing was written: give the lock file the config file's owner and let that owner read and write it, "+
+		"or remove it while the bridge is stopped and no bridge command runs (only the lock taken on it means "+
+		"anything, and the next writer makes it again)", e.Lock, e.Path, fsutil.ErrorWithoutPath(e.Err))
+}
+
+// Is makes a *LockInaccessibleError match ErrLockInaccessible.
+func (e *LockInaccessibleError) Is(target error) bool { return target == ErrLockInaccessible }
+
+// Unwrap is the open's answer.
+func (e *LockInaccessibleError) Unwrap() error { return e.Err }
+
 // ErrChangedInTurn is what a *ChangedInTurnError matches.
 var ErrChangedInTurn = errors.New("config: the config file changed during a writer's turn")
 

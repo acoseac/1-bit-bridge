@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -79,6 +80,9 @@ func TestAConfigSaveRefusalSaysWhatToDoAndNamesNoPath(t *testing.T) {
 		{"the filesystem gave no lock", &config.NoLockManagerError{Path: cfgPath, Wait: config.LockWait,
 			Err: &fs.PathError{Op: "flock", Path: filepath.Join(root, ".bridge.yaml.lock"), Err: errors.New("no locks available")}},
 			"lock manager", nil, ""},
+		{"a lock file this user may not open", &config.LockInaccessibleError{Path: cfgPath, Lock: filepath.Join(root, ".bridge.yaml.lock"),
+			Err: &fs.PathError{Op: "openat", Path: ".bridge.yaml.lock", Err: fs.ErrPermission}},
+			"give the lock file the config file's owner", nil, ""},
 		{"another writer changed the file", &config.ChangedOutsideError{Path: cfgPath}, "restart the bridge", nil, ""},
 		{"another writer changed a setting the save changes", outside(config.OutsideConflict, "libraryName", "scanIntervalSec"),
 			"restart the bridge", []string{"libraryName", "scanIntervalSec"}, ""},
@@ -272,6 +276,56 @@ func TestTheConsolesSavesAnswerARefusalWithoutThePath(t *testing.T) {
 				t.Errorf("the refused save's message %q does not name %s", body.Message, tc.names)
 			}
 		})
+	}
+}
+
+// TestAConsoleSaveBesideALockFileItCannotOpenSaysWhatToDo: the config file's
+// lock file is there and the console's user may not open it to read and write
+// (backlog B537 item 2; mode 0 stands for a file another user made). The
+// settings PATCH, through the real holder, answers 500 save-config in words of
+// that class's own, which name no path and give both ways out, and saves
+// nothing; once the lock file is its owner's to read and write again, the same
+// save lands.
+func TestAConsoleSaveBesideALockFileItCannotOpenSaysWhatToDo(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("a lock file this user may not open needs POSIX modes and a user that is not root")
+	}
+	logs := loggingtest.Record(t)
+	srv, _, cfgPath := newTestServer(t)
+	recordBootRead(t, srv, cfgPath)
+	// The test server's own save made the lock file already: its mode is taken
+	// away, as WriteFile's perm applies to a file it makes alone.
+	lock := filepath.Join(filepath.Dir(cfgPath), config.LockFileName(cfgPath))
+	if err := os.WriteFile(lock, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lock, 0); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := os.OpenFile(lock, os.O_RDWR, 0); !errors.Is(err, fs.ErrPermission) {
+		_ = f.Close()
+		t.Fatalf("premise: this user opens the lock file of mode 0 (%v)", err)
+	}
+	before := readFileOrNil(cfgPath)
+	var body saveRefusalBody
+	code := doJSON(t, srv.Handler(), http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, &body)
+	requireSaveRefusal(t, logs, code, body, filepath.Dir(cfgPath), "give the lock file the config file's owner")
+	for _, says := range []string{"read and write it", "or remove it while the bridge is stopped"} {
+		if !strings.Contains(body.Message, says) {
+			t.Errorf("the refused save's message %q does not say %q", body.Message, says)
+		}
+	}
+	if strings.Contains(body.Message, config.LockFileName(cfgPath)) {
+		t.Errorf("the refused save's message names the lock file: %q", body.Message)
+	}
+	if got := readFileOrNil(cfgPath); string(got) != string(before) {
+		t.Errorf("the refused save wrote the config file:\n%s", got)
+	}
+	if err := os.Chmod(lock, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := doJSON(t, srv.Handler(), http.MethodPatch, "/api/settings", map[string]any{"libraryName": "After"}, &body); code != http.StatusOK {
+		t.Errorf("the save once the lock file is its owner's to read and write again answered %d %+v, want 200", code, body)
 	}
 }
 
