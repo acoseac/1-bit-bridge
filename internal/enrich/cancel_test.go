@@ -419,10 +419,12 @@ func runUntilReturn(t *testing.T, e *Enricher, ctx context.Context) {
 	}
 }
 
-// waitFor polls cond until it holds, failing the test after 5s.
+// waitFor polls cond until it holds, failing the test once enricherWaitBound
+// has passed: a wait on what the enricher does is bounded from above alone,
+// generously (backlog B952).
 func waitFor(t *testing.T, cond func() bool, what string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(enricherWaitBound)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)

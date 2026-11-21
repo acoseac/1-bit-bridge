@@ -46,19 +46,13 @@ func TestAcousticFallbackReachableWithLocalArtwork(t *testing.T) {
 	e.WithAcousticFallback(fakeLookup{"curated.flac": {
 		ArtistMBID: fbArtistMBID, ArtistName: "Ducu Bertzi", AcoustID: "acid-reach",
 	}})
-	defer startEnricherForTest(e, 5*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	deadline := time.Now().Add(5 * time.Second)
-	var got *manifest.Track
-	for time.Now().Before(deadline) {
-		tr, gerr := store.GetTrack(ctx, "curated.flac")
-		if gerr == nil && tr != nil && tr.ArtistMBID != "" {
-			got = tr
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got == nil {
+	// Stamped either way, recovered or not: the row read back says which.
+	run.wait(t, OutcomeDone, 1, "the curated track was never stamped")
+	got, gerr := store.GetTrack(ctx, "curated.flac")
+	if gerr != nil || got == nil || got.ArtistMBID == "" {
 		t.Fatal("the fingerprint answer was never applied — with local artwork present " +
 			"the track reached MarkEnriched without the acoustic fallback being consulted")
 	}

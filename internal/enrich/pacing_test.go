@@ -144,15 +144,10 @@ func TestEnricherResolvesArtistWhenAlbumMisses(t *testing.T) {
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
-	defer startEnricherForTest(e, 5*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	deadline := time.Now().Add(4 * time.Second)
-	for time.Now().Before(deadline) && e.skipped.Load() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.skipped.Load() == 0 {
-		t.Fatal("track was never marked skipped")
-	}
+	run.wait(t, OutcomeSkipped, 1, "track was never marked skipped")
 
 	got, err := store.GetTrack(ctx, "a.flac")
 	if err != nil {

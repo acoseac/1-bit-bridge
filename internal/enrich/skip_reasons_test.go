@@ -37,15 +37,10 @@ func TestSkipReasonsAttributeTheRightCause(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	defer startEnricherForTest(e, 3*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && e.skipped.Load() < 2 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got := e.skipped.Load(); got < 2 {
-		t.Fatalf("only %d tracks skipped, want 2", got)
-	}
+	run.wait(t, OutcomeSkipped, 2, "the two tracks were not both skipped")
 
 	reasons := e.SkipReasons()
 	if reasons[skipReasonNoSearchTerms] != 1 {
@@ -99,12 +94,12 @@ func TestSkipReasonsKeysStayBounded(t *testing.T) {
 
 	e := NewEnricher(store, NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches), nil, filepath.Join(dir, "artwork"))
-	defer startEnricherForTest(e, 3*time.Second)()
+	run := startEnricherForTest(e)
+	defer run.join()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && e.skipped.Load() < 5 {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// All five, so the keys below are the whole run's, not those of the
+	// tracks a slow run had reached.
+	run.wait(t, OutcomeSkipped, 5, "the five tracks were not all skipped")
 
 	reasons := e.SkipReasons()
 	for k := range reasons {

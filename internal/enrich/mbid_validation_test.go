@@ -57,12 +57,12 @@ func TestSearchResultMBIDTraversalDoesNotEscapeCacheDir(t *testing.T) {
 		NewMusicBrainzClient(mbSrv.URL, "t", nil, onSwitches),
 		NewCoverArtClient(caaSrv.URL, "t", nil, onSwitches),
 		nil, artDir)
-	stop := startEnricherForTest(e, 3*time.Second)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && e.Done() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	stop()
+	run := startEnricherForTest(e)
+	defer run.join()
+	// The hostile id is no match, so the track is skipped: its skip is the
+	// proof that the pass ran to its end before anything below looks.
+	run.wait(t, OutcomeSkipped, 1, "the track whose release id is hostile was never skipped")
+	run.join()
 
 	// Nothing may have been created beside the cache dir. `pwned` would land
 	// three levels up from <dir>/artwork — i.e. in the parent of dir.
@@ -112,12 +112,12 @@ func TestBlankArtistAlbumStillScrubsHostileTagMBID(t *testing.T) {
 	}
 
 	e := NewEnricher(store, nil, nil, nil, filepath.Join(dir, "artwork"))
-	stop := startEnricherForTest(e, 3*time.Second)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && e.Done() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	stop()
+	run := startEnricherForTest(e)
+	defer run.join()
+	// A blank album is skipped: its skip is the proof that the row was
+	// stamped, scrubbed or not, before it is read back.
+	run.wait(t, OutcomeSkipped, 1, "the track with a blank album was never skipped")
+	run.join()
 
 	got, err := store.GetTrack(context.Background(), "Artist/Album/01.flac")
 	if err != nil {
