@@ -721,8 +721,9 @@ func healthAnswersAtOnce(h http.Handler) http.Handler {
 // once. The store records whether each read was entered with its round's
 // context live and what ended it, and the case judges the first round whose
 // read was, whenever it comes: a round whose setup outran its context reached
-// the store with nothing left to wait for, and is passed over until the test
-// binary's deadline (serveGiveUpTime, waitForCount's own bound).
+// the store with nothing left to wait for, and is passed over. The case waits
+// for each next round in waitForCount, so the test binary's deadline, at which
+// that wait gives up (serveGiveUpTime), bounds it.
 func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	store := &unansweredStore{}
@@ -730,7 +731,6 @@ func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 		round: 300 * time.Millisecond})
 	seams.storeRead = store.read
 	sb := r.bootWith(t, serveOpts{probation: seams, wrapAPIHandler: healthAnswersAtOnce})
-	giveUp := serveGiveUpTime(t)
 	for n := 1; ; n++ {
 		round := events.waitForCount(t, probationRound, n)
 		if round.ready {
@@ -744,9 +744,6 @@ func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
 			break
 		}
 		t.Logf("round %d (%s) named no read entered live: passed over", n, round.why)
-		if !giveUp.IsZero() && time.Now().After(giveUp) {
-			t.Fatalf("no round named a read entered live by the test binary's deadline; the %d rounds passed over are logged above", n)
-		}
 	}
 	stopServed(t, sb)
 }
