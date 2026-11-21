@@ -1325,6 +1325,76 @@
         },
         "siblingNote": null
       }
+    },
+    {
+      "id": "kiwiears.ad1",
+      "name": "Kiwi Ears AD1",
+      "maker": "Kiwi Ears",
+      "legacyPatterns": [],
+      "legacyCeiling": "dsd128",
+      "pcm": {
+        "maxRateHz": 384000,
+        "bitDepth": 32
+      },
+      "volumeTopology": "hostSyncedDACGain",
+      "timing": {
+        "ioBufferMs": null,
+        "dsdResyncMs": null,
+        "pcmEntryResyncMs": null,
+        "coldStartExtraMs": null,
+        "transitionCushionMs": null
+      },
+      "hiddenMode": false,
+      "nameKeys": {
+        "portNames": [
+          "AD1"
+        ],
+        "tokens": [],
+        "excludedTokens": [],
+        "scope": "model"
+      },
+      "evidence": {
+        "heard": [
+          {
+            "rate": "dsd64",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-21"
+            }
+          },
+          {
+            "rate": "dsd128",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-21"
+            }
+          }
+        ],
+        "failed": [
+          {
+            "rate": "dsd256",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-21"
+            }
+          },
+          {
+            "rate": "dsd512",
+            "failure": "carrierRefused",
+            "source": {
+              "kind": "submission",
+              "date": "2026-11-21"
+            }
+          }
+        ],
+        "statement": {
+          "case": "unrecorded",
+          "upTo": null,
+          "source": null
+        },
+        "siblingNote": null
+      }
     }
   ]
 }
