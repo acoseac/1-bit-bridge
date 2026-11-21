@@ -336,8 +336,9 @@ func TestTheChimeIsModulatedAtItsOwnRate(t *testing.T) {
 	}
 }
 
-// floors are the in-band residual each rate's tones must lie under, in dB
-// under the tone, with a margin under what the loop gives: its noise
+// floors are the in-band residual each rate's tones, and the largest
+// in-band component of each of their edges, must lie under, in dB under the
+// tone, with a margin under what the loop gives: its noise
 // transfer function's five zeros all sit at DC, so the noise it shapes
 // rises toward 20 kHz, where it is 36.8 dB down at DSD64, 64.3 at DSD128
 // and 93.6 at DSD256.
@@ -351,11 +352,12 @@ var floors = map[int]float64{format.DSD64RateHz: 35, 2 * format.DSD64RateHz: 65,
 // away; the residual windowed (four-term Blackman-Harris) and zero-padded
 // to 2^17 points, each bin's power normalised by the window's energy, and
 // the bins from 20 Hz to 20 kHz summed. Each tone's residual lies under its
-// rate's floor, and its level is −36.02 dBFS within 0.5 dB. It reports, as
-// a measurement, the largest in-band component of each 20 ms edge, where
-// the input nears zero and an undithered loop can fall into an idle
-// pattern: the edge's samples less the intended programme, windowed and
-// transformed the same way over 2^16 points.
+// rate's floor, and its level is −36.02 dBFS within 0.5 dB. Each 20 ms
+// edge, where the input nears zero and an undithered loop can fall into an
+// idle pattern, leaves its largest in-band component under the same floor:
+// the edge's samples less the intended programme, windowed and transformed
+// the same way over 2^16 points, the largest bin read as a sine's amplitude
+// and taken in dB under the tone.
 func TestTheChimesInBandResidualIsUnderItsFloor(t *testing.T) {
 	want := 20 * math.Log10(level)
 	for i, rate := range chimeRates {
@@ -391,7 +393,11 @@ func TestTheChimesInBandResidualIsUnderItsFloor(t *testing.T) {
 					edge[k] = x[ch][from+k] - ideal(from+k)
 				}
 				power, spur := inBand(edge, pcmRate, 1<<16)
-				t.Logf("%s %.0f Hz %s: the residual %.2f dBFS in band, its largest component %.2f dBFS, %.1f dB under the tone", rateName(rate), toneHz[ch], name, db(2*power), 20*math.Log10(spur), m.level-20*math.Log10(spur))
+				under := m.level - 20*math.Log10(spur)
+				t.Logf("%s %.0f Hz %s: the residual %.2f dBFS in band, its largest component %.2f dBFS, %.1f dB under the tone (floor %.0f)", rateName(rate), toneHz[ch], name, db(2*power), 20*math.Log10(spur), under, floors[rate])
+				if !(under >= floors[rate]) {
+					t.Errorf("%s: the %.0f Hz tone's %s leaves its largest in-band component %.1f dB under the tone, not %.0f", rateName(rate), toneHz[ch], name, under, floors[rate])
+				}
 			}
 		}
 	}
