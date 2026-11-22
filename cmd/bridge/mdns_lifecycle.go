@@ -69,6 +69,18 @@ func newMDNSLifecycle(port, protocolVersion int, nameSource func() string, stdou
 	}
 }
 
+// Running reports whether the responder runs now: the console's
+// home-network socket answers to the box's `.local` name only while it does
+// (backlog B989, I10).
+func (m *mdnsLifecycle) Running() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.advertiser != nil
+}
+
 // Set is the hot-reload entry point. `enabled=true` starts the
 // advertiser if it isn't already running; `enabled=false` stops
 // it. Errors are logged to stderr (non-fatal — mDNS is a nice-

@@ -33,6 +33,10 @@
       Files land in <code id="upload-root">—</code>. Folders keep their
       structure, including the folder you pick.
     </p>
+    {{- /* What a page with no SubtleCrypto checks (backlog B989): app.js
+        uploadLengthOnlyNote fills it where the page is no secure context,
+        which the console on the home network, plain HTTP, is not. */ -}}
+    <p class="hint warn" id="upload-length-only" hidden></p>
 
     {{- /* NOT role="button" + tabindex.
         A button must not contain interactive descendants, and this one holds

@@ -69,10 +69,11 @@ var logger = logging.Component("admin")
 // handler accepts. 1 MiB is generous for any current admin operation
 // (token mint, settings patch, library-root edit, backup restore
 // confirmation) but rejects multi-gigabyte payloads before the JSON
-// decoder allocates. The admin listener binds loopback by default so
-// the practical attack surface is thin, but defense-in-depth is
-// cheap — a misbehaving local tool or future remote-admin bridge
-// shouldn't be able to OOM the server with a large request body.
+// decoder allocates. The loopback console binds loopback, and the
+// home-network socket an operator may open beside it (adminLANAddress,
+// backlog B989) answers anyone on that network, so the cap is what
+// keeps a misbehaving tool or a visitor there from OOMing the server
+// with a large request body.
 const adminMaxBodyBytes = 1 << 20
 
 // templateFS holds the console's page templates. Its glob starts with [^.]
@@ -1804,18 +1805,23 @@ type Server struct {
 	statsDB      statsDBPart
 	statsDBValid bool
 
-	// boundAdminAddr is the address the TCP listener was actually
-	// bound to, recorded in Serve() once net.Listen succeeds. It is
-	// used by originMatchesAdmin() so that CSRF validation reflects
+	// boundAdminAddr is the address the loopback socket was actually
+	// bound to, recorded in ServeListener once net.Listen succeeds. It
+	// is used by originMatchesAdmin() so that CSRF validation reflects
 	// the port the server is *currently* listening on rather than
 	// the AdminAddress value in the live config (which may have been
-	// updated via a PATCH before a restart).
+	// updated via a PATCH before a restart). The home-network socket
+	// never writes it: its requests carry their own socket's
+	// description (descOf, backlog B989).
 	boundAdminAddr string
 
-	// The home-network socket (backlog B989).
-	consoleLAN            *consoleLAN
-	lanSourceNoted        lanSourceNoted
-	testCompositionFlight func()
+	// consoleLAN is the home-network socket's plan once OpenConsoleLAN
+	// has opened one, nil for no posture (console_lan.go).
+	consoleLAN *consoleLAN
+
+	// lanSourceNoted holds the kinds of source refusal the home-network
+	// socket has logged, once each.
+	lanSourceNoted lanSourceNoted
 
 	// refusedScrapeNoted is set by the first noteRefusedScrape line, which
 	// is the only one this process logs.
@@ -1824,9 +1830,17 @@ type Server struct {
 	// foreignHostSeen holds the Host names loopbackHostOnly has refused,
 	// so each is logged once (noteForeignHost), bounded by
 	// foreignHostSeenCap: a page that rebinds a fresh name per request
-	// must not grow it, or the journal, without limit.
-	foreignHostMu   sync.Mutex
-	foreignHostSeen map[string]struct{}
+	// must not grow it, or the journal, without limit. The home-network
+	// socket keeps a set of its own (foreignHostSeenLAN), so its
+	// refusals cannot use up loopback's.
+	foreignHostMu      sync.Mutex
+	foreignHostSeen    map[string]struct{}
+	foreignHostSeenLAN map[string]struct{}
+
+	// testCompositionFlight, when set, runs inside the composition
+	// snapshot's flight before its scan, so a test holds an event
+	// stream waiting on the snapshot. Nil in production.
+	testCompositionFlight func()
 
 	// library catalog snapshot for /api/player/*; see catalog.go
 	catalogState
@@ -1955,6 +1969,9 @@ func (s *Server) Handler() http.Handler {
 
 	// JSON API.
 	mux.HandleFunc("GET /api/stats", s.apiStats)
+	// The home-network socket's state (backlog B989): the console's menu
+	// line and both doctors read where the console answers from it.
+	mux.HandleFunc("GET /api/console", s.apiConsole)
 	mux.HandleFunc("GET /api/sources", s.apiSources)
 	mux.HandleFunc("GET /api/enrichment", s.apiEnrichment)
 	mux.HandleFunc("GET /api/enrichment/misses", s.apiEnrichmentMisses)
@@ -2162,7 +2179,9 @@ func (s *Server) Handler() http.Handler {
 
 	// Layer order (outer → inner):
 	//   1. boundaryMiddleware — applies loopbackOnly in loopback
-	//      mode; passthrough in public mode (the listener is
+	//      mode, and the home-network socket's own source and Host
+	//      rules on a request that arrived there (lanOnly, backlog
+	//      B989); passthrough in public mode (the listener is
 	//      already exposed beyond loopback by design).
 	//   2. csrfGuard — Content-Type strict + Origin allowlist on
 	//      body-bearing mutations. Defends against drive-by
@@ -2244,18 +2263,29 @@ func (s *Server) Serve(ctx context.Context) error {
 	return s.ServeListener(ctx, lis)
 }
 
+// ServeConsole opens plan's home-network socket, where OpenConsoleLAN has
+// not opened one already, and serves the console on lis and on that
+// socket until ctx is done (ServeListener). A nil plan is no posture.
+func (s *Server) ServeConsole(ctx context.Context, lis net.Listener, plan *ConsoleLANPlan) error {
+	if plan != nil && s.consoleLAN == nil {
+		s.OpenConsoleLAN(ctx, plan)
+	}
+	return s.ServeListener(ctx, lis)
+}
+
 // ServeListener serves the console on lis, which the caller already
 // bound, and blocks until ctx is done. Serve is the production path and
 // listens itself. cmd/bridge's boot tests bind the port first and hand
 // the listener over, so nothing can take it between the choice and the
-// bind (backlog B313).
-// ServeConsole serves loopback alone, the plan ignored (backlog B989).
-func (s *Server) ServeConsole(ctx context.Context, lis net.Listener, plan *ConsoleLANPlan) error {
-	return s.ServeListener(ctx, lis)
-}
-
+// bind (backlog B313). Where OpenConsoleLAN opened a home-network socket,
+// its loop runs from here, and the shutdown stops and joins it, retires
+// the socket and shuts the loopback socket down, all within one window
+// (backlog B989).
 func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 	s.boundAdminAddr = lis.Addr().String()
+	if c := s.consoleLAN; c != nil {
+		c.startLoop(ctx)
+	}
 	// Public-mode direct-TLS path (PR 3): wrap the TCP listener
 	// in tls.NewListener using the cmd-side certManager's
 	// AdminTLSConfig. Same SNI switcher serves the public API,
@@ -2293,10 +2323,11 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 		// r.Context() (e.g. apiUpdatesCheck's GitHub poll) inherit
 		// the same cancellation.
 		BaseContext: func(_ net.Listener) context.Context { return ctx },
-		// Slowloris-class defense. The admin console binds loopback
-		// only by config validation, but a misbehaving local client
-		// (or a buggy admin script) trickling bytes 1/sec could
-		// otherwise tie up an FD indefinitely. Pre-fix only
+		// Slowloris-class defense. This socket binds loopback by
+		// config validation (the home-network socket, where its
+		// operator opened one, takes the same settings), but a
+		// misbehaving client (or a buggy admin script) trickling
+		// bytes 1/sec could otherwise tie up an FD indefinitely. Pre-fix only
 		// `ReadHeaderTimeout` was set; adding `ReadTimeout` and
 		// `IdleTimeout` closes the request-side gap (PR #75).
 		//
@@ -2323,7 +2354,15 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 	logger.Info("console listening", "url", fmt.Sprintf("%s://%s/", scheme, lis.Addr()))
 	select {
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// One window for the whole shutdown (backlog B989, I7): the
+		// home-network socket's loop is stopped and joined, its socket
+		// retired and the loopback socket shut down, all by one deadline,
+		// so a retirement under way at the stop takes no window of its own.
+		deadline := time.Now().Add(s.shutdownWindow())
+		if c := s.consoleLAN; c != nil {
+			c.stopAndRetire(deadline)
+		}
+		shutCtx, cancel := context.WithDeadline(context.Background(), deadline)
 		defer cancel()
 		shutErr := srv.Shutdown(shutCtx)
 		// Wait for any spawnBackgroundScan goroutine to finish before
@@ -2348,6 +2387,12 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 		}
 		return shutErr
 	case err := <-errCh:
+		// The loopback socket's failure stops serve (adminErr); the
+		// home-network socket is closed on that way out, by the same
+		// one window.
+		if c := s.consoleLAN; c != nil {
+			c.stopAndRetire(time.Now().Add(s.shutdownWindow()))
+		}
 		// errors.Is, not ==: net/http returns ErrServerClosed unwrapped today,
 		// so this is behaviour-identical now — but a wrapped one would read as
 		// a real listener failure and turn a clean shutdown into an error
@@ -2357,6 +2402,19 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 		}
 		return nil
 	}
+}
+
+// consoleShutdownWindow is the console's one shutdown window: the API's rule
+// for its LAN and tailnet servers (CLAUDE.md, the dual-stack bullet).
+const consoleShutdownWindow = 5 * time.Second
+
+// shutdownWindow is consoleShutdownWindow, or the plan's own where a test
+// gave one.
+func (s *Server) shutdownWindow() time.Duration {
+	if c := s.consoleLAN; c != nil && c.plan.ShutdownWindow > 0 {
+		return c.plan.ShutdownWindow
+	}
+	return consoleShutdownWindow
 }
 
 // csrfGuard rejects drive-by cross-origin POSTs from a page running
@@ -2439,15 +2497,16 @@ func (s *Server) csrfGuard(next http.Handler) http.Handler {
 			}
 		}
 
-		// Origin header check, when present. The admin server binds
+		// Origin header check, when present. The loopback socket binds
 		// to deps.Cfg.AdminAddress — a same-origin request from the
 		// admin UI carries Origin: http://127.0.0.1:7789 (or
 		// whatever the configured host:port resolves to in the
-		// browser). A cross-origin POST from attacker.com would
-		// carry Origin: https://attacker.com.
+		// browser), and the home-network socket's its own authority
+		// (originMatches, backlog B989). A cross-origin POST from
+		// attacker.com would carry Origin: https://attacker.com.
 		if origin := r.Header.Get("Origin"); origin != "" {
-			if !s.originMatchesAdmin(origin) {
-				s.writeCrossOriginRefusal(w)
+			if !s.originMatches(r, origin) {
+				s.writeCrossOriginRefusal(w, r)
 				return
 			}
 		}
@@ -2469,9 +2528,20 @@ const errCodeCrossOrigin = "cross_origin"
 // who forwarded the console onto a different local port sees what to
 // change instead of a bare "403 Forbidden". An IPv6-bound listener
 // yields `[::1]` in both the open-at URL and the `ssh -L` destination;
-// an empty or unspecified host falls back to `127.0.0.1`.
-func (s *Server) writeCrossOriginRefusal(w http.ResponseWriter) {
+// an empty or unspecified host falls back to `127.0.0.1`. On the
+// home-network socket the message names that socket's own URL and gives
+// no tunnel advice, since the visitor is on the network already; on the
+// loopback socket, while the home-network socket listens, one sentence
+// more says where (backlog B989).
+func (s *Server) writeCrossOriginRefusal(w http.ResponseWriter, r *http.Request) {
 	msg := "admin refused: cross-origin request"
+	if d := descOf(r); d.kind == socketLAN {
+		if d.policy != nil {
+			msg += ". This console must be opened at " + lanURL(d.policy) + "."
+		}
+		writeError(w, http.StatusForbidden, errCodeCrossOrigin, msg)
+		return
+	}
 	cfg := s.deps.CfgHolder.Load()
 	if cfg == nil || !cfg.IsPublic() {
 		if host, port := s.adminListenHostPort(); port != "" {
@@ -2480,6 +2550,9 @@ func (s *Server) writeCrossOriginRefusal(w http.ResponseWriter) {
 				"%s. This console must be opened at http://%s:%s. An SSH tunnel has to keep that port on both ends, for example ssh -L %s:%s:%s …",
 				msg, hintHost, port, port, hintHost, port,
 			)
+		}
+		if st := s.ConsoleLAN(); st.State == ConsoleLANListening && st.URL != "" {
+			msg += " It also answers on your home network at " + st.URL + "."
 		}
 	}
 	writeError(w, http.StatusForbidden, errCodeCrossOrigin, msg)
@@ -2684,11 +2757,13 @@ func loopbackHostname(h string) bool {
 }
 
 // loopbackOnly is a belt-and-braces middleware that refuses non-loopback
-// RemoteAddr connections even if the listener was misconfigured. The
-// primary defense is the loopback-only bind enforced by config validation;
-// this catches regressions where the listener binding drifts (e.g. a
-// future "expose on LAN via Tailscale" feature being wired up without
-// also adding an auth layer).
+// RemoteAddr connections on the loopback socket even if its listener was
+// misconfigured. The primary defense is the loopback-only bind enforced by
+// config validation; this catches regressions where that binding drifts.
+// The one way the console answers beyond loopback in loopback mode is the
+// home-network socket its operator opened (adminLANAddress, backlog B989),
+// whose requests carry that socket's description and meet lanOnly in this
+// middleware's place, never this one relaxed.
 func loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -2729,7 +2804,7 @@ func loopbackOnly(next http.Handler) http.Handler {
 func (s *Server) loopbackHostOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hostIsLoopback(r.Host) {
-			s.noteForeignHost(r.Host)
+			s.noteForeignHostOn(socketLoopback, r.Host)
 			http.Error(w, errMsgForeignHost, http.StatusMisdirectedRequest)
 			return
 		}
@@ -2762,7 +2837,13 @@ const maxLoggedHostLen = 100
 // line is how an operator whose reverse proxy forwards the browser's name
 // learns what the 421 is about, and the record of a page that tried to
 // reach the console under another name.
-func (s *Server) noteForeignHost(hostport string) {
+func (s *Server) noteForeignHost(hostport string) { s.noteForeignHostOn(socketLoopback, hostport) }
+
+// noteForeignHostOn is noteForeignHost for the socket kind the request
+// arrived on: each kind keeps a set of its own, each bounded at
+// foreignHostSeenCap, so the home-network socket's refusals cannot use up
+// loopback's, and its line's hint names its own authority (backlog B989).
+func (s *Server) noteForeignHostOn(kind socketKind, hostport string) {
 	name := (&url.URL{Host: hostport}).Hostname()
 	if name == "" {
 		name = hostport
@@ -2771,22 +2852,35 @@ func (s *Server) noteForeignHost(hostport string) {
 		name = strings.ToValidUTF8(name[:maxLoggedHostLen], "")
 	}
 	s.foreignHostMu.Lock()
-	if s.foreignHostSeen == nil {
-		s.foreignHostSeen = make(map[string]struct{})
+	set := &s.foreignHostSeen
+	if kind == socketLAN {
+		set = &s.foreignHostSeenLAN
 	}
-	_, seen := s.foreignHostSeen[name]
-	full := len(s.foreignHostSeen) >= foreignHostSeenCap
+	if *set == nil {
+		*set = make(map[string]struct{})
+	}
+	_, seen := (*set)[name]
+	full := len(*set) >= foreignHostSeenCap
 	if !seen && !full {
-		s.foreignHostSeen[name] = struct{}{}
+		(*set)[name] = struct{}{}
 	}
 	s.foreignHostMu.Unlock()
 	if seen || full {
 		return
 	}
-	logger.Warn("console refused a request that names another host",
-		"host", name,
-		"hint", "the loopback console answers only to localhost or a loopback address; "+
-			"a reverse proxy in front of it must send Host: 127.0.0.1")
+	hint := "the loopback console answers only to localhost or a loopback address; " +
+		"a reverse proxy in front of it must send Host: 127.0.0.1"
+	if kind == socketLAN {
+		hint = "the home-network console answers only to its own address and port"
+		if st := s.ConsoleLAN(); st.URL != "" {
+			hint = "the home-network console answers only as " + st.URL
+			if st.NameURL != "" {
+				hint += " or " + st.NameURL
+			}
+		}
+		hint += "; a reverse proxy in front of it must send that Host"
+	}
+	logger.Warn("console refused a request that names another host", "host", name, "hint", hint)
 }
 
 // metricsPath is the Prometheus route, which public mode's session

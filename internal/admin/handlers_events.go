@@ -41,7 +41,12 @@ import (
 // bridge shuts down, all in-flight SSE handlers see ctx.Done() within
 // the existing 5 s graceful-shutdown window. No per-handler bgScans
 // bookkeeping needed — the stdlib does the right thing once BaseContext
-// is set.
+// is set. On the home-network socket (backlog B989) the context is the
+// socket's policy's, which its retirement cancels first; every snapshot
+// this stream waits for is waited for on that context (the composition
+// and enrichment flights included), so the stream returns at the
+// cancellation; a stream blocked in a write ends at the retirement's
+// close of its connection, which comes next.
 //
 // Concurrency: per-client tickers, no broker / fan-out. Admin is a
 // single-user loopback console; even with several browser tabs the
@@ -57,12 +62,14 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// origin browser context on the same loopback (a random tab the
 	// operator visited) could otherwise open and hold SSE connections
 	// indefinitely. Reuse the same origin allowlist csrfGuard applies
-	// to mutations: Origin-when-present must match AdminAddress; absent
-	// Origin is allowed (curl, fetch from the admin UI itself in some
-	// browsers). Qodo on PR #107.
+	// to mutations: Origin-when-present must match the request's own
+	// socket (originMatches: AdminAddress on loopback, the socket's own
+	// authority on the home network, backlog B989); absent Origin is
+	// allowed (curl, fetch from the admin UI itself in some browsers).
+	// Qodo on PR #107.
 	if origin := r.Header.Get("Origin"); origin != "" {
-		if !s.originMatchesAdmin(origin) {
-			s.writeCrossOriginRefusal(w)
+		if !s.originMatches(r, origin) {
+			s.writeCrossOriginRefusal(w, r)
 			return
 		}
 	}
@@ -79,10 +86,10 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	h.Set("Cache-Control", "no-cache, no-store, no-transform")
 	h.Set("Connection", "keep-alive")
 	// X-Accel-Buffering disables response buffering in nginx-class
-	// reverse proxies. The admin listener binds loopback by default
-	// (no proxy in the path), but this is cheap defense in depth for
-	// any future "expose admin via Tailscale" deployment that puts
-	// the listener behind nginx.
+	// reverse proxies. The loopback console has no proxy in its path,
+	// nor does the home-network socket, which answers only its own
+	// authority (backlog B989), but this is cheap defense in depth for a
+	// public-mode console behind nginx.
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
@@ -186,7 +193,11 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// single-flighted in getCompositionSnapshot, so this stays cheap even
 	// though the underlying scan is a full-table json_extract.
 	publishComposition := func() error {
-		return marshalAndPublish("composition", s.getCompositionSnapshotNow(), &lastComposition)
+		snap, ok := s.getCompositionSnapshot(ctx)
+		if !ok {
+			return ctx.Err()
+		}
+		return marshalAndPublish("composition", snap, &lastComposition)
 	}
 
 	// sources (dashboard filesystem-vs-UPnP-upstream track breakdown) rides
@@ -205,7 +216,11 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// TTL-cached + single-flighted in getEnrichmentSnapshot, so it stays cheap
 	// even though the underlying matched/missing split is a full-table scan.
 	publishEnrichment := func() error {
-		return marshalAndPublish("enrichment", s.getEnrichmentSnapshot(), &lastEnrichment)
+		snap, ok := s.getEnrichmentSnapshotCtx(ctx)
+		if !ok {
+			return ctx.Err()
+		}
+		return marshalAndPublish("enrichment", snap, &lastEnrichment)
 	}
 
 	// upscale + analysis telemetry — these replace the Settings page's

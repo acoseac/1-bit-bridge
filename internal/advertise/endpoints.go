@@ -170,6 +170,29 @@ func localEndpoint(host string, port int, mdns bool) (url string, converted, ok 
 	return fmt.Sprintf("https://%s.local:%d", name, port), converted, true
 }
 
+// LocalName is the host's `.local` name as Endpoints publishes it while the
+// bridge's own mDNS responder runs (localEndpoint's name, without scheme or
+// port), "" for none: no name, one with no valid form, or a container's
+// generated id. The console's home-network socket answers to it, and asks it
+// only while that responder runs (backlog B989, I10), since a converted name
+// is answered by that responder alone. It reads the host's name through the
+// probe Endpoints reads, at the call, and keeps no state.
+func LocalName() string {
+	host, err := hostnameFunc()
+	if err != nil {
+		return ""
+	}
+	url, _, ok := localEndpoint(host, 7788, true)
+	if !ok {
+		return ""
+	}
+	name := strings.TrimPrefix(url, "https://")
+	if i := strings.LastIndexByte(name, ':'); i > 0 {
+		name = name[:i]
+	}
+	return name
+}
+
 // OwnResponderEndpoint returns the `.local` endpoint Endpoints publishes on
 // port while mdns.enabled is on that no responder but the bridge's own
 // answers (the host's name converted to its IDNA ASCII form), or "" where it

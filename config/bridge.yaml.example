@@ -134,6 +134,28 @@ libraryName: "My Music Library"
 # loopback (default): admin console binds 127.0.0.1, no auth — the
 #   historical home-LAN posture. Anyone on the host already owns the
 #   token store + SQLite DB, so adding auth on top would be theatre.
+#   adminLANAddress (below) is the one way to open it beyond this
+#   machine in this mode: on the home network, still with no login.
+#
+# adminLANAddress: also open the console on this box's home-network IP
+#   address (RFC 1918, or an IPv6 unique local address outside
+#   Tailscale's), at adminAddress's port, with no password and over plain
+#   HTTP: anyone on that network can watch the console and change the
+#   bridge's settings, music and devices. Give the box a fixed address (or
+#   a DHCP reservation), let the network through the host's firewall to
+#   that port, and don't forward the port on a router. The kernel holds the
+#   socket to the address's interface: Linux needs 5.7 or later (or
+#   CAP_NET_RAW), macOS holds an IPv4 address alone, and Windows needs every
+#   interface of the family to keep its strong host model; where it cannot,
+#   the console stays on this machine and says why. Leave it unset for
+#   loopback alone; public mode refuses it.
+#   While this key is in the file, even empty, bridge 0.2.3 and earlier
+#   refuse the file: an update's automatic rollback to one of them is not
+#   made, and one installed by hand will not start. Remove the whole line
+#   before you go back to one. BRIDGE_ADMIN_LAN_ADDRESS instead costs no
+#   rollback: earlier versions ignore it and keep the console on this
+#   machine.
+# adminLANAddress: "192.168.1.20"
 #
 # public: VPS deployment posture. Admin console accepts non-loopback
 #   binds and gates every request behind a session cookie

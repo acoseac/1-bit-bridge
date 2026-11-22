@@ -1987,6 +1987,8 @@ function wireUpload(signal) {
   // banner and the list agreeing (B797 round 4).
   renderResumable();
   refreshResumable();
+  // Before any upload: what a page with no SubtleCrypto checks (B989).
+  uploadLengthOnlyNote();
 
   filesInput?.addEventListener("change", () => stageFiles(collectFromInput(filesInput)));
   folderInput?.addEventListener("change", () => stageFiles(collectFromInput(folderInput)));
@@ -2844,6 +2846,30 @@ async function transferAll(run, session) {
   if (failure !== null) throw failure;
 }
 
+// uploadLengthOnlyNoteText and uploadLengthOnlyEndText say, before an upload
+// and at its end, what a page with no SubtleCrypto checks: the browser gives
+// the console SHA-256 only in a secure context, which plain HTTP on the home
+// network is not (backlog B989, the plan's section 6.3). The end names that
+// cause, where it once blamed the browser.
+// Functions rather than constants, so a harness that carries what a page's
+// functions reach carries these too.
+function uploadLengthOnlyNoteText() {
+  return "From this device, uploads are checked for length only: the browser gives the console SHA-256 only on the bridge's own machine or over HTTPS.";
+}
+function uploadLengthOnlyEndText() {
+  return "Note: each chunk was checked for its length only, since the browser gives the console SHA-256 only on the bridge's own machine or over HTTPS.";
+}
+
+// uploadLengthOnlyNote shows uploadLengthOnlyNoteText on the upload page where
+// the page is no secure context, before any upload begins.
+function uploadLengthOnlyNote() {
+  const el = document.getElementById("upload-length-only");
+  if (!el) return;
+  const secure = globalThis.isSecureContext !== false && !!globalThis.crypto?.subtle;
+  el.textContent = secure ? "" : uploadLengthOnlyNoteText();
+  el.hidden = secure;
+}
+
 // chunkDigestHeaders builds the RFC 9530 Content-Digest for one chunk.
 //
 // Each chunk is checked against the bytes in that request. That does not say
@@ -2853,14 +2879,17 @@ async function transferAll(run, session) {
 // of a different version. A client that declares a whole-file digest still
 // gets that check on the completing chunk; this console does not declare one.
 //
-// crypto.subtle exists only in a secure context. Both supported admin
-// deployments are one (loopback is potentially-trustworthy; public mode serves
-// the console over TLS), so this is populated in practice. An unusual
-// deployment must lose verification rather than the ability to upload, so a
-// missing or failing SubtleCrypto degrades to no header — and says so at the
-// end, because silently dropping an integrity guarantee is worse than not
-// having offered one: null here, which the chunk's run records on its own
-// upload (putUploadChunk), never on whatever upload the page holds by then.
+// crypto.subtle exists only in a secure context. Loopback is one (it is
+// potentially-trustworthy) and public mode serves the console over TLS, but
+// the console a loopback bridge opens on the home network (adminLANAddress,
+// backlog B989) is plain HTTP on a private address, which is not: there each
+// chunk is checked for its length and its offset alone, and the page says so
+// before an upload begins (uploadLengthOnlyNote) and at its end. A page with
+// no SubtleCrypto must lose verification rather than the ability to upload,
+// so a missing or failing SubtleCrypto degrades to no header, and says so,
+// because silently dropping an integrity guarantee is worse than not having
+// offered one: null here, which the chunk's run records on its own upload
+// (putUploadChunk), never on whatever upload the page holds by then.
 async function chunkDigestHeaders(bytes) {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) return null;
@@ -2967,11 +2996,7 @@ function reportCommit(state, res) {
   }
   const failed = (res.outcomes || []).filter((o) => o.status === "failed");
   if (failed.length) msg += ` First failure: ${failed[0].path} (${failed[0].reason}).`;
-  if (state.digestUnavailable) {
-    msg +=
-      " Note: this browser did not expose SHA-256 for chunk checks, so each" +
-      " chunk was checked for length only.";
-  }
+  if (state.digestUnavailable) msg += " " + uploadLengthOnlyEndText();
   uploadAwaitingScan = !!res.committed;
   showUploadResult(msg, !!res.committed);
   resetUpload();
@@ -3472,6 +3497,13 @@ function initPairModal() {
   };
 }
 
+// lanRotationWarning is the rotation's confirmation on a page the
+// home-network socket served (backlog B989, the plan's §6.2): it names no
+// remedy that sends a new credential across the network.
+function lanRotationWarning() {
+  return "This page is not encrypted: the new token would cross your network in the clear, as the old one did. Rotate from the bridge's own machine, or over an SSH tunnel to it.";
+}
+
 function initDevices() {
   initConsoleSessions();
   const modal = document.getElementById("pair-modal");
@@ -3512,7 +3544,14 @@ function initDevices() {
       const tr = btn.closest("tr");
       const id = tr.dataset.id;
       const name = tr.dataset.name || tr.querySelector("td").textContent;
-      if (!confirm(`Rotate the token for ${name}?\n\nThe device will need to scan a fresh QR (or paste the new raw token) before it can reach the bridge again. The previous raw token stops working immediately.`)) return;
+      // A page the home-network socket served (backlog B989) is plain
+      // HTTP: the rotation's answer carries the new token across the
+      // network as the old one crossed it, so the confirmation says so
+      // before anything is sent, and the result step keeps the advice the
+      // layout renders for that socket alone.
+      let ask = `Rotate the token for ${name}?\n\nThe device will need to scan a fresh QR (or paste the new raw token) before it can reach the bridge again. The previous raw token stops working immediately.`;
+      if (document.body && document.body.dataset.socket === "lan") ask += `\n\n${lanRotationWarning()}`;
+      if (!confirm(ask)) return;
       try {
         const r = await API.post(`/api/tokens/${id}/rotate`, {});
         document.getElementById("pair-qr-img").src = r.qrDataURL;

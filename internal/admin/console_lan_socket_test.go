@@ -1189,7 +1189,10 @@ func TestAnEventStreamEndsAtItsSocketsRetirement(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := loggingtest.Record(t)
 			seams := &ConsoleLANSeams{}
-			r := newLANRig(t, newLANBox(t), seams, nil)
+			// The retirement's wait is bounded from its start, and the case
+			// holds the retirement after its section for up to 2 s: the
+			// bound outlasts that hold, so a wait it ends is the code's.
+			r := newLANRig(t, newLANBox(t), seams, func(p *ConsoleLANPlan) { p.RetireWait = socketWait })
 			ready := tc.setup(r)
 			released := make(chan int, 16)
 			seams.Released = func(left int) { released <- left }

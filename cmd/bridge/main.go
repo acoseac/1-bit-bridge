@@ -3220,7 +3220,12 @@ type serveOpts struct {
 	// where the port already accepts and the console does not yet
 	// (backlog B313).
 	beforeAdminServe func()
-	// consoleLAN is the home-network socket's seams (backlog B989).
+	// consoleLAN stands in, field by field, for the home-network socket's
+	// production reading, hold, Windows table, bind, .local name and tick
+	// (backlog B989, consoleLANProduction): a field left zero is
+	// production's. No boot test binds the host's LAN addresses: each hands
+	// a reading and a bind of its own. Per invocation for tailscaleCLI's
+	// reason.
 	consoleLAN consoleLANSeams
 	// dataDirTryLock stands in for fsutil.TryLock on the data dir's lock
 	// file (lockServeDataDirWith). Nil (the kernel's answer) everywhere
@@ -6596,6 +6601,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		LoopbackErr:     outLoop.StartErr,
 		Tokens:          store.List,
 	}
+	// The console's doctor reads its own process's home-network socket
+	// (backlog B989) through this, set once the console exists.
+	var consoleLANServer atomic.Pointer[admin.Server]
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:    cfgHolder,
 		CfgPath:      absCfgPath,
@@ -6681,7 +6689,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// Ports this process bound, so the console's preflight answers
 		// the port checks from knowledge rather than a bind probe that
 		// can only fail against our own listeners.
-		DoctorRun:             adminDoctorRunnerFor(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc), doctorDAC, hostLogs()),
+		DoctorRun: adminDoctorRunnerForServing(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc), doctorDAC, hostLogs(),
+			func() admin.ConsoleLANState { return consoleLANServer.Load().ConsoleLAN() }),
 		OutputChecklist:       consoleOutputChecklist(checklistSrc),
 		PlayerOutput:          playerConsole,
 		AnalysisSweep:         analysisSweepClosure(analysisSweepState),
@@ -7028,6 +7037,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// Drain the post-scan nudge into the player's catalog invalidation.
 	// Started here, after adminSrv exists; the nudge channel's buffer
 	// carries anything fired in the gap.
+	consoleLANServer.Store(adminSrv)
 	startCatalogInvalidator(scanCtx, catalogNudge, adminSrv)
 
 	// Build the player's library snapshot ahead of the first request.
@@ -7044,6 +7054,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 
 	adminCtx, adminCancel := context.WithCancel(context.Background())
 	defer adminCancel()
+	// The console on the home network (backlog B989): its first attempt is
+	// made here, synchronously, before the console's goroutine starts, so
+	// the banner says what happened; the loop that retries and reads the
+	// box again runs from ServeListener, which stops it and retires the
+	// socket at the shutdown. A bind that fails never reaches adminErr: the
+	// console serves loopback alone and says why.
+	consoleLANSeamsNow := opts.consoleLAN.over(consoleLANProduction(func() bool { return mdnsLife.Load().Running() }))
+	consoleLANState := adminSrv.OpenConsoleLAN(adminCtx, consoleLANPlanFor(cfg, consoleLANSeamsNow))
 	adminErr := make(chan error, 1)
 	bgWriters.Add(1)
 	go func() {
@@ -7158,6 +7176,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 		fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
 		fmt.Fprintf(stdout, "Admin console: %s — add library folders, pair devices, view stats\n", operatorAdminURL(cfg, adminScheme))
+		consoleLANBanner(stdout, consoleLANState, consoleLANPortOf(cfg))
 	}
 
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover

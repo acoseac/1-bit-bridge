@@ -867,6 +867,17 @@ header.sidebar {
   overflow-wrap: anywhere;
 }
 
+/* Where the console answers (backlog B989): the home-network socket's line,
+ * under the build line, inside the drawer below 1024px like the rest of the
+ * foot. Body-sized prose would crowd the rail; a URL in it must wrap. */
+.console-lan-line {
+  margin: 0.4rem 0 0;
+  font-size: var(--text-micro);
+  line-height: 1.4;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
 /* Connection-status badge. Reflects the SSE EventSource readyState so the
  * operator can tell at a glance whether live updates are flowing.
  *   data-state="connecting"    initial render, before onopen fires

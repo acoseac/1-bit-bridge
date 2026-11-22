@@ -395,7 +395,12 @@ type Deps struct {
 	Backups func(ctx context.Context) []Check
 
 	// ConsoleLAN is what this run knows of the console's home-network
-	// posture (backlog B989).
+	// posture (backlog B989): the running bridge's report of its socket, and
+	// apart from it what bridge.yaml and this process's environment say now.
+	// Run places its two lines, console-lan and console-lan-rollback, right
+	// after port-admin, each only where it has something to say; nil says
+	// nothing, as `bridge init`'s preflight does, which says its own before
+	// it saves.
 	ConsoleLAN *ConsoleLANFacts
 
 	// LogPath is the file the log-file-size line grades, cmd/bridge's
@@ -538,7 +543,7 @@ func Run(ctx context.Context, d Deps) Report {
 		checkTLSCertSANs,
 		checkPairingURL,
 		checkAPIPort,
-		checkAdminPort,
+		checkAdminPort, // adminPortCheckAt
 		checkLibraryRoots,
 		checkServiceManager,
 		checkBrowserOpener,
@@ -566,8 +571,13 @@ func Run(ctx context.Context, d Deps) Report {
 	if d.InstallProbation != nil {
 		out = append(out, d.InstallProbation(ctx)...)
 	}
-	for _, fn := range checks {
+	for i, fn := range checks {
 		out = append(out, fn(ctx, d))
+		// The console's home-network lines sit right after port-admin
+		// (backlog B989); a run that says nothing of the posture has none.
+		if i == adminPortCheckAt {
+			out = append(out, consoleLANChecks(d)...)
+		}
 	}
 	if d.Backups != nil {
 		out = append(out, d.Backups(ctx)...)

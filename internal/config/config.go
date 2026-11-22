@@ -50,7 +50,11 @@ type Config struct {
 	LibraryRoots  []string `yaml:"libraryRoots"`
 	ListenAddress string   `yaml:"listenAddress"`
 	AdminAddress  string   `yaml:"adminAddress,omitempty"`
-	// AdminLANAddress is the console's home-network address (backlog B989).
+	// AdminLANAddress, set, is a private IP address of this box on which a
+	// loopback install serves its console too, at adminAddress's port, to
+	// devices on the network that address belongs to, with no login
+	// (backlog B989). Empty, the default, is a console on loopback alone.
+	// Only serve's start reads it to bind (internal/admin's ConsoleLANPlan).
 	AdminLANAddress string `yaml:"adminLANAddress,omitempty"`
 	DataDir         string `yaml:"dataDir"`
 	TLSCertPath     string `yaml:"tlsCertPath,omitempty"`
@@ -124,6 +128,11 @@ type Config struct {
 	// zero value, whatever the field's tag (filedEnvValues, marshal). It is
 	// set on that save's copy alone, and Clone drops it.
 	filed []string
+	// fileLANKey is the adminLANAddress key of the file the load that made
+	// this config read, as its bytes held it (LANKeyOf, backlog B989): its
+	// presence, empty or not, and its own value, apart from what a variable
+	// made of the leaf. Clone copies it.
+	fileLANKey LANKey
 }
 
 // OutputConfig is the bridge reporting the player beside it. MPD is
@@ -3187,6 +3196,11 @@ func loadData(path string, data []byte) (*Config, error) {
 		reason := ValueFreeYAMLError(err)
 		return nil, &RefusedError{err: fmt.Errorf("parse config %q: %w", path, reason), reason: reason}
 	}
+	// The adminLANAddress key as the bytes hold it, before any variable
+	// (backlog B989): DecodeFile took the bytes, so LANKeyOf does too.
+	if key, err := LANKeyOf(data); err == nil {
+		cfg.fileLANKey = key
+	}
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()
 	absPath, err := filepath.Abs(path)
@@ -4069,6 +4083,12 @@ func (c *Config) validate(warn bool) error {
 			}
 		}
 	} else if err := ValidateLoopbackAddress("adminAddress", c.AdminAddress); err != nil {
+		return err
+	}
+	// AdminLANAddress (backlog B989): a shape check of the console's
+	// home-network address, never a question about the host, which serve's
+	// bind asks.
+	if err := c.validateConsoleLAN(); err != nil {
 		return err
 	}
 	// Demo-mode static token: must be a well-formed SHA-256 hex digest
