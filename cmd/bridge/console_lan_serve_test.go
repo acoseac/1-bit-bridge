@@ -374,6 +374,19 @@ func TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo(t *testin
 	if status, line := consoleDoctorLine(t, s.admin, "console-lan"); status != "warn" || !strings.Contains(line, "this machine only") {
 		t.Errorf("the console's doctor: %s %q", status, line)
 	}
+	if status, line := runDoctorJSON(t, cfg, "console-lan"); status != "warn" || !strings.Contains(line, "this machine only") {
+		t.Errorf("bridge doctor: %s %q", status, line)
+	}
+	// The menu's line, on a page the loopback socket serves.
+	page, err := http.Get("http://" + s.admin + "/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(page.Body)
+	_ = page.Body.Close()
+	if !strings.Contains(string(body), "Until then this console answers on this machine only.") {
+		t.Errorf("the menu does not say the console answers on this machine only")
+	}
 	req, _ := http.NewRequest(http.MethodGet, "http://"+s.admin+"/api/console", nil)
 	req.Host = serveLANAddr + ":" + port
 	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 421 {
