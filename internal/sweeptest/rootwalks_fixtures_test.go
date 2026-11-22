@@ -1,6 +1,7 @@
 package sweeptest
 
 import (
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
@@ -413,8 +414,9 @@ func TestFreshSweep(t *testing.T) { _ = sweepFresh(filepath.WalkDir, "../..") }
 // through a parameter); a walk a test file holds at package level, listed or
 // not; one the bridge's code holds there, unlisted; a walk in both lists;
 // an item or an entry naming no walk; a listed test that does not reach its
-// walk, is another directory's, or is not there; a rule its walk's branch for
-// a directory does not reach, held by a function that branch does not call,
+// walk, calls only another package's function of the walk's name, is
+// another directory's, or is not there; a rule its walk's branch for a
+// directory does not reach, held by a function that branch does not call,
 // or not the rule the function holds; and an item listed twice.
 func TestCheckWalksNamesEveryWayTheListsCanBeWrong(t *testing.T) {
 	sweepItem := listedWalk{key: "sweep/sweep.go walkTree", tests: []string{"TestSweepTheRoot"}, rule: ruleByName, in: "skips"}
@@ -469,6 +471,14 @@ func TestCheckWalksNamesEveryWayTheListsCanBeWrong(t *testing.T) {
 				return listed
 			},
 			want: "says TestUnrelated makes sweep/sweep.go walkTree from the root, and no test of that name in its directory reaches it"},
+		{name: "a listed test that calls another package's function of its walk's name",
+			files: map[string]string{"sweep/other_test.go": "package sweep\n\nimport (\n\t\"path/filepath\"\n\t\"testing\"\n\n\t\"example/other\"\n)\n\n" +
+				"func TestSweepAnotherTree(t *testing.T) { _ = other.walkTree(filepath.WalkDir, \"..\") }\n"},
+			edit: func(listed []listedWalk, _ map[string]string) []listedWalk {
+				listed[0].tests = []string{"TestSweepAnotherTree"}
+				return listed
+			},
+			want: "says TestSweepAnotherTree makes sweep/sweep.go walkTree from the root, and no test of that name in its directory reaches it"},
 		{name: "a listed test of another directory",
 			edit: func(listed []listedWalk, _ map[string]string) []listedWalk {
 				listed[1].tests = []string{"TestSweepTheRoot"}
@@ -526,6 +536,186 @@ func TestCheckWalksNamesEveryWayTheListsCanBeWrong(t *testing.T) {
 				t.Errorf("checkWalks found %q, want nothing", problems)
 			case row.want != "" && (len(problems) != 1 || !strings.Contains(problems[0], row.want)):
 				t.Errorf("checkWalks found %q, want one problem holding %q", problems, row.want)
+			}
+		})
+	}
+}
+
+// ruleWalk is the file of a package whose one walk from the root, walkRoot,
+// is handed its walk as the sweeps are, and runs for a directory the code a
+// case of TestARuleHoldsOnlyWhereItsPredicateSkipsTheDirectory gives, with
+// the case's imports and declarations beside it.
+const ruleWalk = `package %s
+
+import (
+	"io/fs"
+	"path/filepath"
+	"strings"
+%s)
+
+func walkRoot(walk func(string, fs.WalkDirFunc) error, root string) error {
+	return walk(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+%s
+		}
+		return nil
+	})
+}
+%s`
+
+// ruleWalkTest is that package's test, which makes walkRoot from the root.
+const ruleWalkTest = `package %s
+
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestWalkRoot(t *testing.T) { _ = walkRoot(filepath.WalkDir, "..") }
+`
+
+// sweeptestImport and otherImports are a case's imports: this package, and
+// beside it another package of the fixture's module.
+const (
+	sweeptestImport = "\n\t\"github.com/acoseac/1-bit-bridge/internal/sweeptest\"\n"
+	otherImports    = "\n\t\"example/other\"\n\t\"github.com/acoseac/1-bit-bridge/internal/sweeptest\"\n"
+)
+
+// dsdconvCondition is the condition on which dsdconv's walk of the module
+// (served_test.go's moduleImports) skips a directory below the root.
+const dsdconvCondition = `path != root && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || ` +
+	`name == "testdata" || name == "vendor" || sweeptest.IsOtherCheckout(root, path))`
+
+// skipsHelper is a boolean helper, in skipsForCitations' shape, that
+// answers true where sweeptest.IsMakeTestTmpDir does.
+const skipsHelper = `
+func skips(root, path string) bool {
+	if path == root {
+		return false
+	}
+	if sweeptest.IsMakeTestTmpDir(root, path) {
+		return true
+	}
+	return false
+}
+`
+
+// dirRuleHelper is a helper in hashCostDirRule's shape: filepath.SkipDir
+// where sweeptest.IsMakeTestTmpDir holds, nil to descend.
+const dirRuleHelper = `
+func dirRule(root, path string) error {
+	if path == root {
+		return nil
+	}
+	if sweeptest.IsMakeTestTmpDir(root, path) {
+		return filepath.SkipDir
+	}
+	return nil
+}
+`
+
+// dirRuleOfNames is a helper in moduleDirRule's shape: filepath.SkipDir for
+// a name a boolean helper says the go tool ignores, as goToolIgnores does.
+const dirRuleOfNames = `
+func dirRule(root, path, name string) error {
+	if path == root {
+		return nil
+	}
+	if ignores(name) || name == "vendor" {
+		return filepath.SkipDir
+	}
+	return nil
+}
+
+func ignores(name string) bool { return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") }
+`
+
+// TestARuleHoldsOnlyWhereItsPredicateSkipsTheDirectory runs checkWalks over
+// a module of one walk from the root, listed with its rule, once for each
+// way its branch for a directory holds the rule or only seems to. The rule
+// holds where its predicate's true leads to a return of filepath.SkipDir:
+// in a condition of the branch's own (dsdconv's, as it stands), or by way of
+// a helper of the walk's package, a boolean one whose true the branch turns
+// into SkipDir, or one whose SkipDir the branch returns, a boolean one of
+// its own in its condition included; and so it does for the two forms of
+// the predicate that two directories hold, this package's own
+// IsMakeTestTmpDir and the census's makeTestTmpDir. It does not hold where
+// the predicate's answer is dropped or leads to another return (dsdconv's
+// condition with its SkipDir made nil), where a helper's answer is dropped
+// or ignored, nor for a function of the predicate's name in the walk's own
+// package or in another, a constant of the census's name outside the
+// census, or another package's function of a helper's name.
+func TestARuleHoldsOnlyWhereItsPredicateSkipsTheDirectory(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		dir, pkg string // the walk's package, by its slash path below the root and its name; "" for rule
+		imports  string // the walk's imports beside io/fs, path/filepath and strings
+		rule, in string // the walk's rule and the function its item says holds it
+		branch   string // what the walk runs for a directory
+		decls    string // the declarations beside the walk
+		problem  bool   // whether the rule does not hold
+	}{
+		{name: "dsdconv's condition, as it stands", imports: sweeptestImport, rule: ruleDotDirectory, in: "walkRoot",
+			branch: "if " + dsdconvCondition + " {\nreturn filepath.SkipDir\n}\nreturn nil"},
+		{name: "dsdconv's condition, its SkipDir made nil", imports: sweeptestImport, rule: ruleDotDirectory, in: "walkRoot",
+			branch: "if " + dsdconvCondition + " {\nreturn nil\n}\nreturn nil", problem: true},
+		{name: "a function of the walk's own package named IsMakeTestTmpDir", imports: sweeptestImport, rule: ruleByName, in: "walkRoot",
+			branch: "if IsMakeTestTmpDir(root, path) {\nreturn filepath.SkipDir\n}\nreturn nil",
+			decls:  "\nfunc IsMakeTestTmpDir(root, dir string) bool { return false }\n", problem: true},
+		{name: "the predicate called, its answer dropped", imports: sweeptestImport, rule: ruleByName, in: "walkRoot",
+			branch: "_ = sweeptest.IsMakeTestTmpDir(root, path)\nreturn nil", problem: true},
+		{name: "sweeptest's own IsMakeTestTmpDir, in sweeptest", dir: sweeptestDir, pkg: "sweeptest", rule: ruleByName, in: "walkRoot",
+			branch: "if IsMakeTestTmpDir(root, path) {\nreturn filepath.SkipDir\n}\nreturn nil",
+			decls:  "\nfunc IsMakeTestTmpDir(root, dir string) bool { return filepath.Clean(dir) == filepath.Join(root, \".tmp\") }\n"},
+		{name: "the census's comparison with its own makeTestTmpDir", dir: censusDir, pkg: "main", rule: ruleByName, in: "walkRoot",
+			branch: "rel, err := filepath.Rel(root, path)\nif err != nil {\nreturn err\n}\nif filepath.ToSlash(rel) == makeTestTmpDir {\nreturn filepath.SkipDir\n}\nreturn nil",
+			decls:  "\nconst makeTestTmpDir = \".tmp\"\n"},
+		{name: "another package's IsMakeTestTmpDir", imports: otherImports, rule: ruleByName, in: "walkRoot",
+			branch: "if other.IsMakeTestTmpDir(root, path) {\nreturn filepath.SkipDir\n}\nreturn nil", problem: true},
+		{name: "a constant named makeTestTmpDir outside the census", imports: sweeptestImport, rule: ruleByName, in: "walkRoot",
+			branch: "if name == makeTestTmpDir {\nreturn filepath.SkipDir\n}\nreturn nil",
+			decls:  "\nconst makeTestTmpDir = \".tmp\"\n", problem: true},
+		{name: "a boolean helper's true, which the branch turns into SkipDir", imports: sweeptestImport, rule: ruleByName, in: "skips",
+			branch: "if skips(root, path) {\nreturn filepath.SkipDir\n}\nreturn nil", decls: skipsHelper},
+		{name: "a boolean helper's answer, ignored", imports: sweeptestImport, rule: ruleByName, in: "skips",
+			branch: "skips(root, path)\nreturn nil", decls: skipsHelper, problem: true},
+		{name: "a helper's SkipDir, which the branch returns", imports: sweeptestImport, rule: ruleByName, in: "dirRule",
+			branch: "return dirRule(root, path)", decls: dirRuleHelper},
+		{name: "a helper's SkipDir, dropped", imports: sweeptestImport, rule: ruleByName, in: "dirRule",
+			branch: "_ = dirRule(root, path)\nreturn nil", decls: dirRuleHelper, problem: true},
+		{name: "a helper's SkipDir where a boolean helper of its own holds", imports: sweeptestImport, rule: ruleDotDirectory, in: "dirRule",
+			branch: "return dirRule(root, path, name)", decls: dirRuleOfNames},
+		{name: "another package's function of a helper's name", imports: otherImports, rule: ruleByName, in: "Skips",
+			branch: "if other.Skips(root, path) {\nreturn filepath.SkipDir\n}\nreturn nil",
+			decls:  strings.Replace(skipsHelper, "func skips", "func Skips", 1), problem: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir, pkg := c.dir, c.pkg
+			if dir == "" {
+				dir, pkg = "rule", "rule"
+			}
+			root := filepath.Join(t.TempDir(), "checkout")
+			writeModule(t, root, map[string]string{
+				"go.mod":              "module example\n",
+				dir + "/walk.go":      fmt.Sprintf(ruleWalk, pkg, c.imports, c.branch, c.decls),
+				dir + "/walk_test.go": fmt.Sprintf(ruleWalkTest, pkg),
+			})
+			mod, err := readModule(filepath.WalkDir, root)
+			if err != nil {
+				t.Fatalf("the sweep failed: %v", err)
+			}
+			item := listedWalk{key: dir + "/walk.go walkRoot", tests: []string{"TestWalkRoot"}, rule: c.rule, in: c.in}
+			problems := checkWalks(mod, []listedWalk{item}, map[string]string{})
+			want := fmt.Sprintf("says %s skips the TMPDIR %s, in %s, and no branch its walk takes for a directory", item.key, c.rule, c.in)
+			switch {
+			case !c.problem && len(problems) != 0:
+				t.Errorf("checkWalks found %q, want nothing", problems)
+			case c.problem && (len(problems) != 1 || !strings.Contains(problems[0], want)):
+				t.Errorf("checkWalks found %q, want one problem holding %q", problems, want)
 			}
 		})
 	}

@@ -25,10 +25,10 @@ import (
 // it skips make test's TMPDIR, held in its walk's branch for a directory; any
 // other walk is one walksElsewhere names, with what it walks instead. A walk
 // of neither kind fails, and so does an item of either that names no walk, a
-// listed test that does not reach its walk, a rule its walk's branch for a
-// directory does not reach, and a walk a test file holds at package level,
-// which the sweeps took as their seam until they were handed their walk
-// (the B567 follow-up).
+// listed test that does not reach its walk, a rule whose predicate does not
+// lead its walk's branch for a directory to filepath.SkipDir, and a walk a
+// test file holds at package level, which the sweeps took as their seam
+// until they were handed their walk (the B567 follow-up).
 //
 // B740's record said every Go-file sweep from the root skipped the TMPDIR,
 // and B567 found three that read it: nothing listed the walks that start at
@@ -157,8 +157,10 @@ type moduleSource struct {
 // packageDir is one directory's Go files, its test files among them, and
 // what the sweep knows of the names they declare.
 type packageDir struct {
+	rel        string // its slash path below the root, "." for the root's own
 	files      []*sourceFile
 	funcs      map[string][]funcRef // its functions and methods, by bare name
+	consts     map[string]bool      // the constants it declares at package level
 	walkTypes  map[string]bool      // the func types it declares in filepath.WalkDir's shape
 	walkFields map[string]bool      // the struct fields it declares in that shape
 	callbacks  map[string]bool      // its functions and methods in a walk callback's shape
@@ -178,11 +180,12 @@ type funcRef struct {
 	file *sourceFile
 }
 
-// imports holds a file's names for the packages the sweep reads a walk by,
-// "" for one it does not import, and every name it imports a package as.
+// imports holds a file's names for the packages the sweep reads a walk and
+// its rule by, "" for one it does not import, and every name it imports a
+// package as.
 type imports struct {
-	filepath, fs, os, strings, fsutil string
-	packages                          map[string]bool
+	filepath, fs, os, strings, fsutil, sweeptest string
+	packages                                     map[string]bool
 }
 
 // readModule reads, with walk, every Go file below root that the go tool
@@ -268,14 +271,14 @@ func (m *moduleSource) read(fset *token.FileSet, root, path string) error {
 	}
 	dir := m.dirs[key]
 	if dir == nil {
-		dir = &packageDir{}
+		dir = &packageDir{rel: key}
 		m.dirs[key] = dir
 	}
 	dir.files = append(dir.files, &sourceFile{rel: rel, file: f, names: importsOf(f)})
 	return nil
 }
 
-// importsOf is f's names for the packages a walk is read by.
+// importsOf is f's names for the packages a walk and its rule are read by.
 func importsOf(f *ast.File) imports {
 	n := imports{packages: map[string]bool{}}
 	for _, imp := range f.Imports {
@@ -302,16 +305,19 @@ func importsOf(f *ast.File) imports {
 			n.strings = name
 		case "github.com/acoseac/1-bit-bridge/internal/fsutil":
 			n.fsutil = name
+		case "github.com/acoseac/1-bit-bridge/internal/sweeptest":
+			n.sweeptest = name
 		}
 	}
 	return n
 }
 
 // index fills in what d's files declare: its functions by bare name, its
-// types and struct fields in filepath.WalkDir's shape, and its functions in
-// a walk callback's.
+// constants, its types and struct fields in filepath.WalkDir's shape, and
+// its functions in a walk callback's.
 func (d *packageDir) index() {
 	d.funcs = map[string][]funcRef{}
+	d.consts = map[string]bool{}
 	d.walkTypes = map[string]bool{}
 	d.walkFields = map[string]bool{}
 	d.callbacks = map[string]bool{}
@@ -320,13 +326,21 @@ func (d *packageDir) index() {
 	for _, f := range d.files {
 		for _, decl := range f.file.Decls {
 			gd, ok := decl.(*ast.GenDecl)
-			if !ok || gd.Tok != token.TYPE {
+			if !ok {
 				continue
 			}
 			for _, spec := range gd.Specs {
-				ts := spec.(*ast.TypeSpec)
-				if ft, ok := ts.Type.(*ast.FuncType); ok && f.names.isWalk(ft) {
-					d.walkTypes[ts.Name.Name] = true
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					if ft, ok := s.Type.(*ast.FuncType); ok && f.names.isWalk(ft) {
+						d.walkTypes[s.Name.Name] = true
+					}
+				case *ast.ValueSpec:
+					if gd.Tok == token.CONST {
+						for _, id := range s.Names {
+							d.consts[id.Name] = true
+						}
+					}
 				}
 			}
 		}
@@ -733,7 +747,7 @@ type listedWalk struct {
 	key   string   // the walk: its file's slash path and its function
 	tests []string // the tests that make it from the root
 	rule  string   // ruleByName or ruleDotDirectory
-	in    string   // the function that holds the rule: the walk's own, or one it calls
+	in    string   // the function that holds the rule: the walk's own, or a helper on its way to the predicate
 }
 
 // ruleByName and ruleDotDirectory are the two rules a walk from the root
@@ -743,11 +757,20 @@ const (
 	ruleDotDirectory = "as a dot-directory"
 )
 
-// ruleCheck is what each rule's function must hold, as a problem says it.
-var ruleCheck = map[string]string{
-	ruleByName:       "a call of IsMakeTestTmpDir (in the census, its makeTestTmpDir)",
+// rulePredicate is each rule's predicate, as a problem names it.
+var rulePredicate = map[string]string{
+	ruleByName:       "sweeptest.IsMakeTestTmpDir (in sweeptest, its own IsMakeTestTmpDir; in the census, a comparison with its makeTestTmpDir)",
 	ruleDotDirectory: `strings.HasPrefix of a name and "."`,
 }
+
+// sweeptestDir and censusDir are the two directories whose code holds the
+// rule by its name in a form of its own: this package, which calls its own
+// IsMakeTestTmpDir, and the build-tag census, a program that cannot import
+// this package, which compares a name with its own makeTestTmpDir.
+const (
+	sweeptestDir = "internal/sweeptest"
+	censusDir    = "scripts/third-party-licenses"
+)
 
 // inventoryItem is an item of that list, its lines joined: the walk's file
 // and function, the tests that make it from the root, its rule and the
@@ -886,7 +909,8 @@ func checkWalks(mod *moduleSource, listed []listedWalk, elsewhere map[string]str
 
 // checkListed checks the walk w against its item l: each test l names must
 // be a test of w's directory that reaches w, and w's branch for a directory
-// must reach l's rule through the function l says holds it.
+// must return filepath.SkipDir where l's rule holds, by way of the function
+// l says holds it.
 func (w walkSite) checkListed(l listedWalk) []string {
 	fd, ok := w.decl.(*ast.FuncDecl)
 	if !ok {
@@ -901,8 +925,8 @@ func (w walkSite) checkListed(l listedWalk) []string {
 	}
 	if !w.ruleHeld(fd, l) {
 		problems = append(problems, fmt.Sprintf("MakeTestTmpDir's doc says %s skips the TMPDIR %s, in %s, and no branch "+
-			"its walk takes for a directory (an if on the entry's IsDir) reaches %s through %s", l.key, l.rule, l.in,
-			ruleCheck[l.rule], l.in))
+			"its walk takes for a directory (an if on the entry's IsDir) returns filepath.SkipDir where %s holds, by way of %s",
+			l.key, l.rule, l.in, rulePredicate[l.rule], l.in))
 	}
 	return problems
 }
@@ -917,7 +941,7 @@ func (d *packageDir) reachesFrom(test, target string) bool {
 		if ref.decl.Recv != nil || ref.decl.Body == nil {
 			continue
 		}
-		if test == target || d.reached(ref.decl.Body)[target] {
+		if test == target || d.reached(ref.decl.Body, ref.file.names)[target] {
 			return true
 		}
 	}
@@ -925,34 +949,27 @@ func (d *packageDir) reachesFrom(test, target string) bool {
 }
 
 // ruleHeld reports whether a branch fd's walk takes for a directory
-// (dirBranches) reaches l's rule: in the branch itself, or in what it calls,
-// where l says fd holds it, and otherwise through the function l names,
-// which must hold it.
+// (dirBranches) returns filepath.SkipDir where l's rule holds (skipCheck),
+// by way of the function l names: any way, where that is fd itself.
 func (w walkSite) ruleHeld(fd *ast.FuncDecl, l listedWalk) bool {
+	through := l.in
+	if through == fd.Name.Name {
+		through = ""
+	}
+	c := &skipCheck{dir: w.dir, rule: l.rule, visiting: map[*ast.FuncDecl]bool{}}
 	for _, branch := range dirBranches(w.file.names, fd) {
-		if l.in == fd.Name.Name {
-			if w.dir.holdsRule(branch, w.file, l.rule) {
-				return true
-			}
-			continue
-		}
-		if !w.dir.reached(branch)[l.in] {
-			continue
-		}
-		for _, ref := range w.dir.funcs[l.in] {
-			if ref.decl.Body != nil && w.dir.holdsRule(ref.decl.Body, ref.file, l.rule) {
-				return true
-			}
+		if c.skipsIn(branch, w.file, through, returnsSkipDir) {
+			return true
 		}
 	}
 	return false
 }
 
 // dirBranches is every branch fd's walk callbacks take for a directory: an
-// if whose condition asks an entry's IsDir, its init, its condition and its
-// body, and not its else.
-func dirBranches(n imports, fd *ast.FuncDecl) []ast.Node {
-	var out []ast.Node
+// if whose condition asks an entry's IsDir, with that condition and its
+// body, and not its else, which an entry that is no directory takes.
+func dirBranches(n imports, fd *ast.FuncDecl) []*ast.IfStmt {
+	var out []*ast.IfStmt
 	ast.Inspect(fd, func(node ast.Node) bool {
 		lit, ok := node.(*ast.FuncLit)
 		if !ok || !n.isCallback(lit.Type) {
@@ -960,11 +977,7 @@ func dirBranches(n imports, fd *ast.FuncDecl) []ast.Node {
 		}
 		ast.Inspect(lit.Body, func(node ast.Node) bool {
 			if is, ok := node.(*ast.IfStmt); ok && asksIsDir(is.Cond) {
-				branch := &ast.BlockStmt{List: []ast.Stmt{&ast.ExprStmt{X: is.Cond}, is.Body}}
-				if is.Init != nil {
-					branch.List = append(branch.List, is.Init)
-				}
-				out = append(out, branch)
+				out = append(out, &ast.IfStmt{If: is.If, Cond: is.Cond, Body: is.Body})
 			}
 			return true
 		})
@@ -988,67 +1001,217 @@ func asksIsDir(cond ast.Expr) bool {
 	return false
 }
 
-// holdsRule reports whether node, in file, holds the check rule names, or
-// reaches a function of d that does.
-func (d *packageDir) holdsRule(node ast.Node, file *sourceFile, rule string) bool {
-	if holdsCheck(node, file.names, rule) {
-		return true
-	}
-	for name := range d.reached(node) {
-		for _, ref := range d.funcs[name] {
-			if ref.decl.Body != nil && holdsCheck(ref.decl.Body, ref.file.names, rule) {
-				return true
-			}
-		}
-	}
-	return false
+// skipCheck asks whether the code of one directory skips make test's TMPDIR
+// by one rule: whether a walk's callback returns filepath.SkipDir where the
+// rule's predicate holds, the predicate in a condition of the callback's own
+// or reached by way of the directory's helpers, a boolean one whose true
+// the callback turns into filepath.SkipDir, or one whose error the callback
+// returns. A call of the predicate whose answer is dropped, or that leads to
+// any other return, skips nothing. visiting holds the helpers being looked
+// into, so that one that calls itself ends the look.
+type skipCheck struct {
+	dir      *packageDir
+	rule     string
+	visiting map[*ast.FuncDecl]bool
 }
 
-// holdsCheck reports whether node holds rule's check itself: a call of
-// IsMakeTestTmpDir, or the census's makeTestTmpDir, for ruleByName; a
-// strings.HasPrefix of a name and ".", for ruleDotDirectory.
-func holdsCheck(node ast.Node, n imports, rule string) bool {
+// returnKind is what a return gives for its walk to skip a directory:
+// filepath.SkipDir or fs.SkipDir, from the walk's callback or from a helper
+// whose error the callback returns, or true, from a boolean helper.
+type returnKind int
+
+const (
+	returnsSkipDir returnKind = iota
+	returnsTrue
+)
+
+// is reports whether e, in file, is the value k returns.
+func (k returnKind) is(e ast.Expr, file *sourceFile) bool {
+	if k == returnsTrue {
+		return isIdent(e, "true")
+	}
+	return isSelector(e, file.names.filepath, "SkipDir") || isSelector(e, file.names.fs, "SkipDir")
+}
+
+// result is the type a helper that returns k is declared to return.
+func (k returnKind) result() string {
+	if k == returnsTrue {
+		return "bool"
+	}
+	return "error"
+}
+
+// skipsIn reports whether node, in file, returns k where c's rule holds: an
+// if whose condition holds it (holds) and whose body goes straight to a
+// return of k (leadsTo), or a return of an expression that holds it, where k
+// is true, or of the error of a helper that skips, where k is SkipDir.
+// through is a helper the way must take, "" for any. A function literal in
+// node is code of its own, and is not looked into.
+func (c *skipCheck) skipsIn(node ast.Node, file *sourceFile, through string, k returnKind) bool {
 	found := false
 	ast.Inspect(node, func(x ast.Node) bool {
 		if found {
 			return false
 		}
 		switch v := x.(type) {
-		case *ast.CallExpr:
-			switch rule {
-			case ruleByName:
-				found = calleeName(v) == "IsMakeTestTmpDir"
-			case ruleDotDirectory:
-				if isSelector(v.Fun, n.strings, "HasPrefix") && len(v.Args) == 2 {
-					lit, ok := v.Args[1].(*ast.BasicLit)
-					found = ok && lit.Kind == token.STRING && lit.Value == `"."`
-				}
+		case *ast.FuncLit:
+			return false
+		case *ast.IfStmt:
+			found = leadsTo(v.Body, file, k) && c.holds(v.Cond, file, through)
+		case *ast.ReturnStmt:
+			if len(v.Results) != 1 {
+				break
 			}
-		case *ast.Ident:
-			found = rule == ruleByName && v.Name == "makeTestTmpDir"
+			if k == returnsTrue {
+				found = c.holds(v.Results[0], file, through)
+			} else if call, ok := v.Results[0].(*ast.CallExpr); ok {
+				found = c.helper(call, file, through, returnsSkipDir)
+			}
 		}
 		return !found
 	})
 	return found
 }
 
-// calleeName is the bare name of the function call calls: an identifier's,
-// or a selector's last element, and "" for any other.
-func calleeName(call *ast.CallExpr) string {
+// holds reports whether e, in file, is true where c's rule's predicate is:
+// the predicate itself, or a call of a boolean helper of the directory that
+// returns true where it holds, alone, in parentheses, or as a side of a ||
+// or an && (whose other side can only guard it); never under a !, as a
+// value compared, or passed on as an argument.
+func (c *skipCheck) holds(e ast.Expr, file *sourceFile, through string) bool {
+	if c.predicate(e, file) {
+		return through == ""
+	}
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return c.holds(x.X, file, through)
+	case *ast.BinaryExpr:
+		return (x.Op == token.LOR || x.Op == token.LAND) && (c.holds(x.X, file, through) || c.holds(x.Y, file, through))
+	case *ast.CallExpr:
+		return c.helper(x, file, through, returnsTrue)
+	}
+	return false
+}
+
+// predicate reports whether e, in file, is c's rule's predicate itself. By
+// its name that is sweeptest.IsMakeTestTmpDir, through the file's import of
+// this package, or one of two forms of it in the two directories whose code
+// cannot name it so: this package's own IsMakeTestTmpDir, called in this
+// package, and a comparison with the census's own makeTestTmpDir, in the
+// census (sweeptestDir, censusDir). A function of that name anywhere else,
+// or of another package, is not it. As a dot-directory it is
+// strings.HasPrefix of a name and ".".
+func (c *skipCheck) predicate(e ast.Expr, file *sourceFile) bool {
+	switch x := e.(type) {
+	case *ast.CallExpr:
+		switch c.rule {
+		case ruleByName:
+			return isSelector(x.Fun, file.names.sweeptest, "IsMakeTestTmpDir") ||
+				c.dir.rel == sweeptestDir && isIdent(x.Fun, "IsMakeTestTmpDir") && c.dir.declaresFunc("IsMakeTestTmpDir")
+		case ruleDotDirectory:
+			if isSelector(x.Fun, file.names.strings, "HasPrefix") && len(x.Args) == 2 {
+				lit, ok := x.Args[1].(*ast.BasicLit)
+				return ok && lit.Kind == token.STRING && lit.Value == `"."`
+			}
+		}
+	case *ast.BinaryExpr:
+		return c.rule == ruleByName && x.Op == token.EQL && c.dir.rel == censusDir && c.dir.consts["makeTestTmpDir"] &&
+			(isIdent(x.X, "makeTestTmpDir") || isIdent(x.Y, "makeTestTmpDir"))
+	}
+	return false
+}
+
+// helper reports whether call, in file, calls a function of the directory
+// declared to return k's type alone, whose body returns k where c's rule
+// holds (skipsIn), the way through it taking any way on where it is the
+// helper named. A function of another package is never one.
+func (c *skipCheck) helper(call *ast.CallExpr, file *sourceFile, through string, k returnKind) bool {
+	name := localCallee(call, file.names)
+	if name == "" {
+		return false
+	}
+	if name == through {
+		through = ""
+	}
+	for _, ref := range c.dir.funcs[name] {
+		r := flatTypes(ref.decl.Type.Results)
+		if ref.decl.Body == nil || c.visiting[ref.decl] || len(r) != 1 || !isIdent(r[0], k.result()) {
+			continue
+		}
+		c.visiting[ref.decl] = true
+		ok := c.skipsIn(ref.decl.Body, ref.file, through, k)
+		delete(c.visiting, ref.decl)
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+// leadsTo reports whether body, in file, goes straight to a return of k: its
+// first return at its top level returns k, and no statement before it holds
+// a return of its own.
+func leadsTo(body *ast.BlockStmt, file *sourceFile, k returnKind) bool {
+	for _, st := range body.List {
+		if ret, ok := st.(*ast.ReturnStmt); ok {
+			return len(ret.Results) == 1 && k.is(ret.Results[0], file)
+		}
+		if holdsReturn(st) {
+			return false
+		}
+	}
+	return false
+}
+
+// holdsReturn reports whether st holds a return, outside any function
+// literal in it.
+func holdsReturn(st ast.Stmt) bool {
+	found := false
+	ast.Inspect(st, func(x ast.Node) bool {
+		switch x.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// declaresFunc reports whether d declares a function, not a method, named
+// name.
+func (d *packageDir) declaresFunc(name string) bool {
+	for _, ref := range d.funcs[name] {
+		if ref.decl.Recv == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// localCallee is the bare name of the function of its own package that call
+// calls: an identifier's, or a method's through a value; and "" for a
+// function of another package, which the file names by its import, and for
+// any other call.
+func localCallee(call *ast.CallExpr, n imports) string {
 	switch fun := call.Fun.(type) {
 	case *ast.Ident:
 		return fun.Name
 	case *ast.SelectorExpr:
-		return fun.Sel.Name
+		if !n.isPackage(fun.X) {
+			return fun.Sel.Name
+		}
 	}
 	return ""
 }
 
-// reached is the bare name of every function start calls, and of every
-// function those of d's call in turn.
-func (d *packageDir) reached(start ast.Node) map[string]bool {
+// reached is the bare name of every function of its own package that start,
+// in a file with names n, calls (localCallee), and of every function those
+// of d's call in turn.
+func (d *packageDir) reached(start ast.Node, n imports) map[string]bool {
 	seen := map[string]bool{}
-	queue := calleeNames(start)
+	queue := calleeNames(start, n)
 	for len(queue) > 0 {
 		name := queue[0]
 		queue = queue[1:]
@@ -1058,20 +1221,22 @@ func (d *packageDir) reached(start ast.Node) map[string]bool {
 		seen[name] = true
 		for _, ref := range d.funcs[name] {
 			if ref.decl.Body != nil {
-				queue = append(queue, calleeNames(ref.decl.Body)...)
+				queue = append(queue, calleeNames(ref.decl.Body, ref.file.names)...)
 			}
 		}
 	}
 	return seen
 }
 
-// calleeNames is the bare name of every function node calls: an
-// identifier's, or a selector's last element.
-func calleeNames(node ast.Node) []string {
+// calleeNames is the bare name of every function of its own package that
+// node, in a file with names n, calls (localCallee).
+func calleeNames(node ast.Node, n imports) []string {
 	var out []string
-	ast.Inspect(node, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && calleeName(call) != "" {
-			out = append(out, calleeName(call))
+	ast.Inspect(node, func(x ast.Node) bool {
+		if call, ok := x.(*ast.CallExpr); ok {
+			if name := localCallee(call, n); name != "" {
+				out = append(out, name)
+			}
 		}
 		return true
 	})

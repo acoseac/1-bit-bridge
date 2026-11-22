@@ -135,8 +135,13 @@ func IsOtherCheckout(root, dir string) bool {
 // programs included, and a walk handed in as a parameter, and fails on one
 // listed neither here nor among the walks it names as starting elsewhere,
 // on an item here that names no such function, on a listed test that does
-// not reach its walk, and on a rule its walk's branch for a directory does
-// not reach through the function named. One more test starts at the root,
+// not reach its walk, and on a rule whose predicate does not lead its walk's
+// branch for a directory to filepath.SkipDir by way of the function named:
+// the predicate (IsMakeTestTmpDir through this package's import, or
+// strings.HasPrefix of a name and ".") holding in a condition whose body
+// returns filepath.SkipDir, or in a helper's whose body returns true or
+// filepath.SkipDir, which the branch turns into its own filepath.SkipDir.
+// One more test starts at the root,
 // by another road: TestEveryEmbedPatternRefusesALeadingDot runs go list over
 // ./..., and the go command skips the directory as a dot-directory. The pin
 // reads Go code, so a walk the go command makes for a test is not one it
