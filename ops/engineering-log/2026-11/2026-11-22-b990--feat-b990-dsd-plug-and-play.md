@@ -2,9 +2,9 @@
 
 Branch `feat/b990-dsd-plug-and-play`, from main `9f98e0c1`. Commits: `f3fe6938`, the tests first;
 `1db09523`, the change with its tests, the catalog, the goldens, PROTOCOL.md, the design and the
-rules; and this record. No state, route or protocol version changes; the qualification version
-stays 56 (`go run ./scripts/qualification-version -base 9f98e0c1 -head HEAD`: "qualification
-version OK", no guarded path touched).
+rules; `19b1353b`, this record; and a fourth, the two guarded `internal/alsapcm` tests the gate's
+first run found (below) and the qualification version's bump, 56 to 57, which they need. No
+state, route or protocol version changes.
 
 ### The decision and the change
 
@@ -142,7 +142,34 @@ packages, `-count=1 -v`.
   warning's with a pointer that keeps its rule on `forgetPlayerOffReason`), the moves proved
   alone on a copy of `f3fe6938` by `verify_moves.py` (2 blocks, 3,020 bytes).
 
+### The gate's first run, and the qualification version
+
+`make fmt vet test build-all` on `19b1353b` failed one package, `internal/alsapcm`, whose
+external tests drive the player's backend over the real sinks and the fake kernel: two of them
+asserted the acknowledgement's gate. The runs before it covered the policy, the catalog, the
+backend, the API and cmd/bridge's player tests, and not these.
+
+- `TestAnUnknownDACPlaysDSDConverted`'s case "a known DAC whose first use is not acknowledged"
+  wanted conversion, and the DAC played native (`DSD_U32_BE`). It is now "a known DAC with no
+  acknowledgement plays native": one `DSD_U32_BE` open, no PCM open, no skip or fault. The
+  test's other cases convert still, their rig (`newConvRig`) having no profile database, so every
+  unit is a generic board's; its comment and the test's docblock now say so.
+- `TestAPlayedOutDoPOccurrenceStopsNothingAfterIt` set DoP at DSD64 by a migrated record that
+  approved native at DSD128 alone, and native now plays at every rate offered. Its state adds a
+  listener's later noise for native at DSD64, so DSD64 plays DoP as before, and the set once the
+  volume leaves 0 dB is native at DSD128 and DSD256 with no DoP (it was DSD128 alone). The opens
+  stay a's DoP `S32_LE`, then b's native `DSD_U32_BE`.
+
+Both files are under the guard's `internal/alsapcm/` prefix, test files included, so
+`scripts/qualification-version` asks for a bump: 57, the runbook's five pins with it
+(`TestQualificationRunbookVersion`) and a paragraph of its own, as B972's test-only change took
+56.
+
 ### Runs
 
-Before this record's commit: `internal/player/policy` under `-race -count=20`, 1,340 passes and
-nothing else, 38.1 s. The gate's runs on this record's commit are in the report.
+Before the gate: `internal/player/policy` under `-race -count=20`, 1,340 passes and nothing
+else, 38.1 s. The gate on `19b1353b`, in one slot session: fmt (no change) 0.7 s, vet 17.0 s,
+test 2,361.5 s (91 packages ok, `internal/alsapcm` failed as above), build-all 145.7 s, vet for
+darwin 6.9 s, windows 6.6 s, linux/arm 25.3 s and linux/386 25.5 s, both native-integration
+overlays (51.0 s and 6.1 s, every named test passed), docs-check 0.8 s. The gate's run on the
+fourth commit is in the report.
