@@ -180,6 +180,40 @@ func panicSinkOn(t *testing.T, k *fakeKernel, node sys, c DSDConfig, l *nativeLo
 	return s
 }
 
+// errDropFailed is the errno a case has DROP answer: EIO, asm-generic's, an
+// errno this package does not tell apart.
+const errDropFailed errno = 5
+
+// panickedErrors walks e's tree through both unwrap forms and returns each
+// distinct *Error in it, by identity, that is itself typed ReasonPanicked:
+// one a recovered panic answers. Two panics' errors carry the same details
+// and the same ErrPanicked, so errors.Is cannot tell one from two.
+func panickedErrors(e error) []*Error {
+	var out []*Error
+	seen := map[*Error]bool{}
+	var walk func(error)
+	walk = func(e error) {
+		if pe, ok := e.(*Error); ok && pe.Reason == ReasonPanicked && !seen[pe] {
+			seen[pe] = true
+			out = append(out, pe)
+		}
+		switch u := e.(type) {
+		case interface{ Unwrap() []error }:
+			for _, c := range u.Unwrap() {
+				walk(c)
+			}
+		case interface{ Unwrap() error }:
+			if c := u.Unwrap(); c != nil {
+				walk(c)
+			}
+		}
+	}
+	if e != nil {
+		walk(e)
+	}
+	return out
+}
+
 // cleanupPanicked requires s's cleanup to say a close that panicked: left
 // unconfirmed, typed ReasonPanicked, naming no value.
 func cleanupPanicked(t *testing.T, s *DSDSink) {
@@ -235,18 +269,20 @@ func reopenRefusedItsClosePanicking(t *testing.T, k *fakeKernel, s *DSDSink, l *
 // (closeNative's recover, which every caller takes): the writer's end after
 // a release, after its own panic, at a pause's release and at each refusal
 // of a reopen; a release whose DROP or HW_FREE panics, its close clean,
-// failing or panicking (releaseNative's recovers); a reopen whose setup
-// panicked, its node's close failing or panicking (openNative's own close);
-// and a reopen whose setup was refused, its close panicking. The writer's
-// end runs, Done closes, the cleanup is unconfirmed and typed, holding every
-// failure, the node closed once, each panic is logged once with no value,
-// and a later command answers the end.
+// failing or panicking, and one whose HW_FREE panics after DROP failed
+// (releaseNative's recovers); a reopen whose setup panicked, its node's close
+// failing or panicking (openNative's own close); and a reopen whose setup was
+// refused, its close panicking. The writer's end runs, Done closes, the
+// cleanup is unconfirmed and typed, holding every failure and an error of
+// each panic apart, the node closed once, each panic is logged once with no
+// value, and a later command answers the end.
 func TestANativeSinksCleanupThatPanicsStaysInThePlayer(t *testing.T) {
 	// releasedPanickingIn activates a native sink whose node's next req
-	// panics once armed, edit making its close fail or panic too, releases
-	// it, and requires the release to answer the panic, unconfirmed, and the
-	// sink to end as a close that panicked ends it.
-	releasedPanickingIn := func(t *testing.T, req uint32, edit func(k *fakeKernel)) (*DSDSink, *nativeLog) {
+	// panics once armed, edit making DROP or its close fail, or its close
+	// panic too, releases it, and requires the release to answer the panic,
+	// unconfirmed, the cleanup to hold an error of each of its panics apart,
+	// and the sink to end as a close that panicked ends it.
+	releasedPanickingIn := func(t *testing.T, req uint32, panics int, edit func(k *fakeKernel)) (*DSDSink, *nativeLog) {
 		t.Helper()
 		k, l := nativeKernel(t), newNativeLog()
 		node := &ioctlPanic{sys: k, req: req}
@@ -264,27 +300,37 @@ func TestANativeSinksCleanupThatPanicsStaysInThePlayer(t *testing.T) {
 		}
 		noValue(t, e, "the release")
 		cleanupPanicked(t, s)
+		if got := panickedErrors(s.CleanupResult()); len(got) != panics {
+			t.Errorf("the cleanup %v holds %d errors of a recovered panic, want %d, one for each", s.CleanupResult(), len(got), panics)
+		}
 		endedTouchingNothing(t, k, s, true)
 		return s, l
 	}
 	RunEachCaseInAChild(t, "TestANativeSinksCleanupThatPanicsStaysInThePlayer", map[string]func(t *testing.T){
 		"a release whose DROP panics": func(t *testing.T) {
-			_, l := releasedPanickingIn(t, ioctlDrop, nil)
+			_, l := releasedPanickingIn(t, ioctlDrop, 1, nil)
 			l.panicsLogged(t, "the native sink's close")
 		},
 		"a release whose HW_FREE panics": func(t *testing.T) {
-			_, l := releasedPanickingIn(t, ioctlHWFree, nil)
+			_, l := releasedPanickingIn(t, ioctlHWFree, 1, nil)
+			l.panicsLogged(t, "the native sink's close")
+		},
+		"a release whose DROP fails, its HW_FREE panicking": func(t *testing.T) {
+			s, l := releasedPanickingIn(t, ioctlHWFree, 1, func(k *fakeKernel) { k.fail[ioctlDrop] = errDropFailed })
+			if e := s.CleanupResult(); !errors.Is(e, errDropFailed) {
+				t.Errorf("the cleanup is %v; want DROP's failure beside HW_FREE's panic", e)
+			}
 			l.panicsLogged(t, "the native sink's close")
 		},
 		"a release whose DROP panics, its close failing": func(t *testing.T) {
-			s, l := releasedPanickingIn(t, ioctlDrop, func(k *fakeKernel) { k.closeErr = errCloseFailed })
+			s, l := releasedPanickingIn(t, ioctlDrop, 1, func(k *fakeKernel) { k.closeErr = errCloseFailed })
 			if e := s.CleanupResult(); !errors.Is(e, errCloseFailed) {
 				t.Errorf("the cleanup is %v; want the close's failure beside DROP's panic", e)
 			}
 			l.panicsLogged(t, "the native sink's close")
 		},
 		"a release whose DROP panics, its close panicking": func(t *testing.T) {
-			_, l := releasedPanickingIn(t, ioctlDrop, func(k *fakeKernel) { k.closePanic = closePanicValue })
+			_, l := releasedPanickingIn(t, ioctlDrop, 2, func(k *fakeKernel) { k.closePanic = closePanicValue })
 			l.panicsLogged(t, "the native sink's close", "the native sink's close")
 		},
 		"a reopen's setup refused, its close panicking": func(t *testing.T) {
