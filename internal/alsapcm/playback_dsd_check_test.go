@@ -1017,6 +1017,21 @@ func TestAPolicyChangeEndsTheCheck(t *testing.T) {
 		r.monitorTickThatRevokes()
 		r.endedAs(playback.CheckFailed, playback.CheckPolicyChanged, "the state unreadable")
 	})
+	t.Run("the state made unreadable between the open and its activation", func(t *testing.T) {
+		// The node's check reads the box, never the state: the open passes,
+		// and only the activation's judgement can see the change.
+		r := newCheckRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), nil)
+		held, release := r.unit.holdNextAdmit()
+		t.Cleanup(release)
+		r.admitted(dsdstate.TransportNative, playbacktest.DSD64)
+		awaitOrdered(t, held, "the open's check after open held")
+		r.store.Set(dsdstate.Refusing(playbacktest.T0))
+		release()
+		r.endedAs(playback.CheckFailed, playback.CheckPolicyChanged, "the state unreadable at the activation")
+		if v := r.k.View(); v.Opens != 1 || v.GivenBytes != 0 {
+			t.Errorf("%d opens and %d bytes given; want the sink opened and nothing written, its prefill included", v.Opens, v.GivenBytes)
+		}
+	})
 	t.Run("a reading that panics", func(t *testing.T) {
 		box := &checkBox{}
 		r := newCheckRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), withCheckBox(box))
