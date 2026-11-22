@@ -101,6 +101,10 @@ var (
 		"and held its lock for longer than %s, so nothing was written: try again", config.LockWait)
 	errMsgSaveConfigNoLockManager = "the filesystem holding the config file gave no lock beside it, so nothing was written: " +
 		"it has no working lock manager; mount it with local locking, or start its lock service, and try again"
+	errMsgSaveConfigLockInaccessible = "the lock file beside the config file is there and this bridge's user may not open it " +
+		"to read and write it (a bridge command run as another user, root among them, can leave it so), so nothing was " +
+		"written: give the lock file the config file's owner and let that owner read and write it, or remove it while " +
+		"the bridge is stopped and no bridge command runs"
 	errMsgSaveConfigInTurn = "the config file was changed by another writer while this save had its turn at it (an edit, " +
 		"or a bridge older than the config's lock), so this change was not saved, and the file keeps what that writer " +
 		"left: make the change again, or restart the bridge to load the file first"
@@ -126,14 +130,17 @@ const errMsgRestartToLoad = "restart the bridge to load the file, then make the 
 
 // saveConfigRefusal is what the console says of err, a save of the config
 // file that was refused or failed, by its class: try again past another
-// writer's lock, repair the lock manager, and, of a file changed outside the
-// holder, by its kind (changedOutsideRefusal: a change of a setting another
-// writer changed, a deployment setting changed, a file gone, repointed, that
-// does not decode or that the save would leave one the next start refuses, a
-// change in the save's own turn, each restarted past; a file that writer left
-// that the next start would refuse, corrected, never restarted over), restart
-// once the name resolves, fix a link to no file, or, for any other failure,
-// read the log. It never calls the error's Error, which names the config file.
+// writer's lock, repair the lock manager, give a lock file this user may not
+// open the config file's owner and that owner's read and write, or remove it
+// (backlog B537 item 2, config.LockInaccessibleError), and, of a file changed
+// outside the holder, by its kind (changedOutsideRefusal: a change of a
+// setting another writer changed, a deployment setting changed, a file gone,
+// repointed, that does not decode or that the save would leave one the next
+// start refuses, a change in the save's own turn, each restarted past; a file
+// that writer left that the next start would refuse, corrected, never
+// restarted over), restart once the name resolves, fix a link to no file, or,
+// for any other failure, read the log. It never calls the error's Error,
+// which names the config file.
 func saveConfigRefusal(err error) string {
 	var outside *config.ChangedOutsideError
 	switch {
@@ -141,6 +148,8 @@ func saveConfigRefusal(err error) string {
 		return errMsgSaveConfigBusy
 	case errors.Is(err, config.ErrNoLockManager):
 		return errMsgSaveConfigNoLockManager
+	case errors.Is(err, config.ErrLockInaccessible):
+		return errMsgSaveConfigLockInaccessible
 	case errors.As(err, &outside):
 		return changedOutsideRefusal(outside)
 	case errors.Is(err, config.ErrChangedInTurn):
@@ -4128,8 +4137,10 @@ func (s *Server) lockSettingsWrite() {
 // request's end stopped (serve's stop, which the console's requests take, or
 // the client's), in words that say only that it was stopped and what to do,
 // since the end does not say what stopped it (round 4); anything else a 500
-// in words, logged whole. What stays open here, for the bridge's Windows
-// service, is backlog B831.
+// in words, logged whole. On the bridge's Windows service a wait behind
+// another process's install, whose swap stops the service, is refused at once
+// instead, `marker-locked` in the refusal's own words (backlog B831,
+// updater.LockForChecksOff).
 func writeUpdateChecksOffRefusal(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrUpdateChecksOffLocked):

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,11 +11,13 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
@@ -157,6 +160,254 @@ func TestTheConsolesOffWaitsForTheInstallMarkersLockAndLandsAfter(t *testing.T) 
 	}
 	if switchShown(t, b.adminBase) || readUpdatesPanel(t, b).CheckEnabled {
 		t.Error("the switch is on after the off landed")
+	}
+}
+
+// The console's off behind another process's install on the bridge's Windows
+// service (backlog B831): that install's swap stops the service before it
+// moves the binary, and the off waiting for the install marker's lock ended
+// with serve, so serve refuses it at once there, where the marker it reads
+// without the lock is an install of another version that serve's own updater
+// did not arm.
+
+// anotherVersion is the version another process's install installs.
+const anotherVersion = "99.1.0"
+
+// asTheWindowsService makes serve stand in for the bridge's Windows service
+// (serveOpts.windowsService).
+func asTheWindowsService(o *serveOpts) { o.windowsService = func() bool { return true } }
+
+// servesUpdater hands serve's updater to got once serve has built it
+// (serveOpts.updaterBuilt).
+func servesUpdater(got *atomic.Pointer[updater.Updater]) func(*serveOpts) {
+	return func(o *serveOpts) { o.updaterBuilt = func(u *updater.Updater) { got.Store(u) } }
+}
+
+// offWaitBound is how long a wait of an off's test may take: until the test
+// binary's deadline less a reserve for the cleanups, or ten minutes where it
+// has none.
+func offWaitBound(t *testing.T) time.Duration {
+	t.Helper()
+	if d, ok := t.Deadline(); ok {
+		return time.Until(d) - serveDrainReserve
+	}
+	return 10 * time.Minute
+}
+
+// markerHeld holds the install marker's lock in dataDir as another process
+// does, let go at the test's end, and arms st there under it once serve is
+// up, as `bridge update` arms its install just before its swap.
+func markerHeld(t *testing.T, dataDir string, st updater.State) *updater.StateLock {
+	t.Helper()
+	install, err := updater.LockState(t.Context(), dataDir)
+	if err != nil || !install.Held() {
+		t.Fatalf("hold the install marker's lock as an install does: %+v, %v", install, err)
+	}
+	t.Cleanup(install.Release)
+	if err := updater.SaveState(dataDir, st); err != nil {
+		t.Fatal(err)
+	}
+	return install
+}
+
+// anotherInstall is the marker of another process's install of
+// anotherVersion over this one, armed now and not yet swapped.
+func anotherInstall() updater.State {
+	return updater.State{Status: "installing", TargetVersion: anotherVersion, PreviousVersion: version.ServerVersion,
+		AttemptedAt: time.Now().UTC()}
+}
+
+// heldAnswers counts the answers the install marker's lock gives while
+// another open holds it, from now to the test's end
+// (updater.SetStateTryLockForTest), and says when the nth comes.
+type heldAnswers struct {
+	mu      sync.Mutex
+	n       int
+	reached map[int]chan struct{}
+}
+
+func countHeldAnswers(t *testing.T) *heldAnswers {
+	t.Helper()
+	h := &heldAnswers{reached: map[int]chan struct{}{}}
+	t.Cleanup(updater.SetStateTryLockForTest(func(f *os.File) error {
+		err := fsutil.TryLock(f)
+		if errors.Is(err, fsutil.ErrLocked) {
+			h.mu.Lock()
+			h.n++
+			reached := h.reached[h.n]
+			h.mu.Unlock()
+			if reached != nil {
+				close(reached)
+			}
+		}
+		return err
+	}))
+	return h
+}
+
+// reach is closed once the nth held answer is given.
+func (h *heldAnswers) reach(n int) <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reached[n] == nil {
+		h.reached[n] = make(chan struct{})
+	}
+	return h.reached[n]
+}
+
+func (h *heldAnswers) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.n
+}
+
+// offAnswerOf is the console's answer, failing the test past its bound.
+func offAnswerOf(t *testing.T, answered <-chan offAnswer) offAnswer {
+	t.Helper()
+	select {
+	case a := <-answered:
+		return a
+	case <-time.After(offWaitBound(t)):
+		t.Fatal("the console's off never answered")
+		return offAnswer{}
+	}
+}
+
+// TestTheConsolesOffBehindAnotherProcesssInstallOnTheWindowsServiceIsRefusedAtOnce:
+// serve stands in for the bridge's Windows service; once it is up, another
+// process holds the install marker's lock and arms an install of another
+// version under it, as `bridge update` does just before its swap, which on
+// the service stops serve. The console's off is refused at the lock's first
+// held answer, 409 marker-locked in words that name that install's version and
+// no path, say nothing was saved and to turn the checks off again once the
+// bridge answers, while the other process still holds the lock: never the end
+// of the lock's 30 s wait, whose 409 marker-locked says another process held
+// it. The settings and the running switch are as they were.
+func TestTheConsolesOffBehindAnotherProcesssInstallOnTheWindowsServiceIsRefusedAtOnce(t *testing.T) {
+	b, cfgPath := offBridge(t, asTheWindowsService)
+	before := readBytes(t, cfgPath)
+	install := markerHeld(t, b.dataDir, anotherInstall())
+	answers := countHeldAnswers(t)
+	answered := make(chan offAnswer, 1)
+	go func() { answered <- patchSettingsAt(b.adminBase, `{"updateCheckEnabled":false}`) }()
+	a := offAnswerOf(t, answered)
+	if a.err != nil || a.status != http.StatusConflict || a.code != "marker-locked" {
+		t.Fatalf("the off behind another process's install on the Windows service = %d %s %q (%v), want 409 marker-locked",
+			a.status, a.code, a.message, a.err)
+	}
+	for _, says := range []string{"update checks were not turned off", "an install of " + anotherVersion + " by another process",
+		"replacing the bridge's binary", "can stop this service and this save with it", "nothing was saved",
+		"once the bridge answers, turn the checks off again if they are on"} {
+		if !strings.Contains(a.message, says) {
+			t.Errorf("the refusal does not say %q: %q", says, a.message)
+		}
+	}
+	if strings.Contains(a.message, b.dataDir) {
+		t.Errorf("the refusal names a path: %q", a.message)
+	}
+	if n := answers.count(); n != 1 {
+		t.Errorf("the off was refused after %d held answers of the install marker's lock, want 1: at once", n)
+	}
+	if !install.Held() {
+		t.Error("the other process's hold was let go before the off answered")
+	}
+	requireOffNotSaved(t, cfgPath, before, b.adminBase)
+}
+
+// TestTheConsolesOffBehindTheInstallMarkersLockWaitsWhereItIsNoOtherProcesssInstall:
+// another process holds the install marker's lock in serve's data dir, and
+// the console's off waits for it, still waiting at the lock's third held
+// answer, saving nothing meanwhile, and lands once it is let go: without the
+// stand-in for the Windows service, over another process's install (serve
+// asks the real check, which a test process answers false, on Windows too:
+// TestATestProcessIsNoWindowsService); and on the service over a swap of
+// serve's own waiting for its restart, the marker serve's own updater armed.
+func TestTheConsolesOffBehindTheInstallMarkersLockWaitsWhereItIsNoOtherProcesssInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		service bool
+		// own says the marker is serve's own updater's.
+		own bool
+	}{
+		{"another process's install, not the Windows service", false, false},
+		{"a swap of serve's own waiting for its restart, on the Windows service", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var upd atomic.Pointer[updater.Updater]
+			with := []func(*serveOpts){servesUpdater(&upd)}
+			if tc.service {
+				with = append(with, asTheWindowsService)
+			}
+			b, cfgPath := offBridge(t, with...)
+			st := anotherInstall()
+			if tc.own {
+				st.SwapStarted = true
+				upd.Load().NoteArmedForTest(st)
+			}
+			install := markerHeld(t, b.dataDir, st)
+			answers := countHeldAnswers(t)
+			third := answers.reach(3)
+			answered := make(chan offAnswer, 1)
+			go func() { answered <- patchSettingsAt(b.adminBase, `{"updateCheckEnabled":false}`) }()
+			select {
+			case <-third:
+			case a := <-answered:
+				t.Fatalf("the off answered %d %s %q (%v) while the install marker's lock was held: it did not wait",
+					a.status, a.code, a.message, a.err)
+			case <-time.After(offWaitBound(t)):
+				t.Fatal("the off never waited for the install marker's lock")
+			}
+			if v, there := fileUpdateCheck(t, cfgPath); there {
+				t.Errorf("the off wrote update.checkEnabled = %v while the lock was held", v)
+			}
+			if !switchShown(t, b.adminBase) {
+				t.Error("the off was published while the lock was held")
+			}
+			install.Release()
+			if a := offAnswerOf(t, answered); a.err != nil || a.status != http.StatusOK {
+				t.Fatalf("the off once the lock was let go = %d %s %q (%v), want it saved", a.status, a.code, a.message, a.err)
+			}
+			if v, there := fileUpdateCheck(t, cfgPath); !there || v != false {
+				t.Errorf("the file holds update.checkEnabled = %v (there %v), want false", v, there)
+			}
+			if switchShown(t, b.adminBase) {
+				t.Error("the switch is on after the off landed")
+			}
+		})
+	}
+}
+
+// TestAStoppedOffBehindAnotherProcesssInstallIsAStop: on the bridge's Windows
+// service, behind another process's install holding the install marker's
+// lock, an off whose request had already ended answers its stop, which the
+// console says as 503 stopping in words that claim no cause, and not the
+// refusal it would have been.
+func TestAStoppedOffBehindAnotherProcesssInstallIsAStop(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	markerHeld(t, dataDir, anotherInstall())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	release, err := updateChecksOffSave(dataDir, filepath.Join(dir, "bridge"), filepath.Join(dir, "bridge.yaml"), 0,
+		updater.ChecksOffWait{Service: true, Current: version.ServerVersion, Updater: updater.New(updater.Options{})})(ctx)
+	if release != nil || !errors.Is(err, context.Canceled) || errors.Is(err, admin.ErrUpdateChecksOffLocked) {
+		t.Fatalf("the stopped off = %v (a release %v), want the stop's own error and no refusal", err, release != nil)
+	}
+}
+
+// TestATestProcessIsNoWindowsService: the real check serve asks where no test
+// stands in for the service (serveOpts.asWindowsService, isWindowsService)
+// answers false in a test process, on Windows as everywhere, so a boot test
+// without the stand-in is a foreground serve's.
+func TestATestProcessIsNoWindowsService(t *testing.T) {
+	if isWindowsService() || (serveOpts{}).asWindowsService() {
+		t.Fatal("a test process reads as the bridge's Windows service")
+	}
+	if !(serveOpts{windowsService: func() bool { return true }}).asWindowsService() {
+		t.Fatal("serve does not read its stand-in for the Windows service")
 	}
 }
 
@@ -391,7 +642,7 @@ func TestTheOffsAskSaysWhatRefusedItInTheLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := loggingtest.Record(t)
-	release, err := updateChecksOffSave(dataDir, bin, filepath.Join(dir, "bridge.yaml"), 0)(t.Context())
+	release, err := updateChecksOffSave(dataDir, bin, filepath.Join(dir, "bridge.yaml"), 0, updater.ChecksOffWait{})(t.Context())
 	if release != nil || !errors.Is(err, admin.ErrUpdateChecksOffUnchecked) {
 		t.Fatalf("the ask over a marker that cannot be read = %v (a release %v), want admin.ErrUpdateChecksOffUnchecked",
 			err, release != nil)

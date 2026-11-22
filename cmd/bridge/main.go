@@ -3341,6 +3341,16 @@ type serveOpts struct {
 	// server of their own and count what it is asked (backlog B761). Per
 	// invocation for tailscaleCLI's reason.
 	updateReleases *updater.Client
+	// windowsService stands in for isWindowsService where serve tells the
+	// console's off of update checks whether it is the bridge's Windows
+	// service, which another process's swap stops (updater.ChecksOffWait,
+	// backlog B831; asWindowsService). Nil in production; a boot test stands
+	// in for the service. Per invocation for tailscaleCLI's reason.
+	windowsService func() bool
+	// updaterBuilt is handed serve's updater once it is built, before
+	// anything serves. Nil in production; a boot test stands in for an
+	// install of serve's own through it (updater.Updater.NoteArmedForTest).
+	updaterBuilt func(*updater.Updater)
 	// backupProbeTimeout is how long the early rollback gives its backup to
 	// say its version (backupProbeBound). Zero in production, which gives it
 	// updater.VersionProbeTimeout. A boot test whose backup is a fresh copy
@@ -4755,6 +4765,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		}
 	}
 	upd := updater.New(updOpts)
+	if opts.updaterBuilt != nil {
+		opts.updaterBuilt(upd)
+	}
+	// The console's off of update checks waits for the install marker's lock
+	// behind another open's hold as serve says (backlog B831): whether it is
+	// the bridge's Windows service, its version and its own updater, whose
+	// installs are never another process's.
+	checksOffWait := updater.ChecksOffWait{Service: opts.asWindowsService(), Current: version.ServerVersion, Updater: upd}
 	// Start the background poll loop: it refreshes the GitHub-release status on
 	// the configured cadence AND drives the opt-in auto-installer (maybeAutoInstall
 	// runs ONLY from Run). Lives off scanCtx so a SIGINT cancels it alongside the
@@ -6714,8 +6732,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// its cadence for an on.
 		UpdateChecksSwitched: upd.ChecksSwitched,
 		// A save that turns update checks off takes the install marker's lock
-		// first, and is decided under it (backlog B761's round 3).
-		UpdateChecksOffSave: updateChecksOffSave(cfg.DataDir, binaryPath, *configPath, opts.backupProbeTimeout),
+		// first, and is decided under it (backlog B761's round 3); its wait as
+		// checksOffWait says (backlog B831).
+		UpdateChecksOffSave: updateChecksOffSave(cfg.DataDir, binaryPath, *configPath, opts.backupProbeTimeout, checksOffWait),
 		DuplicatesSweepRun:  jobRunClosure(duplicatesSweepState),
 		// The orphan sweep's and the variant watcher's refusal latches, so
 		// the Jobs card says each is refusing rather than "on" (nil when the
