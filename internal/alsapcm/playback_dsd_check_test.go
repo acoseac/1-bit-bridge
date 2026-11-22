@@ -1172,10 +1172,10 @@ func (panickyOpen) CompletionResult() error     { return nil }
 // own error), or its own step panicked. A close the kernel holds keeps the
 // slot (stopping): StopCheck answers not given back at CheckStopWait, a
 // Start is busy, a probe owed, a check, a tone and a write refused; the close
-// let go, nothing is fenced. So does one held where no sink command waits for
-// it, the check ended between its open and its first (the activation's
-// judgement), where the cleanup's own wait for Done is all that keeps the
-// slot. A close or a DROP that answers an error, a
+// let go, nothing is fenced. So does a close held where no sink command waits
+// for it, the check ended between its open and its first sink command (at the
+// activation's judgement), where the cleanup's own wait for Done is all that
+// keeps the slot. A close or a DROP that answers an error, a
 // disconnect while the chime plays (the native release's DROP answers
 // ENODEV), an open's panic whose close fails, a refused open whose close
 // fails or panics, and a panic in the check's own cleanup step each end it
