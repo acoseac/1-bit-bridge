@@ -13,9 +13,10 @@ entry's own.
 
 ### The hazard
 
-At the base a panic on either of the native sink's goroutines ended the process, and with it all of
-`bridge serve` (API, console, scanner, player) until its supervisor restarted it 2 s later
-(`internal/packaging/systemd.service.tmpl:10-11`):
+At the base a panic in a close of the native sink's node or on its opening worker ended the process,
+and with it all of `bridge serve` (API, console, scanner, player) until its supervisor restarted it
+2 s later (`internal/packaging/systemd.service.tmpl:10-11`); the writer's own panic was already
+recovered, untyped and unlogged (the fourth bullet):
 
 - The writer recovered before it closed: `loopNative`'s one deferred function asked `recover()` at
   `sink_dsd_writer.go:14`, then `s.closeNative()` at `:18`, so a panic in that close (`:486-499`;
@@ -85,8 +86,7 @@ a14a26db` over the non-test Go files, the version constant's one apart; within t
 - **The backend** (`native.go`): `Log: s.b.log` in its `DSDConfig` literal, as `session.go` passes
   `SinkConfig.Log`; and (R1) after an open whose answer holds `ErrPanicked` and
   `ErrReleaseUnconfirmed`, `releaseErr`, so the teardown sets `terminalUnconfirmed` and nothing opens
-  the device until serve restarts. A refusal whose close failed without a panic fences nothing, as
-  before (a residual, below).
+  the device until serve restarts. The residuals are backlog B987.
 - **The package doc** (`doc.go`): the native sink keeps the PCM sink's contract.
 
 **One fault name** (K6): the two words are deliberately apart. An open's panic at a native
@@ -108,7 +108,7 @@ beside the brief's three; and the rig's `unit` gains `panics` (a one-shot panic 
 ### The tests
 
 Four tests, every case in a child process of its test (`RunEachCaseInAChild`, exported from
-`sink_dsd_panic_test.go` for the backend's package): the parent runs `os.Args[0]` again with
+`sink_dsd_panic_test.go` for alsapcm's external test package, where the backend's tests run): the parent runs `os.Args[0]` again with
 `-test.run=^<test>$ -test.v -test.count=1 -test.timeout=2m -watchdog=<its own>` and the case named
 in `BRIDGE_B12_PR0_CHILD_CASE`, which the child runs as a subtest; on a `panic:` line it fails "the
 panic escaped <the goroutine its trace names> and ended the process" with the output, a timeout as
@@ -233,14 +233,5 @@ and nowhere else; C8 is the last bullet:
 
 ### What stays open
 
-- A panic while the writer holds `s.mu` still deadlocks its recovery, which takes the lock
-  (`setNativeError`, `sink_dsd_writer.go`; the carrier's record too): `Done` never closes and the
-  session's teardown waits on it. The PCM writer's `lockW` answers it there; a follow-up touches
-  every writer lock site.
-- The life's watcher (`sink_dsd.go`, the goroutine that revokes the sink once its life has ended)
-  and the release's deadline goroutine keep no recover: a select, a revocation, a cancel and a close.
-- A session's native open refused without a panic, whose node's close failed, fences nothing
-  (`releaseErr` is set at an output's close alone), where the console's test tone fences it; the
-  backend's, for a follow-up.
-- A panic after the opening worker's reply has handed its sink over can come only from the test's
-  seam: nothing on the worker runs there.
+The residuals are backlog B987. A panic after the opening worker's reply has handed its sink over
+can come only from the test's seam: nothing on the worker runs there.

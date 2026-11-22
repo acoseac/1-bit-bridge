@@ -1061,14 +1061,17 @@ through 56 (`LegacyVersion` remains 35). No hardware check was run.
 
 Version 57 covers B728 B12 PR 0 (2026-11-22). A panic on the native sink's writer, on
 its opening worker or in a close of its node is recovered on the goroutine it came on,
-typed `ReasonPanicked` and logged once (`DSDConfig.Log`), where it had ended the process:
-every close of the node has a recover of its own (`releaseRecovered`: `closeNative`'s, the
-close of a node the open did not hand over, `openNative`'s, which keeps a setup's panic
-with its close's failure), the writer's own panic is typed, and the opening worker answers
-its caller or `CompletionResult` (`sink_dsd_open.go`, `sink_dsd.go`, `sink_dsd_writer.go`,
-`device_native.go`, `device.go`, `doc.go`, and `internal/alsapcm`'s tests); the backend's
-`native.go` passes its logger and fences the device after an open that panicked with its
-node's close unconfirmed. No byte a DAC is given changes: what does not panic plays as
-before. Older harness evidence is invalid all the same, as at every bump. The harness
+typed `ReasonPanicked` and logged once (`DSDConfig.Log`). Before it the writer's own
+panic was already recovered, untyped and unlogged (`native writer panic: %T`), and a
+panic in a close of the node or on the opening worker ended the process: every close of
+the node has a recover of its own (`releaseRecovered`: `closeNative`'s, the close of a
+node the open did not hand over, `openNative`'s, which keeps a setup's panic with its
+close's failure), DROP and HW_FREE included, the node closed once whatever they do; a
+reopen whose refused node's close failed answers it in `CleanupResult`; the writer's own
+panic is typed, and the opening worker answers its caller or `CompletionResult`
+(`sink_dsd_open.go`, `sink_dsd.go`, `sink_dsd_writer.go`, `device_native.go`,
+`device.go`, `doc.go`, and `internal/alsapcm`'s tests); the backend's `native.go` passes
+its logger and fences the device after an open that panicked with its node's close
+unconfirmed. No byte a DAC is given changes: what does not panic plays as before. Older harness evidence is invalid all the same, as at every bump. The harness
 admits version 57 records alone; legacy migration accepts versions 35 through 57
 (`LegacyVersion` remains 35). No hardware check was run.
