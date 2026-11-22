@@ -3924,7 +3924,7 @@ through a later install, which waits for the decision's hold of the
 marker's lock, writes a fresh marker of its own and backs up a release
 with the switch, so the no-backup case keeps nothing from a rollback.
 Every text that names backlog B831 names it in a sentence of its own that
-says only where it applies (Codex on round 4); since B831 those texts say
+says only where it applies (a review in round 4); since B831 those texts say
 what that service does instead (below).
 
 *A failed lookup beside a marker the off reads (backlog B898FU's round 2).*
