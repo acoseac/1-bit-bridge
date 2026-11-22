@@ -75575,7 +75575,7 @@ Codex's and Argon's notes on the brief bind the fixes.
 
 **Round 4's record, corrected.** Listing what still runs on Windows with two
 tests skipped there, it said: "The dispatch's look at the root is the same
-code on every platform." That overstated it (a review in round 4): the code is
+code on every platform." That overstated it (Codex on round 4): the code is
 the same, but with `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`
 skipped there, no Windows test reached the debounced dispatch's look at the
 root. `TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent` does now, on
