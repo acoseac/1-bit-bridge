@@ -193,12 +193,14 @@ with `-watchdog 20s`).
 
 The first pass found two predictions wrong, and both found the suite short:
 
-- C2, the slot given back before `Done` (the slot cleared in `cleanCheck` before its wait for the
-  sink's `Done`), went red nowhere: both held-close rows stayed green. With PR 0's native sink every
-  command the run makes after the check's life ends answers only with the cleanup's verdict, so the
-  run was held inside `Finish` until `Done`, and `cleanCheck`'s own wait is the only one that keeps
-  the slot where no command is under way: a check ended between its open and its first command, at
-  the activation's judgement. No case held a close there. The case was added
+- C2, the slot given back before `Done` (the mutation clears the slot in `cleanCheck`, before its
+  wait for the sink's `Done`, where the code clears it in `endCheck`, `b.checking = nil` and then
+  `close(c.done)`, once the cleanup has answered), went red nowhere: both held-close rows stayed
+  green. With PR 0's native sink every command the run makes after the check's life ends answers
+  only with the cleanup's verdict, so the run was held inside `Finish` until `Done`, and the
+  cleanup's own wait for `Done`, which `endCheck` follows, is the only one that keeps the slot where
+  no command is under way: a check ended between its open and its first command, at the
+  activation's judgement. No case held a close there. The case was added
   (`a check ended at its activation keeps the slot until its close answers`), and C2 re-predicted
   on it.
 - C3, the open's identity check skipped (which skips the open's DoP gain check with it), left the
@@ -321,3 +323,124 @@ given back only once the cleanup has answered, the device fenced where its own r
   fake DAC, and read the session's stop `fault` (`disconnected`), its release unconfirmed and a tone
   after it refused `release_unconfirmed`. Whether a disconnect's teardown errors should count as a
   release confirmed is the native sink's question, not this PR's.
+
+### Round 2 (2026-11-22): an ended request admits nothing, the caller gets its own check
+
+Continued at `fe51a206`, round 1's head, the tree clean. Each item of the round's brief was checked
+against the code by line first, and each premise held: `reserveCheck`'s reading (`dsd_check.go`
+`:212`) and its slot switch (`:234-243`, no case for the request's end); the admission's fresh
+context (`:298`); `lockReading`'s uncontended `TryLock` (`dsd_choice.go` `:349`) and its waiter that
+wins the compare-and-swap (`:364-369`), both answering true whatever the request says; the record
+read after the hand-over (`:188`) and the hand-over itself (`:187`), nothing deferred before it;
+and the pending-open case's order (`playback_dsd_check_test.go` `:1337-1364`). `judgeCheckFresh`'s
+reading is at `:437-438`, the brief's "about `:426`".
+
+### Round 2: an ended request admits nothing
+
+Before the round, a request already ended at `Check`, or ended while its reading of the policy was
+parked, was admitted on a fresh context and played the chime, its caller answered a started check
+and no error; and the wait's `select` picks at random among the cases ready, so a probe's end or
+the wait's bound ready beside the request's end could win over it. Three checks close it:
+
+- `refreshDSDWithin` asks the request once it holds the refreshes' lock and before it reads, as a
+  choice's write asks it (`takeChoiceReading`): an ended request reads nothing of the box.
+- `reserveCheck` asks it under `b.mu` first in each pass of its loop, before `slotHeldLocked`, which
+  ends a console tone `preempted`, and so before `admitCheckLocked`; a wait whose probe ended comes
+  back to that check.
+- The wait's `expired` branch asks it before it answers `device_busy`.
+
+Each refusal is the request's own error and leaves the slot, the waiters, the count and the record
+as they were. `judgeCheckFresh`, the reading's other caller, now answers the run's own ended context
+with that error, which ends the run as before: the cause that ended the context stands, and the
+judgement it no longer makes could only have refused.
+
+### Round 2: the caller's own record, the count, the sentinel
+
+- `Check` answered the slot's last record, read after its run began (`CheckStatus`), which a second
+  admission could replace once the first check's run had ended (its stop already closed, a cached
+  chime, a failed `Locate`, a refusal at the fresh reading). `checkStatusLocked(c)` now holds the one
+  `CheckStatus` literal, which `CheckStatus` reads of the last record and the admission builds of its
+  own check in its step under `b.mu`; `reserveCheck` returns it beside the check.
+  `TestDSDOutputProtocolTokens`, internal/api's census of the observation states, is green.
+- The count `checkEnter` takes is given back by a deferred guard until the hand-over to the run
+  (`handed`), which replaces the refusal path's own `leave`, so a panic on the way (the wait's
+  `AfterFunc`) no longer leaves `Wait` to serve's stop bound and its warning of a call held in the
+  kernel.
+- The cleanup's own recover answers an error that wraps `alsapcm.ErrReleaseUnconfirmed`, so the
+  device is fenced exactly where the cleanup's own result wraps the sentinel; the fence is as it was.
+- A residual: a panic in `reserveCheck`'s deferred `stop()` after `admitCheckLocked` has published
+  `b.checking` would keep the slot held with the count given back. The real stop,
+  `time.AfterFunc(...).Stop`, does not panic, and nothing is built for it.
+
+Production this round: +52 -23 lines (`dsd_check.go` +46 -22, `dsd_contain.go` +6 -1), comments
+included, under the round's about 60; the PR's production in `internal/player/playback` against
+`c8340a51`: +821 -54, under round 1's exit of about 900.
+
+### Round 2: the pending open's case
+
+`TestAStopDuringAParkedOpenWaitsForItsCompletion` passed whichever branch the scheduler took: the
+stop's watcher could run after the kernel let the open go, and the run then took the sink's branch,
+which ends the check alike. Its open now goes through the rig's stand-in (`dsdRig.openNative`):
+`r.k.OpenNativeSink`, and a pending answer handed on inside `markedOpen`, which closes `returned` as
+the stand-in returns it and `waiting` at its completion's first ask. The case waits for each within
+`markerBound` (5 s), never the watchdog (`alsapcm.Ordered` is the watchdog itself, which the case's
+first draft waited on), reads the check `stopping`, the slot still its own, refuses a tone, and only
+then lets the kernel go. No seam was added to `internal/alsapcm`.
+
+### Round 2: red first
+
+The predictions were written before the run. The round's tests, run over `fe51a206`'s
+`dsd_check.go` and `dsd_contain.go` overlaid (`go test -overlay`, nothing tracked):
+
+- `internal/player/playback`: red, `TestAnEndedRequestAdmitsNothing`'s five cases (an ended request
+  answered `dac_changed`; beside the console's tone, before `Check` and during its reading, the tone
+  ended `preempted`; with the probe's end ready beside the request's, a round's select took the
+  probe's and answered `dac_changed`; with the bound's, a round took the bound's and answered
+  `device_busy`), `TestTheCheckAnswersItsOwnRecord` (the other check's record) and
+  `TestTheChecksCountIsGivenBackOnEveryWayOut`'s panic case (one goroutine left counted); green, its
+  refusal-then-admission case, the guard against a fix that gives a refusal's count back twice.
+- `internal/alsapcm`: red, both `TestAnEndedRequestOpensNothing` cases (admitted, a record made, the
+  box read once by the first) and `TestAChecksCleanupThatIsNotConfirmedKeepsTheDevice`'s panicking
+  cleanup (its fence's words without the sentinel's); green, the pending-open case, whose red is
+  C-a's, and the cleanup's other cases.
+
+Every prediction matched.
+
+### Round 2: controls
+
+Each control is an exact-once replacement of HEAD's bytes in a production file, overlaid, every
+check test of both packages run (`-race`, `internal/alsapcm` with `-watchdog 20s`), its red leaves
+predicted in a file before the pass. R1 is the brief's item-1 control, the three checks removed
+together; R1a, R1b and R1c remove one each; R2 is item 2's; R5 is item 5's; C-a and C-b are item 3's.
+
+The first pass (at `dbd93471`) found one prediction short: C-a went red in seven leaves, three
+predicted. The four more are refused opens: the open's own node check (`checkNode`: another unit
+of the model, another maker's unit, a gain moved off 0 dB, and a refused open whose close fails)
+ends the check, which cancels the open's context, so `openNativeBounded`'s caller answers pending
+before the worker's reply and the verdict is the completion's; without its wait the pending error
+itself, which wraps `alsapcm.ErrReleaseUnconfirmed`, fences. That is no defect: such an open's two
+answers, pending and refused, give the same verdict through the code. C-a was predicted again on
+it. The first pass also showed C-b red only at its tone's answer, after the watchdog (the tone
+admitted into a slot given back early, its node opened, the DAC held), and the case's markers
+waited up to the watchdog; the case then took `markerBound` and its slot read before the tone
+(`b693d4fc`, `2f72052f`), C-b's red moved to that read ("is playing; want stopping"), and every
+control ran again against predictions written before that pass:
+
+| Control | Mutation | Red leaves | Final pass | First pass |
+|---|---|---|---|---|
+| R1 | every new ctx check removed | 7 | matched | matched |
+|  | red: `TestAnEndedRequestAdmitsNothing`: "as its wait's bound passes", "as the probe it waits for ends", "before Check, the console's tone in the slot", "before Check, the slot free", "during its reading of the policy, the console's tone in the slot"; `TestAnEndedRequestOpensNothing`: "ended before Check", "ended while its reading of the policy is held" |  |  |  |
+| R1a | the reading's ctx check removed | 1 | matched | matched |
+|  | red: `TestAnEndedRequestOpensNothing`: "ended before Check" |  |  |  |
+| R1b | the slot's ctx check removed | 3 | matched | matched |
+|  | red: `TestAnEndedRequestAdmitsNothing`: "as the probe it waits for ends", "during its reading of the policy, the console's tone in the slot"; `TestAnEndedRequestOpensNothing`: "ended while its reading of the policy is held" |  |  |  |
+| R1c | the bound's ctx check removed | 1 | matched | matched |
+|  | red: `TestAnEndedRequestAdmitsNothing`: "as its wait's bound passes" |  |  |  |
+| R2 | the answer read from the slot's record again | 1 | matched | matched |
+|  | red: `TestTheCheckAnswersItsOwnRecord` |  |  |  |
+| R5 | the cleanup's recover answers no sentinel | 1 | matched | matched |
+|  | red: `TestAChecksCleanupThatIsNotConfirmedKeepsTheDevice`: "a panic in the check's own cleanup step" |  |  |  |
+| C-a | the completion's wait deleted | 7 | matched | red in 7, 3 predicted |
+|  | red: `TestAChecksCleanupThatIsNotConfirmedKeepsTheDevice`: "a panic in the check's own cleanup step", "a refused open whose close fails"; `TestAPolicyChangeEndsTheCheck`: "a level control moved before the open's gain check"; `TestAStopDuringAParkedOpenWaitsForItsCompletion`: "its node's close failing", "its node closed cleanly"; `TestAnotherMakersUnitDuringPreparationEndsTheCheck`: "another serial or port of the model at the open", "swapped in at the open" |  |  |  |
+| C-b | the slot given back before the pending completion | 2 | matched | matched |
+|  | red: `TestAStopDuringAParkedOpenWaitsForItsCompletion`: "its node's close failing", "its node closed cleanly" |  |  |  |
