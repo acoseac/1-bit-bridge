@@ -4,7 +4,7 @@ Design and PR plan, 2026-11-22, for bridge 0.2.4. Docs only: this round writes n
 
 **Status.** For review, round 2, on the branch head `808b19ad`, whose code is bridge main `9f98e0c1`'s
 (the two commits between them change this file alone), so every `path:line` cited holds at both.
-Round 1 (`e58896c2`) settled R1 to R12. Round 2 takes the advisor's decision of 2026-11-22, option
+Round 1 (`e58896c2`) settled R1 to R12. Round 2 takes the decision of 2026-11-22, option
 B (§1), and settles C1 to C5 under the binding E1 to E12; §15 says where each is settled, and §14
 where round 1's R1 to R12 now are. The owner's decision of 2026-11-22 stands. The parked 11-13
 design of a larger B634 stays input only: its passcode, its LAN listener and its live DAC switch
@@ -61,7 +61,7 @@ console on the home LAN is B989's, designed apart; this design works on loopback
 through the bridge's player, by its DSD policy: what the DAC takes natively or as DoP, the rest
 converted to PCM (B728 B11, `.claude/rules/player.md`, "Player DSD converted to PCM").
 
-**The advisor's decision (2026-11-22): option B.** The console edits the queue as every OpenHome
+**The decision (2026-11-22): option B.** The console edits the queue as every OpenHome
 controller already does, and the last admitted command wins. The 1-bit app's cast is a `DeleteAll`
 followed by inserts (the iOS repo's `OpenHomeHandoff.swift`, `:599` and `:629`, as the brief cites
 it; that repo was not read for this round), and the bridge's `DeleteAll` and `Insert` are separate,
