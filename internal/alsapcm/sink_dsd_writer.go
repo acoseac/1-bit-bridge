@@ -215,6 +215,13 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		}
 		d, e := s.seams.open(ep, s.devCfg)
 		if e != nil {
+			if errors.Is(e, ErrReleaseUnconfirmed) {
+				// The refused node's close failed or panicked: a cleanup's
+				// failure, which Close answers (B728 B12 PR 0).
+				s.mu.Lock()
+				s.cleanupErr = errors.Join(s.cleanupErr, e)
+				s.mu.Unlock()
+			}
 			return e
 		}
 		s.dev = d

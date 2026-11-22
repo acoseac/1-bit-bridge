@@ -1312,15 +1312,12 @@ func nativePanicked(log *slog.Logger, where string, ep Endpoint, r any) error {
 	return nativeCleanupError(&Error{Reason: ReasonPanicked, Op: "native sink", Endpoint: ep, Detail: where + " panicked: the log has why", Err: ErrPanicked}, cleanup)
 }
 
-// releaseRecovered closes d, once, under a recover of its own: a close that
-// panics answers as its failure, never replacing a panic it runs after.
-func releaseRecovered(d *Device, log *slog.Logger, where string) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = nativePanicked(log, where, d.params.Endpoint, r)
-		}
-	}()
-	return d.releaseNative()
+// releaseRecovered closes d, once, each of its steps under a recover of its
+// own (releaseNative): a DROP, HW_FREE or close that panics answers as its
+// failure, logged once, beside the others', never replacing a panic it runs
+// after.
+func releaseRecovered(d *Device, log *slog.Logger, where string) error {
+	return d.releaseNative(func(r any) error { return nativePanicked(log, where, d.params.Endpoint, r) })
 }
 
 // setupPanic is a native setup's panic whose close then failed, which

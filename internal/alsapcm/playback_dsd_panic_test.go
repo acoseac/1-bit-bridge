@@ -66,10 +66,11 @@ func (d *dsdRig) openPanicking(closeFails bool) {
 // panics fails its native session's start, which faults it backend_error, the
 // engine's word for a backend call that failed (ReasonBackend), nothing
 // written and its node closed once, and the next play plays on; one whose
-// node's close failed too fences the device as a release unconfirmed does. A
-// writer that panics faults its session backend_failed, the backend's own
-// fault (ReasonFailed), never the device's. Each panic is logged once, naming
-// no value.
+// node's close failed too fences the device as a release unconfirmed does,
+// and so does a resume whose reopened node's setup was refused and whose
+// close then panicked, once its session has faulted. A writer that panics
+// faults its session backend_failed, the backend's own fault (ReasonFailed),
+// never the device's. Each panic is logged once, naming no value.
 func TestABackendSurvivesAPanicOnANativeSinksGoroutines(t *testing.T) {
 	unconfirmed := func(s *engine.Snapshot) bool {
 		_, u := s.ReleaseUnconfirmed()
@@ -105,6 +106,29 @@ func TestABackendSurvivesAPanicOnANativeSinksGoroutines(t *testing.T) {
 			d.waitSnap("stopped, the release unconfirmed", unconfirmed)
 			d.opensNothing("a play after the open whose close failed")
 			logs.panicLogged(t, nativePanicMessage, "the native sink's opener")
+		},
+		"a reopen's setup refused, its close panicking": func(t *testing.T) {
+			logs := &lines{}
+			d := newDSDRig(t, initialPolicy(dsdstate.ModeNative), withLog(logs))
+			d.playingDSD()
+			ctx, cancel := within()
+			defer cancel()
+			if err := d.eng.Pause(ctx); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			d.waitSnap("paused", func(s *engine.Snapshot) bool { return s.State() == engine.Paused })
+			// The native sink's own release, thirty seconds into its pause.
+			d.k.Grant(31 * time.Second)
+			d.k.Await(t, "the paused sink letting its node go", func(v alsapcm.KernelView) bool { return v.Opens == 1 && v.Closes == 1 && !v.Open })
+			d.k.RefuseNextSetUp()
+			d.k.PanicAtNextClose(panicValue)
+			if err := d.eng.Play(ctx); err == nil {
+				t.Error("the resume whose reopened node's setup was refused answered nil")
+			}
+			d.tickUntilStopped(engine.ReasonFault)
+			d.waitSnap("stopped, the release unconfirmed", unconfirmed)
+			d.opensNothing("a play after the reopen whose close panicked")
+			logs.panicLogged(t, nativePanicMessage, "the native setup's close")
 		},
 		"a writer that panics as it holds a pause": func(t *testing.T) {
 			logs := &lines{}

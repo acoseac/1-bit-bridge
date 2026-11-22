@@ -63,14 +63,30 @@ func nativeCleanupError(cause, cleanup error) error {
 }
 
 // releaseNative preserves every teardown failure; PCM release is unchanged.
-func (d *Device) releaseNative() error {
+// The node is closed from a defer, once, whatever DROP and HW_FREE do; given
+// recovered (releaseRecovered's), a panic of theirs and one of the close each
+// answer as their failure, beside the other's (B728 B12 PR 0).
+func (d *Device) releaseNative(recovered ...func(any) error) (err error) {
 	if d.closed {
 		return nil
 	}
 	d.closed = true
-	var e error
-	if d.hwSet {
-		e = errors.Join(d.ioctlNone(ioctlDrop), d.ioctlNone(ioctlHWFree))
+	answer := func(e *error) {
+		if len(recovered) > 0 {
+			if r := recover(); r != nil {
+				*e = errors.Join(*e, recovered[0](r))
+			}
+		}
 	}
-	return errors.Join(e, d.sys.close(d.fd))
+	defer func() {
+		err = errors.Join(err, func() (ce error) {
+			defer answer(&ce)
+			return d.sys.close(d.fd)
+		}())
+	}()
+	defer answer(&err)
+	if d.hwSet {
+		return errors.Join(d.ioctlNone(ioctlDrop), d.ioctlNone(ioctlHWFree))
+	}
+	return nil
 }
