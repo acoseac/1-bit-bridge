@@ -351,6 +351,52 @@ func (r *lanRig) step() {
 	}
 }
 
+// stepAsync sends one tick from a goroutine of its own and answers how the
+// loop took it on the channel it returns: that goroutine never ends the case
+// (build-ci-tests.md, the bullet on a hook another goroutine runs), and the
+// case reads the answer with waitStep.
+func (r *lanRig) stepAsync() <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		select {
+		case r.tick <- time.Now():
+		case <-time.After(socketWait):
+			done <- errors.New("the loop took no tick")
+			return
+		}
+		select {
+		case <-r.ticked:
+			done <- nil
+		case <-time.After(socketWait):
+			done <- errors.New("the loop did not finish its tick")
+		}
+	}()
+	return done
+}
+
+// waitStep reads an asynchronous step's answer on the case's goroutine.
+func (r *lanRig) waitStep(done <-chan error) {
+	r.t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			r.t.Fatal(err)
+		}
+	case <-time.After(2 * socketWait):
+		r.t.Fatal("the step never answered")
+	}
+}
+
+// letGoOnce closes ch once, from the case or from its cleanup, whichever
+// comes first, so a case that fails while a seam holds lets the seam go
+// before the rig stops (its cleanup runs first: it is registered after).
+func letGoOnce(t *testing.T, ch chan struct{}) func() {
+	var once sync.Once
+	f := func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(f)
+	return f
+}
+
 // client is an HTTP/1.1 client to the newest LAN listener from from,
 // keeping its connection alive between requests.
 type lanClient struct {
@@ -721,16 +767,18 @@ func TestEveryLANResponseRefusesToBeFramed(t *testing.T) {
 	p := r.policy()
 	r.box.set(enTest(9, "en-other", testLANAddr+"/24"))
 	held := make(chan struct{})
+	letGo := letGoOnce(t, held)
 	var heldOnce sync.Once
 	r.seams.RetirementMarked = func() { heldOnce.Do(func() { <-held }) }
-	go r.step()
+	stepped := r.stepAsync()
 	waitFor(t, func() bool {
 		r.srv.consoleLAN.mu.Lock()
 		defer r.srv.consoleLAN.mu.Unlock()
 		return p.retired
 	})
 	resp, _, err = c.get("/api/console")
-	close(held)
+	letGo()
+	r.waitStep(stepped)
 	if err != nil || resp.StatusCode != 503 {
 		t.Fatalf("after the retirement's section: %v %v", resp, err)
 	}
@@ -992,19 +1040,19 @@ func TestNoRequestIsAdmittedOnceARetirementBegins(t *testing.T) {
 	admitted := 0
 	seams.InAdmission = func() { mu.Lock(); admitted++; mu.Unlock() }
 	marked, release := make(chan struct{}), make(chan struct{})
+	letGo := letGoOnce(t, release)
 	var markOnce sync.Once
 	seams.RetirementMarked = func() { markOnce.Do(func() { close(marked); <-release }) }
 	r.box.set(enTest(9, "en-other", testLANAddr+"/24"))
-	stepped := make(chan struct{})
-	go func() { r.step(); close(stepped) }()
+	stepped := r.stepAsync()
 	select {
 	case <-marked:
 	case <-time.After(socketWait):
 		t.Fatal("the retirement never marked its policy")
 	}
 	resp, _, err := kept.get("/api/console")
-	close(release)
-	<-stepped
+	letGo()
+	r.waitStep(stepped)
 	if err != nil {
 		t.Fatalf("the request after the retirement's section: %v", err)
 	}
@@ -1029,7 +1077,9 @@ func TestAnAdmissionParkedBetweenItsCheckAndItsCountIsSeenByTheRetirement(t *tes
 	seams := &ConsoleLANSeams{}
 	r := newLANRig(t, newLANBox(t), seams, nil)
 	entered, release := heldDoctor(r.srv)
+	letGoDoctor := letGoOnce(t, release)
 	parked, unpark := make(chan struct{}), make(chan struct{})
+	letGoAdmission := letGoOnce(t, unpark)
 	var once sync.Once
 	seams.InAdmission = func() { once.Do(func() { close(parked); <-unpark }) }
 	countAtMark := make(chan int, 4)
@@ -1053,7 +1103,18 @@ func TestAnAdmissionParkedBetweenItsCheckAndItsCountIsSeenByTheRetirement(t *tes
 		}
 		got <- resp.StatusCode
 	}()
-	<-parked
+	select {
+	case <-parked:
+	case <-time.After(socketWait):
+		t.Fatal("the request never reached the admission's seam")
+	}
+	// Parked inside the one section that holds its check and its count, the
+	// admission holds the plan's mutex (I4): a fence of two sections would
+	// hold none here, and a retirement could mark the policy meanwhile.
+	if r.srv.consoleLAN.mu.TryLock() {
+		r.srv.consoleLAN.mu.Unlock()
+		t.Fatal("the admission parked at its seam holds no section of the plan's mutex: its check and its count are two sections")
+	}
 	// The retirement reads the box, then waits for the section the parked
 	// request holds.
 	readAsked := make(chan struct{})
@@ -1068,8 +1129,12 @@ func TestAnAdmissionParkedBetweenItsCheckAndItsCountIsSeenByTheRetirement(t *tes
 		case <-time.After(socketWait):
 		}
 	}()
-	<-readAsked
-	close(unpark)
+	select {
+	case <-readAsked:
+	case <-time.After(socketWait):
+		t.Fatal("the loop took no tick")
+	}
+	letGoAdmission()
 	select {
 	case n := <-countAtMark:
 		if n != 1 {
@@ -1088,7 +1153,7 @@ func TestAnAdmissionParkedBetweenItsCheckAndItsCountIsSeenByTheRetirement(t *tes
 		t.Fatal("the retirement completed while the request it counted ran")
 	case <-time.After(200 * time.Millisecond):
 	}
-	close(release)
+	letGoDoctor()
 	select {
 	case <-r.ticked:
 	case <-time.After(socketWait):
@@ -1115,18 +1180,27 @@ func TestTheRebindTakesAFreshReadingAfterTheWait(t *testing.T) {
 			seams := &ConsoleLANSeams{}
 			r := newLANRig(t, newLANBox(t), seams, nil)
 			entered, release := heldDoctor(r.srv)
+			letGo := letGoOnce(t, release)
 			closed := make(chan struct{})
 			var closeOnce sync.Once
 			seams.RetirementClosed = func() { closeOnce.Do(func() { close(closed) }) }
-			go func() { _, _, _ = r.client("192.168.77.5").get("/api/doctor") }()
-			<-entered
+			client := r.client("192.168.77.5")
+			go func() { _, _, _ = client.get("/api/doctor") }()
+			select {
+			case <-entered:
+			case <-time.After(socketWait):
+				t.Fatal("the held handler never ran")
+			}
 			r.box.set(enTest(9, "en-second", testLANAddr+"/24"))
-			stepped := make(chan struct{})
-			go func() { r.step(); close(stepped) }()
-			<-closed
+			stepped := r.stepAsync()
+			select {
+			case <-closed:
+			case <-time.After(socketWait):
+				t.Fatal("the retirement never closed its server")
+			}
 			r.box.set(c.fresh...)
-			close(release)
-			<-stepped
+			letGo()
+			r.waitStep(stepped)
 			st := r.state()
 			r.box.mu.Lock()
 			holds := append([]int(nil), r.box.holds...)
@@ -1233,14 +1307,18 @@ func TestAnEventStreamEndsAtItsSocketsRetirement(t *testing.T) {
 			_ = openStream(t, c)
 			ready()
 			marked, release := make(chan struct{}), make(chan struct{})
+			letGo := letGoOnce(t, release)
 			closedSeen := make(chan struct{})
 			var markOnce, closeOnce sync.Once
 			seams.RetirementMarked = func() { markOnce.Do(func() { close(marked); <-release }) }
 			seams.RetirementClosed = func() { closeOnce.Do(func() { close(closedSeen) }) }
 			r.box.set(enTest(9, "en-other", testLANAddr+"/24"))
-			stepped := make(chan struct{})
-			go func() { r.step(); close(stepped) }()
-			<-marked
+			stepped := r.stepAsync()
+			select {
+			case <-marked:
+			case <-time.After(socketWait):
+				t.Fatal("the retirement never marked its policy")
+			}
 			endedAtMark := false
 			select {
 			case left := <-released:
@@ -1250,8 +1328,12 @@ func TestAnEventStreamEndsAtItsSocketsRetirement(t *testing.T) {
 			if endedAtMark != tc.atMark {
 				t.Fatalf("the stream ended at the retirement's section: %v, want %v", endedAtMark, tc.atMark)
 			}
-			close(release)
-			<-closedSeen
+			letGo()
+			select {
+			case <-closedSeen:
+			case <-time.After(socketWait):
+				t.Fatal("the retirement never closed its server")
+			}
 			if !tc.atMark {
 				select {
 				case left := <-released:
@@ -1262,7 +1344,7 @@ func TestAnEventStreamEndsAtItsSocketsRetirement(t *testing.T) {
 					t.Fatal("the close did not end the stream blocked in its write")
 				}
 			}
-			<-stepped
+			r.waitStep(stepped)
 			if lines := logs.Lines("console: a request of a retired home-network socket outlived its wait"); len(lines) != 0 {
 				t.Fatalf("the retirement's wait ended at its bound: %v", lines)
 			}
