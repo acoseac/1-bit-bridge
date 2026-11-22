@@ -17,9 +17,9 @@ import (
 // The console's words for the update check's switch (backlog B761's round 3):
 // an off a save sent and got no answer for may not have been saved, every
 // claim that the rollbacks run with the checks off says what the key an off
-// writes costs a release from before the switch, and (rounds 4 and 5) what
-// stays open for the bridge's Windows service is named only as backlog B831,
-// in a sentence of its own.
+// writes costs a release from before the switch, and (backlog B831) every
+// text that says what an off does beside another process's swap says that the
+// bridge's Windows service refuses it at once.
 
 // TestTheConsolesSavesSayAnOffThatGotNoAnswerMayBeLost pins, without node,
 // that both of the console's saves of the switch, the Settings form's and a
@@ -55,23 +55,14 @@ func TestTheConsolesSavesSayAnOffThatGotNoAnswerMayBeLost(t *testing.T) {
 	}
 }
 
-// TestASwapThatStopsTheWindowsServiceIsNamedOnlyAsB831: an off the console
-// saves while a `bridge update` of another process is past its decision waits
-// for the install's swap and is saved after it; a swap that stops nothing (a
-// Startup-folder install's, or one run without the rights to stop the service)
-// leaves the save to land after it (backlog B761's round 4, Codex on round 3).
-// What stays open, for the bridge's Windows service, is backlog B831, and
-// every text that names it, README, PROTOCOL, the Settings page's hint,
+// offSwapTexts are the texts that say what an off the console saves does
+// while another process's `bridge update` swaps a new version in, flattened:
+// README's paragraph, PROTOCOL's, the Settings page's hint,
 // updateChecksOffLost's comment, the docs of the 503's writer and of
-// updater.LockForChecksOff, and the settings matrix's row, names it as the
-// bridge's Windows service and only by its id, none says it of Windows as a
-// whole, and none says in a sentence that names it what a stop does to a
-// save, a semicolon or a colon joining clauses of one sentence (round 5,
-// Codex on round 4: LockForChecksOff's doc named it in a clause of the
-// sentence that gave that contract). The words a failed save answers (the
-// 503's, updateChecksOffLost's) claim no cause, since a stop does not say
-// what stopped it.
-func TestASwapThatStopsTheWindowsServiceIsNamedOnlyAsB831(t *testing.T) {
+// updater.LockForChecksOff, and the settings matrix's row; and the words of
+// writeUpdateChecksOffRefusal's answers.
+func offSwapTexts(t *testing.T) (texts map[string]string, refusalWords string) {
+	t.Helper()
 	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
 	readme := flat(readConsoleJS(t, filepath.Join("..", "..", "README.md")))
 	i := strings.Index(readme, "swapping a new version in")
@@ -108,29 +99,40 @@ func TestASwapThatStopsTheWindowsServiceIsNamedOnlyAsB831(t *testing.T) {
 	if matrix == "" {
 		t.Fatal("the settings matrix has no row for updateCheckEnabled")
 	}
-
-	onWindows := regexp.MustCompile(`(?i)\bon windows\b`)
-	// What a stop does to a save: its wait ending, the save's fate, the 503.
-	stopsASave := regexp.MustCompile(`(?i)\b(sav(e|es|ed|ing)|nothing|lost|los(e|es|ing)|lands?|ends?|cut short|cancel\w*|wait\w*|503|stopping)\b`)
-	for where, text := range map[string]string{
+	return map[string]string{
 		"README": readme, "PROTOCOL.md": protocol, "the Settings page's hint": page,
 		"updateChecksOffLost's comment": lostDoc, "writeUpdateChecksOffRefusal's doc": flat(refusalDoc),
 		"updater.LockForChecksOff's doc": flat(lockDoc), "the settings matrix's row": matrix,
-	} {
-		for _, says := range []string{"Windows service", "backlog B831"} {
+	}, refusalWords
+}
+
+// TestEveryTextSaysTheWindowsServiceRefusesAnOffBehindAnotherProcesssSwap: an
+// off the console saves while a `bridge update` of another process holds the
+// install marker's lock waits for the install's swap and is saved after it,
+// but on the bridge's Windows service, which that swap stops first, it is
+// refused at once (backlog B831). Each of the texts that named what stayed
+// open there (offSwapTexts) says so of the bridge's Windows service, none says
+// it of Windows as a whole, and none names B831 as open: a sentence that names
+// it says nothing of it staying open. The words a failed save answers (the
+// 503's, updateChecksOffLost's) claim no cause, since a stop does not say what
+// stopped it.
+func TestEveryTextSaysTheWindowsServiceRefusesAnOffBehindAnotherProcesssSwap(t *testing.T) {
+	texts, refusalWords := offSwapTexts(t)
+	onWindows := regexp.MustCompile(`(?i)\bon windows\b`)
+	open := regexp.MustCompile(`(?i)\b(open|stays|remains|left|unfixed)\b`)
+	for where, text := range texts {
+		for _, says := range []string{"Windows service", "refused at once"} {
 			if !strings.Contains(text, says) {
-				t.Errorf("%s does not say %q of a swap that stops the bridge's Windows service:\n%s", where, says, text)
+				t.Errorf("%s does not say %q of an off behind another process's swap on the bridge's Windows service:\n%s",
+					where, says, text)
 			}
 		}
 		if m := onWindows.FindString(text); m != "" || strings.Contains(text, "lost with the stop") {
-			t.Errorf("%s still says of Windows as a whole that an off waiting for a swap is lost:\n%s", where, text)
+			t.Errorf("%s says of Windows as a whole what the bridge's Windows service does:\n%s", where, text)
 		}
 		for _, sentence := range sentenceEnd.Split(text, -1) {
-			if !strings.Contains(sentence, "B831") {
-				continue
-			}
-			if m := stopsASave.FindString(sentence); m != "" {
-				t.Errorf("%s names backlog B831 in a sentence that says what a stop does to a save (%q): %q", where, m, sentence)
+			if strings.Contains(sentence, "B831") && open.MatchString(sentence) {
+				t.Errorf("%s names backlog B831 as open: %q", where, sentence)
 			}
 		}
 	}

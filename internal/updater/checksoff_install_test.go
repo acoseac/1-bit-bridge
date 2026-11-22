@@ -47,7 +47,7 @@ type offSaved struct {
 func saveOffAsTheConsoleDoes(dir, livePath string, write func()) <-chan offSaved {
 	saved := make(chan offSaved, 1)
 	go func() {
-		lock, err := LockForChecksOff(context.Background(), dir)
+		lock, err := LockForChecksOff(context.Background(), dir, ChecksOffWait{})
 		if err != nil {
 			saved <- offSaved{err: err}
 			return
@@ -122,7 +122,7 @@ func TestAnOffSavedAfterAnInstallsRereadLandsAfterItsSwap(t *testing.T) {
 func TestAnInstallWaitingBehindAnOffSaveReadsItAndRefuses(t *testing.T) {
 	s := newSwitchedInstall(t, "0.1.0", "0.2.0", nil)
 	var reread rereadStandIn
-	lock, err := LockForChecksOff(context.Background(), s.dir)
+	lock, err := LockForChecksOff(context.Background(), s.dir, ChecksOffWait{})
 	if err != nil || !lock.Held() {
 		t.Fatalf("the off's save takes the install marker's lock: %+v, %v", lock, err)
 	}
@@ -196,7 +196,7 @@ func (w *servesSwitch) on() bool { return w.holder.Load().Update.EffectiveCheckE
 // dataDir, then the console's lock, then the holder's turn, then the switch's
 // gate (ChecksSwitched), released the other way.
 func (w *servesSwitch) saveOff(dataDir string, upd *Updater, inTurn func()) error {
-	lock, err := LockForChecksOff(context.Background(), dataDir)
+	lock, err := LockForChecksOff(context.Background(), dataDir, ChecksOffWait{})
 	if err != nil {
 		return err
 	}

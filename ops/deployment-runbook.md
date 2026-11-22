@@ -876,6 +876,21 @@ back of the `.bak` they leave stays refused until a new install, or `.bak`
 removed by hand (since B707 the console does not offer it, and its Rollback
 row says why).
 
+**A release from before B705 (0.2.2 or older) put back by hand drops that
+record.** Copied over the binary, such a release knows neither the record
+nor B705: its start clears the install marker by its own rule (an install
+older than 6 h as abandoned, one that never reached its swap as not
+swapped), and every marker it writes drops `"dataDirOpenedBy"`, while `.bak`
+can stay beside the binary. A newer version started by hand later over that
+data dir then finds no record, and its console offers a Roll back that puts
+`.bak` back over a store a newer version may have migrated. So before
+starting a newer version by hand over a data dir such a release has run on,
+remove `.bak` from beside the binary, or reach the newer version with
+`bridge update`, whose install arms a fresh marker that its first start
+records in again. To see what is recorded: `cat
+<dataDir>/update-state.json` (`"dataDirOpenedBy"` beside
+`"previousVersion"`).
+
 **From the release that carries B660, an install counts as healthy only once
 it has answered and stayed up.** Until B660 the new version's first start
 stamped its install installed during its boot, before anything listened, and

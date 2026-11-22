@@ -2648,13 +2648,13 @@ func (d DuplicatesConfig) EffectiveFilter() (string, error) {
 
 // SmartPlaylistsConfig governs the optional server-side smart/dynamic
 // playlist generator (Heavy Rotation, Auto Mix, Forgotten Favorites,
-// time-of-day, Daily Mix, The Finish Line). Disabled by default; opt in
-// here. Composes with the analysis + history features it draws from: the
-// listening families work from playback history alone, while the harmonic
-// Auto Mix + Daily Mix discovery self-omit unless `analysis.enabled` is on
-// (the generator gates them internally). Results are precomputed on a daily
-// cadence into the `smart_playlists` cache table and served by
-// GET /v1/smart-playlists.
+// time-of-day, Daily Mix, The Finish Line). On by default since 0.2.0
+// (Enabled, below); `enabled: false` here turns it off. Composes with the
+// analysis + history features it draws from: the listening families work
+// from playback history alone, while the harmonic Auto Mix + Daily Mix
+// discovery self-omit unless `analysis.enabled` is on (the generator gates
+// them internally). Results are precomputed on a daily cadence into the
+// `smart_playlists` cache table and served by GET /v1/smart-playlists.
 type SmartPlaylistsConfig struct {
 	// Enabled is the master toggle. Default ON — nil means on; only an
 	// explicit `enabled: false` turns it off.

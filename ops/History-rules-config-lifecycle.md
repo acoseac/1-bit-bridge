@@ -163,7 +163,10 @@ Windows-runner check, distinct from portable race-test results.
   OneDrive or container folder being a directory (`checkResolvedDir`); a
   link at the last element followed to its target, whose name the lock
   takes, `.actual.yaml.lock` for `alias.yaml` → `actual.yaml`), a lock file
-  a root writer makes taking the config's owner (`fsutil.OpenLockFileLike`);
+  a root writer makes taking the config's owner (`fsutil.OpenLockFileLike`),
+  and one there that this user may not open to read and write refused,
+  nothing written, naming both files and both ways out
+  (`*config.LockInaccessibleError`, B537 item 2);
   the name is resolved again after every read a decision of the turn rests
   on, last: once the turn has made its own read, before each attempt at a
   rename after the byte comparison and a writer's own comparison in
@@ -317,6 +320,51 @@ Windows-runner check, distinct from portable race-test results.
   Run as root with a single owner, the lock is still among the files given
   the install's owner (`TestSaveAsRootKeepsTheConfigOwner`,
   `TestSnapshotAndRestoreAsRootKeepTheInstallOwner`).
+
+  **A lock file there that this user may not open is refused, saying what
+  to do** (2026-11-21, backlog B537 item 2). A lock file already there is
+  opened as it is, so a `sudo bridge init` in a directory root owns left
+  `.bridge.yaml.lock` root's 0600 once bridge.yaml was given to the
+  service's user later, and every writer running as that user, the
+  console's saves included, failed with `open the lock beside <config>:
+  openat .bridge.yaml.lock: permission denied`, while the console said only
+  that the log says why. An open refused for a permission
+  (`fs.ErrPermission`) over a regular file at the lock's name, by an
+  `os.Lstat` that follows no link, is now a `*config.LockInaccessibleError`
+  (`config.ErrLockInaccessible`, `lockInaccessible`; its cause the open's
+  error), whose words name the config file and the lock file and give the
+  two ways out: give the lock file the config file's owner and let that
+  owner read and write it, or remove it while the bridge is stopped and no
+  bridge command runs, since only the lock taken on it means anything and
+  the next writer makes it again. A file whose mode was taken away is the
+  same case, since the open asks to read and write whoever owns the file
+  (the brief's review). The refusal comes before `linkIntoReadOnly`'s
+  remedy, which stays for a lock file that is not there, and every other
+  failure keeps its words: no lock file in a directory this user cannot
+  write, anything but a regular file at the lock's name (a directory, a
+  link), and an Lstat that answers an error of its own. Nothing is chowned
+  or removed, and no value of the config is in the words. The console
+  answers it in words of its own that name no path
+  (`errMsgSaveConfigLockInaccessible`), 500 `save-config` as every other
+  class. `TestALockFileThisUserCannotOpenSaysWhatToDo` (config.Edit and the
+  holder's Update; mode 0 stands for another user's file, the only owner a
+  test that is not root can give one, and the refusal reads the open's
+  answer and the entry's kind, never its owner; each way out then lets the
+  save land), `TestAConfigSaveRefusalSaysWhatToDoAndNamesNoPath`'s row and
+  `TestAConsoleSaveBesideALockFileItCannotOpenSaysWhatToDo` pin it, each red
+  before the fix, which answered in the open's words alone.
+
+  **The console's status for a refused save stays 500 `save-config`**
+  (backlog B537 item 3, not taken: the orchestrator's decision of
+  2026-11-21). A busy lock could answer 503 and a file changed outside the
+  holder 409, and every known client would take either: the console's
+  script turns any status but a 2xx into an error carrying its message, and
+  `bridge library add` and `remove` beside a running bridge print any status
+  from 400. No one asked for the change, though, and the scripts
+  self-hosters run against the console cannot be known
+  (`ops/settings-apply-semantics.md` is what a control plane builds
+  against), so the status, the code and the tests that pin 500 stay as they
+  are.
 
   **It is held around one read-modify-write, never for a process's life**:
   init's turn is its final check and save (`saveInitConfig`), never its
@@ -1446,7 +1494,8 @@ Windows-runner check, distinct from portable race-test results.
   opens, resolve the name before a read a decision rests on rather than
   after it, or retry on the file it opens now, stage a save anywhere but
   where its rename lands, make a root writer's lock file root's beside
-  another owner's config, wait for it without a bound, take ENOLCK or any
+  another owner's config, chown or remove a lock file a writer did not
+  make, wait for it without a bound, take ENOLCK or any
   failure but a definitive no-locks answer for an unlocked turn, rename an
   attempt without the turn's comparison, retry past its refusal or rename
   once the save's window has ended, put a value of the file in a refusal,
@@ -2636,6 +2685,28 @@ window (`BootInstallFailed`, refused on the record) or past it
 refuses. That holds where the version put back carries B705: an older
 release's housekeeping clears the marker by its own rule.
 
+*A release from before B705 put back by hand* (backlog B708, 2026-11-21: no
+code, the runbook's line). The case the paragraph above leaves needs a
+release from before the record and B705, which first shipped together in
+0.2.3, put back by hand (0.2.2 or older), and then a newer version started
+by hand over the same data dir: the old release clears the marker by its own
+rule (its window read before the version), its writes drop
+`DataDirOpenedBy`, `.bak` can stay, and the newer version's Roll back is
+then not refused. An install records again at its first start
+(`AdmitBoot`), so reaching the newer version with `bridge update` closes it.
+Deriving the record again at a start was not taken. The store cannot say:
+it records no version, only `PRAGMA user_version`, and a build knows only
+the top of its own ladder (`manifest.LadderTop`). A backup can say its
+version (`ProbeVersion`), but a record made from it at a start with no
+install armed would be a new writer at serve's admission, which the crash
+rollback keeps short by asking its backup before it takes the marker's lock
+(`statelock.go`'s wait), and it would refuse the Roll back that the
+abandoned clear (`BootClearAbandoned`) leaves to the operator on purpose;
+which rollbacks run is the owner's decision, not a Low. So the runbook says,
+after its B705 paragraph, what such a release does to the record, to remove
+`.bak` or to reach the newer version with `bridge update` before starting it
+by hand over that data dir, and where to read the record.
+
 *The other paths that can clear an install marker while its version runs*
 (the brief's item 3):
 - the restamp before a deferred auto-install restart
@@ -3628,7 +3699,7 @@ pin it. The records, with their negative controls, are in
 
 ## The update check's off switch (backlog B761's PR 1, 2026-11-09)
 
-- **`update.checkEnabled` off asks GitHub nothing and installs nothing new: a check (the start's, a tick's, Check now) and an install are admitted only while it is on, and an install again at its decision under the install marker's lock (`commit`), past which its swap finishes; the off transition (`Updater.ChecksSwitched`, once a settings save is published) stops every check and every install before that decision through its own context; a tick checks only where the switch was on when its wait was armed and no transition came since (the poll loop's `schedule`, against `switchGen`, which every `ChecksSwitched` advances under `gateMu`), and otherwise fires only the restart the auto-installer deferred after a swap that committed, through its gates; on again, the cadence's wait starts over and asks nothing; an install whose process took the switch as it started reads it again as it begins and at its decision (`InstallOptions.RereadSwitch`: `bridge update`'s, the file it resolved and its environment), settings that no longer load refusing it in their load's words; the console's save of an off holds the install marker's lock until the updater is told (`updater.LockForChecksOff`), taken before the holder's lock, `gateMu` after both, so it lands before an install's decision or after its swap; the status masks what a check found (`Status.CheckEnabled`); a status, every rollback (the console's and a start's) and the probation are never refused, and a release from before the switch refuses settings that write its key, so the console's off is refused while the boot's crash rollback would put back such a backup, or while a lookup of that backup fails, or the install marker cannot be read beside a backup or a failed lookup of one (`updater.ChecksOffRefused`, failing closed; one not there or not parsing is no install, as at a start), and no writer outside the holder writes the key from its environment (`KeepFiledSwitches`)** (2026-11-09, backlog B761's PR 1, five rounds). **Don't read the switch for an admission or a decision outside `gateMu`, or a file's reread under it, stop a check or an install with a cancel that carries a cause, stop an install past its decision or commit one the off transition stopped, let a tick ask GitHub whose wait was armed while the switch was off or before a transition, ask at a wake or because the switch came on, let the auto-installer begin an install with the switch off, take a reread that failed for an off or find the config again to reread it, leave a committed swap's deferred restart to a check, show a cached release as current while off, refuse a status, a rollback or the probation for the switch, or advise writing the key true where taking it out turns the checks on. Don't save the console's off but under the install marker's lock (without it only where the filesystem keeps none), take that lock under the holder's or the console's lock, ask for it again on a path that holds it, decide the probation's refusal but by the boot's own predicate and the backup's own answers, or take a check that did not answer, a failed lookup of the backup, or a marker that could not be read beside a backup, for a yes.**
+- **`update.checkEnabled` off asks GitHub nothing and installs nothing new: a check (the start's, a tick's, Check now) and an install are admitted only while it is on, and an install again at its decision under the install marker's lock (`commit`), past which its swap finishes; the off transition (`Updater.ChecksSwitched`, once a settings save is published) stops every check and every install before that decision through its own context; a tick checks only where the switch was on when its wait was armed and no transition came since (the poll loop's `schedule`, against `switchGen`, which every `ChecksSwitched` advances under `gateMu`), and otherwise fires only the restart the auto-installer deferred after a swap that committed, through its gates; on again, the cadence's wait starts over and asks nothing; an install whose process took the switch as it started reads it again as it begins and at its decision (`InstallOptions.RereadSwitch`: `bridge update`'s, the file it resolved and its environment), settings that no longer load refusing it in their load's words; the console's save of an off holds the install marker's lock until the updater is told (`updater.LockForChecksOff`), taken before the holder's lock, `gateMu` after both, so it lands before an install's decision or after its swap, but on the bridge's Windows service, where a wait that finds the lock held over an install marker of another version this process's updater did not arm (read without the lock; `Updater.Armed`, by its target and time; `updater.ChecksOffWait`) is refused at once, 409 `marker-locked` naming that version, a stop observed first keeping its 503 (backlog B831); the status masks what a check found (`Status.CheckEnabled`); a status, every rollback (the console's and a start's) and the probation are never refused, and a release from before the switch refuses settings that write its key, so the console's off is refused while the boot's crash rollback would put back such a backup, or while a lookup of that backup fails, or the install marker cannot be read beside a backup or a failed lookup of one (`updater.ChecksOffRefused`, failing closed; one not there or not parsing is no install, as at a start), and no writer outside the holder writes the key from its environment (`KeepFiledSwitches`)** (2026-11-09, backlog B761's PR 1, five rounds). **Don't read the switch for an admission or a decision outside `gateMu`, or a file's reread under it, stop a check or an install with a cancel that carries a cause, stop an install past its decision or commit one the off transition stopped, let a tick ask GitHub whose wait was armed while the switch was off or before a transition, ask at a wake or because the switch came on, let the auto-installer begin an install with the switch off, take a reread that failed for an off or find the config again to reread it, leave a committed swap's deferred restart to a check, show a cached release as current while off, refuse a status, a rollback or the probation for the switch, or advise writing the key true where taking it out turns the checks on. Don't save the console's off but under the install marker's lock (without it only where the filesystem keeps none), take that lock under the holder's or the console's lock, ask for it again on a path that holds it, refuse an off at it but on the Windows service behind another process's install of another version, tell this process's install by a flag rather than its marker's identity, let that refusal outrank a stop it observes first, decide the probation's refusal but by the boot's own predicate and the backup's own answers, or take a check that did not answer, a failed lookup of the backup, or a marker that could not be read beside a backup, for a yes.**
 
 *What goes out.* While update checks are on, the default, the updater sends
 one unauthenticated GET of GitHub's latest release at its start and once
@@ -3777,8 +3848,9 @@ install's hold, never asks for it again. The wait is `LockState`'s 30 s,
 which an install's hold fits inside (`scmStopWait` held to half of it); the
 save's wait ends with serve's context, which the console's requests take,
 and the console answers 503 `stopping`, nothing saved, in words that claim
-no cause, since a stop does not say what stopped it (round 4). What stays
-open here, for the bridge's Windows service, is backlog B831 (round 5).
+no cause, since a stop does not say what stopped it (round 4). Round 5 named
+the bridge's Windows service's case backlog B831, which refuses such an off
+there at once since 2026-11-21 (the paragraph on it, below).
 A holder past the wait or a lock that fails is
 409 `marker-locked`, nothing saved; a filesystem that keeps no locks saves
 the off at once, since no install commits there (`lockMarkerForUpdate`
@@ -3852,7 +3924,8 @@ through a later install, which waits for the decision's hold of the
 marker's lock, writes a fresh marker of its own and backs up a release
 with the switch, so the no-backup case keeps nothing from a rollback.
 Every text that names backlog B831 names it in a sentence of its own that
-says only where it applies (Codex on round 4).
+says only where it applies (a review in round 4); since B831 those texts say
+what that service does instead (below).
 
 *A failed lookup beside a marker the off reads (backlog B898FU's round 2).*
 Round 5 left `ProbationHolds` and the decision over a marker it reads on
@@ -3866,6 +3939,68 @@ automatic install, at most twice the window, its reason naming the failure
 without a path, since a later start's crash rollback may find a backup this
 lookup could not. `TestAReadMarkerRefusesTheOffWhereTheBackupCannotBeLookedUp`
 and `TestTheAutoInstallerWaitsWhereTheBackupCannotBeLookedUp` pin it.
+
+*The off behind another process's install on the bridge's Windows service
+(backlog B831, 2026-11-21).* `bridge update` holds the install marker's lock
+from just before its decision through its swap, and arms the marker before
+the swap; on Windows the swap first stops the bridge's service through the
+SCM (`swap_windows.go`'s `stopServiceIfRunning`, which stops nothing where
+the process swapping is the service, or where it cannot reach the SCM or
+finds no service registered or running). That stop cancels serve and every
+console request with it, so an off waiting for the lock ended with serve, as
+a 503 `stopping` or no answer at all, and the new version started with the
+checks on. Persisting the off for a later start was not taken: it would be a
+new durable request in the data dir, which a later start, possibly of
+another version, would have to apply before its first check, under the
+marker's lock and the probation's decision, and drop once it is stale (after
+a rollback to a release that does not know it, or a hand edit of the key),
+where every other off refusal saves nothing and says to save again. So the
+off's wait asks, at each held answer of the lock (`LockState`'s first try and
+every retry, never once the lock is taken: `lockStateWhileHeld`), whether
+the hold is another process's install that will stop this service
+(`ChecksOffWait.anotherInstall`): serve is the bridge's Windows service
+(`isWindowsService`, through `serveOpts.asWindowsService`), and the install
+marker, read without the lock (`markerAsSeen`: its writes are renames, so
+the read finds one whole marker or another; one that is not there, does not
+parse or cannot be read is no install, and nothing is logged at a retry),
+is an install of a version other than the running one (`SameVersion`) that
+this process's updater did not arm. The updater tells its own markers by
+their identity, the target and the time each arming wrote (`Updater.Armed`,
+recorded by `noteArmed` just before Install's marker write and kept through
+the auto-installer's restamp of a marker of its own), never by a flag:
+`installInFlight` covers a download, during which another process may
+install, and `swapPending` says a swap landed and not which (the brief's
+review). Where all of these hold the off is refused at once, a
+`*ChecksOffLockError` whose cause matches `ErrChecksOffBehindAnInstall`, 409
+`marker-locked` in words that name that install's version and no path, that
+say nothing was saved and to turn the checks off again once the bridge
+answers; a stop observed before the refusal, or while it is decided, keeps
+the stop's own answer, the 503 that claims no cause. Everywhere else the off
+waits as before: a Startup-folder install's bridge, a foreground serve,
+every other platform, and an install this process made. `LockState`'s other
+callers are unchanged. *What it leaves* (the orchestrator's decisions): a
+swap run without the rights to stop the service, or finding none to stop,
+stops nothing, and an off it refused would have landed after it, a false
+refusal the operator answers by turning the checks off again; a stop that
+lands within one retry (`stateLockRetry`, 50 ms) of the marker's arming
+keeps the 503; and a marker another process armed and left (a `bridge
+update` killed before its swap, or a swap that stopped nothing, waiting for
+its restart) refuses, beside any other holder of the lock (a migrating store
+open, a start's housekeeping, this process's own install or rollback before
+it writes its marker), an off that would have landed, until a start
+resolves that marker. `TestAnOffBehindAnotherProcesssInstallOnTheWindowsServiceIsRefusedAtOnce`,
+`TestAnOffBehindTheInstallMarkersLockWaitsWhereItIsNoOtherProcesssInstall`,
+`TestAStopBeforeTheOffsRefusalKeepsItsError`,
+`TestARestampKeepsWhatThisUpdaterArmed` and
+`TestAnOffBehindAnotherProcesssInstallIsRefusedWhateverThisProcessInstalls`
+(internal/updater, every OS), cmd/bridge's
+`TestTheConsolesOffBehindAnotherProcesssInstallOnTheWindowsServiceIsRefusedAtOnce`,
+`TestTheConsolesOffBehindTheInstallMarkersLockWaitsWhereItIsNoOtherProcesssInstall`,
+`TestAStoppedOffBehindAnotherProcesssInstallIsAStop` and
+`TestATestProcessIsNoWindowsService`, and admin's
+`TestEveryTextSaysTheWindowsServiceRefusesAnOffBehindAnotherProcesssSwap`
+pin it, each refused case red before the fix in the lock's ordinary 30 s
+refusal, and synchronized on the lock's held answers, never on a sleep.
 
 `TestNoRequestAtTheStartOrATickWhileUpdateChecksAreOff` (whose tick turns red
 with the tick's gate alone reverted), `TestARequestAtTheStartAndAtATickWhileUpdateChecksAreOn`,

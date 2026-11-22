@@ -61,6 +61,12 @@ type ChecksOffLockError struct {
 }
 
 func (e *ChecksOffLockError) Error() string {
+	var behind *installBehindError
+	if errors.As(e.cause, &behind) {
+		return fmt.Sprintf("update checks were not turned off: an install of %s by another process holds the install "+
+			"marker's lock and is replacing the bridge's binary, which can stop this service and this save with it, so "+
+			"nothing was saved; once the bridge answers, turn the checks off again if they are on", behind.target)
+	}
 	if errors.Is(e.cause, ErrStateLockHeld) {
 		return fmt.Sprintf("update checks were not turned off: %s (an install of another version, a start's housekeeping or a "+
 			"store's migration), and the off waits for it so that an install cannot read the checks on and then install; "+
@@ -74,6 +80,67 @@ func (e *ChecksOffLockError) Error() string {
 func (e *ChecksOffLockError) Is(target error) bool { return target == ErrChecksOffLocked }
 
 func (e *ChecksOffLockError) Unwrap() error { return e.cause }
+
+// ErrChecksOffBehindAnInstall is what the cause of a *ChecksOffLockError
+// matches where the off was refused at once behind another process's install
+// on the bridge's Windows service (ChecksOffWait, backlog B831).
+var ErrChecksOffBehindAnInstall = errors.New("another process's install holds the install marker's lock, and its swap can stop this service")
+
+// ChecksOffWait is what an off-save's wait for the install marker's lock asks
+// while another open holds it, at its first answer and at every retry
+// (LockForChecksOff, backlog B831): whether that hold is another process's
+// install, whose swap stops the bridge's Windows service and the save with it.
+// The zero value waits as every taker of the lock does.
+type ChecksOffWait struct {
+	// Service says this process is the bridge's Windows service, which another
+	// process's swap stops through the SCM before it moves the binary
+	// (swap_windows.go's stopServiceIfRunning).
+	Service bool
+	// Current is the running version.
+	Current string
+	// Updater is this process's own: an install marker it armed (Armed) is
+	// never another process's install.
+	Updater *Updater
+
+	// read stands in for the marker's read without the lock in a test; nil in
+	// production (markerAsSeen).
+	read func(dataDir string) State
+}
+
+// anotherInstall is the cause an off's wait for the install marker's lock in
+// dataDir is refused with at a held answer, nil to wait on (backlog B831):
+// an *installBehindError where this process is the bridge's Windows service
+// and the marker, read without the lock, is an install armed for a version
+// other than the running one that this process's updater did not arm. A
+// marker that is not there, does not parse or cannot be read is no install.
+func (w ChecksOffWait) anotherInstall(dataDir string) error {
+	if !w.Service {
+		return nil
+	}
+	read := w.read
+	if read == nil {
+		read = markerAsSeen
+	}
+	st := read(dataDir)
+	if st.Status != "installing" || st.TargetVersion == "" || SameVersion(st.TargetVersion, w.Current) || w.Updater.Armed(st) {
+		return nil
+	}
+	return &installBehindError{target: st.TargetVersion}
+}
+
+// installBehindError is the cause of an off's *ChecksOffLockError behind
+// another process's install of target on the bridge's Windows service
+// (ChecksOffWait), matching ErrChecksOffBehindAnInstall.
+type installBehindError struct {
+	target string
+}
+
+func (e *installBehindError) Error() string {
+	return fmt.Sprintf("an install of %s by another process holds the install marker's lock", e.target)
+}
+
+// Is makes an *installBehindError match ErrChecksOffBehindAnInstall.
+func (e *installBehindError) Is(target error) bool { return target == ErrChecksOffBehindAnInstall }
 
 // LockForChecksOff takes the install marker's lock in dataDir for a save of
 // the settings that turns update checks off, first of the locks it takes
@@ -91,7 +158,22 @@ func (e *ChecksOffLockError) Unwrap() error { return e.cause }
 // rights to stop the service) leaves the save to take the lock once the swap
 // is done. A stop of serve ends the wait as it ends every request of the
 // console's, which take serve's context, and a save it ends saves nothing.
-// What stays open here, for the bridge's Windows service, is backlog B831.
+//
+// On the bridge's Windows service that stop is the install's own: its swap
+// stops the service through the SCM before it moves the binary, and a save
+// waiting for the lock would end with serve. So there (w.Service) an off
+// whose wait finds the lock held, at the first answer and at every retry,
+// never once it is taken, is refused at once where the install marker, read
+// without the lock (markerAsSeen), is an install armed for a version other
+// than w.Current that w.Updater did not arm (ChecksOffWait.anotherInstall,
+// backlog B831): a *ChecksOffLockError whose cause matches
+// ErrChecksOffBehindAnInstall, in words that name the install's target and
+// say to turn the checks off again once the bridge answers. A stop observed
+// before that refusal is decided, or while it is, keeps ctx's error
+// (lockStateWhileHeld). Whether the swap will reach the SCM cannot be told
+// from here: one run without the rights to stop the service stops nothing,
+// and the off it refused would have been saved after it. Every other wait,
+// the zero ChecksOffWait's among them, is the one above.
 //
 // On a filesystem that keeps no locks it answers a hold that is not held,
 // and no error: the save goes on, since no install commits on such a
@@ -101,11 +183,12 @@ func (e *ChecksOffLockError) Unwrap() error { return e.cause }
 // *ChecksOffLockError, and a stop in the wait is ctx's error: either way
 // nothing may be saved. A taker whose ctx ended once the lock is taken lets
 // it go and answers ctx's error.
-func LockForChecksOff(ctx context.Context, dataDir string) (*StateLock, error) {
-	lock, err := LockState(ctx, dataDir)
+func LockForChecksOff(ctx context.Context, dataDir string, w ChecksOffWait) (*StateLock, error) {
+	lock, err := lockStateWhileHeld(ctx, dataDir, func() error { return w.anotherInstall(dataDir) })
 	if err != nil {
 		var refused *StateLockError
-		if errors.As(err, &refused) {
+		var behind *installBehindError
+		if errors.As(err, &refused) || errors.As(err, &behind) {
 			return nil, &ChecksOffLockError{cause: err}
 		}
 		return nil, err

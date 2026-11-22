@@ -199,6 +199,17 @@ var noLocksSaid sync.Once
 // fsutil.OpenLockFile, so a link there is refused and a root caller makes it
 // the data dir's owner's.
 func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
+	return lockStateWhileHeld(ctx, dataDir, nil)
+}
+
+// lockStateWhileHeld is LockState, asking whileHeld, where given, at each try
+// another open answered held, the first and every retry, and never once the
+// lock is taken: an error it answers ends the wait with that error, the lock
+// file closed and nothing taken (the console's off behind another process's
+// install, LockForChecksOff, backlog B831). A ctx that has ended is asked
+// first, and again once whileHeld has answered, so a stop observed before or
+// during its answer keeps ctx's error.
+func lockStateWhileHeld(ctx context.Context, dataDir string, whileHeld func() error) (*StateLock, error) {
 	f, err := fsutil.OpenLockFile(dataDir, stateLockFileName)
 	if err != nil {
 		return nil, &StateLockError{Err: err}
@@ -218,6 +229,12 @@ func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
 				if !waiting {
 					waiting = true
 					callStateLockWaiting(dataDir)
+				}
+				if whileHeld != nil {
+					if err := heldRefusal(ctx, whileHeld); err != nil {
+						_ = f.Close()
+						return nil, err
+					}
 				}
 			} else {
 				noLock = err
@@ -248,6 +265,23 @@ func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
 			return nil, &StateLockError{Err: err}
 		}
 	}
+}
+
+// heldRefusal is whileHeld's refusal of a wait for the install marker's lock,
+// nil to wait on: ctx's error where ctx ended before whileHeld answered or
+// while it did, so that a stop keeps its own answer.
+func heldRefusal(ctx context.Context, whileHeld func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	refusal := whileHeld()
+	if refusal == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return refusal
 }
 
 // sleepUnlessDone waits d, or until ctx ends, whose error it then returns.

@@ -531,6 +531,9 @@ func (u *Updater) install(ctx context.Context, a *admission, opts InstallOptions
 		PreviousVersion: version.ServerVersion,
 		AttemptedAt:     time.Now().UTC(),
 	}
+	// This updater's own, before it is written (backlog B831): an off whose
+	// wait reads it is never refused as another process's install.
+	u.noteArmed(state)
 	if err := SaveState(opts.DataDir, state); err != nil {
 		return status, fmt.Errorf("save state: %w", err)
 	}
