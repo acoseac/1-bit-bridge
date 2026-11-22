@@ -3,15 +3,17 @@
 Design and PR plan, 2026-11-22, for bridge 0.2.4 beside B634 (the console plays to the bridge's own
 DAC). This round writes no code.
 
-**Status.** For review, round 2. Binding: the owner's decision of 2026-11-22 (open the bridge's
+**Status.** For review, round 3. Binding: the owner's decision of 2026-11-22 (open the bridge's
 console from another computer or phone on the home network, without a login, as an explicit
-opt-in), the first brief's review items R1 to R10, and the second brief's D1 to D16, of which D11 to
-D16 win wherever other text differs; each is settled below and indexed in §12. Round 1 stands where
-round 2 says nothing different: one field beside a loopback `adminAddress` (§1), a second socket
-that serves the same handler (§3.1), a description per socket (§3.1), one Origin matcher that the
-event stream shares (§4.3), the loopback endpoint audit (§3.7), and who owns the retry and the
-shutdown (§3.4, §3.6). One choice departs from the shape the first brief sketched, and §1 says why
-before anything else. Every current behaviour cited is `path:line` at bridge main `9f98e0c1`.
+opt-in), the first brief's review items R1 to R10, the second brief's D1 to D16, of which D11 to D16
+win wherever other text differs, and the third brief's F1 to F12, of which F9 to F12 win wherever
+other text differs; each is settled below and indexed in §12. Rounds 1 and 2 stand where round 3
+says nothing different: one field beside a loopback `adminAddress` (§1), a second socket that
+serves the same handler (§3.1), a description per socket (§3.1), one Origin matcher that the event
+stream shares (§4.3), the loopback endpoint audit (§3.7), who owns the retry and the shutdown (§3.4,
+§3.6), the kernel's hold of the interface (§3.3) and the policy read again (§3.5). One choice
+departs from the shape the first brief sketched, and §1 says why before anything else. Every
+current behaviour cited is `path:line` at bridge main `9f98e0c1`.
 
 No host, address or key path appears here. `A` is the private address an operator opens the
 console on, `P` the console's port (`adminAddress`'s, 7789 by default), `A2` any other address,
@@ -27,8 +29,10 @@ such hold, or the kernel refuses it, the socket stays closed and says why. The s
 connection only from inside A's own network, answers only a request that names `A:P` or
 `<name>.local:P`, and refuses a write that a page of another origin sends. Every 5 seconds serve
 reads the box's interfaces again: a socket whose interface, address, network or name no longer
-reads as it did at its bind is closed with every connection it holds, kept-alive ones included,
-before another binds, and a reading that fails in any part closes it too. It has no login and speaks
+reads as it did at its bind is retired, and a reading that fails in any part retires it too. From
+the moment a retirement begins its socket admits no request, every event stream on it ends, and
+every connection it holds is closed, kept-alive ones included; another socket binds only on a
+reading taken after all of that, and only where that reading admits A. It has no login and speaks
 plain HTTP, so anyone on that network can watch and use the console. If A does not bind at start,
 serve starts all the same with the console on loopback, says so at WARN, and tries again every 5
 seconds. The console's menu, `bridge doctor` and the serve banner say which it is, from the socket's
@@ -44,7 +48,7 @@ Cloud are unchanged; public mode refuses the field.
 |---|---|---|
 | The console binds `adminAddress` alone, which loopback mode holds to a loopback host | `internal/config/config.go:4069`, `:4785-4814`; `internal/admin/admin.go:2226-2240` | `adminAddress` unchanged; `adminLANAddress` adds a second socket on `A:P` (§2, §3) |
 | A socket bound to an address takes a connection to it from any interface; OpenHome holds its sockets to their interface where it can, and leaves one listening unrestricted where the kernel refuses | `internal/player/openhome/restrict_linux.go:11-20`; `.claude/rules/openhome.md`, the interface bullet | The kernel holds the LAN socket to A's interface, or the socket stays closed (§3.3) |
-| OpenHome reads the box's addresses every 5 s and keeps what is bound when a listing fails; `lan.HostInterfaces` lists an interface whose addresses do not read with none | `openhome.md`, the listener bullet; `internal/player/lan/lan.go:49-60` | The LAN socket's policy is read again every 5 s; a change, or a reading that fails in any part, closes the socket and its connections before another binds (§3.5) |
+| OpenHome reads the box's addresses every 5 s and keeps what is bound when a listing fails; `lan.HostInterfaces` lists an interface whose addresses do not read with none | `openhome.md`, the listener bullet; `internal/player/lan/lan.go:49-60` | The LAN socket's policy is read again every 5 s; a change, or a reading that fails in any part, retires the socket: it admits no request from then on, its streams end, its connections close, and another binds only on a reading taken after that (§3.5) |
 | Every request must come from loopback | `internal/admin/middleware_auth.go:28-39`; `admin.go:2682-2696` | The loopback socket: unchanged. The LAN socket: a source inside A's on-link network and private class (§4.1) |
 | A Host must be a loopback name or literal, any port or none, or empty | `admin.go:2719-2739` | The loopback socket: unchanged. The LAN socket: `A:P` or `<name>.local:P`, each spelling judged alike in Host and Origin by one function (§4.2) |
 | An Origin must be a loopback name on the listener's port, in `csrfGuard` and in the SSE gate | `admin.go:2547-2605`; `internal/admin/handlers_events.go:63-68` | Per socket, through one function both gates call (§4.3) |
@@ -227,17 +231,28 @@ value alone does not show (§2.7), is read apart, by `config.LANKeyOf`.
 - **Recorded at boot, apart from the file.** Serve's plan takes from the boot snapshot the address
   it binds and its source: `file` (the file sets the key and no variable set the leaf),
   `environment` (`BRIDGE_ADMIN_LAN_ADDRESS` set the leaf, `envSet`, and the file has no key) or
-  `both` (the variable set the leaf over a file that has the key, which the variable wins over).
-  It records too whether the file held the key at boot, and whether that key was empty (§2.7).
-  The socket's state carries them, `GET /api/console` reports them (§5.2), and none is read again
-  while serve runs: what the file says now is the doctor's own read, said apart (§5.3).
+  `both` (the variable set the leaf over a file that has the key, whatever the key holds, the
+  variable winning). It records too what the file's key held at boot, apart from the address it
+  binds (F7): `absent`; `empty`, an empty value or `null`; `address`, with the file's own address;
+  or `not_an_address`, a value the field's check refuses, which nothing ever repeats (R10). A value
+  the variable overrides is never checked at the load, since Validate checks the leaf as the
+  variable left it, so it can be anything, a pasted secret included: the plan reads the file's own
+  value from the boot snapshot's bytes with `config.LANKeyOf` (§2.7), which returns the key's
+  presence and its value, and keeps the value only where `ValidateConsoleLANAddress` takes it. The
+  socket's state carries all of it, `GET /api/console` reports it (§5.2), and none of it is read
+  again while serve runs: what the file says now is the doctor's own read, said apart (§5.3).
 - **What clears each.** `file`: remove the `adminLANAddress` line from bridge.yaml, the key itself
   (§2.7), and restart. `environment`: unset `BRIDGE_ADMIN_LAN_ADDRESS` where the service is started
   (the systemd unit's `Environment=` or `EnvironmentFile=`, launchd's `EnvironmentVariables`, the
   container's `-e` or Compose's `environment:`) and restart; a variable set to the empty string
   sets nothing (§2.3), so emptying it is unsetting it. `both`: the two, since unsetting the
   variable alone makes the file's address the one serve binds at its next start (D14), and
-  removing the key alone leaves the variable's (D7).
+  removing the key alone leaves the variable's (D7). `both` over an empty key
+  (`adminLANAddress: ""` beside the variable, F7): unsetting the variable alone turns the console
+  off the home network at the next start, and the empty line costs the rollback (§2.7) until it is
+  removed. `both` over
+  a key that is `not_an_address`: unsetting the variable alone makes the next start refuse
+  bridge.yaml, in Validate's words, until that line is corrected or removed.
 - **The doctor is not the service.** `bridge doctor` runs with its shell's environment, which need
   not be the service's: it never judges the source from its own environment. It reports the
   running bridge's source as `GET /api/console` gives it, and, each named as what it is, what the
@@ -246,8 +261,12 @@ value alone does not show (§2.7), is read apart, by `config.LANKeyOf`.
   console's line and the banner: "set in bridge.yaml (adminLANAddress)", "set by
   BRIDGE_ADMIN_LAN_ADDRESS in the bridge's environment", "set by BRIDGE_ADMIN_LAN_ADDRESS in the
   bridge's environment, over bridge.yaml's adminLANAddress", each followed by its clearing
-  sentence, and for `both`: "unsetting the variable alone opens the console at bridge.yaml's
-  address at the next start".
+  sentence, and for `both` by what the file's key held at boot: "unsetting the variable alone opens
+  the console at bridge.yaml's address at the next start" (`address`, the address named, as the
+  boot read it); "unsetting the variable alone turns the console off the home network at the next
+  start; bridge.yaml's empty adminLANAddress line still costs the rollback: remove it" (`empty`);
+  "unsetting the variable alone makes the next start refuse bridge.yaml: its adminLANAddress does
+  not read as an address" (`not_an_address`, the value never repeated).
 
 ### 2.7 The rollback, said before it is lost (D8, D15, D16)
 
@@ -268,16 +287,17 @@ The key's presence is read from the file's bytes, never from the value: `config.
 decodes them, without the strict check, into a struct whose field is a `yaml.Node`, which yaml.v3
 fills for a key that is there whatever its value, `null` and an empty value included (it hands
 such a field the node before it reads any value: `decode.go:492-495` at the v3.0.1 the module
-builds), and leaves empty for a key that is not, through its own merge keys and aliases. Serve
-records it at boot (§2.6), and each doctor reads the file as it is when it runs, since the rollback
-reads the file as it is then.
+builds), and leaves empty for a key that is not, through its own merge keys and aliases. It
+returns the key's presence and, for a scalar, its value, which its caller checks before it keeps
+it (§2.6). Serve records it at boot (§2.6), and each doctor reads the file as it is when it runs,
+since the rollback reads the file as it is then.
 
 Said before it happens:
 
 | Where | When | What it says |
 |---|---|---|
 | `config/bridge.yaml.example`, the field's comment | always | what the field opens, with no login and over plain HTTP; then "While this key is in the file, even empty, bridge 0.2.3 and earlier refuse the file: an update's automatic rollback to one of them is not made, and one installed by hand will not start. Remove the whole line before you go back to one. BRIDGE_ADMIN_LAN_ADDRESS instead costs no rollback: earlier versions ignore it and keep the console on this machine." |
-| `bridge init` | before `saveInitConfig` (`cmd/bridge/init.go:960`), so before the file holds the key and before any service starts, in a run that writes the field: `--admin-lan-address`, or a rewrite that keeps it (§2.5, item 5) | the no-login sentence (§5.4) and the rollback sentence, with its recovery (D15); a run that keeps the config whole writes nothing and says it in its footer |
+| `bridge init` | before `saveInitConfig` (`cmd/bridge/init.go:960`), and so before any service starts, in every run that writes the field, prompted or not (`--yes` and `--yes --force` alike, F7): `--admin-lan-address`, or a rewrite that keeps it (§2.5, item 5). A first install says it while the file holds no key; a rewrite that keeps one says it while the file still holds its own bytes, before the save replaces them (F12) | the no-login sentence (§5.4) and the rollback sentence, with its recovery (D15); a run that keeps the config whole writes nothing and says it in its footer |
 | the console's menu line | while the boot source is `file` or `both`, or the file held the key at boot | the posture line (§5.1), then "bridge 0.2.3 and earlier refuse this bridge.yaml while it holds the adminLANAddress line, even empty: remove the line before you go back to one" |
 | `bridge doctor` and the console's doctor | while the file holds the key now, empty or not, whatever the running bridge does | `console-lan-rollback` (§5.3) |
 | the serve banner | as the menu line | one line (§5.4) |
@@ -294,11 +314,15 @@ them starts with the console on this machine only".
   with today's settings (`admin.go:2266-2310`): handshakelog's `ErrorLog`, `ReadHeaderTimeout`
   10 s, `ReadTimeout` 30 s, `IdleTimeout` 120 s, `WriteTimeout` unset (`admin-console.md`, the
   `WriteTimeout` bullet).
-- Each server's `BaseContext` returns the shutdown context carrying that socket's description: its
-  kind (loopback or LAN) and its bound address and, for the LAN socket, its policy: the reading it
-  was bound on (§3.5), so the network it admits, the interface that holds it, the hold (§3.3) and
-  the `.local` name it answers to. Every guard reads the description of the request's own socket,
-  and a LAN socket's description never changes: a new policy is a new socket. A request that
+- Each server's `BaseContext` returns a context carrying that socket's description: its kind
+  (loopback or LAN) and its bound address and, for the LAN socket, its policy: the reading it was
+  bound on (§3.5), so the network it admits, the interface that holds it, the hold (§3.3) and the
+  `.local` name it answers to, with the policy's version. The loopback socket's context is the
+  shutdown context, as today; the LAN socket's is the policy's own, a child of the shutdown context
+  that its retirement cancels, so every request on that socket, an event stream included, sees its
+  context end when the policy is retired (§3.5). Every guard reads the description of the
+  request's own socket, and a LAN socket's description never changes: a new policy is a new socket,
+  a new server and a new version. A request that
   carries none, as one through a test's own `httptest` server around `Handler()` does, is the
   loopback socket's, which is today's behaviour, and needs a loopback source anyway.
 - `boundAdminAddr` becomes the loopback socket's bound address alone, which the LAN socket never
@@ -317,18 +341,28 @@ them starts with the console on this machine only".
   `not_supported_here`, binds nothing, and is not tried again, since nothing at run time changes
   the answer.
 - **One reading, whole or nothing (D12).** An attempt reads the interfaces through
-  `lan.ReadInterfaces`, new beside `HostInterfaces`, which OpenHome keeps: `net.Interfaces()` and
-  each interface's addresses, where a failure of any of them fails the whole reading with a
-  `*lan.UnreadableError` that names the interface, and `HostInterfaces` lists such an interface
-  with no addresses (`internal/player/lan/lan.go:49-60`). A reading that fails is
-  `interfaces_unreadable`, and nothing is bound.
-- In a whole reading the attempt finds the one interface that holds exactly A, with A's on-link
-  prefix from that interface's own address (`prefixOf`, `lan.go:75-98`). None is
-  `address_not_on_this_box`. Two, the same address on two interfaces, is
-  `address_on_two_interfaces`. One that is loopback or point-to-point is `address_on_a_tunnel`, and
-  one that is not up or not running `interface_down`. On Windows it then reads that interface's
-  row for A's family (§3.3): a row that does not read is `host_model_unreadable`, and one with weak
-  host send or forwarding on is `interface_not_strong_host`.
+  `lan.ReadInterfacesFrom(list, addrs)`, new beside `HostInterfaces`, which OpenHome keeps:
+  `lan.ReadInterfaces` hands it `net.Interfaces` and `net.Interface.Addrs`, and a test hands it its
+  own, so no package variable stands in for the host. It reads every interface and each one's
+  addresses, and a failure of any of them fails the whole reading with a `*lan.UnreadableError`
+  that names the interface, where `HostInterfaces` lists such an interface with no addresses
+  (`internal/player/lan/lan.go:49-60`). It keeps what `HostInterfaces` drops (F8): an address that
+  is no `*net.IPNet`, which `HostInterfaces` skips (`lan.go:61-65`), is kept as the address alone,
+  as `prefixOf` keeps an address whose mask is no prefix (`lan.go:75-98`); an address that is no
+  IP fails the reading. On Windows the same reading takes the interface table of A's family in one
+  call (`GetIpInterfaceTable`, §3.3), and it is whole only where the table and the listing name the
+  same interfaces of that family: an interface one names and the other does not, one added between
+  the two calls among them, fails it. A reading that fails is `interfaces_unreadable`, and nothing
+  is bound.
+- In a whole reading the attempt finds the one interface that holds A, and A's on-link prefix from
+  that interface's own entry for it. None is `address_not_on_this_box`. A listed more than once, on
+  two interfaces or twice on one, is `address_on_two_interfaces`. A kept as the address alone, with
+  no network (no mask, or one that is no prefix), is `address_has_no_network`: a socket would admit
+  nothing but the box itself, so none is bound. An interface that is loopback or point-to-point is
+  `address_on_a_tunnel`, and one that is not up or not running `interface_down`. On Windows the
+  table is then judged as §3.3 says: a row of A's family that breaks the strong host model is
+  `interface_not_strong_host`, naming that interface, and a table that does not read
+  `host_model_unreadable`.
 - **Then the socket, held before its bind (D11).** It binds `A:P` through a `net.ListenConfig`
   whose `Control` holds the socket to the interface's index (§3.3) before the bind and reads the
   hold back. An index that is not known (0 or less) is `interface_unknown`, a hold the kernel
@@ -360,23 +394,27 @@ where a platform gives no hold the bridge can rely on, the opt-in stays closed t
 
 | Platform | IPv4 (RFC 1918) | IPv6 ULA | What holds, and its limit |
 |---|---|---|---|
-| Linux 5.7 and later; 5.0 and later with `CAP_NET_RAW` | `SO_BINDTOIFINDEX` on the listener before its bind, read back with `getsockopt` | the same: a `SOL_SOCKET` option, which upstream's IPv6 listener lookup compares as IPv4's does (upstream's source, not measured here; §9.5's IPv6 case measures it) | **Arrival.** The kernel hands the listener only a SYN that arrived on A's interface, and one from any other finds no listener and is reset: socket(7), "only packets received from that interface are processed by the socket"; `__inet_lookup_skb` looks a listener up by `inet_iif`, and `inet_bound_dev_eq` matches a held socket only on that index (B527's reading of the kernel's v7.0 source and headers, `ops/engineering-log/2026-11/2026-11-22-b527--test-b527-bindtoifindex-measured.md`). Measured unprivileged on a 7.0 kernel by B527: a socket held to another index refused a loopback dial 50 times in 50, held to loopback's own index it took every one, and the index read back as set. The box's own connection to A counts as arriving on A's interface (B527's case (a)), which the source policy admits as it admits loopback. Limit: a box with two interfaces in one subnet refuses what arrives on the other. |
+| Linux 5.7 and later; 5.0 and later with `CAP_NET_RAW` | `SO_BINDTOIFINDEX` on the listener before its bind, read back with `getsockopt` | the same: a `SOL_SOCKET` option, which upstream's IPv6 listener lookup compares as IPv4's does. A held socket binds an IPv6 address of host or link scope only on the interface that holds it: measured unprivileged on a 7.0 kernel in this round, `[::1]` held to another interface refused its bind (`EADDRNOTAVAIL`) where `127.0.0.1` bound and refused the dial; a ULA, of global scope, held to its own interface binds, as A does. So the IPv6 hold is qualified in network namespaces, never on loopback (§9.5, F4) | **Arrival.** The kernel hands the listener only a SYN that arrived on A's interface, and one from any other finds no listener and is reset: socket(7), "only packets received from that interface are processed by the socket"; `__inet_lookup_skb` looks a listener up by `inet_iif`, and `inet_bound_dev_eq` matches a held socket only on that index (B527's reading of the kernel's v7.0 source and headers, `ops/engineering-log/2026-11/2026-11-22-b527--test-b527-bindtoifindex-measured.md`). Measured unprivileged on a 7.0 kernel by B527: a socket held to another index refused a loopback dial 50 times in 50, held to loopback's own index it took every one, and the index read back as set. The box's own connection to A counts as arriving on A's interface (B527's case (a)), which the source policy admits as it admits loopback. Limit: a box with two interfaces in one subnet refuses what arrives on the other. |
 | Linux before 5.7 without `CAP_NET_RAW` (a `systemd --user` service has none, nor does the bridge's image run as its non-root user) | refused: `restriction_refused` (`EPERM` from 5.0 to 5.6, `ENOPROTOOPT` before 5.0) | the same | None: the opt-in stays closed on such a box, a 5.4 kernel among them. |
 | macOS | `IP_BOUND_IF`, read back | refused in this PR: `not_supported_here` | **The return path.** The kernel scopes what the socket sends, its SYN-ACK included, to A's interface: a SYN that arrived on another interface is not refused, but its handshake completes only with a peer that A's interface reaches. Measured on macOS on 2026-10-23 (`internal/player/openhome/restrict_darwin.go:13-19`): a loopback listener held to en0, dialled on loopback, timed out, and a listener on en0's address held to en0 took the box's own connection, which arrives on lo0. `IPV6_BOUND_IF` is the IPv6 twin and has never been measured, so a ULA there is refused until it is (§11). Limit: a half-open connection from another interface waits in the listen queue until the kernel drops it, and a peer that can send from another interface and receive on A's link is admitted, as anyone on that link is. |
-| Windows | **the strong host model**, read per interface: A's interface's row for `AF_INET` (x/sys/windows' `GetIpInterfaceEntry`, `MibIpInterfaceRow`) must read with `WeakHostSend` and `ForwardingEnabled` false | the same row for `AF_INET6` | **The return path, and arrival by default.** Under strong host send the stack sends a packet from A only out of A's interface, by a route lookup confined to that interface's routes, so the SYN-ACK to a SYN that arrived elsewhere leaves through A's interface; and under strong host receive, every interface's default but the Teredo interface of a host-specific relay, a packet for A that arrives on another interface is discarded (Microsoft, "Strong and Weak Host Models", TechNet Magazine; `MIB_IPINTERFACE_ROW`'s documentation: both flags false by default since Vista). A row that does not read is `host_model_unreadable`, and weak host send or forwarding on A's interface is `interface_not_strong_host`: the socket stays closed. Another interface's `WeakHostReceive` and forwarding are reported (§5.3), not required: a box that forwards on another interface (Internet Connection Sharing, a virtual switch's NAT) would otherwise lose the console where the return path protects it all the same. Limit: the drop of a SYN from another interface is Microsoft's documented default, read here and not measured by this PR's CI, which has no second network (§11); a half-open connection from an interface with weak host receive waits in the queue, as on macOS. |
+| Windows | **the strong host model, whole** (F3): the interface table of A's family, one `GetIpInterfaceTable` call for `AF_INET` a reading (x/sys/windows' `MibIpInterfaceRow`), every row reading `WeakHostSend`, `WeakHostReceive` and `ForwardingEnabled` false | the same, from the table for `AF_INET6` | **Arrival and the return path, both.** Under strong host receive on every other interface, a packet for A that arrives on one of them is discarded before TCP sees it; under strong host send on A's interface, the stack sends a packet from A only out of A's interface, by a route lookup confined to that interface's routes, so the SYN-ACK to a SYN that arrived elsewhere leaves through A's interface (Microsoft, "Strong and Weak Host Models", TechNet Magazine: the send process asks the setting of the interface that holds the source, the receive process that of the interface a packet arrived on; `MIB_IPINTERFACE_ROW`'s documentation: both host flags false by default since Vista, on every interface but the Teredo interface of a host-specific relay). Rather than argue which flag of which row can reach A's traffic (weak host receive on A's interface, weak host send on another), the console takes the model whole, as Windows ships it, and any departure from it on any row closes the socket. Every row is part of the policy (§3.5), so one that changes, appears or goes retires the socket (F11). A table that does not read is `host_model_unreadable`, and a row that breaks the model `interface_not_strong_host`, naming its interface. Limit: the drop is Microsoft's documented behaviour, read at every reading and measured on no CI leg, which has no second network (the owner's gate, §11); a box that forwards on any interface (Internet Connection Sharing, a virtual switch's NAT) or receives weakly anywhere keeps the console closed, and a ULA beside a relaying Teredo interface is refused by that interface's own row. |
 | any other GOOS | refused: `not_supported_here` | refused | None. |
 
 So every platform the bridge ships for holds A's interface where the table says, and the opt-in is
-refused on: a Linux kernel before 5.7 without `CAP_NET_RAW`; a ULA on macOS; a Windows interface
-with weak host send or forwarding, or whose row does not read; and any other GOOS.
+refused on: a Linux kernel before 5.7 without `CAP_NET_RAW`; a ULA on macOS; a Windows box whose
+interface table of A's family departs from the strong host model on any row, or does not read; and
+any other GOOS.
 
 **The qualification is real sockets, apart from the handler tests (D13).** A request through
 `Handler()` with a synthetic `RemoteAddr` proves the source policy and nothing about interfaces.
-The holds are qualified by their own tests (§9.5): on Linux, the console's hold refuses a SYN from
-another interface, unprivileged, in every Linux run, and a routed client inside A's prefix gets no
-console in a CI job that has root for network namespaces; on macOS, the hold scopes its replies, on
-the `macos-latest` leg; on Windows, the row is read from the stack, on the `windows-latest` leg. A
-routed SYN on Windows is the owner's gate (§11).
+The holds are qualified by their own tests (§9.5): on Linux, the console's hold refuses an IPv4 SYN
+from another interface, unprivileged, in every Linux run, and in a CI job with root, network
+namespaces put a routed client inside A's prefix on another interface, for an RFC 1918 address and a
+ULA alike (F4); on macOS, the hold scopes its replies, on the `macos-latest` leg; on Windows, the
+table is read from the stack, on the `windows-latest` leg. Each skips locally where its premise is
+missing and fails where `CI` is set, the repository's rule for such a test (`build-ci-tests.md`, the
+host-address bullet), so a green CI leg shows that it ran. A routed SYN on Windows is the owner's
+gate (§11).
 
 ### 3.4 While it waits
 
@@ -392,26 +430,37 @@ Why 5 seconds, one interval for the retry and the reconciliation (`consoleLANInt
 the window of §3.5, and it is the cadence at which OpenHome reads the same interfaces already
 (`openhome.md`, the listener bullet). A reading is one `net.Interfaces()` and one address read an
 interface: on Linux a netlink dump each, on Windows a `GetAdaptersAddresses` call each
-(`internal/api/endpoints_cache.go:23-31`, which caches /v1/health's walk for that cost), and the
-PR measures it on its Windows leg (§10.4).
+(`internal/api/endpoints_cache.go:23-31`, which caches /v1/health's walk for that cost), and on
+Windows one `GetIpInterfaceTable` call more; the PR measures it on its Windows leg (§10.4).
 
-### 3.5 While it listens: the policy read again (D2, D12)
+### 3.5 While it listens: the policy read again, and its retirement (D2, D12, F1, F2, F9, F11)
 
-The policy a LAN socket was bound on is one reading: the interface that holds A (its index and its
-name), that interface's flags, A's on-link prefix there, on Windows the interface's row, and the
-`.local` name (§4.5). Every 5 seconds, while the socket listens, the plan takes a new reading and
-compares it with the socket's policy:
+The policy a LAN socket was bound on is one reading, and each of its parts is compared at every
+reading (§9.4 has a case for each part, and a structural check that leaves none without one):
+
+| Part of the policy | Read from |
+|---|---|
+| the interface that holds A, by index and by name | the listing |
+| that interface's flags: up, running, loopback, point-to-point | the listing |
+| A's on-link prefix there | that interface's own entry for A |
+| A held once, by that interface alone | every interface's addresses |
+| on Windows, every row of A's family's interface table: the interface each row is of, and its three flags | `GetIpInterfaceTable` (§3.3) |
+| the `.local` name | the host's name as `advertise` reads it (§4.5) |
+
+Every 5 seconds, while the socket listens, the plan takes a new reading and compares it with the
+socket's policy:
 
 | The new reading | What happens |
 |---|---|
 | the same in every part | nothing |
 | A on no interface (renumbered, the lease lost) | the socket is retired; `waiting`, `address_not_on_this_box` |
-| A on another interface, by index or by name | retired, then bound on the new interface with a new policy, if it is eligible |
-| A's prefix changed, narrowed or widened | retired, then bound with the new prefix |
+| A on another interface, by index or by name | retired, then bound on a fresh reading (below) |
+| A's prefix changed, narrowed or widened | retired, then bound on a fresh reading |
+| A kept with no network | retired; `waiting`, `address_has_no_network` |
 | the interface down, not running, loopback or point-to-point | retired; `waiting` with that reason |
-| A on two interfaces | retired; `waiting`, `address_on_two_interfaces` |
-| on Windows, the row changed to weak host send or forwarding, or does not read | retired; `waiting` with that reason |
-| the `.local` name changed | retired, then bound with the new name |
+| A listed more than once | retired; `waiting`, `address_on_two_interfaces` |
+| on Windows, a row of the table that changed, appeared or went, a row that breaks the model, or a table that does not read (F11) | retired, then bound on a fresh reading where that reading admits A, `waiting` with its reason where it does not |
+| the `.local` name changed | retired, then bound on a fresh reading |
 | a reading that fails, the listing or any one interface's addresses | retired; `waiting`, `interfaces_unreadable` (D12) |
 
 **Fail closed.** A reading that fails decides nothing, and deciding nothing closes the socket: the
@@ -423,20 +472,44 @@ at WARN, naming what changed (`address_gone`, `address_moved`, `prefix_changed`,
 `interface_changed`, `interface_down`, `host_model_changed`, `name_changed`,
 `interfaces_unreadable`), and a rebind at INFO.
 
-**Retired before the policy is replaced.** A retirement closes the LAN server (`http.Server.Close`:
-its listener and every connection it tracks, new, active and idle, so a kept-alive connection and
-an event stream end at once; the console hijacks no connection, so every one is tracked), waits for
-its `Serve` goroutine to return, and waits for the handlers those connections started, which a
-count the LAN socket's own middleware takes at each request's start and gives back at its end
-tells, bounded at 5 seconds, the console's shutdown window, since `Close` does not wait for a
-handler. Only then does a new socket bind with the new reading as
-its policy. A handler that outlives the bound is said at WARN and the rebind goes on: its
-connection is closed, so it can neither answer nor take another request. Between the retirement and
-the rebind no LAN socket exists, and the state reads `waiting` with the reason.
+**The fence: nothing is admitted once a retirement begins (F1, F9).** The plan keeps one mutex,
+`plan.mu`, and under it, for each policy: its version, a number that only grows; whether it is
+current or retired; its count of requests in flight; and its context, which the LAN server's
+`BaseContext` returns (§3.1). Every request on a LAN socket passes the fence first, in the first
+middleware of the LAN chain, ahead of the source check: in one critical section of `plan.mu` it
+reads whether the policy its description names by version is current, and if it is, counts itself
+in. A request whose policy is not current is answered 503 with `Connection: close` ("this
+console's home-network socket is being reopened: try again in a moment"), and nothing else of the
+chain runs. At its end, in a deferred call, so that a handler's panic counts it out too, the
+request counts itself out under the same mutex, and the last one out of a retired policy wakes the
+retirement's wait. A retirement, in one critical section of the same mutex, marks the policy
+retired and cancels its context. There is no
+third case: a request either counted itself in before that section, and then its context has
+ended, so an event stream returns at once (its loop selects on its request's context:
+`internal/admin/handlers_events.go:39-42`, `:90`, `:293-295`), or it reads the policy after it, and
+is refused. A request cannot pass the check and count itself in once the retirement has looked,
+since the check and the count are one critical section, the one the retirement takes (F9).
+
+**Retired before the policy is replaced (F1, F2).** After that section the retirement closes the LAN
+server (`http.Server.Close`), which closes its listener, waits for its `Serve` to return and then
+closes every connection it tracks, new, active and idle (`net/http/server.go:3222-3240` at
+go1.27.3, the toolchain `go.mod` names), kept-alive connections and those an event stream holds
+among them; the console hijacks no connection, so every one is tracked. A connection accepted just
+before the close is closed too, since `Serve` tracks it before it returns (`:3557-3603`), but its
+own goroutine has started and can read a request before the close lands: that request meets the
+fence and is refused (F1). `Close` does not wait for a handler, so the retirement then waits until
+the policy's count is 0, on a condition of `plan.mu`, bounded at 5 seconds, the console's shutdown
+window; a handler that outlives the bound is said at WARN, its count left on a policy nothing
+admits by, and the retirement goes on. Only then does the plan take a fresh reading, never the one
+that found the change (F2): where that reading admits A, a new socket binds with it as its policy
+and with a new version; where it does not, the state reads `waiting` with its reason, and §3.4's
+retry takes it from there. Between the retirement and the rebind no LAN socket exists.
 
 **The window.** A change is acted on within one interval and a reading's time: until then the old
-policy stands for new connections and old ones alike, which §6.4 names. A netlink subscription on
-Linux would shorten it, and is not taken (§8).
+policy stands for new connections and old ones alike, which §6.4 names. Once a retirement has
+begun, nothing is admitted under the policy it retires, and a request admitted before it has its
+context ended and is waited for. A netlink subscription on Linux would shorten the window, and is
+not taken (§8).
 
 ### 3.6 A failure while serving, the loopback socket's failure, and shutdown
 
@@ -446,9 +519,10 @@ Linux would shorten it, and is not taken (§8).
 - The loopback socket is unchanged: its bind or serve error is `adminErr`, which stops serve and
   the API (`main.go:7386-7409`); the LAN socket is closed on that way out.
 - Shutdown: the plan's loop, which retries and reads again, stops and is joined first, so no bind
-  or rebind follows the stop; then both servers shut down together under one 5-second window (the
-  API's rule for its LAN and tailnet servers, CLAUDE.md); then the background-scan, catalog and
-  backup drains run once, as today (`admin.go:2328-2338`).
+  or rebind follows the stop; the LAN policy is retired through the fence, so nothing more is
+  admitted on it and its streams end; then both servers shut down together under one 5-second
+  window (the API's rule for its LAN and tailnet servers, CLAUDE.md); then the background-scan,
+  catalog and backup drains run once, as today (`admin.go:2328-2338`).
 
 ### 3.7 One canonical local endpoint (R3)
 
@@ -517,26 +591,34 @@ an address in the prefix and is reached through A's interface is admitted. The H
 still refuses a browser whose page names another host, but a client that writes its own Host is no
 browser, and only the source stops it.
 
-### 4.2 Host (R6, D3, D4, D5)
+### 4.2 Host (R6, D3, D4, D5, F5)
 
 The loopback socket keeps today's rule, an empty Host and any port included. The LAN socket takes
-exactly the authority it is bound to, and judges a Host and an Origin's authority with one function,
-`lanAuthorityMatches(desc, host, port)`, so a spelling is taken or refused alike by both (a
-structural test holds both gates to it). Its rules:
+exactly the authority it is bound to, and reads a Host and an Origin through one parser, so a
+spelling is taken or refused alike by both:
 
-- **The host.** An IP literal is parsed (`netip.ParseAddr`, the brackets of an IPv6 literal
-  removed) and compared as an address with A, after refusing a literal with a zone or in the
-  IPv4-mapped form, so `[::ffff:A]` is refused in Host and Origin alike (D3) and a ULA's
-  uncompressed or upper-case spelling is taken alike. A name is folded to ASCII lower case and
-  loses one trailing dot, then compared with the `.local` name folded the same way (§4.5), so
-  `<NAME>.local.` is taken alike in both (D4). Nothing else is a host: no other name, and no string
-  that `netip.ParseAddr` refuses is read as a literal (an IPv4 address with a leading zero, or one
-  written as a single number).
-- **The port.** An absent port and an empty one (`A:`) are the scheme's default, 80, so they match
-  a socket on port 80 and nothing else, in Host and Origin alike, and an explicit `:80` matches
-  that socket as they do (D5). Any other port must be P's decimal digits exactly.
-- **The Origin's own shape.** An Origin is taken only as a scheme and an authority: the scheme
-  `http`, no user, no path, query or fragment.
+- **One parser (F5).** `parseLANAuthority(raw string) (lanAuthority, bool)` reads an authority as
+  RFC 3986 writes one, with no user information: a host, then a colon and a port, or neither. Its
+  input is the Host header's value as it arrived, or an Origin's value after its exact, lower-case
+  prefix `http://`; anything else in front, `https://` and `null` among them, is no LAN Origin.
+  Every byte must be printable ASCII and none of `@`, `/`, `?`, `#`, `%`, `\` or a space, so a user,
+  a path, a query, a fragment, an escape and a zone are refused in either header alike. (net/http
+  answers 400 to a Host holding any of those but `%` before a guard runs,
+  `net/http/server.go:1074-1075` at go1.27.3, so for them the refusal is an Origin's; the parser
+  keeps it for both all the same.) The host is an IPv6 literal in brackets, which
+  `netip.ParseAddr` must take with no zone and not in the
+  IPv4-mapped form (D3); or an IPv4 literal `netip.ParseAddr` takes, dotted, with no leading zero;
+  or a name of letters, digits, `-` and `_`, in labels of 1 to 63 bytes with one trailing dot at
+  most, that does not read as digits and dots alone; and nothing else, so an IPv6 literal without
+  brackets, whose colons outnumber one, is refused. The port is the digits after the colon, 1 to
+  65535 with no leading zero, and an empty port or none is 80 (D5). What it returns is canonical:
+  an address, or a name in ASCII lower case without its trailing dot (D4), and the port as a
+  number.
+- **One comparison.** The Host check and `originMatches` (§4.3) both call it and compare its answer
+  with the socket's two authorities: A with P, and the `.local` name with P. Neither reads a LAN
+  authority through `url.Parse`, `url.URL.Hostname` or `url.URL.Port`, which split an Origin and a
+  Host by different rules (the table of spellings below), and a structural test holds both to the
+  one parser.
 
 | Host | Loopback socket | LAN socket |
 |---|---|---|
@@ -564,15 +646,31 @@ re-pointed, and the only name the LAN socket takes is the one in §4.5. A browse
 parser serialized, lower case, the default port elided, an IPv4 address in dotted form, so every
 row a browser can produce is one of those taken or one refused alike in both headers.
 
+**The spellings two parsers would answer differently (F5).** Each row is asked as a Host and as an
+Origin (`http://` and the spelling), and the one parser gives both the answer in the last column.
+The middle column is why one parser is needed: what reading an Origin with `url.Parse` and a Host
+with `url.URL{Host: …}.Hostname()` and `.Port()` would give.
+
+| Spelling | Two parsers | One parser, on a LAN socket at P |
+|---|---|---|
+| `u@A:P`, a user | `url.Parse` takes A as the Origin's host, a check of its own having to refuse the user; a Host carrying it never reaches the guard, since net/http refuses the `@` itself | refused in both |
+| `A:P/`, `A:P?x`, `A:P#f` | an Origin alone can carry them, since net/http refuses a Host with any of them, and `url.Parse` keeps A as the Origin's host beside the path, the query or the fragment | refused in both |
+| `HTTP://A:P` | `url.Parse` lower-cases the scheme and takes it | refused: no browser sends it, and the prefix is exact |
+| `A.:P`, a trailing dot on an IPv4 literal | a dot trimmed before `netip.ParseAddr` in one path and not the other takes A in one header alone | refused in both: a trailing dot is a name's, and digits and dots alone are no name |
+| `A:P` where A is a ULA, without brackets | `Hostname` splits at the last colon and reads the literal before it as A | refused in both |
+| `[A%25eth0]:P`, `[A%eth0]:P` | `url.Parse` unescapes the `%25`, `Hostname` keeps it | refused in both: no `%` is taken |
+| `A:+P`, a sign before the port | `url.Parse` refuses it, while `Port` gives no port and `Hostname` the whole | refused in both |
+| `A:`, an empty port | both read no port, as 80 | taken in both where P is 80, refused in both otherwise |
+
 ### 4.3 Origin, in `csrfGuard` and the SSE gate (R6, R7)
 
 The mechanics stay: an Origin is refused when it does not match, never for being absent, and
 `null` is present and does not match (`auth-tls.md`, the `csrfGuard` bullet;
 `admin.go:2373-2383`). `csrfGuard` passes GET and HEAD, so the event stream keeps its own gate
 (`handlers_events.go:63-68`). Both gates call one function, `originMatches(r, origin)`, which
-reads the request's socket and, on the LAN socket, hands the authority to the matcher §4.2's Host
-check calls; today's `originMatchesAdmin` takes no request, so the two gates change together or not
-at all, and a structural test holds both to the one function.
+reads the request's socket and, on the LAN socket, hands the Origin's value to the one parser
+§4.2's Host check calls (F5); today's `originMatchesAdmin` takes no request, so the two gates
+change together or not at all, and a structural test holds both to the one function.
 
 | Origin, on a write or on `GET /api/events` | Loopback socket | LAN socket |
 |---|---|---|
@@ -610,6 +708,9 @@ saves failed would have no other way in. It waits for a measurement (§11).
   refused: this address answers only as http://A:P or http://<name>.local:P (a reverse proxy in
   front of it must send that Host)".
 - **The source's 403**: §4.1's words, with no address in the body.
+- **The fence's 503** (§3.5): "this console's home-network socket is being reopened: try again in
+  a moment", with `Connection: close`, to a request that reached a socket whose policy is retired;
+  it names no address, and its line is the retirement's own (§3.5), never one per request.
 - **`noteForeignHost`** (`admin.go:2755-2780`) keeps a set per socket kind, each bounded at 16, so
   the LAN socket's refusals cannot use up loopback's; the LAN line's hint names its authority.
 - **The source refusal's log line**: one Warn per kind of refusal (outside the network, outside
@@ -624,8 +725,8 @@ The LAN socket takes `<name>.local`, the name the API's `.local` endpoint carrie
 `/v1/health` (`internal/advertise/endpoints.go:158-171`, `localEndpoint`: `hostname.ASCII`'s first
 label, and none for a container's generated id or a name with no valid form), read at each reading
 (§3.5) whatever `mdns.enabled` says, compared as §4.2 compares a name (ASCII lower case, one
-trailing dot), on the LAN socket's port. `hostname.ASCII` returns an ASCII name byte for byte, its case
-included (`auth-tls.md`, the bullet on a reported host name), which is why the comparison folds
+trailing dot), on the LAN socket's port. `hostname.ASCII` returns an ASCII name byte for byte, its
+case included (`auth-tls.md`, the bullet on a reported host name), which is why the comparison folds
 case on both sides, and a converted name is ASCII already.
 
 Why it is safe: the Host check exists because a page's author controls a name that public DNS
@@ -670,13 +771,17 @@ source the plan recorded at boot (§2.6), never the field as it reads now.
 A console route on both sockets that answers
 
 ```json
-{"lan":{"state":"listening","url":"http://A:P","nameUrl":"http://<name>.local:P","reason":"",
-  "source":"file","fileKeyAtBoot":true,"fileKeyEmptyAtBoot":false,
+{"lan":{"state":"listening","address":"<A>","url":"http://A:P","nameUrl":"http://<name>.local:P",
+  "reason":"","source":"both","fileKeyAtBoot":"address","fileAddressAtBoot":"<the file's own A>",
   "network":"<A's network>","interface":"<its name>","hold":"SO_BINDTOIFINDEX"}}
 ```
 
 `state` one of `off`, `listening` and `waiting`; `reason` one of §3.2's codes or `stopped_serving`;
-`source` one of `file`, `environment` and `both`, or empty while off; `hold` one of
+`address` the address the plan took at boot, the effective one, whichever source gave it;
+`source` one of `file`, `environment` and `both`, or empty while off; `fileKeyAtBoot` one of
+`absent`, `empty`, `address` and `not_an_address`, and `fileAddressAtBoot` the file's own address,
+present for `address` alone, so that beside a variable the boot file's value is named apart from
+the effective one (F7) and a value the field's check refuses is never repeated (R10); `hold` one of
 `SO_BINDTOIFINDEX`, `IP_BOUND_IF` and `strong_host`, empty while not listening. The fields are the
 socket's and the boot's (§2.6), never the file's now. `bridge doctor` reads it over `adminAddress`.
 Nothing on `/v1` changes.
@@ -690,8 +795,9 @@ the doctor's own environment nor a running bridge says anything of the posture.
 | State | The line |
 |---|---|
 | running, listening | WARN: the console answers on the home network at http://A:P, with no password and over plain HTTP: anyone on that network can watch it and change the bridge's settings, music and devices; held to <interface> (the hold). Then the running bridge's source and what clears it (§2.6). Hint: the clearing sentence; don't forward this port on a router |
-| running, listening, and on Windows another interface has weak host receive or forwards | the same, and: <interface> may take packets for other interfaces' addresses; the console's replies still leave through <A's interface> only |
+| running, listening, source `both` | the same, and what the file's key held at boot, in §2.6's words: the file's own address, or that it is empty and costs the rollback, or that it does not read as an address and the next start without the variable refuses the file (F7) |
 | running, waiting | WARN: the console answers on this machine only: the reason's words; tried again every 5 s (not for `not_supported_here`). Hint: the reason's own |
+| running, waiting, on Windows, `interface_not_strong_host` | WARN: the console answers on this machine only: <interface> takes packets for other interfaces' addresses, sends from another interface's address, or forwards; the console opens on the home network only where every interface of A's family keeps Windows' strong host model, its default (§3.3). Hint: turn that setting off on <interface>, or keep the console on this machine |
 | running, and the file now differs from what it took at boot (edited since, D14) | WARN naming both: the running bridge's address and source at its start, and what the file says now, and what the next start binds (the variable, if the running bridge's source is `environment` or `both`, wins over the file again) |
 | the doctor's own environment sets the variable and the running bridge's source is not `environment` or `both`, or the other way round | WARN: this shell's BRIDGE_ADMIN_LAN_ADDRESS is not the running bridge's: the service's environment is the one that counts (D14) |
 | not running, and the file or this environment sets it | WARN: when the bridge runs, its console also answers on the home network at http://A:P, with no password; whether the box holds A now; and the source this shell sees, with the warning that the service's environment may differ |
@@ -763,13 +869,32 @@ on the path the phone takes:
   fails: the watcher's copy works for as long as the device's does. A token minted and never paired
   with stays valid as well.
 
-So interception need not show as a failed redemption. On a page that is not a secure context, the
-dialog says so before its fields: "This page reached this device over your network unencrypted,
-and the token below with it. Scanning the QR replaces the token as the phone pairs; a token copied
-into the app by hand keeps working, so on a network you don't trust, pair from the bridge's own
-machine, or revoke this device on the Devices page and pair again from there." Not taken: hiding
-the manual fields on the LAN socket, since the token crosses the network in the mint's answer
-whatever the page shows (§8).
+So interception need not show as a failed redemption, and a token minted on the LAN has crossed it
+in clear whatever the phone does next. A rotation from the Devices page is the same: its answer
+carries the new raw token (`internal/admin/static/app.js:3506-3531`). The console says so before
+any token is minted or rotated on the LAN socket, and says what to do after (F6, F8, F10). Each
+page knows the socket it was served on (`pageData` carries its kind), which decides these words,
+never `isSecureContext`:
+
+- **Before the mint.** The pairing dialog's form step (`layout.html:313-335`) shows, above
+  Generate token: "This page is not encrypted. The token you generate here will cross your network
+  in the clear, and anyone who can see that traffic can use it to read your library. To keep it
+  off the network, pair from the bridge's own machine, or over an SSH tunnel to it." Generate token
+  comes after it, and nothing is sent before it is pressed.
+- **Before a rotation.** The Rotate button's confirmation (`app.js:3515`) gains: "This page is not
+  encrypted: the new token would cross your network in the clear, as the old one did. Rotate from
+  the bridge's own machine, or over an SSH tunnel to it." It still asks, and rotating stays
+  possible, since every action of the console is the LAN visitor's (§6.1, §8).
+- **Beside the result.** The result step of a mint or a rotation made on the LAN socket keeps,
+  beside the token: "This token crossed your network unencrypted. Whether or not the device has
+  paired with it, end that from the bridge's own machine, or over an SSH tunnel to it: there,
+  rotate this device's token and pair the device again, or revoke the device. Rotating from this
+  page would send the new token across the network the same way." No remedy it gives sends a new
+  credential across the LAN (F10).
+
+Not taken: refusing a mint or a rotation on the LAN socket, since pairing from a browser on the
+network is what the posture is for; and hiding the manual fields, since the token crosses the
+network in the mint's answer whatever the page shows (§8).
 
 ### 6.3 Secure-context features on the LAN (R5)
 
@@ -802,9 +927,11 @@ TCP's checksum and each link's CRC already check. The PR corrects `chunkDigestHe
 ### 6.4 The residuals
 
 1. **No login.** Every device on the network is trusted with every action of §6.1.
-2. **Plain HTTP**, as §6.2: anyone who can see the traffic can watch, and take a pairing's device
-   token as it crosses; a token paired by hand stays theirs until it is revoked, and nothing fails
-   to show it (D9).
+2. **Plain HTTP**, as §6.2: anyone who can see the traffic can watch, and take a device token as
+   a mint or a rotation on the LAN answers it; a token paired by hand, or never paired, stays
+   theirs until it is rotated from the bridge's own machine or revoked, and nothing fails to show
+   it (D9). The console says so before the token is minted or rotated, and says that remedy beside
+   it (F6, F10).
 3. **Relays inside the network** (§4.1): a router's SNAT or hairpin NAT, a VPN gateway, a reverse
    proxy that rewrites Host; and a VPN the operator set up to put its clients on the home link
    (proxy ARP, a VPN bridged into it), whose clients are on that link by its design. On Linux a
@@ -835,18 +962,21 @@ TCP's checksum and each link's CRC already check. The PR corrects `chunkDigestHe
     that box may never hold, and the line and the doctor say so.
 12. **No limits of its own.** No rate limit or header cap is added: the network gets the console's
     whole capacity, as loopback does.
-13. **The holds' limits** (§3.3). On macOS and Windows the hold is the return path, not arrival: a
-    SYN from another interface waits half-open in the listen queue, and a flood of them can fill it,
-    which denies the console and admits nothing. On Windows the drop of such a SYN is Microsoft's
-    documented default, read at every reading and measured only at the owner's gate. The opt-in
-    stays closed on a Linux kernel before 5.7 without `CAP_NET_RAW`, on a ULA on macOS, on a
-    Windows interface that sends weakly or forwards, and on any other GOOS.
+13. **The holds' limits** (§3.3). On macOS the hold is the return path, not arrival: a SYN from
+    another interface waits half-open in the listen queue, and a flood of them can fill it, which
+    denies the console and admits nothing. On Windows the strong host model holds both directions,
+    and its drop of such a SYN is Microsoft's documented behaviour, read at every reading and
+    measured only at the owner's gate. The opt-in stays closed on a Linux kernel before 5.7
+    without `CAP_NET_RAW`, on a ULA on macOS, on a Windows box any interface of whose family
+    departs from the strong host model (one that forwards for a NAT among them), and on any other
+    GOOS.
 14. **Two interfaces in one subnet.** On Linux the socket refuses what arrives on the interface A
     is not on, so a neighbour whose frames reach that one is refused, closed and not open; on macOS
     and Windows replies leave through A's interface.
 15. **The window of §3.5.** For up to one interval and a reading's time after a change of the box's
-    network, the old policy stands; a handler already running when its connection is closed
-    finishes its work, its answer going nowhere.
+    network, the old policy stands. Once its retirement begins, nothing more is admitted under it;
+    a request admitted before has its context ended, and one that does not stop for it finishes its
+    work within the wait's bound or past it, its connection closed and its answer going nowhere.
 16. **An older bridge given the variable alone** starts with the console on loopback, saying
     nothing of a variable it does not know: closed, and silent.
 
@@ -920,16 +1050,32 @@ TCP's checksum and each link's CRC already check. The PR corrects `chunkDigestHe
 18. A netlink subscription on Linux in place of the poll: not taken. The poll bounds the window on
     every platform alike, and a subscription is a second mechanism per platform; it is the way to a
     shorter window if 5 s proves long (§11).
-19. On Windows, requiring strong host receive and no forwarding on every interface: not taken. A box
-    that forwards on another interface (Internet Connection Sharing, a virtual switch's NAT) would
-    lose the console where the return path protects it all the same; the doctor names such an
-    interface (§5.3).
+19. On Windows, strong host send on A's interface alone (round 2's rule): lost to F3. It left weak
+    host receive on A's interface and weak host send on the others to be argued one by one; the
+    model is taken whole (§3.3), at the cost of a box that forwards for a NAT on any interface,
+    which the doctor names (§5.3).
 20. A ULA on macOS through `IPV6_BOUND_IF`, unmeasured: deferred to a measurement (§11).
 21. Taking the IPv4-mapped spelling in Host and Origin, unmapped, in place of refusing it in both
     (D3): not taken. The field takes no mapped address, the canonical URI of a track refuses the
     form too (`openhome.md`, the Insert bullet), and one spelling of A keeps the matcher small.
 22. Hiding the manual pairing fields on the LAN socket: not taken: the token crosses the network in
     the mint's answer whatever the page shows (§6.2).
+23. A count of handlers alone, then `Close` and a wait (round 2's retirement): lost to F1 and F9. A
+    request could pass a check, pause, and count itself in after the retirement had seen none; the
+    fence makes the check and the count one section of the mutex that retires the policy (§3.5).
+24. A second `Close` after the wait, for a connection the server tracked late: not needed. `Close`
+    waits for `Serve` to return before it closes what it tracks (§3.5), and whatever a connection's
+    goroutine reads after the retirement began meets the fence.
+25. Rebinding on the reading that found the change: lost to F2. A reading taken before the wait can
+    be stale by its end, so the rebind reads again.
+26. Reading an Origin with `url.Parse` and a Host with `url.URL`'s methods, and comparing the parts:
+    lost to F5. The two split some spellings differently (§4.2's table), so one parser reads both.
+27. The pairing warning in the result step alone (round 2's): lost to F6. It came after the token
+    had crossed the network; the warning comes before the mint and before a rotation (§6.2).
+28. Advising a rotation from the LAN page after a pairing there: lost to F10. A rotation's answer
+    carries the new token across the same network; the remedy is the bridge's own machine (§6.2).
+29. Refusing a mint or a rotation on the LAN socket: not taken. Pairing from a browser on the
+    network is what the posture serves; the console warns first instead (§6.2).
 
 ## 9. The tests, red first (D10)
 
@@ -956,10 +1102,14 @@ Names only, each body inert until the change gives it its own: `Config.AdminLANA
 tag (so the key loads at main with the shim, which is why `TestALANAddressTakesEachPrivateClass` is
 a control and not a red); `config.ValidateConsoleLANAddress` (takes every value),
 `config.ConsoleLANClass` (false for every address), `config.LANKeyOf` (absent for every file);
-`lan.ReadInterfaces` (`HostInterfaces`, no error); `admin.ServeConsole` (serves loopback alone, the plan ignored), the plan's type, its
-seams and `GET /api/console`'s DTO with no route; `consolelan.Hold` (sets nothing, reads nothing
-back), `consolelan.Decide` (no hold for any platform), `consolelan.HostModel` (a strong row, read
-from nothing); `doctor.Deps.ConsoleLAN`; init's `--admin-lan-address` flag (parsed, ignored).
+`lan.ReadInterfacesFrom` and `lan.ReadInterfaces` (`HostInterfaces`, no error);
+`admin.ServeConsole` (serves loopback alone, the plan ignored), the plan's type and its seams (the
+reading, the hold, the tick, the fence's and the retirement's), `parseLANAuthority` (no authority
+for any input), the page data's socket kind, and `GET /api/console`'s DTO with no route;
+`consolelan.Hold` (sets nothing, reads nothing back), `consolelan.Decide` (no hold for any
+platform), `consolelan.HostModel` (a strong table, read from nothing); `doctor.Deps.ConsoleLAN`;
+init's `--admin-lan-address` flag (parsed, ignored) and its save's seam (`initHost.save`, the real
+save).
 
 ### 9.3 Behavioural reds
 
@@ -973,8 +1123,9 @@ from nothing); `doctor.Deps.ConsoleLAN`; init's `--admin-lan-address` flag (pars
 | `TestTheLANSocketAdmitsOnlyItsOwnNetwork` | `internal/admin` | every source of §4.1 through `Handler()`, a request stamped with the LAN socket and its `RemoteAddr` (R1) | the admitted rows: `loopbackOnly` refuses every LAN source |
 | `TestEachHostIsAnsweredAsItsSocketsRuleSays` | `internal/admin` | §4.2, both columns (R6) | the LAN column's accepted rows |
 | `TestEachOriginIsAnsweredAsItsSocketsRuleSays` | `internal/admin` | §4.3 for a PATCH, a bodyless POST, an upload chunk's PUT and `GET /api/events` (R6, R7) | the LAN column's passed rows |
-| `TestHostAndOriginTakeEachSpellingAlike` | `internal/admin` | one table of spellings (mapped, `.local` in each case and with one dot or two, every port form, on a socket at P and at 80, IPv4 and ULA), each asked as a Host and as an Origin: both answers agree, and agree with the table (D3, D4, D5) | the table's accepted spellings (at main both headers refuse every one alike, so the agreement half alone would be green) |
-| `TestTheEventStreamAndTheCSRFGuardShareOneOriginRule`, `TestHostAndOriginShareOneAuthorityMatcher` | `internal/admin` | both gates call `originMatches`, and it and the Host check call `lanAuthorityMatches` (structural) | the shim's functions are called by neither gate |
+| `TestHostAndOriginTakeEachSpellingAlike` | `internal/admin` | one table of spellings (mapped, `.local` in each case and with one dot or two, every port form, on a socket at P and at 80, IPv4 and ULA, and every row of §4.2's table of spellings two parsers would answer differently), each asked as a Host and as an Origin: both answers agree, and agree with the table (D3, D4, D5, F5) | the table's accepted spellings (at main both headers refuse every one alike, so the agreement half alone would be green) |
+| `TestTheEventStreamAndTheCSRFGuardShareOneOriginRule`, `TestHostAndOriginShareOneAuthorityParser` | `internal/admin` | both gates call `originMatches`; it and the Host check call `parseLANAuthority`; and no code of the LAN socket's reads an authority through `url.Parse`, `url.URL.Hostname` or `url.URL.Port` (structural, F5) | the shim's functions are called by neither gate |
+| `TestTheLANAuthorityParserIsOneGrammar` | `internal/admin` | `parseLANAuthority` over its grammar's every edge (§4.2): each refused byte, a bracketed literal with a zone or mapped, digits and dots that are no IPv4 literal, a label of 64 bytes, a port of 0, 65536 or with a leading zero, an empty port; and what it returns is canonical, a second parse of its answer giving the same (F5) | the shim parses nothing |
 | `TestEachRefusalSaysWhereToOpenTheConsole` | `internal/admin` | §4.4's 421 and 403 bodies, per socket, with and without the LAN socket listening (R7) | the LAN words |
 | `TestTheLANSocketsRefusalsNameNoPeerAndSpareLoopbacksLog` | `internal/admin` | §4.4's log lines | no such line |
 | `TestTheMenuSaysWhereTheConsoleAnswers` | `internal/admin` | §5.1's three states (R9) | no line |
@@ -983,19 +1134,25 @@ from nothing); `doctor.Deps.ConsoleLAN`; init's `--admin-lan-address` flag (pars
 | `TestAHoldTheKernelRefusesLeavesTheLANSocketClosed` | `internal/admin` | an injected hold that answers `EPERM`, `ENOPROTOOPT`, an index of 0, and a read-back of another index: nothing listens, the state is `waiting` with each reason, the loopback socket serves (D11) | no state |
 | `TestAReadingThatFailsBindsNothing` | `internal/admin` | an injected reading that fails whole, and one whose one interface's addresses fail: nothing binds, `interfaces_unreadable` (D12) | no state |
 | `TestEachPlatformAndFamilyIsDecided` | `internal/consolelan` | `Decide(goos, family)` gives §3.3's table, GOOS a parameter, on every leg (D13) | the shim decides no hold anywhere |
-| `TestTheStrongHostRowDecidesTheWindowsHold` | `internal/consolelan` | injected rows: weak host send, forwarding, a read that fails, each closed with its reason; a strong row held (D13) | the shim holds every row |
+| `TestTheStrongHostTableDecidesTheWindowsHold` | `internal/consolelan` | injected tables: each of the three flags on A's row and on another's, a table that does not read, and a table and a listing that name different interfaces, each closed with its reason and the interface named; a strong table held (D13, F3) | the shim holds every table |
+| `TestAReadingOfAWithNoNetworkBindsNothing` | `internal/admin` | A kept as the address alone (no `*net.IPNet`, a mask that is no prefix, a mask of no ones): nothing binds, `address_has_no_network` (F8) | no state |
+| `TestReadInterfacesFailsWholeOnAnyInterfacesAddresses`, `TestReadInterfacesKeepsAnAddressThatIsNoIPNetAsTheAddressAlone` | `internal/player/lan` | `ReadInterfacesFrom` over a lister and an address reader of the test's: one interface's addresses failing fails the reading, naming it; an address that is no IP fails it; one that is no `*net.IPNet` is kept as the address alone (F8, `lan.go:49-98`) | the shim is `HostInterfaces`, which lists the first with no addresses and skips the second |
+| `TestServeHoldsItsLANSocketThroughConsolelan` | `cmd/bridge` | serve's bind calls the hold it is given with the reading's index before the bind, and a hold that errs leaves no LAN socket; the reading and the Windows table are the ones it is given (F8, the package boundary) | serve binds nothing for the LAN, so no hold is called |
 | `TestAnUploadWithoutSubtleCryptoSendsNoDigestAndSaysSo` | `internal/admin`, under node | `globalThis.crypto` with no `subtle` and `isSecureContext` false: the chunk's PUT carries no `Content-Digest`, the server takes it through the LAN socket, and the end says length only, naming the cause (R5) | the words |
 | `TestTheUploadPageSaysChunksAreCheckedForLengthOnly` | `internal/admin`, under node | §6.3's note before an upload | no note |
-| `TestThePairingDialogSaysWhatCrossesAnUnencryptedNetwork` | `internal/admin`, under node | §6.2's sentence where `isSecureContext` is false, none where it is true (D9) | no sentence |
+| `TestThePairingDialogWarnsBeforeGenerateOnTheLANSocket` | `internal/admin` | a page the LAN socket served renders §6.2's warning in the dialog's form step, before Generate token in the document's order, and the recovery advice beside the result's token; a page the loopback socket served renders neither (D9, F6, F8) | no warning |
+| `TestARotationOnTheLANSocketWarnsBeforeItIsSent` | `internal/admin`, under node | on a page the LAN socket served, Rotate's confirmation carries §6.2's warning before any request is sent, a confirmation refused sends nothing, and the result carries the recovery advice, whose words offer no rotation from the page; on a loopback page none of it (F6, F10) | no warning |
 | `TestServeOpensTheConsoleOnItsLANAddress` | `cmd/bridge` | the real serve with a handed loopback listener and a stand-in box for the LAN bind (§9.6): a client from inside the network gets the console, one from outside gets 403, and the banner's line | serve binds nothing for the LAN |
 | `TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo` | `cmd/bridge` | a bind that fails: serve starts, one WARN, the menu says this machine only, `/api/console` says waiting, both doctors WARN, the loopback socket refuses `Host: A:P` and `Origin: http://A:P`, then a tick binds it and the line changes (R9) | no WARN, no state |
 | `TestRemovingTheKeyLeavesTheVariablesListenerAndTheDoctorSaysSo` | `cmd/bridge` | serve with the variable and a file without the key listens, `source` is `environment`, and the doctor's line names the variable and how to clear it (D7) | serve binds nothing for the LAN |
 | `TestTheDoctorReadsTheServingProcesssSourceNotItsOwnEnvironment` | `cmd/bridge` | serve started with the variable and the doctor run without it, and the other way round: the line names the serving process's source, and says apart what this shell sets (D14) | no line |
 | `TestUnsettingTheVariableMakesTheFilesAddressTheOneServed` | `cmd/bridge` | a file with A and a variable with A2: serve binds A2, source `both`; restarted without the variable it binds A, source `file`; the line said so before (D14) | serve binds nothing for the LAN |
 | `TestAnEmptyKeyIsReportedAsCostingTheRollback` | `cmd/bridge` | a file with `adminLANAddress: ""`: no LAN socket, `/api/console` reports the key at boot and empty, both doctors' `console-lan-rollback` WARN says to remove the line (D16) | no route, no line |
+| `TestAVariableOverAnEmptyKeyIsBothAndCostsTheRollback` | `cmd/bridge` | `adminLANAddress: ""` with `BRIDGE_ADMIN_LAN_ADDRESS` set: serve binds the variable's address, source `both`, `fileKeyAtBoot` `empty`; the doctor's line says that unsetting the variable turns the console off the home network and that the line costs the rollback; `console-lan-rollback` warns (F7) | serve binds nothing for the LAN |
+| `TestTheConsoleNamesTheBootFilesAddressBesideTheEffectiveOne` | `cmd/bridge` | a variable's A2 over a file's A: `address` A2 and `fileAddressAtBoot` A; over a file whose value is a secret-shaped string the check refuses: `fileKeyAtBoot` `not_an_address`, and the value in no answer, line or log (F7, R10) | no route |
 | `TestInitWritesTheLANAddressItIsGiven`, `TestInitRefusesALANAddressWithPublic`, `TestInitAddressFlagsErrorChecksTheLANAddress` | `cmd/bridge` | §2.5, item 4 (R8) | the shim's flag writes nothing and refuses nothing |
 | `TestInitNeverEchoesARefusedLANAddress` | `cmd/bridge` | init's real path, its whole output read, for each of §2.2's refusals of a secret-shaped value and for the flag with `--public`: exit 2, and the value nowhere (D6) | init takes the flag and exits 0 |
-| `TestInitWarnsOfTheLostRollbackBeforeItSaves` | `cmd/bridge` | a first install with the flag and a rewrite that keeps the key: the rollback sentence is written while bridge.yaml does not yet hold the key (read by the writer the test hands init's stderr), and before the `initHost` stand-in records an install or a start (D15) | no sentence |
+| `TestInitWarnsOfTheLostRollbackBeforeItSaves` | `cmd/bridge` | init's real path with `--yes`, the writer the test hands its stderr reading bridge.yaml as the rollback sentence is written. A first install with the flag: the file is absent then. A `--yes --force` rewrite over a file whose key it keeps: the file holds its original bytes then, byte for byte, and the save that follows is observed apart, through `initHost.save`, whose stand-in records its call and then makes the real save, after the sentence. Each before the `initHost` stand-in records an install or a start (D15, F7, F12) | no sentence |
 | `TestARewriteKeepsTheLANAddressWithTheAdminAddress`, `TestARewriteThatNamesAnAddressFlagSaysTheLANAddressIsNotKept`, `TestARewriteToPublicSaysTheLANAddressIsNotKept`, `TestARewriteDropsAKeptLANAddressTheCheckRefuses` | `cmd/bridge` | §2.5, item 5 (R4) | `priorInstallFile` reads no such field; no line |
 | `TestBridgeDoctorReadsTheRunningBridgesConsole` | `cmd/bridge` | the CLI asks §5.2 and words its answer | no route |
 | `TestTheConsoleLANLineSaysEachState`, `TestTheConsoleLANLinesNameTheSourceAndWhatClearsIt`, `TestTheRollbackLineIsReadFromTheFileAsItIsNow` | `internal/doctor` | §5.3's two tables (R9, D7, D8, D16) | no check |
@@ -1016,6 +1173,8 @@ Green baseline controls, green at main, with the shim and after:
 | `TestTheLibraryCommandsReachTheLiveAPIBesideALANSocket` | `cmd/bridge` | `tryLibraryViaAdmin` (R3) | the same |
 | `TestOnlyTheBindAndItsChecksReadTheLANAddress` | `cmd/bridge` | the AST walk of §3.7 (R3) | the same |
 | `TestALANSocketThatDoesNotBindIsNoFailedStart` | `cmd/bridge` | B660's count is untouched | a LAN bind's failure sent to `adminErr` (§10.3, 6) |
+| `TestTheProductionSeamsAreConsolelansAndLans` | `cmd/bridge` | serve's default hold, Windows table and reading are `consolelan.Hold`, `consolelan.HostModel` and `lan.ReadInterfaces`, compared as functions, so `internal/consolelan`'s qualification (§9.5) is of the code serve runs (F8) | a default replaced by another function |
+| `TestReadInterfacesAgreesWithHostInterfacesWhereNothingFails` | `internal/player/lan` | where every read answers and every address is a `*net.IPNet`, `ReadInterfacesFrom` gives what `HostInterfaces` gives, prefixes and all (`lan.go:75-98`'s cases: a 16-byte IPv4 address and mask, a mask that is no prefix, a mask of no ones) (F8) | a prefix read another way in the new path alone |
 
 After-only controls, whose precondition is a LAN socket that listens:
 
@@ -1028,22 +1187,40 @@ After-only controls, whose precondition is a LAN socket that listens:
 | `TestTheLANSocketIsRetiredWhenItsAddressIsRenumbered`, `…WhenItsMaskNarrows`, `…WhenItsAddressMovesToAnotherInterface` | `internal/admin` | §3.5's rows through an injected reading: a kept-alive connection opened before the change gets no answer to its next request, and a new connection is judged by the new policy (a source in the old /24 and outside the new /25 refused; the moved socket held to the new index) (D2) | no reconciliation; the address compared alone; the index compared alone (§10.3, 18 and 19) |
 | `TestAKeptAliveConnectionIsClosedBeforeTheNewSocketBinds` | `internal/admin` | the old connections' close is seen before the new listener's bind, through the plan's seams (D2) | a retirement that closes the listener alone, and a rebind before the close (§10.3, 20 and 21) |
 | `TestAReadingThatFailsAfterTheBindClosesTheLANSocket` | `internal/admin` | after admission, a listing that fails and one interface whose addresses fail each retire the socket and its kept-alive connection within one tick; a whole reading binds again (D12) | a failed reading that keeps the socket, and a reading through `HostInterfaces` (§10.3, 22 and 23) |
+| `TestEachPolicyFieldRetiresTheSocketWhenItChanges` | `internal/admin` | a case for each part of §3.5's policy table: the index, the name, each flag, the prefix, A held twice, each flag of A's Windows row and of another's, a Windows row added and one removed, the `.local` name; each with a kept-alive connection that gets no answer after the change; and a structural half that fails when the policy's type gains a field no case names (F8, F11) | a part left out of the comparison (§10.3, 19 and 34) |
+| `TestNoRequestIsAdmittedOnceARetirementBegins` | `internal/admin` | a connection opened before a retirement, its request sent once the retirement's section of `plan.mu` has passed and before its `Close` (the retirement held at its seam there): 503 with `Connection: close`, and a handler that records every request it gets records none (F1) | the fence removed, round 2's count alone (§10.3, 32) |
+| `TestAnEventStreamEndsAtItsSocketsRetirement` | `internal/admin` | a `GET /api/events` open across a retirement held before its `Close`: the stream ends at the retirement's section, before the close, and the retirement's wait returns only once the stream's handler has (F1) | the policy's context left uncancelled, the stream then ending at the close alone (§10.3, 33) |
+| `TestAnAdmissionParkedBetweenItsCheckAndItsCountIsSeenByTheRetirement` | `internal/admin` | a request parked at the admission's seam, between its check and its count; a retirement begun meanwhile waits for that section, then finds the request counted, cancels its context and waits for it, and never completes with a count of 0 while the request is parked; a request after the retirement's section is refused. Ordered by the two seams alone, with no sleep (F9) | the check and the count in two sections of the mutex: the retirement completes, then the parked request runs (§10.3, 32) |
+| `TestTheRebindTakesAFreshReadingAfterTheWait` | `internal/admin` | the reading that finds the change says A moved to another interface; while the retirement waits on a handler the test holds, the injected reading changes again, A gone in one case and on a third interface in another; the rebind follows the fresh reading, no socket in the first and one held to the third interface in the second, never the second interface (F2) | the rebind on the reading that found the change (§10.3, 35) |
 
 ### 9.5 The holds, on real sockets (D13)
 
 | Test | Platform, family | Where it runs | What it shows | Red at main, with the shim, because | Its control |
 |---|---|---|---|---|---|
-| `TestTheConsolesHoldRefusesASYNFromAnotherInterface` | Linux, IPv4 and IPv6 | every Linux run, unprivileged | the console's `consolelan.Hold` on `127.0.0.1:0` and `[::1]:0`, held to an index that is not loopback's: a loopback dial is refused (`ECONNREFUSED`, 2 s bound), held to loopback's own it is taken, the index reads back (B527's cases (c) and (d), for the console's code) | the shim's hold sets nothing: the dial is taken | the hold made a no-op |
-| `TestARoutedClientInsideThePrefixGetsNoConsole` | Linux, IPv4 and IPv6 | a gate job of its own with root (§10.4) | three network namespaces and two veth pairs: the box, with A in its prefix on one link and another address on the second; a client on A's link; a routed client on the second link whose address lies in A's prefix, with a host route each way (the shape of a VPN that hands out home addresses). The real plan and handler run in the box's namespace on its real interfaces: the client on A's link gets 200, the routed client's connect is refused, and the source policy and the Host check are shown to admit it without the hold | the shim's `ServeConsole` binds nothing for the LAN | the hold removed: the routed client gets the console's 200 |
+| `TestTheConsolesHoldRefusesASYNFromAnotherInterface` | Linux, IPv4 | every Linux run, unprivileged | the console's `consolelan.Hold` on `127.0.0.1:0`, held to an index that is not loopback's: a loopback dial is refused (`ECONNREFUSED`, 2 s bound), held to loopback's own it is taken, the index reads back (B527's cases (c) and (d), for the console's code). IPv6 is not asked here: a socket held to another interface cannot bind `[::1]` (§3.3, F4) | the shim's hold sets nothing: the dial is taken | the hold made a no-op |
+| `TestARoutedClientInsideThePrefixGetsNoConsole` | Linux, IPv4 and a ULA | a gate job of its own with root (§10.4) | three network namespaces and two veth pairs: the box, with A in its prefix on one link and another address on the second; a client on A's link; a routed client on the second link whose address lies in A's prefix, with a host route each way (the shape of a VPN that hands out home addresses); once with an RFC 1918 A and once with a ULA, each the box's own address on its own veth, which a socket held to that veth binds (F4). The real plan and handler run in the box's namespace on its real interfaces: the client on A's link gets 200, the routed client's connect is refused, and the source policy and the Host check are shown to admit it without the hold | the shim's `ServeConsole` binds nothing for the LAN | the hold removed: the routed client gets the console's 200 |
 | `TestTheConsolesHoldScopesItsRepliesOnMacOS` | macOS, IPv4 | the `macos-latest` leg | `127.0.0.1:0` held to an interface that is not lo0 does not connect on a loopback dial within 2 s; held to lo0 it connects at once; `IP_BOUND_IF` reads back | the shim's hold sets nothing: the dial connects | the hold made a no-op |
-| `TestTheStrongHostModelIsReadFromTheStack` | Windows, IPv4 and IPv6 | the `windows-latest` leg | `consolelan.HostModel` reads each up interface's row in both families from the stack, its index and flags those `GetIpInterfaceTable` lists for it, and the runner's default rows hold | the shim's row is read from nothing | the read replaced by a strong row |
+| `TestTheStrongHostModelIsReadFromTheStack` | Windows, IPv4 and IPv6 | the `windows-latest` leg | `consolelan.HostModel` reads the interface table of each family from the stack, each row's interface and flags those `GetIpInterfaceEntry` gives for it, and the decision §3.3 makes of the rows read; it records the runner's rows in its log, and asserts no particular answer of them, since a runner's own adapters may forward | the shim's table is read from nothing | the read replaced by a strong table |
 
-Each skips only where its premise is missing (no non-loopback interface; no root), and a run that
-sets `BRIDGE_QUALIFY_HOLD=1` (the macOS and Windows legs, and the Linux shards) or
-`BRIDGE_QUALIFY_ROUTED=1` (the root job) fails instead of skipping, so a green leg is the evidence
-that it ran. The namespaces need root: an unprivileged user namespace is refused where AppArmor
-restricts them, Ubuntu's default since 23.10, and a veth pair to the box needs `CAP_NET_ADMIN`
-there (B527's list of what it could not measure).
+The three that need only the host follow the repository's rule for a test whose premise a host can
+lack: each skips locally where its premise is missing (a non-loopback interface, the stack's table)
+and fails where `CI` is set (`build-ci-tests.md`, the host-address bullet), so a green CI leg shows
+it ran. The routed client's test skips without root and without `BRIDGE_QUALIFY_ROUTED=1`, which
+only its own job sets, and that job requires its `--- PASS` line (§10.4).
+
+**The namespaces, and Go's threads (F8).** A network namespace belongs to an OS thread, not to a
+process: a Go program that switched one with `setns` would have to lock the goroutine to its thread
+(`runtime.LockOSThread`) and never unlock it, since an unlocked thread returns to the scheduler's
+pool in the namespace it switched to, while a socket keeps the namespace of the thread that made it.
+The test never switches a namespace from Go. It makes the namespaces and the veth pairs with `ip`
+(found by `exec.LookPath`, run by its absolute answer: `build-ci-tests.md`, the exec bullet), and
+runs each side in a process of its own, the test binary itself (`os.Executable`) re-executed under
+`ip netns exec`, whose helper mode a variable of the test's selects: the box's process runs the
+plan, the hold and the handler, and each client's process dials and reports. Each process is in one
+namespace for its whole life, and the test deletes the namespaces it made in its cleanup. The
+namespaces need root: an unprivileged user namespace is refused where AppArmor restricts them,
+Ubuntu's default since 23.10, and a veth pair to the box needs `CAP_NET_ADMIN` there (B527's list
+of what it could not measure).
 
 ### 9.6 Existing guards, and what no test does
 
@@ -1057,7 +1234,12 @@ No test outside §9.5 binds the host's LAN addresses or lists its interfaces (`o
 tests bullet): the console's tests are requests through `Handler()` and sockets on loopback that
 stand for A, as `internal/player/lan/lantest` stands for OpenHome's (a listener on 127.0.0.1
 whose connections report the source the test names), with a reading of the test's that can fail
-whole or for one interface.
+whole or for one interface. The package boundary (F8): `internal/consolelan`'s tests qualify the
+holds and the Windows table on real sockets and the real stack; `internal/admin`'s, the plan, the
+fence and the guards over seams; `internal/player/lan`'s, the reading; and `cmd/bridge`'s, that
+serve wires those three into the plan by default and calls them in their order
+(`TestServeHoldsItsLANSocketThroughConsolelan`, `TestTheProductionSeamsAreConsolelansAndLans`), so
+no layer's green stands in for another's.
 
 ## 10. The PR
 
@@ -1072,29 +1254,33 @@ go-ahead.
 - `internal/config/config.go` (the field, Validate's call), `internal/config/console_lan.go` (new:
   `ValidateConsoleLANAddress`, `ConsoleLANClass`, `LANKeyOf`), `config/bridge.yaml.example` (the
   block, §2.7).
-- `internal/player/lan/lan.go` (`ReadInterfaces`, `UnreadableError`; `HostInterfaces` unchanged).
+- `internal/player/lan/lan.go` (`ReadInterfacesFrom`, `ReadInterfaces`, `UnreadableError`;
+  `HostInterfaces` unchanged).
 - `internal/consolelan` (new): `decide.go` (§3.3's table, GOOS a parameter), `hold_linux.go`
   (`SO_BINDTOIFINDEX` and its read-back), `hold_darwin.go` (`IP_BOUND_IF` and its read-back),
-  `hold_windows.go` (the row, `GetIpInterfaceEntry`), `hold_other.go` (refuses), and §9.5's tests.
+  `hold_windows.go` (the table, `GetIpInterfaceTable`, and the strong host model's judgement of
+  every row), `hold_other.go` (refuses), and §9.5's tests, the routed client's helper processes
+  among them.
 - `internal/admin/admin.go` (the two servers, the socket's description, the per-socket guards and
   words), `internal/admin/middleware_auth.go` (the boundary per socket),
   `internal/admin/handlers_events.go` (the stream's gate on `originMatches`),
-  `internal/admin/console_lan.go` (new: the plan, its reading, its comparison, retirement, its
-  state, `lanAuthorityMatches`, `GET /api/console`), `internal/admin/handlers_pages.go`
-  (`pageData`), the templates `layout.html` (the menu's line, the pairing dialog's sentence),
-  `settings.html` and `upload.html`, and `static/app.js` (the upload's notes, the pairing sentence,
-  the comment), `static/app.css` (the line's style) and `static/player/audio.js` (the comment).
+  `internal/admin/console_lan.go` (new: the plan, its reading, its comparison, the fence and the
+  retirement, its state, `GET /api/console`), `internal/admin/console_lan_authority.go` (new:
+  `parseLANAuthority`), `internal/admin/handlers_pages.go` (`pageData` and its socket kind), the
+  templates `layout.html` (the menu's line, the pairing dialog's warning and its recovery advice),
+  `settings.html` and `upload.html`, and `static/app.js` (the upload's notes, the rotation's
+  warning, the recovery advice, the comment), `static/app.css` (the line's style) and
+  `static/player/audio.js` (the comment).
 - `internal/advertise/endpoints.go` (the `.local` name, exported for the reading).
 - `internal/doctor/doctor.go` and `internal/doctor/console_lan.go` (new: both checks and their
   words, the source's words, `Deps.ConsoleLAN`).
 - `cmd/bridge/main.go` (the plan, the first attempt, the banner, the test seams),
   `cmd/bridge/serve_console_lan.go` (new: the reading, the hold and the source wired in),
   `cmd/bridge/doctor.go` (both doctors' sources), `cmd/bridge/init.go` and
-  `cmd/bridge/init_rewrite.go` (the flag, its refusals, the warning before the save, the
-  rewrite's rule), `cmd/bridge/banner_url.go` (the LAN line).
-- `.github/workflows/gate.yml`: `BRIDGE_QUALIFY_HOLD=1` on the macOS and Windows legs and the Linux
-  shards, and a job of its own with root for `TestARoutedClientInsideThePrefixGetsNoConsole`, under
-  `build-ci-tests.md`'s rules for a job.
+  `cmd/bridge/init_rewrite.go` (the flag, its refusals, the warning before the save, the save's
+  seam `initHost.save`, the rewrite's rule), `cmd/bridge/banner_url.go` (the LAN line).
+- `.github/workflows/gate.yml`: a job of its own for `TestARoutedClientInsideThePrefixGetsNoConsole`
+  (§10.4), and its name in the `gate` job's `needs`.
 - Tests: §9. Records: §10.5.
 
 ### 10.3 Negative controls
@@ -1130,7 +1316,7 @@ Each mutation is made in a copy, its named test shown red, and the tree left as 
 15. the read-back skipped while the hold sets another index:
     `TestAHoldTheKernelRefusesLeavesTheLANSocketClosed`'s read-back case (D11).
 16. a ULA on macOS taken through `IPV6_BOUND_IF`: `TestEachPlatformAndFamilyIsDecided` (D13).
-17. a Windows row with weak host send read as strong: `TestTheStrongHostRowDecidesTheWindowsHold`
+17. a Windows row with weak host send read as strong: `TestTheStrongHostTableDecidesTheWindowsHold`
     (D13).
 18. no reconciliation while the socket listens: the three retirement tests (D2).
 19. the reconciliation comparing the address alone, or the index alone: the mask and the move
@@ -1152,37 +1338,95 @@ Each mutation is made in a copy, its named test shown red, and the tree left as 
 28. the example's or the menu's rollback sentence removed:
     `TestTheConfigExampleSaysWhatTheKeyCostsTheRollback`,
     `TestTheMenuLineSaysWhereTheAddressCameFromAndWhatItCostsTheRollback` (D8).
-29. init's warning moved after the save, to its footer:
-    `TestInitWarnsOfTheLostRollbackBeforeItSaves` (D15).
+29. init's warning moved after the save, to its footer, and apart, the save made before the
+    warning in the rewrite's path alone: `TestInitWarnsOfTheLostRollbackBeforeItSaves`'s first
+    install and its rewrite (D15, F12).
 30. the key's presence read from its value: `TestTheLANKeysPresenceIsReadApartFromItsValue` and
     `TestAnEmptyKeyIsReportedAsCostingTheRollback` (D16).
-31. the pairing sentence shown on a secure context too, or nowhere:
-    `TestThePairingDialogSaysWhatCrossesAnUnencryptedNetwork` (D9).
+31. the pairing warning rendered on a loopback page too, or nowhere:
+    `TestThePairingDialogWarnsBeforeGenerateOnTheLANSocket` (D9).
+32. the fence removed, round 2's count alone, and apart, the fence's check and its count in two
+    sections of `plan.mu`: `TestNoRequestIsAdmittedOnceARetirementBegins` and
+    `TestAnAdmissionParkedBetweenItsCheckAndItsCountIsSeenByTheRetirement` (F1, F9).
+33. the policy's context left uncancelled at the retirement:
+    `TestAnEventStreamEndsAtItsSocketsRetirement` (F1).
+34. one part of the policy left out of the comparison, each Windows row's among them, one part at a
+    time: its case of `TestEachPolicyFieldRetiresTheSocketWhenItChanges` (F8, F11).
+35. the rebind on the reading that found the change: `TestTheRebindTakesAFreshReadingAfterTheWait`
+    (F2).
+36. A's Windows row alone judged, round 2's rule: `TestTheStrongHostTableDecidesTheWindowsHold`'s
+    rows of another interface (F3).
+37. an Origin read through `url.Parse` and a Host through `url.URL`'s methods: the rows of §4.2's
+    table of spellings in `TestHostAndOriginTakeEachSpellingAlike`, and
+    `TestHostAndOriginShareOneAuthorityParser` (F5).
+38. the pairing warning moved into the result step, and apart, the rotation's confirmation left as
+    it is: `TestThePairingDialogWarnsBeforeGenerateOnTheLANSocket` and
+    `TestARotationOnTheLANSocketWarnsBeforeItIsSent` (F6, F8).
+39. the recovery advice offering a rotation from the page:
+    `TestARotationOnTheLANSocketWarnsBeforeItIsSent` (F10).
+40. `fileAddressAtBoot` filled from the effective address, and apart, a value the check refuses
+    kept: `TestTheConsoleNamesTheBootFilesAddressBesideTheEffectiveOne` (F7).
+41. the source over an empty key read as `environment`:
+    `TestAVariableOverAnEmptyKeyIsBothAndCostsTheRollback` (F7).
+42. serve's bind made without its hold, and apart, a default seam replaced:
+    `TestServeHoldsItsLANSocketThroughConsolelan` and `TestTheProductionSeamsAreConsolelansAndLans`
+    (F8).
+43. `ReadInterfacesFrom` skipping an address that is no `*net.IPNet`, as `HostInterfaces` does:
+    `TestReadInterfacesKeepsAnAddressThatIsNoIPNetAsTheAddressAlone` and
+    `TestAReadingOfAWithNoNetworkBindsNothing` (F8).
 
 ### 10.4 Runs
 
 `make fmt vet test build-all` through the build slot, on `go.mod`'s toolchain; `make docs-check`;
-and, if a rules entry moves, `scripts/doc-split/verify_moves.py`. §9.5's Linux test runs in every
-Linux run, unprivileged, where the PR's session runs it too; the root job, the macOS leg and the
-Windows leg are CI's, and their green, with the qualify variables set, is the evidence (§9.5). The
-Windows leg also measures a reading's cost (§3.4), which the record gives. The browser check and a
-routed SYN on Windows are the owner's (§11).
+and, if a rules entry moves, `scripts/doc-split/verify_moves.py`. §9.5's Linux IPv4 test runs in
+every Linux run, unprivileged, wherever the PR is built and tested; the macOS and Windows legs
+(`.github/workflows/gate.yml:532-642`, `go test ./...`) run theirs, which fail rather than skip
+where `CI` is set; and the routed client's test runs in a job of its own. The Windows leg also
+measures a reading's cost (§3.4), and its log records the runner's interface tables, which the
+record gives. The browser check and a routed SYN on Windows are the owner's (§11).
+
+**The routed client's job (F8)**, written to the gate's conventions and `build-ci-tests.md`'s rules:
+
+- `runs-on: ubuntu-latest`, `timeout-minutes: 15`, `permissions: contents: read`;
+  `actions/checkout` and `actions/setup-go` pinned by their SHAs as every job of the gate pins them,
+  `persist-credentials: false`, and `go-version-file: go.mod` with `check-latest: true` and
+  `cache: false`, as `dsd-measure` and `installer` take them (`gate.yml:244-293`, `:704-724`).
+- One `bash` step under `set -euo pipefail`. It builds the test binary as the runner's own user,
+  `go test -c -tags ts_omit_webclient,ts_omit_debugeventbus -o "$RUNNER_TEMP/consolelan.test"
+  ./internal/consolelan`, with the release tags, so the build-site census reviews the site with its
+  tags; it prints `ip -V`; it runs the binary under `sudo` with `BRIDGE_QUALIFY_ROUTED=1`,
+  `-test.run` naming the one test, `-test.v` and `-test.count=1`, through `tee` into a log under
+  `$RUNNER_TEMP`; and it requires the test's `--- PASS:` line, and each case's, by `grep -q`, as
+  `native-qualification` requires its own (`gate.yml:674-692`), so a skip, or a run that ran
+  nothing, fails the job. Building as the user keeps the module and build caches the user's: only
+  the test binary runs as root. The gate already takes root in a job (`dsd-measure` mounts a tmpfs
+  with `sudo`, `gate.yml:288-291`).
+- The job's name goes into the `gate` job's `needs` (`gate.yml:728`), whose verdict reads every
+  need's result (`:758-774`): a job not named there is waited for by nothing (`build-ci-tests.md`,
+  the `needs` bullet).
+- The test is listed in the race shards too, where it skips (no root, no variable), so it runs in
+  one place and is in no shard's way (`build-ci-tests.md`, the bullet on a test that runs in no
+  shard).
 
 ### 10.5 Records
 
 - `.claude/rules/auth-tls.md`: its first bullet, "The admin console is loopback-only with no auth,
   by design" (`:38-41`), says loopback only unless the operator opens it on the home network with
   `adminLANAddress`; a new bullet holds the posture's rules: the kernel's hold per platform and
-  what is refused where (§3.3), the policy read again and fail-closed retirement (§3.5), the
-  source, the one matcher for Host and Origin and its spellings, the `.local` name, the words, no
-  peer in a line, where the address came from and what clears it (§2.6), and the rollback the key
-  costs, empty or not, said before init saves (§2.7); the `csrfGuard` bullet's loopback sentence
+  what is refused where, Windows' strong host model taken whole (§3.3), the policy read again,
+  fail-closed retirement, the fence that admits nothing once a retirement begins and the fresh
+  reading a rebind takes (§3.5), the source, the one parser for Host and Origin and its spellings,
+  the `.local` name, the words, no peer in a line, where the address came from and what clears it
+  (§2.6), the rollback the key costs, empty or not, said before init saves (§2.7), and the warning
+  before a token is minted or rotated on the LAN socket, with its remedy (§6.2); the `csrfGuard`
+  bullet's loopback sentence
   (`:91-98`) becomes per socket. Its `paths:` gain `internal/config/console_lan*.go`,
   `internal/admin/console_lan*.go`, `internal/consolelan/**` and
   `cmd/bridge/serve_console_lan*.go`. It has about 33 KB of its budget left, so the new rules go
   here.
 - `.claude/rules/admin-console.md`: its first bullet (`:16-24`) per socket, and a sentence for the
-  upload's length-only note and the pairing sentence. It has about 1.7 KB left: if the edit would
+  upload's length-only note and the pairing and rotation warnings. It has about 1.7 KB left: if
+  the edit would
   pass the budget, its largest entry moves out first (`scripts/doc-split/move_entry.py
   .claude/rules/admin-console.md --largest`). `config-lifecycle.md`, 0.6 KB from its budget, gains
   nothing.
@@ -1210,9 +1454,9 @@ routed SYN on Windows are the owner's (§11).
   change, and `ProtocolVersion` stays 1.
 - The engineering log: an entry,
   `ops/engineering-log/2026-11/<date>-b989--feat-b989-lan-console.md`, with what was measured: the
-  holds' qualification per platform and family (which leg, which job), the reading's cost on
-  Windows, the bind's errnos per OS where CI shows them, and the owner's browser check and Windows
-  routed SYN.
+  holds' qualification per platform and family (which leg, which job), the runner's Windows
+  interface tables and a reading's cost there, the bind's errnos per OS where CI shows them, the
+  IPv6 bind a held socket refuses (§3.3), and the owner's browser check and Windows routed SYN.
 - The backlog: the follow-ups of §11, item 4.
 - The privacy page, for the owner (its text is B683's):
 
@@ -1237,11 +1481,15 @@ routed SYN on Windows are the owner's (§11).
    (§3.4).
 5. The owner's gates: the browser check (a phone and a laptop on one network open the console at
    `http://A:P` and at `http://<name>.local:P`; the menu's line; a save; an upload and its
-   length-only note; the pairing dialog's sentence and its copy by selection; a refusal of another
-   name), and on a Windows box with a second network, a client on that network whose address lies
-   in A's prefix gets no console (§3.3).
-6. The gate's new job with root (§10.2): a job of a kind the gate has not run before.
+   length-only note; the pairing dialog's warning before Generate token, the rotation's before its
+   request, the recovery advice and the copy by selection; a refusal of another name), and on a
+   Windows box with a second network, a client on that network whose address lies in A's prefix
+   gets no console (§3.3).
+6. The gate's new job (§10.4): the gate takes root already, in `dsd-measure`'s mount, but has not
+   run a test binary as root.
 7. The interval (§3.4): 5 s, OpenHome's, or shorter at a reading's cost.
+8. Windows' cost (§3.3): with the strong host model taken whole, a box whose adapters forward for a
+   NAT, or receive weakly, keeps the console closed.
 
 ## 12. The briefs' review items, and where each is settled
 
@@ -1273,3 +1521,16 @@ routed SYN on Windows are the owner's (§11).
 | D14, the serving process's provenance | §2.6, §5.2, §5.3; §10.3, 27 |
 | D15, the warning before init saves | §2.7; §10.3, 29 |
 | D16, an empty key still breaks the rollback | §2.5, item 6, §2.7, §5.3; §10.3, 30 |
+| F1, retirement admits nothing after it starts | §3.1 (the policy's context), §3.5 (the fence, `Close`'s order); §9.4, §10.3, 32 and 33 |
+| F2, the rebind takes a fresh reading | §3.5; `TestTheRebindTakesAFreshReadingAfterTheWait`, §10.3, 35 |
+| F3, Windows' host model, both directions | §3.3 (the model taken whole), §5.3; §10.3, 36 |
+| F4, the Linux IPv6 qualification reaches its assertion | §3.3 (the bind measured), §9.5 (IPv4 unprivileged, a ULA in the namespaces) |
+| F5, one parser for Host and Origin | §4.2 (`parseLANAuthority`, the table of spellings), §4.3; §10.3, 37 |
+| F6, pairing on the LAN | §6.2 (warned before the mint and the rotation, the remedy beside the result), §6.4, item 2; §10.3, 38 |
+| F7, provenance and rollback edges | §2.6 (`both` over an empty key, the boot file's value), §2.7 (`--yes`), §5.2; §10.3, 29, 40 and 41 |
+| F8, the pairing warning's order | §6.2; `TestThePairingDialogWarnsBeforeGenerateOnTheLANSocket`, §10.3, 38 |
+| F8, coverage and package boundaries | §3.2 and §3.5 (every part, `lan.go`'s edges), §9.4, §9.5 (the namespaces and Go's threads), §9.6, §10.4 (the job's rules); §10.3, 34, 42 and 43 |
+| F9, the fence's admission is atomic | §3.5 (one section for the check and the count); `TestAnAdmissionParkedBetweenItsCheckAndItsCountIsSeenByTheRetirement`, §10.3, 32 |
+| F10, no new credential over the LAN | §6.2 (the remedy on the bridge's own machine); §10.3, 39 |
+| F11, every Windows row revalidated | §3.3, §3.5 (the table in the policy); §10.3, 34 |
+| F12, the rewrite test asserts what is possible | §2.7, §9.3 (`TestInitWarnsOfTheLostRollbackBeforeItSaves`); §10.3, 29 |
