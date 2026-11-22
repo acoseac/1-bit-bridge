@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -622,19 +623,48 @@ func heldDoctor(srv *Server) (entered chan struct{}, release chan struct{}) {
 
 // TestAShutdownStopsBothSocketsInOneWindowAndBindsNothingAfter: the stop
 // joins the plan's loop, retires the LAN socket through the fence and shuts
-// the loopback socket down, all within one window, a LAN handler that never
-// returns holding no second one (I7); nothing binds after.
+// the loopback socket down, in that order and all within one window: a
+// handler that never returns on each socket, the LAN's holding the
+// retirement's wait and the loopback's the server's shutdown, holds no
+// second window (I7); nothing binds after.
 func TestAShutdownStopsBothSocketsInOneWindowAndBindsNothingAfter(t *testing.T) {
 	const window = 1500 * time.Millisecond
-	r := newLANRig(t, newLANBox(t), nil, func(p *ConsoleLANPlan) { p.ShutdownWindow, p.RetireWait = window, window })
+	seams := &ConsoleLANSeams{}
+	r := newLANRig(t, newLANBox(t), seams, func(p *ConsoleLANPlan) { p.ShutdownWindow, p.RetireWait = window, window })
 	entered, release := heldDoctor(r.srv)
 	defer close(release)
 	c := r.client("192.168.77.5")
 	go func() { _, _, _ = c.get("/api/doctor") }()
-	select {
-	case <-entered:
-	case <-time.After(socketWait):
-		t.Fatal("the held handler never ran")
+	go func() {
+		cl := &http.Client{Timeout: socketWait}
+		if resp, err := cl.Get("http://" + r.loop.Addr().String() + "/api/doctor"); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(socketWait):
+			t.Fatal("the held handlers never ran")
+		}
+	}
+	// At the stop's retirement the loop is joined and the loopback socket
+	// still takes connections. Set before the stop, whose context's end
+	// orders this write before the retirement's read.
+	var joinedFirst, loopbackUp bool
+	var markOnce sync.Once
+	seams.RetirementMarked = func() {
+		markOnce.Do(func() {
+			select {
+			case <-r.srv.consoleLAN.loopDone:
+				joinedFirst = true
+			default:
+			}
+			if conn, err := net.DialTimeout("tcp4", r.loop.Addr().String(), time.Second); err == nil {
+				loopbackUp = true
+				_ = conn.Close()
+			}
+		})
 	}
 	binds := r.box.count()
 	start := time.Now()
@@ -645,6 +675,9 @@ func TestAShutdownStopsBothSocketsInOneWindowAndBindsNothingAfter(t *testing.T) 
 	took := time.Since(start)
 	if took > window+window/2 {
 		t.Fatalf("the stop took %v, past its one window of %v", took, window)
+	}
+	if !joinedFirst || !loopbackUp {
+		t.Fatalf("at the stop's retirement: the loop joined %v, the loopback socket up %v; want both", joinedFirst, loopbackUp)
 	}
 	if r.box.count() != binds {
 		t.Fatalf("%d binds after the stop", r.box.count()-binds)
@@ -1258,7 +1291,9 @@ func TestAPairingQRMintedThroughTheLANSocketIsLoopbacks(t *testing.T) {
 	if resp.StatusCode/100 != 2 {
 		t.Fatalf("mint: %d %s", resp.StatusCode, b)
 	}
-	if strings.Contains(string(b), "192.168.77.20:7789") {
-		t.Fatalf("the mint's answer carries the Host the request used: %s", b)
+	for _, form := range []string{testLANHost, url.QueryEscape(testLANHost)} {
+		if strings.Contains(string(b), form) {
+			t.Fatalf("the mint's answer carries the Host the request used (%s): %s", form, b)
+		}
 	}
 }

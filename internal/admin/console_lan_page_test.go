@@ -149,6 +149,13 @@ func TestAnUploadWithoutSubtleCryptoSendsNoDigestAndSaysSo(t *testing.T) {
 	if !strings.Contains(extractJSFunction(t, src, "uploadLengthOnlyEndText"), "only on the bridge's own machine or over HTTPS") {
 		t.Error("the end's words do not name the cause")
 	}
+	// Held structurally where node is not installed: with no SubtleCrypto the
+	// chunk's headers are none, decided before any digest is asked for.
+	digest := extractJSFunction(t, src, "chunkDigestHeaders")
+	guard, use := strings.Index(digest, "if (!subtle) return null;"), strings.Index(digest, "subtle.digest(")
+	if guard < 0 || use < 0 || guard > use {
+		t.Errorf("chunkDigestHeaders does not answer no digest before it asks SubtleCrypto: the guard at %d, the digest at %d", guard, use)
+	}
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; the digest half executes the shipped client source")
