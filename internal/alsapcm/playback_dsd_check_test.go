@@ -964,7 +964,8 @@ func withVolume(p *playback.DSDPolicy) {
 // session's occurrence and never plans it again. A DoP level control moved
 // off 0 dB during the preparation ends it at the reading before its open,
 // and one moved between that reading and its node's check at the open's gain
-// check (failed, policy_changed), nothing written either way; one moved once
+// check (failed, policy_changed), nothing written either way and nothing
+// recorded of a node its open refused; one moved once
 // audio reached the DAC, the DAC plugged in all along, at the check's own
 // monitor's tick, its sink revoked before the chime's end; the state made
 // unreadable, through the reading and the reconciliation a session meets
@@ -997,6 +998,11 @@ func TestAPolicyChangeEndsTheCheck(t *testing.T) {
 		r.endedAs(playback.CheckFailed, playback.CheckPolicyChanged, "a gain moved off 0 dB at the open")
 		if v := r.k.View(); v.Opens != 1 || v.GivenBytes != 0 {
 			t.Errorf("%d opens and %d bytes given; want the one open refused, nothing written", v.Opens, v.GivenBytes)
+		}
+		// The open's own check refused it: an open that passed would have
+		// recorded its driver_accepted, the activation refusing it after.
+		if e := playbacktest.Evidence(r.store.State(), dsdstate.TransportDoP, string(format.S32LE), playbacktest.DSD64); e != nil {
+			t.Errorf("the open refused for its gain recorded %+v", e)
 		}
 	})
 	t.Run("a level control moved once audio reached the DAC", func(t *testing.T) {
@@ -1075,7 +1081,8 @@ func identicalElsewhere() dsdstate.State {
 // (the same dacKey, another stamp) swapped in as the check prepares ends it
 // at the reading before its open (failed, policy_changed), nothing opened;
 // one swapped in between that reading and the open is refused by the open's
-// check (failed, wrong_device), nothing written; another maker or another
+// check (failed, wrong_device), nothing written and no driver_accepted
+// recorded for the admitted unit; another maker or another
 // firmware offered an identical tuple, reconciled by a refresh before any
 // word of the supervisor's gate, ends it, never moved to the new set, nothing
 // opened; and a unit of the same model and firmware at another serial or
@@ -1112,6 +1119,9 @@ func TestAnotherMakersUnitDuringPreparationEndsTheCheck(t *testing.T) {
 		r.endedAs(playback.CheckFailed, playback.CheckWrongDevice, "another maker's unit at the open")
 		if v := r.k.View(); v.Opens != 1 || v.GivenBytes != 0 {
 			t.Errorf("%d opens and %d bytes given; want the one open refused, nothing written", v.Opens, v.GivenBytes)
+		}
+		if e := playbacktest.Evidence(r.store.State(), dsdstate.TransportNative, string(format.DSDU32BE), playbacktest.DSD64); e != nil {
+			t.Errorf("another maker's unit was recorded as the admitted one's: %+v", e)
 		}
 	})
 	for _, c := range []struct {
@@ -1162,7 +1172,10 @@ func (panickyOpen) CompletionResult() error     { return nil }
 // own error), or its own step panicked. A close the kernel holds keeps the
 // slot (stopping): StopCheck answers not given back at CheckStopWait, a
 // Start is busy, a probe owed, a check, a tone and a write refused; the close
-// let go, nothing is fenced. A close or a DROP that answers an error, a
+// let go, nothing is fenced. So does one held where no sink command waits for
+// it, the check ended between its open and its first (the activation's
+// judgement), where the cleanup's own wait for Done is all that keeps the
+// slot. A close or a DROP that answers an error, a
 // disconnect while the chime plays (the native release's DROP answers
 // ENODEV), an open's panic whose close fails, a refused open whose close
 // fails or panics, and a panic in the check's own cleanup step each end it
@@ -1203,6 +1216,29 @@ func TestAChecksCleanupThatIsNotConfirmedKeepsTheDevice(t *testing.T) {
 			letClose()
 			r.endedAs(playback.CheckStopped, playback.CheckStop, "the check once its close answered")
 			r.reusable("a close held, then answered")
+		},
+		"a check ended at its activation keeps the slot until its close answers": func(t *testing.T) {
+			// No sink command waits for this cleanup: the check's own wait
+			// for Done is the only one that keeps the slot.
+			r := newCheckRig(t, native, nil)
+			held, release := r.unit.holdNextAdmit()
+			t.Cleanup(release)
+			r.admitted(dsdstate.TransportNative, playbacktest.DSD64)
+			awaitOrdered(t, held, "the open's check after open held")
+			r.store.Set(dsdstate.Refusing(playbacktest.T0))
+			parked, letClose := r.k.ParkNextClose()
+			t.Cleanup(letClose)
+			release()
+			awaitOrdered(t, parked, "the sink's close held, the check ended at its activation")
+			stopped := make(chan bool, 1)
+			go func() { stopped <- r.be.StopCheck(bg) }()
+			r.timers.fire(t, playback.CheckStopWait, "StopCheck's wait")
+			if receiveIn(t, stopped, "StopCheck") {
+				t.Error("StopCheck answered the slot given back while the sink's close is held")
+			}
+			r.toneRefused(playback.ToneCheckRunning, "a tone beside the held close")
+			letClose()
+			r.endedAs(playback.CheckFailed, playback.CheckPolicyChanged, "the check once its close answered")
 		},
 		"a close that answers an error": func(t *testing.T) {
 			r := newCheckRig(t, native, nil)
