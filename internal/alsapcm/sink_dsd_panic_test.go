@@ -132,6 +132,11 @@ func (l *nativeLog) panicsLogged(t *testing.T, where ...string) {
 	}
 }
 
+// neverRan says whether e answers a resume as one the writer never ran
+// (errNativeActivationCancelled): a resume the writer's panic cut short ran,
+// and answers that failure.
+func neverRan(e error) bool { return errors.Is(e, errNativeActivationCancelled) }
+
 // noValue fails the test when e names a value a panic carried.
 func noValue(t *testing.T, e error, what string) {
 	t.Helper()
@@ -246,7 +251,7 @@ func TestANativeSinksCleanupThatPanicsStaysInThePlayer(t *testing.T) {
 			armed.Store(true)
 			k.inspect(func(k *fakeKernel) { k.closePanic = closePanicValue })
 			e := s.Resume(context.Background())
-			if ReasonOf(e) != ReasonPanicked || !strings.Contains(e.Error(), "the native sink's writer panicked") || !errors.Is(e, ErrReleaseUnconfirmed) {
+			if ReasonOf(e) != ReasonPanicked || !strings.Contains(e.Error(), "the native sink's writer panicked") || !errors.Is(e, ErrReleaseUnconfirmed) || neverRan(e) {
 				t.Errorf("the resume the panic cut short answered %v; want the writer's panic, and its close's, unconfirmed", e)
 			}
 			noValue(t, e, "the resume")
@@ -332,7 +337,7 @@ func TestANativeSinksCleanupThatPanicsStaysInThePlayer(t *testing.T) {
 				k.closeErr = errCloseFailed
 			})
 			e := s.Resume(context.Background())
-			if ReasonOf(e) != ReasonPanicked || !errors.Is(e, ErrReleaseUnconfirmed) || !errors.Is(e, errCloseFailed) {
+			if ReasonOf(e) != ReasonPanicked || !errors.Is(e, ErrReleaseUnconfirmed) || !errors.Is(e, errCloseFailed) || neverRan(e) {
 				t.Errorf("the resume answered %v; want its setup's panic beside its close's failure, unconfirmed", e)
 			}
 			noValue(t, e, "the resume")
@@ -351,7 +356,7 @@ func TestANativeSinksCleanupThatPanicsStaysInThePlayer(t *testing.T) {
 				k.closePanic = closePanicValue
 			})
 			e := s.Resume(context.Background())
-			if ReasonOf(e) != ReasonPanicked || !strings.Contains(e.Error(), "the native sink's writer panicked") || !errors.Is(e, ErrReleaseUnconfirmed) {
+			if ReasonOf(e) != ReasonPanicked || !strings.Contains(e.Error(), "the native sink's writer panicked") || !errors.Is(e, ErrReleaseUnconfirmed) || neverRan(e) {
 				t.Errorf("the resume answered %v; want its setup's panic beside its close's, unconfirmed", e)
 			}
 			noValue(t, e, "the resume")
@@ -435,7 +440,7 @@ func TestANativeWritersOwnPanicIsTypedAndLogged(t *testing.T) {
 			pauseUntilReleased(t, k, s)
 			armed.Store(true)
 			e := s.Resume(context.Background())
-			if ReasonOf(e) != ReasonPanicked || errors.Is(e, ErrReleaseUnconfirmed) {
+			if ReasonOf(e) != ReasonPanicked || errors.Is(e, ErrReleaseUnconfirmed) || neverRan(e) {
 				t.Errorf("the resume the panic cut short answered %v; want the writer's panic, its cleanup confirmed", e)
 			}
 			noValue(t, e, "the resume")
