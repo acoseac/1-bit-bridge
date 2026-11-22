@@ -91,6 +91,10 @@ func IsOtherCheckout(root, dir string) bool {
 //     TestNoProductionCodeLowersTheHashCost: by its name, in hashCostDirRule.
 //   - internal/manifest/flac_handle_discipline_test.go leakyFlacCalls, from
 //     TestNoLeakyFlacConstructors: by its name, in flacDirRule.
+//   - internal/manifest/store_open_lock_sweep_test.go
+//     TestEveryOpenerOfTheLiveDatabaseTakesTheStoreLock, from
+//     TestEveryOpenerOfTheLiveDatabaseTakesTheStoreLock: by its name, in
+//     TestEveryOpenerOfTheLiveDatabaseTakesTheStoreLock.
 //   - internal/sweeptest/rootwalks_test.go readModule, from
 //     TestEveryWalkFromTheRootIsListed: by its name, in skipsDir.
 //   - scripts/third-party-licenses/tags.go discoverBuildSites, from
