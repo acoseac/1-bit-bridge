@@ -444,3 +444,46 @@ control ran again against predictions written before that pass:
 |  | red: `TestAChecksCleanupThatIsNotConfirmedKeepsTheDevice`: "a panic in the check's own cleanup step", "a refused open whose close fails"; `TestAPolicyChangeEndsTheCheck`: "a level control moved before the open's gain check"; `TestAStopDuringAParkedOpenWaitsForItsCompletion`: "its node's close failing", "its node closed cleanly"; `TestAnotherMakersUnitDuringPreparationEndsTheCheck`: "another serial or port of the model at the open", "swapped in at the open" |  |  |  |
 | C-b | the slot given back before the pending completion | 2 | matched | matched |
 |  | red: `TestAStopDuringAParkedOpenWaitsForItsCompletion`: "its node's close failing", "its node closed cleanly" |  |  |  |
+
+### Round 2: runs
+
+- The round's tests red first over `fe51a206`'s production (above), then green over the fix; both
+  packages' full suites under `-race` (`internal/alsapcm` 138.0 s, `internal/player/playback`
+  3.2 s), internal/api's `TestDSDOutputProtocolTokens` and cmd/bridge's four source guards green at
+  `dbd93471`.
+- One slot session at `08161414` (go1.27.3, the release tags, P=4, TMPDIR under the worktree's
+  `.tmp`), 2,991.6 s:
+  - `make fmt vet test build-all`: ok in 2,129 s; `make fmt` rewrote nothing (`git status` clean
+    after it) and vet was clean; `make test` passed 92 packages, none failed, 15 without tests
+    (cmd/bridge 1,743.7 s, internal/manifest 1,617.7 s, internal/admin 1,245.5 s, internal/backup
+    661.4 s, internal/alsapcm 145.3 s, internal/player/playback 3.5 s); `check-build-tags: OK`; the
+    six release targets built.
+  - The round's new and changed tests, `-race -count=50`: internal/player/playback's
+    `TestAnEndedRequestAdmitsNothing`, `TestTheCheckAnswersItsOwnRecord` and
+    `TestTheChecksCountIsGivenBackOnEveryWayOut`, ok in 1.5 s; internal/alsapcm's
+    `TestAnEndedRequestOpensNothing`, `TestAStopDuringAParkedOpenWaitsForItsCompletion` and
+    `TestAChecksCleanupThatIsNotConfirmedKeepsTheDevice` (its cases in child processes), with
+    `-watchdog 20s`, ok in 805.6 s.
+  - `go vet` with the tags as `GOOS=linux`, `darwin` and `windows`: ok, nothing reported (1 s, 2 s
+    and 2 s, the go command replaying a package's cached vet result where its inputs are
+    unchanged).
+  - The native-integration overlays, as `gate.yml`'s two steps: `./cmd/bridge` ok in 22.0 s, 16
+    passes, none skipped, every name the workflow checks passing; `./internal/player/playback` ok in
+    3.0 s, 33 passes, none skipped, every named one passing.
+- The qualification tool: `-base c8340a51 -head HEAD`, "qualification version OK"; and from
+  round 1's head, after its bump, `-base fe51a206 -head HEAD`: "guarded code changed without
+  qualificationVersion increase (58 -> 58)". The guarded change is this round's
+  `internal/alsapcm/playback_dsd_check_test.go` alone, a test file the `internal/alsapcm/` prefix
+  guards; no guarded production file changed. The version stays 58, and the tool's answer is
+  reported, as the round's brief asks.
+- Once this section was written: `make docs-check` ok, cmd/bridge's `TestEveryCitedTestNameExists`,
+  `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` and
+  `TestEveryBackgroundGoroutineDrainsOnCleanup` and internal/api's `TestDSDOutputProtocolTokens`
+  green; the tree clean.
+
+### Round 2: what stays open
+
+- A panic in `reserveCheck`'s deferred stop after admission (above): the real stop does not panic.
+- The residuals above, unchanged: nothing in serve can start, stop or answer a check until PR 4; the
+  chime's listen on a real DAC; the preparation's bound on a Pi 4; B12 PR 0's writer panic under the
+  sink's lock (backlog B987); a native unplug that fences the device as a native session's does.
