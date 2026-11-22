@@ -754,7 +754,7 @@ and PR 1 is useful alone (the routes can be driven by hand).
   Add), `boot.js`, `app.js` (the `player` event), `player.css`,
   `internal/admin/templates/layout.html` (the output glyph), `output.html` (the help text).
 - **Red first.** §8's PR 2 column, through the shipped modules under node where node is installed
-  (CI and the owner's Mac: legion0 has none, and those cases skip there, which the PR says), plus
+  (CI runs them; a host without node skips those cases, which the PR says), plus
   structural cases that run everywhere: `TestThePlayerFrameIsWiredFromTheStreamToTheBar` and
   `TestEveryPlayerControlStateFieldIsRenderedSomewhere` (the guard every console payload has, both
   directions); and the existing `TestNoConsoleControlDisablesItselfOutsideSetDisabled`,
