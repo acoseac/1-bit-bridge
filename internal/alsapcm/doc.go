@@ -43,7 +43,10 @@
 //     closed, and whatever waited on the writer answered. A node a panic
 //     comes to between its open and a sink taking it (the kernel's setup,
 //     the check after open) is closed before the panic goes on to its
-//     caller, or, at a reopen, ends the sink the same way.
+//     caller, or, at a reopen, ends the sink the same way. The native sink
+//     keeps the contract (B728 B12 PR 0, DSDConfig.Log): its writer's and its
+//     opener's panics are recovered there, each close of its node under a
+//     recover of its own, and an open's panic answers it, or CompletionResult.
 //   - No buffer is ever shared with the kernel past a call: nothing is
 //     mmapped, and each ioctl's argument is kept alive across the call
 //     (ioctlOn).

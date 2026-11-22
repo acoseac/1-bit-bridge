@@ -62,6 +62,15 @@ func (tk *FakeKernel) PanicAtNextClose(v any) {
 	tk.k.inspect(func(k *fakeKernel) { k.closePanic = v })
 }
 
+// RefuseNextSetUp makes the next HW_PARAMS commit one channel, which the
+// open's read-back refuses once the hardware is set: a refused setup that
+// frees its parameters and closes its node.
+func (tk *FakeKernel) RefuseNextSetUp() {
+	tk.k.inspect(func(k *fakeKernel) {
+		k.commit = func(p *hwParams) { p.setInteger(hwParamChannels, 1); k.commit = nil }
+	})
+}
+
 // Rates sets the rates the DAC takes, in place of the eight the iFi GO bar
 // lists.
 func (tk *FakeKernel) Rates(hz ...uint32) {

@@ -40,7 +40,12 @@ func openNative(s sys, now func() time.Time, ep Endpoint, cfg Config) (_ *Device
 	set := false
 	defer func() {
 		if !set {
-			err = nativeCleanupError(err, d.releaseNative())
+			ce := releaseRecovered(d, cfg.log, "the native setup's close")
+			if err = nativeCleanupError(err, ce); ce != nil {
+				if r := recover(); r != nil { // a setup's panic goes on with its close's failure (B728 B12 PR 0)
+					panic(&setupPanic{value: r, cleanup: ce})
+				}
+			}
 		}
 	}()
 	if err = d.setUp(want); err != nil {
@@ -58,14 +63,33 @@ func nativeCleanupError(cause, cleanup error) error {
 }
 
 // releaseNative preserves every teardown failure; PCM release is unchanged.
-func (d *Device) releaseNative() error {
+// The node is closed from a defer, once, whatever DROP and HW_FREE do; given
+// recovered (releaseRecovered's), a panic of theirs and one of the close each
+// answer as their failure, beside the other's, and each ioctl's result is kept
+// before the next is made, so a panic in HW_FREE keeps DROP's error (B728 B12
+// PR 0).
+func (d *Device) releaseNative(recovered ...func(any) error) (err error) {
 	if d.closed {
 		return nil
 	}
-	d.closed = true
-	var e error
-	if d.hwSet {
-		e = errors.Join(d.ioctlNone(ioctlDrop), d.ioctlNone(ioctlHWFree))
+	answer := func(e *error) {
+		if len(recovered) > 0 {
+			if r := recover(); r != nil {
+				*e = errors.Join(*e, recovered[0](r))
+			}
+		}
 	}
-	return errors.Join(e, d.sys.close(d.fd))
+	d.closed = true
+	defer func() {
+		err = errors.Join(err, func() (ce error) {
+			defer answer(&ce)
+			return d.sys.close(d.fd)
+		}())
+	}()
+	defer answer(&err)
+	if d.hwSet {
+		err = d.ioctlNone(ioctlDrop)
+		err = errors.Join(err, d.ioctlNone(ioctlHWFree))
+	}
+	return err
 }

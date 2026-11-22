@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"strconv"
 	"strings"
@@ -48,6 +49,7 @@ type Config struct {
 	// BufferTime is the hardware buffer to aim for; 0 means
 	// DefaultBufferTime. What the hardware grants is in Params.
 	BufferTime time.Duration
+	log        *slog.Logger // a native open's, for a close that panics (openNative)
 }
 
 // DefaultBufferTime is the hardware buffer Open aims for: about 200 ms,

@@ -1628,7 +1628,7 @@ B1 narrows the guard to the code that changes DSD bytes or the harness's evidenc
 | B4, the probe | `internal/alsapcm/` | 39 |
 | B7, the cutover | `internal/player/playback/native.go` and `edges.go` (plan construction) | the next free at its merge |
 | B11, conversion wired | `native.go`, whose DSD open (`internal/player/playback/native.go:23-74`) is where a convert plan branches off | the next free at its merge |
-| B12, the check | `native.go`, and `internal/alsapcm/` if the check needs a sink seam | the next free at its merge |
+| B12, the check | PR 0 (amended 2026-11-22, the native sink's panic containment): `internal/alsapcm/` (`sink_dsd.go`, `sink_dsd_open.go`, `sink_dsd_writer.go`, `device_native.go`, `device.go`, `doc.go` and the package's tests) and `native.go` (`DSDConfig.Log`, and the fence after an open that panicked with its node's close unconfirmed); then `native.go`, and `internal/alsapcm/` if the check needs a sink seam | PR 0: 57 (main's 56, B972's, and one); the rest: the next free at its merge |
 | every other PR (B2, B5, B6, B8, B9, B10, B13) | none. Their code is in new packages or paths B1 unguards | unchanged |
 
 The rows after B3 plan no number: B735 took 37 on main and B3 takes 38, the numbers this table

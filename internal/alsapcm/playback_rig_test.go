@@ -322,6 +322,7 @@ type unit struct {
 	at      alsapcm.Endpoint
 	err     error
 	refuse  int // the next checks to refuse
+	panics  any // when set, what the next check panics with, once
 	checked []alsapcm.NodeInfo
 	located int
 	// holdIn and holdGate hold the next check (holdNextAdmit).
@@ -364,6 +365,10 @@ func (u *unit) admit(n alsapcm.NodeInfo) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.checked = append(u.checked, n)
+	if v := u.panics; v != nil {
+		u.panics = nil
+		panic(v)
+	}
 	if u.refuse > 0 {
 		u.refuse--
 		return errors.New("card 5 is another unit now")
