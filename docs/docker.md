@@ -322,6 +322,7 @@ saved, and the variable sets the setting again at the next start.
 |---|---|---|
 | `BRIDGE_LISTEN_ADDRESS` | `listenAddress` | Main HTTPS bind, e.g. `:7788`. |
 | `BRIDGE_ADMIN_ADDRESS` | `adminAddress` | Loopback admin console (default `127.0.0.1:7789`). **Must stay a loopback host in loopback mode** — a non-loopback value (e.g. `0.0.0.0:7789`) fails validation and the bridge **refuses to start**, since the admin API is unauthenticated in loopback mode. Public mode (which password-protects the console) allows non-loopback binds. For browser access see [Admin console access](#admin-console-access). |
+| `BRIDGE_ADMIN_LAN_ADDRESS` | `adminLANAddress` | Also opens the console on this box's home-network IP address (a private IPv4 address, or an IPv6 unique local address), at `adminAddress`'s port, **with no password and over plain HTTP**, to the devices on that address's own network. Unset by default; public mode refuses it. In a container it needs host networking and a host kernel of 5.7 or later: see [On the home network](#on-the-home-network). Unlike the key in `bridge.yaml`, the variable costs no rollback: 0.2.3 and earlier ignore it. |
 | `BRIDGE_DATA_DIR` | `dataDir` | Persistent volume path inside the container. See [Where state lives](#where-state-lives-data) before overriding. |
 | `BRIDGE_LIBRARY_NAME` | `libraryName` | Display name for the library. |
 | `BRIDGE_DISABLE_HTTP3` | `disableHttp3` | Set to `true` to bypass UDP listeners. |
@@ -509,7 +510,19 @@ useful complementary throttle on top.
 
 The admin console (default `127.0.0.1:7789` inside the container)
 is unauthenticated — exposing it to the host port-forward layer
-means anyone on the host can hit it. Two safer patterns:
+means anyone on the host can hit it. Two safer patterns, and a third
+for a console the whole home network may use:
+
+### On the home network
+
+`BRIDGE_ADMIN_LAN_ADDRESS` (or `adminLANAddress`) opens the console on the
+host's home-network address too, with no password: any device on that
+network can then use it. The bridge holds that socket to the interface the
+address is on, which a container sees only with host networking
+(`network_mode: host`); without it the address is not on the container's
+interfaces and the console says so and stays on loopback. The hold needs a
+host kernel of 5.7 or later (or `CAP_NET_RAW`). Don't publish the port with
+`-p` for it, and don't forward it on a router.
 
 ### `docker exec` for one-off ops
 

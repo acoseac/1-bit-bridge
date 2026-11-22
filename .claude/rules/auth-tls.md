@@ -26,6 +26,13 @@ paths:
   - "internal/advertise/**"
   - "internal/hostname/**"
   - "internal/baseurl/**"
+  - "internal/config/console_lan*.go"
+  - "internal/admin/console_lan*.go"
+  - "internal/consolelan/**"
+  - "internal/doctor/console_lan*.go"
+  - "cmd/bridge/serve_console_lan*.go"
+  - "cmd/bridge/init_console_lan*.go"
+  - "cmd/bridge/doctor_console_lan*.go"
 ---
 # Auth, pairing, TLS and security posture
 
@@ -38,7 +45,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **The admin console is loopback-only with no auth, by design.** Anyone on the
   host already owns the token store and the DB, so auth on top would be theatre.
   Don't add a layer that bypasses the loopback constraint; SSH-tunnel for remote
-  admin. Public mode is the separate, credentialed posture.
+  admin. Public mode is the separate, credentialed posture. The one way beyond
+  loopback in loopback mode is the operator's explicit `adminLANAddress`, which
+  opens the console to the home network with no auth (the B989 bullet below).
 - **…and "loopback" is a fact about the request's HOST as well as its source,
   so a loopback console refuses a Host that names another host with 421**
   (2026-09-29, backlog B170). `loopbackOnly` and `csrfGuard` judged a request
@@ -91,11 +100,14 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   never answers. **A mismatched Origin answers with `writeCrossOriginRefusal`
   (`error: cross_origin`), never a bare `http.Error` status line** — the
   console's `errorFromResponse` reads the JSON, and in loopback mode the
-  message names the admin host and port (from the listener via
-  `adminListenHostPort` / `adminHintHost`, not the page URL) plus an
-  equal-port `ssh -L` example: IPv6 literals as `[::1]`, localhost and IPv4
-  as written, empty/unspecified → `127.0.0.1` (B471). The SSE Origin gate
-  reuses the same writer.
+  message names, on the loopback socket, the admin host and port (from the
+  listener via `adminListenHostPort` / `adminHintHost`, not the page URL)
+  plus an equal-port `ssh -L` example: IPv6 literals as `[::1]`, localhost
+  and IPv4 as written, empty/unspecified → `127.0.0.1` (B471), and on the
+  home-network socket that socket's own URL (B989). The SSE Origin gate
+  reuses the same writer, and both gates ask one rule of the request's
+  socket, `originMatches`.
+- **A loopback install opens its console to the home network only where its operator sets `adminLANAddress` (`BRIDGE_ADMIN_LAN_ADDRESS`), and then with no login and over plain HTTP: a second socket at that private address of the box (RFC 1918, or a ULA, never Tailscale's ranges, a zone, a mapping or loopback; public mode refuses the key) and `adminAddress`'s port, serving the one console, held by the kernel to the interface the address is on, and answering that address's own network alone** (2026-11-22, backlog B989; `ops/plan-b989-lan-console-design.md`). The hold is per platform (`internal/consolelan`, `Decide`): Linux's `SO_BINDTOIFINDEX`, set and read back, which an unprivileged process may set from Linux 5.7 (before it, `CAP_NET_RAW`); macOS's `IP_BOUND_IF`, set and read back, for IPv4 alone, a ULA refused there; on Windows the strong host model, every row of the address family's `GetIpInterfaceTable` read with weak host send, weak host receive and forwarding off, and every interface the listing shows holding an address of the family, the address's own above all, with a row of its own (a missing row is a reading not whole, asked again at the next reading; a row of an adapter that holds no such address is judged and closes nothing else); every other platform refused. **A hold refused, or not read back, leaves nothing listening, never an unrestricted socket**, and no failure of the home-network socket reaches serve's start or its exit (`adminErr`): the console serves loopback and says why. Every five seconds the plan reads the box again, whole or failing (`lan.ReadInterfacesFrom`), and a reading that fails or differs in any part of the policy (`lanPolicyParts`: the interface's index, name and flags, the prefix, the Windows table, the `.local` name) retires the socket: in one section of the plan's mutex, where the fence checks and counts every request, it is marked retired and its context cancelled, so nothing is admitted after (503, `Connection: close`) and a stream waiting on its context or on a snapshot it waits for on the request's context ends; then its server's `Close` ends every connection, a stream blocked in a write among them; the wait for what it admitted is bounded, the stop's one deadline shared with the loopback socket's shutdown; and a rebind takes a fresh reading after that wait. A request is admitted only from a source inside the address's private class and its on-link prefix, unmapped, never in Tailscale's IPv4 or IPv6 range whatever the prefix; its Host and an Origin are read by one parser (`parseLANAuthority`, never `url.Parse`) and match the socket's own authority alone, the address with the port or the bridge's `<name>.local` with the port, the name only while the bridge's own mDNS responder runs, an absent port being 80; every answer of the socket refuses framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`). Its refusals say where the console answers, and its log lines name its network, never a peer. Serve's local probes and the library commands dial `adminAddress`, never the home-network address. Where the address came from (the file, the variable, both) and what the file held at boot are the serving process's, which `GET /api/console`, the menu, the banner and both doctors report, read from the file's bytes (`config.LANKeyOf`, aliases and merge keys as the load takes them); **the key in the file, even empty, makes 0.2.3 and earlier refuse the file**, which the example, `bridge init` before it saves, serve's banner, the menu and the doctors' `console-lan-rollback` line say, and the variable costs no rollback. A page the socket served warns before a token is minted or rotated there, since it crosses the network in the clear, and says that its remedy is on the bridge's own machine or over an SSH tunnel. **Don't open the console beyond loopback any other way, fall back to an unrestricted socket, let the socket's failure fail serve, keep a socket over a reading that failed or changed, admit a request once a retirement's section has passed, rebind on the reading that found the change, give the retirement and the shutdown a deadline each, admit a Tailscale address for its prefix, read an authority twice or through `url.Parse`, take a `.local` name while the responder is off, frame a page of the socket, name a peer in a line, dial the home-network address from a local probe, or say the key in the file is free.** `TestTheLANSocketAdmitsOnlyItsOwnNetwork`, `TestEachHostIsAnsweredAsItsSocketsRuleSays`, `TestEachOriginIsAnsweredAsItsSocketsRuleSays`, `TestHostAndOriginTakeEachSpellingAlike`, `TestTheLANAuthorityParserIsOneGrammar`, `TestHostAndOriginShareOneAuthorityParser`, `TestAHoldTheKernelRefusesLeavesTheLANSocketClosed`, `TestEachPolicyFieldRetiresTheSocketWhenItChanges`, `TestNoRequestIsAdmittedOnceARetirementBegins`, `TestAnAdmissionParkedBetweenItsCheckAndItsCountIsSeenByTheRetirement`, `TestAnEventStreamEndsAtItsSocketsRetirement`, `TestTheRebindTakesAFreshReadingAfterTheWait`, `TestAShutdownStopsBothSocketsInOneWindowAndBindsNothingAfter`, `TestEveryLANResponseRefusesToBeFramed`, `TestTheStrongHostTableDecidesTheWindowsHold`, `TestEachPlatformAndFamilyIsDecided`, consolelan's `TestTheConsolesHoldRefusesASYNFromAnotherInterface` (Linux), `TestTheConsolesHoldScopesItsRepliesOnMacOS`, `TestTheStrongHostModelIsReadFromTheStack` (Windows) and `TestARoutedClientInsideThePrefixGetsNoConsole` (gate.yml's `console-lan-routed`, as root), config's `TestAnAliasedLANAddressLoadsAndKeepsItsSource`, and cmd/bridge's `TestServeOpensTheConsoleOnItsLANAddress`, `TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo`, `TestStatusAndTheRunningInstanceGuardsFindTheBridgeAfterALANFallback`, `TestTheDoctorReadsTheServingProcesssSourceNotItsOwnEnvironment` and `TestInitWarnsOfTheLostRollbackBeforeItSaves` pin it; the record is `ops/engineering-log/2026-11/2026-11-22-b989--feat-b989-lan-console.md`.
 - **Any long-lived GET needs its own Origin gate** — `csrfGuard` lets GETs
   through, which is right for one-shot reads and wrong for a held SSE
   connection.

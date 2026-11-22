@@ -1271,7 +1271,9 @@ func (t TailscaleConfig) EffectiveMode() (TailscaleMode, error) {
 
 // DeploymentConfig selects the overall deployment posture. `loopback`
 // (default) preserves the historical single-operator-on-trusted-LAN
-// shape: admin console is loopback-only with no auth, mDNS advertises
+// shape: admin console is loopback-only with no auth (unless its operator
+// also opens it on the home network with adminLANAddress, backlog B989,
+// with no auth there either), mDNS advertises
 // freely, Tailscale auto-pilot runs by default, the self-signed TLS
 // cert is the pinning anchor for iOS clients.
 //
@@ -4023,7 +4025,9 @@ func (c *Config) validate(warn bool) error {
 	}
 	// AdminAddress: loopback installs enforce the historical loopback
 	// trust boundary (admin console has no auth in loopback mode, so
-	// loopback binding IS the security boundary). Public installs
+	// loopback binding IS the security boundary; the one socket beyond
+	// it is AdminLANAddress's, the operator's explicit opt-in, checked
+	// below, backlog B989). Public installs
 	// require a parseable host:port but allow non-loopback binds —
 	// the admin auth layer (gated on IsPublic) becomes the trust
 	// boundary instead. See internal/adminauth and the
@@ -4807,7 +4811,9 @@ func ValidateLoopbackAddress(field, addr string) error {
 // validateLoopbackAddress enforces that the admin listener binds only to a
 // loopback interface. Accepts "127.0.0.1:N", "[::1]:N", and "localhost:N" —
 // an empty host (":N" = all interfaces) or any non-loopback IP is rejected.
-// The admin console has no auth layer; loopback binding is the trust boundary.
+// The admin console has no auth layer; loopback binding is the trust boundary,
+// and adminLANAddress, which the operator sets to open the console to the
+// home network as well, the one socket beyond it (backlog B989).
 // Its errors quote nothing of addr (ValidateBindAddress says why).
 func validateLoopbackAddress(addr string) error {
 	host, port, err := net.SplitHostPort(addr)

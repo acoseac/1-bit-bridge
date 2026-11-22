@@ -226,7 +226,7 @@ file, it warns and drops an offending output setting while keeping valid neighbo
 
 ## Protocol
 
-See [`PROTOCOL.md`](PROTOCOL.md). Every client endpoint is prefixed `/v1/`. The admin console (`/`, `/api/*`, `/static/*`) lives on a separate loopback listener and is **not** part of the wire protocol — iOS never talks to it.
+See [`PROTOCOL.md`](PROTOCOL.md). Every client endpoint is prefixed `/v1/`. The admin console (`/`, `/api/*`, `/static/*`) lives on a separate listener, loopback alone unless its operator also opens it on the home network (`adminLANAddress`, with no login), and is **not** part of the wire protocol — iOS never talks to it.
 
 ## License
 

@@ -64,9 +64,9 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// indefinitely. Reuse the same origin allowlist csrfGuard applies
 	// to mutations: Origin-when-present must match the request's own
 	// socket (originMatches: AdminAddress on loopback, the socket's own
-	// authority on the home network, backlog B989); absent Origin is
-	// allowed (curl, fetch from the admin UI itself in some browsers).
-	// Qodo on PR #107.
+	// authority on the home network, backlog B989); absent
+	// Origin is allowed (curl, fetch from the admin UI itself in some
+	// browsers). Qodo on PR #107.
 	if origin := r.Header.Get("Origin"); origin != "" {
 		if !s.originMatches(r, origin) {
 			s.writeCrossOriginRefusal(w, r)
