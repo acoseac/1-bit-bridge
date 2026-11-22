@@ -417,9 +417,10 @@ type settingsResponse struct {
 	// Same restart-required contract as upscale. Shares the sox-missing
 	// warning fields above (both features decode through sox).
 	AnalysisEnabled bool `json:"analysisEnabled"`
-	// Smart-playlist generation opt-in (the iOS Home tab's mixes). Same
-	// restart-required contract — the daily regenerator is wired at
-	// `bridge serve` startup.
+	// Smart-playlist generation (the iOS Home tab's mixes): on by default
+	// since 0.2.0, and live, not restart-bound: the route, the health flag
+	// and the daily regenerator all read the running config
+	// (cmd/bridge/main.go).
 	SmartPlaylistsEnabled bool `json:"smartPlaylistsEnabled"`
 	// OptimizeEnabled is the RESOLVED CarPlay-optimize gate
 	// (cfg.Upscale.EffectiveOptimizeEnabled() — YAML nil defaults to
@@ -2564,9 +2565,10 @@ type settingsPatch struct {
 	// upscale — the serve-side `waveform` health flag + /v1/waveform
 	// wiring are decided once at startup.
 	AnalysisEnabled *bool `json:"analysisEnabled,omitempty"`
-	// Smart-playlist generation opt-in. Restart-required: the daily
-	// regenerator goroutine is launched once at `bridge serve` startup
-	// (same rationale as UpscaleEnabled / AnalysisEnabled).
+	// Smart-playlist generation, on by default since 0.2.0. Live: the
+	// daily regenerator is launched once at `bridge serve` startup but
+	// reads the running config, as the route and the health flag do, so
+	// a save takes effect without a restart (cmd/bridge/main.go).
 	SmartPlaylistsEnabled *bool `json:"smartPlaylistsEnabled,omitempty"`
 	// OptimizeEnabled sets the CarPlay-optimize gate. The config field
 	// is a *bool whose nil defaults to true (EffectiveOptimizeEnabled),

@@ -2125,7 +2125,7 @@ The handler **drops, never faults,** events with an empty `path`, a non-positive
 
 ### Smart playlists (additive, since v1.9)
 
-Server-generated dynamic "smart" playlists derived **entirely on the operator's own host** from the playback history + offline analysis already described above — no transcoding, no external service, nothing leaves the box. Opt-in (`smartPlaylists.enabled` in `bridge.yaml`); advertised via the `smartPlaylists` flag in `/v1/health.features`. Pre-feature (or feature-off) bridges return `404` from the route. `ProtocolVersion` stays `1` (a new endpoint + a new health flag, no change to any existing shape).
+Server-generated dynamic "smart" playlists derived **entirely on the operator's own host** from the playback history + offline analysis already described above — no transcoding, no external service, nothing leaves the box. On by default since 0.2.0; `smartPlaylists.enabled: false` in `bridge.yaml` turns it off; advertised via the `smartPlaylists` flag in `/v1/health.features`. Pre-feature (or feature-off) bridges return `404` from the route. `ProtocolVersion` stays `1` (a new endpoint + a new health flag, no change to any existing shape).
 
 The bridge regenerates the families on a daily cadence into a server-side cache **distinct from the `/v1/playlists` backup store** (these are ephemeral/derived, never device-authored, no LWW). Only **populated** families appear — a family below its minimum-track threshold is omitted, so a brand-new library or one with analysis disabled simply returns fewer (or zero) playlists. Families:
 
