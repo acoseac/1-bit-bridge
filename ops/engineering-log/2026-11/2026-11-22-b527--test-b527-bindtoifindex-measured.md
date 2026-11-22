@@ -142,7 +142,7 @@ is skipped for that, as the brief said.
 `internal/player/openhome/restrict_measured_linux_test.go` (`//go:build linux`), committed because
 (d) refused in every run: it finds the loopback interface alone (`loopbackInterface`), calls
 production's `Listen` on `127.0.0.1:0` with the loopback interface's own index and takes a loopback
-dial (2 s), its premise, then with `1 << 30` and requires the dial (200 ms) refused,
+dial (2 s), its premise, then with `1 << 30` and requires the dial (2 s, room for a loaded CI runner; the reset comes at once) refused,
 `errors.Is(err, syscall.ECONNREFUSED)`. It skips only where `Listen`'s answer starts `none: `, and
 fails on any answer but that and `SO_BINDTOIFINDEX`. Screened before its control: `-race
 -count=200`, 200 passes, no skip.

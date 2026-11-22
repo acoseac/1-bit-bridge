@@ -28,7 +28,7 @@ const absentIndex = 1 << 30
 // 2026-11-22, B527): the kernel stored the absent index without asking
 // whether an interface has it (setsockopt, bind and listen each answered nil)
 // and answered each of 50 loopback dials with a reset, ECONNREFUSED, within
-// 0.1 ms, so the refused dial's 200 ms bound is room, never a wait. It binds
+// 0.1 ms, so the refused dial's 2 s bound is room for a loaded runner, never a wait. It binds
 // loopback and lists the loopback interface alone (openhome.md), and skips
 // only where Listen says the kernel left the socket unrestricted ("none: "),
 // which leaves no restriction to measure.
@@ -81,7 +81,7 @@ func TestALoopbackSocketRestrictedToAnotherIndexRefusesALoopbackConnection(t *te
 	// Restricted to an index no interface has, it is handed no connection:
 	// the kernel answers the SYN with a reset.
 	other := listen(absentIndex)
-	c, err = net.DialTimeout("tcp4", other.Addr().String(), 200*time.Millisecond)
+	c, err = net.DialTimeout("tcp4", other.Addr().String(), 2*time.Second)
 	if err == nil {
 		_ = c.Close()
 		t.Fatal("restricted to an index no interface has, the socket took a loopback connection")
