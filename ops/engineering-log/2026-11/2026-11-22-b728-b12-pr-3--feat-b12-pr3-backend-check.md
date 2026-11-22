@@ -269,6 +269,34 @@ C7 of the first brief, the sink's own recover removed, is B12 PR 0's control and
   c8340a51..HEAD" after it (W5).
 - The pinned gofmt (`go run cmd/gofmt -l` under go1.27.3) over the changed packages: clean.
 
+### The gate
+
+At `8f30bd49`, the records' commit; this section was added after it.
+
+- `make fmt vet test build-all` in one slot session (P=4, go1.27.3, the release tags, TMPDIR under
+  the worktree's `.tmp`): ok in 2,168.5 s. `make fmt` rewrote nothing and vet was clean; `make test`
+  (`-race -timeout 45m ./...`) passed 92 packages, none failed, 15 without tests (cmd/bridge
+  1,738.9 s, internal/manifest 1,606.8 s, internal/admin 1,246.0 s, internal/backup 659.2 s,
+  internal/alsapcm 145.7 s, internal/player/playback 3.5 s); `check-build-tags: OK`; the six release
+  targets built.
+- The ordering and race tests, in a second slot session: `go test -race -count=50 -timeout 90m -run
+  '^(<the sixteen>)$' ./internal/player/playback/ ./internal/alsapcm/`, the sixteen exactly the
+  `func Test` lines the diff against `c8340a51` adds, each found in its package's test files: ok,
+  internal/alsapcm 1,275.9 s, internal/player/playback 1.4 s. One verbose run of each at the same
+  commit, outside the slot: 10 tests and 79 cases passing in internal/alsapcm, 6 and 23 in
+  internal/player/playback, none skipped.
+- `go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` as `GOOS=linux`, `darwin` and
+  `windows`, in that session after the race run: ok each, nothing reported, in 1 s, 4 s and 4 s (the
+  go command replays a package's cached vet result where its inputs are unchanged).
+- The native-integration overlays, as `gate.yml`'s two steps (`scripts/native-integration-overlay.py`,
+  then `go test -v -race` with the tags and the overlay): `./cmd/bridge -run '^TestNativeIntegration'
+  -timeout 5m -watchdog 10s` ok in 20.0 s, 16 passes, none skipped, every name the workflow checks
+  passing; `./internal/player/playback` ok in 3.0 s, 33 passes, none skipped, every named one passing.
+- Once this section was written: `make docs-check` ok, cmd/bridge's `TestEveryCitedTestNameExists`,
+  `TestNoDocblockNamesAnotherDeclaration`, `TestNoBlankKeepers` and
+  `TestEveryBackgroundGoroutineDrainsOnCleanup` green, and the qualification tool, `-base c8340a51
+  -head HEAD`, "qualification version OK"; the tree clean.
+
 ### PR 4's dependency
 
 PR 4 wires the check (its three routes, serve's adapter, which enters and exits the engine's hold
