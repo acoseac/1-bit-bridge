@@ -787,7 +787,7 @@ func scanTestCitations(t *testing.T, root string) (cited map[string][]string, de
 // top-level `Test…` FuncDecls, citations from its comment groups and nothing
 // else — a test file's CODE names tests legitimately, and its string
 // literals can hold anything (a User-Agent value spelled like a test name,
-// say — one does). Gemini on #921 folded the two passes into one.
+// say — one does). #921 folded the two passes into one.
 func scanTestCitationsIn(t *testing.T, walk func(root string, fn fs.WalkDirFunc) error, root string, trackedMD map[string]bool) (cited map[string][]string, defined map[string]bool, mdCited int) {
 	t.Helper()
 	cited, defined = map[string][]string{}, map[string]bool{}
