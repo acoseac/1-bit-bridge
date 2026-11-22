@@ -85,3 +85,52 @@ Reopen it if a test is found walking into that directory.
 
 9e99dc1f's docblock change, `scanTestCitationsIn`'s naming #921 alone,
 stays.
+
+### Item 1's controls
+
+At a5c3d3c9, the pin removed, predicted before the runs. Each control is a
+file of that commit with one replacement made once (two files for (a′),
+whose two callbacks share `skipsForCitations`), handed to `go test` by
+`-overlay`, so nothing tracked was edited while the runs below built from
+the tree; each selection ran `-count=1 -timeout 45m`, green at the commit
+first. Every result was as predicted:
+
+| Mutation | Selection | Red | Green |
+|---|---|---|---|
+| (a) `skipsForCitations` without its TMPDIR check | `TestTheCitationGuardsWalksSkipMakeTestsTMPDIRAtTheRoot` | both walks' two TMPDIR rows: each walk read `.tmp`'s planted citation or call, or failed on its half-written files | each walk's other three rows |
+| (b) `hashCostDirRule` without its check | `TestHashCostSweepSkipsMakeTestsTMPDIRAtTheRoot` | its two TMPDIR rows | the other three |
+| (c) `flacDirRule` without its check | `TestFlacSweepSkipsMakeTestsTMPDIRAtTheRoot` | its TMPDIR row | the other three |
+| (a′) both citation callbacks ask `d.Info()` of a directory before `skipsForCitations`, returning its error | each walk's "make test's TMPDIR itself" row of `TestTheCitationGuardsWalksFinishWhileMakeTestsTMPDIRChanges` | both: `lstat …/.tmp: no such file or directory` | none selected |
+| (b′) `hashCostSetterCallers` asks `d.Info()` before `hashCostDirRule` | that row of `TestHashCostSweepFinishesWhileMakeTestsTMPDIRChanges` | it, on the same lstat | none selected |
+| (c′) `leakyFlacCalls` asks `d.Info()` before `flacDirRule` | that row of `TestFlacSweepFinishesWhileMakeTestsTMPDIRChanges` | it, on the same lstat | none selected |
+
+So each sweep's own cases fail without its skip, and its "TMPDIR itself"
+row fails for a skip that asks anything of the directory first: the cases
+stand without the pin.
+
+### The runs
+
+On Linux amd64 (Ubuntu 26.04, kernel 7.0.0-38-generic, 16 cores, 8 of them
+used at a time), Go go1.27.3, go.mod's toolchain, from an offline module
+cache (`GOPROXY=off`), TMPDIR outside the checkout, the Makefile's tags
+(`ts_omit_webclient,ts_omit_debugeventbus`), at a5c3d3c9:
+
+- the touched tests under `-race -count=20 -timeout 45m`, three
+  single-package lanes at `GOMAXPROCS=2`, by the selectors
+  `TestTheCitationGuardsWalks(SkipMakeTestsTMPDIRAtTheRoot|FinishWhileMakeTestsTMPDIRChanges)`,
+  `TestHashCostSweep(SkipsMakeTestsTMPDIRAtTheRoot|FinishesWhileMakeTestsTMPDIRChanges)`
+  and `TestFlacSweep(SkipsMakeTestsTMPDIRAtTheRoot|FinishesWhileMakeTestsTMPDIRChanges)`:
+  each of the six tests passed 20 times, no race reported;
+- `go vet` with the tags as linux, darwin and windows: clean;
+- `make test` once, uncached (`GOFLAGS=-count=1`, `P=4` at
+  `GOMAXPROCS=2`): exit 0 after 2,056 s, 92 packages ok and 15 with no test files, none failed, none cached and no race reported; `cmd/bridge` took 1,752 s and `internal/manifest` 1,589 s of their 45 minutes;
+- `./internal/sweeptest`, `./cmd/bridge`, `./internal/adminauth` and
+  `./internal/manifest` once each under `-race` (`-count=1 -timeout 45m`,
+  `-p 2`, `GOMAXPROCS=4`): all ok, in 1 s, 1,681 s, 58 s and 1,558 s; exit 0 after 1,683 s;
+- the controls above;
+- `qualification.CheckVersion(dfc926f1, HEAD)` answers nil: no guarded
+  path changed, so no `qualificationVersion` bump.
+
+At this record's commit: `make fmt` changed nothing, `make vet` and `make
+docs-check` (the engineering log's check among it) were clean, and
+`TestEveryCitedTestNameExists` passed with this entry tracked.
