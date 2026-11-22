@@ -85,10 +85,13 @@ it).
   `make test P=2`, raise with `P=$(sysctl -n hw.ncpu)` on a roomy box.
 - **Pre-push gate: `make fmt vet test build-all`.** `make check` in the inner
   loop; `make build-all` once before pushing. CI mirrors this
-  command-for-command — keep CI and Makefile in lockstep.
-- The 30m test timeout (not the 10m default) exists because
+  command-for-command — keep CI and Makefile in lockstep. The one intended
+  difference is the timeout: `make test` takes 45m per package, while CI's
+  race shards (slices of packages) and its native legs (no `-race`) keep 30m.
+- The 45m test timeout (not the 10m default) exists because
   `internal/adminauth`'s suite pays real bcrypt cost-12 per simulated login
-  under `-race`.
+  under `-race`, and `cmd/bridge`'s whole package took 1,741 s of 30m on a
+  loaded Linux test box (backlog B897).
 - There is **no `make fixtures` target yet** — `CONTRIBUTING.md` mentions it
   as "to be added".
 

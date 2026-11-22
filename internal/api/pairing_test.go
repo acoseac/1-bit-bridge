@@ -20,7 +20,7 @@ import (
 
 // pairingTestTTL is the request lifetime of a pairing store in a test
 // whose subject is not expiry: an hour, longer than a test binary may run
-// (`go test -timeout 30m` in the Makefile and in CI), so no runner is slow
+// (`go test -timeout 45m` in the Makefile, 30m in CI), so no runner is slow
 // enough to expire a request before the test acts on it.
 //
 // The store's sweeper takes part in every test that creates a request. A

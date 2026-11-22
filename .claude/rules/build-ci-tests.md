@@ -50,7 +50,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **A sweep from the root also skips a directory below the root whose name begins with `_`, and decides it from the NAME before listing it** (#1008) → History-rules-build-ci-tests.md
 - **A timeout is not a failure, and the difference is one flag.** A local
   `go test -race` without `-timeout` uses Go's 10-minute default, while
-  the Makefile passes `30m` — `internal/admin` reported `FAIL … 600.758s`
+  the Makefile passes a longer timeout (`30m` then, `45m` since backlog B897) — `internal/admin` reported `FAIL … 600.758s`
   under CPU contention and passes in **826s** with the flag. The signature
   is a duration landing on exactly 600s with a goroutine dump and no
   assertion. Don't report one as a code failure.

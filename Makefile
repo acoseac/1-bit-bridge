@@ -56,8 +56,8 @@ build-all: check-build-tags
 # whole package took 1,741s of 1,800 under -race on a loaded Linux test box
 # (2026-11-21, backlog B897): a timeout there is the host's, not a hang. CI's
 # race suite runs slices of packages (test-shard.sh, 30m each) and its native
-# legs run without -race (gate.yml, 30m), so neither moves. The race detector
-# still catches a genuine deadlock at the 45m ceiling; it reports 15 minutes
+# legs run without -race (gate.yml, 30m), so neither moves. A genuine hang
+# still fails at the package timeout, now 45m, so it reports 15 minutes
 # later than at 30m.
 # Use disk-backed scratch space unless the caller supplied a non-empty TMPDIR.
 # Target-specific export keeps build/vet/run and CI's explicit TMPDIR unchanged.

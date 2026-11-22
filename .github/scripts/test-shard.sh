@@ -70,9 +70,12 @@ set -euo pipefail
 GROUP="${1:?usage: test-shard.sh <rest|manifest|admin|bridge> <index>}"
 INDEX="${2:?shard index, 0-based}"
 
-# The two flags that MUST stay identical to the Makefile's `test` target.
-# They live here as well only because this script bypasses that target to
-# add `-run`; if either changes there, change it here in the same commit.
+# `-race` MUST stay identical to the Makefile's `test` target; the timeout
+# differs on purpose: 30m here, where a shard runs a slice of a package and
+# stays far below it, against the Makefile's 45m for whole packages on a
+# loaded host (backlog B897). The flags live here as well only because this
+# script bypasses that target to add `-run`; if `-race` changes there,
+# change it here in the same commit.
 RACE_FLAGS=(-race -timeout 30m)
 
 # group:shards — which packages are sharded by test name AND how many ways,
