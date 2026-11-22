@@ -69,7 +69,7 @@ it).
 |---|---|
 | `make build` | Builds `./bin/bridge` for the host OS (injects `VERSION` from `git describe` into `internal/version.ServerVersion`). |
 | `make build-all` | Cross-compiles all 6 targets into `dist/bridge-<os>-<arch>{.exe}`. |
-| `make test` | Full suite: `go test -p $(P) -race -timeout 30m ./...`. |
+| `make test` | Full suite: `go test -p $(P) -race -timeout 45m ./...`. |
 | `make test-fast` | Same without `-race` — the inner-loop option. |
 | `make check` | Per-change gate: `fmt` + `vet` + `test` (race), sequentially; skips `build-all`. |
 | `make fmt` / `make vet` | `go fmt ./...` / `go vet ./...`. |
@@ -85,10 +85,13 @@ it).
   `make test P=2`, raise with `P=$(sysctl -n hw.ncpu)` on a roomy box.
 - **Pre-push gate: `make fmt vet test build-all`.** `make check` in the inner
   loop; `make build-all` once before pushing. CI mirrors this
-  command-for-command — keep CI and Makefile in lockstep.
-- The 30m test timeout (not the 10m default) exists because
+  command-for-command — keep CI and Makefile in lockstep. The one intended
+  difference is the timeout: `make test` takes 45m per package, while CI's
+  race shards (slices of packages) and its native legs (no `-race`) keep 30m.
+- The 45m test timeout (not the 10m default) exists because
   `internal/adminauth`'s suite pays real bcrypt cost-12 per simulated login
-  under `-race`.
+  under `-race`, and `cmd/bridge`'s whole package took 1,741 s of 30m on a
+  loaded Linux test box (backlog B897).
 - There is **no `make fixtures` target yet** — `CONTRIBUTING.md` mentions it
   as "to be added".
 
@@ -218,7 +221,7 @@ mode). iOS never talks to the admin listener.
 
 ## Testing instructions
 
-- `make test` (race, 30m timeout) before pushing; `make test-fast` or
+- `make test` (race, 45m timeout) before pushing; `make test-fast` or
   `go test ./internal/<pkg>/` while iterating. The suite is ~2,400 test
   functions across `internal/…` and `cmd/bridge`.
 - Tests are pure Go (no cgo); table-driven tests pin most documented

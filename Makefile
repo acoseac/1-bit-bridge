@@ -48,12 +48,17 @@ build-all: check-build-tags
 	GOOS=windows GOARCH=arm64 go build -tags "$(GO_TAGS)" -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-arm64.exe $(PKG)
 
 # Full pre-push gate's test step: race-enabled, parallelism-capped (see P).
-# -timeout 30m (not the default 10m/package): internal/adminauth's suite pays
+# -timeout 45m (not the default 10m/package): internal/adminauth's suite pays
 # real bcrypt cost-12 per simulated login across its rate-limit tests, which
 # cumulatively exceeds 10m under -race on slower CI runners (TestPersistedHash
 # IsBcryptShape was the recurring timeout victim — it's just where the package
-# timeout goroutine-dump landed, not a hang). The race detector still catches a
-# genuine deadlock at the 30m ceiling.
+# timeout goroutine-dump landed, not a hang). 45m, not 30m, since cmd/bridge's
+# whole package took 1,741s of 1,800 under -race on a loaded Linux test box
+# (2026-11-21, backlog B897): a timeout there is the host's, not a hang. CI's
+# race suite runs slices of packages (test-shard.sh, 30m each) and its native
+# legs run without -race (gate.yml, 30m), so neither moves. A genuine hang
+# still fails at the package timeout, now 45m, so it reports 15 minutes
+# later than at 30m.
 # Use disk-backed scratch space unless the caller supplied a non-empty TMPDIR.
 # Target-specific export keeps build/vet/run and CI's explicit TMPDIR unchanged.
 # An explicit recipe assignment also makes the effective path visible in make -n.
@@ -64,7 +69,7 @@ test test-fast: override TMPDIR := $(if $(strip $(TMPDIR)),$(TMPDIR),$(CURDIR)/.
 
 test:
 	@mkdir -p "$(TMPDIR)"
-	TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $(P) -race -timeout 30m $(TEST_PKGS)
+	TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $(P) -race -timeout 45m $(TEST_PKGS)
 
 # Fast inner-loop tests: no race detector — much faster to build and a
 # fraction of the RAM, so it won't thrash on a loaded machine. Use while

@@ -151,8 +151,10 @@ jobs:
 
   # The race suite, SHARDED. `make test` remains the local gate and the
   # single source of the flags; `.github/scripts/test-shard.sh` runs the
-  # same `-race -timeout 30m` over a slice of it, and its header carries
-  # the measurements and the partition guards.
+  # same `-race` over a slice of it with a 30m timeout (a slice runs far
+  # below a whole package; `make test`'s 45m is for whole packages on a
+  # loaded host, backlog B897), and its header carries the measurements
+  # and the partition guards.
   #
   # Why shard at all, measured on the 2026-09-21 run (895s wall, 4 cores):
   # total work is ~1,970 CPU-seconds and `-p $(nproc)` already packs it
@@ -619,8 +621,11 @@ jobs:
       # liveness, and it cannot run from a non-Windows host.
       - name: vet
         run: go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...
-      # -timeout 30m, matching the Makefile's `test` target rather than
-      # taking Go's 10m/package default. The Makefile already documents
+      # -timeout 30m rather than Go's 10m/package default. The Makefile's
+      # race-enabled `test` target takes 45m (backlog B897); these legs run
+      # without -race, and their slowest package, cmd/bridge on Windows,
+      # took 714-1,167s (at most 65% of 30m) on the eight main runs of
+      # 2026-11-21 and 2026-11-22. The Makefile already documents
       # why 10m is too short even on Linux (internal/adminauth pays real
       # bcrypt cost-12 per simulated login across its rate-limit tests);
       # Windows is slower still, and the first full run had

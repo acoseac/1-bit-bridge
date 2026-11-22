@@ -1068,7 +1068,8 @@
   `pairingTestSetup` defaulted to 100 ms with no test on it about the timer.
   With a second's delay after each create, 11 tests on the two fixtures
   failed on those values and none on `pairingTestTTL`, an hour, past the
-  30-minute `-timeout` every test binary here runs under. The third time
+  30-minute `-timeout` every test binary here ran under then (45 minutes for
+  `make test` since backlog B897, still under the hour). The third time
   the class bit: `internal/admin`'s fixture went to 5 s on PR #104, and
   `TestPairingCreateQueueFull` to a minute on #674. **Don't shorten a shared
   fixture's timer to keep the suite fast: a test about expiry passes a
