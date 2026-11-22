@@ -141,11 +141,12 @@ type nativeSeams struct {
 	now  func() time.Time
 	at   func(time.Time) (<-chan time.Time, func())
 	// unhanded is where openDSDSink reports to the opening worker's recover
-	// the failed close of a node it did not hand over (openNativeBounded),
-	// and delivered, nil but in a test, runs on that worker once its reply
-	// has handed the sink over.
-	unhanded  *error
-	delivered func()
+	// the failed close of a node it did not hand over (openNativeBounded);
+	// delivered, nil but in a test, runs on that worker once its reply has
+	// handed the sink over, and openEnded once its recover has run, as it
+	// ends.
+	unhanded             *error
+	delivered, openEnded func()
 	// lifeEnded, nil but in a test, runs on the goroutine that revokes the
 	// sink once its life, the open's context, has ended, just before the
 	// revocation: a test parks it there, as a scheduler can leave it (B765).

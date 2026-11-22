@@ -36,6 +36,9 @@ func openNativeBounded(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSin
 	var completed error
 	go func() {
 		defer close(done)
+		if h.openEnded != nil {
+			defer h.openEnded()
+		}
 		var s *DSDSink
 		var e, unhanded error
 		sent := false

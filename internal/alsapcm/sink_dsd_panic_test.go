@@ -618,11 +618,12 @@ func completedPanicked(t *testing.T, k *fakeKernel, p pendingOpen) {
 // sink's opening worker (openNativeBounded's recover): in the check after
 // open, in the kernel's setup, each with its node's close clean, failing or
 // panicking; in a refusal's close; after the open's caller has gone; in the
-// cancellation arm, a sink made and not delivered; and after the hand-off,
-// a sink delivered. The node a panic comes to is closed once before the
-// answer, the answer is typed ReasonPanicked beside a close that failed or
-// panicked, unconfirmed, the caller's or its CompletionResult, and each panic
-// is logged once with no value.
+// cancellation arm, a sink made and not delivered, its close clean or
+// failing; and after the hand-off, a sink delivered, which is never revoked.
+// The node a panic comes to is closed once before the answer, the answer is
+// typed ReasonPanicked beside a close that failed or panicked, unconfirmed,
+// the caller's or its CompletionResult, and each panic is logged once with
+// no value.
 func TestANativeOpenThatPanicsStaysInThePlayer(t *testing.T) {
 	checkPanics := func() DSDConfig {
 		c := nativeConfig()
@@ -631,6 +632,24 @@ func TestANativeOpenThatPanicsStaysInThePlayer(t *testing.T) {
 	}
 	setupPanics := func(k *fakeKernel) {
 		k.inspect(func(k *fakeKernel) { k.commit = func(*hwParams) { panic(sinkPanicValue) } })
+	}
+	// inTheCancellationArm opens a native sink on k whose caller has gone,
+	// with its watcher, which revokes it once its life has ended, held
+	// before it does (its end, if it takes that first, has nothing to
+	// revoke), so the clock's first read once the open goes on is the
+	// worker's revocation in the cancellation arm, which panics there: no
+	// other goroutine reads it. It returns the open's pending answer.
+	inTheCancellationArm := func(t *testing.T, k *fakeKernel, l *nativeLog) pendingOpen {
+		t.Helper()
+		watcher := make(chan struct{})
+		var once sync.Once
+		t.Cleanup(func() { once.Do(func() { close(watcher) }) })
+		p, let := openAfterItsCallerHasGone(t, k, nativeConfig(), l, func(h *nativeSeams) {
+			h.lifeEnded = func() { <-watcher }
+		})
+		panicAtNextClock(k, sinkPanicValue)
+		let()
+		return p
 	}
 	RunEachCaseInAChild(t, "TestANativeOpenThatPanicsStaysInThePlayer", map[string]func(t *testing.T){
 		"the check after open": func(t *testing.T) {
@@ -695,34 +714,39 @@ func TestANativeOpenThatPanicsStaysInThePlayer(t *testing.T) {
 		},
 		"in the cancellation arm, its sink made": func(t *testing.T) {
 			k, l := nativeKernel(t), newNativeLog()
-			// The sink's watcher, which revokes it once its life has ended,
-			// is held before it does (its end, if it takes that first, has
-			// nothing to revoke), so the clock's first read once the open
-			// goes on is the worker's revocation in the cancellation arm,
-			// which panics there: no other goroutine reads it.
-			watcher := make(chan struct{})
-			var once sync.Once
-			letWatcher := func() { once.Do(func() { close(watcher) }) }
-			t.Cleanup(letWatcher)
-			p, let := openAfterItsCallerHasGone(t, k, nativeConfig(), l, func(h *nativeSeams) {
-				h.lifeEnded = func() { <-watcher }
-			})
-			panicAtNextClock(k, sinkPanicValue)
-			let()
+			p := inTheCancellationArm(t, k, l)
 			completedPanicked(t, k, p)
 			l.panicsLogged(t, "the native sink's opener")
-			letWatcher()
+		},
+		"in the cancellation arm, its sink made, its close failing": func(t *testing.T) {
+			k, l := nativeKernel(t), newNativeLog()
+			k.inspect(func(k *fakeKernel) { k.closeErr = errCloseFailed })
+			p := inTheCancellationArm(t, k, l)
+			await(t, p.Completion(), "the opening worker's end")
+			// The worker's panic beside the result of the sink it revoked, whose
+			// writer's close failed.
+			e := p.CompletionResult()
+			if ReasonOf(e) != ReasonPanicked || !errors.Is(e, ErrPanicked) || !errors.Is(e, ErrReleaseUnconfirmed) || !errors.Is(e, errCloseFailed) {
+				t.Errorf("the completion is %v; want the worker's panic, typed %s, beside its sink's close's failure, unconfirmed", e, ReasonPanicked)
+			}
+			noValue(t, e, "the completion")
+			k.checkClosedEach(t)
+			l.panicsLogged(t, "the native sink's opener")
 		},
 		"after the hand-off, its sink delivered": func(t *testing.T) {
 			k, l := nativeKernel(t), newNativeLog()
+			ended := make(chan struct{})
 			s, e := openPanicking(context.Background(), k, nativeConfig(), l, func(h *nativeSeams) {
 				h.delivered = func() { panic(sinkPanicValue) }
+				h.openEnded = func() { close(ended) }
 			})
 			if e != nil || s == nil {
 				t.Fatalf("the open answered %v, %v; want its sink", s, e)
 			}
 			t.Cleanup(s.Revoke)
-			await(t, l.logged, "the opening worker's panic, past its hand-off, logged")
+			// The worker's end, past its recover: whatever that recover would do
+			// to the sink is done before the sink is used.
+			await(t, ended, "the opening worker's end, past its recover")
 			l.panicsLogged(t, "the native sink's opener")
 			// The sink delivered is its caller's: the worker's recover leaves it
 			// as it was, and it plays.
