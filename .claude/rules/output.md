@@ -121,6 +121,7 @@ The bridge as an output: on a Linux box with a DAC and MPD, it reports the DAC a
 
 ## The player's DSD check (B728 B12)
 
-The check's hold in the engine is under the configuration reservation above (B728 B12 PR 2); its chime is here (PR 1).
+The check's hold in the engine is under the configuration reservation above (B728 B12 PR 2); its chime (PR 1) and the backend's check (PR 3) are here.
 
 - **The check's chime is `internal/player/dsdchime`'s: a fifth-order loop held to its generator's digest, packed, cancellable and bounded, modulated at each rate's own, its oscillators free of libm.** **Don't repeat a lower rate's bits for a higher one, return one byte a sample, build without asking the context, or let the loop leave its bounds.** → History-rules-output.md
+- **The check plays only a tuple the effective set plays now, on the identity its token names, as the device slot's fourth holder; reconciliation, containment and its own 100 ms monitor end it; it gives the slot back only once its sink's cleanup is confirmed, and fences the device where that cleanup failed.** **Don't play a tuple merely offered, open after an unconfirmed release, judge the check outside the policy's reconciliation, move it to a set of another identity, give the slot back before `Done`, touch the queue, or autoplay after it.** → History-rules-output.md
