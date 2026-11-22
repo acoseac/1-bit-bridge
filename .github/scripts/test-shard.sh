@@ -3,8 +3,9 @@
 # One shard of the race-detector suite.
 #
 # `make test` runs `go test -p N -race ./...` and is the local gate; this is
-# the SAME flags, split so CI's wall clock stops being one package's
-# sequential runtime. Measured on the 2026-09-21 run of gate.yml (895s wall,
+# the same `-race`, split so CI's wall clock stops being one package's
+# sequential runtime, with a 30m timeout per slice where `make test` takes
+# 45m per whole package (backlog B897). Measured on the 2026-09-21 run of gate.yml (895s wall,
 # ubuntu-latest, 4 cores):
 #
 #   internal/manifest  760s      internal/api         72s

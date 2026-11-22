@@ -69,7 +69,7 @@ it).
 |---|---|
 | `make build` | Builds `./bin/bridge` for the host OS (injects `VERSION` from `git describe` into `internal/version.ServerVersion`). |
 | `make build-all` | Cross-compiles all 6 targets into `dist/bridge-<os>-<arch>{.exe}`. |
-| `make test` | Full suite: `go test -p $(P) -race -timeout 30m ./...`. |
+| `make test` | Full suite: `go test -p $(P) -race -timeout 45m ./...`. |
 | `make test-fast` | Same without `-race` — the inner-loop option. |
 | `make check` | Per-change gate: `fmt` + `vet` + `test` (race), sequentially; skips `build-all`. |
 | `make fmt` / `make vet` | `go fmt ./...` / `go vet ./...`. |
@@ -218,7 +218,7 @@ mode). iOS never talks to the admin listener.
 
 ## Testing instructions
 
-- `make test` (race, 30m timeout) before pushing; `make test-fast` or
+- `make test` (race, 45m timeout) before pushing; `make test-fast` or
   `go test ./internal/<pkg>/` while iterating. The suite is ~2,400 test
   functions across `internal/…` and `cmd/bridge`.
 - Tests are pure Go (no cgo); table-driven tests pin most documented
