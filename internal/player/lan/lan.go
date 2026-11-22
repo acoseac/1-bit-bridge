@@ -283,3 +283,22 @@ func inAny(ps []netip.Prefix, a netip.Addr) bool {
 	}
 	return false
 }
+
+// UnreadableError is a reading that is not whole (backlog B989; names-only
+// shim).
+type UnreadableError struct {
+	Interface string
+	Err       error
+}
+
+func (e *UnreadableError) Error() string { return e.Interface }
+
+func (e *UnreadableError) Unwrap() error { return e.Err }
+
+// ReadInterfacesFrom reads nothing (names-only shim).
+func ReadInterfacesFrom(list func() ([]net.Interface, error), addrs func(net.Interface) ([]net.Addr, error)) ([]Interface, error) {
+	return nil, nil
+}
+
+// ReadInterfaces is HostInterfaces (names-only shim).
+func ReadInterfaces() ([]Interface, error) { return HostInterfaces() }

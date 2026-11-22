@@ -972,7 +972,12 @@ const compositionDBTimeout = 60 * time.Second
 // SSE connections hitting the 30s tick (or initial-emit) after expiry
 // collapse to ONE scan, not N concurrent ones. Best-effort: a SQL error
 // serves the last good snapshot rather than failing the tile.
-func (s *Server) getCompositionSnapshot() compositionResponse {
+func (s *Server) getCompositionSnapshot(ctx context.Context) (compositionResponse, bool) {
+	return s.getCompositionSnapshotNow(), true
+}
+
+// getCompositionSnapshotNow is the snapshot as main reads it.
+func (s *Server) getCompositionSnapshotNow() compositionResponse {
 	if s.deps.Manifest == nil {
 		return compositionResponse{}
 	}

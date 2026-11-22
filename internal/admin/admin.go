@@ -1812,6 +1812,11 @@ type Server struct {
 	// updated via a PATCH before a restart).
 	boundAdminAddr string
 
+	// The home-network socket (backlog B989).
+	consoleLAN            *consoleLAN
+	lanSourceNoted        lanSourceNoted
+	testCompositionFlight func()
+
 	// refusedScrapeNoted is set by the first noteRefusedScrape line, which
 	// is the only one this process logs.
 	refusedScrapeNoted atomic.Bool
@@ -2244,6 +2249,11 @@ func (s *Server) Serve(ctx context.Context) error {
 // listens itself. cmd/bridge's boot tests bind the port first and hand
 // the listener over, so nothing can take it between the choice and the
 // bind (backlog B313).
+// ServeConsole serves loopback alone, the plan ignored (backlog B989).
+func (s *Server) ServeConsole(ctx context.Context, lis net.Listener, plan *ConsoleLANPlan) error {
+	return s.ServeListener(ctx, lis)
+}
+
 func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 	s.boundAdminAddr = lis.Addr().String()
 	// Public-mode direct-TLS path (PR 3): wrap the TCP listener

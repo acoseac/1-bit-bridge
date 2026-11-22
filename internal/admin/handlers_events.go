@@ -186,7 +186,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// single-flighted in getCompositionSnapshot, so this stays cheap even
 	// though the underlying scan is a full-table json_extract.
 	publishComposition := func() error {
-		return marshalAndPublish("composition", s.getCompositionSnapshot(), &lastComposition)
+		return marshalAndPublish("composition", s.getCompositionSnapshotNow(), &lastComposition)
 	}
 
 	// sources (dashboard filesystem-vs-UPnP-upstream track breakdown) rides

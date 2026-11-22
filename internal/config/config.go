@@ -47,14 +47,16 @@ var validateLogger = logging.Component("config")
 
 // Config mirrors the on-disk bridge.yaml shape. See config/bridge.yaml.example.
 type Config struct {
-	LibraryRoots    []string `yaml:"libraryRoots"`
-	ListenAddress   string   `yaml:"listenAddress"`
-	AdminAddress    string   `yaml:"adminAddress,omitempty"`
-	DataDir         string   `yaml:"dataDir"`
-	TLSCertPath     string   `yaml:"tlsCertPath,omitempty"`
-	TLSKeyPath      string   `yaml:"tlsKeyPath,omitempty"`
-	ScanIntervalSec int      `yaml:"scanIntervalSec"`
-	LibraryName     string   `yaml:"libraryName"`
+	LibraryRoots  []string `yaml:"libraryRoots"`
+	ListenAddress string   `yaml:"listenAddress"`
+	AdminAddress  string   `yaml:"adminAddress,omitempty"`
+	// AdminLANAddress is the console's home-network address (backlog B989).
+	AdminLANAddress string `yaml:"adminLANAddress,omitempty"`
+	DataDir         string `yaml:"dataDir"`
+	TLSCertPath     string `yaml:"tlsCertPath,omitempty"`
+	TLSKeyPath      string `yaml:"tlsKeyPath,omitempty"`
+	ScanIntervalSec int    `yaml:"scanIntervalSec"`
+	LibraryName     string `yaml:"libraryName"`
 	// CustomEndpoints lets operators advertise URLs that aren't
 	// discoverable from the host's interface table — e.g. a reverse
 	// proxy, a port-forwarded WAN URL, or a non-default Tailscale

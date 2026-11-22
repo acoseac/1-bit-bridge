@@ -394,6 +394,10 @@ type Deps struct {
 	// does: an install it is about to write has no snapshot to grade.
 	Backups func(ctx context.Context) []Check
 
+	// ConsoleLAN is what this run knows of the console's home-network
+	// posture (backlog B989).
+	ConsoleLAN *ConsoleLANFacts
+
 	// LogPath is the file the log-file-size line grades, cmd/bridge's
 	// doctorLogs: for bridge doctor run from a shell the installed bridge's
 	// log, on Windows the one bridge logs reads by its install check, and

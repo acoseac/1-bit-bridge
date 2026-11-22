@@ -335,6 +335,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		"loopback address: that console has no login")
 	listenAddressFlag := fs.String("listen-address", "", "bind address for the iOS-facing API "+
 		"(default :7788; with --public :443, which ACME needs)")
+	_ = fs.String("admin-lan-address", "", "the console's home-network address (backlog B989)")
 	publicProxy := fs.Bool("admin-tls-proxy", false, "with --public: a reverse proxy (Caddy/nginx) fronts admin TLS — disables native ACME wrapping of the admin listener")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -957,7 +958,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// another process can have written the config meanwhile
 	// (configChangedSinceRead). The check and the save are one turn of
 	// bridge.yaml's lock (saveInitConfig).
-	if code := saveInitConfig(stderr, cfgPath, asRead, cfg); code != 0 {
+	if code := initSave(stderr, cfgPath, asRead, cfg); code != 0 {
 		return code
 	}
 	printKept(stdout, cfg, initDataDir, rootsKept, nameKept, endpointsKept, listenListed, adminListed)
@@ -1199,6 +1200,7 @@ type initHostOps struct {
 	install, installStartup, installSCM func(packaging.Params) (string, error)
 	spawnDetached                       func(binary, cfgPath, logPath string) error
 	openBrowser                         func(url string)
+	save                                func(stderr io.Writer, cfgPath string, asRead configAsRead, cfg *config.Config) int
 }
 
 // initHost is finishInit's host. A test puts a stand-in in its place to run
@@ -1214,6 +1216,15 @@ var initHost = initHostOps{
 	installSCM:     packaging.InstallWindowsService,
 	spawnDetached:  packaging.SpawnDetached,
 	openBrowser:    openInBrowser,
+	save:           saveInitConfig,
+}
+
+// initSave is initHost's save, saveInitConfig where none is set.
+func initSave(stderr io.Writer, cfgPath string, asRead configAsRead, cfg *config.Config) int {
+	if initHost.save != nil {
+		return initHost.save(stderr, cfgPath, asRead, cfg)
+	}
+	return saveInitConfig(stderr, cfgPath, asRead, cfg)
 }
 
 // finishInit installs the service (or tells the user how to run manually)

@@ -3220,6 +3220,8 @@ type serveOpts struct {
 	// where the port already accepts and the console does not yet
 	// (backlog B313).
 	beforeAdminServe func()
+	// consoleLAN is the home-network socket's seams (backlog B989).
+	consoleLAN consoleLANSeams
 	// dataDirTryLock stands in for fsutil.TryLock on the data dir's lock
 	// file (lockServeDataDirWith). Nil (the kernel's answer) everywhere
 	// but the boot tests, which answer what a filesystem that keeps no
