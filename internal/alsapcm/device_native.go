@@ -40,7 +40,12 @@ func openNative(s sys, now func() time.Time, ep Endpoint, cfg Config) (_ *Device
 	set := false
 	defer func() {
 		if !set {
-			err = nativeCleanupError(err, d.releaseNative())
+			ce := releaseRecovered(d, cfg.log, "the native setup's close")
+			if err = nativeCleanupError(err, ce); ce != nil {
+				if r := recover(); r != nil { // a setup's panic goes on with its close's failure (B728 B12 PR 0)
+					panic(&setupPanic{value: r, cleanup: ce})
+				}
+			}
 		}
 	}()
 	if err = d.setUp(want); err != nil {

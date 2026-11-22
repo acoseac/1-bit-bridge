@@ -245,9 +245,15 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	// Native lifetime survives the producer cancellation during TrackChange.
 	life, cancel := context.WithCancel(context.Background())
 	out.nativeCancel = cancel
-	sink, err := open(life, alsapcm.DSDConfig{Kind: o.transport.Kind, Endpoint: u.Endpoint, Format: format.ALSAFormat(o.plan.Tuple.Format), BitRate: o.plan.Tuple.BitRate, Pause: pause, Tail: o.plan.Tail, Prefill: o.plan.Prefill, Check: out.admit, Locate: out.locate})
+	sink, err := open(life, alsapcm.DSDConfig{Kind: o.transport.Kind, Endpoint: u.Endpoint, Format: format.ALSAFormat(o.plan.Tuple.Format), BitRate: o.plan.Tuple.BitRate, Pause: pause, Tail: o.plan.Tail, Prefill: o.plan.Prefill, Check: out.admit, Locate: out.locate, Log: s.b.log})
 	if err != nil {
 		cancel()
+		if errors.Is(err, alsapcm.ErrPanicked) && errors.Is(err, alsapcm.ErrReleaseUnconfirmed) {
+			// A panic left the node's close unconfirmed: the teardown fences (B728 B12 PR 0).
+			s.mu.Lock()
+			s.releaseErr = errors.Join(s.releaseErr, engine.ErrReleaseUnconfirmed, err)
+			s.mu.Unlock()
+		}
 		return nil, err
 	}
 	// The open committed exactly the plan's format, rate and channels

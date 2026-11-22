@@ -36,10 +36,39 @@ func openNativeBounded(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSin
 	var completed error
 	go func() {
 		defer close(done)
-		s, e := openDSDSink(ctx, c, h)
+		var s *DSDSink
+		var e, unhanded error
+		sent := false
+		defer func() {
+			// A panic anywhere on the worker is its open's answer, never the
+			// process's end (B728 B12 PR 0); a sink made and not delivered is
+			// revoked, woken past a revocation the panic cut, and waited for.
+			if r := recover(); r != nil {
+				e = nativeCleanupError(nativePanicked(c.Log, "the native sink's opener", c.Endpoint, r), unhanded)
+				if s != nil && !sent {
+					s.Revoke()
+					s.mu.Lock()
+					s.interrupt()
+					s.mu.Unlock()
+					<-s.Done()
+					e = errors.Join(e, s.result())
+				}
+				if completed = errors.Join(completed, e); !sent {
+					select {
+					case reply <- result{nil, e}:
+					case <-ctx.Done():
+					}
+				}
+			}
+		}()
+		h.unhanded = &unhanded
+		s, e = openDSDSink(ctx, c, h)
 		completed = e
 		select {
 		case reply <- result{s, e}:
+			if sent = true; h.delivered != nil {
+				h.delivered()
+			}
 		case <-ctx.Done():
 			if s != nil {
 				s.Revoke()

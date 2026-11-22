@@ -1,9 +1,14 @@
 package alsapcm
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"log/slog"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -25,6 +30,9 @@ var ErrReleaseUnconfirmed = errors.New("native release unconfirmed")
 
 // ErrActivationFenced identifies an activation stopped by the sink's own fence.
 var ErrActivationFenced = errors.New("native activation fenced")
+
+// ErrPanicked is in every error a panic the native sink recovered answers.
+var ErrPanicked = errors.New("a panic was recovered")
 
 const nativeReleaseBudget = 2 * time.Second
 
@@ -55,6 +63,9 @@ type DSDConfig struct {
 	Check                     func(NodeInfo) error
 	// Locate resolves the binding afresh before a released pause reopens.
 	Locate func(context.Context) (Endpoint, error)
+	// Log is where a panic recovered on the sink's goroutines is logged;
+	// nil is the player's component.
+	Log *slog.Logger
 }
 
 // DSDPosition counts logical bits per channel, excluding all silence/padding.
@@ -129,6 +140,12 @@ type nativeSeams struct {
 	open func(Endpoint, Config) (*Device, error)
 	now  func() time.Time
 	at   func(time.Time) (<-chan time.Time, func())
+	// unhanded is where openDSDSink reports to the opening worker's recover
+	// the failed close of a node it did not hand over (openNativeBounded),
+	// and delivered, nil but in a test, runs on that worker once its reply
+	// has handed the sink over.
+	unhanded  *error
+	delivered func()
 	// lifeEnded, nil but in a test, runs on the goroutine that revokes the
 	// sink once its life, the open's context, has ended, just before the
 	// revocation: a test parks it there, as a scheduler can leave it (B765).
@@ -243,8 +260,7 @@ func (c DSDConfig) validate() (DSDConfig, error) {
 	}
 	return c, nil
 }
-func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, error) {
-	var err error
+func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (_ *DSDSink, err error) {
 	c, err = c.validate()
 	if err != nil {
 		return nil, err
@@ -266,26 +282,37 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 	if c.Kind == format.KindDoP {
 		carrier = c.BitRate / 16
 	}
-	dc := Config{RateHz: carrier, Format: c.Format, BufferTime: c.BufferTime}
+	dc := Config{RateHz: carrier, Format: c.Format, BufferTime: c.BufferTime, log: c.Log}
 	d, err := h.open(c.Endpoint, dc)
 	if err != nil {
 		return nil, err
 	}
+	// Closed on every way out but its hand-off, under a recover of its own:
+	// a refusal's answer, or a panic's, holds its failure (B728 B12 PR 0).
+	handed := false
+	defer func() {
+		if !handed {
+			ce := releaseRecovered(d, c.Log, "the native open's close")
+			if err = nativeCleanupError(err, ce); h.unhanded != nil {
+				*h.unhanded = ce
+			}
+		}
+	}()
 	p := d.Params()
 	if err = dopPrecision(c, p); err != nil {
-		return nil, nativeCleanupError(err, d.releaseNative())
+		return nil, err
 	}
 	if p.BufferTime() > 500*time.Millisecond || p.BufferTime()+nativeFrameDuration(nativeFrames(p.RateHz, c.Tail), p.RateHz)+nativeCloseMargin >= nativeReleaseBudget {
-		return nil, nativeCleanupError(errors.New("native readback exceeds release budget"), d.releaseNative())
+		return nil, errors.New("native readback exceeds release budget")
 	}
 	if c.Pause == PauseKernel && !p.CanPause() {
-		return nil, nativeCleanupError(errors.New("native kernel pause unavailable"), d.releaseNative())
+		return nil, errors.New("native kernel pause unavailable")
 	}
 	if err = admit(c.Check, d, c.Endpoint, "native open"); err != nil {
-		return nil, nativeCleanupError(err, d.releaseNative())
+		return nil, err
 	}
 	if c.RingBytes/(2*w) <= p.BufferFrames {
-		return nil, nativeCleanupError(errors.New("native ring must retain hardware buffer plus lookahead"), d.releaseNative())
+		return nil, errors.New("native ring must retain hardware buffer plus lookahead")
 	}
 	// DoP retains four canonical bytes per stereo frame, then expands to
 	// eight hardware bytes in writer-owned scratch; budget both stores.
@@ -295,9 +322,10 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 		packedBytes = p.PeriodFrames * 8
 	}
 	if c.RingBytes+scratchBytes+packedBytes+nativeLedgerMax*16+8+4096 > MaxRingBytes {
-		return nil, nativeCleanupError(errors.New("native aggregate memory budget"), d.releaseNative())
+		return nil, errors.New("native aggregate memory budget")
 	}
 	s := &DSDSink{life: ctx, cfg: c, seams: h, devCfg: dc, params: p, dev: d, word: w * 8, ring: newRing(int64(c.RingBytes/(2*w)), 2*w, int64(p.BufferFrames)), changed: make(chan struct{}), kick: make(chan struct{}, 1), done: make(chan struct{}), releaseExpired: make(chan struct{}), scratch: make([]byte, scratchBytes), dopScratch: make([]byte, packedBytes), dopPhase: 0x05}
+	handed = true
 	go s.loopNative()
 	go func() {
 		if h.watched != nil {
@@ -1261,4 +1289,43 @@ func dopPrecision(c DSDConfig, p Params) error {
 		return errors.New("DoP requires 24..32 significant bits")
 	}
 	return nil
+}
+
+// nativePanicMessage is the line a panic a native sink recovers is logged with.
+const nativePanicMessage = "player: a panic was recovered in the native DSD sink; it ends typed and its node is closed"
+
+// nativePanicked logs a panic a native sink's goroutine recovered once, to log
+// (nil: the player's component), with where, the endpoint, its stack, and its
+// value only when it is the runtime's own error; it answers it typed
+// ReasonPanicked, beside the failed close a setup's panic carried (B728 B12
+// PR 0).
+func nativePanicked(log *slog.Logger, where string, ep Endpoint, r any) error {
+	var cleanup error
+	if p, ok := r.(*setupPanic); ok {
+		r, cleanup = p.value, p.cleanup
+	}
+	attrs := []any{"where", where, "endpoint", ep.String(), "stack", string(debug.Stack())}
+	if rerr, ok := r.(runtime.Error); ok {
+		attrs = append(attrs, "error", rerr.Error())
+	}
+	cmp.Or(log, logging.Component("player")).Error(nativePanicMessage, attrs...)
+	return nativeCleanupError(&Error{Reason: ReasonPanicked, Op: "native sink", Endpoint: ep, Detail: where + " panicked: the log has why", Err: ErrPanicked}, cleanup)
+}
+
+// releaseRecovered closes d, once, under a recover of its own: a close that
+// panics answers as its failure, never replacing a panic it runs after.
+func releaseRecovered(d *Device, log *slog.Logger, where string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = nativePanicked(log, where, d.params.Endpoint, r)
+		}
+	}()
+	return d.releaseNative()
+}
+
+// setupPanic is a native setup's panic whose close then failed, which
+// openNative raises again with that failure, so neither is lost.
+type setupPanic struct {
+	value   any
+	cleanup error
 }

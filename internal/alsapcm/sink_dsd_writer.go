@@ -10,9 +10,17 @@ import (
 )
 
 func (s *DSDSink) loopNative() {
+	var running *nativeRequest // the activation under way, which a panic can cut short
 	defer func() {
+		var fault error
 		if r := recover(); r != nil {
-			s.setNativeError(fmt.Errorf("native writer panic: %T", r))
+			if p, ok := r.(*setupPanic); ok { // a reopen's setup panicked, its close failed
+				s.mu.Lock()
+				s.cleanupErr = errors.Join(s.cleanupErr, ErrReleaseUnconfirmed, p.cleanup)
+				s.mu.Unlock()
+			}
+			fault = nativePanicked(s.cfg.Log, "the native sink's writer", s.params.Endpoint, r)
+			s.setNativeError(fault)
 		}
 		if s.dev != nil {
 			if e := s.closeNative(); e != nil {
@@ -27,7 +35,12 @@ func (s *DSDSink) loopNative() {
 			if s.err != nil {
 				e = errNativeActivationCancelled
 			}
-			s.activation.reply <- nativeAnswer{err: s.fenced(s.activation.op, e), kind: answerNeverRan, op: s.activation.op}
+			a := nativeAnswer{err: s.fenced(s.activation.op, e), kind: answerNeverRan, op: s.activation.op}
+			if s.activation == running && fault != nil {
+				// It ran: the record answers it, the panic and its cleanup's (B728 B12 PR 0).
+				a = nativeAnswer{err: s.err, kind: answerFault, op: running.op}
+			}
+			s.activation.reply <- a
 			s.activation = nil
 		}
 		if s.releaseCancel != nil {
@@ -76,7 +89,9 @@ func (s *DSDSink) loopNative() {
 			return
 		}
 		if r != nil {
+			running = r
 			e := s.activateNative(r)
+			running = nil
 			s.mu.Lock()
 			if s.activation == r {
 				s.activation = nil
@@ -483,13 +498,14 @@ func (s *DSDSink) pauseNative() error {
 // closeNative preserves teardown errors (the PCM release semantics are left
 // untouched). The writer retains exclusive ownership through every ioctl and
 // close, even when the caller has already received ErrReleaseUnconfirmed.
+// Its close's own recover makes one that panics a failed close (B728 B12 PR 0).
 func (s *DSDSink) closeNative() error {
 	d := s.dev
 	if d == nil {
 		return nil
 	}
 	s.dev = nil
-	err := d.releaseNative()
+	err := releaseRecovered(d, s.cfg.Log, "the native sink's close")
 	if err != nil {
 		s.mu.Lock()
 		s.cleanupErr = errors.Join(s.cleanupErr, ErrReleaseUnconfirmed, err)
