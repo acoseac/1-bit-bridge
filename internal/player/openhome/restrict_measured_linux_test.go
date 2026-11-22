@@ -67,8 +67,15 @@ func TestALoopbackSocketRestrictedToAnotherIndexRefusesALoopbackConnection(t *te
 		t.Fatalf("restricted to the loopback interface's own index, the socket took no loopback connection: %v", err)
 	}
 	_ = c.Close()
-	if err := <-accepted; err != nil {
-		t.Fatal(err)
+	// Bounded: an accept that stalls fails here, and the cleanup's close
+	// ends the goroutine's Accept.
+	select {
+	case err := <-accepted:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("restricted to the loopback interface's own index, the socket accepted no connection within 2 s")
 	}
 
 	// Restricted to an index no interface has, it is handed no connection:

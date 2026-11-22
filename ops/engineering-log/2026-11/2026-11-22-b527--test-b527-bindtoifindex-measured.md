@@ -79,11 +79,11 @@ refused: production's path listens unrestricted and says why. A kernel before 5.
 
 ### What (a) shows
 
-The brief's premise was that a dial from this host to the served address arrives on lo, so that
+The brief's premise was that a dial from this host to the served address arrives on the loopback interface, so that
 the restriction would keep the box's own processes from the socket. On this kernel it does not.
 Restricted to the address's own interface, the socket took every such dial; restricted to
 loopback's index, it refused every one. So the kernel counts the box's own connection to its
-address as arriving on that address's interface, not on lo. The brief names a restricted socket
+address as arriving on that address's interface, not on the loopback interface. The brief names a restricted socket
 that takes a connection arriving on another interface as a contradiction to stop at and report, so
 this part stops here: the rule's line and its long form say what was measured, nothing else in
 them or in the code changed for it, and any rewording of the long form's "a listening socket bound
@@ -157,7 +157,7 @@ Predicted in writing; the mutation, uncommitted on `fcab2e9d`: `restrictToInterf
   `restrict_measured_linux_test.go:80: restricted to an index no interface has, the socket took a
   loopback connection`;
 - `TestEachSocketIsRestrictedToItsInterfaceWhereThePlatformLets`, red too, as expected, since it
-  reads the index back: `restrict_test.go:57: the socket is bound to interface 0, want 1`.
+  reads the index back: `restrict_test.go:57: the socket is bound to interface 0, want` the loopback interface's index.
 
 Restored with `git checkout -- internal/player/openhome/restrict_linux.go`, its SHA-256 the one
 taken before the mutation, `git status` clean; then the package green under `-race` (122 top-level
