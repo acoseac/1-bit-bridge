@@ -14,18 +14,32 @@
           "bootId": "golden-boot",
           "policyGeneration": 2,
           "publication": 2,
-          "reason": "first_use_pending",
-          "tuples": [],
+          "tuples": [
+            {
+              "format": "S32_LE",
+              "bitRate": 2822400,
+              "channels": 2,
+              "policyId": "dop/S32_LE/2822400/silence/100/400",
+              "pause": "silence",
+              "tailMs": 100,
+              "prefillMs": 400,
+              "transport": "dop",
+              "evidence": "reported"
+            },
+            {
+              "format": "S32_LE",
+              "bitRate": 5644800,
+              "channels": 2,
+              "policyId": "dop/S32_LE/5644800/silence/100/400",
+              "pause": "silence",
+              "tailMs": 100,
+              "prefillMs": 400,
+              "transport": "dop",
+              "evidence": "reported"
+            }
+          ],
           "converted": [],
           "refused": [
-            {
-              "bitRate": 2822400,
-              "reason": "first_use_pending"
-            },
-            {
-              "bitRate": 5644800,
-              "reason": "first_use_pending"
-            },
             {
               "bitRate": 11289600,
               "reason": "dop_confirmation_required"
@@ -126,7 +140,9 @@
           "flac",
           "wav",
           "aiff",
-          "alac"
+          "alac",
+          "dsf",
+          "dff"
         ],
         "dsdMode": "dop",
         "allowDoP": true,

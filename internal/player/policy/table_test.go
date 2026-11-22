@@ -102,17 +102,6 @@ func conditions(transport string) map[string]condition {
 				r.mixer.Controls.Controls = append(r.mixer.Controls.Controls, unreadable("Master Playback Volume", 0))
 			}},
 		}},
-		"acknowledged at r": {fail: []failure{
-			{"no acknowledgement", ReasonFirstUsePending, func(r *rig) { r.unacknowledge(transport) }},
-			{"a migrated one of DSD64 alone", ReasonFirstUsePending, func(r *rig) { r.acknowledge(transport, dsd64) }},
-			{"one under another firmware", ReasonFirstUsePending, func(r *rig) {
-				for i := range r.firstUse {
-					if r.firstUse[i].Transport == transport {
-						r.firstUse[i].BCDDevice = "0200"
-					}
-				}
-			}},
-		}},
 		"no rejection": {fail: []failure{
 			{"the latest answer is noise", ReasonListenerRejected, func(r *rig) { r.hear(transport, testRate, dsdstate.AnswerNoise) }},
 			{"the latest answer is nothing", ReasonListenerRejected, func(r *rig) { r.hear(transport, testRate, dsdstate.AnswerNothing) }},
@@ -120,9 +109,14 @@ func conditions(transport string) map[string]condition {
 		"r ≤ `maxBitRate`": {fail: []failure{
 			{"the cap is DSD64", ReasonAboveChoice, func(r *rig) { r.max = dsd64 }},
 		}},
-		"the latest listener answer for native at r is `clean`": {fail: []failure{
-			{"no answer", "", func(r *rig) { r.forget(dsdstate.TransportNative, testRate) }},
-			{"the latest answer is noise", "", func(r *rig) { r.hear(dsdstate.TransportNative, testRate, dsdstate.AnswerNoise) }},
+		cleanOrNoBoardClause: {fail: []failure{
+			{"a generic board's IDs and no answer", "", func(r *rig) { r.forget(dsdstate.TransportNative, testRate) }},
+		}},
+		knownCleanOrNoBoardClause: {fail: []failure{
+			{"unknown, a generic board's IDs and no answer", ReasonNativeCheckRequired, func(r *rig) {
+				r.known, r.profileNative, r.profileDoP = false, nil, nil
+				r.forget(dsdstate.TransportNative, testRate)
+			}},
 		}},
 		"the latest listener answer for DoP at r is `clean`": {fail: []failure{
 			{"no answer", "", func(r *rig) { r.forget(dsdstate.TransportDoP, testRate) }},
@@ -145,18 +139,36 @@ func conditions(transport string) map[string]condition {
 	}
 }
 
-// heardOrConfirmedClause is the auto row's claim of DoP on a known DAC, and
-// heardOrConfirmed the ways it holds, each tried alone.
-const heardOrConfirmedClause = "the profile heard DoP at r, or the user confirmed DoP"
+// The clauses of alternatives: the auto row's claim of DoP on a known DAC,
+// and native's on an unknown DAC (B990), auto's and an explicit native's,
+// which a known DAC holds too. A DAC is on a generic board where its IDs are
+// one of the DAC list's shared reference IDs, or there is no list to ask.
+const (
+	heardOrConfirmedClause    = "the profile heard DoP at r, or the user confirmed DoP"
+	cleanOrNoBoardClause      = "the latest listener answer for native at r is `clean`, or the DAC is on no generic board"
+	knownCleanOrNoBoardClause = "the DAC is known, or the latest listener answer for native at r is `clean`, or the DAC is on no generic board"
+)
 
-var heardOrConfirmed = []failure{
-	{"the profile heard DoP at r alone", "", func(r *rig) { r.confirmed = nil }},
-	{"the user confirmed DoP alone", "", func(r *rig) { r.profileDoP = &dacprofile.DoP{StatedMaxBitRate: dsd256} }},
-}
-
-// unacknowledge drops transport's acknowledgement.
-func (r *rig) unacknowledge(transport string) {
-	r.firstUse = slices.DeleteFunc(r.firstUse, func(f dsdstate.FirstUse) bool { return f.Transport == transport })
+// ways are the ways a clause of alternatives holds, each tried alone on its
+// row's base.
+var ways = map[string][]failure{
+	heardOrConfirmedClause: {
+		{"the profile heard DoP at r alone", "", func(r *rig) { r.confirmed = nil }},
+		{"the user confirmed DoP alone", "", func(r *rig) { r.profileDoP = &dacprofile.DoP{StatedMaxBitRate: dsd256} }},
+	},
+	cleanOrNoBoardClause: {
+		{"a clean answer alone, on a generic board's IDs", "", func(r *rig) {}},
+		{"IDs no generic board's alone", "", func(r *rig) { r.catalog = shipped(r.t); r.forget(dsdstate.TransportNative, testRate) }},
+	},
+	knownCleanOrNoBoardClause: {
+		{"known alone", "", func(r *rig) { r.boardIDs = true; r.forget(dsdstate.TransportNative, testRate) }},
+		{"a clean answer alone", "", func(r *rig) { r.known, r.profileNative, r.profileDoP = false, nil, nil }},
+		{"IDs no generic board's alone", "", func(r *rig) {
+			r.known, r.profileNative, r.profileDoP = false, nil, nil
+			r.catalog = shipped(r.t)
+			r.forget(dsdstate.TransportNative, testRate)
+		}},
+	},
 }
 
 var (
@@ -251,8 +263,8 @@ func TestTheEffectivePolicyTable(t *testing.T) {
 				r := base()
 				out(r)
 				wantOutcome(t, cell.transport+" with every clause holding", r.plan(testRate), cell.outcome)
-				if slices.Contains(clauses, heardOrConfirmedClause) {
-					for _, w := range heardOrConfirmed {
+				for _, clause := range clauses {
+					for _, w := range ways[clause] {
 						r := base()
 						out(r)
 						w.do(r)

@@ -16,6 +16,9 @@ import (
 // The refusals of a DSD rate the effective set names: the design's section
 // 3.2's closed list, dsd_state_unreadable (section 2.5) and
 // rate_not_supported, the refusal of every rate past DSD256 in every mode.
+// Since B990 first_use_pending, a word older clients know, is no longer
+// given, and native_check_required refuses an explicit native on a generic
+// board's IDs (genericBridge) at a rate no listener's answer holds clean.
 const (
 	ReasonOffByChoice          engine.Reason = "dsd_off_by_choice"
 	ReasonNativeNotOffered     engine.Reason = "native_not_offered"
@@ -26,6 +29,7 @@ const (
 	ReasonAboveChoice          engine.Reason = "dsd_rate_above_choice"
 	ReasonFirstUsePending      engine.Reason = "first_use_pending"
 	ReasonListenerRejected     engine.Reason = "listener_rejected"
+	ReasonNativeCheckRequired  engine.Reason = "native_check_required"
 	ReasonConversionNotOffered engine.Reason = "conversion_not_offered"
 	ReasonStateUnreadable      engine.Reason = dsdstate.RefusalStateUnreadable
 	ReasonRateNotSupported     engine.Reason = "rate_not_supported"
@@ -207,7 +211,8 @@ type Native struct {
 	Evidence   Rung
 	EvidenceOn string
 	// Acknowledged: native's first use is acknowledged under the unit's
-	// firmware by an entry that covers the rate.
+	// firmware by an entry that covers the rate, which gates no rate since
+	// B990.
 	Acknowledged bool
 	// Rejected and Clean: the latest listener answer for native at the rate
 	// under the unit's firmware is noise or nothing, or clean.
@@ -604,14 +609,19 @@ func refused(bitRate int, reason engine.Reason, detail string) Plan {
 	return Plan{BitRate: bitRate, Outcome: OutcomeRefused, Reason: reason, Detail: detail}
 }
 
-// decide is section 3.2's table at bitRate under the choice s holds. Where
-// several conditions fail under an explicit native or dop, the reason is the
-// first in this order: what the DAC does not offer, then a listener's
-// rejection, then what the gain check cannot see, then what the user can
-// change (the level, the confirmation, the cap, the acknowledgement).
+// decide is section 3.2's table at bitRate under the choice s holds, with no
+// first use asked (B990: the state's acknowledgements are reported and gate
+// no rate). Where several conditions fail under an explicit native or dop,
+// the reason is the first in this order: what the DAC does not offer, then a
+// listener's rejection, then what the bridge cannot see (a generic board's
+// DAC, the gain check's stages), then what the user can change (the level,
+// the confirmation, the cap).
 func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 	under := s.MaxBitRate == 0 || bitRate <= s.MaxBitRate
 	offered := n.Format != ""
+	// vouched: the native offer is the DAC's to play: a profile knows it, a
+	// listener heard it clean at the rate, or its IDs are no generic board's.
+	vouched := s.Known || n.Clean || !rd.genericBridge()
 	converted := func() Plan {
 		if s.Conversion == nil {
 			return refused(bitRate, ReasonConversionNotOffered, "the DAC takes no conversion target: no 176.4, 88.2 or 44.1 kHz PCM in two channels")
@@ -621,17 +631,17 @@ func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 	switch s.Mode {
 	case dsdstate.ModeAuto:
 		if s.Known {
-			if offered && n.Acknowledged && !n.Rejected && under {
+			if offered && !n.Rejected && under {
 				return rd.nativePlan(bitRate, n)
 			}
-			if (d.Heard || d.Confirmed) && d.Offered && d.Gain.Unity && d.Acknowledged && !d.Rejected && under {
+			if (d.Heard || d.Confirmed) && d.Offered && d.Gain.Unity && !d.Rejected && under {
 				return rd.dopPlan(bitRate, d)
 			}
 		} else {
-			if n.Clean && offered && n.Acknowledged && under {
+			if offered && !n.Rejected && under && vouched {
 				return rd.nativePlan(bitRate, n)
 			}
-			if d.Clean && d.Confirmed && d.Offered && d.Gain.Unity && d.Acknowledged && under {
+			if d.Clean && d.Confirmed && d.Offered && d.Gain.Unity && under {
 				return rd.dopPlan(bitRate, d)
 			}
 		}
@@ -642,10 +652,10 @@ func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 			return refused(bitRate, ReasonNativeNotOffered, "the DAC offers no native DSD format at this rate")
 		case n.Rejected:
 			return refused(bitRate, ReasonListenerRejected, "a listener's latest answer for native DSD at this rate is a rejection")
+		case !vouched:
+			return refused(bitRate, ReasonNativeCheckRequired, "the DAC list does not know this DAC and its USB IDs are a generic board's, whose native DSD offer is the board's: native plays at this rate once a listener's latest answer here is clean")
 		case !under:
 			return refused(bitRate, ReasonAboveChoice, "the rate is above the DAC's chosen maximum")
-		case !n.Acknowledged:
-			return refused(bitRate, ReasonFirstUsePending, "native DSD's first use is not acknowledged at this rate on this firmware")
 		}
 		return rd.nativePlan(bitRate, n)
 	case dsdstate.ModeDoP:
@@ -664,8 +674,6 @@ func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 			return refused(bitRate, ReasonConfirmationRequired, "the DAC list claims no DoP at this rate, and DoP is not confirmed on this firmware")
 		case !under:
 			return refused(bitRate, ReasonAboveChoice, "the rate is above the DAC's chosen maximum")
-		case !d.Acknowledged:
-			return refused(bitRate, ReasonFirstUsePending, "DoP's first use is not acknowledged at this rate on this firmware")
 		}
 		return rd.dopPlan(bitRate, d)
 	case dsdstate.ModeConvert:
@@ -676,6 +684,14 @@ func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 	// A state that decodes holds no other mode; one that holds it is a state
 	// that would not read.
 	return refused(bitRate, ReasonStateUnreadable, "the choice that applies is not a mode")
+}
+
+// genericBridge reports whether the unit's IDs are a shared reference ID of
+// the DAC list, an interface board's whose DSD offer is the board's, not the
+// DAC's behind it (B990), or there is no list, which cannot tell them apart.
+// decide asks it only of a unit no profile knows, a wildcard's included.
+func (rd *reading) genericBridge() bool {
+	return rd.in.Profiles == nil || rd.in.Profiles.SharedReference(rd.in.Unit.Key)
 }
 
 // The conversion targets of the design's section 4.3, best first, and the
