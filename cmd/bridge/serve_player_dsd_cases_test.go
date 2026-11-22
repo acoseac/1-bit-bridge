@@ -132,8 +132,10 @@ func migrationLines(log string) []string {
 // reader takes, on another port of the GO bar's model, is the GO bar's at the
 // migration, which compares the model and not the port: its rates' answers
 // and their acknowledgement, under the record's firmware. Since the cutover
-// (B7) those rates play: the effective policy serve wires reads no record,
-// so nothing compares the port.
+// (B7) the effective policy serve wires reads no record, so nothing compares
+// the port, and since B990 the acknowledgement gates no rate: the GO bar,
+// which the shipped DAC list does not know and whose IDs are no generic
+// board's, plays native at every rate it offers.
 func TestAVersion35RecordOnAnotherPortMigrates(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -160,8 +162,8 @@ func TestAVersion35RecordOnAnotherPortMigrates(t *testing.T) {
 	if len(st.Warnings) != 0 {
 		t.Errorf("a record taken left warnings: %+v", st.Warnings)
 	}
-	if got := ratesPublished(pol); got != `2822400/"" 5644800/"" ` || pol.Reason != "" {
-		t.Errorf("the effective policy publishes %s(reason %q), want the record's DSD64 and DSD128 native", got, pol.Reason)
+	if got := ratesPublished(pol); got != `2822400/"" 5644800/"" 11289600/"" ` || pol.Reason != "" {
+		t.Errorf("the effective policy publishes %s(reason %q), want native at every rate", got, pol.Reason)
 	}
 }
 
@@ -169,7 +171,7 @@ func TestAVersion35RecordOnAnotherPortMigrates(t *testing.T) {
 // 3): a record the legacy reader refuses for the bound DAC, or none, is a
 // warning in the state the app can read, owned by the DAC the part went to,
 // beside a Warn line naming it, and the DAC gets the fallback: native's
-// choice with nothing acknowledged, which refuses until the app acknowledges
+// choice with nothing acknowledged, which since B990 plays what native plays
 // and never converts. The migration is done: nothing waits.
 func TestARefusedRecordLeavesAWarning(t *testing.T) {
 	needsDirectorySync(t)

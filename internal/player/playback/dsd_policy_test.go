@@ -82,7 +82,7 @@ func ratesOf(p playback.PlayerPolicy) (rates []int, transports []string) {
 // publication of its generation holds.
 func TestSelectionAndPublicationReadOneSet(t *testing.T) {
 	store := playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeNative))
-	b := policyBackend(t, playbacktest.NewBox(5), store)
+	b := policyBackend(t, playbacktest.NewBox(5), store, shippedList(t))
 	b.RefreshDSD(true)
 	first := b.Policy()
 	if rates, transports := ratesOf(first); !slices.Equal(rates, []int{playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256}) || slices.ContainsFunc(transports, func(s string) bool { return s != "" }) {
@@ -261,22 +261,36 @@ func TestAnUnknownDACsDSDIsConverted(t *testing.T) {
 	}
 }
 
-// TestAMigratedChoiceRefusesARateItsRecordDidNotApprove (B728 B7; the
-// design's section 3.6): a migrated native choice plays the rates the
-// owner's record approved, with no new acknowledgement, and refuses every
-// other as first_use_pending; the publication lists the approved rates, its
-// reason empty while a rate plays.
-func TestAMigratedChoiceRefusesARateItsRecordDidNotApprove(t *testing.T) {
-	b := policyBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(playbacktest.MigratedState(dsdstate.ModeNative, false, []int{playbacktest.DSD64}, nil)))
-	if plan, _, err := b.AdmitDSDForTest(dsdAt(playbacktest.DSD64), true); err != nil || plan.Tuple.Transport != "" {
-		t.Errorf("the approved rate: %+v, %v; want it native", plan, err)
-	}
-	for _, rate := range []int{playbacktest.DSD128, playbacktest.DSD256} {
-		if _, _, err := b.AdmitDSDForTest(dsdAt(rate), false); reasonOf(err) != "first_use_pending" {
-			t.Errorf("DSD at %d, which the record did not approve: %v, want first_use_pending", rate, err)
+// TestAMigratedChoicePlaysWhatTheTablePlays (B728 B7; the design's sections
+// 3.2 and 3.6; B990): a migrated native choice plays what section 3.2's table
+// plays, its record's acknowledgement gating no rate. On a DAC the shipped
+// list does not know, on no generic board's IDs, every rate plays native; with
+// no list, every unit on a generic board, the rate the owner's record
+// approved plays on its clean answer and every other is refused as
+// native_check_required. The publication lists what plays, its reason empty
+// while a rate plays, and names the unit.
+func TestAMigratedChoicePlaysWhatTheTablePlays(t *testing.T) {
+	st := playbacktest.MigratedState(dsdstate.ModeNative, false, []int{playbacktest.DSD64}, nil)
+	every := []int{playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256}
+	b := policyBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(st), shippedList(t))
+	for _, rate := range every {
+		if plan, _, err := b.AdmitDSDForTest(dsdAt(rate), true); err != nil || plan.Tuple.Transport != "" {
+			t.Errorf("DSD at %d on a DAC no row knows: %+v, %v; want it native", rate, plan, err)
 		}
 	}
-	p := b.Policy()
+	if rates, _ := ratesOf(b.Policy()); !slices.Equal(rates, every) {
+		t.Errorf("the publication lists %v, want native at every rate", rates)
+	}
+	board := policyBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(st))
+	if plan, _, err := board.AdmitDSDForTest(dsdAt(playbacktest.DSD64), true); err != nil || plan.Tuple.Transport != "" {
+		t.Errorf("the approved rate with no list: %+v, %v; want it native", plan, err)
+	}
+	for _, rate := range []int{playbacktest.DSD128, playbacktest.DSD256} {
+		if _, _, err := board.AdmitDSDForTest(dsdAt(rate), false); reasonOf(err) != "native_check_required" {
+			t.Errorf("DSD at %d with no list, which the record did not approve: %v, want native_check_required", rate, err)
+		}
+	}
+	p := board.Policy()
 	if rates, _ := ratesOf(p); !slices.Equal(rates, []int{playbacktest.DSD64}) || p.Reason != "" {
 		t.Errorf("the publication %+v (%q), want DSD64 alone and no reason", p.Tuples, p.Reason)
 	}
@@ -323,7 +337,7 @@ func TestThePublishedReasonIsTheLowestRatesWordOnlyWhenNoRatePlays(t *testing.T)
 	native := playbacktest.NativeAltset()
 	native.Rates = []int{176400, 352800}
 	box.SetAltsets(5, 0, playbacktest.S32Altset(), native)
-	b := policyBackend(t, box, playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeNative)))
+	b := policyBackend(t, box, playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeNative)), shippedList(t))
 	b.RefreshDSD(true)
 	if p := b.Policy(); p.Reason != "" || len(p.Tuples) != 2 || p.Tuples[0].Tuple.BitRate != playbacktest.DSD128 {
 		t.Errorf("a set playing DSD128 and DSD256: %+v (%q), want their tuples and no reason", p.Tuples, p.Reason)

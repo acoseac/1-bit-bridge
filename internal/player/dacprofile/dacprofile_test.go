@@ -232,9 +232,10 @@ func TestAProfileMatchesByUSBIdentityNeverByName(t *testing.T) {
 
 // TestASharedReferenceIDNeedsItsProductString: the database lists the XMOS
 // reference ID the captured iFi unit carries (20b1:0010), the Amanero board's
-// (16d0:071a), the C-Media ID the kernel gives a DSD quirk under one maker's
-// name while another maker's units ship it too (0d8c:0316), and the WaveIO
-// board's (20a0:4143), each with why; a unit on any of them is unknown, the
+// (16d0:071a) and its newer firmware's (16d0:0a23, B990), the C-Media ID the
+// kernel gives a DSD quirk under one maker's name while another maker's units
+// ship it too (0d8c:0316), and the WaveIO board's (20a0:4143), each with why;
+// a unit on any of them is unknown, the
 // iFi unit included (its capture establishes no DoP, raw-maximum or native
 // claim), whatever product string it carries, until a capture gives one; a
 // profile on a shared ID without its product string is refused by the lint,
@@ -243,7 +244,7 @@ func TestAProfileMatchesByUSBIdentityNeverByName(t *testing.T) {
 // an alternative without its product string.
 func TestASharedReferenceIDNeedsItsProductString(t *testing.T) {
 	db := mustDefault(t)
-	for _, want := range [][2]string{{"20b1", "0010"}, {"16d0", "071a"}, {"0d8c", "0316"}, {"20a0", "4143"}} {
+	for _, want := range [][2]string{{"20b1", "0010"}, {"16d0", "071a"}, {"16d0", "0a23"}, {"0d8c", "0316"}, {"20a0", "4143"}} {
 		i := slices.IndexFunc(db.SharedReferenceIDs, func(s SharedID) bool { return s.VendorID == want[0] && s.ProductID == want[1] })
 		if i < 0 {
 			t.Errorf("the database does not list %s:%s as a shared reference ID", want[0], want[1])
@@ -261,6 +262,7 @@ func TestASharedReferenceIDNeedsItsProductString(t *testing.T) {
 		unit(t, 0x20a0, 0x4143, ptr(0), ptr("A DAC built on the board"), "0100"),
 		unit(t, 0x20a0, 0x4143, nil, nil, ""),
 		unit(t, 0x16d0, 0x071a, ptr(0), ptr("Combo384"), "019b"),
+		unit(t, 0x16d0, 0x0a23, ptr(0), ptr("Combo384"), "0100"),
 	} {
 		if got := matched(db, u); got != "" {
 			t.Errorf("a unit on the shared ID %04x:%04x is known as %q", u.Key.VendorID(), u.Key.ProductID(), got)

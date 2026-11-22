@@ -15,10 +15,11 @@ import (
 )
 
 // A choice write's checks that read the state and what it writes (B728 B9;
-// the design's sections 2.5 and 7.2): the compare-and-set, the mode offered,
-// DoP's confirmation and first use, each in that order and each refusing with
-// the state as it was; and the write itself, its revision, its confirmation,
-// its acknowledgements, the rejections it clears and the warnings it clears.
+// the design's sections 2.5 and 7.2): the compare-and-set, the mode offered
+// and DoP's confirmation, each in that order and each refusing with the state
+// as it was (first use is no check since B990); and the write itself, its
+// revision, its confirmation, its acknowledgements, the rejections its retry
+// clears and the warnings it clears.
 
 // t1 is when the tests' writes are made.
 var t1 = t0.Add(time.Hour)
@@ -82,7 +83,8 @@ func everyRate(f *dsdstate.FirstUse) bool {
 
 // TestTheChecksThatReadTheStateRunInTheirOrder: a write that fails several
 // checks is refused by the first in the design's order, the compare-and-set,
-// then the mode, then DoP's confirmation, then first use.
+// then the mode, then DoP's confirmation; first use is no check (B990), so
+// the write that passes those three lands with nothing acknowledged.
 func TestTheChecksThatReadTheStateRunInTheirOrder(t *testing.T) {
 	// An unknown DAC with no choice (revision 0), no carrier for DoP at all,
 	// and nothing acknowledged.
@@ -93,8 +95,7 @@ func TestTheChecksThatReadTheStateRunInTheirOrder(t *testing.T) {
 	refusedWith(t, r.inputs(), Choice{BaseRevision: 0, Mode: dsdstate.ModeDoP}, ChoiceModeNotOffered)
 	r = newRig(t)
 	refusedWith(t, r.inputs(), Choice{Mode: dsdstate.ModeDoP}, ChoiceConfirmationRequired)
-	refusedWith(t, r.inputs(), Choice{Mode: dsdstate.ModeDoP, ConfirmDoP: true}, ChoiceFirstUseUnacknowledged)
-	choose(t, r.inputs(), Choice{Mode: dsdstate.ModeDoP, ConfirmDoP: true, FirstUseAcknowledged: true})
+	choose(t, r.inputs(), Choice{Mode: dsdstate.ModeDoP, ConfirmDoP: true})
 }
 
 // TestTheStoredRevisionIsWhatTheReadSidePublishes: the revision a write's base
@@ -244,98 +245,6 @@ func TestTheConfirmationSurvivesLeavingDoP(t *testing.T) {
 	}
 }
 
-// TestNativeOrDoPNeedsFirstUseAcknowledged (B728 B9; the design's sections 3.2,
-// 6.1 and 7.2): an explicit native or DoP whose first use is not acknowledged
-// at every rate under the unit's firmware carries firstUseAcknowledged, which
-// records an acknowledgement of that transport at every rate under it; one
-// acknowledged at every rate under it needs none, one acknowledged under
-// another firmware does; auto, convert and off never need it.
-func TestNativeOrDoPNeedsFirstUseAcknowledged(t *testing.T) {
-	for _, tc := range []struct{ mode, transport string }{
-		{dsdstate.ModeNative, dsdstate.TransportNative},
-		{dsdstate.ModeDoP, dsdstate.TransportDoP},
-	} {
-		t.Run(tc.mode, func(t *testing.T) {
-			r := newRig(t)
-			r.confirm()
-			refusedWith(t, r.inputs(), Choice{Mode: tc.mode}, ChoiceFirstUseUnacknowledged)
-			st := choose(t, r.inputs(), Choice{Mode: tc.mode, FirstUseAcknowledged: true})
-			d := dacOfState(t, st)
-			if !everyRate(firstUseIn(d, tc.transport)) {
-				t.Fatalf("the acknowledgement written: %+v, want %s at every rate under %s", d.FirstUse, tc.transport, bcd)
-			}
-			if len(d.FirstUse) != 1 {
-				t.Errorf("an explicit %s acknowledged %+v: the other transport too", tc.mode, d.FirstUse)
-			}
-			r.acknowledge(tc.transport)
-			choose(t, r.inputs(), Choice{Mode: tc.mode})
-			r.firstUse = []dsdstate.FirstUse{{Transport: tc.transport, BCDDevice: "0200", AcknowledgedAt: t0}}
-			refusedWith(t, r.inputs(), Choice{Mode: tc.mode}, ChoiceFirstUseUnacknowledged)
-		})
-	}
-	for _, mode := range []string{dsdstate.ModeAuto, dsdstate.ModeConvert, dsdstate.ModeOff} {
-		choose(t, newRig(t).inputs(), Choice{Mode: mode})
-	}
-}
-
-// TestChoosingARejectedTransportAgainClearsTheRejection (B728 B9; the design's
-// sections 1.2 and 7.2): a listener's rejection re-arms that transport's first
-// use, so a state that holds one for the transport at any rate under the
-// unit's firmware needs the acknowledgement, even beside an acknowledgement
-// that would cover the rate; the write that carries it clears that
-// transport's rejections under the firmware, and leaves its clean answers,
-// the other transport's and another firmware's alone. auto clears no
-// rejection, which only an explicit choice of the transport does.
-func TestChoosingARejectedTransportAgainClearsTheRejection(t *testing.T) {
-	rejected := func() *rig {
-		r := newRig(t)
-		r.known = true
-		r.profileNative = &dacprofile.Native{MaxBitRate: dsd256, Formats: []string{"DSD_U32_BE"}}
-		r.mode = dsdstate.ModeNative
-		r.acknowledge(dsdstate.TransportNative)
-		r.hear(dsdstate.TransportNative, dsd64, dsdstate.AnswerNoise)
-		r.hear(dsdstate.TransportNative, dsd128, dsdstate.AnswerClean)
-		r.hear(dsdstate.TransportDoP, dsd64, dsdstate.AnswerNothing)
-		r.listener = append(r.listener, dsdstate.Answer{Transport: dsdstate.TransportNative, BitRate: dsd256, BCDDevice: "0200", Answer: dsdstate.AnswerNoise})
-		return r
-	}
-	r := rejected()
-	refusedWith(t, r.inputs(), Choice{BaseRevision: 1, Mode: dsdstate.ModeNative}, ChoiceFirstUseUnacknowledged)
-	st := choose(t, r.inputs(), Choice{BaseRevision: 1, Mode: dsdstate.ModeNative, FirstUseAcknowledged: true})
-	d := dacOfState(t, st)
-	want := []dsdstate.Answer{
-		{Transport: dsdstate.TransportNative, BitRate: dsd128, BCDDevice: bcd, Answer: dsdstate.AnswerClean, On: "2026-11-05"},
-		{Transport: dsdstate.TransportNative, BitRate: dsd256, BCDDevice: "0200", Answer: dsdstate.AnswerNoise},
-		{Transport: dsdstate.TransportDoP, BitRate: dsd64, BCDDevice: bcd, Answer: dsdstate.AnswerNothing, On: "2026-11-05"},
-	}
-	got := slices.Clone(d.Listener)
-	slices.SortFunc(got, func(a, b dsdstate.Answer) int {
-		return cmpAnswer(a, b)
-	})
-	slices.SortFunc(want, cmpAnswer)
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("the answers after native was chosen again: %+v, want %+v", got, want)
-	}
-	if !everyRate(firstUseIn(d, dsdstate.TransportNative)) {
-		t.Errorf("the acknowledgement after native was chosen again: %+v", d.FirstUse)
-	}
-	// The rejection cleared, native plays at DSD64 again.
-	in := r.inputs()
-	in.State = st
-	if p := Effective(in).At(dsd64).Plan; p.Outcome != OutcomeNative {
-		t.Errorf("native at DSD64 once its rejection was cleared: %s %s", p.Outcome, p.Reason)
-	}
-	t.Run("auto clears no rejection", func(t *testing.T) {
-		r := rejected()
-		st := choose(t, r.inputs(), Choice{BaseRevision: 1, Mode: dsdstate.ModeAuto, FirstUseAcknowledged: true})
-		if !slices.ContainsFunc(dacOfState(t, st).Listener, func(a dsdstate.Answer) bool {
-			return a.Transport == dsdstate.TransportNative && a.BitRate == dsd64 && a.Answer == dsdstate.AnswerNoise
-		}) {
-			t.Errorf("an auto write cleared native's rejection: %+v", dacOfState(t, st).Listener)
-		}
-	})
-}
-
 // cmpAnswer orders answers by transport, rate and firmware.
 func cmpAnswer(a, b dsdstate.Answer) int {
 	switch {
@@ -356,9 +265,11 @@ func cmpAnswer(a, b dsdstate.Answer) int {
 }
 
 // TestAnAcknowledgementWidensAMigratedChoiceToEveryRate (B728 B9; the design's
-// sections 2.5 and 3.2): a migrated acknowledgement covers its record's rates
-// alone, so choosing the mode again needs the acknowledgement, and the write
-// that carries it replaces the entry with one that covers every rate.
+// sections 2.5 and 3.2; B990): a migrated acknowledgement covers its record's
+// rates alone; choosing the mode again without the acknowledgement keeps the
+// entry as it was, and the write that carries it replaces the entry with one
+// that covers every rate. Native plays at every rate after either: no rate is
+// gated on it.
 func TestAnAcknowledgementWidensAMigratedChoiceToEveryRate(t *testing.T) {
 	r := newRig(t)
 	r.known = true
@@ -367,12 +278,21 @@ func TestAnAcknowledgementWidensAMigratedChoiceToEveryRate(t *testing.T) {
 	r.by = dsdstate.ByMigration
 	r.acknowledge(dsdstate.TransportNative, dsd64)
 	r.firstUse[0].ObservedAt = t0
-	refusedWith(t, r.inputs(), Choice{BaseRevision: 1, Mode: dsdstate.ModeNative}, ChoiceFirstUseUnacknowledged)
+	kept := choose(t, r.inputs(), Choice{BaseRevision: 1, Mode: dsdstate.ModeNative})
+	if f := firstUseIn(dacOfState(t, kept), dsdstate.TransportNative); f == nil || !slices.Equal(f.BitRates, []int{dsd64}) || !f.ObservedAt.Equal(t0) {
+		t.Errorf("the acknowledgement after a write that carried none: %+v, want the migrated one as it was", f)
+	}
+	in := r.inputs()
+	in.State = kept
+	for _, rate := range dsdRates {
+		if p := Effective(in).At(rate).Plan; p.Outcome != OutcomeNative {
+			t.Errorf("native at %d after a write that carried no acknowledgement: %s %s", rate, p.Outcome, p.Reason)
+		}
+	}
 	st := choose(t, r.inputs(), Choice{BaseRevision: 1, Mode: dsdstate.ModeNative, FirstUseAcknowledged: true})
 	if f := firstUseIn(dacOfState(t, st), dsdstate.TransportNative); !everyRate(f) {
 		t.Fatalf("the acknowledgement after the write: %+v, want every rate, acknowledged now and not yet observed", f)
 	}
-	in := r.inputs()
 	in.State = st
 	for _, rate := range dsdRates {
 		if p := Effective(in).At(rate).Plan; p.Outcome != OutcomeNative {

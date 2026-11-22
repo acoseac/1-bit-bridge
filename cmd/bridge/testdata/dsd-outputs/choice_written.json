@@ -4,7 +4,7 @@
   "body": {
     "dsdPlayback": {
       "bootId": "golden-boot",
-      "policyGeneration": 2,
+      "policyGeneration": 3,
       "publication": 3,
       "tuples": [],
       "converted": [

@@ -162,34 +162,22 @@ func migrated(t *testing.T, mode string, allowDoP bool) dsdstate.State {
 	return s
 }
 
-// TestAdmissionIsPerRateForAMigratedAcknowledgement: an owner who approved
+// TestAMigratedAcknowledgementGatesNoRate (B990): an owner who approved
 // native DSD64 alone has, once migrated, native's first use acknowledged at
-// DSD64 alone: native plays there, and DSD128 and DSD256 refuse as
-// first_use_pending under the migrated native and convert under a migrated
-// auto, until an acknowledgement of the transport covers every rate.
-func TestAdmissionIsPerRateForAMigratedAcknowledgement(t *testing.T) {
+// DSD64 alone, which the state keeps as it is; on a known DAC native plays at
+// every rate the DAC offers under the migrated native and the migrated auto,
+// DSD128 and DSD256 included, since no rate is gated on first use.
+func TestAMigratedAcknowledgementGatesNoRate(t *testing.T) {
 	for _, mode := range []string{dsdstate.ModeNative, dsdstate.ModeAuto} {
 		r := newRig(t).withoutCarrier()
 		r.known = true
 		in := r.inputs()
 		in.State = migrated(t, mode, false)
-		s := Effective(in)
-		wantOutcome(t, "migrated "+mode+", DSD64", s.At(dsd64).Plan, OutcomeNative)
-		for _, rate := range []int{dsd128, dsd256} {
-			p := s.At(rate).Plan
-			if mode == dsdstate.ModeNative {
-				wantOutcome(t, "migrated native above its record's rates", p, OutcomeRefused, ReasonFirstUsePending)
-			} else {
-				wantOutcome(t, "migrated auto above its record's rates", p, OutcomeConverted)
-			}
-		}
-		// A later acknowledgement of the transport covers every rate.
-		d := &in.State.DACs[0]
-		for i := range d.FirstUse {
-			d.FirstUse[i].BitRates = nil
+		if f := in.State.DACs[0].FirstUse; len(f) != 1 || !slices.Equal(f[0].BitRates, []int{dsd64}) {
+			t.Fatalf("migrated %s acknowledged %+v, want native at DSD64 alone", mode, f)
 		}
 		for _, rate := range dsdRates {
-			wantOutcome(t, "migrated "+mode+" acknowledged since", Effective(in).At(rate).Plan, OutcomeNative)
+			wantOutcome(t, fmt.Sprintf("migrated %s at %d", mode, rate), Effective(in).At(rate).Plan, OutcomeNative)
 		}
 	}
 }
@@ -236,8 +224,8 @@ func migratedEntry(t *testing.T, mode string, record bool) dsdstate.DAC {
 // confirmation), the profile's claims beside it: with every clause of the
 // row's cell holding its transport plays, and each clause failing in each way
 // TestTheEffectivePolicyTable knows refuses with the word the clause names.
-// The migration of no record, the choice alone, refuses every rate as
-// first_use_pending; neither converts.
+// The migration of no record, the choice alone, plays its transport at every
+// rate, no first use being asked (B990).
 func TestAnExplicitChoiceNeverConvertsWrittenOrMigrated(t *testing.T) {
 	rows := designTable(t)
 	for _, c := range []struct {
@@ -295,7 +283,7 @@ func TestAnExplicitChoiceNeverConvertsWrittenOrMigrated(t *testing.T) {
 			}
 			r := base(false)
 			for _, rate := range dsdRates {
-				wantOutcome(t, "migrated "+c.mode+" with no record", r.plan(rate), OutcomeRefused, ReasonFirstUsePending)
+				wantOutcome(t, "migrated "+c.mode+" with no record", r.plan(rate), c.outcome)
 			}
 		})
 	}
@@ -588,12 +576,13 @@ func TestEachTuplePublishesItsHighestRungOnThisFirmware(t *testing.T) {
 
 // TestTheRefusalsComeInTheirOrder: where several conditions fail under an
 // explicit native or dop, the reason is the first in the order the policy
-// gives (decide's doc).
+// gives (decide's doc), on a known DAC and, for native, on an unknown one
+// whose IDs are a generic board's (no DAC list to ask).
 func TestTheRefusalsComeInTheirOrder(t *testing.T) {
-	steps := func(mode string, fixes []func(*rig), want []engine.Reason) {
+	steps := func(mode string, known bool, fixes []func(*rig), want []engine.Reason) {
 		t.Helper()
 		r := newRig(t)
-		r.known, r.mode = true, mode
+		r.known, r.mode = known, mode
 		r.withoutNative().withoutCarrier()
 		r.answer(format.DSDU32BE, testRate/32, alsapcm.ProbeAccepted, 32)
 		r.max = dsd64
@@ -612,13 +601,18 @@ func TestTheRefusalsComeInTheirOrder(t *testing.T) {
 			wantOutcome(t, "dop once every condition holds", r.plan(testRate), OutcomeDoP)
 		}
 	}
-	steps(dsdstate.ModeNative, []func(*rig){
+	steps(dsdstate.ModeNative, true, []func(*rig){
 		func(r *rig) { r.altsets = append(r.altsets, nativeAltset()) },
 		func(r *rig) { r.forget(dsdstate.TransportNative, testRate) },
 		func(r *rig) { r.max = 0 },
-		func(r *rig) { r.acknowledge(dsdstate.TransportNative) },
-	}, []engine.Reason{ReasonNativeNotOffered, ReasonListenerRejected, ReasonAboveChoice, ReasonFirstUsePending})
-	steps(dsdstate.ModeDoP, []func(*rig){
+	}, []engine.Reason{ReasonNativeNotOffered, ReasonListenerRejected, ReasonAboveChoice})
+	steps(dsdstate.ModeNative, false, []func(*rig){
+		func(r *rig) { r.altsets = append(r.altsets, nativeAltset()) },
+		func(r *rig) { r.forget(dsdstate.TransportNative, testRate) },
+		func(r *rig) { r.hear(dsdstate.TransportNative, testRate, dsdstate.AnswerClean) },
+		func(r *rig) { r.max = 0 },
+	}, []engine.Reason{ReasonNativeNotOffered, ReasonListenerRejected, ReasonNativeCheckRequired, ReasonAboveChoice})
+	steps(dsdstate.ModeDoP, true, []func(*rig){
 		func(r *rig) { r.altsets = append(r.altsets, s32Altset()) },
 		func(r *rig) { r.forget(dsdstate.TransportDoP, testRate) },
 		func(r *rig) {
@@ -629,8 +623,7 @@ func TestTheRefusalsComeInTheirOrder(t *testing.T) {
 		},
 		func(r *rig) { r.confirm() },
 		func(r *rig) { r.max = 0 },
-		func(r *rig) { r.acknowledge(dsdstate.TransportDoP) },
-	}, []engine.Reason{ReasonDoPNotOffered, ReasonListenerRejected, ReasonGainUnverifiable, ReasonGainNotUnity, ReasonConfirmationRequired, ReasonAboveChoice, ReasonFirstUsePending})
+	}, []engine.Reason{ReasonDoPNotOffered, ReasonListenerRejected, ReasonGainUnverifiable, ReasonGainNotUnity, ReasonConfirmationRequired, ReasonAboveChoice})
 }
 
 // TestTheConversionTargetIsTheDACsBest: a conversion's target is 176.4 kHz

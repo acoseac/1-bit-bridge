@@ -17,6 +17,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
@@ -140,6 +141,18 @@ func choiceOf(t *testing.T, b *playback.Backend, mode string, base uint64, edit 
 func acknowledged(r *playback.ChoiceRequest) { r.Choice.FirstUseAcknowledged = true }
 func confirmed(r *playback.ChoiceRequest)    { r.Choice.ConfirmDoP = true }
 
+// shippedList gives a policy the shipped DAC list, which does not know the
+// test DAC and holds its IDs as no generic board's, so native plays on it
+// (B990); with no list it would count as on one.
+func shippedList(t *testing.T) func(*playback.DSDPolicy) {
+	t.Helper()
+	db, err := dacprofile.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return func(p *playback.DSDPolicy) { p.Profiles = db }
+}
+
 // wantChoice fails t unless res's outcome is want.
 func wantChoice(t *testing.T, res playback.ChoiceResult, want playback.ChoiceOutcome) {
 	t.Helper()
@@ -152,32 +165,36 @@ func wantChoice(t *testing.T, res playback.ChoiceResult, want playback.ChoiceOut
 // section 7.2): a write lands in the state, moves the choice's revision, and
 // is answered with the epoch the backend published once it was written, which
 // is what the backend publishes afterwards: a choice that leaves what plays as
-// it was (auto converting an unknown DAC's DSD, then convert) at the same
-// generation, and one that changes it (native) at the next.
+// it was (auto playing native on a DAC the shipped list does not know, B990,
+// then native, with no acknowledgement) at the same generation, and one that
+// changes it (convert) at the next.
 func TestAChoiceIsWrittenAndAnsweredFromTheEpochItPublished(t *testing.T) {
-	b, store, _ := choiceBackend(t, dsdstate.Defaults())
+	b, store, _ := choiceBackend(t, dsdstate.Defaults(), shippedList(t))
 	before := b.Policy()
-	res := b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeConvert, 0))
+	if rates, _ := ratesOf(before); !slices.Equal(rates, []int{playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256}) {
+		t.Fatalf("auto published tuples at %v, want native at the three rates", rates)
+	}
+	res := b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 0))
 	wantChoice(t, res, playback.ChoiceWritten)
 	if !reflect.DeepEqual(res.Policy, b.Policy()) {
 		t.Errorf("the answer's epoch %+v is not the one published after it %+v", res.Policy, b.Policy())
 	}
 	if res.Policy.Generation != before.Generation {
-		t.Errorf("convert after auto, which converted the same rates, published generation %d after %d: a change that leaves what plays as it was keeps the generation", res.Policy.Generation, before.Generation)
+		t.Errorf("native after auto, which played the same rates natively, published generation %d after %d: a change that leaves what plays as it was keeps the generation", res.Policy.Generation, before.Generation)
 	}
-	if c := res.Policy.DSD.DAC.Choice; c.Mode != dsdstate.ModeConvert || c.Revision != 1 {
-		t.Errorf("the answer's choice %+v, want convert at revision 1", c)
+	if c := res.Policy.DSD.DAC.Choice; c.Mode != dsdstate.ModeNative || c.Revision != 1 {
+		t.Errorf("the answer's choice %+v, want native at revision 1", c)
 	}
-	if mode, _, own := store.State().ChoiceFor(playbacktest.DACKey(), playbacktest.DACStamp()); !own || mode != dsdstate.ModeConvert {
-		t.Errorf("the state holds %s (own %v), want convert", mode, own)
+	if mode, _, own := store.State().ChoiceFor(playbacktest.DACKey(), playbacktest.DACStamp()); !own || mode != dsdstate.ModeNative {
+		t.Errorf("the state holds %s (own %v), want native", mode, own)
 	}
-	res = b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1, acknowledged))
+	res = b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeConvert, 1))
 	wantChoice(t, res, playback.ChoiceWritten)
 	if res.Policy.Generation != before.Generation+1 {
-		t.Errorf("native after convert published generation %d, want %d", res.Policy.Generation, before.Generation+1)
+		t.Errorf("convert after native published generation %d, want %d", res.Policy.Generation, before.Generation+1)
 	}
-	if rates, _ := ratesOf(res.Policy); !slices.Equal(rates, []int{playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256}) {
-		t.Errorf("native published tuples at %v, want the three rates", rates)
+	if rates, _ := ratesOf(res.Policy); len(rates) != 0 || len(res.Policy.Converted) != 3 {
+		t.Errorf("convert published tuples at %v and converts %+v, want the three rates converted", rates, res.Policy.Converted)
 	}
 }
 
@@ -242,9 +259,6 @@ func TestEveryRefusalChangesNothing(t *testing.T) {
 		{"DoP unconfirmed", dsdstate.Defaults(), nil, nil, func(t *testing.T, b *playback.Backend) playback.ChoiceRequest {
 			return choiceOf(t, b, dsdstate.ModeDoP, 0, acknowledged)
 		}, playback.ChoiceConfirmationRequired},
-		{"first use unacknowledged", dsdstate.Defaults(), nil, nil, func(t *testing.T, b *playback.Backend) playback.ChoiceRequest {
-			return choiceOf(t, b, dsdstate.ModeNative, 0)
-		}, playback.ChoiceFirstUseUnacknowledged},
 		{"a write that fails before it lands", native, nil, func(m *playbacktest.MemStore) { m.Fail(errors.New("no space left on device")) },
 			func(t *testing.T, b *playback.Backend) playback.ChoiceRequest {
 				return choiceOf(t, b, dsdstate.ModeOff, 1)
@@ -538,19 +552,30 @@ func TestARevisionMovedBeforeTheStoresWriteIsStale(t *testing.T) {
 	}
 }
 
-// TestARejectionAtTheCurrentRevisionNeedsTheAcknowledgement (binding note 2):
-// a state that holds a listener's rejection of native at its current revision
-// needs the acknowledgement to choose native again, answers the first-use
-// word without it, and clears the rejection with it.
-func TestARejectionAtTheCurrentRevisionNeedsTheAcknowledgement(t *testing.T) {
+// TestARejectionAtTheCurrentRevisionGoesOnlyWithItsTransportsRetry (binding
+// note 2; B990): a state that holds a listener's rejection of native at its
+// current revision, native the DAC's choice, keeps it through a write of
+// native again, with the acknowledgement or without, and through one of
+// another mode; the transport's retry, native chosen once the choice is
+// another mode, clears it.
+func TestARejectionAtTheCurrentRevisionGoesOnlyWithItsTransportsRetry(t *testing.T) {
 	st := playbacktest.ChoiceState(dsdstate.ModeNative)
 	st.DACs[0].Listener = []dsdstate.Answer{{Transport: dsdstate.TransportNative, BitRate: playbacktest.DSD64, BCDDevice: playbacktest.DACBCD, Answer: dsdstate.AnswerNoise, On: "2026-11-06"}}
 	b, store, _ := choiceBackend(t, st)
-	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1)), playback.ChoiceFirstUseUnacknowledged)
-	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1, acknowledged)), playback.ChoiceWritten)
-	if d, _ := store.State().DAC(playbacktest.DACKey(), playbacktest.DACStamp()); len(d.Listener) != 0 {
-		t.Errorf("the rejection is still held: %+v", d.Listener)
+	held := func(what string, want bool) {
+		t.Helper()
+		if d, _ := store.State().DAC(playbacktest.DACKey(), playbacktest.DACStamp()); (len(d.Listener) != 0) != want {
+			t.Errorf("%s: the listener's answers %+v, want the rejection held %v", what, d.Listener, want)
+		}
 	}
+	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1)), playback.ChoiceWritten)
+	held("native again", true)
+	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 2, acknowledged)), playback.ChoiceWritten)
+	held("native again, acknowledged", true)
+	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeConvert, 3)), playback.ChoiceWritten)
+	held("convert", true)
+	wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 4)), playback.ChoiceWritten)
+	held("native chosen over convert", false)
 }
 
 // TestTheRevisionOfAStateThatDidNotRead (binding notes 2 and 13): a state that
@@ -589,9 +614,9 @@ func TestTheRevisionOfAStateThatDidNotRead(t *testing.T) {
 // evidence never moves the choice's revision, so a write whose base was read
 // before an evidence write that lands while it is made lands too, the evidence
 // kept; and a listener's answer written between the write's lease and its
-// state's write is what the write's checks read, on the state the write is
-// made from: native's rejection re-arms first use, which a write without the
-// acknowledgement is refused for and one with it clears.
+// state's write is what the write reads, on the state the write is made from:
+// native's rejection, which a write of native over the DAC's own native keeps
+// and native's retry, chosen over auto, clears (B990).
 func TestAnEvidenceWriteRacingAChoiceMovesNoRevision(t *testing.T) {
 	t.Run("streaming observed", func(t *testing.T) {
 		b, store, _ := choiceBackend(t, playbacktest.ChoiceState(dsdstate.ModeNative))
@@ -617,14 +642,14 @@ func TestAnEvidenceWriteRacingAChoiceMovesNoRevision(t *testing.T) {
 	})
 	for _, tc := range []struct {
 		name string
-		ack  bool
-		want playback.ChoiceOutcome
+		from string
+		kept bool
 	}{
-		{"a rejection written in the write's window, the write unacknowledged", false, playback.ChoiceFirstUseUnacknowledged},
-		{"a rejection written in the write's window, the write acknowledged", true, playback.ChoiceWritten},
+		{"a rejection written in the write's window, native over native", dsdstate.ModeNative, true},
+		{"a rejection written in the write's window, native's retry over auto", dsdstate.ModeAuto, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, store, _ := choiceBackend(t, playbacktest.ChoiceState(dsdstate.ModeAuto), func(p *playback.DSDPolicy) { p.Profiles = playbacktest.KnownProfiles(nil) })
+			b, store, _ := choiceBackend(t, playbacktest.ChoiceState(tc.from), func(p *playback.DSDPolicy) { p.Profiles = playbacktest.KnownProfiles(nil) })
 			var leased atomic.Int32
 			playback.SetSeamsForTest(b, &playback.Seams{ChoiceLeased: func() {
 				if leased.Add(1) != 1 {
@@ -637,15 +662,13 @@ func TestAnEvidenceWriteRacingAChoiceMovesNoRevision(t *testing.T) {
 					t.Error(err)
 				}
 			}})
-			req := choiceOf(t, b, dsdstate.ModeNative, 1)
-			req.Choice.FirstUseAcknowledged = tc.ack
-			wantChoice(t, b.ChooseDSD(bg, req), tc.want)
+			wantChoice(t, b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1)), playback.ChoiceWritten)
 			if got := leased.Load(); got != 1 {
 				t.Errorf("the write took the lease %d times, want once: a write goes round no more", got)
 			}
 			d, _ := store.State().DAC(playbacktest.DACKey(), playbacktest.DACStamp())
-			if rejected := len(d.Listener) != 0; rejected == tc.ack {
-				t.Errorf("the listener's answers after the write: %+v; want the rejection kept unless the write acknowledged native", d.Listener)
+			if rejected := len(d.Listener) != 0; rejected != tc.kept {
+				t.Errorf("the listener's answers after the write: %+v; want the rejection kept %v", d.Listener, tc.kept)
 			}
 		})
 	}
@@ -829,6 +852,7 @@ func acceptedNative(ep alsapcm.Endpoint) alsapcm.ProbeReport {
 func TestAWrittenChoiceOwesAProbeAndKeepsTheProbesAnswers(t *testing.T) {
 	store := playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeNative))
 	pol := playbacktest.Policy(5, playbacktest.NewBox(5), store)
+	shippedList(t)(pol)
 	unit := alsapcm.ProbeUnit{Model: playbacktest.DACKey().Canonical(), Stamp: string(playbacktest.DACStamp()), Firmware: playbacktest.DACBCD, Kernel: playbacktest.Kernel, Enumeration: "test/2"}
 	pol.Probes.Record(pol.Probes.Begin(unit), acceptedNative(alsapcm.Endpoint{Card: 5}))
 	var asked atomic.Int32
@@ -878,7 +902,7 @@ func TestAWrittenChoiceOwesAProbeAndKeepsTheProbesAnswers(t *testing.T) {
 		t.Error("the probe ran and is still owed")
 	}
 	t.Run("never a driver acceptance the probe did not give", func(t *testing.T) {
-		b, _, _ := choiceBackend(t, playbacktest.ChoiceState(dsdstate.ModeNative))
+		b, _, _ := choiceBackend(t, playbacktest.ChoiceState(dsdstate.ModeNative), shippedList(t))
 		res := b.ChooseDSD(bg, choiceOf(t, b, dsdstate.ModeNative, 1))
 		wantChoice(t, res, playback.ChoiceWritten)
 		for _, e := range res.Policy.DSD.Evidence {

@@ -10,7 +10,6 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
-	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
@@ -23,10 +22,6 @@ import (
 // where only a listener's clean answer at the rate admits it. The cases take
 // the shipped DAC list (dacprofile.Default), whose matcher decides what is
 // known.
-
-// reasonCheckRequired is the word an explicit native on a generic board's IDs
-// is refused with at a rate no listener's answer holds clean.
-const reasonCheckRequired engine.Reason = "native_check_required"
 
 // shipped is the shipped DAC list, parsed afresh.
 func shipped(t *testing.T) *dacprofile.Database {
@@ -209,7 +204,7 @@ func TestAnUnknownDACPlaysNativeUnlessItsIDsAreAGenericBoards(t *testing.T) {
 			if mode == dsdstate.ModeAuto {
 				wantAt(t, what, s, dsdRates, OutcomeConverted)
 			} else {
-				wantAt(t, what, s, dsdRates, OutcomeRefused, reasonCheckRequired)
+				wantAt(t, what, s, dsdRates, OutcomeRefused, ReasonNativeCheckRequired)
 			}
 		}
 	}
@@ -275,7 +270,7 @@ func TestAListenersCleanAnswerKeepsNativeOnAGenericBoard(t *testing.T) {
 			if mode == dsdstate.ModeAuto {
 				wantAt(t, "migrated auto past its record's rate", s, []int{dsd128, dsd256}, OutcomeConverted)
 			} else {
-				wantAt(t, "migrated native past its record's rate", s, []int{dsd128, dsd256}, OutcomeRefused, reasonCheckRequired)
+				wantAt(t, "migrated native past its record's rate", s, []int{dsd128, dsd256}, OutcomeRefused, ReasonNativeCheckRequired)
 			}
 			i := slices.IndexFunc(in.State.DACs, func(d dsdstate.DAC) bool { return d.Key.Equal(board) })
 			d := &in.State.DACs[i]
@@ -525,7 +520,7 @@ func TestAnExplicitNativeOnAGenericBoardWaitsForACleanAnswer(t *testing.T) {
 		without := OutcomeConverted
 		var reason []any
 		if mode == dsdstate.ModeNative {
-			without, reason = OutcomeRefused, []any{reasonCheckRequired}
+			without, reason = OutcomeRefused, []any{ReasonNativeCheckRequired}
 		}
 		s := Effective(r.onCatalog(board, shipped(t)))
 		if s.Known {

@@ -213,8 +213,8 @@ var (
 // known to be durable (choiceFenced: persist_uncertain, a write of any
 // writer's, an evidence write's included, answered before the state's checks);
 // then the policy's, inside the state's one write, on the state that write is
-// made from (policy.Choose: stale, mode_not_offered, dop_confirmation_required,
-// first_use_unacknowledged). Then the state is written durably (persist_failed
+// made from (policy.Choose: stale, mode_not_offered,
+// dop_confirmation_required). Then the state is written durably (persist_failed
 // before it lands, nothing changed; persist_uncertain once it lands and its
 // sync fails, its state recorded (landedChoice) and the set published held to
 // what the two states play alike until the next start; state_unreadable where
