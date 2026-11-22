@@ -397,14 +397,15 @@ func letGoOnce(t *testing.T, ch chan struct{}) func() {
 	return f
 }
 
-// client is an HTTP/1.1 client to the newest LAN listener from from,
-// keeping its connection alive between requests.
+// lanClient is an HTTP/1.1 client of the newest LAN listener, keeping its
+// connection alive between requests.
 type lanClient struct {
 	t    *testing.T
 	conn net.Conn
 	rd   *bufio.Reader
 }
 
+// client dials the newest LAN listener from the source from.
 func (r *lanRig) client(from string) *lanClient {
 	r.t.Helper()
 	c, err := r.box.dial(netip.MustParseAddr(from))

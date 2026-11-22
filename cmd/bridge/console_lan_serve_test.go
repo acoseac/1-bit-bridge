@@ -722,5 +722,4 @@ func TestTheProductionSeamsAreConsolelansAndLans(t *testing.T) {
 	if err == nil || ifs != nil {
 		t.Fatalf("a failed reading converted to %v, %v", ifs, err)
 	}
-	_ = io.EOF
 }

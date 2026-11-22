@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
-	"github.com/acoseac/1-bit-bridge/internal/consolelan"
 )
 
 // bridge init's --admin-lan-address (backlog B989, the plan's §2.5 items 4
@@ -287,5 +286,4 @@ func TestARewriteDropsAKeptLANAddressTheCheckRefuses(t *testing.T) {
 	if !strings.Contains(out, "holds an adminLANAddress line its check refuses: it is not kept") {
 		t.Errorf("no line says why:\n%s", out)
 	}
-	_ = consolelan.RollbackWords
 }
