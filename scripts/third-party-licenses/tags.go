@@ -122,6 +122,7 @@ var reviewedBuildSites = map[string][]string{
 		"run: go test -tags @TAGS@ -timeout 30m ./...",
 		"go run -tags @TAGS@ ./scripts/dac-profiles/ios-export -check",
 		"go test -tags @TAGS@ ./internal/player/dacprofile ./scripts/dac-profiles/ios-export -count=1 -v",
+		"go test -c -tags @TAGS@ -o \"$RUNNER_TEMP/consolelan.test\" ./internal/consolelan",
 	},
 	".goreleaser.yaml": {
 		"- go run ./scripts/third-party-licenses",

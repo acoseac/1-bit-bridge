@@ -723,9 +723,45 @@ jobs:
       - name: shellcheck, then the installer's tests under each shell
         run: make installer-check INSTALLER_SHELLS="sh,dash,bash --posix,busybox sh,ksh"
 
+  # The console's home-network socket held by the kernel to its address's
+  # interface, against a routed client whose address lies inside that
+  # address's prefix (backlog B989, the plan's 9.5 and 10.4): three network
+  # namespaces and two veth pairs, which need root. The test binary is built
+  # as the runner's user, with the release tags, and only it runs as root;
+  # each side runs in a process of its own, the binary re-executed under
+  # `ip netns exec`. Everywhere else the test skips (no root, no
+  # BRIDGE_QUALIFY_ROUTED), so this job requires its PASS lines, the test's
+  # and each case's: a skip, or a run that ran nothing, fails it.
+  console-lan-routed:
+    name: console-lan routed client
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - name: a routed client inside the prefix gets no console
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -c -tags ts_omit_webclient,ts_omit_debugeventbus -o "$RUNNER_TEMP/consolelan.test" ./internal/consolelan
+          ip -V
+          sudo env BRIDGE_QUALIFY_ROUTED=1 "$RUNNER_TEMP/consolelan.test" -test.run '^TestARoutedClientInsideThePrefixGetsNoConsole$' -test.v -test.count=1 | tee "$RUNNER_TEMP/console-lan-routed.log"
+          grep -q '^--- PASS: TestARoutedClientInsideThePrefixGetsNoConsole (' "$RUNNER_TEMP/console-lan-routed.log"
+          for name in rfc1918 ula; do
+            grep -q "^    --- PASS: TestARoutedClientInsideThePrefixGetsNoConsole/${name} (" "$RUNNER_TEMP/console-lan-routed.log"
+          done
+
   gate:
     name: gate
-    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform, docs-check, alsa-abi, dac-profiles, native-qualification, installer]
+    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform, docs-check, alsa-abi, dac-profiles, native-qualification, installer, console-lan-routed]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
