@@ -70,7 +70,6 @@ func (d *Device) releaseNative(recovered ...func(any) error) (err error) {
 	if d.closed {
 		return nil
 	}
-	d.closed = true
 	answer := func(e *error) {
 		if len(recovered) > 0 {
 			if r := recover(); r != nil {
@@ -78,6 +77,7 @@ func (d *Device) releaseNative(recovered ...func(any) error) (err error) {
 			}
 		}
 	}
+	d.closed = true
 	defer func() {
 		err = errors.Join(err, func() (ce error) {
 			defer answer(&ce)
