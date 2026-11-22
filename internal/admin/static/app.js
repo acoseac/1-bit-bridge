@@ -8355,6 +8355,7 @@ const PLAYER_TONE_WORDS = {
   start_waiting: "The player is about to play.",
   session_holds: "The player holds its DAC.",
   tone_playing: "A test tone is playing already: stop it first, or wait for its end.",
+  check_running: "The player's DSD check is playing on the DAC: try again once it ends.",
   request_ended: "The tone's request ended, and the tone with it.",
   played: "The tone played to its end.",
   preempted: "The player started to play, and the tone stopped.",

@@ -242,6 +242,9 @@ type Seams struct {
 	// backend.
 	ToneEntering, ToneCounted, ToneAdmitted func()
 	ToneClosed                              func(closedOK bool)
+	// CheckPreparing runs on the DSD check's goroutine before the chime's
+	// build, given the check's context (Check, B728 B12). It may block.
+	CheckPreparing func(ctx context.Context)
 }
 
 // reconcilingPermission is the ReconcilingPermission seam.
@@ -549,6 +552,11 @@ type Backend struct {
 	tonesClosed bool
 	toneLast    ToneResult
 	toneFenced  bool
+	// checking is the DSD check that holds the device slot (Check, B728 B12),
+	// nil while none does; checkRec that check or the last; checksClosed
+	// CloseChecks' shut.
+	checking, checkRec *checkHold
+	checksClosed       bool
 	// lease is the configuration lease a choice's write holds (takeLease, B728
 	// B9 PR 2), nil while none does: taken in the step that finds no session's
 	// record, nothing holding the device and no release unconfirmed, it keeps
@@ -563,7 +571,7 @@ type Backend struct {
 	// of what it asked (publishProbe, B762). A Start that gave its wait up, or
 	// that its context or its release ended first, took nothing and is not
 	// counted (round 2). It moves under mu, which the probe's answers are
-	// decided under too (takeProbe, round 3).
+	// decided under too (takeProbe, round 3). A DSD check's take counts too.
 	starts atomic.Uint64
 
 	// The supervisor's refresh (RequestRefreshDSD, B762): its goroutine, a
@@ -582,6 +590,7 @@ type Backend struct {
 	// now on (CloseDSDWrites, B762 round 2). One lock, so a count of both is
 	// one reading (Running). tclosed is the console's tones closed to any asked
 	// from now on (CloseTones, B601): no tone is counted once it is set.
+	// cclosed is the DSD checks' (CloseChecks, B728 B12).
 	gmu     sync.Mutex
 	live    int
 	zero    chan struct{} // closed while live is 0
@@ -589,6 +598,7 @@ type Backend struct {
 	wzero   chan struct{} // closed while writes is 0
 	wclosed bool
 	tclosed bool
+	cclosed bool
 	// wrefused says, once, that a write came once the writes were closed.
 	wrefused sync.Once
 }
@@ -937,7 +947,8 @@ var errReleased = errors.New("player backend: the session's release came first: 
 // test tone in the slot (Tone, B601) is preempted: ended, on the record found
 // under the lock, and waited for as a probe is, at most ToneYield, its node
 // closed before the slot is taken; past it the device is busy, the tone's
-// close still held in the kernel.
+// close still held in the kernel. The DSD check in the slot (Check, B728 B12)
+// is waited for as a probe is, never ended (slotHeldLocked).
 func (b *Backend) hold(ctx context.Context, s *session) error {
 	var expired chan struct{}
 	stop := func() bool { return false }
@@ -956,8 +967,8 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 			b.mu.Unlock()
 			return engine.ErrReleaseUnconfirmed
 		}
-		p, tn := b.probing, b.toning
-		if p == nil && tn == nil {
+		held, bound, by := b.slotHeldLocked()
+		if held == nil {
 			if waiting {
 				b.waiters--
 				waiting = false
@@ -972,13 +983,6 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 			b.starts.Add(1)
 			b.mu.Unlock()
 			return nil
-		}
-		held, bound, by := (<-chan struct{})(nil), ProbeWait, "the silent probe"
-		if p != nil {
-			held = p.done
-		} else {
-			tn.end(TonePreempted)
-			held, bound, by = tn.done, ToneYield, "the console's test tone"
 		}
 		if !waiting {
 			b.waiters++
@@ -1003,6 +1007,22 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 			return errReleased
 		}
 	}
+}
+
+// slotHeldLocked is what a taker of the device slot waits for, its bound and
+// its name, nil while none holds it: the probe, the tone (ended preempted) or
+// the DSD check. b.mu is held.
+func (b *Backend) slotHeldLocked() (<-chan struct{}, time.Duration, string) {
+	switch {
+	case b.probing != nil:
+		return b.probing.done, ProbeWait, "the silent probe"
+	case b.toning != nil:
+		b.toning.end(TonePreempted)
+		return b.toning.done, ToneYield, "the console's test tone"
+	case b.checking != nil:
+		return b.checking.done, ProbeWait, "the DSD check"
+	}
+	return nil, 0, ""
 }
 
 // letGo ends s's hold, and its record once its Start has come.

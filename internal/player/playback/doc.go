@@ -180,13 +180,14 @@
 // The silent probe (Probe, B728 B4) shares that device slot: it takes it in
 // the step that finds no session holding it (none plays, opens, is paused or
 // is being released, no release was left unconfirmed, no choice's write
-// holds the configuration lease, B728 B9, and no console's test tone holds
-// it, B601), holds it from
+// holds the configuration lease, B728 B9, and no console's test tone or DSD
+// check holds it, B601, B728 B12), holds it from
 // the binding's location to its node's close, and a Start that comes
 // meanwhile waits for it, at most ProbeWait, holding nothing, then answers
 // the device busy. A probe never waits: one the slot refuses opens nothing.
 // The console's test tone holds the slot the same way, and a Start ends it
-// before it waits for it (Tone, above).
+// before it waits for it (Tone, above); the DSD check (Check) too, and a Start
+// waits for it as for a probe, never ending it.
 //
 // Release is confirmed or it is not: Release ends the session's life, so
 // its sinks drop their streams and close their devices; a teardown joins
