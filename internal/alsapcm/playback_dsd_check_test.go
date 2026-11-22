@@ -181,6 +181,27 @@ func (r *checkRig) refused(req playback.CheckRequest, stop chan struct{}, word, 
 	}
 }
 
+// refusedEnded fails the test unless c, a check whose request had ended, was
+// refused with the request's error and an empty record, and, once the
+// backend's work is joined, opened nothing and made no record; a check
+// admitted in its place is stopped first, so the join answers.
+func (r *checkRig) refusedEnded(c checkCall, what string) {
+	r.t.Helper()
+	if !errors.Is(c.err, context.Canceled) || !sameCheckStatus(c.st, playback.CheckStatus{}) {
+		r.t.Errorf("%s: the check answered %+v, %v; want its request's error", what, c.st, c.err)
+		if c.err == nil {
+			close(c.stop)
+		}
+	}
+	r.joined(what)
+	if v := r.k.View(); v.Opens != 0 {
+		r.t.Errorf("%s: %d opens asked; want none", what, v.Opens)
+	}
+	if st, ok := r.be.CheckStatus(); ok {
+		r.t.Errorf("%s: a record was made: %+v", what, st)
+	}
+}
+
 // sameCheckStatus reports whether two records say one thing, the identities
 // opened compared by value.
 func sameCheckStatus(a, b playback.CheckStatus) bool {
@@ -348,12 +369,14 @@ func (r *checkRig) reusable(what string) {
 
 // checkBox is the rig's box whose next reading of the unit, once armed, is
 // held (holdNext) or panics (panics): a reading of the box under the
-// refreshes' lock that does not answer, or one that fails.
+// refreshes' lock that does not answer, or one that fails. reads counts the
+// readings of the unit.
 type checkBox struct {
 	playback.DSDBox
 	mu     sync.Mutex
 	park   *parkAt
 	panics atomic.Bool
+	reads  atomic.Int64
 }
 
 func (b *checkBox) holdNext() *parkAt {
@@ -365,6 +388,7 @@ func (b *checkBox) holdNext() *parkAt {
 }
 
 func (b *checkBox) UnitModel(card int) (alsa.UnitModel, error) {
+	b.reads.Add(1)
 	b.mu.Lock()
 	p := b.park
 	b.park = nil
@@ -515,6 +539,48 @@ func TestTheCheckAdmitsOnlyWhatTheSetPlays(t *testing.T) {
 		r.k.Free()
 		r.admitted(dsdstate.TransportNative, playbacktest.DSD64)
 		r.endedAs(playback.CheckComplete, "", "native on an unknown DAC")
+	})
+}
+
+// TestAnEndedRequestOpensNothing: through the engine's Run, the backend and
+// the fake kernel, a check of a tuple the set plays whose request has ended
+// is refused with the request's error and an empty record, and opens nothing,
+// the fake's opens read once the backend's work is joined: one ended before
+// Check reads nothing of the box (its reading of the policy asks the request
+// once it holds the refreshes' lock), and one whose request ends while that
+// reading is held in the box is refused as the reading ends, before the slot.
+func TestAnEndedRequestOpensNothing(t *testing.T) {
+	native := playbacktest.ChoiceState(dsdstate.ModeNative)
+	t.Run("ended before Check", func(t *testing.T) {
+		box := &checkBox{}
+		r := newCheckRig(t, native, withCheckBox(box))
+		req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
+		reads := box.reads.Load()
+		ctx, cancel := context.WithCancel(bg)
+		cancel()
+		st, err := r.be.Check(ctx, req)
+		r.refusedEnded(checkCall{st: st, err: err, stop: stop}, "a request ended before Check")
+		if n := box.reads.Load() - reads; n != 0 {
+			t.Errorf("a request ended before Check read the box %d times; want none", n)
+		}
+	})
+	t.Run("ended while its reading of the policy is held", func(t *testing.T) {
+		box := &checkBox{}
+		r := newCheckRig(t, native, withCheckBox(box))
+		req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
+		p := box.holdNext()
+		t.Cleanup(p.letGo)
+		ctx, cancel := context.WithCancel(bg)
+		defer cancel()
+		answer := make(chan checkCall, 1)
+		go func() {
+			st, err := r.be.Check(ctx, req)
+			answer <- checkCall{st: st, err: err, stop: stop}
+		}()
+		awaitOrdered(t, p.in, "the check's reading of the policy held in the box")
+		cancel()
+		p.letGo()
+		r.refusedEnded(receiveIn(t, answer, "the check's answer"), "a request ended while its reading was held")
 	})
 }
 
@@ -1321,18 +1387,47 @@ func TestAChecksCleanupThatIsNotConfirmedKeepsTheDevice(t *testing.T) {
 			r.dsdRig.mu.Unlock()
 			r.admitted(dsdstate.TransportNative, playbacktest.DSD64)
 			r.endedAs(playback.CheckFailed, playback.CheckReleaseUnconfirmed, "a cleanup that panicked")
-			r.fenceSaid("the DSD check's cleanup panicked")
+			// Its error wraps alsapcm.ErrReleaseUnconfirmed, as every fenced
+			// cleanup's does.
+			r.fenceSaid("the DSD check's cleanup panicked; the bridge's log has why: native release unconfirmed")
 			r.logs.panicLogged(t, backendPanicMessage, "the DSD check's cleanup")
 		},
 	})
 }
 
+// pendingCompletion is an open's answer whose worker finishes it later,
+// alsapcm's pending open as the check's cleanup reads it.
+type pendingCompletion interface {
+	Completion() <-chan struct{}
+	CompletionResult() error
+}
+
+// markedOpen is a pending open's answer as the rig's stand-in hands it on:
+// the opener's own, its completion's first ask closing waiting.
+type markedOpen struct {
+	err     error
+	pending pendingCompletion
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (m *markedOpen) Error() string { return m.err.Error() }
+func (m *markedOpen) Unwrap() error { return m.err }
+func (m *markedOpen) Completion() <-chan struct{} {
+	m.once.Do(func() { close(m.waiting) })
+	return m.pending.Completion()
+}
+func (m *markedOpen) CompletionResult() error { return m.pending.CompletionResult() }
+
 // TestAStopDuringAParkedOpenWaitsForItsCompletion: a check stopped while its
 // sink's open is held in the kernel ends through the opener's completion
 // fence: the open answers no sink and its worker keeps the node, so the check
-// keeps the slot, refusing a tone, until the worker has finished; an open
-// refused for the stop whose node then closes cleanly leaves the slot
-// reusable, its error no cleanup's (stopped, stop), and one whose node's
+// keeps the slot, refusing a tone, until the worker has finished. The rig's
+// stand-in opens through the fake kernel and marks that the open answered
+// pending (returned) and that the cleanup asked for its completion (waiting),
+// both before the kernel is let go, so the case takes that branch on every
+// run. An open refused for the stop whose node then closes cleanly leaves the
+// slot reusable, its error no cleanup's (stopped, stop), and one whose node's
 // close fails fences the device (failed, release_unconfirmed).
 func TestAStopDuringAParkedOpenWaitsForItsCompletion(t *testing.T) {
 	for _, c := range []struct {
@@ -1341,6 +1436,19 @@ func TestAStopDuringAParkedOpenWaitsForItsCompletion(t *testing.T) {
 	}{{"its node closed cleanly", false}, {"its node's close failing", true}} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newCheckRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), nil)
+			returned, waiting := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			r.dsdRig.mu.Lock()
+			r.openNative = func(ctx context.Context, cfg alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
+				s, err := r.k.OpenNativeSink(ctx, cfg)
+				var p pendingCompletion
+				if errors.As(err, &p) {
+					once.Do(func() { close(returned) })
+					return nil, &markedOpen{err: err, pending: p, waiting: waiting}
+				}
+				return s, err
+			}
+			r.dsdRig.mu.Unlock()
 			parked, letOpen := r.k.ParkNextOpen()
 			t.Cleanup(letOpen)
 			call := r.admitted(dsdstate.TransportNative, playbacktest.DSD64)
@@ -1349,6 +1457,8 @@ func TestAStopDuringAParkedOpenWaitsForItsCompletion(t *testing.T) {
 				r.k.FailNextClose(syscall.EIO)
 			}
 			close(call.stop)
+			awaitOrdered(t, returned, "the open answered pending, its worker keeping the node")
+			awaitOrdered(t, waiting, "the check's cleanup waiting for the open's completion")
 			r.toneRefused(playback.ToneCheckRunning, "a tone while the open's worker holds the node")
 			letOpen()
 			if !c.closeFail {

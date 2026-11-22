@@ -158,7 +158,9 @@ func (c *checkHold) end(p CheckPhase, r CheckReason) { c.cancel(&checkCause{phas
 // the device slot, its run going on, on a goroutine the backend counts from
 // before the slot (Wait). Refused, in order: a request that is none, a backend
 // with no DSD policy, CloseChecks having run, then as reserveCheck says. ctx
-// bounds its waits, and ends them with its error.
+// bounds its waits, and ends them with its error. The record is the one its
+// admission built, and the count is given back on every way out before the
+// hand-over to its run, a panic's included.
 func (b *Backend) Check(ctx context.Context, req CheckRequest) (CheckStatus, error) {
 	word := ""
 	switch {
@@ -172,9 +174,14 @@ func (b *Backend) Check(ctx context.Context, req CheckRequest) (CheckStatus, err
 	if word != "" {
 		return CheckStatus{}, &CheckRefused{Word: word}
 	}
-	c, err := b.reserveCheck(ctx, req)
+	handed := false
+	defer func() {
+		if !handed {
+			b.leave()
+		}
+	}()
+	c, st, err := b.reserveCheck(ctx, req)
 	if c == nil {
-		b.leave()
 		return CheckStatus{}, err
 	}
 	b.spawn(func() {
@@ -184,8 +191,8 @@ func (b *Backend) Check(ctx context.Context, req CheckRequest) (CheckStatus, err
 		case <-c.ctx.Done():
 		}
 	})
+	handed = true
 	go b.counted(false, func() { b.runCheck(c) })
-	st, _ := b.CheckStatus()
 	return st, nil
 }
 
@@ -206,14 +213,17 @@ func (b *Backend) checkEnter() bool {
 // never confirmed, or a choice's lease, a session's record or hold, or another
 // check stands (device_busy); the probe or the tone (ended preempted) waited
 // for, the check among the waiters meanwhile, device_busy past its bound; then
-// admitted (admitCheckLocked). The take moves starts, which voids an ending
-// probe's answers as a Start's take does (takeProbe).
-func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*checkHold, error) {
+// admitted (admitCheckLocked), its record built in that step. The take moves
+// starts, which voids an ending probe's answers as a Start's take does
+// (takeProbe). A request that has ended is refused with its error first,
+// before the slot is looked at, so no tone is preempted for it, and where its
+// wait ends at its bound.
+func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*checkHold, CheckStatus, error) {
 	if _, err := b.refreshDSDWithin(ctx, "a DSD check's admission"); err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, CheckStatus{}, ctx.Err()
 		}
-		return nil, &CheckRefused{Word: string(ReasonDACUnread)}
+		return nil, CheckStatus{}, &CheckRefused{Word: string(ReasonDACUnread)}
 	}
 	var expired chan struct{}
 	stop := func() bool { return false }
@@ -228,6 +238,10 @@ func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*checkHol
 	}()
 	for {
 		b.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			b.mu.Unlock()
+			return nil, CheckStatus{}, err
+		}
 		var held <-chan struct{}
 		var bound time.Duration
 		word := ""
@@ -248,14 +262,15 @@ func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*checkHol
 				}
 				var c *checkHold
 				if c, word = b.admitCheckLocked(req); c != nil {
+					st := b.checkStatusLocked(c)
 					b.mu.Unlock()
-					return c, nil
+					return c, st, nil
 				}
 			}
 		}
 		if word != "" {
 			b.mu.Unlock()
-			return nil, &CheckRefused{Word: word}
+			return nil, CheckStatus{}, &CheckRefused{Word: word}
 		}
 		if !waiting {
 			b.waiters++
@@ -270,9 +285,12 @@ func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*checkHol
 		select {
 		case <-held:
 		case <-expired:
-			return nil, &CheckRefused{Word: string(CheckDeviceBusy)}
+			if err := ctx.Err(); err != nil {
+				return nil, CheckStatus{}, err
+			}
+			return nil, CheckStatus{}, &CheckRefused{Word: string(CheckDeviceBusy)}
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, CheckStatus{}, ctx.Err()
 		}
 	}
 }
@@ -514,13 +532,14 @@ func (b *Backend) monitorCheck(c *checkHold, sink *alsapcm.DSDSink) {
 // completion (CompletionResult); a refused open, by its own answer. Each is a
 // failure exactly where that result wraps alsapcm.ErrReleaseUnconfirmed: an
 // open's own refusal, or a panic the sink recovered whose release was
-// confirmed (alsapcm.ErrPanicked alone), leaves the slot reusable. A cleanup
-// that never answers keeps the slot.
+// confirmed (alsapcm.ErrPanicked alone), leaves the slot reusable; a panic in
+// the cleanup itself answers an error that wraps it. A cleanup that never
+// answers keeps the slot.
 func (b *Backend) cleanCheck(c *checkHold) (confirmed bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			b.logPanic("the DSD check's cleanup", r)
-			confirmed, err = false, errors.New("player backend: the DSD check's cleanup panicked; the bridge's log has why")
+			confirmed, err = false, fmt.Errorf("player backend: the DSD check's cleanup panicked; the bridge's log has why: %w", alsapcm.ErrReleaseUnconfirmed)
 		}
 	}()
 	b.mu.Lock()
@@ -628,16 +647,21 @@ func (b *Backend) CloseChecks() {
 }
 
 // CheckStatus is the check in the slot or the last one, false while there was
-// none, read under b.mu with no I/O: stopping while it holds the slot past its
-// end. One literal from a phase of its own, as ToneStatus (internal/api's
-// census of the protocol's observation states).
+// none, read under b.mu with no I/O (checkStatusLocked).
 func (b *Backend) CheckStatus() (CheckStatus, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	c := b.checkRec
-	if c == nil {
+	if b.checkRec == nil {
 		return CheckStatus{}, false
 	}
+	return b.checkStatusLocked(b.checkRec), true
+}
+
+// checkStatusLocked is c's record, stopping while it holds the slot past its
+// end: what CheckStatus reads and what Check answers, built in its admission's
+// step. One literal from a phase of its own, as ToneStatus (internal/api's
+// census of the protocol's observation states). b.mu is held.
+func (b *Backend) checkStatusLocked(c *checkHold) CheckStatus {
 	phase, reason := c.phase, c.reason
 	if b.checking == c && c.ctx.Err() != nil {
 		phase, reason = CheckStopping, ""
@@ -647,7 +671,7 @@ func (b *Backend) CheckStatus() (CheckStatus, bool) {
 		id := *c.opened
 		opened = &id
 	}
-	return CheckStatus{ID: c.id, Transport: c.transport, BitRate: c.bitRate, Phase: phase, Reason: reason, Token: c.token, Identity: c.identity, Opened: opened}, true
+	return CheckStatus{ID: c.id, Transport: c.transport, BitRate: c.bitRate, Phase: phase, Reason: reason, Token: c.token, Identity: c.identity, Opened: opened}
 }
 
 // checkPreparing is the CheckPreparing seam.

@@ -35,12 +35,17 @@ func (b *Backend) refreshDSD(where string) (*dsdSet, error) {
 
 // refreshDSDWithin is refreshDSD for a caller whose wait for the refreshes'
 // lock ends with ctx (lockReading), the DSD check's: ctx's error, nothing
-// read, once it has.
+// read, once it has, asked again once the lock is held, as a choice's write
+// asks it (takeChoiceReading), since lockReading takes a free lock without
+// looking at ctx.
 func (b *Backend) refreshDSDWithin(ctx context.Context, where string) (*dsdSet, error) {
 	if !b.lockReading(ctx) {
 		return nil, ctx.Err()
 	}
 	defer b.dsdMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return b.refreshHeld(where)
 }
 
