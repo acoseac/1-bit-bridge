@@ -1419,16 +1419,34 @@ func (m *markedOpen) Completion() <-chan struct{} {
 }
 func (m *markedOpen) CompletionResult() error { return m.pending.CompletionResult() }
 
+// markerBound is how long a case waits for a marker a few goroutine steps
+// after the step that causes it, short of the watchdog.
+const markerBound = 5 * time.Second
+
+// awaitMarker waits for ch to close within markerBound.
+func awaitMarker(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	timer := time.NewTimer(markerBound)
+	defer timer.Stop()
+	select {
+	case <-ch:
+	case <-timer.C:
+		alsapcm.LogGoroutines(t)
+		t.Fatalf("waited %v for %s", markerBound, what)
+	}
+}
+
 // TestAStopDuringAParkedOpenWaitsForItsCompletion: a check stopped while its
 // sink's open is held in the kernel ends through the opener's completion
 // fence: the open answers no sink and its worker keeps the node, so the check
 // keeps the slot, refusing a tone, until the worker has finished. The rig's
 // stand-in opens through the fake kernel and marks that the open answered
 // pending (returned) and that the cleanup asked for its completion (waiting),
-// both before the kernel is let go, so the case takes that branch on every
-// run. An open refused for the stop whose node then closes cleanly leaves the
-// slot reusable, its error no cleanup's (stopped, stop), and one whose node's
-// close fails fences the device (failed, release_unconfirmed).
+// each waited for within markerBound before the kernel is let go, so the case
+// takes that branch on every run. An open refused for the stop whose node
+// then closes cleanly leaves the slot reusable, its error no cleanup's
+// (stopped, stop), and one whose node's close fails fences the device
+// (failed, release_unconfirmed).
 func TestAStopDuringAParkedOpenWaitsForItsCompletion(t *testing.T) {
 	for _, c := range []struct {
 		name      string
@@ -1457,8 +1475,8 @@ func TestAStopDuringAParkedOpenWaitsForItsCompletion(t *testing.T) {
 				r.k.FailNextClose(syscall.EIO)
 			}
 			close(call.stop)
-			awaitOrdered(t, returned, "the open answered pending, its worker keeping the node")
-			awaitOrdered(t, waiting, "the check's cleanup waiting for the open's completion")
+			awaitMarker(t, returned, "the open answered pending, its worker keeping the node")
+			awaitMarker(t, waiting, "the check's cleanup waiting for the open's completion")
 			r.toneRefused(playback.ToneCheckRunning, "a tone while the open's worker holds the node")
 			letOpen()
 			if !c.closeFail {
