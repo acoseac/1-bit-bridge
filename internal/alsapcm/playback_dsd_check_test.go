@@ -1439,14 +1439,14 @@ func awaitMarker(t *testing.T, ch <-chan struct{}, what string) {
 // TestAStopDuringAParkedOpenWaitsForItsCompletion: a check stopped while its
 // sink's open is held in the kernel ends through the opener's completion
 // fence: the open answers no sink and its worker keeps the node, so the check
-// keeps the slot, refusing a tone, until the worker has finished. The rig's
-// stand-in opens through the fake kernel and marks that the open answered
-// pending (returned) and that the cleanup asked for its completion (waiting),
-// each waited for within markerBound before the kernel is let go, so the case
-// takes that branch on every run. An open refused for the stop whose node
-// then closes cleanly leaves the slot reusable, its error no cleanup's
-// (stopped, stop), and one whose node's close fails fences the device
-// (failed, release_unconfirmed).
+// keeps the slot (stopping), refusing a tone, until the worker has finished.
+// The rig's stand-in opens through the fake kernel and marks that the open
+// answered pending (returned) and that the cleanup asked for its completion
+// (waiting), each waited for within markerBound before the kernel is let go,
+// so the case takes that branch on every run. An open refused for the stop
+// whose node then closes cleanly leaves the slot reusable, its error no
+// cleanup's (stopped, stop), and one whose node's close fails fences the
+// device (failed, release_unconfirmed).
 func TestAStopDuringAParkedOpenWaitsForItsCompletion(t *testing.T) {
 	for _, c := range []struct {
 		name      string
@@ -1477,6 +1477,9 @@ func TestAStopDuringAParkedOpenWaitsForItsCompletion(t *testing.T) {
 			close(call.stop)
 			awaitMarker(t, returned, "the open answered pending, its worker keeping the node")
 			awaitMarker(t, waiting, "the check's cleanup waiting for the open's completion")
+			if p := r.phase(); p != playback.CheckStopping {
+				t.Fatalf("the check whose open's completion is waited for is %s; want stopping, the slot still its own", p)
+			}
 			r.toneRefused(playback.ToneCheckRunning, "a tone while the open's worker holds the node")
 			letOpen()
 			if !c.closeFail {
