@@ -14,7 +14,7 @@ import (
 
 // nativePanicMessage is the line a native sink logs a panic it recovered
 // with.
-const nativePanicMessage = "player: a panic was recovered in the native DSD sink; it ends typed and its node is closed"
+const nativePanicMessage = "player: a panic was recovered in the native DSD sink"
 
 // opensNothing plays a PCM entry and fails the test unless it is refused and
 // the device stays as it was: no open of the node.

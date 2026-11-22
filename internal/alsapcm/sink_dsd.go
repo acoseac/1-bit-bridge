@@ -1293,7 +1293,7 @@ func dopPrecision(c DSDConfig, p Params) error {
 }
 
 // nativePanicMessage is the line a panic a native sink recovers is logged with.
-const nativePanicMessage = "player: a panic was recovered in the native DSD sink; it ends typed and its node is closed"
+const nativePanicMessage = "player: a panic was recovered in the native DSD sink"
 
 // nativePanicked logs a panic a native sink's goroutine recovered once, to log
 // (nil: the player's component), with where, the endpoint, its stack, and its
