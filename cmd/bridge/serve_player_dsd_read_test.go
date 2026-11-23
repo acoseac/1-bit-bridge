@@ -291,10 +291,12 @@ func TestTheBridgeElementCarriesTheDACChoice(t *testing.T) {
 		if fu := firstUseIn(t, d, "dop"); fu.State != playback.FirstUsePending {
 			t.Errorf("DoP's first use %+v, want pending", fu)
 		}
+		// With no DAC list the unit counts as on a generic board's IDs, where
+		// the record's clean answer admits DSD64 alone (B990).
 		p := f.DSDPlayback
-		want := []api.OutputDSDRefused{{BitRate: playbacktest.DSD128, Reason: "first_use_pending"}, {BitRate: playbacktest.DSD256, Reason: "first_use_pending"}}
+		want := []api.OutputDSDRefused{{BitRate: playbacktest.DSD128, Reason: "native_check_required"}, {BitRate: playbacktest.DSD256, Reason: "native_check_required"}}
 		if p == nil || len(p.Tuples) != 1 || p.Tuples[0].BitRate != playbacktest.DSD64 || p.Tuples[0].Evidence != "listener_confirmed" || p.Tuples[0].EvidenceOn != "2026-10-01" || !reflect.DeepEqual(p.Refused, want) {
-			t.Errorf("dsdPlayback %+v, want DSD64 native, listener confirmed on the record's date, and the rest refused for their first use", p)
+			t.Errorf("dsdPlayback %+v, want DSD64 native, listener confirmed on the record's date, and the rest refused as native_check_required", p)
 		}
 	})
 

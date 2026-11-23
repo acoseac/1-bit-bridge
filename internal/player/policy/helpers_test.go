@@ -73,11 +73,16 @@ func nativeAltset() alsa.Altset {
 // the tests turn; inputs builds Effective's inputs from it.
 type rig struct {
 	t *testing.T
-	// known gives the DAC a profile, with these claims.
+	// known gives the DAC a profile, with these claims, and boardIDs that
+	// profile's list the DAC's IDs as a shared reference ID; catalog is the DAC
+	// list an unknown DAC is read under, nil for none, under which every unit
+	// counts as a generic board's (genericBridge).
 	known         bool
+	boardIDs      bool
 	profileNative *dacprofile.Native
 	profileDoP    *dacprofile.DoP
 	timing        *dacprofile.Timing
+	catalog       *dacprofile.Database
 	// The choice: the DAC's own when mode is set, else defaultMode; by is
 	// who set it, the app when it is empty.
 	mode        string
@@ -199,6 +204,11 @@ func (r *rig) inputs() Inputs {
 			Match:  []dacprofile.Match{{VendorID: "1234", ProductID: "5678", Interface: &iface, Product: &product}},
 			Native: r.profileNative, DoP: r.profileDoP, Timing: r.timing,
 		}}}
+		if r.boardIDs {
+			in.Profiles.SharedReferenceIDs = []dacprofile.SharedID{{VendorID: "1234", ProductID: "5678", Why: "the tests' board"}}
+		}
+	} else {
+		in.Profiles = r.catalog
 	}
 	in.State = dsdstate.State{DefaultMode: r.defaultMode}
 	d := dsdstate.DAC{Key: key, Stamp: testStamp, DoPConfirmed: r.confirmed, FirstUse: r.firstUse, Listener: r.listener, Evidence: r.evidence}

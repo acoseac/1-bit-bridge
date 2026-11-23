@@ -53,8 +53,16 @@ func publishedRates(p playback.PlayerPolicy) (rates []int, transports []string) 
 // (TestAGainChangeRevokesDoPWithoutConsent).
 func TestAPlayedOutDoPOccurrenceStopsNothingAfterIt(t *testing.T) {
 	// auto, as the migration leaves an owner's record that approved DoP at
-	// DSD64 and native DSD at DSD128: DSD64 plays DoP, DSD128 native.
-	d := newDSDRig(t, playbacktest.MigratedState(dsdstate.ModeAuto, true, []int{playbacktest.DSD128}, []int{playbacktest.DSD64}))
+	// DSD64 and native DSD at DSD128, with a listener's later noise for native
+	// at DSD64, since native plays wherever the kernel offers it (B990): DSD64
+	// plays DoP, DSD128 and DSD256 native.
+	st := playbacktest.MigratedState(dsdstate.ModeAuto, true, []int{playbacktest.DSD128}, []int{playbacktest.DSD64})
+	if len(st.DACs) != 1 {
+		t.Fatalf("the migration left %d DAC entries, want the bound DAC's", len(st.DACs))
+	}
+	st.DACs[0].Listener = append(st.DACs[0].Listener, dsdstate.Answer{Transport: dsdstate.TransportNative, BitRate: playbacktest.DSD64,
+		BCDDevice: playbacktest.DACBCD, Answer: dsdstate.AnswerNoise, On: "2026-10-02"})
+	d := newDSDRig(t, st)
 	unit := playbacktest.DACUnit()
 	unit.Descriptors = playbacktest.VolumeDescriptors()
 	d.box.SetUnit(card, unit)
@@ -73,8 +81,8 @@ func TestAPlayedOutDoPOccurrenceStopsNothingAfterIt(t *testing.T) {
 	awaitHeld(t, "the check after open of b's node", held)
 	d.box.SetControls(card, playbacktest.VolumeControls(200)...)
 	d.monitorTick()
-	if rates, transports := publishedRates(d.be.Policy()); !slices.Equal(rates, []int{playbacktest.DSD128}) || transports[0] != "" {
-		t.Fatalf("the set once the volume left 0 dB publishes %v (%q), want native at DSD128 alone", rates, transports)
+	if rates, transports := publishedRates(d.be.Policy()); !slices.Equal(rates, []int{playbacktest.DSD128, playbacktest.DSD256}) || slices.ContainsFunc(transports, func(tr string) bool { return tr != "" }) {
+		t.Fatalf("the set once the volume left 0 dB publishes %v (%q), want native at DSD128 and DSD256 and no DoP", rates, transports)
 	}
 	release()
 	s := d.waitEnded()

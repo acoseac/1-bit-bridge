@@ -6,7 +6,7 @@
     "message": "the DAC's choice was written since it was read; read it again",
     "dsdPlayback": {
       "bootId": "golden-boot",
-      "policyGeneration": 2,
+      "policyGeneration": 3,
       "publication": 3,
       "tuples": [],
       "converted": [

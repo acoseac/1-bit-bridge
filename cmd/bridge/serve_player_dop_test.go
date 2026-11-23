@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -334,12 +335,13 @@ func dopRecordAs(t *testing.T, dir string, trees outputTrees, confirmation strin
 // player's DSD state (B6) from an owner's record of one DoP policy at DSD64:
 // under dop with allowDoP false the migration's defaultMode off refuses DSD
 // as dsd_off_by_choice before the DAC is opened, nothing published, and PCM
-// still reaches the DAC; under auto with allowDoP false the record gives its
-// answer and no acknowledgement, so the GO bar's DSD converts (B11): no tuple,
-// no reason, every rate converted, and the DSD opens nothing native, only the
-// PCM sink of its conversion's target. With allowDoP the record's DoP rate
-// publishes and opens DoP, from the policy over the box, the gain check
-// passing a card with no gain stage.
+// still reaches the DAC; under auto, allowDoP or not, the GO bar, which the
+// shipped DAC list does not know and whose IDs are no generic board's, plays
+// native at every rate it offers, with no acknowledgement (B990), and the DSD
+// opens the native sink. Under dop with allowDoP the dop the migration wrote,
+// its confirmation with it, plays DoP at every rate the GO bar offers its
+// carrier at, from the policy over the box, the gain check passing a card with
+// no gain stage, and the DSD opens DoP.
 func TestServeOutputPlayAllowDoP(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -348,13 +350,15 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := dopContents{"dsd": dsd, "pcm": qualifyWAV(44100)}
+	every, carrier := []int{2822400, 5644800, 11289600}, []int{2822400, 5644800}
 	for _, path := range []string{"serve", "output_play"} {
 		for _, tc := range []struct {
-			mode     string
-			allow    bool
-			refusal  engine.Reason
-			converts bool
-		}{{"dop", false, "dsd_off_by_choice", false}, {"auto", false, "", true}, {"dop", true, "", false}, {"auto", true, "", false}} {
+			mode      string
+			allow     bool
+			refusal   engine.Reason
+			transport string
+			rates     []int
+		}{{"dop", false, "dsd_off_by_choice", "", nil}, {"auto", false, "", "", every}, {"dop", true, "", "dop", carrier}, {"auto", true, "", "", every}} {
 			t.Run(fmt.Sprintf("%s/%s_allowDoP_%t", path, tc.mode, tc.allow), func(t *testing.T) {
 				var wired playback.Config
 				switch path {
@@ -369,18 +373,7 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 				b := policyBackendOf(t, wired, content, opens)
 				pol := b.Policy()
 				err := startOn(t, b, 1, "dsd")
-				native, pcm := opens.counts()
-				if tc.converts {
-					if len(pol.Tuples) != 0 || pol.Reason != "" || len(pol.Converted) != 3 {
-						t.Fatalf("auto with allowDoP false published %+v (reason %q, converted %+v), want every rate converted", pol.Tuples, pol.Reason, pol.Converted)
-					}
-					c := pol.Converted[0]
-					if len(native) != 0 || len(pcm) != 1 || pcm[0].Transport.Kind != format.KindPCM || pcm[0].Transport.RateHz != c.Plan.RateHz ||
-						pcm[0].Transport.ValidBits != c.Plan.ValidBits || pcm[0].Transport.Format != c.Packing {
-						t.Fatalf("DSD under auto with allowDoP false: %d DSD opens, PCM opens %+v (%v); want its conversion's sink alone, %+v in %s", len(native), pcm, err, c.Plan, c.Packing)
-					}
-					return
-				}
+				native, _ := opens.counts()
 				if tc.refusal != "" {
 					if len(pol.Tuples) != 0 || pol.Reason != string(tc.refusal) {
 						t.Fatalf("allowDoP false published %+v (reason %q), want nothing playing for %s", pol.Tuples, pol.Reason, tc.refusal)
@@ -394,11 +387,22 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 					}
 					return
 				}
-				if len(pol.Tuples) != 1 || pol.Tuples[0].Tuple.Transport != "dop" || pol.Tuples[0].Tuple.BitRate != 2822400 {
-					t.Fatalf("allowDoP true published %+v (reason %q), want DoP at DSD64, the record's rate", pol.Tuples, pol.Reason)
+				var rates []int
+				for _, tu := range pol.Tuples {
+					if tu.Tuple.Transport != tc.transport {
+						t.Fatalf("%s with allowDoP %t published %+v (reason %q), want transport %q alone", tc.mode, tc.allow, pol.Tuples, pol.Reason, tc.transport)
+					}
+					rates = append(rates, tu.Tuple.BitRate)
 				}
-				if len(native) != 1 || native[0].Kind != format.KindDoP || native[0].Format != format.S32LE {
-					t.Fatalf("DSD with allowDoP true opened %+v (%v), want the DoP sink", native, err)
+				if !slices.Equal(rates, tc.rates) {
+					t.Fatalf("%s with allowDoP %t published %+v (reason %q), want tuples at %v", tc.mode, tc.allow, pol.Tuples, pol.Reason, tc.rates)
+				}
+				kind, f := format.KindNativeDSD, format.DSDU32BE
+				if tc.transport == "dop" {
+					kind, f = format.KindDoP, format.S32LE
+				}
+				if len(native) != 1 || native[0].Kind != kind || native[0].Format != f {
+					t.Fatalf("DSD under %s with allowDoP %t opened %+v (%v), want the %s sink", tc.mode, tc.allow, native, err, f)
 				}
 			})
 		}

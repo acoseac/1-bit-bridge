@@ -50,9 +50,9 @@
           "dacKey": "d1-29e725b72bbce9ac",
           "dacToken": "t1-a2ca2a32aa499dbe7e01e2fe17c7fd2a",
           "choice": {
-            "mode": "auto",
+            "mode": "convert",
             "maxBitRate": 0,
-            "revision": 0,
+            "revision": 1,
             "dopConfirmed": false
           },
           "options": [
@@ -147,7 +147,7 @@
           "dsf",
           "dff"
         ],
-        "dsdMode": "auto",
+        "dsdMode": "convert",
         "allowDoP": false,
         "timeSeek": {
           "pcm": "supported",

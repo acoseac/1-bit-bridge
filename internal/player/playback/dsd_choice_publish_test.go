@@ -175,7 +175,6 @@ func TestEveryOutcomeAfterTheReadingPublishesThatReading(t *testing.T) {
 					t.Errorf("DoP's option %+v, want offered and needing the confirmation", o)
 				}
 			}},
-		{name: "first_use_unacknowledged", st: dsdstate.Defaults(), mode: dsdstate.ModeDoP, base: 0, ask: confirmed, want: playback.ChoiceFirstUseUnacknowledged, after: true},
 		{name: "state_unreadable, the file refused in memory", st: native,
 			prepare: func(_ *testing.T, r *moveRig) {
 				r.store.Fail(fmt.Errorf("%w: a named pipe is there", dsdstate.ErrNotWritable))
@@ -696,7 +695,6 @@ func TestTheCauseIsKeptWhereItOccurs(t *testing.T) {
 		{name: "written", mode: dsdstate.ModeConvert, base: 1, want: playback.ChoiceWritten},
 		{name: "stale", mode: dsdstate.ModeOff, base: 0, want: playback.ChoiceStale},
 		{name: "dac_changed", mode: dsdstate.ModeOff, base: 1, ask: func(r *playback.ChoiceRequest) { r.DACKey = "d1-0000000000000000" }, want: playback.ChoiceDACChanged},
-		{name: "first_use_unacknowledged", mode: dsdstate.ModeDoP, base: 0, ask: confirmed, want: playback.ChoiceFirstUseUnacknowledged, edit: freshState},
 		{name: "dop_confirmation_required", mode: dsdstate.ModeDoP, base: 0, ask: acknowledged, want: playback.ChoiceConfirmationRequired, edit: freshState},
 		{name: "mode_not_offered", mode: dsdstate.ModeNative, base: 1, ask: acknowledged, want: playback.ChoiceModeNotOffered, edit: func(p *playback.DSDPolicy) {
 			p.Box.(*playbacktest.Box).SetAltsets(5, 0, playbacktest.S32Altset(), playbacktest.S24Altset())
