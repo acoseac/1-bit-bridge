@@ -120,7 +120,8 @@ func (s *Server) pairingCodeFor(tok auth.Token) string {
 // iOS builds (which only read `url`) pick the same default the
 // operator saw in the admin modal.
 //
-// `endpoints` IS that list — `Deps.Endpoints`, the api layer's
+// `eps` IS that list, as pairingEndpoints read it before the request
+// minted or rotated anything — `Deps.Endpoints`, the api layer's
 // `ReachableEndpoints`, the one place the Tailscale MagicDNS + tailnet
 // IPs are appended (from the TailscaleProvider, in `cli` and `tsnet`
 // modes) and the one place customEndpoints join the loopback set.
@@ -135,7 +136,8 @@ func (s *Server) pairingCodeFor(tok auth.Token) string {
 // alone (see advertisedEndpoints for why not the old walk).
 //
 // **Public-mode short-circuit (PR 5)**: when cfg.IsPublic(), skip
-// the LAN / mDNS / Tailscale enumeration and use only the
+// the LAN / mDNS / Tailscale enumeration (eps is never read, and
+// pairingEndpoints reads none) and use only the
 // operator-declared customEndpoints plus the autocert public
 // domain. Avoids baking VPS-internal hostnames into the iOS
 // pair QR (an iOS device that connects to the public bridge
@@ -147,14 +149,9 @@ func (s *Server) pairingCodeFor(tok auth.Token) string {
 // where health omits the https default, because a port-less dial
 // URL trips the iOS 7788-default bug on shipped builds (see
 // defaultBridgeURL). The two shapes differ on purpose.
-func pairAlternates(primary string, cfg *config.Config, endpoints func() []advertise.Endpoint) []string {
-	listenAddress := cfg.ListenAddress
-	_, portStr, err := net.SplitHostPort(listenAddress)
-	if err != nil {
-		return []string{primary}
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 {
+func pairAlternates(primary string, cfg *config.Config, eps []advertise.Endpoint) []string {
+	portStr, ok := pairingPort(cfg)
+	if !ok {
 		return []string{primary}
 	}
 
@@ -212,7 +209,7 @@ func pairAlternates(primary string, cfg *config.Config, endpoints func() []adver
 		// Loopback mode: the auto-discovered LAN / mDNS / Tailscale /
 		// custom enumeration, class-ordered the way the phone's
 		// selector ranks it. Exactly what `/v1/health` says.
-		for _, e := range advertisedEndpoints(endpoints) {
+		for _, e := range eps {
 			urls = append(urls, e.URL)
 		}
 	}
@@ -231,6 +228,38 @@ func pairAlternates(primary string, cfg *config.Config, endpoints func() []adver
 		}
 	}
 	return out
+}
+
+// pairingPort is the port of cfg's listen address, the one the QR's
+// synthesized URL names, and false where the address names no port above
+// zero: the QR then carries the operator's primary alone (pairAlternates),
+// and no endpoint list is read for it (pairingEndpoints).
+func pairingPort(cfg *config.Config) (string, bool) {
+	_, portStr, err := net.SplitHostPort(cfg.ListenAddress)
+	if err != nil {
+		return "", false
+	}
+	if port, err := strconv.Atoi(portStr); err != nil || port <= 0 {
+		return "", false
+	}
+	return portStr, true
+}
+
+// pairingEndpoints is the endpoint list a pairing QR's alternates are built
+// from (pairAlternates), waited for on ctx (endpointsWithin). The mint and the
+// rotation read it before they take the console's lock and write a token
+// (backlog B997): the list can wait behind another caller's Tailscale status
+// read, up to that read's own bound, so a request that ends meanwhile returns
+// with no token minted or rotated and no code issued, never leaving a secret
+// made or replaced that nobody was shown, and the pairing requests behind it
+// never wait on the console's lock for that read. It is nil, and asks no
+// provider, where pairAlternates reads none: on a public bridge, whose QR
+// carries its own synthesis, and for a listen address with no port.
+func (s *Server) pairingEndpoints(ctx context.Context, cfg *config.Config) ([]advertise.Endpoint, error) {
+	if _, ok := pairingPort(cfg); !ok || cfg.IsPublic() {
+		return nil, nil
+	}
+	return endpointsWithin(ctx, s.deps.Endpoints)
 }
 
 // declaredEndpointForHost returns the first customEndpoint whose host is
@@ -295,7 +324,8 @@ func endpointHost(raw string) string {
 // advertisedEndpoints is the classed list this bridge advertises to
 // paired devices — `Deps.Endpoints`, the api layer's `/v1/health`
 // enumeration — or nothing when no provider is wired. Shared by the
-// pairing QR and the Settings "Reachable endpoints" panel so the two
+// pairing QR and the Settings "Reachable endpoints" panel, each of which
+// waits for it on its request's context (endpointsWithin), so the two
 // cannot disagree about what the phone will see.
 //
 // Nil is NOT a fallback to the host-network walk. That walk is what
@@ -351,7 +381,7 @@ func endpointsWithin(ctx context.Context, provider func() []advertise.Endpoint) 
 			}
 			done <- a
 		}()
-		a.eps = provider()
+		a.eps = advertisedEndpoints(provider)
 	}()
 	select {
 	case a := <-done:

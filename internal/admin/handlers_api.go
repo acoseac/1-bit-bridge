@@ -2388,6 +2388,13 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.URL = url
+	// The QR's endpoint list is read before the console's lock and the mint
+	// (pairingEndpoints): a request that ends while it waits mints nothing,
+	// and nobody reads an answer.
+	eps, err := s.pairingEndpoints(r.Context(), cfg)
+	if err != nil {
+		return
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2406,7 +2413,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 	// moment of pairing. Empty slice if enumeration fails — the
 	// operator-supplied primary URL is always the first entry, so the
 	// QR always pairs even on an interface-less environment.
-	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, s.deps.Endpoints))
+	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, eps))
 	pairURL := buildPairURL(req.URL, rawToken, s.pairingCodeFor(tok), fp, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {

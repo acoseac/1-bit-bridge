@@ -63,6 +63,13 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.URL = url
+	// The QR's endpoint list is read before the console's lock and the
+	// rotation (pairingEndpoints): a request that ends while it waits
+	// rotates nothing, and nobody reads an answer.
+	eps, err := s.pairingEndpoints(r.Context(), cfg)
+	if err != nil {
+		return
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -84,7 +91,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 	// A fresh code replaces the one the token's previous QR carried
 	// (pairingcode.Store keeps one live code per token), so the old QR
 	// has nothing left to redeem, as its token has nothing left to use.
-	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, s.deps.Endpoints))
+	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, eps))
 	pairURL := buildPairURL(req.URL, rawToken, s.pairingCodeFor(tok), fp, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
