@@ -41,9 +41,9 @@ import (
 //
 // Every command is an operation, named by its tab, its count in that tab and
 // the epoch it was sent in, run one at a time in the order of arrival: one
-// that arrives ends the older one's steps not yet sent, and every operation
-// but a Stop waits for the older one's step in flight, so the steps of two
-// operations never interleave. A step runs on a context the request's end
+// that arrives ends the older ones' steps not yet sent, and every operation
+// but a Stop waits for every older one not yet ended, whatever Stops came
+// between, so the steps of two operations never interleave. A step runs on a context the request's end
 // does not end, and the control waits for the engine's own answer, which every
 // command the engine takes gets. The record of each tab's last operation is
 // kept, for the 64 tabs that ran one most recently, and each tab's mark (the
@@ -120,6 +120,12 @@ type controlSeams struct {
 	// afterStep runs after each engine step's answer, on the operation's
 	// goroutine, with the step's name and its answer.
 	afterStep func(kind, step string, err error)
+	// beforeSend runs in a step that found its operation's unsent steps not
+	// ended, before its engine command is sent, with the step's name.
+	beforeSend func(kind, step string)
+	// awaitPrev runs on an operation's goroutine before it waits for an
+	// older operation's end, with that operation's kind.
+	awaitPrev func(kind, prev string)
 	// afterSilence runs in the barrier once it has observed the bridge
 	// silent, before the capture that answers it.
 	afterSilence func()
@@ -175,13 +181,14 @@ type consoleControl struct {
 	quit  chan struct{}
 	wg    sync.WaitGroup
 
-	mu      sync.Mutex
-	closed  bool
-	current *operation
-	marks   map[string]markEntry
-	records map[string]*opRecord
-	recent  []*opRecord
-	order   uint64
+	mu     sync.Mutex
+	closed bool
+	// unfinished are the operations admitted and not yet ended, oldest first.
+	unfinished []*operation
+	marks      map[string]markEntry
+	records    map[string]*opRecord
+	recent     []*opRecord
+	order      uint64
 }
 
 // dlnaHeld is the DLNA listener the control asks, once DLNA has started.
@@ -507,16 +514,14 @@ func (c *consoleControl) Plays() (admin.PlayerPlays, bool) {
 }
 
 // operation is one operation as it runs: its record, whether it is a Stop
-// (sent at once), whether its steps not yet sent were ended, the step it has
-// in flight, and its end.
+// (sent at once), whether its steps not yet sent were ended, and its end.
 type operation struct {
 	c    *consoleControl
 	r    *opRecord
 	stop bool
 
-	mu       sync.Mutex
-	ended    bool
-	inflight chan struct{}
+	mu    sync.Mutex
+	ended bool
 	// endCh is closed once o's unsent steps are ended, which every wait of
 	// o's between its steps (a release, the barrier's settle) selects on.
 	endCh   chan struct{}
@@ -552,15 +557,17 @@ func (o *operation) endedNow() bool {
 // epoch_changed, a count below the tab's mark replayed, one at the mark
 // answers its record (another command under it operation_conflict while the
 // record is kept, operation_gone once it is not), and one above it is a new
-// operation. Only a new operation is admitted; prev is the older one's end,
-// which every operation but a Stop waits for: its step in flight answered and
-// its record final (it sends nothing more once ended), so the steps of two
-// operations never interleave and the newer one starts once the older one's
-// record says how it ended.
-func (c *consoleControl) admit(op admin.PlayerOp, digest [32]byte, kind, command string) (o *operation, prev <-chan struct{}, a admin.PlayerAnswer, ok bool) {
+// operation. Only a new operation is admitted, ending the unsent steps of
+// every older one not yet ended; prevs are those older ones, whose ends every
+// operation but a Stop waits for, a Stop's among them: each one's step in
+// flight answered and its record final (it sends nothing more once ended), so
+// the steps of two operations never interleave, a step a Stop overtook in
+// flight included, and the newer one starts once every older one's record
+// says how it ended.
+func (c *consoleControl) admit(op admin.PlayerOp, digest [32]byte, kind, command string) (o *operation, prevs []*operation, a admin.PlayerAnswer, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	refuse := func(code string, status int) (*operation, <-chan struct{}, admin.PlayerAnswer, bool) {
+	refuse := func(code string, status int) (*operation, []*operation, admin.PlayerAnswer, bool) {
 		return nil, nil, admin.PlayerAnswer{Refused: code, Status: status, Player: c.pub.latestPub().PlayerPublication}, false
 	}
 	switch {
@@ -603,12 +610,14 @@ func (c *consoleControl) admit(op admin.PlayerOp, digest [32]byte, kind, command
 	}
 	o = &operation{c: c, r: r, stop: kind == opKindTransport && command == admin.PlayerCmdStop, done: make(chan struct{}), endCh: make(chan struct{})}
 	r.op = o
-	if cur := c.current; cur != nil {
-		cur.endUnsent()
-		prev = cur.done
+	for _, u := range c.unfinished {
+		u.endUnsent()
 	}
-	c.current = o
-	return o, prev, admin.PlayerAnswer{}, true
+	if !o.stop {
+		prevs = slices.Clone(c.unfinished)
+	}
+	c.unfinished = append(c.unfinished, o)
+	return o, prevs, admin.PlayerAnswer{}, true
 }
 
 // evictMark drops the oldest tab's mark; the caller holds mu.
@@ -663,16 +672,13 @@ func (o *operation) step(name string, f func(ctx context.Context) error) error {
 		o.mu.Unlock()
 		return errStepEnded
 	}
-	ch := make(chan struct{})
-	o.inflight = ch
 	o.mu.Unlock()
 	o.set(func(r *admin.PlayerRecord) { r.Sent++ })
 	ctx, _ := engine.WithAdmission(context.Background())
+	if s := o.c.seams; s != nil && s.beforeSend != nil {
+		s.beforeSend(o.r.rec.Kind, name)
+	}
 	err := f(ctx)
-	o.mu.Lock()
-	o.inflight = nil
-	close(ch)
-	o.mu.Unlock()
 	switch effectOfStep(name, err) {
 	case admin.PlayerEffectSome:
 		o.anyNil = true
@@ -843,9 +849,7 @@ func (o *operation) settleOn(eval func(cap *capture) (final bool, status, word s
 		s.afterFinal(o.record().Kind)
 	}
 	o.c.mu.Lock()
-	if o.c.current == o {
-		o.c.current = nil
-	}
+	o.c.unfinished = slices.DeleteFunc(o.c.unfinished, func(u *operation) bool { return u == o })
 	o.c.mu.Unlock()
 	close(o.done)
 	return true
@@ -876,13 +880,13 @@ func (o *operation) finishErr(err error) {
 	o.finishAs(status, word)
 }
 
-// run starts o's body on a goroutine the control joins, once the older
-// operation has ended (a Stop does not wait for it: the engine takes it after
-// the older one's step in flight),
-// and waits for o's end, or for the request's end or the handler's wait,
+// run starts o's body on a goroutine the control joins, once each of prevs,
+// the older operations not ended at its admission, has ended (a Stop has none
+// to wait for: the engine takes it after an older one's step in flight), and
+// waits for o's end, or for the request's end or the handler's wait,
 // answering the record as it stands then. The request's end ends o's steps
 // not yet sent; neither ends its step in flight.
-func (c *consoleControl) run(ctx context.Context, o *operation, prev <-chan struct{}, body func(o *operation)) admin.PlayerAnswer {
+func (c *consoleControl) run(ctx context.Context, o *operation, prevs []*operation, body func(o *operation)) admin.PlayerAnswer {
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
@@ -896,9 +900,12 @@ func (c *consoleControl) run(ctx context.Context, o *operation, prev <-chan stru
 				}
 			}
 		}()
-		if prev != nil && !o.stop {
+		for _, p := range prevs {
+			if s := c.seams; s != nil && s.awaitPrev != nil {
+				s.awaitPrev(o.r.rec.Kind, p.r.rec.Kind)
+			}
 			select {
-			case <-prev:
+			case <-p.done:
 			case <-c.quit:
 			}
 		}
@@ -984,11 +991,11 @@ func (c *consoleControl) Operation(epoch, tab string, seq uint64) admin.PlayerRe
 // then body.
 func (c *consoleControl) begin(ctx context.Context, op admin.PlayerOp, digest [32]byte, kind, command string,
 	body func(o *operation, eng *engine.Engine)) admin.PlayerAnswer {
-	o, prev, refusal, ok := c.admit(op, digest, kind, command)
+	o, prevs, refusal, ok := c.admit(op, digest, kind, command)
 	if !ok {
 		return c.withHandover(refusal)
 	}
-	return c.run(ctx, o, prev, func(o *operation) {
+	return c.run(ctx, o, prevs, func(o *operation) {
 		eng, why := c.runningEngine()
 		if eng == nil {
 			o.set(func(r *admin.PlayerRecord) { r.Reason = why })
@@ -1710,11 +1717,11 @@ func (c *consoleControl) runAppend(o *operation, eng *engine.Engine, r admin.Pla
 // console's own Pause, sent whatever the bridge reads, and the bridge's
 // silence published after it, from the capture that answers (J1).
 func (c *consoleControl) SwitchOut(ctx context.Context, r admin.PlayerSwitchOut) admin.PlayerAnswer {
-	o, prev, refusal, ok := c.admit(r.Op, r.Digest, opKindSwitchOut, "")
+	o, prevs, refusal, ok := c.admit(r.Op, r.Digest, opKindSwitchOut, "")
 	if !ok {
 		return c.withHandover(refusal)
 	}
-	return c.run(ctx, o, prev, func(o *operation) { c.runSwitchOut(o, r.Take) })
+	return c.run(ctx, o, prevs, func(o *operation) { c.runSwitchOut(o, r.Take) })
 }
 
 // runSwitchOut is the barrier's steps.

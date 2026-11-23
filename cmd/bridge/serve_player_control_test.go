@@ -1370,17 +1370,20 @@ func TestANewerOperationEndsTheOldersUnsentSteps(t *testing.T) {
 	}
 }
 
-// waitEnded waits until the control's current operation is the newer one, of
-// kind, admitted after the one first admitted: the older one's unsent steps
-// are ended by then.
+// waitEnded waits until the operation the control admitted last is the newer
+// one, of kind: the older ones' unsent steps are ended by then, in the same
+// admission.
 func waitEnded(t *testing.T, c *consoleControl, kind string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		c.mu.Lock()
-		cur := c.current
+		var last string
+		if n := len(c.recent); n > 0 {
+			last = c.recent[n-1].rec.Kind
+		}
 		c.mu.Unlock()
-		if cur != nil && cur.r.rec.Kind == kind {
+		if last == kind {
 			return
 		}
 		time.Sleep(time.Millisecond)
@@ -1437,6 +1440,131 @@ func TestALostReplaceHeldBetweenStepsThenAnotherPickNeverPlaysBoth(t *testing.T)
 	}
 	if lost == nil || lost.Status != admin.PlayerOpCancelled {
 		t.Fatalf("the lost replace's record in the switch-out's publication: %+v, want cancelled", lost)
+	}
+}
+
+// TestAStepAStopOvertookInFlightReachesTheEngineBeforeTheSwitchOutsPause
+// pins the Stop's order: a replace's PlayID held after its step's check and
+// before its send, then Stops and the bar's pick of this browser. The Stop is
+// sent at once, and the switch-out waits for the replace as for every older
+// operation not yet ended, whatever Stops came between, so the PlayID reaches
+// the engine before the switch-out's Pause and the bridge is silent once the
+// switch-out answers: a switch-out admitted before the Stop settles, one
+// admitted after, and two Stops in a row, the first settling after the second.
+func TestAStepAStopOvertookInFlightReachesTheEngineBeforeTheSwitchOutsPause(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// stops are the Stops sent; holdFirst holds the first after its answer,
+		// before it settles, until the switch-out is admitted (switchWhileHeld)
+		// or the Stops after it have settled.
+		stops                      int
+		holdFirst, switchWhileHeld bool
+	}{
+		{name: "a switch-out admitted before the Stop settles", stops: 1, holdFirst: true, switchWhileHeld: true},
+		{name: "a switch-out admitted after the Stop settles", stops: 1},
+		{name: "two Stops in a row", stops: 2, holdFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newCtlRig(t, ctlOptions{seams: &controlSeams{}})
+			at, release := make(chan struct{}), make(chan struct{})
+			var parked, stopParked atomic.Bool
+			var letGo, stopLetGo, waitsOnce sync.Once
+			free := func() { letGo.Do(func() { close(release) }) }
+			t.Cleanup(free)
+			stopAt, stopGo := make(chan struct{}), make(chan struct{})
+			freeStop := func() { stopLetGo.Do(func() { close(stopGo) }) }
+			t.Cleanup(freeStop)
+			// waits is closed once the switch-out waits for the replace's end, or
+			// once its answer is published, whichever comes first: the held
+			// PlayID is let go then.
+			waits := make(chan struct{})
+			var afterPause atomic.Int32
+			r.c.seams.beforeSend = func(kind, step string) {
+				if kind == opKindReplace && step == "play_id" && parked.CompareAndSwap(false, true) {
+					close(at)
+					<-release
+				}
+			}
+			r.c.seams.awaitPrev = func(kind, prev string) {
+				if kind == opKindSwitchOut && prev == opKindReplace {
+					waitsOnce.Do(func() { close(waits) })
+				}
+			}
+			r.c.seams.afterFinal = func(kind string) {
+				if kind == opKindSwitchOut {
+					waitsOnce.Do(func() { close(waits) })
+				}
+			}
+			r.c.seams.afterStep = func(kind, step string, err error) {
+				switch {
+				case kind == opKindSwitchOut && step == "pause":
+					afterPause.Store(1)
+				case kind == opKindReplace && afterPause.Load() == 1:
+					t.Errorf("the replace sent %s after the switch-out's pause", step)
+				case kind == opKindTransport && step == "stop" && tc.holdFirst && stopParked.CompareAndSwap(false, true):
+					close(stopAt)
+					<-stopGo
+				}
+			}
+			replaced := make(chan admin.PlayerAnswer, 1)
+			go func() { replaced <- r.replace(r.paths(), 0, 0, true) }()
+			select {
+			case <-at:
+			case <-serveGiveUp(t):
+				t.Fatal("the replace's PlayID was never held before its send")
+			}
+			var first chan admin.PlayerAnswer
+			rest := tc.stops
+			if tc.holdFirst {
+				first = make(chan admin.PlayerAnswer, 1)
+				go func() { first <- r.command(admin.PlayerCmdStop, nil) }()
+				select {
+				case <-stopAt:
+				case <-serveGiveUp(t):
+					t.Fatal("the first Stop was never answered")
+				}
+				rest--
+			}
+			for range rest {
+				wantRecord(t, "a Stop beside the held PlayID", r.command(admin.PlayerCmdStop, nil), admin.PlayerOpDone, "", "")
+			}
+			switched := make(chan admin.PlayerAnswer, 1)
+			if tc.switchWhileHeld {
+				go func() { switched <- r.switchOut(false) }()
+				waitEnded(t, r.c, opKindSwitchOut)
+			}
+			if first != nil {
+				freeStop()
+				wantRecord(t, "the first Stop", <-first, admin.PlayerOpDone, "", "")
+			}
+			if !tc.switchWhileHeld {
+				go func() { switched <- r.switchOut(false) }()
+			}
+			select {
+			case <-waits:
+			case <-serveGiveUp(t):
+				t.Fatal("the switch-out neither answered nor waited for the replace")
+			}
+			free()
+			a := <-switched
+			rec := wantRecord(t, "the switch-out", a, admin.PlayerOpDone, "", "")
+			if st := stateOf(t, a.Player); !st.Silent || st.Transport == engine.Playing.String() || rec.Silence != st.Revision {
+				t.Fatalf("the switch-out's publication: %s silent %v at %d (silence %d), want silent, its own", st.Transport, st.Silent, st.Revision, rec.Silence)
+			}
+			<-replaced
+			if s := r.eng.Snapshot().State(); s == engine.Playing {
+				t.Fatal("the bridge plays once the switch-out has answered")
+			}
+			var overtaken *admin.PlayerRecord
+			for _, rec := range stateOf(t, a.Player).Operations {
+				if rec.Tab == r.tab && rec.Seq == 1 {
+					overtaken = &rec
+				}
+			}
+			if overtaken == nil || overtaken.Status == admin.PlayerOpRunning {
+				t.Fatalf("the overtaken replace's record in the switch-out's publication: %+v, want it ended before the switch-out began", overtaken)
+			}
+		})
 	}
 }
 
