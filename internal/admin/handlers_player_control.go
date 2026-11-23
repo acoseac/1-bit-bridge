@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
@@ -48,6 +49,11 @@ type PlayerControl interface {
 	// enabled on the boot snapshot with serve's data directory's lock held),
 	// started or not: a plan that does not is a bridge that offers no player.
 	Lists() bool
+	// Clock is the control's clock now, the one that stamps a publication's
+	// at (the wall clock in production): GET now says it as its answer is
+	// sent (X-Bridge-Clock), the one sample of the server's clock the bar
+	// takes its offset from (M1).
+	Clock() time.Time
 	// Now is a publication captured now: a new revision where the state
 	// differs from the latest publication's, and that publication otherwise,
 	// at once.
@@ -726,7 +732,15 @@ func (s *Server) controlPrelude(w http.ResponseWriter) (PlayerControl, bool) {
 	return s.deps.PlayerControl, true
 }
 
-// apiPlayerControlNow handles GET /api/output/player/now.
+// playerClockHeader is GET now's sample of the server's clock as its answer
+// is sent (M1): the control's clock, the one a publication's at is stamped
+// by, in RFC 3339 with nanoseconds in UTC, as that at is written. The bar
+// takes its clock's offset from these samples alone, never from a
+// publication's at, which the latest publication carries however old it is.
+const playerClockHeader = "X-Bridge-Clock"
+
+// apiPlayerControlNow handles GET /api/output/player/now: the publication,
+// and the server's clock read after it, just before the answer is written.
 func (s *Server) apiPlayerControlNow(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.controlPrelude(w)
 	if !ok {
@@ -735,6 +749,7 @@ func (s *Server) apiPlayerControlNow(w http.ResponseWriter, r *http.Request) {
 	pub := c.Now(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(playerClockHeader, c.Clock().UTC().Format(time.RFC3339Nano))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(pub.Bytes)
 }

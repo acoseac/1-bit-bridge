@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,8 @@ type fakeControl struct {
 	// handoverPaths are the library paths a read back names its record's
 	// handover's tracks by.
 	handoverPaths []string
+	// clock is what Clock answers: the control's clock as an answer is sent.
+	clock time.Time
 }
 
 func newFakeControl() *fakeControl {
@@ -61,6 +64,10 @@ func (f *fakeControl) called() []string {
 
 func (f *fakeControl) Platform() string { return f.platform }
 func (f *fakeControl) Lists() bool      { return f.lists }
+func (f *fakeControl) Clock() time.Time {
+	f.count("clock")
+	return f.clock
+}
 func (f *fakeControl) Now(context.Context) PlayerPublication {
 	f.count("now")
 	return f.pub
@@ -364,6 +371,65 @@ func TestEveryControlAnswerHasItsStatus(t *testing.T) {
 				t.Errorf("%s has no sentence", tc.code)
 			}
 		})
+	}
+}
+
+// TestGETNowSaysTheServersClockAtSend pins M1 (P1): GET now's answer carries
+// X-Bridge-Clock, the control's clock as the answer is sent (PlayerControl's
+// Clock, asked after the publication is read, never a clock of the
+// handler's), in RFC 3339 with nanoseconds in UTC as a publication's at is
+// written, while the publication it answers was captured earlier; no other
+// control route carries it, and the event stream does not.
+func TestGETNowSaysTheServersClockAtSend(t *testing.T) {
+	srv, fake, _ := newControlTestServer(t)
+	captured := time.Date(2026, 11, 23, 9, 59, 51, 123456789, time.UTC)
+	fake.pub.Bytes = []byte(`{"epoch":"` + fake.pub.Epoch + `","revision":7,"at":"` + captured.Format(time.RFC3339Nano) + `"}`)
+	fake.clock = time.Date(2026, 11, 23, 11, 0, 0, 987654321, time.FixedZone("CET", 3600))
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		var r *http.Request
+		if body == "" {
+			r = httptest.NewRequest(method, path, nil)
+		} else {
+			r = httptest.NewRequest(method, path, strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+		}
+		r.RemoteAddr = "127.0.0.1:54321"
+		r.Host = testConsoleHost
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		return w
+	}
+	w := call(http.MethodGet, "/api/output/player/now", "")
+	if w.Code != http.StatusOK || w.Body.String() != string(fake.pub.Bytes) {
+		t.Fatalf("GET now = %d %s, want 200 and the publication", w.Code, w.Body.String())
+	}
+	if got, want := w.Header().Get("X-Bridge-Clock"), "2026-11-23T10:00:00.987654321Z"; got != want {
+		t.Fatalf("X-Bridge-Clock %q, want the control's clock at send, %q, after the publication's at %s", got, want, captured.Format(time.RFC3339Nano))
+	}
+	calls := fake.called()
+	if i, j := slices.Index(calls, "now"), slices.Index(calls, "clock"); i < 0 || j < i {
+		t.Fatalf("the route asked %v: want the publication read, then the clock", calls)
+	}
+	for _, route := range controlRoutes[1:] {
+		if w := call(route.method, route.path, route.body); w.Header().Get("X-Bridge-Clock") != "" {
+			t.Errorf("%s %s carries X-Bridge-Clock (%d): GET now alone says the clock", route.method, route.path, w.Code)
+		}
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := (&http.Client{Transport: &http.Transport{}}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("X-Bridge-Clock") != "" {
+		t.Error("the event stream carries X-Bridge-Clock: GET now alone says the clock")
 	}
 }
 
