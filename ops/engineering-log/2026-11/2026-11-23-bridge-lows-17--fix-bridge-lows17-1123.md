@@ -91,7 +91,9 @@ holds that round's code, and `274d0e9b` after it changes the record alone.
 
 ### Runs
 
-At `36d0cb76`, the last commit of code, on linux/amd64 (16 CPUs):
+At `36d0cb76`, on linux/amd64 (16 CPUs), whose tree held every change of code: the last commit that
+changed code or tests is `828225b6`, and none after it changed any, `36d0cb76` changing B997's
+entry alone (bridge lows 19's correction: this line named `36d0cb76` the last commit of code):
 - In the shared build slot, one session, taken at once (14:12 UTC): `make fmt` rewrote nothing
   (`git status` clean after it); `make vet` clean; `go vet` of `internal/admin`, `internal/api` and
   `internal/consolelan` for windows/amd64 and windows/arm64 clean; those three packages' tests as
