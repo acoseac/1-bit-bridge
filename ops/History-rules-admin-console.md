@@ -62,3 +62,47 @@
   `TestAnOriginRecordOutsideTheTrashIsNotWritten`,
   `TestAnOriginRecordOutsideTheTrashIsNotRemoved`,
   `TestARecordedRootThatIsNotAbsoluteCannotBeRead`.)
+
+- **`/api/jobs` is guarded in BOTH directions, down to the LEAF.**
+  `TestSettingsPrereqsOnlyReadRealJobsFields` walks JS→Go (every `jobs.<field>`
+  names a real field) and cannot see a field nobody reads;
+  `TestEveryJobsFieldIsRenderedSomewhere` walks Go→JS. #891's stated purpose was
+  "a Jobs card" and it touched no template and no JS — the endpoint ran a
+  full-table scan every thirty seconds for numbers no pixel consumed, and the DTO
+  test passed. **The first version of that guard walked the twelve CONTAINERS
+  and was satisfied by `j.lyrics` alone** — so "`lyrics` was the only field with
+  zero reads" was true at the only level it looked, and the nine numbers inside
+  were as unguarded as `lyrics` had been. Walked recursively it found six more
+  leaves marshalled for nobody (`scanner.isScanning`, `scanner.lastFullScan`,
+  `enrichment.source` — all read off `/api/stats` instead — plus
+  `analysis.intervalSec`, `coverage.totalLocal`, `smartMixes.analysisAssisted`).
+  Two mechanisms make the recursive form work, and both are negative-controlled:
+  it resolves the JS's local and parameter aliases (`const lyr = j.lyrics`;
+  `renderAnalysisCoverage(an.coverage)` → `cov.eligible`), and it strips
+  COMMENTS ONLY — most nested reads sit inside `${…}` template interpolations,
+  which `stripJSNoise` blanks. Recursion stops at the exported shared types
+  (`*JobRunState` and kin), which have other consumers. **A guard that checks
+  containers proves nothing about their contents.** One of those stops is
+  `*AnalysisSweepState`, and a field added to its `last` breakdown and never
+  rendered leaves this guard green (measured on #992), so that breakdown is
+  pinned the other way: `TestDescribeAnalysisSweepAccountsForEveryTrack`
+  executes the line that renders it. **A leaf the server sends as a KEY
+  for the console to word needs its wording pinned too**: the guard proves
+  `maintenance.orphanSidecarGCRefusal` is read, not that every value it
+  can take has words, so `TestEveryOrphanRefusalKindIsWorded` runs
+  `describeOrphanGCRefusal` under node for each
+  `integrity.OrphanRefusalKinds()` entry (2026-09-28), and refuses one that
+  comes back blank, `undefined` or `null` (what `console.log` prints for a
+  case that returns nothing), as its key, as the fallback, or in another
+  kind's words. **And a list that stands for every value is pinned to the
+  declarations**: `TestEveryOrphanRefusalKindIsListed` reads the integrity
+  package's source for every constant of type `OrphanRefusalKind` and
+  requires `OrphanRefusalKinds()` to hold exactly those, since a kind the
+  list omits is worded by nobody and the wording test passes over it.
+  The variant watcher's key (`maintenance.variantIntegrityRefusal`,
+  2026-09-29) has the same pair, `TestEveryVariantRefusalKindIsWorded` and
+  `TestEveryVariantRefusalKindIsListed`, over the same helpers
+  (`requireEveryRefusalKindIsWorded`, `requireEveryKindIsListed`): **a
+  third refusing sweep takes both helpers, not copies of them.**
+
+- **The player bar's control routes (B634, `handlers_player_control.go`) refuse where no player is offered (no control wired, a public bridge, a host that is not Linux, a boot plan that lists none) before anything is read, asking neither the player block's Unread nor the managed settings; take one JSON object of at most 8 MiB, at most 20,000 paths of 4,096 bytes, each bound its own refusal; answer a command's record under the publication captured after it; and the event stream sends the player frame only where a player is offered.** The eight routes are GET `now`, `queue` and `operation`, and POST `queue` (a replace: an album or a playlist by its id, expanded on the server, or a list of paths), `queue/append`, `queue/delete`, `transport` and `switch-out`, all under `/api/output/player/`; each refusal says no player is offered here (`player_not_wired`, `player_not_available`, `player_not_supported`, `player_not_offered`), which GET now answers at once, so the bar tells a bridge that offers none from a stream not yet open. A long playlist travels by its id, not as its paths. A command's identity is checked by its shape (a tab of 32 lower-case hexadecimal digits, a count above 0, an epoch); its digest is the route and the command's decoded fields without the identity. A catalog row carries `bridge`, how the bridge's own player plays it (`BridgeWayOf`, the one function a replace's checks run too), while the player runs, and none otherwise. **Don't take the console's lock or bridge.yaml's in a control route, write the config from one, or refuse a Stop over an unreadable player block.** `TestTheControlRoutesRefuseWhereThePlayerCannotRun`, `TestAnUnreadablePlayerBlockStopsNothingTheControlAsks`, `TestTheControlRoutesAreGuardedLikeEveryConsoleWrite`, `TestAControlBodyHasBoundsOfItsOwn`, `TestEveryControlAnswerHasItsStatus`, `TestEachExcludedDeploymentSaysNoPlayerIsOfferedHere` and `TestTheCatalogSaysWhatTheBridgesPlayerPlays` pin it.

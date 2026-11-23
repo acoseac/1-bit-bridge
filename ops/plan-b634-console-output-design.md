@@ -2,7 +2,7 @@
 
 Design and PR plan, 2026-11-22, for bridge 0.2.4. Docs only: this round writes no code.
 
-**Status.** For review, round 3, on the branch head `77593eb2`, whose code is bridge main
+**Status.** For review, round 3, branched from `77593eb2`, whose code is bridge main
 `9f98e0c1`'s (the commits between them change this file alone), so every `path:line` cited holds at
 both. Round 1 (`e58896c2`) settled R1 to R12. Round 2 (`baeac103`) took the decision of
 2026-11-22, option B (§1), and settled C1 to C5 under the binding E1 to E12. Round 3 settles G1 to
@@ -10,6 +10,17 @@ G12, both reviews of round 2; option B and its contract stand where nothing belo
 where each G is settled, §15 each C and E, and §14 where round 1's R1 to R12 now are. The owner's
 decision of 2026-11-22 stands. The parked 11-13 design of a larger B634 stays input only: its
 passcode, its LAN listener and its live DAC switch are not part of this design.
+
+**What PR 1 settles.** PR 1, the server (`feat/b634-console-control`), builds §2 to §6 and §10's
+PR 1, and this file now says what it built where its brief's bindings, J1 to J10 and K1 to K11,
+differ from round 3: an answer's outcome, final record and revision from one capture (§2.3, §4.1);
+effect `none` only for an answer that proves no change (§2.3); a refusal before the first step a
+record (§2.3); a read back by epoch, with its revision and its handover hydrated (§5.2); one command
+digest per identity, `operation_conflict` (§2.3, §5.3); the mid-edit promise narrowed to what the
+IDs show (§2.2); the excluded deployments and the routes' bounds (§5.1, §5.2); the no-LAN entry by
+the builder's resource option and the XML policy (§6.6); a closed engine's four facts and the
+handover's position (§3.1, §3.2). §17 lists each binding with where it is settled; J10 is PR 2's,
+recorded in §10.
 
 **What round 2 changes.** The compound edit is an OpenHome controller's, the last admitted command
 winning, in place of round 1's chain of generations (§2). Every console command is an operation
@@ -166,7 +177,14 @@ step.** After each step the control reads one snapshot (no command: `Snapshot.Le
 `snapshot.go:382-383`, `:419-425`) and goes on only while the queue's IDs are exactly what its own
 steps made: the entries it kept (none for a replace, the queue it read for an append) and then the
 IDs it was handed, in its order. At the first ID it did not make, or the first of its own that is
-missing, it stops and reports `changed`.
+missing, it stops and reports `changed`. The promise is that difference and no more (J6): another
+controller's change the IDs do not show, its membership or its order, is no change of the console's
+edit. A cast's `DeleteAll` that lands on the console's queue while it is still empty (after the
+console's `DeleteAll`, before its first insert) changes neither, and the edit goes on, `done`; the
+cast's insert, landing after the console's end, is the next frame's to show. The one exception
+stays: an insert between the console's last check and its play leaves the play playing the
+console's entry in a queue that holds the other controller's, which the end reports `changed`
+(below).
 
 - **Only IDs are compared, never the generation.** A repeat setting, a skip, a track's advance, a
   release's acknowledgement or an output report moves the generation and changes no ID, so none of
@@ -211,14 +229,22 @@ Every console command is an operation of the control layer (`consoleControl`, §
   tab's mark, set in the step that puts the operation in the control's order. A request below its
   tab's mark is refused, `replayed`, and never runs; one at the mark runs nothing and answers that
   operation's record where it is kept, `operation_gone` where it is not; one above it is a new
-  operation.
+  operation. A record keeps the digest of its command as the server decoded it, its route and its
+  fields without the identity, never the bytes sent (K11); a request at the mark whose digest
+  differs is refused `operation_conflict` (409, no record, the latest publication), the record kept
+  as it was. The checks run in that order: another epoch, `epoch_changed`; a count below the mark,
+  `replayed`; at the mark, a digest that differs `operation_conflict` while the record is kept, and
+  `operation_gone` once it is not; above it, a new operation. Two tabs started from identical
+  session storage share a tab's identity, and the second learns so from that refusal: PR 2's bar
+  takes a new tab identity on `operation_conflict` (J5).
 - **One at a time.** The control runs operations in their order of arrival. One that arrives while
   another runs ends the older one's steps not yet sent, and the older sends nothing more. Its step in
   flight, sent before, runs on in the engine ahead of the newer operation's commands, and its answer
   finishes the older record. A Stop is sent at once: the engine takes it after that step, and a play
   still waiting there is overtaken by it (`owner.go:549-570`; `doc.go:114-134`). Every other
-  operation first waits for that step's answer, so the steps of two console operations never
-  interleave.
+  operation first waits for that step's answer and the older record's end, so the steps of two
+  console operations never interleave, and the newer one starts once the older one's record says
+  how it ended.
 - **Steps never run on the request's context.** Each runs on a context the request's end does not
   end (`context.WithoutCancel`), under `engine.WithAdmission`, and the control waits for the engine's
   own answer, which every command the engine takes gets (§2.1) within the engine's own bounds
@@ -248,11 +274,22 @@ Every console command is an operation of the control layer (`consoleControl`, §
 
   The other fields:
   - `effect` (G9) is `none` when no step took effect: the operation was refused before any step
-    (§5.3's refusals before the engine, step 0, an append's read of its base), or the engine refused
-    its first step, and a command the engine refuses changes nothing; it is `some` once a step the
-    engine answered nil has run. It is the engine's answer that decides, never the count sent: a
-    stale `DeleteAll` is sent, admitted and refused by the owner (`owner.go:601-602`), so `sent` is
-    1 and `effect` is `none`.
+    (§5.3's refusals before the engine, step 0, an append's read of its base), or the engine
+    answered each step it sent with a refusal that proves the command changed nothing (J2): a
+    command not admitted, overtaken by a Stop, refused stale or under a hold (decided before the
+    command), or refused by its own guards before its first change (`preEffect`,
+    `cmd/bridge/serve_player_control.go`). It is `some` once a step the engine answered nil has
+    run, and `unknown` for every other answer: the engine's timeout of a call (which releases the
+    session), its shutdown (`ReasonClosed`), and a start that failed after the command moved the
+    selection or the seek state (K8: `Play`, `PlayIndex`, `Next`, `Previous` and a seek change
+    them before the session starts, so `ReasonBackend`, `ReasonAllUnplayable`, `ReasonUnplayable`,
+    `ReasonTimeout` and the occurrence budget are effects not known). It is the engine's answer
+    that decides, never the count sent: a stale `DeleteAll` is sent, admitted and refused by the
+    owner (`owner.go:601-602`), so `sent` is 1 and `effect` is `none`.
+  - A request refused once it became an operation and before its first step
+    (`player_not_running`, `not_playable`, `queue_full`) is a record all the same, final, its
+    tab's mark moved, so a tab that lost the answer reads back how it ended (J3); one refused for
+    its epoch stores nothing.
   - `release` (G10) is `none`, `confirmed` or `unconfirmed`: for an operation that waited on a
     release (a replace that stopped a session, a switch-out), how it ended (§2.4, §3.2).
   - `silence`, for a switch-out: the revision of the publication that showed the bridge silent
@@ -271,10 +308,12 @@ Every console command is an operation of the control layer (`consoleControl`, §
   its commands now. A handover holds track ids, not entries (1,000 ids of 16 hexadecimal digits at
   most), so the records come to about 1 MiB at most. One console is one person's browser on
   loopback, so the bounds are not met in use, and a test holds each (§2.8).
-- **An answer of its own (G3).** The record's final status is set before the handler asks the
-  publisher for its capture, and is part of the published state (§4.3), so the capture differs from
-  every state published before it; and a capture asked for an answer is published under the next
-  revision whatever it found (§4.1). The bar confirms an operation by its record, never by a change of
+- **An answer of its own (G3).** The record's final status is set within the capture that answers
+  it: the publisher evaluates the operation's outcome on that capture, sets the record final under
+  the control's lock and publishes it under the next revision, one capture for the three (J1, K10),
+  so the capture differs from every state published before it, and no answer is a state from
+  before its command; and a capture asked for an answer is published under the next revision
+  whatever it found (§4.1). The bar confirms an operation by its record, never by a change of
   the engine's state: a Pause or a Stop of a stopped player, or a repeat set to what it is, changes
   nothing the engine publishes, and is answered with its record, `done`, under a revision of its own.
 - **The bar** shows an operation it has no answer for as unconfirmed until it reads the record's final
@@ -517,12 +556,14 @@ The browser starts only on a publication (§4) that:
 A refusal is not silence, and neither is a Pause's success alone: a Pause during a release that
 carries a play succeeds, and the play follows (§2.1). A player that never ran an engine (off at
 boot, no DAC bound, its start failed) holds no device and is silent. **One whose engine has closed
-is silent only once serve's player has said that no session holds the device** (G7): after a panic
-in Run, the backend's release of every session has answered (`releaseAll`,
-`cmd/bridge/serve_player.go:886-897`, whose outcome serve's player then keeps for the publisher,
-where today it only logs it), and the engine's last snapshot holds no release unconfirmed
-(`serve_player.go:873-876`). Until then the barrier waits within its bound, and past it answers
-`refused` (`release_unconfirmed`); so does a release of every session that answered with an error.
+is silent only once serve's player has said that no session holds the device** (G7), on four facts
+its shutdown establishes (K7, `playerClosedFacts`): its Run returned within its bound; after a
+panic in Run, the backend's release of every session answered with no error (`releaseAll`,
+`cmd/bridge/serve_player.go:886-897`, whose outcome serve's player now keeps for the publisher
+beside its line); the backend's Wait left no device goroutine; and the engine's last snapshot holds
+no release unconfirmed (`serve_player.go:873-876`). Until they are known the barrier waits within
+its bound, and past it answers `refused` (`release_unconfirmed`); so do facts short of any of the
+four.
 The narrowed promise (§3.3) is then kept without counting a closed engine silent.
 
 ### 3.2 The barrier, the one way the browser starts (G1, G8)
@@ -541,15 +582,18 @@ The narrowed promise (§3.3) is then kept without counting a closed engine silen
    and the Pause then pauses what the resume started (E4). Paused or stopped with nothing under way,
    the Pause does nothing (`doc.go:73`).
 4. It waits, within 10 s, for a publication captured after the Pause's answer in which the
-   transport has settled (not starting, not releasing). Silent (§3.1): `done`. Playing: another
-   Pause, three at most, then `changed`. A hold: `refused` (`check`, `maintenance`). The tone in the
+   transport has settled (not starting, not releasing). Silent (§3.1): `done`, judged on the
+   capture that answers, never on the one that observed the silence (J1): a play another controller
+   starts between them leaves the answering capture not silent, and the barrier pauses again.
+   Playing: another Pause, three at most, then `changed`. A hold: `refused` (`check`, `maintenance`). The tone in the
    slot: `refused` (`tone`). A release that stays unconfirmed to the bound (`transport.go:742-778`;
    its acknowledgement may never come): `refused` (`release_unconfirmed`), never a wait without end
    (G10).
 5. Its answer carries its record, whose `silence` is the revision of the publication that showed
    the silence, and that publication. With `take`, the answer also carries that publication's queue
-   (each entry's track, §4.2), its selection, its position for PCM and whether step 2 found the
-   bridge playing: one capture, so no cast and no track change lands between the pause and the
+   (each entry's track, §4.2), its selection, its position for PCM (only where the occurrence heard
+   is the captured snapshot's track and that track is the selected entry, K2) and whether step 2
+   found the bridge playing: one capture, so no cast and no track change lands between the pause and the
    reads (C3). The record keeps them as its `handover`, so a tab that loses the answer reads them
    back (§2.3, G5).
 
@@ -645,8 +689,8 @@ shape of serve's supervisor loop (`cmd/bridge/serve_player.go:609-651`).
   publisher gives it its revision in the same step as the capture.
 - **Every capture asked for completes, and no answer is suppressed (G3, G12).** A capture of the
   publisher's own wakes is published only where its state differs from the last. A capture asked for
-  an operation's answer is published under the next revision whatever it found, after the record's
-  final status is set, which makes it differ anyway (§2.3): no command waits for a change, and none
+  an operation's answer evaluates the operation's outcome on itself, sets the record final within
+  it and is published under the next revision whatever it found (§2.3; J1, K10): no command waits for a change, and none
   is answered with a state from before it. A capture asked by `GET now` or `GET queue` is published
   where it differs from the last, and otherwise the read answers the latest publication, at once,
   since the state now is that one: no read waits for a revision that may never come.
@@ -816,17 +860,19 @@ interface of the console's, beside `PlayerOutput` (`:75-117`), that `cmd/bridge`
 ```go
 // PlayerControl is the bridge's own player as the console's player bar drives it (B634).
 type PlayerControl interface {
+	Platform() string                                                // the host the player runs on
+	Lists() bool                                                     // serve's boot plan lists the player
 	Now(ctx context.Context) PlayerPublication                       // §4: a capture after now
-	Latest() PlayerPublication                                       // the stream's
+	Latest() (PlayerPublication, bool)                               // the stream's
 	Wake() <-chan struct{}                                           // closed at the next publication
 	Queue(ctx context.Context) PlayerQueue                           // §4.2
-	Plays() PlayerPlays                                              // §6.7: the codecs and each DSD rate's way
+	Plays() (PlayerPlays, bool)                                      // §6.7: the codecs and each DSD rate's way
 	Replace(ctx context.Context, r PlayerReplace) PlayerAnswer       // §2.4
 	Append(ctx context.Context, r PlayerAppend) PlayerAnswer
 	Delete(ctx context.Context, r PlayerDelete) PlayerAnswer
-	Transport(ctx context.Context, r PlayerTransport) PlayerAnswer
+	Transport(ctx context.Context, r PlayerCommand) PlayerAnswer
 	SwitchOut(ctx context.Context, r PlayerSwitchOut) PlayerAnswer   // §3.2
-	Operation(tab string, seq uint64) (PlayerRecord, bool)          // §2.3: a tab's last, read back
+	Operation(epoch, tab string, seq uint64) PlayerReadBack          // §2.3: a tab's last, read back (K9)
 }
 ```
 
@@ -848,7 +894,11 @@ cli-serve.md line).
 matching Origin. Then the control's own refusal, `controlRefusal`, asked before anything is read: no
 control wired, 503 `player_not_wired`; a public bridge, a signed-in session included, 403
 `player_not_available` (a public bridge runs no player: `config.PlayerEnabled`); a host that is not
-Linux, 409 `player_not_supported`.
+Linux, 409 `player_not_supported`; a boot plan that does not list the player (it was not enabled
+when serve started), 409 `player_not_offered`. Each says that no player is offered here, and GET
+now answers it at once, also just after a restart: so the bar tells a deployment that offers no
+player from a stream not yet open (K1). Such a deployment's stream sends no player frame, and the
+barrier is asked only where a player is offered.
 
 **Control is not config.** `controlRefusal` asks neither the player block's `Unread` nor the managed
 settings: those guard a write of `output.player` (`handlers_player_output.go:436-460`), which a
@@ -862,9 +912,9 @@ player that runs (R8). The control routes take neither the console's lock (`lock
 |---|---|---|
 | `GET /api/output/player/now` | — | a publication captured now (§4) |
 | `GET /api/output/player/queue` | — | the queue of a publication captured now (§4.2) |
-| `GET /api/output/player/operation?tab=&seq=` | — | the tab's last record, read back whole, a switch-out's handover included (§2.3) |
-| `POST /api/output/player/queue` | `op`, `at`, `album` or `tracks`, `start`, `position`, `play` | replace (§2.4) |
-| `POST /api/output/player/queue/append` | `op`, `at`, `album` or `tracks` | append |
+| `GET /api/output/player/operation?epoch=&tab=&seq=` | — | the tab's last record in that epoch, read back whole with the epoch and the latest revision beside it, a switch-out's handover hydrated through the catalog (§2.3; J4, K9); another epoch is 409 `epoch_changed` |
+| `POST /api/output/player/queue` | `op`, `at`, `album`, `playlist` or `tracks`, `start`, `position`, `play` | replace (§2.4) |
+| `POST /api/output/player/queue/append` | `op`, `at`, `album`, `playlist` or `tracks` | append |
 | `POST /api/output/player/queue/delete` | `op`, `at`, `entry` | delete one entry |
 | `POST /api/output/player/transport` | `op`, `at`, `command`, and `index`, `seconds` or `on` | the transport; `at` with every command but `pause` and `stop`, which carry none (§2.6) |
 | `POST /api/output/player/switch-out` | `op`, `take` | the barrier (§3.2): with `take` true the switch to this browser, false the browser's resume of its own |
@@ -876,8 +926,10 @@ player that runs (R8). The control routes take neither the console's lock (`lock
   `bad_generation`.
 - `album` is a catalog album ID, expanded on the server to its tracks in the catalog's order, never
   a path prefix (`.claude/rules/admin-console.md`: an album is a set of tracks; identity scopes
-  travel as IDs and are expanded server-side). `tracks` is a list of catalog paths. Exactly one of
-  the two; a list past the queue's limits is windowed (§6.3), and the answer says so.
+  travel as IDs and are expanded server-side). `playlist` is a playlist's ID, expanded on the
+  server to its items' paths in its order, so a playlist longer than a body carries travels by its
+  ID (K5). `tracks` is a list of catalog paths. Exactly one of the three; a list past the queue's
+  limits is windowed (§6.3), and the answer says so.
 - `start` is an index into the list (0 by default), `position` whole seconds into that track (none
   by default), `play` whether to start it. With `play` false the whole list is sent and the track at
   `start` is selected (§6.5).
@@ -885,9 +937,12 @@ player that runs (R8). The control routes take neither the console's lock (`lock
   (`Previous`), `index` (`PlayIndex(index)`: the queue panel is positional, and under the tab's
   generation an index names the entry the tab saw), `seek` (`SeekAbsolute(seconds)`) or `repeat`
   (`SetRepeat(on)`). There is no shuffle (R10).
-- Every body goes through `decodePlayerBody` (one JSON object, no key it does not take, nothing after
-  it, `handlers_player_output.go:541-592`), with a route constant of its own for its log line
-  (`:600-607`).
+- Every body is one JSON object, no key it does not take and nothing after it, as
+  `decodePlayerBody` takes (`handlers_player_output.go:541-592`), with bounds of its own (K5): at
+  most 8 MiB (413 `body_too_large`, where the Player page's writes take 1 MiB), at most 20,000
+  paths (400 `too_many_tracks`), each 1 to 4,096 bytes (400 `bad_track`), each bound its own
+  refusal; a body its reader could not read is answered as the Player page's are
+  (`playerBodyUnread`), with its route constant.
 
 ### 5.3 Answers and refusals
 
@@ -901,12 +956,14 @@ console's error envelope (`error`, `message`) with the record and the publicatio
 
 | Condition | Status | `error` |
 |---|---|---|
-| no control wired; a public bridge; not Linux | 503; 403; 409 | `player_not_wired`; `player_not_available`; `player_not_supported` |
+| no control wired; a public bridge; not Linux; a boot plan that lists no player | 503; 403; 409; 409 | `player_not_wired`; `player_not_available`; `player_not_supported`; `player_not_offered` |
 | no player serve runs: off at boot, no DAC bound, refused at boot | 409 | `player_not_running`, `reason` `off` |
 | the player starting, its start failed, its engine closed (`ReasonClosed`) | 409 | `player_not_running`, `reason` `starting`, `start_failed` or `closed` |
-| a body that does not decode; an `at` that is no generation; an `op` that is no identity | 400 | `bad_json`; `bad_generation`; `bad_operation` |
+| a body that does not decode; an `at` that is no generation; an `op` that is no identity | 400 | `bad-json`; `bad_generation`; `bad_operation` |
+| a body past 8 MiB; more than 20,000 paths; an empty path or one past 4,096 bytes | 413; 400; 400 | `body_too_large`; `too_many_tracks`; `bad_track` |
 | an `op` sent for another epoch than the control's | 409 | `epoch_changed` (it never runs) |
 | an `op` below its tab's mark | 409 | `replayed` (it never runs); at the mark, the record it names is answered |
+| an `op` at its tab's mark carrying another command than its record's (K11) | 409 | `operation_conflict`: no record, the latest publication, the record kept as it was |
 | a read back of a record not kept | 404 | `operation_gone` |
 | no track of the request plays on the bridge's player | 409 | `not_playable`, each track's word |
 | an append the queue has no room for | 409 | `queue_full`, with the room left (§6.4) |
@@ -980,7 +1037,9 @@ plays the track before it and the ones before that, and the tracks after it as f
 allow; where the list ends first, the window reaches further back. Past 16 MiB it gives up tracks from
 its far end after the start first, then from its far end before it. A track step 0 left out takes no
 place in it. The answer names it: "The bridge's player holds 1,000 tracks: tracks 3,901 to 4,900 of
-this playlist's 5,214 are queued."
+this playlist's 5,214 are queued." The list is the whole one: an album or a playlist travels by its
+ID and is expanded on the server, and a list of paths travels whole within the routes' bounds
+(§5.2), so the window is cut from the whole list on the server, never by the size of a body (K5).
 
 ### 6.4 An append, and an append to an empty queue (C4, E7, E11)
 
@@ -1047,10 +1106,16 @@ the start onward (red: the queue is `[B, C]`, and Previous restarts B).
     the bound port and whether artwork is mounted, set at Start and cleared at Stop), never from a
     value of `cmd/bridge`'s.
   The item is under 64 KiB and XML 1.0 text, the bounds an Insert's metadata is held to
-  (`writes.go:489-525`), which step 0 checks (§6.2).
+  (`writes.go:489-525`, exported as `openhome.MetadataTaken`), which step 0 checks (§6.2). A tag
+  holding a character XML 1.0 cannot carry (U+FFFE, U+FFFF, a surrogate, a byte that is not UTF-8)
+  has it replaced by U+FFFD before the item is built, and a C0 control is dropped as Browse's
+  escaper drops it: replaced, never a track refused for its tags (K4).
 - **A box with no LAN-eligible host** (none `/v1/health` advertises that an Insert takes, and none
   the DLNA listener takes connections on) writes the canonical URI on the loopback literal,
-  `http://127.0.0.1:7790/dlna/file/<id>`, and metadata with no `<res>` and no `albumArtURI` (E9). The
+  `http://127.0.0.1:7790/dlna/file/<id>`, and metadata with no `<res>` and no `albumArtURI` (E9),
+  by the same builder's resource option (K3: `dlna.DIDLResources`, whose zero value, the source's
+  and the variants' `<res>`, is Browse's and Search's, unchanged; the source's alone on a LAN host;
+  none here). The
   reference stays canonical, which `trackref.Parse` takes and the resolver plays, and no URL in the
   entry sends a controller to a host it cannot reach. Round 1's fallback, the bare id and a
   `<res>` holding the route's path alone, is dropped (C4): nothing shows that a controller, the 1-bit
@@ -1412,6 +1477,11 @@ and PR 1 is useful alone (the routes can be driven by hand).
   for word. CLAUDE.md's `internal/admin` row, a few words. A new entry under
   `ops/engineering-log/2026-11/`. 1-bit.app's pages are outward-facing copy, the owner's to approve,
   and not in either PR.
+- **J10, from PR 1's brief, recorded here and not built in PR 1.** Every start of the browser
+  crosses the barrier (§3.2). The bar holds a state of another epoch only while its stream
+  reconnects, and processes a held answer's record whatever its revision. The bounds (64 tabs'
+  records, 4,096 tabs' marks, the release waits) and `operation_gone` have words in the bar and its
+  help, and `operation_conflict` takes a new tab identity (J5).
 
 ### The records and their room (C5, E10)
 
@@ -1432,7 +1502,7 @@ proved by `verify_moves.py --base <the PR's base>`; each lands verbatim in the H
 
 ## 11. The acceptance list
 
-In a browser alone, on the owner's Pi with its DAC bound and the player running, the app closed, a
+In a browser alone, on a Pi with its DAC bound and the player running, the app closed, a
 fresh browser profile (empty session storage), the library holding a DSD-only album and a PCM album.
 Each step names the test that pins it; the Pi run is the hardware's.
 
@@ -1449,10 +1519,10 @@ Each step names the test that pins it; the Pi run is the hardware's.
 | A9 | Switch back to the browser | `TestTheSwitchToTheBrowserStartsItOnlyOnSilence`, `TestThePositionCarriesOverForPCM`, `TestADSDTrackSwitchedToTheBrowser` | the DAC goes quiet first; the laptop plays the PCM track from the bridge's place |
 | A10 | With the app open and OpenHome on: cast from the app while the bar has the bridge chosen; then press a control from before the cast | `TestACastAfterTheConsolesDeleteAllStopsItAtTheNextCheck`, `TestAStaleGenerationChangesNothing` | the bar follows the cast; the press is refused, then acts on the cast |
 | A11 | Unplug the DAC with the bridge chosen; plug it back | `TestTheBarKeepsTheViewWhileTheBridgeIsUnavailable`, `TestTheBridgesReturnPlaysNothing` | the view stays, with the DAC's line; back, nothing plays by itself |
-| A12 | Switch a playing PCM track to the bridge: listen to the handover | `TestAHandoverSeeksPCMAndNotDSD` | the owner judges the fragment from the track's start (§7.3) |
+| A12 | Switch a playing PCM track to the bridge: listen to the handover | `TestAHandoverSeeksPCMAndNotDSD` | the fragment from the track's start, judged by ear (§7.3) |
 | A13 | Close the browser while the bridge plays | — | playback goes on |
 | A14 | Pause the browser in the middle of an album, pick the bridge, then press Previous | `TestAPausedHandoverKeepsTheQueueBeforeItsTrack` | the bridge holds the whole album, that track selected and stopped; Previous plays the track before it |
-| A15 | With the box off its network (the console on the box's own screen), play an album from the console; back on the network, open the app with OpenHome on | `TestABoxWithNoLANHostWritesTheLoopbackURIAndNoRes` | the owner sees how the app shows entries with no stream URL (§13) |
+| A15 | With the box off its network (the console on the box's own screen), play an album from the console; back on the network, open the app with OpenHome on | `TestABoxWithNoLANHostWritesTheLoopbackURIAndNoRes` | how the app shows entries with no stream URL (§13) |
 | A16 | Pick this browser and reload the tab while the bar says "Moving to this browser…"; then the same with the app playing to the bridge's player after the move | `TestARecoveredHandoverIsHistory`, `TestAReloadedTabReadsItsOperationBack` | the tab reads its move back and plays the track from the bridge's place only once the DAC is quiet; with the app playing, it starts nothing and says so |
 | A17 | Restart the bridge from the Settings page while the bar has the bridge chosen | `TestALateAnswerFromBeforeARestartNeverReplacesTheNewEpoch` | the bar says it is reconnecting, then shows the restarted player, stopped, and nothing plays by itself |
 
@@ -1667,12 +1737,39 @@ and no engine command, field or seam is added.
 | G11 | §7.3, step 1: the queue, the track, whether it plays and the position read from the player's snapshot before `abandon`, and kept for the resume and the saved queue; §9's case |
 | G12 | §4.1: `GET now` and `GET queue` answer the latest publication at once where nothing changed; §4.5's case |
 
-**Not settled: the rest of G7's Lows.** G7 names two Lows, the append's read against `at` and the
-closed-engine residual against the narrowed promise, both settled above, "and the rest". The rest
-are not in this round's brief, and the reviews themselves were not part of its input, so they are
-not settled here: their text is missing, and no guess is made of it.
+**Not settled before PR 1: the rest of G7's Lows.** G7 names two Lows, the append's read against `at` and
+the closed-engine residual against the narrowed promise, both settled above, "and the rest". PR 1's
+brief named the rest, J6 and J7: J6 narrows §2.2's mid-edit promise to what the IDs show, membership
+and order, the exception of an insert before the play kept; J7 words §11's acceptance list without
+naming who does a step.
 
 **The exits.** Neither applies. G3 and G5 need nothing past the round-2 plan: an answer's revision
 is the publisher's, and the records, the marks and the read back are the control's, all in
 `cmd/bridge`, with no second queue owner and no engine change; the one new thing serve's player keeps
 is `releaseAll`'s outcome, beside the line it already logs.
+
+## 17. PR 1's brief, J1 to J10 and K1 to K11, where each is settled
+
+| | Settled in |
+|---|---|
+| J1 | §2.3 an answer of its own and §4.1: the publisher evaluates an operation's outcome, sets its record final and assigns its revision on one capture; §3.2, step 4: the barrier judged on the capture that answers; `TestTheSwitchOutsAnswerIsTheCaptureThatSawSilence` |
+| J2 | §2.3 `effect`: `none` only for an answer that proves no change; `TestOnlyAKnownPreEffectRefusalIsEffectNone` |
+| J3 | §2.3: a refusal before the first step is a record; `TestARefusalBeforeTheFirstStepIsStillARecord` |
+| J4 | §5.2 the read back by epoch, its revision and its handover hydrated; `TestTheReadBackCarriesItsEpochAndHydrates` |
+| J5 | §2.3 one digest per identity, `operation_conflict`, and PR 2's new tab identity on it; `TestTwoTabsFromOneSessionStorageNeverShareARecord` |
+| J6 | §2.2 the promise narrowed to what the IDs show; `TestACastsDeleteAllOfAnEmptyConsoleQueueChangesNoMembership` |
+| J7 | §11 the acceptance list, role-free |
+| J8 | the status line; §16's Lows; §10's PR 2 records J10 |
+| J9 | the premises, checked at PR 1's base: one `bridgePlayer` runs at most one engine run, `Entry`'s fields are public, `MaxReadList` is `MaxEntries` (the engineering log's PR 1 entry) |
+| J10 | §10, PR 2: recorded, not built |
+| K1 | §5.1 `player_not_offered`, the refusals GET now answers at once, no player frame, the barrier only where offered; `TestEachExcludedDeploymentSaysNoPlayerIsOfferedHere`, `TestAPlayerTurnedOffIsNotOfferedJustAfterTheRestart` |
+| K2 | §3.2, step 5: the handover's position only for the captured, selected track; `TestTheHandoverPositionBelongsToItsTrack` |
+| K3 | §6.6 the no-LAN entry by the builder's resource option, Browse's default unchanged; `TestABoxWithNoLANHostWritesTheLoopbackURIAndNoRes`, `TestTheBrowseItemIsTheSameBytesAfterTheExport` |
+| K4 | §6.6 the XML policy: replace; `TestTheConsolesMetadataIsXMLTextWhateverTheTags` |
+| K5 | §5.2 the routes' bounds, a playlist by its ID; §6.3; `TestAControlBodyHasBoundsOfItsOwn`, `TestALongListIsWindowedThroughTheConsolesRoute` |
+| K6 | the metadata pinned to the builder structurally; `TestTheConsoleBuildsItsMetadataWithTheContentDirectorysBuilder` |
+| K7 | §3.1 a closed engine's four facts; `TestAClosedEngineIsSilentOnlyOnceItsSessionsWereLetGo` |
+| K8 | §2.3 `effect`: the commands that change the selection or the seek state before a session starts; `TestOnlyAKnownPreEffectRefusalIsEffectNone` |
+| K9 | §5.1 `Operation(epoch, tab, seq)`; §5.2 the read back's query |
+| K10 | §2.3 and §4.1, the record set within its capture; `TestARevisionIsAssignedOnlyToTheCaptureItNames` |
+| K11 | §2.3 the digest and the check order; §5.3 `operation_conflict`; `TestAResentOperationNeverRunsTwice`, `TestTwoTabsFromOneSessionStorageNeverShareARecord` |
