@@ -637,7 +637,23 @@ starts the browser on that `done`; where it shows the bridge playing, a controll
 the switch, and the tab starts nothing, keeps the handover in the browser, stopped, and says the
 bridge's player is playing again. The record's `silence` was then; only a barrier answered now is
 present silence. The barrier's Pause does nothing where the bridge reads silent, except to a resume
-under way, which it pauses (step 3).
+under way, which it pauses (step 3). **A record another document left is not this tab's to start
+(PR 2's round 2, R8):** session storage, which a copy of the tab copies, carries the operations a
+document had not resolved, and a document that reads one of them back (a reload, or the copy) takes
+its handover stopped, resumes nothing for a switch-in of it refused with nothing changed, and says
+to press Play, which goes through the gate below; the start after an outcome read back is the
+sending tab's alone. So a reload no longer resumes by itself.
+
+**Every start of this browser asks one gate (PR 2's round 2, R1):** a row's play, an album's or a
+playlist's Play and Shuffle, the bar's Play, Next and Previous, the MediaSession's handlers and the
+starts above all go through audio.js's `requestStart` to the output's `gateStart`. Where GET now's
+typed refusal says no player is offered (a box that offers none sends no frame) the start goes on
+at once; before that answer or a frame, and with a player offered before its epoch is known, it
+waits; beside a bridge whose latest state sounds it is refused with §3.3's line; otherwise it runs
+the barrier (`take` false) and starts on its `done`, a play the start defers (to the track's
+metadata, or a retry after an error) asking again whether a newer pick or a newer state showing the
+bridge sounding has come. A pause never waits. The element's own end of a track and a skip past one
+it cannot play keep playing what plays.
 
 ### 3.3 The promise, narrowed
 
@@ -824,15 +840,19 @@ The bar extrapolates from the anchor's own time, never from a frame's arrival: t
 track's length, `offset` being the client's clock less the server's. The offset comes from `GET now`
 alone (PR 2's brief, M1): each answer carries the server's clock as it is sent, `X-Bridge-Clock`
 (`time.RFC3339Nano`, UTC, the control's `Clock`, which stamps every capture's `at`), and `offset` is
-the least `received − X-Bridge-Clock` over the samples of the current epoch and stream connection.
-It is never `received − at`: a publication's `at` is its capture's time, and steady playback
-publishes nothing, so a tab that opens on an anchor 100 s old would take that age for clock skew and
-show the anchor's seconds for ever. The bar samples on load and at each stream connection, and shows
-the anchor's seconds, unextrapolated, until a sample lands; a sample asked under an earlier
-connection, epoch or sampling generation is dropped whole, its state and its clock (P7, P8); one
-that fails extrapolates nothing and is asked again at most every 5 s; and the samples are forgotten
-and asked again at a new epoch, a new connection, `visibilitychange` to visible, a `pageshow` from
-the back/forward cache and a jump of the page's clock past a second. A frame for another change (a
+the least `received − X-Bridge-Clock` over the samples of the current sampling generation, which a
+new epoch, a new stream connection, `visibilitychange` to visible, a `pageshow` from the
+back/forward cache and a jump of the page's clock past a second each begin, its samples forgotten
+and asked again. It is never `received − at`: a publication's `at` is its capture's time, and
+steady playback publishes nothing, so a tab that opens on an anchor 100 s old would take that age
+for clock skew and show the anchor's seconds for ever. GET now on load says whether a player is
+offered (K1); its sample counts only where its connection and epoch are still current, which
+before the first frame they are not, so the first sample that counts is the one the epoch's first
+frame asks for, and the bar shows the anchor's seconds, unextrapolated, until one lands. A sample
+asked under an earlier connection, epoch or sampling generation is dropped whole, its state and its
+clock (P7, P8); one that fails extrapolates nothing and is asked again within 5 s while the box has
+not said that no player is offered (PR 2's round 2, V6: round 1 retried only once `offered` was
+known, and this paragraph said the offset was taken over the epoch and the connection: C10). A frame for another change (a
 repeat setting, a queue update) carries the same anchor and moves nothing; a reconnection's first
 frame carries it too, and the position goes on where it was. Round 1 extrapolated from each frame's
 arrival, so a repeat change during steady playback took the position back to the anchor's seconds.
