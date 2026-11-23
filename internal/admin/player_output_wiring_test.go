@@ -96,6 +96,27 @@ func TestTheBarsPromiseIsSaidWordForWord(t *testing.T) {
 	}
 }
 
+// TestEveryRowDecidesByTheOutputChosen pins §7.6's one decision where the
+// rows are drawn: views.js's trackRow, unplayableNote and collectionActions
+// each ask playFor for the output chosen, and nothing in views.js decides a
+// row's playability from its play field alone, as every list did before
+// the bar had an output. TestRowsFollowTheChosenOutput runs playFor itself
+// under node; this is its way into the rows, on every host.
+func TestEveryRowDecidesByTheOutputChosen(t *testing.T) {
+	views := stripJSComments(readFile(t, "static/player/views.js"))
+	for _, fn := range []string{"trackRow", "unplayableNote", "collectionActions"} {
+		body := extractJSFunction(t, views, fn)
+		if !strings.Contains(body, "const output = chosenOutput();") || !strings.Contains(body, "playFor(t, output)") {
+			t.Errorf("%s does not decide by playFor for the output chosen", fn)
+		}
+	}
+	for _, re := range []string{`\.play\??\.kind`, `unplayableReason\(`} {
+		if m := regexp.MustCompile(re).FindString(views); m != "" {
+			t.Errorf("views.js decides a row's playability apart from playFor: %s", m)
+		}
+	}
+}
+
 // barStateExempt are the state's fields the bar must not act on, each
 // forbidden as an input by the design: at, a capture's time, never the
 // clock's offset (M1: the offset is GET now's X-Bridge-Clock samples
