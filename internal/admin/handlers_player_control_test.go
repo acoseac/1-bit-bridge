@@ -215,8 +215,9 @@ func TestAnUnreadablePlayerBlockStopsNothingTheControlAsks(t *testing.T) {
 			if code, body := playerRequest(t, srv.Handler(), http.MethodPost, "/api/output/player/transport", `{"op":`+testOp+`,"command":"stop"}`, nil); code != http.StatusOK {
 				t.Fatalf("a Stop = %d: %s", code, body)
 			}
-			if calls := fake.called(); strings.Join(calls, ",") != "now,transport" {
-				t.Fatalf("the control was asked %v, want now and the Stop", calls)
+			// GET now asks the control's clock as it answers (X-Bridge-Clock).
+			if calls := fake.called(); strings.Join(calls, ",") != "now,clock,transport" {
+				t.Fatalf("the control was asked %v, want now, its clock and the Stop", calls)
 			}
 		})
 	}
