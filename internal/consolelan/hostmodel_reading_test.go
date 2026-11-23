@@ -162,10 +162,10 @@ func readingOf(ifs []readInterface, rows ...int) hostModelReading {
 // *net.IPAddr alone, and one interface holds none.
 func mixedInterfaces() []readInterface {
 	return []readInterface{
-		{index: 1, name: "v4-unicast", addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.2"), Mask: net.CIDRMask(24, 32)}}},
-		{index: 2, name: "v4-anycast", addrs: []net.Addr{&net.IPAddr{IP: net.ParseIP("192.168.1.3")}}},
-		{index: 3, name: "v6-unicast", addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("fd00::2"), Mask: net.CIDRMask(64, 128)}}},
-		{index: 4, name: "v6-anycast", addrs: []net.Addr{&net.IPAddr{IP: net.ParseIP("fd00::3")}}},
+		{index: 1, name: "v4-unicast", addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("192.0.2.2"), Mask: net.CIDRMask(24, 32)}}},
+		{index: 2, name: "v4-anycast", addrs: []net.Addr{&net.IPAddr{IP: net.ParseIP("192.0.2.3")}}},
+		{index: 3, name: "v6-unicast", addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("2001:db8::2"), Mask: net.CIDRMask(64, 128)}}},
+		{index: 4, name: "v6-anycast", addrs: []net.Addr{&net.IPAddr{IP: net.ParseIP("2001:db8::3")}}},
 		{index: 5, name: "unnumbered"},
 	}
 }
