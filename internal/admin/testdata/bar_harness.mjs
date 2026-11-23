@@ -2024,14 +2024,16 @@ S.TestARetryPlaysOnlyWhatThisBrowserMeantToPlay = async () => {
 
 S.TestARestoredQueuesRetryPlaysNothing = async () => {
   // S2: a queue restored at page load, paused, whose metadata is in when a
-  // Range fetch fails.
-  const r = await pageRig({ gate: true, saved: { queue: [flac(1), flac(2)], index: 0, at: 40, shuffle: false, repeat: "off" }, latest: playing({ revision: 3 }) });
+  // Range fetch fails; the bridge silent, so a retry the gate let through
+  // would sound beside the tab this one was copied from.
+  const r = await pageRig({ gate: true, saved: { queue: [flac(1), flac(2)], index: 0, at: 40, shuffle: false, repeat: "off" }, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
   r.el.metadata(200);
   await settle();
   check("restored paused at its position", r.el.paused && r.el.currentTime === 40 && r.el.plays.length === 0, [r.el.paused, r.el.currentTime]);
   r.el.fail(2);
   await settle();
-  check("its retry plays nothing", r.el.paused && r.el.plays.length === 0 && !r.audio.snapshot().playing, [r.el.paused, r.el.plays]);
+  check("its retry plays nothing and asks nothing", r.el.paused && r.el.plays.length === 0 && !r.audio.snapshot().playing && r.s.posts().length === 0, [r.el.paused, r.el.plays, r.s.posts()]);
 };
 
 const name = scenarioName;
