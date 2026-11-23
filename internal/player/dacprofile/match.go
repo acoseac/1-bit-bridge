@@ -52,6 +52,16 @@ func (db *Database) Match(u Unit) (Profile, bool) {
 	return found.clone(), true
 }
 
+// SharedReference reports whether k's vendor and product IDs are one of
+// db's shared reference IDs, whatever its interface and product string.
+func (db *Database) SharedReference(k Key) bool {
+	return slices.ContainsFunc(db.SharedReferenceIDs, func(s SharedID) bool {
+		v, e1 := usbid.ParseHex16(s.VendorID)
+		p, e2 := usbid.ParseHex16(s.ProductID)
+		return e1 == nil && e2 == nil && v == k.VendorID() && p == k.ProductID()
+	})
+}
+
 // matches reports whether u matches the alternative m.
 func (m Match) matches(u Unit, bcd uint16, hasBCD bool, shared map[[2]uint16]bool) bool {
 	v, e1 := usbid.ParseHex16(m.VendorID)

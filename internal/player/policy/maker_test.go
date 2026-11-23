@@ -111,7 +111,9 @@ func throughPersistence(t *testing.T, file []byte) map[string]dsdstate.State {
 // TestNoSchemaOneEntryAuthorizesNativeOrDoP: a schema-1 file's entry for the
 // bound DAC's model, its maker never recorded, authorizes neither native nor
 // DoP at any rate, whichever way the file reaches the box (opened, written
-// over, restored), with every live input offering both: a choice with its
+// over, restored), with every live input offering both, the unit's IDs a
+// generic board's, where only its entry's clean answers would let it play
+// native (B990): a choice with its
 // first use acknowledged, its answers clean and DoP confirmed is dropped, and
 // so is a refusal, the migration's fallback pending its acknowledgement or a
 // DAC's own off, which falls to the default kept: under auto, DSD converted
@@ -119,7 +121,7 @@ func throughPersistence(t *testing.T, file []byte) map[string]dsdstate.State {
 // refused; a state that did not read refuses every rate as before.
 func TestNoSchemaOneEntryAuthorizesNativeOrDoP(t *testing.T) {
 	durableStore(t)
-	key := dacKey(t)
+	key := modelKey(t, 0x16d0, 0x071a, "Test DAC")
 	authorized := dsdstate.DAC{Key: key,
 		Choice:       &dsdstate.Choice{Mode: dsdstate.ModeNative, Revision: 2, SetAt: t0, SetBy: dsdstate.ByApp},
 		DoPConfirmed: &dsdstate.DoPConfirmation{BCDDevice: bcd, ConfirmedAt: t0, SetBy: dsdstate.ByApp},
@@ -164,7 +166,7 @@ func TestNoSchemaOneEntryAuthorizesNativeOrDoP(t *testing.T) {
 					if !offered {
 						r.altsets = []alsa.Altset{nativeAltset()}
 					}
-					s := Effective(r.inputs().WithState(st))
+					s := Effective(r.onCatalog(key, shipped(t)).WithState(st))
 					for _, rate := range s.All() {
 						p := rate.Plan
 						switch {
@@ -280,9 +282,10 @@ func TestAChoiceIsTheBoundUnitsOwnEntrysAlone(t *testing.T) {
 // TestAUnitWithNoManufacturerStringReadsOnlyAnEntryOfNone: StampNone, a
 // unit's stamp with no manufacturer string, is a maker like any other: an
 // entry of none authorizes a unit of none, and neither a unit of a maker nor
-// an entry of one is taken for the other.
+// an entry of one is taken for the other. The unit's IDs are a generic
+// board's, where only its entry's clean answers let it play native (B990).
 func TestAUnitWithNoManufacturerStringReadsOnlyAnEntryOfNone(t *testing.T) {
-	in := newRig(t).everything(dsdstate.ModeNative).inputs()
+	in := newRig(t).everything(dsdstate.ModeNative).onCatalog(modelKey(t, 0x16d0, 0x071a, "Test DAC"), shipped(t))
 	in.State.DACs[0].Stamp, in.Stamp = dsdstate.StampNone, dsdstate.StampNone
 	if p := Effective(in).At(dsd64).Plan; p.Outcome != OutcomeNative {
 		t.Fatalf("a unit of none on an entry of none plays %s %s, want native", p.Outcome, p.Reason)

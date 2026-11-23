@@ -12,6 +12,11 @@
       "why": "the Amanero Combo384, a USB interface board DACs of several makers are built on: the kernel's DSD quirk for this ID follows the board's firmware, its bcdDevice, alone (Linux kernel sound/usb/quirks.c, v6.12)"
     },
     {
+      "vendorId": "16d0",
+      "productId": "0a23",
+      "why": "the Amanero Combo384 board again, on the newer firmware that took a product ID of its own: the kernel's DSD quirk for this ID is that firmware's, not a DAC's (Linux kernel commit ed993c6fdfa7, 2017-08-18, which adds DSD support for the new Amanero Combo384 firmware version with a new PID; sound/usb/quirks.c, v6.12, under its Amanero Combo384 heading)"
+    },
+    {
       "vendorId": "20a0",
       "productId": "4143",
       "why": "the WaveIO, a USB interface board other makers' DACs are built on, as its maker describes it (the review of PR #1402, 2026-11-04); the kernel gives the board's altsetting 3 a DSD quirk (Linux kernel sound/usb/quirks.c, v6.12); a profile on it waits for a captured product string"
@@ -722,37 +727,6 @@
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:09dd",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
-      ]
-    },
-    {
-      "id": "kernel.16d0-0a23",
-      "name": "USB audio device 16d0:0a23",
-      "match": [
-        {
-          "vendorId": "16d0",
-          "productId": "0a23",
-          "interface": null,
-          "product": null,
-          "bcdDevice": null
-        }
-      ],
-      "native": {
-        "maxBitRate": 0,
-        "formats": [
-          "DSD_U32_BE"
-        ],
-        "source": {
-          "kind": "kernel-quirk",
-          "ref": "sound/usb/quirks.c at v6.12"
-        }
-      },
-      "dop": null,
-      "timing": null,
-      "caveats": [],
-      "ios": null,
-      "provenance": [
-        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:0a23",
-        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
       ]
     },
     {

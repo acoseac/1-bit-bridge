@@ -576,3 +576,51 @@ func TestTheAnswerIsTheEffectiveChoice(t *testing.T) {
 		}
 	}
 }
+
+// TestAnExplicitChoiceWithNoAcknowledgementIsWrittenThroughTheRoute (B990):
+// real PUTs that carry no firstUseAcknowledged. An explicit native is
+// written, 200, its answer's set native at every rate and first use still
+// pending; an explicit dop carrying confirmDoP alone is written and plays DoP
+// at every rate; and a native chosen over a convert whose state holds a
+// listener's noise at DSD64 is the retry that clears it, native playing at
+// every rate.
+func TestAnExplicitChoiceWithNoAcknowledgementIsWrittenThroughTheRoute(t *testing.T) {
+	r := newChoiceRig(t, readSideBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(dsdstate.Defaults()), withKnownDAC))
+	body := choiceBody(t, r.dac(t), dsdstate.ModeNative)
+	if strings.Contains(body, "firstUseAcknowledged") {
+		t.Fatalf("the body %s carries the acknowledgement", body)
+	}
+	obj := wantAnswer(t, "an explicit native", r.put(t, body), http.StatusOK, "", 4)
+	wantEveryRateTuples(t, "the native write's set", dsdPlaybackOf(t, obj), "")
+	for _, f := range dsdDACOf(t, obj).FirstUse {
+		if f.State != playback.FirstUsePending {
+			t.Errorf("%s's first use is %s after a write that acknowledged nothing", f.Transport, f.State)
+		}
+	}
+	obj = wantAnswer(t, "an explicit dop with confirmDoP", r.put(t, choiceBody(t, dsdDACOf(t, obj), dsdstate.ModeDoP, `"confirmDoP":true`)), http.StatusOK, "", 4)
+	wantEveryRateTuples(t, "the dop write's set", dsdPlaybackOf(t, obj), "dop")
+
+	st := dsdstate.Defaults()
+	st.DACs = []dsdstate.DAC{{Key: playbacktest.DACKey(), Stamp: playbacktest.DACStamp(),
+		Choice:   &dsdstate.Choice{Mode: dsdstate.ModeConvert, Revision: 1, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp},
+		Listener: []dsdstate.Answer{{Transport: dsdstate.TransportNative, BitRate: playbacktest.DSD64, BCDDevice: playbacktest.DACBCD, Answer: dsdstate.AnswerNoise, On: "2026-11-21"}}}}
+	retry := newChoiceRig(t, readSideBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(st), withKnownDAC))
+	obj = wantAnswer(t, "native chosen over convert", retry.put(t, choiceBody(t, retry.dac(t), dsdstate.ModeNative)), http.StatusOK, "", 4)
+	wantEveryRateTuples(t, "the retry's set", dsdPlaybackOf(t, obj), "")
+}
+
+// wantEveryRateTuples requires p to publish a tuple of transport ("" native)
+// at DSD64, DSD128 and DSD256, and nothing converted or refused.
+func wantEveryRateTuples(t *testing.T, what string, p api.OutputDSDPlayback, transport string) {
+	t.Helper()
+	var rates []int
+	for _, tu := range p.Tuples {
+		if tu.Transport != transport {
+			t.Errorf("%s: a tuple at %d is %q, want %q", what, tu.BitRate, tu.Transport, transport)
+		}
+		rates = append(rates, tu.BitRate)
+	}
+	if !slices.Equal(rates, []int{playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256}) || len(p.Converted) != 0 || len(p.Refused) != 0 {
+		t.Errorf("%s: tuples %+v, converted %+v, refused %+v; want %q at DSD64, DSD128 and DSD256 alone", what, p.Tuples, p.Converted, p.Refused, transport)
+	}
+}

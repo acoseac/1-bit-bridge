@@ -45,14 +45,22 @@ type dsdGoldenCase struct {
 
 // dsdGoldenCases are the kinds: a DAC the database knows, playing native
 // DSD at every rate, its evidence from each rung but driver acceptance; an
-// unknown DAC, converting every rate; a known DAC whose explicit DoP waits
-// for its first use and its confirmation; DSD migrated off; no DAC
-// available, the state damaged; and a converted occurrence playing.
+// unknown DAC that offers no native format, converting every rate; a known
+// DAC whose explicit DoP plays where its profile heard DoP and waits for its
+// confirmation above; DSD migrated off; no DAC available, the state damaged;
+// a converted occurrence playing, the DAC's choice convert; and an unknown DAC
+// on no generic board's IDs, playing native at every rate (B990), last so the
+// kinds before it keep their UUIDs.
 func dsdGoldenCases(t *testing.T) []dsdGoldenCase {
 	t.Helper()
 	known := playbacktest.KnownProfiles(nil)
 	known.Profiles[0].Caveats = []dacprofile.Caveat{{Code: dacprofile.CaveatTransitionClicks, Transport: "dop", Note: "This DAC clicks at a transition into DSD128 or DSD256."}}
 	withKnown := func(p *playback.DSDPolicy) { p.Profiles = known }
+	shipped, err := dacprofile.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	withShipped := func(p *playback.DSDPolicy) { p.Profiles = shipped }
 	noDAC := func(p *playback.DSDPolicy) {
 		p.Bound = func() (playback.BoundDAC, bool) { return playback.BoundDAC{}, false }
 	}
@@ -72,26 +80,34 @@ func dsdGoldenCases(t *testing.T) []dsdGoldenCase {
 		t.Fatal(err)
 	}
 
+	convertState := dsdstate.Defaults()
+	convertState.DACs = []dsdstate.DAC{{Key: playbacktest.DACKey(), Stamp: playbacktest.DACStamp(), Choice: &dsdstate.Choice{Mode: dsdstate.ModeConvert, Revision: 1, SetAt: playbacktest.T0, SetBy: dsdstate.ByApp}}}
+
 	type kind struct {
 		name, state, reason string
 		st                  dsdstate.State
 		edit                func(*playback.DSDPolicy)
-		playing             bool
+		playing, noNative   bool
 	}
 	var out []dsdGoldenCase
 	for i, k := range []kind{
 		{name: "known_native", state: bridgeStateStopped, st: nativeState, edit: withKnown},
-		{name: "unknown_converted", state: bridgeStateStopped, st: dsdstate.Defaults()},
+		{name: "unknown_converted", state: bridgeStateStopped, st: dsdstate.Defaults(), edit: withShipped, noNative: true},
 		{name: "dop_pending", state: bridgeStateStopped, st: dopState, edit: withKnown},
 		{name: "off", state: bridgeStateStopped, st: off},
 		{name: "no_dac_damaged_state", state: bridgeStateUnavailable, reason: "device_missing", st: dsdstate.Refusing(playbacktest.T0), edit: noDAC},
-		{name: "converted_playing", state: bridgeStatePlaying, st: dsdstate.Defaults(), playing: true},
+		{name: "converted_playing", state: bridgeStatePlaying, st: convertState, playing: true},
+		{name: "unknown_native", state: bridgeStateStopped, st: dsdstate.Defaults(), edit: withShipped},
 	} {
 		var edits []func(*playback.DSDPolicy)
 		if k.edit != nil {
 			edits = append(edits, k.edit)
 		}
-		b := readSideBackend(t, playbacktest.NewBox(5), playbacktest.NewMemStore(k.st), edits...)
+		box := playbacktest.NewBox(5)
+		if k.noNative {
+			box.SetAltsets(5, 0, playbacktest.S32Altset(), playbacktest.S24Altset())
+		}
+		b := readSideBackend(t, box, playbacktest.NewMemStore(k.st), edits...)
 		f := readSideFacts(t, b, config.PlayerDevice{})
 		if k.playing {
 			policy, _ := b.Facts()

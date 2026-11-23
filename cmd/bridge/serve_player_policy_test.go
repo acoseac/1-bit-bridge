@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
+	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
@@ -102,12 +103,26 @@ func ratesPublished(p playback.PlayerPolicy) string {
 	return b.String()
 }
 
+// everyRateNative is ratesPublished of a set that plays native at DSD64,
+// DSD128 and DSD256.
+const everyRateNative = `2822400/"" 5644800/"" 11289600/"" `
+
+// firstRung is the evidence rung of p's first tuple, "" where it has none.
+func firstRung(p playback.PlayerPolicy) string {
+	if p.DSD == nil || len(p.DSD.Evidence) == 0 {
+		return ""
+	}
+	return p.DSD.Evidence[0].Rung
+}
+
 // TestServeReadsNoApprovalRecord (B728 B7, the cutover; binding note 11):
 // once the migration took an owner's record, serve's player decides DSD by
 // the effective policy alone: the backend serve wires configures no approval
-// admission, and the set its policy publishes, native at the rates the record
-// approved, stays the same with the record and its reports gone from the data
-// directory: nothing the backend admits by reads them.
+// admission, and the set its policy publishes, native at every rate the GO
+// bar offers (B990: no rate waits on the record's acknowledgement), the
+// record's rates listener confirmed, stays the same with the record and its
+// reports gone from the data directory: nothing the backend admits by reads
+// them.
 func TestServeReadsNoApprovalRecord(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -129,8 +144,8 @@ func TestServeReadsNoApprovalRecord(t *testing.T) {
 		t.Fatalf("the state serve's player holds %+v: the record was not migrated", st.MigratedFrom)
 	}
 	before := policyBackendOf(t, wired, dopContents{}, &dopOpens{}).Policy()
-	if got := ratesPublished(before); got != `2822400/"" 5644800/"" ` || before.Reason != "" {
-		t.Fatalf("the migrated owner's set publishes %s(reason %q), want native at DSD64 and DSD128, the record's rates", got, before.Reason)
+	if got := ratesPublished(before); got != everyRateNative || before.Reason != "" || firstRung(before) != "listener_confirmed" {
+		t.Fatalf("the migrated owner's set publishes %s(reason %q, DSD64 at %q), want native at every rate, DSD64 listener confirmed", got, before.Reason, firstRung(before))
 	}
 	// The record and the reports it names, and nothing else: serve's own
 	// files (its DSD state, its queue) stay where they are (round 2).
@@ -222,6 +237,13 @@ func TestOutputsPublishTheEffectiveSet(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := playbacktest.Policy(5, playbacktest.NewBox(5), playbacktest.NewMemStore(tc.st))
+			// The shipped DAC list, which does not know the test DAC and holds
+			// its IDs as no generic board's (B990).
+			db, err := dacprofile.Default()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.Profiles = db
 			b, err := playback.New(playback.Config{DSD: p, Locator: refusedNativeLocator{new(int)}, Resolver: dopContents{}})
 			if err != nil {
 				t.Fatal(err)

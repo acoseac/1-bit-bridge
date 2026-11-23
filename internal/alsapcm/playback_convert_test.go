@@ -29,9 +29,10 @@ import (
 // 176.4 kHz with 24 significant bits, the table's first packing.
 var convPlan = dsdconv.Plan{RateHz: 176400, ValidBits: 24}
 
-// newConvRig is a rig whose DAC the profile database does not know, its DSD
-// state the defaults: auto converts every rate, to 176.4 kHz / 24 bits in
-// S24_3LE for the test DAC.
+// newConvRig is a rig with no profile database, its DSD state the defaults:
+// no DAC is known and, with no list to tell a board from a DAC, every unit
+// counts as a generic board's (B990), so auto converts every rate, to
+// 176.4 kHz / 24 bits in S24_3LE for the test DAC.
 func newConvRig(t *testing.T, opts ...func(*rigOptions)) *dsdRig {
 	t.Helper()
 	return newDSDRigWith(t, dsdstate.Defaults(), func(p *playback.DSDPolicy) { p.Profiles = nil }, opts...)
@@ -369,14 +370,15 @@ func (d *dsdRig) firstOcc() engine.OccurrenceID {
 }
 
 // TestAnUnknownDACPlaysDSDConverted (B728 B11; the design's sections 3.2 and
-// 4.3): a DAC the profile database does not know, with no choice of its own,
-// plays DSD64, DSD128 and DSD256 converted to its best target, 176.4 kHz /
-// 24 bits in S24_3LE for the test DAC, through one PCM open and no DSD sink,
-// the DAC given exactly the converter's samples; the set publishes no tuple
-// and no reason, every rate converted. A known DAC whose first use is not
-// acknowledged converts as well; a migrated explicit off refuses every rate,
-// before any open, and so does a DAC that takes no conversion target, by the
-// policy's word, conversion_not_offered.
+// 4.3): a DAC no profile knows, with no profile database to read (every unit
+// then a generic board's, B990) and no choice of its own, plays DSD64, DSD128
+// and DSD256 converted to its best target, 176.4 kHz / 24 bits in S24_3LE for
+// the test DAC, through one PCM open and no DSD sink, the DAC given exactly
+// the converter's samples; the set publishes no tuple and no reason, every
+// rate converted. A known DAC with no acknowledgement plays native, no first
+// use asked (B990); a migrated explicit off refuses every rate, before any
+// open, and so does a DAC that takes no conversion target, by the policy's
+// word, conversion_not_offered.
 func TestAnUnknownDACPlaysDSDConverted(t *testing.T) {
 	for _, rate := range []int{playbacktest.DSD64, playbacktest.DSD128, playbacktest.DSD256} {
 		t.Run(rateName(rate), func(t *testing.T) {
@@ -409,19 +411,19 @@ func TestAnUnknownDACPlaysDSDConverted(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a known DAC whose first use is not acknowledged", func(t *testing.T) {
+	t.Run("a known DAC with no acknowledgement plays native", func(t *testing.T) {
 		d := newDSDRig(t, dsdstate.Defaults())
-		a := track(playbacktest.DSD64, 0.25, noise(1))
-		d.files.add("a", a)
+		d.files.add("a", track(playbacktest.DSD64, 0.25, noise(1)))
 		d.insert("a")
 		d.k.Free()
 		d.play()
-		d.waitStopped(engine.ReasonEndOfQueue)
-		if got := d.openFormats(); len(got) != 0 || d.pcmOpens() != 1 {
-			t.Errorf("a known DAC unacknowledged asked DSD opens %v and %d PCM opens; want it converted, one PCM open", got, d.pcmOpens())
+		s := d.waitStopped(engine.ReasonEndOfQueue)
+		if len(s.Skips()) != 0 || len(s.Faults()) != 0 {
+			t.Fatalf("a known DAC's DSD did not play: skips %+v, faults %+v", s.Skips(), s.Faults())
 		}
-		want, _ := converted(t, a, convPlan)
-		same(t, "the DAC was given", unpack(t, d.k.Heard(), format.S243LE, 24), want)
+		if got := d.openFormats(); !slices.Equal(got, []format.ALSAFormat{format.DSDU32BE}) || d.pcmOpens() != 0 {
+			t.Errorf("a known DAC with no acknowledgement asked DSD opens %v and %d PCM opens; want one DSD_U32_BE open and no PCM open", got, d.pcmOpens())
+		}
 	})
 	t.Run("a migrated explicit off", func(t *testing.T) {
 		st := dsdstate.Defaults()
