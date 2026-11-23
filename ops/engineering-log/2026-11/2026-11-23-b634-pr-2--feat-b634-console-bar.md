@@ -116,6 +116,32 @@ eight cases, the field guard among them, since it reads a field the state does n
 first control, a poll of the records, stayed green (the poll's race); the admission seam held made
 it deterministic and red.
 
+### The runs
+
+Each through the shared build lock, on `GOTOOLCHAIN=go1.27.3` with `GOPROXY=off`.
+
+- `make fmt vet test build-all docs-check`, one session. The first, at `e19a7887`, failed in
+  `make test` at PR 1's `TestAnUnreadablePlayerBlockStopsNothingTheControlAsks`, which lists the
+  calls the routes make of the control and now saw GET now ask its clock (M1): its expectation is
+  `now,clock,transport` (`267271aa`). The second, at `267271aa`: exit 0 in 2,032 s, 93 packages
+  ok, the six cross-builds, and docs-check with its self-tests; `make fmt` rewrote nothing.
+- The release-tag vets, `make vet` for linux/arm, linux/386, windows/amd64, windows/arm64 and
+  linux/amd64: exit 0, 31 to 46 s each, and again at `267271aa`.
+- The source guards, run by name with `-v`: `TestNoConsoleControlDisablesItselfOutsideSetDisabled`,
+  `TestPlayerEmittedClassesAreStyled`, `TestTrackSubgridColumnsMatchTheRow`,
+  `TestAppJSHasNoCallsToDeletedHelpers`, `TestByteFormattersAgree`, `TestEveryCitedTestNameExists`
+  and `TestNoBlankKeepers` pass.
+- `scripts/qualification-version -base a79c69b2 -head HEAD`: OK.
+- `-race -count=50`. The first run put 26 tests in one binary (the seven Lows cases, the five
+  control cases L3 and L4 changed, and the publisher's fourteen) under a 45-minute timeout, and
+  timed out at about the 26th of its 50 iterations (an iteration takes about 104 s here). In its
+  last 35 s every wait bounded by the binary's deadline (`serveGiveUp`) gave up at once, the rig's
+  engine drain among them, and the strict writer's medium seam was put back (`ctlMedium`'s cleanup)
+  beside a reservation writer still running, which the race detector reported: a deadline's
+  artifact, since that cleanup runs once the drain has joined the engine and only a drain that gave
+  up lets it run sooner. Run again in two binaries under a 120-minute timeout: the control's twelve
+  ok in 781 s, the publisher's fourteen ok in 3,883 s, no race reported.
+
 ### Deviations
 
 - The rules line for the bar's output in `.claude/rules/admin-console.md` was not written: the
