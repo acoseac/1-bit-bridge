@@ -446,12 +446,14 @@ export function createOutput(env) {
 
   // storeIdentity keeps this document's identity and every operation not yet
   // resolved, its own and the ones it inherited, each by its key, so a
-  // reload, or a second one, still reads each back (R7).
+  // reload, or a second one, still reads each back (R7); and whether a newer
+  // pick has superseded it (stale), so no reload lets it move the output
+  // (S4).
   function storeIdentity() {
     const pending = {};
     for (const m of [inherited, ops]) {
       for (const [k, e] of m) {
-        pending[k] = { epoch: e.epoch, tab: e.tab, seq: e.seq, role: e.role, kind: e.kind || "", handover: e.handover || null };
+        pending[k] = { epoch: e.epoch, tab: e.tab, seq: e.seq, role: e.role, kind: e.kind || "", handover: e.handover || null, stale: !ours(e) };
       }
     }
     try {
@@ -467,17 +469,20 @@ export function createOutput(env) {
     const pending = stored && typeof stored.pending === "object" && stored.pending ? stored.pending : {};
     for (const p of Object.values(pending)) {
       if (!p || typeof p.tab !== "string" || !/^[0-9a-f]{32}$/.test(p.tab) || !(p.seq > 0) || typeof p.epoch !== "string") continue;
+      // One a newer pick had superseded keeps a pick no pick here takes:
+      // read back, it moves nothing (S4).
       const e = { key: opKey(p.epoch, p.tab, p.seq), epoch: p.epoch, tab: p.tab, seq: p.seq, role: p.role, kind: p.kind || "",
-        handover: p.handover || null, inherited: true, pick: 0 };
+        handover: p.handover || null, inherited: true, pick: p.stale === true ? -1 : 0 };
       inherited.set(e.key, e);
     }
     // A document's own commands go under an identity of its own: two tabs
     // started from one session storage never share an operation (M2). The
-    // operations it inherited stay stored until each resolves (R7).
+    // operations it inherited stay stored until each resolves (R7); only
+    // those no newer pick superseded hold the phase (Q4).
     tab = newTab();
     seq = 0;
     storeIdentity();
-    if (inherited.size) {
+    if ([...inherited.values()].some(ours)) {
       phase = PHASE.unconfirmed;
       line = WORDS.unconfirmed;
     }
@@ -1291,6 +1296,9 @@ export function createOutput(env) {
     pickGen += 1;
     waiting = null;
     startPending = null;
+    // Stored at once: a pick that sends nothing still supersedes, across a
+    // reload too (S4, Q10).
+    storeIdentity();
   }
 
   // queueBehind says whether the queue the bar drew is older than the state's

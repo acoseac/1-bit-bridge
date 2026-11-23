@@ -459,6 +459,12 @@ func TestABarrierLostPastItsDeadlineFreesTheNextStart(t *testing.T) { barScenari
 // ran free the next start, which sends a barrier of its own.
 func TestEveryEndOfABarrierFreesTheNextStart(t *testing.T) { barScenario(t, 7) }
 
+// TestAReloadKeepsANewerPicksSupersession pins S4, Q4 and Q10: a switch to
+// this browser lost, then superseded by a pick of the bridge that ends at
+// once, is stored superseded, so a reload, and a second one, read it back
+// done with its handover and move nothing, the phase not held for it.
+func TestAReloadKeepsANewerPicksSupersession(t *testing.T) { barScenario(t, 6) }
+
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start
 // on the barrier's done, and the skip moves nothing of it.

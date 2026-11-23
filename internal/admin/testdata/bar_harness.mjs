@@ -2109,6 +2109,53 @@ S.TestEveryEndOfABarrierFreesTheNextStart = async () => {
   }
 };
 
+S.TestAReloadKeepsANewerPicksSupersession = async () => {
+  // S4, Q4, Q10: round 2's V11 case (a switch to this browser lost, then a
+  // pick of the bridge from an empty browser, which ends at once and sends
+  // nothing), then a reload over a copy of its session storage, and a
+  // second over the first's: the switch-out read back done, its handover
+  // with it, moves nothing, and neither document holds the phase for it.
+  const ma = new Map();
+  const a = rig({ storage: storageOf(ma), output: "bridge", latest: playing({ revision: 3 }), browser: { queue: [] } });
+  a.open();
+  a.frame(a.latest);
+  await settle();
+  a.s.on("POST", ROUTES.switchOut, async () => "lost");
+  a.s.on("GET", ROUTES.operation, async () => new Promise(() => {}));
+  await a.out.pick("browser");
+  await settle();
+  check("the switch to this browser lost: unconfirmed", a.v().phase === PHASE.unconfirmed, a.v().phase);
+  await a.out.pick("bridge");
+  await settle();
+  check("the newer pick, at once: the bridge, nothing sent", a.v().output === "bridge" && a.v().phase === PHASE.bridge && a.s.posts().length === 1, [a.v().output, a.v().phase, a.s.posts().length]);
+  const doc = (storage, held) => {
+    const r = rig({ storage, latest: playing({ revision: 9 }) });
+    r.s.on("GET", ROUTES.operation, async (e) => { await held.p; return readBackOf(e, { silence: 5, handover: handoverOf() }); });
+    return r;
+  };
+  const mb = new Map(ma);
+  const gb = gate();
+  const b = doc(storageOf(mb), gb);
+  check("the reload: the bridge, its phase not held", b.v().output === "bridge" && b.v().phase === PHASE.bridge && b.v().line !== WORDS.unconfirmed, [b.v().output, b.v().phase, b.v().line]);
+  b.open();
+  b.frame(b.latest);
+  await settle();
+  const gc = gate();
+  const c = doc(storageOf(new Map(mb)), gc);
+  check("a second reload, over the first's storage: the bridge, its phase not held", c.v().output === "bridge" && c.v().phase === PHASE.bridge && c.v().line !== WORDS.unconfirmed, [c.v().output, c.v().phase, c.v().line]);
+  c.open();
+  c.frame(c.latest);
+  await settle();
+  gb.open();
+  gc.open();
+  await settle();
+  for (const [n, r] of [["the reload", b], ["the second reload", c]]) {
+    check(`${n}: the switch-out read back done moves nothing: the bridge, nothing taken`,
+      r.s.gets(ROUTES.operation).length >= 1 && r.v().output === "bridge" && r.v().phase === PHASE.bridge && !r.b.calls.some((x) => x.startsWith("take")),
+      [r.s.gets(ROUTES.operation).length, r.v().output, r.v().phase, r.b.calls]);
+  }
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });
