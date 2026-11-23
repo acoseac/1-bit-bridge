@@ -131,3 +131,15 @@ All red for the reason predicted but where the table says:
 | R7e | a cancelled preparation finished cancelled | S5's two cases, refused `not_playable` |
 | R7f | the route's rows for the handover | `TestTheReadBackRouteHydratesItsHandoverThroughTheCatalog` |
 | RJ | the join counted in `admit` (counted in `run` again) | `TestTheControlsStopJoinsAnOperationAdmittedJustBeforeIt`, the stop returning at once |
+
+### Runs
+
+On `9e52bf06`, in one build-slot session (queued from 05:13, run from 05:44): `make fmt` (no
+change), `make vet`, `make test` in 2,073 s (92 packages ok; `cmd/bridge` 1,916 s of its 45
+minutes, `internal/manifest` 1,614 s, `internal/admin` 1,335 s), `make build-all` in 23 s; `go vet
+./...` for darwin/arm64, windows/amd64, linux/arm and linux/386; and `-race -count=50` of all 78
+cases of the control's and the publisher's test files, in four lanes (13, 13, 12 and 12 runs),
+2,334 s. The first session, on `1419bb24`, failed at `make test` for the stop's join above and was
+stopped there. Beside them: `make docs-check`'s seven steps; the `cmd/bridge` source guards; the
+engine's, openhome's, playback's, alsapcm's and the library resolver's own suites before the gate;
+and `scripts/qualification-version -base 9b66c2af`, OK. `PROTOCOL.md` is unchanged.
