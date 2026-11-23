@@ -534,6 +534,18 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (Â
   (`authorization.go:202-213`, R10 and R11). The `effectiveSet` shape stays, gaining the converted
   rates.
 
+**A residual: XMOS's vendor ID** (B993, 2026-11-23). Linux's `sound/usb/quirks.c` sets
+`QUIRK_FLAG_DSD_RAW` for every XMOS device, vendor `20b1`, by one vendor-wide `VENDOR_FLG` (at
+v6.12, as B990 read it), while `profiles.json`'s `sharedReferenceIds` names `20b1:0010` alone. A
+`20b1` unit that no profile knows and whose product ID is not `0010` is therefore on no generic
+board, and under `auto` it plays native DSD wherever the kernel offers it. If its firmware offers
+DSD in front of a PCM-only chip, what plays is noise. In `decide` and `nativeOffered`
+(`internal/player/policy/policy.go`), these keep native off such a unit at a rate: the DAC's mode
+set to `convert` or `off`; a cap below the rate; a listener's latest answer for native at the rate,
+under the unit's firmware, that is `noise` or `nothing`, which the listening check (B12, bridge
+0.2.5) records; the probe refusing every native format the kernel lists at the rate; or the unit's
+IDs among `sharedReferenceIds`. Neither that list nor the policy changes for it.
+
 ### 3.3 Above the effective maximum
 
 The effective maximum is the user's `maxBitRate`, or what the profile, the kernel and the probe
