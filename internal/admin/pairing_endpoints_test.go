@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -45,7 +46,7 @@ var tailscaleURLs = []string{
 func TestPairAlternatesLoopbackBakesTheAdvertisedTailscaleEndpoints(t *testing.T) {
 	cfg := &config.Config{ListenAddress: "0.0.0.0:7788"}
 	const primary = "https://nuc.local:7788"
-	got := pairAlternates(primary, cfg, healthStyleEndpoints)
+	got := pairAlternates(primary, cfg, healthStyleEndpoints())
 
 	if got[0] != primary {
 		t.Fatalf("alternates[0] = %q, want the operator primary %q (full=%v)", got[0], primary, got)
@@ -84,7 +85,9 @@ func TestPairAlternatesUnwiredYieldsThePrimaryAlone(t *testing.T) {
 // Public mode keeps its own synthesis (explicit-port autocert URL +
 // customEndpoints, PR 5) and never consults the provider — a VPS's
 // Tailscale identity must not reach the QR even when the api layer
-// would happily report it.
+// would happily report it. The pairing handlers read no list there
+// (pairingEndpoints), and a list handed to pairAlternates anyway is
+// not read.
 func TestPairAlternatesPublicModeNeverConsultsTheProvider(t *testing.T) {
 	cfg := &config.Config{
 		ListenAddress:   ":443",
@@ -93,14 +96,16 @@ func TestPairAlternatesPublicModeNeverConsultsTheProvider(t *testing.T) {
 		CustomEndpoints: []string{"https://alt.example.com:443"},
 	}
 	calls := 0
-	provider := func() []advertise.Endpoint {
+	srv, _, _ := newTestServer(t)
+	srv.deps.Endpoints = func() []advertise.Endpoint {
 		calls++
 		return healthStyleEndpoints()
 	}
-	got := pairAlternates("https://bridge.example.com:443", cfg, provider)
-	if calls != 0 {
-		t.Errorf("public mode consulted the endpoint provider %d time(s); want 0", calls)
+	eps, err := srv.pairingEndpoints(context.Background(), cfg)
+	if calls != 0 || eps != nil || err != nil {
+		t.Errorf("public mode read the endpoint list: %d provider call(s), %v, %v; want none", calls, eps, err)
 	}
+	got := pairAlternates("https://bridge.example.com:443", cfg, healthStyleEndpoints())
 	for _, u := range got {
 		if strings.Contains(u, ".ts.net") || strings.Contains(u, "100.102.") || strings.Contains(u, "fd7a:") {
 			t.Errorf("public-mode alternate %q is a Tailscale address — leak", u)

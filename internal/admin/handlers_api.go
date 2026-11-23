@@ -1860,7 +1860,7 @@ func (s *Server) getEndpointsSnapshot(ctx context.Context) ([]adminEndpointEntry
 	if port == 0 {
 		return []adminEndpointEntry{}, nil
 	}
-	eps, err := endpointsWithin(ctx, s.deps.Endpoints)
+	eps, err := s.endpointsWithin(ctx)
 	if err != nil {
 		return nil, &endpointsErr{code: "request_ended", msg: "the request ended before the endpoint list was read"}
 	}
@@ -2388,9 +2388,23 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.URL = url
+	// The QR's endpoint list is read before the console's lock and the mint
+	// (pairingEndpoints): a request that ends while it waits mints nothing,
+	// and nobody reads an answer.
+	eps, err := s.pairingEndpoints(r.Context(), cfg)
+	if err != nil {
+		return
+	}
 
-	s.mu.Lock()
+	s.lockPairingWrite()
 	defer s.mu.Unlock()
+	// A request whose context has ended when the lock is held mints nothing
+	// (backlog B997's second round): it may have waited here behind another
+	// pairing write, or come down a path that reads no endpoint list. Nobody
+	// reads an answer.
+	if r.Context().Err() != nil {
+		return
+	}
 
 	rawToken, tok, err := s.deps.Auth.Mint(req.Name)
 	if err != nil {
@@ -2406,7 +2420,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 	// moment of pairing. Empty slice if enumeration fails — the
 	// operator-supplied primary URL is always the first entry, so the
 	// QR always pairs even on an interface-less environment.
-	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, s.deps.Endpoints))
+	alternates := ensurePrimaryFirst(req.URL, pairAlternates(req.URL, cfg, eps))
 	pairURL := buildPairURL(req.URL, rawToken, s.pairingCodeFor(tok), fp, cfg.LibraryName, alternates)
 	qrData, err := qrDataURL(pairURL)
 	if err != nil {
