@@ -2163,6 +2163,49 @@ func TestASwitchOutWaitingForAClosedEnginesFactsHearsItsEnd(t *testing.T) {
 	})
 }
 
+// TestTheControlsStopJoinsAnOperationAdmittedJustBeforeIt pins the stop's
+// join: an operation admitted just before the control's stop, its goroutine
+// not started yet, is one the stop waits for, counted in the step that
+// admits it, under the lock the stop closes the control under.
+func TestTheControlsStopJoinsAnOperationAdmittedJustBeforeIt(t *testing.T) {
+	r := newCtlRig(t, ctlOptions{seams: &controlSeams{}})
+	at, release := make(chan struct{}), make(chan struct{})
+	var parked atomic.Bool
+	var letGo sync.Once
+	free := func() { letGo.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	r.c.seams.admitted = func(kind string) {
+		if kind == opKindTransport && parked.CompareAndSwap(false, true) {
+			close(at)
+			<-release
+		}
+	}
+	paused := make(chan admin.PlayerAnswer, 1)
+	go func() { paused <- r.command(admin.PlayerCmdPause, nil) }()
+	select {
+	case <-at:
+	case <-serveGiveUp(t):
+		t.Fatal("the pause was never admitted")
+	}
+	stopped := make(chan struct{})
+	go func() { r.c.stop(); close(stopped) }()
+	select {
+	case <-stopped:
+		t.Fatal("the control's stop returned while an operation it had admitted had not run")
+	case <-time.After(200 * time.Millisecond):
+	}
+	free()
+	select {
+	case <-stopped:
+	case <-serveGiveUp(t):
+		t.Fatal("the control's stop never returned")
+	}
+	<-paused
+	if rec := r.c.recordOf(r.tab); rec.Status == admin.PlayerOpRunning {
+		t.Fatalf("the pause once the stop returned: %s, want it ended", rec.Status)
+	}
+}
+
 // TestAnEngineThatClosesUnderTheBarrierIsJudgedByItsClosedFacts pins K7
 // under the barrier: a switch-out whose engine closes under it goes to the
 // closed engine's judgement, done on facts that say nothing is held, its

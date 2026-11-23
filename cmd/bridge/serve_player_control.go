@@ -146,6 +146,9 @@ type controlSeams struct {
 	// waits for the publication of a record it found final, with its kind.
 	readRecord       func()
 	awaitPublication func(kind string)
+	// admitted runs on a request's goroutine once its operation is admitted,
+	// before the operation's goroutine starts, with its kind.
+	admitted func(kind string)
 	// Bounds in place of production's, where set.
 	handlerWait, barrier, releaseGap, publishWait time.Duration
 }
@@ -634,6 +637,9 @@ func (c *consoleControl) admit(op admin.PlayerOp, digest [32]byte, kind, command
 		prevs = slices.Clone(c.unfinished)
 	}
 	c.unfinished = append(c.unfinished, o)
+	// Counted for stop's join in the step that admits it, under the lock stop
+	// closes the control under: an operation admitted is one stop waits for.
+	c.wg.Add(1)
 	return o, prevs, nil, admin.PlayerAnswer{}, true
 }
 
@@ -913,14 +919,16 @@ func (o *operation) finishErr(err error) {
 	o.finishAs(status, word)
 }
 
-// run starts o's body on a goroutine the control joins, once each of prevs,
-// the older operations not ended at its admission, has ended (a Stop has none
-// to wait for: the engine takes it after an older one's step in flight), and
-// waits for o's end, or for the request's end or the handler's wait,
-// answering the record as it stands then. The request's end ends o's steps
-// not yet sent; neither ends its step in flight.
+// run starts o's body on a goroutine the control joins (admit counted it),
+// once each of prevs, the older operations not ended at its admission, has
+// ended (a Stop has none to wait for: the engine takes it in its order of
+// arrival), and waits for o's end, or for the request's end or the handler's
+// wait, answering the record as it stands then. The request's end ends o's
+// steps not yet sent; neither ends its step in flight.
 func (c *consoleControl) run(ctx context.Context, o *operation, prevs []*operation, body func(o *operation)) admin.PlayerAnswer {
-	c.wg.Add(1)
+	if s := c.seams; s != nil && s.admitted != nil {
+		s.admitted(o.r.rec.Kind)
+	}
 	go func() {
 		defer c.wg.Done()
 		defer func() {
