@@ -423,7 +423,9 @@ func sortedAnswers(answers ...dsdstate.Answer) []dsdstate.Answer {
 // rejections under the unit's firmware at each rate its maxBitRate admits,
 // every rate for none, and keeps the rejections above its cap, the
 // transport's clean answers, the other transport's answers and those under
-// another firmware; a rate it cleared plays again.
+// another firmware; a rate it cleared plays again. Native's retry is written
+// capped and uncapped over every other mode, and DoP's over auto, uncapped
+// and capped at DSD64.
 func TestARetryClearsTheRejectionsAtTheRatesItsCapAdmits(t *testing.T) {
 	answer := func(transport string, rate int, a, bcdDevice, on string) dsdstate.Answer {
 		return dsdstate.Answer{Transport: transport, BitRate: rate, BCDDevice: bcdDevice, Answer: a, On: on}
@@ -460,6 +462,19 @@ func TestARetryClearsTheRejectionsAtTheRatesItsCapAdmits(t *testing.T) {
 	if got, want := sortedAnswers(dacOfState(t, st).Listener...), sortedAnswers(noise64, clean128, noise256, other256); !reflect.DeepEqual(got, want) {
 		t.Errorf("dop chosen over auto: the answers %+v, want DoP's rejection cleared and native's kept, %+v", got, want)
 	}
+	// DoP capped at DSD64, over a noise for DoP at DSD128 too: the rejection
+	// at the cap goes, the one above it and every native answer stay.
+	noise128 := answer(dsdstate.TransportDoP, dsd128, dsdstate.AnswerNoise, bcd, "2026-11-05")
+	r := rejectedNative(t, dsdstate.ModeAuto)
+	r.hear(dsdstate.TransportDoP, dsd128, dsdstate.AnswerNoise)
+	st = choose(t, r.inputs(), Choice{BaseRevision: 1, Mode: dsdstate.ModeDoP, MaxBitRate: dsd64, ConfirmDoP: true})
+	if got, want := sortedAnswers(dacOfState(t, st).Listener...), sortedAnswers(noise64, clean128, noise256, other256, noise128); !reflect.DeepEqual(got, want) {
+		t.Errorf("dop capped at DSD64 chosen over auto: the answers %+v, want DoP's rejection at DSD64 cleared, its rejection above the cap and native's kept, %+v", got, want)
+	}
+	in := r.onCatalog(dacKey(t), shipped(t))
+	in.State = st
+	wantAt(t, "dop capped at DSD64 chosen over auto", Effective(in), []int{dsd64}, OutcomeDoP)
+	wantAt(t, "dop capped at DSD64 chosen over auto", Effective(in), []int{dsd128}, OutcomeRefused, ReasonListenerRejected)
 }
 
 // TestAWriteInTheSameModeKeepsEveryRejection (B990): a write that leaves the
