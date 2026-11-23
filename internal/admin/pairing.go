@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
@@ -354,10 +355,20 @@ func advertisedEndpoints(provider func() []advertise.Endpoint) []advertise.Endpo
 // its own and to its end whatever ctx does. The shared read it makes, which
 // /v1/health takes too, is never cut short by a request, and what it finds is
 // cached for every caller; a request that ends meanwhile returns ctx's error
-// at once. A panic in the provider is raised again on the caller's goroutine
-// while the caller waits, as a direct call raised it, and logged with its
-// stack where the request had ended before it. The steps a test holds or
-// hears are Server.testEndpoints'.
+// at once.
+//
+// The provider's answer has one owner, decided by one claim (backlog B997):
+// the goroutine claims it for the caller as it hands it over, once the
+// provider has returned or panicked, and the caller claims it for the
+// goroutine as it stops waiting at ctx's end; whichever claim comes first
+// decides. A panic is raised again on the caller's goroutine, as a direct call
+// raised it, where the hand-off came first, the caller then still waiting or
+// yet to choose; and logged by the goroutine, with its value under panic and
+// the stack its recovery read, where the caller had stopped waiting first.
+// Never both and never neither, whatever the order of the panic, the
+// request's end and the caller's choice. A list handed over once ctx has
+// ended is dropped for ctx's error. The steps a test holds or hears are
+// Server.testEndpoints'.
 func (s *Server) endpointsWithin(ctx context.Context) ([]advertise.Endpoint, error) {
 	provider := s.deps.Endpoints
 	if provider == nil {
@@ -367,22 +378,20 @@ func (s *Server) endpointsWithin(ctx context.Context) ([]advertise.Endpoint, err
 		return nil, err
 	}
 	seams := s.testEndpoints.Load()
-	type answer struct {
-		eps      []advertise.Endpoint
-		panicked any
-	}
-	done := make(chan answer, 1)
+	var claimed atomic.Bool
+	done := make(chan endpointsAnswer, 1)
 	go func() {
-		var a answer
+		var a endpointsAnswer
 		defer func() {
 			if p := recover(); p != nil {
-				a.panicked = p
-				if ctx.Err() != nil {
-					logger.Error(endpointsPanicLine, "stack", string(debug.Stack()))
-				}
+				a.panicked, a.stack = p, debug.Stack()
 			}
 			seams.claim()
-			done <- a
+			if claimed.CompareAndSwap(false, true) {
+				done <- a
+			} else if a.panicked != nil {
+				logger.Error(endpointsPanicLine, "panic", a.panicked, "stack", string(a.stack))
+			}
 			seams.end()
 		}()
 		a.eps = advertisedEndpoints(provider)
@@ -390,13 +399,33 @@ func (s *Server) endpointsWithin(ctx context.Context) ([]advertise.Endpoint, err
 	seams.choose()
 	select {
 	case a := <-done:
-		if a.panicked != nil {
-			panic(a.panicked)
-		}
-		return a.eps, nil
+		return a.taken(ctx)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		if claimed.CompareAndSwap(false, true) {
+			return nil, ctx.Err()
+		}
+		return (<-done).taken(ctx)
 	}
+}
+
+// endpointsAnswer is what endpointsWithin's provider gave: its list, or the
+// value it panicked with and the stack its recovery read.
+type endpointsAnswer struct {
+	eps      []advertise.Endpoint
+	panicked any
+	stack    []byte
+}
+
+// taken is the answer for the caller that owns it: its panic raised again,
+// else ctx's error once ctx has ended, else its list.
+func (a endpointsAnswer) taken(ctx context.Context) ([]advertise.Endpoint, error) {
+	if a.panicked != nil {
+		panic(a.panicked)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return a.eps, nil
 }
 
 // endpointsPanicLine is the line a panic of the endpoint list's provider is
