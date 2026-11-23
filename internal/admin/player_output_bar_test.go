@@ -455,9 +455,9 @@ func TestARestoredQueuesRetryPlaysNothing(t *testing.T) { barScenario(t, 2) }
 func TestABarrierLostPastItsDeadlineFreesTheNextStart(t *testing.T) { barScenario(t, 3) }
 
 // TestEveryEndOfABarrierFreesTheNextStart pins Q9: a barrier a restart's new
-// epoch made unknown, and one a newer pick superseded, free the next start,
-// which sends a barrier of its own.
-func TestEveryEndOfABarrierFreesTheNextStart(t *testing.T) { barScenario(t, 5) }
+// epoch made unknown, one a newer pick superseded, and one refused before it
+// ran free the next start, which sends a barrier of its own.
+func TestEveryEndOfABarrierFreesTheNextStart(t *testing.T) { barScenario(t, 7) }
 
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start

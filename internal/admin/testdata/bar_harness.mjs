@@ -2094,6 +2094,19 @@ S.TestEveryEndOfABarrierFreesTheNextStart = async () => {
     check("a pick of the bridge meanwhile, refused with nothing changed: the browser's resume sends a barrier of its own and resumes on its answer",
       r.s.posts(ROUTES.switchOut).length === 2 && r.b.calls.includes("resume") && r.ran === 0 && r.v().output === "browser", [r.s.posts(ROUTES.switchOut).length, r.b.calls, r.ran]);
   }
+  {
+    // ...and one refused before it ran.
+    const r = await started2({ latest: pub({ revision: 3, silent: true }) });
+    let n = 0;
+    r.s.on("POST", ROUTES.switchOut, async (e) => { n += 1; return n === 1 ? refusal("operation_conflict", null) : answer(recOf(e, { kind: "switch-out", silence: 5 }), pub({ revision: 5, silent: true })); });
+    let ran = 0;
+    r.out.gateStart(() => { ran += 1; });
+    await settle();
+    check("a barrier refused before it ran starts nothing", ran === 0 && r.v().line === WORDS.conflict, [ran, r.v().line]);
+    r.out.gateStart(() => { ran += 1; });
+    await settle();
+    check("the next start sends a barrier of its own, and starts on its answer", r.s.posts(ROUTES.switchOut).length === 2 && ran === 1, [r.s.posts(ROUTES.switchOut).length, ran]);
+  }
 };
 
 const name = scenarioName;
