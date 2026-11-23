@@ -111,16 +111,22 @@ func conditions(transport string) map[string]condition {
 		}},
 		cleanOrNoBoardClause: {fail: []failure{
 			{"a generic board's IDs and no answer", "", func(r *rig) { r.forget(dsdstate.TransportNative, testRate) }},
+			{"a generic board's IDs and a clean answer on another firmware alone", "", func(r *rig) { cleanElsewhere(r, dsdstate.TransportNative) }},
 		}},
 		knownCleanOrNoBoardClause: {fail: []failure{
 			{"unknown, a generic board's IDs and no answer", ReasonNativeCheckRequired, func(r *rig) {
 				r.known, r.profileNative, r.profileDoP = false, nil, nil
 				r.forget(dsdstate.TransportNative, testRate)
 			}},
+			{"unknown, a generic board's IDs and a clean answer on another firmware alone", ReasonNativeCheckRequired, func(r *rig) {
+				r.known, r.profileNative, r.profileDoP = false, nil, nil
+				cleanElsewhere(r, dsdstate.TransportNative)
+			}},
 		}},
 		"the latest listener answer for DoP at r is `clean`": {fail: []failure{
 			{"no answer", "", func(r *rig) { r.forget(dsdstate.TransportDoP, testRate) }},
 			{"the latest answer is nothing", "", func(r *rig) { r.hear(dsdstate.TransportDoP, testRate, dsdstate.AnswerNothing) }},
+			{"a clean answer on another firmware alone", "", func(r *rig) { cleanElsewhere(r, dsdstate.TransportDoP) }},
 		}},
 		"DoP confirmed": {fail: []failure{
 			{"no confirmation", "", func(r *rig) { r.confirmed = nil }},
@@ -137,6 +143,14 @@ func conditions(transport string) map[string]condition {
 			}},
 		}},
 	}
+}
+
+// cleanElsewhere leaves transport's one listener answer at the test rate a
+// clean one under another firmware than the unit's, which is no clean answer
+// at the unit's firmware.
+func cleanElsewhere(r *rig, transport string) {
+	r.forget(transport, testRate)
+	r.listener = append(r.listener, dsdstate.Answer{Transport: transport, BitRate: testRate, BCDDevice: "0200", Answer: dsdstate.AnswerClean, On: "2026-11-05"})
 }
 
 // The clauses of alternatives: the auto row's claim of DoP on a known DAC,

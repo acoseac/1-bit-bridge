@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
@@ -291,6 +292,15 @@ type Server struct {
 	tailscaleStatusMu      sync.Mutex
 	tailscaleStatusCache   admin.TailscaleStatus
 	tailscaleStatusFetched time.Time
+
+	// tailscaleStatusLockFoundHeld, when set, is told each time a read of
+	// the cached status finds tailscaleStatusMu held, its TryLock failing,
+	// just before it calls Lock (lockTailscaleStatus). It says the lock was
+	// found held, by another read or by a setter, not that the read then
+	// waits for it: the holder can let go between the two. Tests only: nil
+	// in production. An atomic pointer, so a test may set it while the
+	// server serves (OnTailscaleStatusLockFoundHeldForTest).
+	tailscaleStatusLockFoundHeld atomic.Pointer[func()]
 }
 
 // ConfigHolder exposes the API server's live runtime-config holder so
@@ -1305,7 +1315,7 @@ const tailscaleStatusTTL = 5 * time.Second
 // "Running" && MagicDNSName != ""` so the zero value is safe to use
 // without an explicit nil check at the call site.
 func (s *Server) cachedTailscaleStatus() admin.TailscaleStatus {
-	s.tailscaleStatusMu.Lock()
+	s.lockTailscaleStatus()
 	defer s.tailscaleStatusMu.Unlock()
 	if s.tailscaleStatus == nil {
 		return admin.TailscaleStatus{}
@@ -1317,6 +1327,38 @@ func (s *Server) cachedTailscaleStatus() admin.TailscaleStatus {
 	s.tailscaleStatusCache = s.tailscaleStatus.Status()
 	s.tailscaleStatusFetched = time.Now()
 	return s.tailscaleStatusCache
+}
+
+// lockTailscaleStatus takes tailscaleStatusMu for cachedTailscaleStatus.
+// Where a test has set OnTailscaleStatusLockFoundHeldForTest, a read that
+// finds the lock held (its TryLock fails) tells the test so before it calls
+// Lock: the test learns that the lock was found held, never that the read has
+// begun to wait for it, since the holder can let it go in between. A lock
+// found free tells it nothing. With no hook, as in production, it is
+// tailscaleStatusMu.Lock.
+func (s *Server) lockTailscaleStatus() {
+	if found := s.tailscaleStatusLockFoundHeld.Load(); found != nil {
+		if s.tailscaleStatusMu.TryLock() {
+			return
+		}
+		(*found)()
+	}
+	s.tailscaleStatusMu.Lock()
+}
+
+// OnTailscaleStatusLockFoundHeldForTest has f told each time a read of the
+// cached Tailscale status finds the status cache's lock held
+// (cachedTailscaleStatus): the one place such a read can wait, which a
+// console request waiting for its endpoint list reaches through
+// ReachableEndpoints. f is told before the read calls Lock, so it learns that
+// the lock was found held, not that the read waits for it. A nil f tells
+// nothing. Tests only.
+func (s *Server) OnTailscaleStatusLockFoundHeldForTest(f func()) {
+	if f == nil {
+		s.tailscaleStatusLockFoundHeld.Store(nil)
+		return
+	}
+	s.tailscaleStatusLockFoundHeld.Store(&f)
 }
 
 // EnableSyncEvents advertises syncEvents and is the serve-side statement

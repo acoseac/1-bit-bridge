@@ -1120,8 +1120,10 @@ acknowledged on the DAC's current firmware), `acknowledged`, or `observed` (an
 occurrence of the transport has since played 5 s of its content without a fault);
 `bitRates`, ascending, are the rates an acknowledgement covers that a migrated
 owner's approval made, absent for every rate. `firstUse` is reported for
-information: this bridge plays no rate and refuses no write on it, and an earlier
-bridge that did refused such a rate as `first_use_pending`.
+information: this bridge plays no rate and refuses no write on it. An earlier
+bridge refused a rate whose first use was not acknowledged, as
+`first_use_pending`, in `dsdPlayback.refused[].reason` and in
+`dsdPlayback.reason`; this bridge gives that word in neither.
 
 On `playback`, `transport` is `dop` for a DoP occurrence, `pcm` for a PCM one,
 `converted` for DSD the player converts to PCM, and absent for native DSD.
@@ -1188,8 +1190,8 @@ The current token vocabularies are exact and case-sensitive:
 | `dsdDAC.firstUse[].transport` | `native`, `dop` |
 | `dsdDAC.firstUse[].state` | `pending`, `acknowledged`, `observed` |
 
-An earlier bridge also refused a rate in `dsdPlayback.refused[].reason` as
-`first_use_pending`, its first use not acknowledged; this bridge no longer does.
+An earlier bridge's `dsdPlayback.refused[].reason` may also be
+`first_use_pending` (`firstUse`, above).
 
 Format sources are `format.DSDU32BE`, `format.DSDU32LE`, `format.DSDU16LE`
 (`internal/player/format/dsd_pack.go`) and `format.S16LE`, `format.S243LE`,
@@ -1225,11 +1227,11 @@ the lowest rate with (`internal/player/policy/policy.go`,
 `internal/player/playback/dsd_policy.go`): `dsd_off_by_choice`, `native_not_offered`,
 `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`,
 `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending` (an
-earlier bridge's word for a rate whose first use was not acknowledged; this bridge
-no longer gives it), `listener_rejected`, `native_check_required` (native DSD on a
-DAC the bridge's database of DAC models does not know whose USB vendor and product
-IDs are a generic board's, one of the database's shared reference IDs, at a rate no
-listener's latest answer holds clean on the DAC's firmware), `conversion_not_offered`, `dsd_state_unreadable`,
+earlier bridge's word: `firstUse`, above), `listener_rejected`,
+`native_check_required` (native DSD on a DAC whose USB vendor and product IDs are a
+generic board's, one of the shared reference IDs of the bridge's database of DAC
+models, and which that database does not know, at a rate no listener's latest
+answer holds clean on the DAC's firmware), `conversion_not_offered`, `dsd_state_unreadable`,
 `dsd_choice_uncertain` (a write of the DAC's choice reached the bridge's file and is
 not known to be kept, and the state it left plays the rate another way:
 `PUT /v1/outputs/{id}/dsd`, `persist_uncertain`),
@@ -1251,11 +1253,11 @@ default for a DAC with none), the bridge's database of DAC models, what the kern
 and a silent probe establish of the DAC now, and for DoP a check that every gain
 stage on the DAC's playback path is visible and at unity. No first-use
 acknowledgement is asked: `auto` plays native wherever the DAC offers it and no
-listener rejected it, except on a DAC the database does not know whose USB IDs are
-a generic board's (an interface board's or a chip maker's reference IDs, which the
-DACs of several makers ship, so the kernel's DSD offer there is the board's), where
-native plays only at a rate a listener's latest answer holds clean and an explicit
-`native` is refused as `native_check_required`. A rate plays native DSD,
+listener rejected it, except on a DAC whose USB IDs are a generic board's (an
+interface board's or a chip maker's reference IDs, which the DACs of several makers
+ship, so the kernel's DSD offer there is the board's) and which the database does
+not know, where native plays only at a rate a listener's latest answer holds clean
+and an explicit `native` is refused as `native_check_required`. A rate plays native DSD,
 in the first format the DAC offers of `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE`, or
 DoP, or publishes no tuple; a rate the policy converts to PCM, which the player does,
 publishes a converted entry and no tuple. A change of the set never moves an occurrence
