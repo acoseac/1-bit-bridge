@@ -417,3 +417,44 @@ darwin/arm64, windows/amd64, linux/386 and linux/arm, clean; and the gate, `make
 build-all` in one build-slot session taken at once, passed in 2,097 s (cmd/bridge 1,781 s,
 manifest 1,617 s, admin 1,309 s, backup 662 s), 38 small packages answered from its test cache.
 The macOS order and the node halves are CI's to verify.
+
+### Round 5
+
+CI on round 4's head failed one test on windows-latest alone, `TestTheStrongHostModelIsReadFromTheStack`,
+as it had at every gate run since round 1's runs commit; round 4's two fixes passed.
+
+The cause is production's, on every Windows bridge with two or more interfaces. `HostModel` stepped
+through `GetIpInterfaceTable`'s rows by indexing x/sys's `MibIpInterfaceRow`, which declares
+`TransmitOffload` and `ReceiveOffload` (natively `NL_INTERFACE_OFFLOAD_ROD`, one byte of one-bit
+fields each) as `uint32`: measured for windows/amd64 and windows/arm64 against x/sys v0.50.0, its
+row is 176 bytes, its fields below `TransmitOffload` (offset 164) at the native offsets, where the
+native row is 168. Row k was read 8×k bytes past its start, so from the second row on the console
+read another row's bytes: the runner's rows read the indexes 1, then 0 and 200 (the native row's
+`InterfaceIdentifier` and `MinRouterAdvertisementInterval`), the addressed interface had no row, and
+the console decided `interfaces_unreadable`; a row read from another's bytes could as well have
+carried another interface's flags.
+
+`parseInterfaceTable` (`internal/consolelan/table.go`, no build tag) reads the table's bytes at the
+native layout, `NumEntries` at 0 and rows of 168 bytes from 8, a row's index at 16 and its
+forwarding, weak host send and weak host receive bytes at 41, 42 and 43, non-zero true, and refuses
+a buffer short of the rows its `NumEntries` says as `host_model_unreadable`. `HostModel` hands it
+the table's bytes before `FreeMibTable`. `hostModelEntry` keeps x/sys's row: `GetIpInterfaceEntry`
+writes the native 168 bytes into its 176, and the fields it reads lie below offset 164.
+
+The platform-independent test builds a three-row table at the native layout, its offsets numbers of
+its own, each row one flag alone (one of them `0x80`), every other byte a filler, and asks each
+row's index and flags and a buffer one byte short. The live test, where CI is set, now fails an
+interface whose addresses do not read and one holding an address of the family with no row in the
+table, asked of the rows' indexes directly.
+
+`a0d01a5c` holds it. The controls, each a copy, went red for their own reasons as predicted before
+the run: the rows stepped at 176 with the length check left at 168, at the second row's index (the
+filler's `0xA5A5A5A5` where 14 was due); `WeakHostSend` read at 43, at the first row's flags.
+
+Runs on `a0d01a5c` and this record: `internal/consolelan` `-race -count=50`, passed in 1.1 s; vets for
+windows/amd64 and windows/arm64 of `internal/consolelan` and cmd/bridge, and the release-tag vets for
+darwin/arm64, windows/amd64, windows/arm64, linux/386 and linux/arm, clean; `make docs-check`'s seven
+steps, the source guards and `scripts/qualification-version -base 9b66c2af -head HEAD`, clean; and the
+gate, in its own commit below. The live Windows reading runs only on CI's windows-latest leg, which
+verifies it. PROTOCOL.md's SHA-256 did not move:
+`b3198929371b3041340a168f19f955cefe9786f159120f396f70e42e91e60c7d`.
