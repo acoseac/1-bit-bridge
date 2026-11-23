@@ -314,7 +314,7 @@ func (e *Engine) beginShutdown() {
 	}
 	o.parked = nil
 	for _, w := range o.waiters {
-		e.answer(w.c, reply{err: closing(w.c)})
+		e.answer(w.c, reply{err: waited(closing(w.c))})
 	}
 	o.waiters = nil
 	for _, c := range o.calls {
@@ -717,7 +717,7 @@ func (e *Engine) settleWaiters() {
 				err = refuse(w.c.op.String(), ReasonSuperseded, "playback did not begin")
 			}
 		}
-		e.answer(w.c, reply{err: err})
+		e.answer(w.c, reply{err: waited(err)})
 	}
 	o.waiters = nil
 }
@@ -728,7 +728,9 @@ func (e *Engine) busy() bool {
 	return s != nil && (s.phase == sessStarting || s.phase == sessReleasing)
 }
 
-// wait answers c when the transport settles.
+// wait answers c when the transport settles, or as the engine closes or
+// maintenance begins, a refusal then marked ErrAfterChange (waited): c's rule
+// has run.
 func (e *Engine) wait(c *command, play bool) {
 	e.o.waiters = append(e.o.waiters, waiter{c: c, play: play})
 }

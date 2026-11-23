@@ -56,6 +56,9 @@ type ctlOptions struct {
 	engSeams   *engine.Seams
 	// holdRelease holds every Release of the stand-in until it is closed.
 	holdRelease chan struct{}
+	// holdStart holds a Start of the reference it names until its channel is
+	// closed (playerStandIn.holdStart).
+	holdStart map[string]chan struct{}
 	// noOutput leaves the engine's output unknown.
 	noOutput bool
 	policy   playback.PlayerPolicy
@@ -181,7 +184,7 @@ func newCtlRig(t *testing.T, o ctlOptions) *ctlRig {
 	}
 	r.res = res
 	r.standIn = newPlayerStandIn()
-	r.standIn.holdRelease = o.holdRelease
+	r.standIn.holdRelease, r.standIn.holdStart = o.holdRelease, o.holdStart
 	d := engine.Details{Frames: 44100 * 180, RateHz: 44100, Bits: 16, Channels: 2, Codec: "FLAC", Lossless: true}
 	if o.details != nil {
 		d = *o.details
@@ -1303,6 +1306,58 @@ func TestOnlyAKnownPreEffectRefusalIsEffectNone(t *testing.T) {
 	a := r.command(admin.PlayerCmdIndex, func(c *admin.PlayerCommand) { c.Index = 1 })
 	if a.Record == nil || a.Record.Effect != admin.PlayerEffectUnknown {
 		t.Fatalf("an index whose start failed after the selection moved: %+v, want effect unknown", a.Record)
+	}
+}
+
+// TestARefusalThroughThePlayWaiterIsAnEffectNotKnown pins the waiter path: a
+// play the engine admitted, whose rule moved the selection and released or
+// started a session before it waited, and which the engine then refused
+// (release_unconfirmed at the release's deadline, maintenance as a hold
+// began, output_unavailable as the output went) is effect unknown, whatever
+// the word; the same word refused before anything changed stays none.
+func TestARefusalThroughThePlayWaiterIsAnEffectNotKnown(t *testing.T) {
+	t.Run("release_unconfirmed at the release's deadline", func(t *testing.T) {
+		hold := make(chan struct{})
+		t.Cleanup(func() { close(hold) })
+		r := newCtlRig(t, ctlOptions{holdRelease: hold})
+		wantRecord(t, "a replace and play", r.replace(r.paths(), 0, 0, true), admin.PlayerOpDone, "", "")
+		a := r.command(admin.PlayerCmdIndex, func(c *admin.PlayerCommand) { c.Index = 1 })
+		wantRecord(t, "an index whose release stays unconfirmed past its deadline", a, admin.PlayerOpRefused,
+			string(engine.ReasonReleaseUnconfirmed), admin.PlayerEffectUnknown)
+		if s := r.eng.Snapshot(); s.Selected() != s.IDs()[1] {
+			t.Fatalf("the selection is %d, want the index's entry %d: the index changed it", s.Selected(), s.IDs()[1])
+		}
+		a = r.command(admin.PlayerCmdIndex, func(c *admin.PlayerCommand) { c.Index = 0 })
+		wantRecord(t, "an index refused before it changed anything", a, admin.PlayerOpRefused,
+			string(engine.ReasonReleaseUnconfirmed), admin.PlayerEffectNone)
+	})
+	for _, tc := range []struct {
+		name, word string
+		refuse     func(r *ctlRig)
+	}{
+		{"maintenance as a hold begins", string(engine.ReasonMaintenance), func(r *ctlRig) {
+			if _, err := r.eng.EnterMaintenance(context.Background(), r.eng.Snapshot().Generation(), "a test's hold"); err != nil {
+				r.t.Fatal(err)
+			}
+		}},
+		{"output_unavailable as the output goes", string(engine.ReasonOutputUnavailable), func(r *ctlRig) { r.report(2, false, "") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := "http://192.168.1.20:7790/dlna/file/" + dlna.TrackID("", defaultCtlTracks[0].path)
+			hold := make(chan struct{})
+			r := newCtlRig(t, ctlOptions{holdStart: map[string]chan struct{}{first: hold}})
+			t.Cleanup(func() { close(hold) })
+			wantRecord(t, "a replace", r.replace(r.paths(), 0, 0, false), admin.PlayerOpDone, "", "")
+			indexed := make(chan admin.PlayerAnswer, 1)
+			go func() { indexed <- r.command(admin.PlayerCmdIndex, func(c *admin.PlayerCommand) { c.Index = 0 }) }()
+			r.standIn.await(t, "the index's Start held", func(b *playerStandIn) bool { return b.parked == 1 })
+			tc.refuse(r)
+			rec := wantRecord(t, "an index the engine refused as it waited", <-indexed, admin.PlayerOpRefused, tc.word,
+				admin.PlayerEffectUnknown)
+			if rec.Last != tc.word {
+				t.Fatalf("the index answered %q, want %s", rec.Last, tc.word)
+			}
+		})
 	}
 }
 

@@ -727,7 +727,9 @@ func lastWord(err error) string {
 // edit's before its queue does, a seek's before its target is set). Every
 // other answer is an effect not known: the engine's timeout of a call (which
 // releases the session), its shutdown, and a start that failed after the
-// command moved the selection among them.
+// command moved the selection among them; and so is every refusal the engine
+// answers a command as a waiter, whatever its reason (engine.ErrAfterChange):
+// its rule had run.
 var preEffect = map[string][]engine.Reason{
 	"*": {engine.ReasonConflict, engine.ReasonMaintenance, engine.ReasonOvertaken},
 	"insert": {engine.ReasonBadReference, engine.ReasonIDNotFound, engine.ReasonMetadataTooLarge, engine.ReasonFull,
@@ -757,6 +759,8 @@ func effectOfStep(step string, err error) string {
 		return admin.PlayerEffectSome
 	case errors.Is(err, errStepEnded), errors.Is(err, engine.ErrNotAdmitted):
 		return admin.PlayerEffectNone
+	case errors.Is(err, engine.ErrAfterChange):
+		return admin.PlayerEffectUnknown
 	}
 	reason := engine.ReasonOf(err)
 	if slices.Contains(preEffect["*"], reason) || slices.Contains(preEffect[step], reason) {

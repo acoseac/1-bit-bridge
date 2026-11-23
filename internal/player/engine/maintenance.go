@@ -127,7 +127,7 @@ func (e *Engine) grantHold(c *command, reason string, k *checkHold) {
 				err = refuse(w.c.op.String(), ReasonMaintenance, "maintenance began: "+reason)
 			}
 		}
-		e.answer(w.c, reply{err: err})
+		e.answer(w.c, reply{err: waited(err)})
 	}
 	o.waiters = nil
 	for _, p := range o.parked {
