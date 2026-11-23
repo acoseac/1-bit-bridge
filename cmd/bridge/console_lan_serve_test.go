@@ -726,18 +726,44 @@ func TestTheProductionSeamsAreConsolelansAndLans(t *testing.T) {
 	}
 }
 
+// boundFirstListener is a handed console listener whose address is read only
+// once the box has bound its stand-in for the home-network socket, so serve's
+// refusal of it comes after that bind.
+type boundFirstListener struct {
+	net.Listener
+	bound <-chan struct{}
+}
+
+func (l boundFirstListener) Addr() net.Addr {
+	select {
+	case <-l.bound:
+	case <-time.After(10 * time.Second):
+	}
+	return l.Listener.Addr()
+}
+
 // TestAHandedConsoleListenerThatIsRefusedRetiresTheLANSocket: serve refuses
 // a console listener it was handed for an address other than the config's,
-// and exits 1; the home-network socket is retired on that way out, so once
-// serve has returned no listener of the plan takes a connection (backlog
-// B989, its second round).
+// and exits 1; the home-network socket, bound before the refusal (the handed
+// listener's address is read only once the box's stand-in is bound), is
+// retired on that way out, so once serve has returned its listener takes no
+// connection (backlog B989, its second and third rounds).
 func TestAHandedConsoleListenerThatIsRefusedRetiresTheLANSocket(t *testing.T) {
 	adminLn := holdAdmin(t)
-	other := holdAdmin(t)
 	cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
 	box := newServeBox(serveLANAddr + "/24")
+	seams := box.seams(make(chan time.Time))
+	bound := make(chan struct{})
+	var boundOnce sync.Once
+	listen := seams.listen
+	seams.listen = func(ctx context.Context, lc *net.ListenConfig, network, address string) (net.Listener, error) {
+		l, err := listen(ctx, lc, network, address)
+		boundOnce.Do(func() { close(bound) })
+		return l, err
+	}
+	other := boundFirstListener{Listener: holdAdmin(t), bound: bound}
 	served := serveWithOpts(t, serveOpts{configPath: cfg, adminListener: other, tailscaleCLI: noTailscaleCLI(),
-		consoleLAN: box.seams(make(chan time.Time))})
+		consoleLAN: seams})
 	select {
 	case code := <-served.done:
 		if code != 1 {
@@ -752,6 +778,9 @@ func TestAHandedConsoleListenerThatIsRefusedRetiresTheLANSocket(t *testing.T) {
 	box.mu.Lock()
 	reals := append([]net.Listener(nil), box.reals...)
 	box.mu.Unlock()
+	if len(reals) != 1 {
+		t.Fatalf("precondition: %d stand-ins bound before the refusal, want one", len(reals))
+	}
 	for _, real := range reals {
 		if c, err := net.DialTimeout("tcp4", real.Addr().String(), time.Second); err == nil {
 			_ = c.Close()

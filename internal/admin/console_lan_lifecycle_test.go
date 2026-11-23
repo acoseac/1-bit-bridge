@@ -216,68 +216,112 @@ func TestARetryAfterAFailuresRetirementKeepsItsOwnReason(t *testing.T) {
 }
 
 // TestAShutdownJoinsAFailuresRetirementUnderWay: a failure's retirement held
-// at its section, its server not yet closed, a handler it admitted that never
-// returns; the stop does not finish while the retirement is held, and once it
-// is let go the stop finishes with the retirement's connections closed and
-// its wait ended at the stop's one deadline.
+// at its section, its server not yet closed, a handler it admitted held too;
+// the stop does not finish while the retirement is held. Let go with the
+// handler returning before the stop's deadline, the stop finishes once the
+// retirement has ended, its count back to zero and its connections closed.
+// Let go with the handler held past the deadline, the stop finishes within
+// its one window, and the retirement ends just after, its wait ended at that
+// deadline (one line says so); stopAndRetire's wait for it is bounded by the
+// deadline by design, so its count at the stop's return is no assertion.
 func TestAShutdownJoinsAFailuresRetirementUnderWay(t *testing.T) {
 	const window = 1500 * time.Millisecond
-	logs := loggingtest.Record(t)
-	seams := &ConsoleLANSeams{}
-	r := newLANRig(t, newLANBox(t), seams, func(p *ConsoleLANPlan) { p.ShutdownWindow, p.RetireWait = window, socketWait })
-	entered, releaseDoctor := heldDoctor(r.srv)
-	letGoOnce(t, releaseDoctor)
-	kept := r.client("192.168.77.5")
-	go func() { _, _, _ = kept.get("/api/doctor") }()
-	select {
-	case <-entered:
-	case <-time.After(socketWait):
-		t.Fatal("the held handler never ran")
-	}
-	marked, release := make(chan struct{}), make(chan struct{})
-	letGo := letGoOnce(t, release)
-	var once sync.Once
-	seams.RetirementMarked = func() { once.Do(func() { close(marked); <-release }) }
-	failNextAccept(t, r.box)
-	select {
-	case <-marked:
-	case <-time.After(socketWait):
-		t.Fatal("the failure's retirement never marked its policy")
-	}
-	r.box.mu.Lock()
-	r.box.events = nil
-	r.box.mu.Unlock()
-	start := time.Now()
-	r.cancel()
-	select {
-	case <-r.served:
-		r.stopOnce.Do(func() { r.stopped = true })
-		t.Fatal("the stop finished while a failure's retirement was under way, its connections open")
-	case <-time.After(300 * time.Millisecond):
-	}
-	letGo()
-	select {
-	case <-r.served:
-		r.stopOnce.Do(func() { r.stopped = true })
-	case <-time.After(socketWait):
-		t.Fatal("the stop never finished")
-	}
-	took := time.Since(start)
-	r.box.mu.Lock()
-	events := append([]string(nil), r.box.events...)
-	r.box.mu.Unlock()
-	closed := false
-	for _, e := range events {
-		closed = closed || e == "conn closed"
-	}
-	if !closed {
-		t.Fatalf("the stop finished with the failure's connections open: events %v", events)
-	}
-	if n := len(logs.Lines("console: a request of a retired home-network socket outlived its wait")); n != 1 {
-		t.Fatalf("%d lines saying the retirement's wait ended at its bound, want one: the stop finished before the wait", n)
-	}
-	if took > window+window/2 {
-		t.Fatalf("the stop took %v, past its one window of %v", took, window)
+	for _, c := range []struct {
+		name string
+		// handlerEnds: the held handler returns once the retirement has
+		// closed its server, before the stop's deadline.
+		handlerEnds bool
+	}{
+		{"the handler ends before the deadline", true},
+		{"the handler outlives the deadline", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			logs := loggingtest.Record(t)
+			seams := &ConsoleLANSeams{}
+			r := newLANRig(t, newLANBox(t), seams, func(p *ConsoleLANPlan) { p.ShutdownWindow, p.RetireWait = window, socketWait })
+			p := r.policy()
+			entered, releaseDoctor := heldDoctor(r.srv)
+			letGoDoctor := letGoOnce(t, releaseDoctor)
+			kept := r.client("192.168.77.5")
+			go func() { _, _, _ = kept.get("/api/doctor") }()
+			select {
+			case <-entered:
+			case <-time.After(socketWait):
+				t.Fatal("the held handler never ran")
+			}
+			marked, release := make(chan struct{}), make(chan struct{})
+			letGo := letGoOnce(t, release)
+			closed := make(chan struct{})
+			var markOnce, closeOnce sync.Once
+			seams.RetirementMarked = func() { markOnce.Do(func() { close(marked); <-release }) }
+			seams.RetirementClosed = func() { closeOnce.Do(func() { close(closed) }) }
+			failNextAccept(t, r.box)
+			select {
+			case <-marked:
+			case <-time.After(socketWait):
+				t.Fatal("the failure's retirement never marked its policy")
+			}
+			r.box.mu.Lock()
+			r.box.events = nil
+			r.box.mu.Unlock()
+			start := time.Now()
+			r.cancel()
+			select {
+			case <-r.served:
+				r.stopOnce.Do(func() { r.stopped = true })
+				t.Fatal("the stop finished while a failure's retirement was under way, its connections open")
+			case <-time.After(300 * time.Millisecond):
+			}
+			letGo()
+			if c.handlerEnds {
+				select {
+				case <-closed:
+				case <-time.After(socketWait):
+					t.Fatal("the failure's retirement never closed its server")
+				}
+				letGoDoctor()
+			}
+			select {
+			case <-r.served:
+				r.stopOnce.Do(func() { r.stopped = true })
+			case <-time.After(socketWait):
+				t.Fatal("the stop never finished")
+			}
+			took := time.Since(start)
+			if took > window+window/2 {
+				t.Fatalf("the stop took %v, past its one window of %v", took, window)
+			}
+			r.box.mu.Lock()
+			events := append([]string(nil), r.box.events...)
+			r.box.mu.Unlock()
+			connClosed := false
+			for _, e := range events {
+				connClosed = connClosed || e == "conn closed"
+			}
+			if !connClosed {
+				t.Fatalf("the stop finished with the failure's connections open: events %v", events)
+			}
+			if c.handlerEnds {
+				if took >= window {
+					t.Fatalf("the stop took %v, its deadline's %v: the retirement it joined should have ended first", took, window)
+				}
+				r.srv.consoleLAN.mu.Lock()
+				left := r.srv.consoleLAN.retiring
+				r.srv.consoleLAN.mu.Unlock()
+				if left != 0 {
+					t.Fatalf("the stop finished with %d retirements under way, want the failure's joined", left)
+				}
+				return
+			}
+			select {
+			case <-p.served:
+			case <-time.After(time.Second):
+				t.Fatal("the failure's retirement did not end once the stop's deadline had passed")
+			}
+			if n := len(logs.Lines("console: a request of a retired home-network socket outlived its wait")); n != 1 {
+				t.Fatalf("%d lines saying the retirement's wait ended at its bound, want one", n)
+			}
+		})
 	}
 }
 
