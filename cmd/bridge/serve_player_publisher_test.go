@@ -383,7 +383,10 @@ func TestACommandThatChangesNothingVisibleIsAnsweredUnderARevisionOfItsOwn(t *te
 func TestEveryExplicitCaptureCompletesWhenNothingChanged(t *testing.T) {
 	r := newCtlRig(t, ctlOptions{})
 	wantRecord(t, "a replace", r.replace(r.paths(), 0, 0, false), admin.PlayerOpDone, "", "")
-	latest := r.c.Now(context.Background())
+	latest, ok := r.c.Latest()
+	if !ok {
+		t.Fatal("no publication")
+	}
 	const bound = 2 * time.Second
 	for i := 0; i < 3; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
