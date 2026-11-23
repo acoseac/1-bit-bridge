@@ -51,6 +51,13 @@ player frame, serve's wiring.
   engine was writing a reservation, and the second rig's `persistentMedium` set the seam again under
   that write. `ctlMedium` now installs it once for every rig alive at a time and puts it back when
   the last one's engine has been joined.
+- **A replace without play could miss the release it began.** The second `make test` failed
+  `TestAPausedReplaceWaitsForTheReleaseItBegan` once, under the whole suite's load: the stand-in
+  acknowledged the release DeleteAll began before the control read the engine after it, and the
+  record said `release: none`. The control now takes the release as the replace's where the
+  snapshot read before DeleteAll is at the tab's generation (the state DeleteAll was admitted on)
+  and holds a session; the case parks the replace after its DeleteAll until the engine shows the
+  release acknowledged (red with the fix taken out, control M31).
 
 ### Red first
 
@@ -71,7 +78,8 @@ what is there as well (the transport's eight commands and repeat offered; the en
 
 Each the fix taken out as an uncommitted edit, its named cases run, the bytes put back from memory
 and the file's `git diff` asked clean after every run; predictions written before any ran
-(`.tmp`, not tracked). All thirty went red for the reason predicted, the tree clean after each:
+(`.tmp`, not tracked). All thirty went red for the reason predicted, the tree clean after each, and M31, the later fix's
+own (below the table), red too:
 
 | | Taken out | Red |
 |---|---|---|
@@ -105,6 +113,7 @@ and the file's `git diff` asked clean after every run; predictions written befor
 | M28 | effect from the engine's answer (from `sent`) | `TestAStaleFirstStepChangedNothingThoughItWasSent`: effect some |
 | M29 | a read answered at once (waiting for the next publication) | `TestEveryExplicitCaptureCompletesWhenNothingChanged`: 10 s |
 | M30 | (J1) the barrier judged on its answering capture | `TestTheSwitchOutsAnswerIsTheCaptureThatSawSilence`: the answer not silent |
+| M31 | the release a replace's DeleteAll began, read before it | `TestAPausedReplaceWaitsForTheReleaseItBegan`: release none (M25 red again on the fixed code) |
 
 ### The records' room
 

@@ -1436,13 +1436,21 @@ func (c *consoleControl) runReplace(o *operation, eng *engine.Engine, r admin.Pl
 	}
 	o.set(func(rec *admin.PlayerRecord) { rec.Of = of })
 
-	// 1. DeleteAll under the tab's generation.
+	// 1. DeleteAll under the tab's generation. It releases the session the
+	// queue held: where the snapshot read before it is at the tab's
+	// generation (which moves at every visible change, so it is the state
+	// DeleteAll was admitted on) and holds a session, the release is the
+	// replace's even where its acknowledgement lands before the snapshot
+	// after DeleteAll is read.
+	g, _ := engine.ParseGeneration(r.At)
+	before := eng.Snapshot()
+	held := before.Generation() == g && holdsSession(before.State())
 	if err := o.step("delete_all", func(ctx context.Context) error { return eng.DeleteAll(ctx, cnd) }); err != nil {
 		o.finishErr(err)
 		return
 	}
 	deleteAnswered := c.now()
-	releasing := eng.Snapshot().State() == engine.Releasing
+	releasing := held || eng.Snapshot().State() == engine.Releasing
 
 	// 2. The start track into the emptied queue, the tracks before it from
 	// the head, those after it after it, the queue's IDs compared after each.
@@ -1519,6 +1527,12 @@ func (c *consoleControl) runReplace(o *operation, eng *engine.Engine, r admin.Pl
 		}
 		return admin.PlayerOpDone, ""
 	})
+}
+
+// holdsSession reports whether a transport state holds a session, which a
+// DeleteAll releases.
+func holdsSession(st engine.State) bool {
+	return st == engine.Playing || st == engine.Paused || st == engine.Releasing
 }
 
 // seekTo seeks the start entry to seconds under the generation of a snapshot

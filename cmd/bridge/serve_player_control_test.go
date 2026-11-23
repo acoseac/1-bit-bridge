@@ -731,6 +731,36 @@ func TestAPausedReplaceWaitsForTheReleaseItBegan(t *testing.T) {
 		t.Fatalf("release %q, want confirmed", rec.Release)
 	}
 
+	// The release acknowledged before the replace reads the engine after its
+	// DeleteAll (held at the seam until the engine shows it stopped) is still
+	// the one the replace began: confirmed.
+	q := newCtlRig(t, ctlOptions{seams: &controlSeams{}})
+	wantRecord(t, "the first replace", q.replace(q.paths(), 0, 0, true), admin.PlayerOpDone, "", "")
+	q.c.seams.afterStep = func(kind, step string, err error) {
+		if kind != opKindReplace || step != "delete_all" || err != nil {
+			return
+		}
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		for {
+			ch := q.eng.Changed()
+			if s := q.eng.Snapshot(); s.State() == engine.Stopped {
+				return
+			}
+			select {
+			case <-ch:
+			case <-deadline.C:
+				t.Errorf("the release DeleteAll began was never acknowledged")
+				return
+			}
+		}
+	}
+	rec = wantRecord(t, "a replace without play whose release was acknowledged before it looked", q.replace(q.paths(), 1, 0, false),
+		admin.PlayerOpDone, "", "")
+	if rec.Release != releaseConfirmed {
+		t.Fatalf("release %q, want confirmed: the release its DeleteAll began", rec.Release)
+	}
+
 	hold := make(chan struct{})
 	t.Cleanup(func() { close(hold) })
 	h := newCtlRig(t, ctlOptions{holdRelease: hold})
