@@ -260,6 +260,10 @@ func (s tailscaleAdminSource) Status() admin.TailscaleStatus {
 	return s.stamp(out)
 }
 
+// StatusContext is round 2's name, with today's behaviour (a names-only
+// shim the change replaces).
+func (s tailscaleAdminSource) StatusContext(context.Context) admin.TailscaleStatus { return s.Status() }
+
 func (s tailscaleAdminSource) RefreshNow(ctx context.Context) admin.TailscaleStatus {
 	if s.cli != nil {
 		return s.stamp(toAdminStatus(s.cli.RefreshNow(ctx)))

@@ -46,6 +46,7 @@ type lanBox struct {
 	ifs       []consolelan.Interface
 	readErr   error
 	table     consolelan.Table
+	tableErr  error
 	holds     []int
 	listeners []*standIn
 	sources   map[int]netip.Addr
@@ -91,6 +92,9 @@ func (b *lanBox) read() ([]consolelan.Interface, error) {
 func (b *lanBox) hostTable(bool) (consolelan.Table, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.tableErr != nil {
+		return nil, b.tableErr
+	}
 	return append(consolelan.Table(nil), b.table...), nil
 }
 
@@ -296,12 +300,7 @@ func openLANRig(t *testing.T, box *lanBox, seams *ConsoleLANSeams, edit func(*Co
 	}
 	r := &lanRig{t: t, srv: srv, box: box, tick: make(chan time.Time), ticked: make(chan struct{}, 16), seams: seams}
 	seams.Ticked = func() { r.ticked <- struct{}{} }
-	plan := &ConsoleLANPlan{
-		Address: netip.MustParseAddr(testLANAddr), Port: 7789, Source: consolelan.SourceFile,
-		FileKey: config.LANKey{State: config.LANKeyAddress, Address: testLANAddr},
-		Read:    box.read, HostTable: box.hostTable, Hold: box.hold, Listen: box.listen,
-		GOOS: "linux", Tick: r.tick, RetireWait: 2 * time.Second, ShutdownWindow: 2 * time.Second, Seams: seams,
-	}
+	plan := testLANPlan(box, r.tick, seams)
 	if edit != nil {
 		edit(plan)
 	}
@@ -321,6 +320,17 @@ func openLANRig(t *testing.T, box *lanBox, seams *ConsoleLANSeams, edit func(*Co
 	go func() { r.served <- srv.ServeListener(ctx, loop) }()
 	t.Cleanup(r.stop)
 	return r
+}
+
+// testLANPlan is the plan the rig opens on box: A at P = 7789 from the file,
+// the box's reading, Windows table, hold and bind, and ticks from tick.
+func testLANPlan(box *lanBox, tick chan time.Time, seams *ConsoleLANSeams) *ConsoleLANPlan {
+	return &ConsoleLANPlan{
+		Address: netip.MustParseAddr(testLANAddr), Port: 7789, Source: consolelan.SourceFile,
+		FileKey: config.LANKey{State: config.LANKeyAddress, Address: testLANAddr},
+		Read:    box.read, HostTable: box.hostTable, Hold: box.hold, Listen: box.listen,
+		GOOS: "linux", Tick: tick, RetireWait: 2 * time.Second, ShutdownWindow: 2 * time.Second, Seams: seams,
+	}
 }
 
 // stop shuts the console down and waits for it, once.
@@ -628,20 +638,20 @@ func waitFor(t *testing.T, ok func() bool) {
 // TestALANSocketThatFailsLeavesLoopbackServingAndClosesItsConnections: the
 // LAN server's Serve failing retires the socket as a reading's change does,
 // its kept-alive connection closed, the state waiting stopped_serving, and
-// the loopback socket serving; the next tick binds again (§3.6, R2).
+// the loopback socket serving; the first tick once that retirement has ended
+// (its Serve returned) binds again (§3.6, R2).
 func TestALANSocketThatFailsLeavesLoopbackServingAndClosesItsConnections(t *testing.T) {
 	r := newLANRig(t, newLANBox(t), nil, nil)
 	kept := r.client(testLANPeer[:len(testLANPeer)-6])
 	if resp, _, err := kept.get("/api/console"); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("first request: %v %v", resp, err)
 	}
-	r.box.mu.Lock()
-	r.box.failNext = true
-	r.box.mu.Unlock()
-	if c, err := r.box.dial(netip.MustParseAddr("192.168.77.6")); err == nil {
-		_ = c.Close()
+	p := r.policy()
+	failNextAccept(t, r.box)
+	waitServed(t, p)
+	if st := r.state(); st.State != ConsoleLANWaiting || st.Reason != consolelan.ReasonStoppedServing {
+		t.Fatalf("once the failure's retirement ended the state read %+v", st)
 	}
-	waitFor(t, func() bool { return r.state().Reason == consolelan.ReasonStoppedServing })
 	if _, _, err := kept.get("/api/console"); err == nil {
 		t.Fatal("the kept-alive connection was answered after its socket failed")
 	}

@@ -131,6 +131,8 @@ type ConsoleLANSeams struct {
 	Released func(left int)
 	// Ticked runs once the loop has done what a tick asked, whatever it was.
 	Ticked func()
+	// RetirementEnded runs once a retirement's wait has ended.
+	RetirementEnded func()
 }
 
 // socketKind tells the loopback socket from the home-network one.
@@ -248,6 +250,16 @@ func (s *Server) OpenConsoleLAN(ctx context.Context, plan *ConsoleLANPlan) Conso
 	c.attempt(ctx)
 	return c.State()
 }
+
+// PrepareConsoleLAN, BeginConsoleLAN and AbortConsoleLAN are round 2's
+// names, with today's behaviour (a names-only shim the change replaces).
+func (s *Server) PrepareConsoleLAN(ctx context.Context, plan *ConsoleLANPlan) ConsoleLANState {
+	return s.OpenConsoleLAN(ctx, plan)
+}
+
+func (s *Server) BeginConsoleLAN(context.Context) ConsoleLANState { return s.ConsoleLAN() }
+
+func (s *Server) AbortConsoleLAN() {}
 
 // ConsoleLAN is the home-network socket's state, off where no plan runs
 // (or no console exists yet: a nil s).
@@ -608,6 +620,9 @@ func (c *consoleLAN) retire(p *lanPolicy, cause string, deadline time.Time) {
 		sm.RetirementClosed()
 	}
 	c.waitHandlers(p, deadline)
+	if sm := c.plan.Seams; sm != nil && sm.RetirementEnded != nil {
+		sm.RetirementEnded()
+	}
 }
 
 // waitHandlers waits until p's count is 0 or deadline has passed, the stop's

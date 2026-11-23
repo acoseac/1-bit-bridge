@@ -674,7 +674,7 @@ type settingsResponse struct {
 // --- GET /api/stats ---
 
 func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.getStatsSnapshot())
+	writeJSON(w, http.StatusOK, s.getStatsSnapshot(r.Context()))
 }
 
 // snapshotDBTimeout bounds the best-effort DB reads behind the dashboard
@@ -728,6 +728,11 @@ type statsDBPart struct {
 // total + variant rollup consistent. (Gemini on PR #443.)
 func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 	var p statsDBPart
+	if h := s.testStatsRead; h != nil {
+		if err := h(ctx); err != nil {
+			return statsDBPart{}, err
+		}
+	}
 	rollup, err := s.deps.Manifest.RollupByPrefix(ctx, "")
 	if err != nil {
 		return statsDBPart{}, fmt.Errorf("library rollup: %w", err)
@@ -765,7 +770,7 @@ func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 // network. Suitable for sub-second polling. The DB reads are bounded by
 // snapshotDBTimeout and degrade to the last-good statsDBPart on
 // error/timeout so a tick during lock contention doesn't flash zeros.
-func (s *Server) getStatsSnapshot() statsResponse {
+func (s *Server) getStatsSnapshot(context.Context) statsResponse {
 	cfg := s.deps.CfgHolder.Load()
 	now := time.Now().UTC()
 
@@ -820,8 +825,8 @@ func (s *Server) getStatsSnapshot() statsResponse {
 // template, which was true until #948 removed StartedAt from this
 // payload as a field with no reader. `UptimeSec` itself stays because
 // `bridge status` prints it off the non-SSE form.
-func (s *Server) getStatsSSESnapshot() statsResponse {
-	snap := s.getStatsSnapshot()
+func (s *Server) getStatsSSESnapshot(ctx context.Context) statsResponse {
+	snap := s.getStatsSnapshot(ctx)
 	snap.UptimeSec = 0
 	return snap
 }
@@ -1094,7 +1099,7 @@ type sourcesResponse struct {
 // #948 removed that when it dropped `dbBytes`, whose value /api/diagnostics
 // already served. The decision is unchanged; the evidence for it had gone
 // stale, which is the class #955 swept and this one outlived.
-func (s *Server) trackSourceCounts() (total, routed int) {
+func (s *Server) trackSourceCounts(context.Context) (total, routed int) {
 	s.statsMu.Lock()
 	warm := s.statsDBValid
 	if warm {
@@ -1143,7 +1148,7 @@ func (s *Server) trackSourceCounts() (total, routed int) {
 // (rows whose upstream was just removed, pre-reap) that app.js renders as
 // "Other UPnP sources".
 func (s *Server) getSourcesSnapshot(ctx context.Context) sourcesResponse {
-	total, routed := s.trackSourceCounts()
+	total, routed := s.trackSourceCounts(ctx)
 	if routed > total {
 		routed = total
 	}

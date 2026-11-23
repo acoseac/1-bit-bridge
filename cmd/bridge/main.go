@@ -3215,6 +3215,9 @@ type serveOpts struct {
 	// test that leaves mDNS on pins the responder to loopback, so it
 	// answers nothing on the LAN. Per invocation for tailscaleCLI's reason.
 	mdnsPick func() (*net.Interface, error)
+	// mdnsStart stands in for the responder's start (bridgemdns.Advertise).
+	// Nil in production. A boot test forces a responder that fails to start.
+	mdnsStart mdnsStartFunc
 	// beforeAdminServe runs immediately before ServeListener on the
 	// handed admin path. Nil in production. A test holds serve there,
 	// where the port already accepts and the console does not yet
@@ -7204,6 +7207,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		}
 		ml := newMDNSLifecycle(boundAddr.Port, version.ProtocolVersion, nameSource, stdout, stderr)
 		ml.pick = opts.mdnsPick
+		ml.start = opts.mdnsStart
 		// Resolve the effective initial state. Catch-up apply:
 		// if an admin PATCH arrived during the pre-listener
 		// window, mdnsDesired carries its target value — that

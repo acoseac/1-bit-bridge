@@ -49,11 +49,14 @@ type mdnsLifecycle struct {
 	pick func() (*net.Interface, error)
 	// start starts the responder; nil is bridgemdns.Advertise. A test forces
 	// a startup failure with it.
-	start func(bridgemdns.Config) (*bridgemdns.Advertiser, error)
+	start mdnsStartFunc
 
 	mu         sync.Mutex
 	advertiser *bridgemdns.Advertiser
 }
+
+// mdnsStartFunc starts the responder, as bridgemdns.Advertise does.
+type mdnsStartFunc = func(bridgemdns.Config) (*bridgemdns.Advertiser, error)
 
 // newMDNSLifecycle constructs the lifecycle helper. The
 // `nameSource` closure is invoked at every Set(true) so a

@@ -162,7 +162,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	publishStats := func() error {
-		return marshalAndPublish("stats", s.getStatsSSESnapshot(), &lastStats)
+		return marshalAndPublish("stats", s.getStatsSSESnapshot(ctx), &lastStats)
 	}
 
 	publishEndpoints := func() error {
@@ -186,7 +186,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	publishTailscale := func() error {
-		return marshalAndPublish("tailscale", s.getTailscaleSnapshot(), &lastTailscale)
+		return marshalAndPublish("tailscale", s.getTailscaleSnapshot(ctx), &lastTailscale)
 	}
 
 	// composition (dashboard master-quality breakdown) is TTL-cached +

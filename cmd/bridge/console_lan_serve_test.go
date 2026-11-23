@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/consolelan"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
+	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 )
 
@@ -721,5 +723,144 @@ func TestTheProductionSeamsAreConsolelansAndLans(t *testing.T) {
 	ifs, err := consoleLANInterfacesOf([]lan.Interface{{Name: "x"}}, errors.New("the listing"))
 	if err == nil || ifs != nil {
 		t.Fatalf("a failed reading converted to %v, %v", ifs, err)
+	}
+}
+
+// TestAHandedConsoleListenerThatIsRefusedRetiresTheLANSocket: serve refuses
+// a console listener it was handed for an address other than the config's,
+// and exits 1; the home-network socket is retired on that way out, so once
+// serve has returned no listener of the plan takes a connection (backlog
+// B989, its second round).
+func TestAHandedConsoleListenerThatIsRefusedRetiresTheLANSocket(t *testing.T) {
+	adminLn := holdAdmin(t)
+	other := holdAdmin(t)
+	cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
+	box := newServeBox(serveLANAddr + "/24")
+	served := serveWithOpts(t, serveOpts{configPath: cfg, adminListener: other, tailscaleCLI: noTailscaleCLI(),
+		consoleLAN: box.seams(make(chan time.Time))})
+	select {
+	case code := <-served.done:
+		if code != 1 {
+			t.Fatalf("serve exited %d with its console listener refused, want 1; stderr=%s", code, served.stderr.String())
+		}
+	case <-serveGiveUp(t):
+		t.Fatalf("serve did not exit with its console listener refused; stderr=%s", served.stderr.String())
+	}
+	if !strings.Contains(served.stderr.String(), "admin server: admin listen") {
+		t.Fatalf("serve did not say it refused the listener: %s", served.stderr.String())
+	}
+	box.mu.Lock()
+	reals := append([]net.Listener(nil), box.reals...)
+	box.mu.Unlock()
+	for _, real := range reals {
+		if c, err := net.DialTimeout("tcp4", real.Addr().String(), time.Second); err == nil {
+			_ = c.Close()
+			t.Errorf("the home-network socket at %s takes connections after serve's way out", real.Addr())
+		}
+	}
+}
+
+// setMDNS rewrites the mDNS switch writeConsoleLANConfig writes.
+func setMDNS(t *testing.T, cfg string, on bool) {
+	t.Helper()
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Replace(string(raw), "mdns:\n  enabled: false\n", "mdns:\n  enabled: "+strconv.FormatBool(on)+"\n", 1)
+	if err := os.WriteFile(cfg, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTheConsolesFirstReadingFollowsTheResponderStart: serve makes the home-
+// network socket's first attempt once the mDNS responder's start has
+// answered, so the first reading holds the box's .local name exactly while
+// the responder runs and the first tick of a clean start retires nothing:
+// with a responder that starts, the socket answers the name from its first
+// bind; with mDNS off, and with a responder that fails to start, it answers
+// no name (backlog B989, its second round).
+func TestTheConsolesFirstReadingFollowsTheResponderStart(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		mdns    bool
+		fails   bool
+		answers bool
+	}{
+		{"a responder that starts", true, false, true},
+		{"mDNS off", false, false, false},
+		{"a responder that fails to start", true, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			reportHostName(t, "musicbox")
+			logs := loggingtest.Record(t)
+			adminLn := holdAdmin(t)
+			port := lanPortOf(t, adminLn)
+			cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
+			setMDNS(t, cfg, c.mdns)
+			box := newServeBox(serveLANAddr + "/24")
+			tick := make(chan time.Time)
+			seams := box.seams(tick)
+			seams.localName = nil // production's: the box's .local name while the responder runs
+			opts := serveOpts{configPath: cfg, adminListener: adminLn, tailscaleCLI: noTailscaleCLI(), consoleLAN: seams,
+				mdnsPick: loopbackPick(t)}
+			if c.fails {
+				opts.mdnsStart = func(bridgemdns.Config) (*bridgemdns.Advertiser, error) {
+					return nil, errors.New("the responder could not start")
+				}
+			}
+			s := &lanServe{admin: adminLn.Addr().String(), cfgPath: cfg, box: box, tick: tick}
+			s.served = serveWithOpts(t, opts)
+			defer s.stop(t)
+			// The first tick of a clean start comes once the responder's start
+			// has answered, as production's comes five seconds into the start.
+			if c.mdns {
+				said, where := "mDNS: advertising as", s.served.stdout
+				if c.fails {
+					said, where = "mDNS advertise failed (non-fatal): the responder could not start", s.served.stderr
+				}
+				deadline := time.Now().Add(10 * time.Second)
+				for !strings.Contains(where.String(), said) {
+					if time.Now().After(deadline) {
+						t.Fatalf("precondition: serve never said %q; stdout=%s stderr=%s", said, s.served.stdout.String(), s.served.stderr.String())
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			// Two ticks: the second is taken only once the first is done.
+			for i := 0; i < 2; i++ {
+				select {
+				case tick <- time.Now():
+				case <-time.After(10 * time.Second):
+					t.Fatal("the plan's loop took no tick")
+				}
+			}
+			if n := box.count(); n != 1 {
+				t.Errorf("%d binds after the first tick of a clean start, want the first alone", n)
+			}
+			if lines := logs.Lines("console: the home-network socket is retired"); len(lines) != 0 {
+				t.Errorf("the first tick of a clean start retired the socket: %v", lines)
+			}
+			st := s.console(t)
+			nameURL := ""
+			if c.answers {
+				nameURL = "http://musicbox.local:" + port
+			}
+			if st.State != consolelan.StateListening || st.NameURL != nameURL {
+				t.Fatalf("state %+v, want listening with the name's URL %q", st, nameURL)
+			}
+			resp, err := box.client(t, "192.168.88.5").Get("http://musicbox.local:" + port + "/api/stats")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			want := http.StatusMisdirectedRequest
+			if c.answers {
+				want = http.StatusOK
+			}
+			if resp.StatusCode != want {
+				t.Fatalf("the socket answered the .local name %d, want %d", resp.StatusCode, want)
+			}
+		})
 	}
 }

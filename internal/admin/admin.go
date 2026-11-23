@@ -1842,6 +1842,10 @@ type Server struct {
 	// stream waiting on the snapshot. Nil in production.
 	testCompositionFlight func()
 
+	// testStatsRead, when set, runs as the stats reads begin, on their
+	// context, and its error is theirs. Nil in production.
+	testStatsRead func(ctx context.Context) error
+
 	// library catalog snapshot for /api/player/*; see catalog.go
 	catalogState
 

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 )
 
@@ -17,14 +18,14 @@ import (
 // That's the same convention `apiUpdatesGet` follows for missing
 // updater wiring.
 func (s *Server) apiTailscaleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.getTailscaleSnapshot())
+	writeJSON(w, http.StatusOK, s.getTailscaleSnapshot(r.Context()))
 }
 
 // getTailscaleSnapshot returns the latest auto-pilot status, or the
 // empty-zero-value when no Tailscale provider is wired (test
 // deployments, builds without the auto-pilot). Shared by
 // apiTailscaleStatus (REST) and apiEvents (SSE).
-func (s *Server) getTailscaleSnapshot() TailscaleStatus {
+func (s *Server) getTailscaleSnapshot(context.Context) TailscaleStatus {
 	if s.deps.Tailscale == nil {
 		return TailscaleStatus{}
 	}

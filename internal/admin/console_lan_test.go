@@ -78,13 +78,18 @@ func serveTo(srv *Server, r *http.Request) *httptest.ResponseRecorder {
 // plan's §4.1, R1, I9): a peer inside both A's on-link network and A's
 // private class, unmapped and without a zone, the box's own address among
 // them; nothing outside either, nothing in Tailscale's ranges whatever the
-// prefix (a broad ULA prefix that holds Tailscale's), and nothing whose
-// address does not read.
+// prefix (a broad ULA prefix that holds Tailscale's), nothing whose address
+// does not read, and nothing outside the class though a prefix wider than
+// the class holds it (each private class's, the class check alone refusing).
 func TestTheLANSocketAdmitsOnlyItsOwnNetwork(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	v4 := testLANPolicy(t, testLANAddr, testLANNet, 7789, "")
 	ula := testLANPolicy(t, "fd12::20", "fd00::/8", 7789, "")
 	wide := testLANPolicy(t, "fd12::20", "fc00::/7", 7789, "")
+	wide192 := testLANPolicy(t, testLANAddr, "192.168.0.0/15", 7789, "")
+	wide172 := testLANPolicy(t, "172.16.0.20", "172.0.0.0/11", 7789, "")
+	wide10 := testLANPolicy(t, "10.1.2.20", "10.0.0.0/7", 7789, "")
+	wideULA := testLANPolicy(t, "fd12::20", "f800::/6", 7789, "")
 	for _, c := range []struct {
 		name   string
 		p      *lanPolicy
@@ -106,6 +111,11 @@ func TestTheLANSocketAdmitsOnlyItsOwnNetwork(t *testing.T) {
 		{"Tailscale's ULA inside the broad prefix", ula, "[fd7a:115c:a1e0::5]:51000", "[fd12::20]:7789", false},
 		{"Tailscale's ULA inside fc00::/7 itself", wide, "[fd7a:115c:a1e0::5]:51000", "[fd12::20]:7789", false},
 		{"a zoned peer", ula, "[fe80::1%25eth0]:51000", "[fd12::20]:7789", false},
+		{"the class inside a prefix wider than 192.168.0.0/16", wide192, "192.168.200.5:51000", testLANHost, true},
+		{"a public address inside a prefix wider than 192.168.0.0/16", wide192, "192.169.1.5:51000", testLANHost, false},
+		{"a public address inside a prefix wider than 172.16.0.0/12", wide172, "172.15.0.5:51000", "172.16.0.20:7789", false},
+		{"a public address inside a prefix wider than 10.0.0.0/8", wide10, "11.0.0.5:51000", "10.1.2.20:7789", false},
+		{"an address outside fc00::/7 inside a wider prefix", wideULA, "[fb00::5]:51000", "[fd12::20]:7789", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			rr := serveTo(srv, lanRequest(c.p, http.MethodGet, "/api/console", c.remote, c.host, nil))

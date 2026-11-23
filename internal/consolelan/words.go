@@ -43,6 +43,7 @@ const (
 	ReasonBindFailed       = "bind_failed"
 	ReasonStoppedServing   = "stopped_serving"
 	ReasonStopping         = "stopping"
+	ReasonReopening        = "reopening"
 )
 
 // State is the home-network socket as the serving process reports it, the
