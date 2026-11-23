@@ -102,8 +102,33 @@ A run of the whole package before the gate found `TestFailureAutoAdvanceIsGuarde
 read the intent in place of the skip timer's `state.playing`, which that test pins, and which a
 browser that rejects a failed source's play clears. `daa7e2ea` asks both.
 
-Five more controls edit the tracked modules for the structural guard and restore them from
-memory: all red, the tree clean after each.
+Seven more controls edit the tracked modules for the source tests and restore them from memory,
+run at the round's head after the gate: six for the structural guard (each continuation, the
+re-check, the wiring, the old way on) and one for the timer's playing check. All were red, the
+tree clean after each.
+
+### The runs
+
+Each through the shared build lock, on `GOTOOLCHAIN=go1.27.3` with `GOPROXY=off`, node v24.22.3 on
+the path, so the node cases ran rather than skipped.
+
+- `make fmt vet test build-all docs-check` and the rest in one session, at `c685caff`:
+  - `make fmt` rewrote nothing.
+  - `make vet`, and the same for linux/arm, linux/386, windows/amd64, windows/arm64 and
+    darwin/arm64: exit 0, 5 to 10 s each.
+  - `make docs-check` and its self-tests: exit 0.
+  - `scripts/qualification-version -base a79c69b2 -head HEAD`: OK.
+  - `make test` at `P=8`: exit 0 in 2,037 s, 93 packages ok, cmd/bridge 1,994 s, internal/admin
+    1,522 s.
+  - `make build-all`: exit 0 in 32 s. The tree was clean after.
+- The source guards, run by name before it: `TestNoConsoleControlDisablesItselfOutsideSetDisabled`,
+  `TestPlayerEmittedClassesAreStyled`, `TestTrackSubgridColumnsMatchTheRow`,
+  `TestAppJSHasNoCallsToDeletedHelpers`, `TestByteFormattersAgree`,
+  `TestEveryCitedTestNameExists`, `TestNoBlankKeepers` and
+  `TestNoDocblockNamesAnotherDeclaration` pass.
+- internal/admin whole, without `-race`: ok in 338 s at `daa7e2ea`. Its first run found the
+  timer's pin, above.
+- No other race run: the server did not change.
 
 ### Residuals
 
