@@ -725,7 +725,6 @@ func goBarBoot() *config.Config {
 // check's hold and a release unconfirmed, which the frame names apart.
 func TestThePlayerFrameSaysWhyTheBridgeIsNotOffered(t *testing.T) {
 	needsDirectorySync(t)
-	persistentMedium(t)
 	bare := func(t *testing.T, plan servePlayerPlan, ready bool) *consoleControl {
 		p := &bridgePlayer{plan: plan, ready: make(chan struct{}), done: make(chan struct{}), settled: make(chan struct{}), closedKnown: make(chan struct{})}
 		if ready {

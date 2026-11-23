@@ -46,6 +46,11 @@ player frame, serve's wiring.
 - **A source pin that matches text matches commentary.** The builder's pin first looked for
   `<res` as text in every file of the package and found a backquoted name in a comment of
   `dlna_wiring.go`; it now walks the AST's string literals.
+- **The strict writer's medium seam is the process's, so a test's rigs share one install.** The first
+  `make test` failed three cases under `-race` alone: each made a second rig while the first rig's
+  engine was writing a reservation, and the second rig's `persistentMedium` set the seam again under
+  that write. `ctlMedium` now installs it once for every rig alive at a time and puts it back when
+  the last one's engine has been joined.
 
 ### Red first
 

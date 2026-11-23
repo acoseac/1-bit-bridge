@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -155,7 +156,7 @@ var defaultCtlTracks = []ctlTrack{
 func newCtlRig(t *testing.T, o ctlOptions) *ctlRig {
 	t.Helper()
 	needsDirectorySync(t)
-	persistentMedium(t)
+	ctlMedium(t)
 	root := t.TempDir()
 	r := &ctlRig{t: t, music: filepath.Join(root, "Music"), dataDir: filepath.Join(root, "data")}
 	for _, d := range []string{r.music, r.dataDir} {
@@ -231,6 +232,36 @@ func newCtlRig(t *testing.T, o ctlOptions) *ctlRig {
 	drainLoopOnCleanup(t, r.stopRun, r.runDone, "the rig's engine")
 	r.tab = strings.Repeat("ab", 16)
 	return r
+}
+
+// The strict writer's medium seam (atomicwrite.SetMediumForTest) is
+// process-wide: a rig made while another rig's engine writes a reservation
+// must not set it again, which the race detector reports. ctlMedium installs
+// the persistent medium once for every rig alive at a time and puts it back
+// when the last of them is let go.
+var (
+	ctlMediumMu      sync.Mutex
+	ctlMediumUsers   int
+	ctlMediumRestore func()
+)
+
+// ctlMedium holds the persistent medium for a rig: its cleanup, registered
+// before the rig's engine's, runs once that engine is joined.
+func ctlMedium(t *testing.T) {
+	ctlMediumMu.Lock()
+	if ctlMediumUsers == 0 {
+		ctlMediumRestore = atomicwrite.SetMediumForTest(func(string) error { return nil })
+	}
+	ctlMediumUsers++
+	ctlMediumMu.Unlock()
+	t.Cleanup(func() {
+		ctlMediumMu.Lock()
+		defer ctlMediumMu.Unlock()
+		if ctlMediumUsers--; ctlMediumUsers == 0 {
+			ctlMediumRestore()
+			ctlMediumRestore = nil
+		}
+	})
 }
 
 // stopEngine stops the engine and waits for its Run.
