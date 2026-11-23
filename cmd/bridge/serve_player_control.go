@@ -1334,7 +1334,10 @@ func (c *consoleControl) referenceHost() refHost {
 // while that listener takes connections on the host and serves artwork. A
 // character XML 1.0 cannot carry is replaced by U+FFFD in the track's text
 // before the item is built, and the metadata is held to what an Insert takes
-// (openhome.MetadataTaken) before anything is changed.
+// (openhome.MetadataTaken) before anything is changed. A track whose row
+// cannot be read (logged), or is gone since the catalog's read, is left out
+// not_in_library, as a catalog that cannot be read leaves every track out:
+// an entry is never written with no names.
 func (c *consoleControl) entryFor(ctx context.Context, path, id string, row manifest.CatalogTrackRow, host refHost) (entryIn, string) {
 	uri := "http://" + host.host + "/dlna/file/" + id
 	if len(uri) > trackref.MaxLength {
@@ -1344,16 +1347,18 @@ func (c *consoleControl) entryFor(ctx context.Context, path, id string, row mani
 	if err != nil {
 		return entryIn{}, wordReferenceLong
 	}
-	var t manifest.Track
-	if c.store != nil {
-		got, err := c.store.GetTrack(ctx, path)
-		if err == nil && got != nil {
-			t = *got
-		}
+	if c.store == nil {
+		return entryIn{}, wordNotInLibrary
 	}
-	if t.Path == "" {
-		t.Path = path
+	got, err := c.store.GetTrack(ctx, path)
+	switch {
+	case err != nil:
+		playerLog.Warn("player control: a track's row could not be read; the track is left out", "err", err)
+		return entryIn{}, wordNotInLibrary
+	case got == nil:
+		return entryIn{}, wordNotInLibrary
 	}
+	t := *got
 	ti := manifestTrackToDLNATrackInfo(t, "", "")
 	ti.Variants = nil
 	ti.Title, ti.Artist, ti.AlbumArtist = xmlChars(ti.Title), xmlChars(ti.Artist), xmlChars(ti.AlbumArtist)

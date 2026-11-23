@@ -70,6 +70,9 @@ type ctlOptions struct {
 	// the control read the withholding from; nil for none.
 	boot *config.Config
 	live func() *config.Config
+	// store, when set, is the library index the control reads, over the
+	// rig's.
+	store func(controlStore) controlStore
 }
 
 // ctlBackend is the stand-in with the player's facts and a test tone's
@@ -226,7 +229,11 @@ func newCtlRig(t *testing.T, o ctlOptions) *ctlRig {
 	if seams.handlerWait == 0 {
 		seams.handlerWait = 20 * time.Second
 	}
-	r.c = newConsoleControl(consoleControlWiring{Plan: plan, Player: r.p, View: r.view, Boot: o.boot, Live: o.live, Store: store, Hosts: inv,
+	var cs controlStore = store
+	if o.store != nil {
+		cs = o.store(store)
+	}
+	r.c = newConsoleControl(consoleControlWiring{Plan: plan, Player: r.p, View: r.view, Boot: o.boot, Live: o.live, Store: cs, Hosts: inv,
 		GOOS: "linux", Seams: seams})
 	if o.dlna != nil {
 		r.c.setDLNA(o.dlna)
@@ -809,6 +816,56 @@ func TestEveryLimitIsCheckedBeforeDeleteAll(t *testing.T) {
 	if !slices.Equal(r.refs(), before) {
 		t.Fatalf("the queue changed: %v", r.refs())
 	}
+}
+
+// rowFailingStore is the library index with one track's row failing to read
+// and another's gone since the catalog's read.
+type rowFailingStore struct {
+	controlStore
+	fail, gone string
+}
+
+func (s rowFailingStore) GetTrack(ctx context.Context, path string) (*manifest.Track, error) {
+	switch path {
+	case s.fail:
+		return nil, errors.New("the index could not be read")
+	case s.gone:
+		return nil, nil
+	}
+	return s.controlStore.GetTrack(ctx, path)
+}
+
+// TestATrackWhoseRowCannotBeReadIsLeftOut pins item 6 of round 2: a track
+// whose whole row fails to read, or is gone since the catalog's read, is
+// left out not_in_library before anything is changed, never inserted with
+// no names; a list of nothing else is refused with nothing sent and the
+// queue as it was, and one beside a track that reads queues that track
+// alone.
+func TestATrackWhoseRowCannotBeReadIsLeftOut(t *testing.T) {
+	paths := []string{defaultCtlTracks[0].path, defaultCtlTracks[1].path, defaultCtlTracks[2].path}
+	r := newCtlRig(t, ctlOptions{store: func(cs controlStore) controlStore { return rowFailingStore{cs, paths[1], paths[2]} }})
+	wantRecord(t, "a first replace", r.replace(paths[:1], 0, 0, false), admin.PlayerOpDone, "", "")
+	before := r.refs()
+	leftOut := func(rec *admin.PlayerRecord) map[string]string {
+		words := map[string]string{}
+		for _, l := range rec.LeftOut {
+			words[l.Path] = l.Word
+		}
+		return words
+	}
+	rec := wantRecord(t, "a replace of two tracks whose rows do not read", r.replace(paths[1:], 0, 0, true), admin.PlayerOpRefused,
+		wordNotPlayable, admin.PlayerEffectNone)
+	if words := leftOut(rec); rec.Sent != 0 || words[paths[1]] != wordNotInLibrary || words[paths[2]] != wordNotInLibrary {
+		t.Fatalf("sent %d, left out %v; want nothing sent and both left out %s", rec.Sent, words, wordNotInLibrary)
+	}
+	if !slices.Equal(r.refs(), before) {
+		t.Fatalf("the queue changed: %v, was %v", r.refs(), before)
+	}
+	rec = wantRecord(t, "a replace beside them", r.replace(paths, 0, 0, false), admin.PlayerOpDone, "", "")
+	if words := leftOut(rec); len(words) != 2 || words[paths[1]] != wordNotInLibrary || words[paths[2]] != wordNotInLibrary {
+		t.Fatalf("left out %v, want the two tracks whose rows do not read", words)
+	}
+	r.wantQueue("the replace beside them", paths[0])
 }
 
 // TestRoutedVirtualGatedAndLossyTracksAreLeftOutBeforeTheReplace pins a
