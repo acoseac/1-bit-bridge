@@ -369,7 +369,25 @@ after serve's way out).
 
 #### Runs
 
-To be filled once they have run.
+On `14f9d028`, with `GOTOOLCHAIN=go1.27.3` and `GOPROXY=off`, `TMPDIR` below `.tmp/`:
+
+- The gate, `make fmt vet test build-all` in one build-slot session, after 2,005 s waiting for
+  the slot: passed in 2,112 s (cmd/bridge 1,792 s, manifest 1,616 s, admin 1,317 s, backup 660 s,
+  api 154 s), the build-site census and build-all's six targets with it, the tree clean after
+  its fmt. It answered 37 small packages, unchanged this round, from its test cache; a fresh
+  run of them queued behind another worker's slot for 57 minutes and was stopped before it
+  began, inside this round's time, so those 37 stand on the cached results.
+- internal/admin's console-LAN, endpoint-list and event-stream tests (53: the four
+  `console_lan_*_test.go` files, the external `console_lan_endpoints_test.go` and
+  `handlers_events_test.go`), one race binary, `-race -count=50` in three lanes of
+  `GOMAXPROCS=2` on eight of the host's sixteen CPUs, beside another worker's gate: every run
+  passed, no race reported, 1,657 s.
+- Each new or changed test `-count=20` before its controls, the admin ones under `-race`: passed.
+- Vets with the release tags for darwin/arm64, windows/amd64, linux/386 and linux/arm: clean.
+- `make docs-check`'s seven steps, one at a time: clean, before and after this section.
+- cmd/bridge's source guards (the cited test names, the docblocks, the import keepers, the
+  drains, the servers' error logs): clean.
+- `scripts/qualification-version -base 9b66c2af -head HEAD`: OK.
 
 PROTOCOL.md's SHA-256 did not move this round:
 `b3198929371b3041340a168f19f955cefe9786f159120f396f70e42e91e60c7d`.
