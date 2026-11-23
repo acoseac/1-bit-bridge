@@ -288,7 +288,21 @@ socket (R2-19); and the abort's own doubled window (R2-20).
 
 #### Runs
 
-To be filled once they have run.
+On `9a8dabdd`, with `GOTOOLCHAIN=go1.27.3` and `GOPROXY=off`, `TMPDIR` below `.tmp/`:
+
+- The gate, `make fmt vet test build-all` in one build-slot session, after 1,240 s waiting for
+  the slot: passed in 2,115 s (`-p 4`, `-race`, `-timeout 45m`; cmd/bridge 1,790 s, manifest
+  1,624 s, admin 1,319 s, backup 660 s), the build-site census and build-all's six targets
+  with it, the tree clean after its fmt. It answered 36 small packages from its test cache;
+  those 36 then passed fresh (`-count=1 -race`, 45 s in the slot).
+- internal/admin's 45 console-LAN tests (the four `console_lan_*_test.go` files), one race
+  binary, `-race -count=50` in four lanes of `GOMAXPROCS=2` on eight of the host's sixteen
+  CPUs: every run passed, no race reported, 911 s.
+- Vets with the release tags for darwin/arm64, windows/amd64, linux/386 and linux/arm: clean.
+- `make docs-check`'s seven steps, one at a time: clean, before and after this section.
+- cmd/bridge's source guards (the cited test names, the docblocks, the import keepers, the
+  drains, the servers' error logs): clean.
+- `scripts/qualification-version -base 9b66c2af -head HEAD`: OK.
 
 PROTOCOL.md's SHA-256 after the merge, for the iOS app's mirror:
 `b3198929371b3041340a168f19f955cefe9786f159120f396f70e42e91e60c7d`.
