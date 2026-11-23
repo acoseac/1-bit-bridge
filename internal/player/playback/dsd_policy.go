@@ -270,10 +270,12 @@ func (d *dsdSet) bcd() string {
 
 // same reports whether e publishes and admits what d does: both computed or
 // neither, with the same reason; the same unit, endpoint and identity; and at
-// every rate the same plan (policy.Plan.Same) or the same refusal. The read
-// side is no part of it: a change of evidence, first use, the choice's
-// revision or a warning alone moves neither the set nor its generation, and
-// refreshDSD publishes it beside the set as it was (B728 B8).
+// every rate the same plan (policy.Plan.Same) or the same refusal, and the
+// same candidate or none (policy.Plan.Candidate, what the DSD check may play
+// there, B728 B12 PR 3 round 3). The read side is no part of it: a change of
+// evidence, first use, the choice's revision or a warning alone moves neither
+// the set nor its generation, and refreshDSD publishes it beside the set as it
+// was (B728 B8).
 func (d *dsdSet) same(e *dsdSet) bool {
 	if d.computed != e.computed {
 		return false
@@ -294,6 +296,9 @@ func (d *dsdSet) same(e *dsdSet) bool {
 			return false
 		}
 		if (p.Outcome == policy.OutcomeNative || p.Outcome == policy.OutcomeDoP || p.Outcome == policy.OutcomeConverted) && !p.Same(q) {
+			return false
+		}
+		if (p.Candidate == nil) != (q.Candidate == nil) || p.Candidate != nil && !p.Candidate.Same(*q.Candidate) {
 			return false
 		}
 	}

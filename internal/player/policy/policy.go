@@ -181,6 +181,12 @@ type Plan struct {
 	// answer and an answer of the probe's alone, which nothing dates.
 	Evidence   Rung
 	EvidenceOn string
+	// Candidate is, on a native_check_required refusal alone, the plan an
+	// explicit native has at the rate were the DAC vouched for, where that is
+	// native (explicitNative): the one tuple the DSD check may play there, so
+	// a listener's clean answer can vouch for it (B728 B12 PR 3, round 3). No
+	// session plays it, Same does not compare it, and nil means none.
+	Candidate *Plan
 }
 
 // Same reports whether q plays what p plays: both native or both DoP with
@@ -647,17 +653,7 @@ func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 		}
 		return converted()
 	case dsdstate.ModeNative:
-		switch {
-		case !offered:
-			return refused(bitRate, ReasonNativeNotOffered, "the DAC offers no native DSD format at this rate")
-		case n.Rejected:
-			return refused(bitRate, ReasonListenerRejected, "a listener's latest answer for native DSD at this rate is a rejection")
-		case !vouched:
-			return refused(bitRate, ReasonNativeCheckRequired, "the DAC list does not know this DAC and its USB IDs are a generic board's, whose native DSD offer is the board's: native plays at this rate once a listener's latest answer here is clean")
-		case !under:
-			return refused(bitRate, ReasonAboveChoice, "the rate is above the DAC's chosen maximum")
-		}
-		return rd.nativePlan(bitRate, n)
+		return rd.explicitNative(bitRate, n, under, vouched)
 	case dsdstate.ModeDoP:
 		switch {
 		case !d.Offered:
@@ -684,6 +680,28 @@ func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 	// A state that decodes holds no other mode; one that holds it is a state
 	// that would not read.
 	return refused(bitRate, ReasonStateUnreadable, "the choice that applies is not a mode")
+}
+
+// explicitNative is decide's explicit native at bitRate, its refusals in the
+// table's order. Its native_check_required refusal carries as its Candidate
+// what it decides at the rate with vouched true, where that is native: !vouched
+// is asked before !under, so a rate above the cap carries none.
+func (rd *reading) explicitNative(bitRate int, n Native, under, vouched bool) Plan {
+	switch {
+	case n.Format == "":
+		return refused(bitRate, ReasonNativeNotOffered, "the DAC offers no native DSD format at this rate")
+	case n.Rejected:
+		return refused(bitRate, ReasonListenerRejected, "a listener's latest answer for native DSD at this rate is a rejection")
+	case !vouched:
+		p := refused(bitRate, ReasonNativeCheckRequired, "the DAC list does not know this DAC and its USB IDs are a generic board's, whose native DSD offer is the board's: native plays at this rate once a listener's latest answer here is clean")
+		if c := rd.explicitNative(bitRate, n, under, true); c.Outcome == OutcomeNative {
+			p.Candidate = &c
+		}
+		return p
+	case !under:
+		return refused(bitRate, ReasonAboveChoice, "the rate is above the DAC's chosen maximum")
+	}
+	return rd.nativePlan(bitRate, n)
 }
 
 // genericBridge reports whether the unit's IDs are a shared reference ID of

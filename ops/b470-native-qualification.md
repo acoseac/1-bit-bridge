@@ -1091,9 +1091,10 @@ admits version 57 records alone; legacy migration accepts versions 35 through 57
 Version 58 covers B728 B12 PR 3 (2026-11-22): the player's backend gains the DSD
 check (`internal/player/playback/dsd_check.go`), which no production path calls
 yet, and its tests through the real native and DoP sinks over the fake kernel,
-which live in the guarded `internal/alsapcm` (`playback_dsd_check_test.go`, and
-an opener stand-in in `playback_dsd_policy_test.go`'s rig) because the fake
-kernel is reachable only there. No guarded production file changes, and no byte
+which live in the guarded `internal/alsapcm` (`playback_dsd_check_test.go`,
+`playback_dsd_check_candidate_test.go` since round 3, and an opener stand-in in
+`playback_dsd_policy_test.go`'s rig) because the fake kernel is reachable only
+there. No guarded production file changes, and no byte
 a DAC is given changes. Older harness evidence is invalid all the same, as at
 every bump. The harness admits version 58 records alone; legacy migration
 accepts versions 35 through 58 (`LegacyVersion` remains 35). No hardware check

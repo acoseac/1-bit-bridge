@@ -433,10 +433,12 @@ func checkIdentity() policy.Identity {
 // TestTheCheckAdmitsOnlyWhatTheSetPlays: the check plays only a tuple the
 // effective set plays now, by that very plan, for the DAC the read side
 // names, behind the supervisor's gate: a tuple the set refuses is refused by
-// the set's word for the rate, DoP unconfirmed on a DAC no profile knows and
-// native chosen on one (B990: no list reads, so its IDs are a generic
-// board's) among them; a rate the set converts (an unknown DAC under auto
-// among them) is refused converted; one it plays the other way,
+// the set's word for the rate, DoP unconfirmed on a DAC no profile knows
+// among them (native chosen on one, whose IDs are a generic board's while no
+// list reads, B990, is its refusal's candidate's check, round 3:
+// TestAGenericBoardsNativeCheckLetsItsAnswerBeEarned); a rate the set
+// converts (an unknown DAC under auto among them) is refused converted; one
+// it plays the other way,
 // other_transport; a key or a token not the read side's, dac_changed; and the
 // gate shut, by its word, as it starts and for each shut. No refusal opens
 // anything, or makes or changes the record (the last check's, which stays as
@@ -468,7 +470,6 @@ func TestTheCheckAdmitsOnlyWhatTheSetPlays(t *testing.T) {
 		first bool // a check runs and ends first: its record stays
 	}{
 		{name: "DoP unconfirmed on a DAC no profile knows", st: unconfirmed, edit: unknown, req: dopReq, want: string(policy.ReasonConfirmationRequired)},
-		{name: "native chosen on a DAC no profile knows", st: native, edit: unknown, req: nativeReq, want: string(policy.ReasonNativeCheckRequired)},
 		{name: "a rate the set converts", st: playbacktest.ChoiceState(dsdstate.ModeConvert), req: nativeReq, want: playback.CheckConverted},
 		{name: "an unknown DAC under auto", st: playbacktest.ChoiceState(dsdstate.ModeAuto), edit: unknown, req: nativeReq, want: playback.CheckConverted},
 		{name: "a rate the set plays the other way", st: native, first: true, req: dopReq, want: playback.CheckOtherTransport},

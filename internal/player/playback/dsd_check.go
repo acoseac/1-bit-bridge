@@ -17,7 +17,8 @@ import (
 
 // The player's DSD check (B728 B12 PR 3; the design's sections 6.2 to 6.4):
 // the chime (internal/player/dsdchime) through the bound DAC at one tuple the
-// effective set plays now, by that tuple's plan, while the engine's check hold
+// effective set plays now, or the native candidate its native_check_required
+// refusal carries (round 3), by that tuple's plan, while the engine's check hold
 // (engine.EnterCheck) keeps the engine closed: the device slot's fourth holder,
 // beside a session, the silent probe and the console's tone. Every end is a
 // cause on its context, the first standing, which revokes its sink; the slot
@@ -297,14 +298,19 @@ func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*checkHol
 
 // admitCheckLocked admits req by the pair published now and gives it the slot:
 // the DAC's key and token the read side's (dac_changed), and the tuple the
-// set's plan at the rate, never one merely offered (the rate's own refusal
-// word, converted, other_transport). b.mu is held.
+// set's plan at the rate, or, for a request of its transport, the candidate a
+// native_check_required refusal carries there (policy.Plan.Candidate, B728 B12
+// PR 3 round 3), never one merely offered (the rate's own refusal word,
+// converted, other_transport). b.mu is held.
 func (b *Backend) admitCheckLocked(req CheckRequest) (*checkHold, string) {
 	pub := b.dsdPub.Load()
 	if d := pub.view.DAC; d == nil || d.Key != req.DACKey || !hmac.Equal([]byte(d.Token), []byte(req.DACToken)) {
 		return nil, CheckDACChanged
 	}
 	p := pub.set.set.At(req.BitRate).Plan
+	if c := p.Candidate; c != nil && tupleTransport(*c) == req.Transport {
+		p = *c
+	}
 	switch {
 	case p.Outcome == policy.OutcomeConverted:
 		return nil, CheckConverted
@@ -464,8 +470,9 @@ func (b *Backend) judgeCheckFresh(c *checkHold, where string) bool {
 // judgeCheckLocked judges c against next: kept, and moved to it, only where
 // next was computed for the identity c was admitted under, compared first,
 // before the open too, and policy.Reconcile keeps c's plan on its frames and
-// the identity its sink opened; ended policy_changed otherwise, never planned
-// again. b.mu is held.
+// the identity its sink opened, or next's candidate at the rate is that plan
+// (candidateKeeps), as admission takes it; ended policy_changed otherwise,
+// never planned again. b.mu is held.
 func (b *Backend) judgeCheckLocked(c *checkHold, next *dsdSet) bool {
 	if next == c.admitted {
 		return true
@@ -475,12 +482,22 @@ func (b *Backend) judgeCheckLocked(c *checkHold, next *dsdSet) bool {
 		p := c.sink.Position()
 		o.Submitted, o.Written, o.Played, o.Audible = p.Submitted, p.Written, p.Played, p.Played > 0
 	}
-	if next.computed && next.set.Identity().Same(c.identity) && policy.Reconcile(next.set, o).Action == policy.Keep {
+	if next.computed && next.set.Identity().Same(c.identity) && (policy.Reconcile(next.set, o).Action == policy.Keep || candidateKeeps(next.set, c.plan)) {
 		c.admitted = next
 		return true
 	}
 	c.end(CheckFailed, CheckPolicyChanged)
 	return false
+}
+
+// candidateKeeps reports whether next's candidate at p's rate
+// (policy.Plan.Candidate) is p (policy.Plan.Same): what keeps a check its
+// admission took by the candidate. Its caller compares the identity first,
+// which the identity its sink opened is (checkNode); no session's
+// reconciliation reads a candidate.
+func candidateKeeps(next policy.Set, p policy.Plan) bool {
+	c := next.At(p.BitRate).Plan.Candidate
+	return c != nil && p.Same(*c)
 }
 
 // reconcileCheck judges c, the check that held the slot as reconcileDSD read

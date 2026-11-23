@@ -507,6 +507,14 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
   `dsd_rate_above_choice`. For DoP: `dop_not_offered` (a profile's refused rate included),
   `listener_rejected`, `dop_gain_unverifiable`, `dop_gain_not_unity`, `dop_confirmation_required`,
   `dsd_rate_above_choice`.
+- **`native_check_required` carries a candidate** (B12 PR 3, round 3): the plan the row's
+  explicit `native` gives at r once the DAC is vouched for (`decide` asked again with vouched
+  true), where that is native: native offered, no rejection, r ≤ `maxBitRate`. The bridge's blind
+  spot is asked before the cap, so a rate above it is refused with the same word and carries
+  none. No session plays a candidate, which is no row's plan; the DSD check of native at r plays it
+  alone (§6.2), so the listener's clean answer at r that makes it the row's plan can be earned on
+  a generic board's IDs. A set held to what two states play alike (B9's `Intersect`) keeps a
+  candidate only where both states carry it, the same plan.
 - **`auto` on a DAC that takes no conversion target** refuses a rate neither transport plays as
   `conversion_not_offered`, as `convert` does.
 - **`auto` means no explicit choice.** It is the preselection the decision asks for. The app shows
@@ -1232,11 +1240,20 @@ safety half the app needs is on the bridge before the app's I4 ships.
 
 - **Admission is the effective policy's.** The tuple asked for, transport and rate, must be one the
   effective set plays now for this DAC (§3.2): offered, gain at unity, DoP confirmed where the DAC
-  has no DoP claim, and no rejection (B990: first use is no condition). Being merely offered is not enough. A
-  tuple outside the set is refused, `check_unavailable` with the set's reason. So the check cannot
-  play anything an ordinary track could not. To check native on an unknown DAC, the user first
-  chooses native, which makes native the set's for this DAC wherever nothing else refuses it there
-  (§3.2; B990: no acknowledgement).
+  has no DoP claim, and no rejection (B990: first use is no condition); or, for native alone, the
+  candidate a `native_check_required` refusal carries at the rate (§3.2; B12 PR 3, round 3).
+  Being merely offered is not enough. Any other tuple is refused, `check_unavailable` with the
+  set's reason, DoP at a rate where native waits for a listener's answer among them
+  (`native_check_required`, the rate's own word). So the check plays nothing an ordinary track
+  could not, but the one plan a clean answer at the rate lets an ordinary track play. To check
+  native on an unknown DAC, the user first chooses native. On IDs that are no generic board's that
+  makes native the set's for this DAC wherever nothing else refuses it there (§3.2; B990: no
+  acknowledgement); on a generic board's it is refused `native_check_required` at each rate no
+  listener's answer holds clean, and the check plays that refusal's candidate, so the answer can
+  be earned. A check so admitted is judged by the candidate as one the set's plan admitted is by
+  that plan (§3.5): kept while the candidate published at its rate is its plan, on the identity it
+  was admitted under, and ended `policy_changed` once it is gone or changed; no session's
+  reconciliation reads a candidate.
 - **The hold comes first** (amended 2026-11-20, B12 PR 2). The engine's owner decides the check in
   the one step that grants its hold (`EnterCheck`): a choice's write in flight (its configuration
   reservation), another hold, an unconfirmed release and a DAC that is not there refuse it; and if
@@ -1547,9 +1564,10 @@ after the sync, the new choice, which the next start reads and publishes, answer
 
 Admission is the effective policy's (§6.2). The tuple must be one the effective set plays now, so
 first use acknowledged, DoP confirmed where the DAC has no DoP claim, gain at unity and no rejection
-all hold. Being merely offered is not enough. (B990: first use is no condition, and a refused
-tuple's reason is the set's, `native_check_required` among them; `first_use_pending` is given no
-more.)
+all hold, or, for native alone, the candidate a `native_check_required` refusal carries at the rate
+(§3.2; B12 PR 3, round 3). Being merely offered is not enough. (B990: first use is no condition,
+and a refused tuple's reason is the set's, `native_check_required` among them; `first_use_pending`
+is given no more.)
 
 Refusals:
 - 409 `dac_changed`, `would_interrupt` or `check_running`;
