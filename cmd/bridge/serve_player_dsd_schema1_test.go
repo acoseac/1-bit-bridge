@@ -27,13 +27,15 @@ func goBarSchemaOne(recordSHA256 string) string {
 }
 
 // TestAStateMovedAsideMigratesTheBoundUnitAfresh: serve over a schema-1 state
-// holds none of its entries, so the GO bar plays no DSD natively, its first
-// use pending, its record unread, and the file is left as it was. With the
-// file moved aside, the next start migrates the legacy keys afresh for the
-// GO bar, under its own stamp: where its owner's record is still in the data
-// directory, its rows, DSD64 native again; where it is not (a restore's
-// destination that never held it), the fallback's native alone, its first
-// use pending at every rate, so native waits for a choice written again.
+// holds none of its entries, so the GO bar plays what the default auto plays
+// on it, native at every rate since B990, with none of the entry's answers
+// read (DSD64 not listener confirmed), its record unread, and the file is
+// left as it was. With the file moved aside, the next start migrates the
+// legacy keys afresh for the GO bar, under its own stamp: where its owner's
+// record is still in the data directory, its rows, DSD64 listener confirmed
+// again; where it is not (a restore's destination that never held it), the
+// fallback's native alone, which plays native at every rate with nothing
+// acknowledged.
 func TestAStateMovedAsideMigratesTheBoundUnitAfresh(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -56,8 +58,8 @@ func TestAStateMovedAsideMigratesTheBoundUnitAfresh(t *testing.T) {
 			availableOutput(t, ps.runningEngine(t))
 			pol := policyBackendOf(t, wiredPlayback(t, ps.standIn), dopContents{}, &dopOpens{}).Policy()
 			stopped(t, ps)
-			if got := ratesPublished(pol); got != "" {
-				t.Errorf("over the schema-1 state the set publishes %s, want no native or DoP tuple", got)
+			if got, rung := ratesPublished(pol), firstRung(pol); got != everyRateNative || rung == "listener_confirmed" {
+				t.Errorf("over the schema-1 state the set publishes %s, DSD64 at %q; want native at every rate, none of the entry's answers read", got, rung)
 			}
 			statePath := filepath.Join(ps.dataDir, dsdstate.FileName)
 			if now := readBytes(t, statePath); string(now) != file {
@@ -87,16 +89,16 @@ func TestAStateMovedAsideMigratesTheBoundUnitAfresh(t *testing.T) {
 				if len(d.FirstUse) != 1 || !reflect.DeepEqual(d.FirstUse[0].BitRates, []int{dsdstate.DSD64}) || st.MigratedFrom.RecordSHA256 != record.SHA256 {
 					t.Errorf("with its record kept the GO bar holds %+v, marker %+v: want the record's rows", d, st.MigratedFrom)
 				}
-				if got := ratesPublished(pol2); got != `2822400/"" ` {
-					t.Errorf("with its record kept the set publishes %s, want DSD64 native", got)
+				if got, rung := ratesPublished(pol2), firstRung(pol2); got != everyRateNative || rung != "listener_confirmed" {
+					t.Errorf("with its record kept the set publishes %s, DSD64 at %q; want native at every rate, DSD64 listener confirmed", got, rung)
 				}
 				return
 			}
 			if len(d.FirstUse) != 0 || d.DoPConfirmed != nil || len(d.Listener) != 0 {
 				t.Errorf("with its record gone the GO bar holds %+v, want the fallback's choice alone", d)
 			}
-			if got := ratesPublished(pol2); got != "" || pol2.Reason != "first_use_pending" {
-				t.Errorf("with its record gone the set publishes %s (reason %q), want nothing native, first use pending", got, pol2.Reason)
+			if got := ratesPublished(pol2); got != everyRateNative || pol2.Reason != "" {
+				t.Errorf("with its record gone the set publishes %s (reason %q), want native at every rate", got, pol2.Reason)
 			}
 		})
 	}

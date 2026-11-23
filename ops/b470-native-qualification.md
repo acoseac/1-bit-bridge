@@ -1059,6 +1059,18 @@ changes. Older harness evidence is invalid all the same, as at every bump. The
 harness admits version 56 records alone; legacy migration accepts versions 35
 through 56 (`LegacyVersion` remains 35). No hardware check was run.
 
+Version 57 covers B990 (2026-11-22): the player plays what the DAC supports with
+no first use asked, by its effective policy (`internal/player/policy`, not
+guarded), and two guarded `internal/alsapcm` tests that asserted the
+acknowledgement's gate changed with it: `playback_convert_test.go`, whose known
+DAC with no acknowledgement now plays native, and
+`playback_dsd_policy_round2_test.go`, whose played-out DoP occurrence now takes
+a listener's noise for native at DSD64 to play DoP there. No guarded production
+code changes, and the DSD byte path is as it was. Older harness evidence is
+invalid all the same, as at every bump. The harness admits version 57 records
+alone; legacy migration accepts versions 35 through 57 (`LegacyVersion` remains
+35). No hardware check was run.
+
 Version 57 covers B728 B12 PR 0 (2026-11-22). A panic on the native sink's writer, on
 its opening worker or in a close of its node is recovered on the goroutine it came on,
 typed `ReasonPanicked` and logged once (`DSDConfig.Log`). Before it the writer's own
@@ -1085,4 +1097,5 @@ kernel is reachable only there. No guarded production file changes, and no byte
 a DAC is given changes. Older harness evidence is invalid all the same, as at
 every bump. The harness admits version 58 records alone; legacy migration
 accepts versions 35 through 58 (`LegacyVersion` remains 35). No hardware check
-was run.
+was run. Main's B990 took version 57, as B12 PR 0 did on its branch; both B12
+PRs are renumbered above main's at their merges, after the 0.2.4 tag.

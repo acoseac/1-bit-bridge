@@ -25,9 +25,19 @@ import (
 // Per-request dispatch (not Server-construction-time) so a config
 // hot-reload of `deployment.mode` takes effect on the next
 // request without a Handler rebuild.
+//
+// A request that arrived on the home-network socket (backlog B989) meets
+// that socket's own rules, its source and then its Host (lanOnly), first
+// and whatever the live config says: the socket exists only because a
+// loopback install opened it at its start.
 func (s *Server) boundaryMiddleware(next http.Handler) http.Handler {
 	guarded := loopbackOnly(s.loopbackHostOnly(next))
+	lan := s.lanOnly(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if onLANSocket(r) {
+			lan.ServeHTTP(w, r)
+			return
+		}
 		cfg := s.deps.CfgHolder.Load()
 		if cfg != nil && cfg.IsPublic() {
 			setHSTS(w, r)

@@ -432,21 +432,19 @@ func checkIdentity() policy.Identity {
 
 // TestTheCheckAdmitsOnlyWhatTheSetPlays: the check plays only a tuple the
 // effective set plays now, by that very plan, for the DAC the read side
-// names, behind the supervisor's gate: a tuple merely offered, its first use
-// not acknowledged, is refused by the set's word for the rate; so is DoP
-// unconfirmed on a DAC no profile knows; a rate the set converts (an unknown
-// DAC under auto among them) is refused converted; one it plays the other
-// way, other_transport; a key or a token not the read side's, dac_changed;
-// and the gate shut, by its word, as it starts and for each shut. No refusal
-// opens anything, or makes or changes the record (the last check's, which
-// stays as it ended). A tuple the set plays is admitted, under the set's
-// identity, its plan's carrier opened on that identity, its driver_accepted
-// recorded and nothing streaming_observed; and native on a DAC no profile
-// knows plays where it is chosen and its first use acknowledged.
+// names, behind the supervisor's gate: a tuple the set refuses is refused by
+// the set's word for the rate, DoP unconfirmed on a DAC no profile knows and
+// native chosen on one (B990: no list reads, so its IDs are a generic
+// board's) among them; a rate the set converts (an unknown DAC under auto
+// among them) is refused converted; one it plays the other way,
+// other_transport; a key or a token not the read side's, dac_changed; and the
+// gate shut, by its word, as it starts and for each shut. No refusal opens
+// anything, or makes or changes the record (the last check's, which stays as
+// it ended). A tuple the set plays is admitted, under the set's identity, its
+// plan's carrier opened on that identity, its driver_accepted recorded and
+// nothing streaming_observed.
 func TestTheCheckAdmitsOnlyWhatTheSetPlays(t *testing.T) {
 	native := playbacktest.ChoiceState(dsdstate.ModeNative)
-	unacknowledged := playbacktest.ChoiceState(dsdstate.ModeNative)
-	unacknowledged.DACs[0].FirstUse = nil
 	unconfirmed := playbacktest.ChoiceState(dsdstate.ModeDoP)
 	unconfirmed.DACs[0].DoPConfirmed = nil
 	unknown := func(p *playback.DSDPolicy) { p.Profiles = nil }
@@ -469,8 +467,8 @@ func TestTheCheckAdmitsOnlyWhatTheSetPlays(t *testing.T) {
 		want  string
 		first bool // a check runs and ends first: its record stays
 	}{
-		{name: "an offered tuple whose first use is not acknowledged", st: unacknowledged, req: nativeReq, want: string(policy.ReasonFirstUsePending)},
 		{name: "DoP unconfirmed on a DAC no profile knows", st: unconfirmed, edit: unknown, req: dopReq, want: string(policy.ReasonConfirmationRequired)},
+		{name: "native chosen on a DAC no profile knows", st: native, edit: unknown, req: nativeReq, want: string(policy.ReasonNativeCheckRequired)},
 		{name: "a rate the set converts", st: playbacktest.ChoiceState(dsdstate.ModeConvert), req: nativeReq, want: playback.CheckConverted},
 		{name: "an unknown DAC under auto", st: playbacktest.ChoiceState(dsdstate.ModeAuto), edit: unknown, req: nativeReq, want: playback.CheckConverted},
 		{name: "a rate the set plays the other way", st: native, first: true, req: dopReq, want: playback.CheckOtherTransport},
@@ -533,12 +531,6 @@ func TestTheCheckAdmitsOnlyWhatTheSetPlays(t *testing.T) {
 		if e == nil || e.DriverAcceptedAt.IsZero() || e.Kernel != playbacktest.Kernel || !e.StreamingObservedAt.IsZero() {
 			t.Errorf("the check's evidence: %+v; want driver_accepted under the kernel, nothing streaming_observed", e)
 		}
-	})
-	t.Run("native on a DAC no profile knows, chosen and acknowledged", func(t *testing.T) {
-		r := newCheckRig(t, native, unknown)
-		r.k.Free()
-		r.admitted(dsdstate.TransportNative, playbacktest.DSD64)
-		r.endedAs(playback.CheckComplete, "", "native on an unknown DAC")
 	})
 }
 

@@ -25,6 +25,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/consolelan"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/hostname"
@@ -335,6 +336,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		"loopback address: that console has no login")
 	listenAddressFlag := fs.String("listen-address", "", "bind address for the iOS-facing API "+
 		"(default :7788; with --public :443, which ACME needs)")
+	// The console on the home network (backlog B989), a loopback install's
+	// opt-in by name: init's prompts ask nothing about it.
+	adminLANAddressFlag := fs.String("admin-lan-address", "", "also open the admin console on this home-network IP address "+
+		"(a private address of this box), at adminAddress's port, with no password and over plain HTTP; "+
+		"not with --public")
 	publicProxy := fs.Bool("admin-tls-proxy", false, "with --public: a reverse proxy (Caddy/nginx) fronts admin TLS — disables native ACME wrapping of the admin listener")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -420,6 +426,14 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// overlays the install's own once that decision is made, before the
 	// preflight grades them.
 	listenAddr, adminAddr := initAddresses(*publicMode, *publicProxy, *listenAddressFlag, *adminAddressFlag)
+	// --admin-lan-address is refused here, before anything is written, in
+	// words that never name its value (D6, R10): what is refused can be a
+	// secret pasted onto the wrong flag, and init's output reaches a
+	// terminal's scrollback and an installer's log.
+	if err := initLANAddressFlagError(*publicMode, *adminLANAddressFlag, adminAddr); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
+	}
 
 	cfgDir := *cfgDirFlag
 	if cfgDir == "" {
@@ -625,6 +639,14 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	listenAddr, adminAddr, listenListed, adminListed = addressesARewriteKeeps(
 		listenAddr, adminAddr, *listenAddressFlag != "", *adminAddressFlag != "",
 		*publicMode, *publicProxy, replace, prior)
+	// The console's home-network address: the flag's, or the install's where
+	// the rewrite keeps its addresses and the kept value still passes its
+	// check (lanAddressARewriteKeeps, backlog B989).
+	lanAddr, lanListed, lanNote := lanAddressARewriteKeeps(*adminLANAddressFlag, *listenAddressFlag != "",
+		*adminAddressFlag != "", *publicMode, replace, prior, adminAddr)
+	if lanNote != "" {
+		fmt.Fprintln(stderr, lanNote)
+	}
 
 	// Preflight. Run after library-path resolution so doctor sees the
 	// real path the user chose, not a default. --skip-doctor bypasses
@@ -793,6 +815,7 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// The addresses the preflight graded: initAddresses, or the install's
 	// pair a same-posture rewrite kept over it.
 	cfg.ListenAddress, cfg.AdminAddress = listenAddr, adminAddr
+	cfg.AdminLANAddress = lanAddr
 	if *publicMode {
 		// Public-mode YAML shape (PR 5). Defaults:
 		//   listenAddress / adminAddress: initAddresses
@@ -957,10 +980,20 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// another process can have written the config meanwhile
 	// (configChangedSinceRead). The check and the save are one turn of
 	// bridge.yaml's lock (saveInitConfig).
-	if code := saveInitConfig(stderr, cfgPath, asRead, cfg); code != 0 {
+	// A run that writes the console's home-network address says what it
+	// opens and what it costs the rollback before the save (the plan's §2.7,
+	// D15, F12): a first install while the file holds no key, a rewrite while
+	// the file still holds its own bytes, prompted or not.
+	if cfg.AdminLANAddress != "" {
+		warnLANBeforeSave(stderr, cfg.AdminLANAddress, consoleLANPortOf(cfg))
+	}
+	if code := initSave(stderr, cfgPath, asRead, cfg); code != 0 {
 		return code
 	}
 	printKept(stdout, cfg, initDataDir, rootsKept, nameKept, endpointsKept, listenListed, adminListed)
+	if lanListed {
+		fmt.Fprintf(stdout, "  adminLANAddress  %s\n", cfg.AdminLANAddress)
+	}
 	if endpointsKept {
 		warnKeptEndpointsOnAMovedPort(stderr, prior.ListenAddress, cfg.ListenAddress, cfg.CustomEndpoints)
 	}
@@ -1199,6 +1232,10 @@ type initHostOps struct {
 	install, installStartup, installSCM func(packaging.Params) (string, error)
 	spawnDetached                       func(binary, cfgPath, logPath string) error
 	openBrowser                         func(url string)
+	// save is init's save of bridge.yaml (saveInitConfig), a seam so a test
+	// sees when it is made beside what init printed before it; nil is
+	// saveInitConfig.
+	save func(stderr io.Writer, cfgPath string, asRead configAsRead, cfg *config.Config) int
 }
 
 // initHost is finishInit's host. A test puts a stand-in in its place to run
@@ -1214,6 +1251,15 @@ var initHost = initHostOps{
 	installSCM:     packaging.InstallWindowsService,
 	spawnDetached:  packaging.SpawnDetached,
 	openBrowser:    openInBrowser,
+	save:           saveInitConfig,
+}
+
+// initSave is initHost's save, saveInitConfig where none is set.
+func initSave(stderr io.Writer, cfgPath string, asRead configAsRead, cfg *config.Config) int {
+	if initHost.save != nil {
+		return initHost.save(stderr, cfgPath, asRead, cfg)
+	}
+	return saveInitConfig(stderr, cfgPath, asRead, cfg)
 }
 
 // finishInit installs the service (or tells the user how to run manually)
@@ -1277,6 +1323,15 @@ func finishInit(in *bufio.Reader, nonInteractive bool, stdout, stderr io.Writer,
 			}
 		}
 		fmt.Fprintf(stdout, "\nAdmin console: %s\n", browseURL)
+		// The console on the home network, where the config names it
+		// (backlog B989): its URL, and the rollback the key costs.
+		if loadedCfg != nil && loadedCfg.AdminLANAddress != "" && !loadedCfg.IsPublic() {
+			fmt.Fprintf(stdout, "Home network: %s/ (no password: anyone on your network can use it)\n",
+				consoleLANURLText(loadedCfg.AdminLANAddress, consoleLANPortOf(loadedCfg)))
+			if loadedCfg.FileLANKey().InFile() {
+				fmt.Fprintf(stdout, "  %s\n", consolelan.RollbackWords)
+			}
+		}
 		if serverIsLive {
 			initHost.openBrowser(browseURL)
 		}

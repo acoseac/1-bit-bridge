@@ -268,20 +268,51 @@ func findVariant(variants []VariantInfo, variantID string) (VariantInfo, bool) {
 	return VariantInfo{}, false
 }
 
+// DIDLItemOpts is what the item builder (TrackInfo.DIDLItem) takes beside
+// the track: the base its <res> URLs are built on (TrackBase), the base its
+// albumArtURI is built on (ArtworkBase, "" for no albumArtURI), the
+// renderer's User-Agent, the parent container, and which <res> elements the
+// item carries. The two bases are apart (B634): Browse passes the one server
+// URL its request names as both, so its bytes are what they were; the
+// console's queue entries pass the track URI's base on 7790 and the DLNA
+// listener's own endpoint for the artwork.
+type DIDLItemOpts struct {
+	TrackBase   string
+	ArtworkBase string
+	UserAgent   string
+	ParentID    string
+	Resources   DIDLResources
+}
+
+// DIDLItem is the DIDL-Lite `<item>` the ContentDirectory answers for t,
+// built on o's bases: the one builder Browse, Search and the console's queue
+// entries share (B634).
+func (t TrackInfo) DIDLItem(o DIDLItemOpts) string { return DIDLForTrack(t.didlOpts(o)) }
+
 // toDIDLOpts converts a TrackInfo + per-request fields into the
-// DIDLTrackOpts shape that `DIDLForTrack` expects. Kept private
-// because it's a one-line struct copy plus the server URL / UA
-// fields — callers shouldn't need to do this themselves.
+// DIDLTrackOpts shape that `DIDLForTrack` expects: one server URL for the
+// track's <res> and its artwork alike, the source's and the variants' <res>.
 //
 // `albumArt` is the server-level gate (ServerConfig.Artwork != nil): the
 // albumArtURI is composed from ArtworkKey against THIS request's serverURL
 // only when the route that serves it is mounted.
 func (t TrackInfo) toDIDLOpts(serverURL, userAgent, parentID string, albumArt bool) DIDLTrackOpts {
-	artworkURL := ""
+	o := DIDLItemOpts{TrackBase: serverURL, UserAgent: userAgent, ParentID: parentID}
 	if albumArt {
-		artworkURL = ArtworkURLFor(serverURL, t.ArtworkKey)
+		o.ArtworkBase = serverURL
 	}
+	return t.didlOpts(o)
+}
+
+// didlOpts is t as DIDLForTrack takes it, on o's bases.
+func (t TrackInfo) didlOpts(o DIDLItemOpts) DIDLTrackOpts {
+	artworkURL := ""
+	if o.ArtworkBase != "" {
+		artworkURL = ArtworkURLFor(o.ArtworkBase, t.ArtworkKey)
+	}
+	serverURL, userAgent, parentID := o.TrackBase, o.UserAgent, o.ParentID
 	return DIDLTrackOpts{
+		Resources:       o.Resources,
 		TrackID:         t.TrackID,
 		ParentID:        parentID,
 		Title:           t.Title,

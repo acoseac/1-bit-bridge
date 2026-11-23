@@ -177,6 +177,30 @@ const (
 // so nothing of it stands. errors.Is finds it.
 var ErrNotAdmitted = errors.New("not admitted")
 
+// ErrAfterChange is what every refusal of a command answered as a waiter
+// wraps (B634): a command answered once the transport settles (wait) was
+// admitted and its rule ran (the selection moved, a session released or
+// started, the pending intent set) before the refusal was decided, so the
+// refusal, whatever its reason, does not show that the command changed
+// nothing. A refusal decided before the command changed anything does not
+// wrap it. errors.Is finds it.
+var ErrAfterChange = errors.New("refused after the command's rule ran")
+
+// afterChange is a waiter's refusal, marked ErrAfterChange.
+type afterChange struct{ err error }
+
+func (a afterChange) Error() string   { return a.err.Error() }
+func (a afterChange) Unwrap() []error { return []error{a.err, ErrAfterChange} }
+
+// waited is err as a waiter is answered with it: marked ErrAfterChange, nil
+// for nil.
+func waited(err error) error {
+	if err == nil {
+		return nil
+	}
+	return afterChange{err}
+}
+
 // Error is a refused command, or a failure the engine reports for one.
 type Error struct {
 	Reason Reason

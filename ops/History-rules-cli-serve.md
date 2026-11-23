@@ -2319,6 +2319,8 @@ mentions across the four `ops/audit-*.md` files.
   refusal STATUS cannot catch the ordering — 503-before and 404-after are both
   "refused"; assert on which one comes back for a nonexistent path.
 
+- **Serve builds the console's control of its player (`newConsoleControl`) beside the console's view, hands it the DLNA listener once that starts, and stops it, its publisher and operations joined within their bound, after the player's stop and before the store closes, in both teardown paths, the closed engine's facts (`playerClosedFacts`) kept for its barrier (B634).** The player's stop answers every step an operation waits on (`ReasonClosed` at the latest), so the control's join, bounded at 2 s, finds them ended; past the bound it says so and abandons them, the process's end ending them. The facts are the four the shutdown establishes: Run returned within its bound, the release of every session after a panic answered nil, the backend's Wait left no device goroutine, and the snapshot holds no unconfirmed release (`playerClosedFacts.Silent`). **Don't stop the control before the player or after the store.** `TestAPlayerTurnedOffIsNotOfferedJustAfterTheRestart` and `TestALongListIsWindowedThroughTheConsolesRoute` run it through serve.
+
 ## Scanner, deletion passes, and manifest writes
 
 - **Shutdown joins every background writer**, and the wait must be written
@@ -2592,8 +2594,11 @@ Windows-runner check, distinct from portable race-test results.
   file that changed, as it did before, rather than hold every other writer
   off while it waits on the operator; no writer that takes the lock can land
   between the check and the save. `TestTheChangedConfigCheckIsTheStepBeforeSave`
-  pins it by the syntax tree (initCmd calls `saveInitConfig` once and
-  neither the check nor `cfg.Save` itself; in `saveInitConfig` the lock
+  pins it by the syntax tree (initCmd saves once, through `initSave`, the
+  save's seam since backlog B989, which calls `initHost.save` or
+  `saveInitConfig` and nothing else, production's `initHost.save` being
+  `saveInitConfig`, and calls neither the check nor `cfg.Save` itself; in
+  `saveInitConfig` the lock
   comes before the check and the check directly before the save), and
   `TestInitRefusesAConfigThatChangedWhileItRan` the refusal. The save then
   compares the file once more just before its rename (the turn's own

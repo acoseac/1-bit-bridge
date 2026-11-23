@@ -1075,7 +1075,7 @@ func (h *heldControls) holdNext() (came <-chan struct{}, let func()) {
 func TestARefreshAskedWhileOneIsHeldRunsOnceItEnds(t *testing.T) {
 	store := playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeNative))
 	box := &heldControls{Box: playbacktest.NewBox(5)}
-	b := policyBackend(t, box.Box, store, func(p *playback.DSDPolicy) { p.Box = box })
+	b := policyBackend(t, box.Box, store, func(p *playback.DSDPolicy) { p.Box = box }, shippedList(t))
 	b.RefreshDSD(true)
 	first := b.Policy().Generation
 	came, let := box.holdNext()

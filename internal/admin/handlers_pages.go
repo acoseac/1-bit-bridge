@@ -90,7 +90,16 @@ type pageData struct {
 	// somebody can click, and these are the controls the endpoint
 	// refuses.
 	Managed map[string]bool
-	Data    any
+	// Socket is the socket the page was served on, "loopback" or "lan"
+	// (backlog B989): a page the home-network socket served warns before
+	// a token is minted or rotated, since its answer crosses the network
+	// in the clear, and says beside the result what ends that.
+	Socket string
+	// ConsoleLANLine is the menu's line saying where the console answers,
+	// from the home-network socket's state at this page load (consolelan.Line),
+	// "" for none.
+	ConsoleLANLine string
+	Data           any
 }
 
 // playerNavEntry maps a player sub-section to the sidebar entry that
@@ -260,6 +269,8 @@ func (s *Server) renderPageStatus(w http.ResponseWriter, r *http.Request, active
 		ProtocolVersion: version.ProtocolVersion,
 		IsPublic:        cfg.IsPublic(),
 		Managed:         managedControlSet(cfg),
+		Socket:          pageSocket(r),
+		ConsoleLANLine:  s.consoleLANLine(),
 		Data:            data,
 	}
 

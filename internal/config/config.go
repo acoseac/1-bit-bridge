@@ -47,14 +47,20 @@ var validateLogger = logging.Component("config")
 
 // Config mirrors the on-disk bridge.yaml shape. See config/bridge.yaml.example.
 type Config struct {
-	LibraryRoots    []string `yaml:"libraryRoots"`
-	ListenAddress   string   `yaml:"listenAddress"`
-	AdminAddress    string   `yaml:"adminAddress,omitempty"`
-	DataDir         string   `yaml:"dataDir"`
-	TLSCertPath     string   `yaml:"tlsCertPath,omitempty"`
-	TLSKeyPath      string   `yaml:"tlsKeyPath,omitempty"`
-	ScanIntervalSec int      `yaml:"scanIntervalSec"`
-	LibraryName     string   `yaml:"libraryName"`
+	LibraryRoots  []string `yaml:"libraryRoots"`
+	ListenAddress string   `yaml:"listenAddress"`
+	AdminAddress  string   `yaml:"adminAddress,omitempty"`
+	// AdminLANAddress, set, is a private IP address of this box on which a
+	// loopback install serves its console too, at adminAddress's port, to
+	// devices on the network that address belongs to, with no login
+	// (backlog B989). Empty, the default, is a console on loopback alone.
+	// Only serve's start reads it to bind (internal/admin's ConsoleLANPlan).
+	AdminLANAddress string `yaml:"adminLANAddress,omitempty"`
+	DataDir         string `yaml:"dataDir"`
+	TLSCertPath     string `yaml:"tlsCertPath,omitempty"`
+	TLSKeyPath      string `yaml:"tlsKeyPath,omitempty"`
+	ScanIntervalSec int    `yaml:"scanIntervalSec"`
+	LibraryName     string `yaml:"libraryName"`
 	// CustomEndpoints lets operators advertise URLs that aren't
 	// discoverable from the host's interface table — e.g. a reverse
 	// proxy, a port-forwarded WAN URL, or a non-default Tailscale
@@ -122,6 +128,11 @@ type Config struct {
 	// zero value, whatever the field's tag (filedEnvValues, marshal). It is
 	// set on that save's copy alone, and Clone drops it.
 	filed []string
+	// fileLANKey is the adminLANAddress key of the file the load that made
+	// this config read, as its bytes held it (LANKeyOf, backlog B989): its
+	// presence, empty or not, and its own value, apart from what a variable
+	// made of the leaf. Clone copies it.
+	fileLANKey LANKey
 }
 
 // OutputConfig is the bridge reporting the player beside it. MPD is
@@ -1260,7 +1271,9 @@ func (t TailscaleConfig) EffectiveMode() (TailscaleMode, error) {
 
 // DeploymentConfig selects the overall deployment posture. `loopback`
 // (default) preserves the historical single-operator-on-trusted-LAN
-// shape: admin console is loopback-only with no auth, mDNS advertises
+// shape: admin console is loopback-only with no auth (unless its operator
+// also opens it on the home network with adminLANAddress, backlog B989,
+// with no auth there either), mDNS advertises
 // freely, Tailscale auto-pilot runs by default, the self-signed TLS
 // cert is the pinning anchor for iOS clients.
 //
@@ -3185,6 +3198,11 @@ func loadData(path string, data []byte) (*Config, error) {
 		reason := ValueFreeYAMLError(err)
 		return nil, &RefusedError{err: fmt.Errorf("parse config %q: %w", path, reason), reason: reason}
 	}
+	// The adminLANAddress key as the bytes hold it, before any variable
+	// (backlog B989): DecodeFile took the bytes, so LANKeyOf does too.
+	if key, err := LANKeyOf(data); err == nil {
+		cfg.fileLANKey = key
+	}
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()
 	absPath, err := filepath.Abs(path)
@@ -4007,7 +4025,9 @@ func (c *Config) validate(warn bool) error {
 	}
 	// AdminAddress: loopback installs enforce the historical loopback
 	// trust boundary (admin console has no auth in loopback mode, so
-	// loopback binding IS the security boundary). Public installs
+	// loopback binding IS the security boundary; the one socket beyond
+	// it is AdminLANAddress's, the operator's explicit opt-in, checked
+	// below, backlog B989). Public installs
 	// require a parseable host:port but allow non-loopback binds —
 	// the admin auth layer (gated on IsPublic) becomes the trust
 	// boundary instead. See internal/adminauth and the
@@ -4067,6 +4087,12 @@ func (c *Config) validate(warn bool) error {
 			}
 		}
 	} else if err := ValidateLoopbackAddress("adminAddress", c.AdminAddress); err != nil {
+		return err
+	}
+	// AdminLANAddress (backlog B989): a shape check of the console's
+	// home-network address, never a question about the host, which serve's
+	// bind asks.
+	if err := c.validateConsoleLAN(); err != nil {
 		return err
 	}
 	// Demo-mode static token: must be a well-formed SHA-256 hex digest
@@ -4785,7 +4811,9 @@ func ValidateLoopbackAddress(field, addr string) error {
 // validateLoopbackAddress enforces that the admin listener binds only to a
 // loopback interface. Accepts "127.0.0.1:N", "[::1]:N", and "localhost:N" —
 // an empty host (":N" = all interfaces) or any non-loopback IP is rejected.
-// The admin console has no auth layer; loopback binding is the trust boundary.
+// The admin console has no auth layer; loopback binding is the trust boundary,
+// and adminLANAddress, which the operator sets to open the console to the
+// home network as well, the one socket beyond it (backlog B989).
 // Its errors quote nothing of addr (ValidateBindAddress says why).
 func validateLoopbackAddress(addr string) error {
 	host, port, err := net.SplitHostPort(addr)

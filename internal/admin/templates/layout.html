@@ -23,7 +23,7 @@
     edit to app.css — see its header for why. */ -}}
 <link rel="stylesheet" href="/static/player.css?v={{.ServerVersion}}">
 </head>
-<body data-active="{{.ActiveTab}}" data-section="{{.ActiveSection}}">
+<body data-active="{{.ActiveTab}}" data-section="{{.ActiveSection}}" data-socket="{{.Socket}}">
 {{- /* Skip link: with an 11-entry sidebar standing between the document
     start and the content, a keyboard user would otherwise tab through
     the whole nav on every page. Visually hidden until focused. */ -}}
@@ -284,6 +284,9 @@
       {{if .IsPublic}}<button id="logout-btn" class="logout-btn" type="button">Sign out</button>{{end}}
     </div>
     <p class="build-line">bridge {{.ServerVersion}} · protocol v{{.ProtocolVersion}}</p>
+    {{- /* Where the console answers (backlog B989): from the home-network
+        socket's state at this page load, never the config as it reads now. */ -}}
+    {{if .ConsoleLANLine}}<p class="console-lan-line" id="console-lan-line">{{.ConsoleLANLine}}</p>{{end}}
   </div>
   </div>{{- /* .sidebar-drawer */}}
 </header>
@@ -328,6 +331,13 @@
         </small>
         {{end}}
       </label>
+      {{- /* A page the home-network socket served is plain HTTP (backlog
+          B989): the mint's answer carries the device's token across the
+          network, so this comes before Generate token, and nothing is
+          sent before it is pressed. */ -}}
+      {{if eq .Socket "lan"}}
+      <p class="hint warn" id="pair-lan-warning">This page is not encrypted. The token you generate here will cross your network in the clear, and anyone who can see that traffic can use it to read your library. To keep it off the network, pair from the bridge's own machine, or over an SSH tunnel to it.</p>
+      {{end}}
       <div class="actions">
         <button type="button" class="btn" data-close>Cancel</button>
         <button type="submit" class="btn primary">Generate token</button>
@@ -361,6 +371,12 @@
           <code id="pair-token"></code>
           <button type="button" class="btn" data-copy="pair-token">Copy</button>
         </div>
+        {{- /* Beside the token of a mint or a rotation made on the
+            home-network socket (backlog B989): what ends its crossing, on the
+            bridge's own machine, never a rotation from this page. */ -}}
+        {{if eq .Socket "lan"}}
+        <p class="hint warn" id="pair-lan-recovery">This token crossed your network unencrypted. Whether or not the device has paired with it, end that from the bridge's own machine, or over an SSH tunnel to it: there, rotate this device's token and pair the device again, or revoke the device. Rotating from this page would send the new token across the network the same way.</p>
+        {{end}}
       </div>
       <div class="kv">
         <div class="kv-label">TLS fingerprint</div>

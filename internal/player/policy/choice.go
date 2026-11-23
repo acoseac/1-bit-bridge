@@ -35,9 +35,9 @@ const (
 	// nor a confirmation under the unit's firmware covers, and the write
 	// carries no confirmDoP.
 	ChoiceConfirmationRequired ChoiceReason = "dop_confirmation_required"
-	// ChoiceFirstUseUnacknowledged: an explicit native or DoP whose first use
-	// is not acknowledged at every rate under the unit's firmware, or which a
-	// listener rejected there, and the write carries no firstUseAcknowledged.
+	// ChoiceFirstUseUnacknowledged was an explicit native or DoP written with
+	// no firstUseAcknowledged where its first use was not acknowledged; since
+	// B990 no write is refused with it, a word an older client knows.
 	ChoiceFirstUseUnacknowledged ChoiceReason = "first_use_unacknowledged"
 )
 
@@ -103,12 +103,10 @@ func StoredRevision(st dsdstate.State, key dacprofile.Key, stamp dsdstate.Stamp)
 // profile-refused rates aside; convert where the DAC takes a target; auto and
 // off always); DoP carries confirmDoP where a rate it is offered at has
 // neither the profile's claim nor a confirmation under the firmware, as the
-// read side's needsConfirmation says; an explicit native or DoP carries
-// firstUseAcknowledged unless an entry under the firmware covers every rate
-// and no listener rejected the transport there at any rate (a rejection
-// re-arms first use, the design's section 1.2). A state that does not read
-// is read as the write leaves it, its refusal cleared, so a write over it
-// sees what the DAC offers.
+// read side's needsConfirmation says. No first use is asked (B990): an
+// explicit native or DoP is taken with no firstUseAcknowledged. A state that
+// does not read is read as the write leaves it, its refusal cleared, so a
+// write over it sees what the DAC offers.
 //
 // The write: the DAC's choice at the next revision (one more than its own,
 // whatever was published, so a revision never goes back), set now by c.By;
@@ -121,10 +119,13 @@ func StoredRevision(st dsdstate.State, key dacprofile.Key, stamp dsdstate.Stamp)
 // its cap, its rejections kept and DoP by the profile's claim or a
 // confirmation; convert and off none), replacing a migrated entry, one under
 // another firmware and, for an explicit mode, one a rejection re-armed, and
-// keeping a whole entry as it is, its observation with it; an explicit native
-// or dop that carried it clears that transport's rejections under the
-// firmware, and auto clears none. A unit whose firmware does not read takes
-// the choice and records neither consent: nothing is held under no firmware.
+// keeping a whole entry as it is, its observation with it; it gates no rate
+// since B990 and clears no rejection. An explicit native or dop that makes
+// its transport the DAC's mode, its own choice another mode or none, is that
+// transport's retry: it clears the transport's rejections under the firmware
+// at the rates its cap admits; a write that leaves the mode as it was clears
+// none. A unit whose firmware does not read takes the choice and records
+// neither consent: nothing is held under no firmware, and nothing cleared.
 // Every write clears the DAC's warnings and state_unreadable
 // (dsdstate.State.ClearWarningsFor).
 func Choose(in Inputs, c Choice, now time.Time) (dsdstate.State, error) {
@@ -158,19 +159,22 @@ func Choose(in Inputs, c Choice, now time.Time) (dsdstate.State, error) {
 		}
 	}
 	explicit := transportOf(c.Mode)
-	if explicit != "" && !c.FirstUseAcknowledged && !rd.wholeAcknowledgement(explicit) {
-		return in.State, &ChoiceRefusal{Reason: ChoiceFirstUseUnacknowledged, Detail: "the transport's first use is not acknowledged at every rate on this firmware, or a listener rejected it"}
-	}
-
 	d := st.Entry(key, stamp)
 	var rev uint64
+	var was string
 	if d.Choice != nil {
-		rev = d.Choice.Revision
+		rev, was = d.Choice.Revision, d.Choice.Mode
 	}
 	at := now.UTC().Truncate(time.Second)
 	d.Choice = &dsdstate.Choice{Mode: c.Mode, MaxBitRate: c.MaxBitRate, Revision: rev + 1, SetAt: at, SetBy: c.By}
 	if rd.bcd == "" {
 		return st, nil
+	}
+	if explicit != "" && was != c.Mode {
+		// The transport's retry: its rejections at the rates the cap admits go.
+		d.Listener = slices.DeleteFunc(d.Listener, func(a dsdstate.Answer) bool {
+			return a.Transport == explicit && a.BCDDevice == rd.bcd && a.Answer != dsdstate.AnswerClean && (c.MaxBitRate == 0 || a.BitRate <= c.MaxBitRate)
+		})
 	}
 	if c.ConfirmDoP && (c.Mode == dsdstate.ModeDoP || c.Mode == dsdstate.ModeAuto) && (d.DoPConfirmed == nil || d.DoPConfirmed.BCDDevice != rd.bcd) {
 		d.DoPConfirmed = &dsdstate.DoPConfirmation{BCDDevice: rd.bcd, ConfirmedAt: at, SetBy: c.By}
@@ -190,13 +194,6 @@ func Choose(in Inputs, c Choice, now time.Time) (dsdstate.State, error) {
 		if !whole {
 			d.FirstUse = slices.DeleteFunc(d.FirstUse, func(f dsdstate.FirstUse) bool { return f.Transport == t })
 			d.FirstUse = append(d.FirstUse, dsdstate.FirstUse{Transport: t, BCDDevice: rd.bcd, AcknowledgedAt: at})
-		}
-		if c.Mode != dsdstate.ModeAuto {
-			// The transport chosen again: its rejections under the firmware are
-			// cleared, its clean answers kept.
-			d.Listener = slices.DeleteFunc(d.Listener, func(a dsdstate.Answer) bool {
-				return a.Transport == t && a.BCDDevice == rd.bcd && a.Answer != dsdstate.AnswerClean
-			})
 		}
 	}
 	return st, nil
@@ -227,9 +224,10 @@ func (rd *reading) wholeEntry(transport string) bool {
 	})
 }
 
-// wholeAcknowledgement reports whether an explicit choice of transport needs
-// no acknowledgement: its entry under the unit's firmware covers every rate,
-// and no listener's latest answer there rejects it at any rate.
+// wholeAcknowledgement reports whether transport's acknowledgement stands
+// whole, which a write that carries one keeps as it is: its entry under the
+// unit's firmware covers every rate, and no listener's latest answer there
+// rejects it at any rate (a rejection re-arms it).
 func (rd *reading) wholeAcknowledgement(transport string) bool {
 	if !rd.wholeEntry(transport) {
 		return false

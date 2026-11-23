@@ -24,7 +24,7 @@ func TestGetStatsSnapshotServesLastGoodOnDBError(t *testing.T) {
 		}
 	}
 
-	first := srv.getStatsSnapshot()
+	first := srv.getStatsSnapshot(context.Background())
 	if first.TracksIndexed != 3 {
 		t.Fatalf("first snapshot TracksIndexed = %d, want 3", first.TracksIndexed)
 	}
@@ -37,7 +37,7 @@ func TestGetStatsSnapshotServesLastGoodOnDBError(t *testing.T) {
 		t.Fatalf("close store: %v", err)
 	}
 
-	second := srv.getStatsSnapshot()
+	second := srv.getStatsSnapshot(context.Background())
 	if second.TracksIndexed != 3 {
 		t.Errorf("after DB error TracksIndexed = %d, want 3 (last-good, not zeroed)", second.TracksIndexed)
 	}
@@ -58,7 +58,7 @@ func TestGetStatsSnapshotZeroWithoutCacheOnDBError(t *testing.T) {
 	if err := srv.deps.Manifest.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
-	snap := srv.getStatsSnapshot()
+	snap := srv.getStatsSnapshot(context.Background())
 	if snap.TracksIndexed != 0 {
 		t.Errorf("no-cache DB error TracksIndexed = %d, want 0", snap.TracksIndexed)
 	}

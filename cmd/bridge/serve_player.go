@@ -293,6 +293,57 @@ type bridgePlayer struct {
 	closing       bool
 	discoveryStop context.Context
 	stopped       time.Duration // how long its stop took, once it has
+
+	// closedFacts is what the shutdown found of the engine it closed, under
+	// mu, and closedKnown is closed once it is set (B634): the console's
+	// barrier counts a closed engine silent only on those facts. One
+	// bridgePlayer runs one engine run, so they are set once.
+	closedFacts playerClosedFacts
+	closedKnown chan struct{}
+}
+
+// playerClosedFacts is what the player's shutdown found of the engine it
+// closed: the four facts on which alone a closed engine is silent (B634).
+// Ended is Run returned within its bound; Panicked is a Run a panic ended,
+// whose sessions the backend was asked to let go (releaseAll), ReleaseErr
+// that release's answer; DeviceHeld is the backend's wait that gave up with
+// a goroutine of the device's still running; Unconfirmed is the engine's
+// last snapshot holding a release never confirmed.
+type playerClosedFacts struct {
+	Ended, Panicked bool
+	ReleaseErr      error
+	DeviceHeld      bool
+	Unconfirmed     bool
+}
+
+// Silent reports whether no session of the closed engine can hold the
+// device: Run returned within its bound, a panic's release of every session
+// answered without error, no goroutine of the device's runs, and no release
+// is unconfirmed.
+func (f playerClosedFacts) Silent() bool {
+	return f.Ended && (!f.Panicked || f.ReleaseErr == nil) && !f.DeviceHeld && !f.Unconfirmed
+}
+
+// closedEngine is what the shutdown found of the engine it closed, false
+// until it has.
+func (p *bridgePlayer) closedEngine() (playerClosedFacts, bool) {
+	if p.closedKnown == nil || !signalled(p.closedKnown) {
+		return playerClosedFacts{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closedFacts, true
+}
+
+// noteClosed keeps f, once.
+func (p *bridgePlayer) noteClosed(f playerClosedFacts) {
+	if p.closedKnown == nil || signalled(p.closedKnown) {
+		return
+	}
+	p.mu.Lock()
+	p.closedFacts = f
+	p.mu.Unlock()
+	close(p.closedKnown)
 }
 
 // playerRun is the engine as it runs: its Run, ended by stop and over once
@@ -324,7 +375,7 @@ type playerRun struct {
 func startServePlayer(plan servePlayerPlan, w servePlayerWiring) *bridgePlayer {
 	p := &bridgePlayer{plan: plan, bounds: w.Bounds.orProduction(), hold: w.Hold, seams: w.Seams,
 		feed: w.Feed, trees: w.Trees.or(hostTrees),
-		ready: make(chan struct{}), done: make(chan struct{}), settled: make(chan struct{})}
+		ready: make(chan struct{}), done: make(chan struct{}), settled: make(chan struct{}), closedKnown: make(chan struct{})}
 	if !plan.start {
 		if plan.off != "" && !plan.told {
 			playerLog.Warn("player: not started", "reason", plan.off)
@@ -851,8 +902,9 @@ func (p *bridgePlayer) shutdown() {
 			"bound", p.bounds.engine)
 	}
 	wctx, cancel := context.WithTimeout(context.Background(), p.bounds.backend)
-	if ended && run.panicked {
-		releaseAll(wctx, run.be)
+	facts := playerClosedFacts{Ended: ended, Panicked: ended && run.panicked}
+	if facts.Panicked {
+		facts.ReleaseErr = releaseAll(wctx, run.be)
 	}
 	err := run.be.Wait(wctx)
 	cancel()
@@ -869,11 +921,16 @@ func (p *bridgePlayer) shutdown() {
 			playerLog.Warn("player: the backend did not finish within its bound: a call to the device is held in the kernel, and the device may still be held until the process exits",
 				"err", err)
 		}
+		facts.DeviceHeld = others
 	}
 	if u, ok := run.eng.Snapshot().ReleaseUnconfirmed(); ok {
 		playerLog.Warn("player: a session's release was never confirmed: the device may still be held until the process exits",
 			"session", uint64(u.Session))
+		facts.Unconfirmed = true
 	}
+	// What the console's barrier counts a closed engine silent on (B634),
+	// kept beside the lines above, which say the same to the log.
+	p.noteClosed(facts)
 	p.joinWarm(run)
 	run.sub.Close()
 	took := time.Since(began)
@@ -886,14 +943,17 @@ func (p *bridgePlayer) shutdown() {
 // releaseAll has the backend let go of every session it holds, for an
 // engine whose Run a panic ended: the engine's owner, the backend's only
 // caller, is gone, and the session it played would hold the DAC until the
-// process exits. It waits at most until ctx ends, and says how it went.
-func releaseAll(ctx context.Context, be playBackend) {
+// process exits. It waits at most until ctx ends, says how it went, and
+// answers the backend's error, which serve's player keeps for the console's
+// barrier (playerClosedFacts).
+func releaseAll(ctx context.Context, be playBackend) error {
 	if err := be.ReleaseAll(ctx); err != nil {
 		playerLog.Warn("player: the engine's Run ended in a panic, and the backend did not let go of every session it held within its bound: the device may still be held until the process exits",
 			"err", err)
-		return
+		return err
 	}
 	playerLog.Info("player: the engine's Run ended in a panic, so the backend let go of every session it held: the device is free")
+	return nil
 }
 
 // settle lets go of the player's share of the data directory's lock and

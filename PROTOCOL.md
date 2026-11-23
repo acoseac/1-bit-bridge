@@ -1119,7 +1119,11 @@ set establishes nothing of the DAC, and off alone is offered.
 acknowledged on the DAC's current firmware), `acknowledged`, or `observed` (an
 occurrence of the transport has since played 5 s of its content without a fault);
 `bitRates`, ascending, are the rates an acknowledgement covers that a migrated
-owner's approval made, absent for every rate.
+owner's approval made, absent for every rate. `firstUse` is reported for
+information: this bridge plays no rate and refuses no write on it. An earlier
+bridge refused a rate whose first use was not acknowledged, as
+`first_use_pending`, in `dsdPlayback.refused[].reason` and in
+`dsdPlayback.reason`; this bridge gives that word in neither.
 
 On `playback`, `transport` is `dop` for a DoP occurrence, `pcm` for a PCM one,
 `converted` for DSD the player converts to PCM, and absent for native DSD.
@@ -1164,7 +1168,7 @@ The current token vocabularies are exact and case-sensitive:
 | `dsdPlayback.tuples[].evidence` | `reported`, `driver_accepted`, `streaming_observed`, `listener_confirmed` |
 | `dsdPlayback.converted[].dither` | `none`, `tpdf` |
 | `dsdPlayback.converted[].filter` | `dsdconv-1` |
-| `dsdPlayback.refused[].reason` | `dsd_off_by_choice`, `native_not_offered`, `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected`, `conversion_not_offered`, `dsd_state_unreadable`, `dsd_choice_uncertain`, `dsd_dac_unread` |
+| `dsdPlayback.refused[].reason` | `dsd_off_by_choice`, `native_not_offered`, `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`, `dop_confirmation_required`, `dsd_rate_above_choice`, `listener_rejected`, `native_check_required`, `conversion_not_offered`, `dsd_state_unreadable`, `dsd_choice_uncertain`, `dsd_dac_unread` |
 | `dsdPlayback.warnings[].code` | `migration_record_refused`, `migration_record_missing`, `migrated_off`, `state_unreadable` |
 | `dsdPlayback.warnings[].reason` | `stale_version`, `identity_mismatch`, `hash_mismatch`, `unreadable` |
 | `playback.state` | `open`, `released`, `revoked` |
@@ -1185,6 +1189,9 @@ The current token vocabularies are exact and case-sensitive:
 | `dsdDAC.options[].dither` | `none`, `tpdf` |
 | `dsdDAC.firstUse[].transport` | `native`, `dop` |
 | `dsdDAC.firstUse[].state` | `pending`, `acknowledged`, `observed` |
+
+An earlier bridge's `dsdPlayback.refused[].reason` may also be
+`first_use_pending` (`firstUse`, above).
 
 Format sources are `format.DSDU32BE`, `format.DSDU32LE`, `format.DSDU16LE`
 (`internal/player/format/dsd_pack.go`) and `format.S16LE`, `format.S243LE`,
@@ -1219,8 +1226,12 @@ sent only while no rate plays, and it is then the word the effective policy refu
 the lowest rate with (`internal/player/policy/policy.go`,
 `internal/player/playback/dsd_policy.go`): `dsd_off_by_choice`, `native_not_offered`,
 `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`,
-`dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`,
-`listener_rejected`, `conversion_not_offered`, `dsd_state_unreadable`,
+`dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending` (an
+earlier bridge's word: `firstUse`, above), `listener_rejected`,
+`native_check_required` (native DSD on a DAC whose USB vendor and product IDs are a
+generic board's, one of the shared reference IDs of the bridge's database of DAC
+models, and which that database does not know, at a rate no listener's latest
+answer holds clean on the DAC's firmware), `conversion_not_offered`, `dsd_state_unreadable`,
 `dsd_choice_uncertain` (a write of the DAC's choice reached the bridge's file and is
 not known to be kept, and the state it left plays the rate another way:
 `PUT /v1/outputs/{id}/dsd`, `persist_uncertain`),
@@ -1240,7 +1251,13 @@ DSD128, DSD256). Since the DSD cutover the set is the player's effective DSD pol
 for the bound DAC, from the DAC's choice in the player's DSD state (or the bridge's
 default for a DAC with none), the bridge's database of DAC models, what the kernel
 and a silent probe establish of the DAC now, and for DoP a check that every gain
-stage on the DAC's playback path is visible and at unity. A rate plays native DSD,
+stage on the DAC's playback path is visible and at unity. No first-use
+acknowledgement is asked: `auto` plays native wherever the DAC offers it and no
+listener rejected it, except on a DAC whose USB IDs are a generic board's (an
+interface board's or a chip maker's reference IDs, which the DACs of several makers
+ship, so the kernel's DSD offer there is the board's) and which the database does
+not know, where native plays only at a rate a listener's latest answer holds clean
+and an explicit `native` is refused as `native_check_required`. A rate plays native DSD,
 in the first format the DAC offers of `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE`, or
 DoP, or publishes no tuple; a rate the policy converts to PCM, which the player does,
 publishes a converted entry and no tuple. A change of the set never moves an occurrence
@@ -1248,8 +1265,7 @@ to another transport: an occurrence plays the transport it was admitted under or
 stops (below). The set itself publishes what the policy plays at each rate now: a
 rate whose transport a change took away (a gain stage leaving unity takes DoP away)
 holds no tuple, or, under `auto` only, the other transport where that one qualifies
-by itself, its own first use included, as `auto` tries DoP once native is out at a
-rate. With no rate playing the player gives the original PCM codecs and ProtocolInfo
+by itself, as `auto` tries DoP once native is out at a rate. With no rate playing the player gives the original PCM codecs and ProtocolInfo
 bytes. GET only copies the published set, performing no hardware probes.
 
 `playback` is the latest current occurrence's observation. Released/revoked
@@ -1284,7 +1300,7 @@ The route is bearer-authenticated and draws from the write rate limit. `{id}` is
   "mode": "auto", "maxBitRate": 0, "confirmDoP": false, "firstUseAcknowledged": false }
 ```
 
-`dacKey`, `dacToken`, `baseRevision` and `mode` are required. A client sends the first three from the one `dsdDAC` it holds: its `dacKey`, its `dacToken` and its `choice.revision`, which is 0 for a DAC with no choice of its own. `mode` is `auto`, `native`, `dop`, `convert` or `off`. `maxBitRate` is the rate above which native and DoP are not played: `0` (no cap, and the value when absent), `2822400`, `5644800` or `11289600`. `confirmDoP` is the user's confirmation of DoP on this DAC, and `firstUseAcknowledged` the user's acknowledgement of the first use of the transports the choice plays: each is `false` when absent, so no consent is given by default. A member this bridge does not know is ignored, so a consent misspelled is a consent not given. A body that is not one such object (malformed, a required member missing or `null`, a member of the wrong type, anything after the object, or more than 4 KiB) is `400` `bad_request`.
+`dacKey`, `dacToken`, `baseRevision` and `mode` are required. A client sends the first three from the one `dsdDAC` it holds: its `dacKey`, its `dacToken` and its `choice.revision`, which is 0 for a DAC with no choice of its own. `mode` is `auto`, `native`, `dop`, `convert` or `off`. `maxBitRate` is the rate above which native and DoP are not played: `0` (no cap, and the value when absent), `2822400`, `5644800` or `11289600`. `confirmDoP` is the user's confirmation of DoP on this DAC, and `firstUseAcknowledged` the user's acknowledgement of the first use of the transports the choice plays: each is `false` when absent, so no consent is given by default. The bridge records an acknowledgement and reports it (`dsdDAC.firstUse`), and no write needs one: it plays no rate and clears no rejection. A member this bridge does not know is ignored, so a consent misspelled is a consent not given. A body that is not one such object (malformed, a required member missing or `null`, a member of the wrong type, anything after the object, or more than 4 KiB) is `400` `bad_request`.
 
 The checks run in this order, and the first that fails answers:
 
@@ -1305,8 +1321,10 @@ The checks run in this order, and the first that fails answers:
 | 13 | `baseRevision` is the revision of the DAC's choice now | `409` `stale` |
 | 14 | the DAC offers `mode` at some rate | `409` `mode_not_offered` |
 | 15 | a `dop` choice carries `confirmDoP` where a rate DoP is offered at needs a confirmation (`needsConfirmation`) | `409` `dop_confirmation_required` |
-| 16 | an explicit `native` or `dop` carries `firstUseAcknowledged`, unless that transport's first use is acknowledged at every rate on the DAC's firmware and no listener rejected it there | `409` `first_use_unacknowledged` |
+| 16 | none in this bridge: an explicit `native` or `dop` needs no `firstUseAcknowledged` (an earlier bridge refused one without it, `409` `first_use_unacknowledged`) | — |
 | 17 | the write | `200` once the state is written and kept; `409` `state_unreadable` where the state cannot be written; `500` `persist_failed` where the write did not reach the state's file; `500` `persist_uncertain` where it reached the file and is not known to be kept |
+
+**A listener's rejection** of a transport at a rate (`listener_rejected` in `dsdPlayback.refused`) goes only with that transport's retry: a write whose `mode` is `native` or `dop` where the DAC's own choice was another mode, or it had none, clears that transport's rejections on the DAC's firmware at each rate its `maxBitRate` admits (every rate for `0`). A write that leaves the mode as it was (another cap, a consent) clears none, and neither does `firstUseAcknowledged`.
 
 `500` `persist_failed` answers too where the write was not made: the bridge stopping, or the route's time (about ten seconds) running out while the write waited for an earlier write, a check of the DAC or its reading. Nothing was written. A write that has begun writing the state runs to its end whatever the client does, and its answer is what happened.
 
@@ -1321,7 +1339,7 @@ The members are absent together where the answer carries no publication: `400`, 
 
 **Ordering.** Within one `bootId`, `dsdPlayback.publication` orders the members of two answers, an answer and a `GET /v1/outputs` included: the larger is the later, and a client shows the latest it has. An answer carries the publication its write made or found, never one made after it, so a `GET` that answers after a `PUT` can carry an earlier publication than the `PUT`'s answer, which the client sets aside. Across two `bootId`s the members say nothing of order: the bridge's player restarted.
 
-**The client's rules.** A client sends `dacKey`, `dacToken` and `baseRevision` from the one `dsdDAC` it holds, never put together from two. It acts on every answer's code: `stale` and `dac_changed` show the DAC's choice as the answer carries it, and the user chooses again; `dac_unavailable` says no DAC can be chosen for now; `dop_confirmation_required` and `first_use_unacknowledged` ask the user, and a write carrying the consent may follow; `playback_not_stopped` asks the user to stop playback. It reads `GET /v1/outputs` once after each answer, and wherever an answer carries no `dsdPlayback`.
+**The client's rules.** A client sends `dacKey`, `dacToken` and `baseRevision` from the one `dsdDAC` it holds, never put together from two. It acts on every answer's code: `stale` and `dac_changed` show the DAC's choice as the answer carries it, and the user chooses again; `dac_unavailable` says no DAC can be chosen for now; `dop_confirmation_required` asks the user, and a write carrying the consent may follow (an earlier bridge's `first_use_unacknowledged` the same way, for `firstUseAcknowledged`); `playback_not_stopped` asks the user to stop playback. To retry a transport a listener rejected, the client writes that mode where the DAC's choice is another, with a cap that admits the rates to retry. It reads `GET /v1/outputs` once after each answer, and wherever an answer carries no `dsdPlayback`.
 
 **Applied once.** A write is applied once: the same body sent again answers `stale`, its `baseRevision` no longer the choice's.
 
@@ -2503,7 +2521,7 @@ Errors are JSON, with the exceptions listed under the table:
 |    409 | `dac_changed`            | `PUT /v1/outputs/{id}/dsd`: `dacKey` or `dacToken` is not the DAC the bridge reads now (another model, maker, firmware or unit, or a token from before the bridge's player restarted) |
 |    409 | `mode_not_offered`       | `PUT /v1/outputs/{id}/dsd`: the DAC offers the mode at no rate |
 |    409 | `dop_confirmation_required` | `PUT /v1/outputs/{id}/dsd`: a `dop` choice without `confirmDoP` where a rate DoP is offered at needs the user's confirmation |
-|    409 | `first_use_unacknowledged` | `PUT /v1/outputs/{id}/dsd`: an explicit `native` or `dop` choice without `firstUseAcknowledged` whose transport's first use is not acknowledged at every rate, or which a listener rejected, on the DAC's firmware |
+|    409 | `first_use_unacknowledged` | `PUT /v1/outputs/{id}/dsd`: an earlier bridge's refusal of an explicit `native` or `dop` choice without `firstUseAcknowledged` whose transport's first use was not acknowledged at every rate, or which a listener rejected, on the DAC's firmware; this bridge's write refuses none (step 16) |
 |    409 | `state_unreadable`       | `PUT /v1/outputs/{id}/dsd`: the player's DSD state did not open, or cannot be written |
 |    410 | `pairing_code_invalid`   | Pairing-link code unknown, already redeemed or expired, or its token revoked or expired since |
 |    410 | `variant_stale`          | `?variant=`: the source's mtime (beyond 2 s) or size changed since the rendition was made |
@@ -2635,7 +2653,7 @@ Releases that don't ship `release-meta.json` (any pre-Phase-C build) are treated
 
 The manual `bridge update --override-client-floor` flag bypasses the gate; the auto-installer never sets it.
 
-**Trust boundary:** the install endpoint is admin-loopback only (same trust model as every other admin route — see `internal/admin/admin.go` doc comment). There is intentionally no remote-trigger install from iOS. Operators install at the bridge host. The iOS app's role is awareness.
+**Trust boundary:** the install endpoint is the admin console's (same trust model as every other admin route — see `internal/admin/admin.go` doc comment), which a loopback bridge serves on loopback and, where its operator opened it there (`adminLANAddress`), on the home network with no login. There is intentionally no remote-trigger install from iOS. Operators install at the bridge host. The iOS app's role is awareness.
 
 ### Client version reporting
 

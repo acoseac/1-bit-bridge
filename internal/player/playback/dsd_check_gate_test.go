@@ -14,6 +14,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 )
 
@@ -441,10 +442,16 @@ func TestABackendBuiltStartsNothingOfTheCheck(t *testing.T) {
 // publishedBackend is a backend whose effective DSD set plays the fixture
 // DAC natively, read through box (fixtureBox, or one over it), its gate open,
 // after its AfterFunc, with no unit to locate: a check it admits ends
-// output_gone once its chime is built, unless something ended it first.
+// output_gone once its chime is built, unless something ended it first. The
+// shipped DAC list knows the fixture DAC as no generic board's, so its native
+// plays (B990), as fixtureSessionBackend's does.
 func publishedBackend(t *testing.T, after func(time.Duration, func()) func() bool, box DSDBox) *Backend {
 	t.Helper()
-	pol := &DSDPolicy{Store: &fixtureStore{st: nativeFixture(t)}, Kernel: fixtureKernel, Box: box, Probes: alsapcm.NewProbeCache(),
+	db, err := dacprofile.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol := &DSDPolicy{Store: &fixtureStore{st: nativeFixture(t)}, Kernel: fixtureKernel, Box: box, Probes: alsapcm.NewProbeCache(), Profiles: db,
 		Bound: func() (BoundDAC, bool) { return BoundDAC{Card: 5, Identity: fixtureUSB(), Enumeration: "test/2"}, true },
 		Now:   func() time.Time { return fixtureT0 }}
 	b, err := New(Config{Resolver: nopResolver{}, Locator: noUnit{}, DSD: pol, AfterFunc: after})

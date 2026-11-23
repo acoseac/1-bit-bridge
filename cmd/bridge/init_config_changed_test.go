@@ -108,9 +108,11 @@ func checkLeftAsWritten(t *testing.T, cfgDir, written, printed string) {
 // TestTheChangedConfigCheckIsTheStepBeforeSave: the statement that asks
 // configChangedSinceRead comes directly before the one that calls cfg.Save,
 // both in saveInitConfig after it takes bridge.yaml's lock (backlog B506),
-// and initCmd saves through saveInitConfig, once, and calls neither itself:
-// so no step of the run falls between the check and the write, and no
-// writer that takes the lock does either. The check sat before refuseRewrite
+// and initCmd saves once, through initSave, the save's seam (backlog B989),
+// which calls initHost.save or saveInitConfig and nothing else, production's
+// initHost.save being saveInitConfig, and initCmd calls neither the check
+// nor cfg.Save itself: so no step of the run falls between the check and
+// the write, and no writer that takes the lock does either. The check sat before refuseRewrite
 // first, and the second port pass and the TLS load then ran after it
 // (CodeRabbit's second review of #1106). A change made during those steps
 // cannot be timed from a test without a seam, so the order is pinned here.
@@ -122,16 +124,42 @@ func TestTheChangedConfigCheckIsTheStepBeforeSave(t *testing.T) {
 	}
 	bodies := map[string][]ast.Stmt{}
 	for _, d := range f.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && (fn.Name.Name == "initCmd" || fn.Name.Name == "saveInitConfig") {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil &&
+			(fn.Name.Name == "initCmd" || fn.Name.Name == "saveInitConfig" || fn.Name.Name == "initSave") {
 			bodies[fn.Name.Name] = fn.Body.List
 		}
 	}
-	initBody, saveBody := bodies["initCmd"], bodies["saveInitConfig"]
-	if initBody == nil || saveBody == nil {
-		t.Fatal("init.go declares no initCmd, or no saveInitConfig")
+	initBody, saveBody, seamBody := bodies["initCmd"], bodies["saveInitConfig"], bodies["initSave"]
+	if initBody == nil || saveBody == nil || seamBody == nil {
+		t.Fatal("init.go declares no initCmd, no saveInitConfig or no initSave")
 	}
-	if n := len(statementsCalling(initBody, isCallOf("saveInitConfig"))); n != 1 {
-		t.Errorf("initCmd has %d top-level statements calling saveInitConfig, want one", n)
+	if n, m := len(statementsCalling(initBody, isCallOf("initSave"))), len(statementsCalling(initBody, isCallOf("saveInitConfig"))); n != 1 || m != 0 {
+		t.Errorf("initCmd has %d top-level statements calling initSave and %d calling saveInitConfig, want one and none: it saves once, through the seam", n, m)
+	}
+	// The seam adds no step: every call it makes is the save itself.
+	var seamCalls []string
+	for _, s := range seamBody {
+		ast.Inspect(s, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				switch fn := c.Fun.(type) {
+				case *ast.Ident:
+					seamCalls = append(seamCalls, fn.Name)
+				case *ast.SelectorExpr:
+					if x, ok := fn.X.(*ast.Ident); ok {
+						seamCalls = append(seamCalls, x.Name+"."+fn.Sel.Name)
+					}
+				}
+			}
+			return true
+		})
+	}
+	for _, c := range seamCalls {
+		if c != "initHost.save" && c != "saveInitConfig" {
+			t.Errorf("initSave calls %s, a step between the run and its save", c)
+		}
+	}
+	if !productionSaveIsSaveInitConfig(f) {
+		t.Error("initHost's production save is not saveInitConfig")
 	}
 	if n, m := len(statementsCalling(initBody, isCallOf("configChangedSinceRead"))), len(statementsCalling(initBody, isCfgSave)); n != 0 || m != 0 {
 		t.Errorf("initCmd itself calls configChangedSinceRead %d times and cfg.Save %d times, want none: it saves through saveInitConfig", n, m)
@@ -150,6 +178,35 @@ func TestTheChangedConfigCheckIsTheStepBeforeSave(t *testing.T) {
 		t.Errorf("saveInitConfig calls cfg.Save at %s and configChangedSinceRead at %s, %d statements before it; want the check directly before the save",
 			fset.Position(saveBody[save[0]].Pos()), fset.Position(saveBody[check[0]].Pos()), save[0]-check[0])
 	}
+}
+
+// productionSaveIsSaveInitConfig reports whether init.go's initHost literal
+// sets save to saveInitConfig.
+func productionSaveIsSaveInitConfig(f *ast.File) bool {
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "initHost" || len(vs.Values) != 1 {
+			return true
+		}
+		lit, ok := vs.Values[0].(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			k, kok := kv.Key.(*ast.Ident)
+			v, vok := kv.Value.(*ast.Ident)
+			if kok && vok && k.Name == "save" && v.Name == "saveInitConfig" {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // isSelectorCall matches a call of pkg.name.

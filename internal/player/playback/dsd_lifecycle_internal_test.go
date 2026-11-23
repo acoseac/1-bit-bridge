@@ -11,6 +11,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
@@ -127,10 +128,17 @@ func (r *replans) asked() []engine.OccurrenceID {
 
 type plainEvents struct{ engine.Events }
 
+// fixtureSessionBackend is a backend over the fixture DAC, native at every
+// rate: unknown to the shipped DAC list and on no generic board's IDs, which
+// lets an unknown DAC play native (B990), its state's choice native.
 func fixtureSessionBackend(t *testing.T, edit ...func(*DSDPolicy)) (*Backend, *fixtureStore) {
 	t.Helper()
+	db, err := dacprofile.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := &fixtureStore{st: nativeFixture(t)}
-	pol := &DSDPolicy{Store: store, Kernel: fixtureKernel, Box: fixtureBox{}, Probes: alsapcm.NewProbeCache(),
+	pol := &DSDPolicy{Store: store, Kernel: fixtureKernel, Box: fixtureBox{}, Probes: alsapcm.NewProbeCache(), Profiles: db,
 		Bound: func() (BoundDAC, bool) { return BoundDAC{Card: 5, Identity: fixtureUSB(), Enumeration: "test/2"}, true },
 		Now:   func() time.Time { return fixtureT0 }}
 	for _, e := range edit {

@@ -230,6 +230,10 @@ func (s *Server) hydrateTracks(r *http.Request, cat *librarycat.Catalog,
 	// browseTrackRow's call site, which already takes it as an
 	// argument. (Gemini on PR #814)
 	canDecode := s.soxCanDecode()
+	// What the bridge's own player plays, read once a request: every row's
+	// bridge field is the one function of the row and of these facts that a
+	// replace's checks run too (BridgeWayOf), and absent while no player runs.
+	plays, bridgeRuns := s.bridgePlays()
 
 	out := make([]playerTrackDTO, 0, len(paths))
 	for _, p := range paths {
@@ -265,6 +269,10 @@ func (s *Server) hydrateTracks(r *http.Request, cat *librarycat.Catalog,
 			row.RoutedUDN != "", row.IsDSD, row.Codec,
 			floatOrNil(row.SampleRate), intOrNil(row.BitsPerSample),
 			p, canDecode)
+		if bridgeRuns {
+			way := BridgeWayOf(p, row.Codec, row.RoutedUDN != "", row.IsDSD, row.SampleRate, plays)
+			dto.Bridge = &way
+		}
 		out = append(out, dto)
 	}
 	return out, nil

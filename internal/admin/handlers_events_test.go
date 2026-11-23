@@ -306,11 +306,11 @@ func TestStatsSSESnapshotZeroesUptime(t *testing.T) {
 	// captured at New() time so we have to mutate via the deps struct.
 	srv.deps.StartedAt = time.Now().Add(-30 * time.Second)
 
-	full := srv.getStatsSnapshot()
+	full := srv.getStatsSnapshot(context.Background())
 	if full.UptimeSec == 0 {
 		t.Fatalf("getStatsSnapshot returned UptimeSec=0 with backdated StartedAt — test setup wrong")
 	}
-	sse := srv.getStatsSSESnapshot()
+	sse := srv.getStatsSSESnapshot(context.Background())
 	if sse.UptimeSec != 0 {
 		t.Errorf("getStatsSSESnapshot UptimeSec: got %d want 0", sse.UptimeSec)
 	}

@@ -85,19 +85,24 @@ func TestAControlIndexPastAUint32LeavesDoPUnverifiable(t *testing.T) {
 // the DoP rate whose gain cannot be verified converts, as the design's section
 // 3.2 has auto do wherever neither transport qualifies, which the player does
 // since B728's B11; only an explicit dop names dop_gain_unverifiable
-// (TestAMigratedDoPSetupWithUnverifiableGainRefuses).
+// (TestAMigratedDoPSetupWithUnverifiableGainRefuses). A known DAC plays native
+// wherever it is offered (B990), so its case offers none at the DoP rate; the
+// unknown DAC's, with no DAC list, counts as on a generic board, where only the
+// record's clean answers admit native.
 func TestANativeRateIsUnaffectedByAnUnverifiableDoPGain(t *testing.T) {
 	mixed := playbacktest.MigratedState(dsdstate.ModeAuto, true, []int{playbacktest.DSD64}, []int{playbacktest.DSD128})
 	for _, c := range []struct {
 		name      string
 		st        dsdstate.State
 		profiles  *dacprofile.Database
+		noNative  int
 		native    []int
 		converted []int
 	}{
-		{"a migrated mixed setup, a DAC the database knows", mixed, playbacktest.KnownProfiles(nil), []int{playbacktest.DSD64}, []int{playbacktest.DSD128}},
-		{"a migrated mixed setup, a DAC the database does not know", mixed, nil, []int{playbacktest.DSD64}, []int{playbacktest.DSD128}},
-		{"a migrated native setup", playbacktest.MigratedState(dsdstate.ModeNative, false, []int{playbacktest.DSD64, playbacktest.DSD128}, nil), nil,
+		{"a migrated mixed setup, a DAC the database knows", mixed, playbacktest.KnownProfiles(nil), playbacktest.DSD128,
+			[]int{playbacktest.DSD64, playbacktest.DSD256}, []int{playbacktest.DSD128}},
+		{"a migrated mixed setup, a DAC the database does not know", mixed, nil, 0, []int{playbacktest.DSD64}, []int{playbacktest.DSD128}},
+		{"a migrated native setup", playbacktest.MigratedState(dsdstate.ModeNative, false, []int{playbacktest.DSD64, playbacktest.DSD128}, nil), nil, 0,
 			[]int{playbacktest.DSD64, playbacktest.DSD128}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -107,6 +112,11 @@ func TestANativeRateIsUnaffectedByAnUnverifiableDoPGain(t *testing.T) {
 			box.SetUnit(5, unit)
 			box.SetControls(5, playbacktest.VolumeControls(255)...)
 			box.SetMixer(5, []byte("this is not the kernel's table"))
+			if c.noNative != 0 {
+				native := playbacktest.NativeAltset()
+				native.Rates = slices.DeleteFunc(native.Rates, func(r int) bool { return r == c.noNative/32 })
+				box.SetAltsets(5, 0, playbacktest.S32Altset(), playbacktest.S24Altset(), native)
+			}
 			b := policyBackend(t, box, playbacktest.NewMemStore(c.st), func(p *playback.DSDPolicy) { p.Profiles = c.profiles })
 			for _, rate := range c.native {
 				if plan, _, err := b.AdmitDSDForTest(dsdAt(rate), true); err != nil || plan.Tuple.Transport != "" {

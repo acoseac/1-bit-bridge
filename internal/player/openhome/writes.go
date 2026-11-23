@@ -417,7 +417,7 @@ func playlistInsert(wr writeRequest) ([][]byte, *faultReply) {
 // 605, any other shape 600, a host with a byte that is not ASCII among them),
 // naming a host the bridge advertises or binds and a port its tracks are
 // served on (Hosts: 600 otherwise), never a host that cannot name this
-// bridge to a controller on its LAN (lanHostRefused: 600), and a track id the
+// bridge to a controller on its LAN (LANHostRefused: 600), and a track id the
 // library serves now (Library: a track that is not the library's 600; no
 // answer, or a library that failed, 501). The host is compared in its
 // canonical form (trackref.CanonicalName, on the inventory's side too).
@@ -428,7 +428,7 @@ func (h *handler) confine(ctx context.Context, uri string) *faultReply {
 		return &faultReply{code: errStringTooLong}
 	case err != nil:
 		return &faultReply{code: errArgumentValueInvalid}
-	case lanHostRefused(u), h.hosts == nil || !h.hosts.Names(u):
+	case LANHostRefused(u), h.hosts == nil || !h.hosts.Names(u):
 		return &faultReply{code: errArgumentValueInvalid}
 	case h.library == nil:
 		return &faultReply{code: errActionFailed}
@@ -468,7 +468,7 @@ var (
 	tailnetV6 = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
 )
 
-// lanHostRefused reports whether u's host is one that cannot name this bridge
+// LANHostRefused reports whether u's host is one that cannot name this bridge
 // to a controller on its LAN, whatever the bridge advertises or binds: a
 // loopback, unspecified or multicast address, or localhost, which name the
 // controller's own host; a link-local one, refused outright in this release
@@ -476,8 +476,10 @@ var (
 // controller can know; a custom endpoint can carry one); and a tailnet's
 // address or name, which neither 1-bit derives (its BridgeDLNAURLResolver
 // takes an RFC 1918 address, else a host the DLNA listener can serve) nor the
-// DLNA listener serves (backlog B48).
-func lanHostRefused(u trackref.URI) bool {
+// DLNA listener serves (backlog B48). It is the one rule an Insert's URI and
+// a console queue entry's reference are held to (B634: the console writes
+// its entries on the first host an Insert would take).
+func LANHostRefused(u trackref.URI) bool {
 	if a := u.Addr; a.IsValid() {
 		return a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() || a.IsLinkLocalUnicast() ||
 			a.IsLinkLocalMulticast() || a.IsInterfaceLocalMulticast() || tailnetV4.Contains(a) || tailnetV6.Contains(a)
@@ -502,6 +504,12 @@ func metadataFault(meta []byte) *faultReply {
 	}
 	return nil
 }
+
+// MetadataTaken reports whether an Insert would take meta as an entry's
+// metadata (metadataFault): at most the engine's 64 KiB, and XML 1.0 text.
+// The console's queue entries are held to it before anything is changed
+// (B634), so an entry the console writes is one an Insert could have written.
+func MetadataTaken(meta []byte) bool { return metadataFault(meta) == nil }
 
 // xmlText reports whether b is UTF-8 whose every character is in XML 1.0's
 // Char production: tab, line feed, carriage return, U+0020 to U+D7FF, U+E000

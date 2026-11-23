@@ -708,11 +708,11 @@ export function cycleRepeat() {
 // is a listening preference and not a security decision, so this is not
 // a threat-model change — it is that the CSPRNG is available
 // unconditionally here and costs nothing, which makes the argument
-// moot rather than won. Verified: 127.0.0.1 is a
-// potentially-trustworthy origin, so isSecureContext is true even over
-// plain http on loopback, and public-mode admin is always behind TLS
-// (directly or via a terminating proxy). There is no configuration the
-// bridge permits where crypto is absent.
+// moot rather than won. crypto.getRandomValues is no secure-context
+// API: it is there on the console the bridge opens on the home network
+// (adminLANAddress, backlog B989), plain http on a private address that
+// is no secure context, as on loopback and behind TLS. What that page
+// lacks is crypto.subtle, which this does not use.
 //
 // Rejection sampling rather than a plain modulo: 2^32 is not a multiple
 // of most n, so `value % n` would bias the low indices. The discarded

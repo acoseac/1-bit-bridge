@@ -217,11 +217,20 @@ func (s tailscaleAdminSource) displayConfigPath() string {
 const adminStatusTimeout = 5 * time.Second
 
 func (s tailscaleAdminSource) Status() admin.TailscaleStatus {
+	return s.StatusContext(context.Background())
+}
+
+// StatusContext is Status on its caller's context, which the console's
+// reads hand it (an event stream's ends at its home-network socket's
+// retirement and at the shutdown, backlog B989): the embedded node's
+// status waits on ctx, bounded by adminStatusTimeout as before; the CLI
+// auto-pilot's is its snapshot, which waits on nothing.
+func (s tailscaleAdminSource) StatusContext(ctx context.Context) admin.TailscaleStatus {
 	if s.cli != nil {
 		return s.stamp(toAdminStatus(s.cli.Snapshot()))
 	}
 	if s.tsnet != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), adminStatusTimeout)
+		ctx, cancel := context.WithTimeout(ctx, adminStatusTimeout)
 		defer cancel()
 		return s.stamp(tsnetAdminStatus(ctx, s.tsnet))
 	}

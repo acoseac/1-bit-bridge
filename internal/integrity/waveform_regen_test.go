@@ -242,12 +242,54 @@ type guardHarness struct {
 	admits []string
 }
 
-func newGuardHarness(t *testing.T, c *waveformCatalog) *guardHarness {
+// listHold holds a guard's judgment in its List, before the catalog is
+// returned, until the test releases it: a judgment under way is then a state
+// a test can ask in, where one left to run can be recorded before the test's
+// next step (backlog B988). The judgment waits outside the Once that marks it
+// entered, and the release has a Once of its own, so a cleanup that lets it
+// go waits on nothing the judgment holds.
+type listHold struct {
+	entered, released    chan struct{}
+	enterOnce, leaveOnce sync.Once
+}
+
+func newListHold() *listHold {
+	return &listHold{entered: make(chan struct{}), released: make(chan struct{})}
+}
+
+// wait is the hold, on the judgment's goroutine; once released, it holds no
+// judgment.
+func (l *listHold) wait() {
+	l.enterOnce.Do(func() { close(l.entered) })
+	<-l.released
+}
+
+func (l *listHold) release() { l.leaveOnce.Do(func() { close(l.released) }) }
+
+// waitEntered waits, until the test's deadline, for a judgment to reach the
+// hold.
+func (l *listHold) waitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-l.entered:
+	case <-time.After(time.Minute):
+		t.Fatal("no judgment reached its List")
+	}
+}
+
+// newGuardHarness runs the guard over c. With a hold, each judgment waits in
+// its List until the hold is released; nil lets each go at once.
+func newGuardHarness(t *testing.T, c *waveformCatalog, hold *listHold) *guardHarness {
 	t.Helper()
 	h := &guardHarness{clock: &fakeClock{now: time.Unix(1_800_000_000, 0)}, judged: make(chan WaveformJudgment, 16)}
 	h.g = NewWaveformRegenGuard(context.Background(), WaveformRegenConfig{
-		List: func(context.Context) ([]WaveformSnapshot, error) { return c.rows, nil },
-		Dir:  func() string { return c.dir },
+		List: func(context.Context) ([]WaveformSnapshot, error) {
+			if hold != nil {
+				hold.wait()
+			}
+			return c.rows, nil
+		},
+		Dir: func() string { return c.dir },
 		Admit: func(p, _ string, id os.FileInfo) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -261,6 +303,13 @@ func newGuardHarness(t *testing.T, c *waveformCatalog) *guardHarness {
 		OnJudged:          func(j WaveformJudgment) { h.judged <- j },
 	})
 	t.Cleanup(h.g.Close)
+	if hold != nil {
+		// After Close, so it runs first: a case that ends with its judgment
+		// held lets it go before Close cancels and joins it, where Close
+		// alone would give up on it once its grace ran out and leave it
+		// parked.
+		t.Cleanup(hold.release)
+	}
 	return h
 }
 
@@ -291,21 +340,27 @@ func (h *guardHarness) waitAdmitted(t *testing.T, n int) []string {
 }
 
 // TestTheGuardJudgesBeforeTheFirstRegenerationAndThenOnceAnInterval: the
-// first ask starts a judgment and is answered when it admits; asks while one
-// stands are answered from it, never judged again; a curve gone after the
-// judgment waits for the next one, which comes only once the interval has
-// passed.
+// first ask starts a judgment, and an ask while it runs (held in its List
+// until the test lets it go) waits for it, both answered when it admits; asks
+// while one stands are answered from it, never judged again; a curve gone
+// after the judgment waits for the next one, which comes only once the
+// interval has passed.
 func TestTheGuardJudgesBeforeTheFirstRegenerationAndThenOnceAnInterval(t *testing.T) {
 	c := newWaveformCatalog(t, 4)
 	c.remove(t, 1)
-	h := newGuardHarness(t, c)
+	hold := newListHold()
+	h := newGuardHarness(t, c, hold)
 
 	if a := h.g.Ask(c.rows[0].SourcePath); a.Kind != WaveformJudging {
 		t.Fatalf("first ask: %v, want a judgment started", a.Kind)
 	}
+	// Held, the judgment is still under way at the next ask: let go, it can be
+	// recorded first, and that ask is then answered from it (backlog B988).
+	hold.waitEntered(t)
 	if a := h.g.Ask(c.rows[0].SourcePath); a.Kind != WaveformJudging {
 		t.Fatalf("an ask while judging: %v, want it to wait for the judgment", a.Kind)
 	}
+	hold.release()
 	if j := h.waitJudged(t); !j.Admits() {
 		t.Fatalf("judgment %+v, want admitted", j)
 	}
@@ -335,12 +390,47 @@ func TestTheGuardJudgesBeforeTheFirstRegenerationAndThenOnceAnInterval(t *testin
 	}
 }
 
+// TestACaseEndingWhileItsJudgmentIsHeldLetsItGo: a case that ends with its
+// judgment held in its List, as a failure ends one, lets the judgment go in
+// its cleanup before the guard's Close, which then joins it within its
+// grace: the cleanup takes less than that grace, and the judgment has ended
+// once the case has (backlog B988).
+func TestACaseEndingWhileItsJudgmentIsHeldLetsItGo(t *testing.T) {
+	c := newWaveformCatalog(t, 4)
+	c.remove(t, 1)
+	var g *WaveformRegenGuard
+	var ending, ended time.Time
+	if !t.Run("held", func(t *testing.T) {
+		t.Cleanup(func() { ended = time.Now() }) // the last cleanup, after the guard's Close
+		hold := newListHold()
+		h := newGuardHarness(t, c, hold)
+		g = h.g
+		if a := h.g.Ask(c.rows[0].SourcePath); a.Kind != WaveformJudging {
+			t.Fatalf("first ask: %v, want a judgment started", a.Kind)
+		}
+		hold.waitEntered(t)
+		ending = time.Now()
+	}) {
+		return
+	}
+	if took := ended.Sub(ending); took >= stopGrace {
+		t.Errorf("the case's cleanup took %v, the guard's grace is %v: Close gave up on the held judgment", took, stopGrace)
+	}
+	joined := make(chan struct{})
+	go func() { g.Wait(); close(joined) }()
+	select {
+	case <-joined:
+	case <-time.After(time.Minute):
+		t.Fatal("the held judgment is still parked after its case ended")
+	}
+}
+
 // TestTheGuardsRefusalStandsForItsInterval: a judgment that refuses is the
 // answer to every ask until the interval has passed, and admits nothing.
 func TestTheGuardsRefusalStandsForItsInterval(t *testing.T) {
 	c := newWaveformCatalog(t, 1)
 	c.remove(t, 1)
-	h := newGuardHarness(t, c)
+	h := newGuardHarness(t, c, nil)
 	h.g.Ask(c.rows[0].SourcePath)
 	if j := h.waitJudged(t); j.Refusal != WaveformRefusalDirAway {
 		t.Fatalf("judgment %+v, want the last curve's deletion refused", j)

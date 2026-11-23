@@ -58,18 +58,8 @@
           "options": [
             {
               "mode": "native",
-              "offered": true,
-              "rates": [
-                {
-                  "bitRate": 2822400
-                },
-                {
-                  "bitRate": 5644800
-                },
-                {
-                  "bitRate": 11289600
-                }
-              ]
+              "offered": false,
+              "rates": []
             },
             {
               "mode": "dop",
