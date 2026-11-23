@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
@@ -291,6 +292,13 @@ type Server struct {
 	tailscaleStatusMu      sync.Mutex
 	tailscaleStatusCache   admin.TailscaleStatus
 	tailscaleStatusFetched time.Time
+
+	// tailscaleStatusWaits, when set, is told each time a read of the
+	// cached status finds tailscaleStatusMu held by another caller's read
+	// and is about to wait for it (lockTailscaleStatus). Tests only: nil
+	// in production. An atomic pointer, so a test may set it while the
+	// server serves (OnTailscaleStatusWaitForTest).
+	tailscaleStatusWaits atomic.Pointer[func()]
 }
 
 // ConfigHolder exposes the API server's live runtime-config holder so
@@ -1305,7 +1313,7 @@ const tailscaleStatusTTL = 5 * time.Second
 // "Running" && MagicDNSName != ""` so the zero value is safe to use
 // without an explicit nil check at the call site.
 func (s *Server) cachedTailscaleStatus() admin.TailscaleStatus {
-	s.tailscaleStatusMu.Lock()
+	s.lockTailscaleStatus()
 	defer s.tailscaleStatusMu.Unlock()
 	if s.tailscaleStatus == nil {
 		return admin.TailscaleStatus{}
@@ -1317,6 +1325,34 @@ func (s *Server) cachedTailscaleStatus() admin.TailscaleStatus {
 	s.tailscaleStatusCache = s.tailscaleStatus.Status()
 	s.tailscaleStatusFetched = time.Now()
 	return s.tailscaleStatusCache
+}
+
+// lockTailscaleStatus takes tailscaleStatusMu for cachedTailscaleStatus. A
+// test that holds one read of the status is told, through
+// OnTailscaleStatusWaitForTest, that another read found the lock held and
+// waits behind it; a lock found free tells it nothing. With no hook, as in
+// production, it is tailscaleStatusMu.Lock.
+func (s *Server) lockTailscaleStatus() {
+	if waits := s.tailscaleStatusWaits.Load(); waits != nil {
+		if s.tailscaleStatusMu.TryLock() {
+			return
+		}
+		(*waits)()
+	}
+	s.tailscaleStatusMu.Lock()
+}
+
+// OnTailscaleStatusWaitForTest has f told each time a read of the cached
+// Tailscale status finds another caller's read under way and waits behind it,
+// at the status cache's lock (cachedTailscaleStatus): the one place such a
+// read waits, which a console request waiting for its endpoint list reaches
+// through ReachableEndpoints. A nil f tells nothing. Tests only.
+func (s *Server) OnTailscaleStatusWaitForTest(f func()) {
+	if f == nil {
+		s.tailscaleStatusWaits.Store(nil)
+		return
+	}
+	s.tailscaleStatusWaits.Store(&f)
 }
 
 // EnableSyncEvents advertises syncEvents and is the serve-side statement
