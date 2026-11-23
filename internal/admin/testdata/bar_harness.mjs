@@ -1157,7 +1157,8 @@ S.TestARefusalBeforeAdmissionEndsTheSwitchToTheBridge = async () => {
     r.s.on("GET", ROUTES.operation, async (e) => readBackOf(e, { kind: "replace", status: "running" }));
     await r.out.pick("bridge");
     await settle();
-    check(`${k.name}: unconfirmed, read back, nothing resumed`, r.v().phase === PHASE.unconfirmed && r.s.gets(ROUTES.operation).length >= 1 && !r.b.calls.includes("resume"), [r.v().phase, r.s.gets(ROUTES.operation).length, r.b.calls]);
+    check(`${k.name}: unconfirmed on the bridge, read back, no barrier, nothing resumed`, r.v().output === "bridge" && r.v().phase === PHASE.unconfirmed && r.s.gets(ROUTES.operation).length >= 1 &&
+      r.s.posts(ROUTES.switchOut).length === 0 && !r.b.calls.includes("resume"), [r.v().output, r.v().phase, r.s.gets(ROUTES.operation).length, r.s.posts(), r.b.calls]);
   }
 };
 
