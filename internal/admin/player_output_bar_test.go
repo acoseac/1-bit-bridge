@@ -465,6 +465,12 @@ func TestEveryEndOfABarrierFreesTheNextStart(t *testing.T) { barScenario(t, 7) }
 // done with its handover and move nothing, the phase not held for it.
 func TestAReloadKeepsANewerPicksSupersession(t *testing.T) { barScenario(t, 6) }
 
+// TestABarrierRefusedForNoPlayerLetsItsStartGoOn pins round 3's check of a
+// gated start a refusal drops: a barrier refused because no player is
+// offered lets its start go on in this browser, as a start goes where none
+// is offered.
+func TestABarrierRefusedForNoPlayerLetsItsStartGoOn(t *testing.T) { barScenario(t, 2) }
+
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start
 // on the barrier's done, and the skip moves nothing of it.

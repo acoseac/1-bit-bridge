@@ -2156,6 +2156,23 @@ S.TestAReloadKeepsANewerPicksSupersession = async () => {
   }
 };
 
+S.TestABarrierRefusedForNoPlayerLetsItsStartGoOn = async () => {
+  // A barrier refused with a not-offered word (the console's player taken
+  // away meanwhile): no player is offered, so the start it held goes on in
+  // this browser, as a start does where none is offered, and as a refused
+  // switch to the bridge's resume already does.
+  const r = await started2({ latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async () => refusal("player_not_offered", null, 409, "this bridge offers no player of its own"));
+  let ran = 0;
+  const permits = [];
+  r.out.gateStart((p) => { ran += 1; permits.push(p); });
+  await settle();
+  check("refused for no player: the start goes on in this browser, with no permit to ask", ran === 1 && permits[0] === null && r.v().notOffered, [ran, permits, r.v().notOffered]);
+  r.out.gateStart(() => { ran += 1; });
+  await settle();
+  check("and the next start goes on at once, nothing sent", ran === 2 && r.s.posts(ROUTES.switchOut).length === 1, [ran, r.s.posts(ROUTES.switchOut).length]);
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });

@@ -1079,10 +1079,14 @@ export function createOutput(env) {
           line = words || WORDS.startAgain;
         }
       },
-      // Refused before it ran: nothing starts, the refusal's line said (R2).
+      // Refused before it ran: nothing starts, the refusal's line said (R2);
+      // but refused for no player, none is offered, and the start goes on in
+      // this browser as a start does where none is (round 3).
       refused(ans, words, mine) {
         release();
-        if (mine) phase = PHASE.browser;
+        if (!mine) return;
+        phase = PHASE.browser;
+        if (NOT_OFFERED.has(ans.error)) start(null);
       },
     });
   }
