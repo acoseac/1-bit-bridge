@@ -536,3 +536,53 @@ func TestAPlanBetweenItsOpeningAndItsFirstAttemptSaysTheBridgeIsStarting(t *test
 		}
 	})
 }
+
+// TestThePlansLoopTakesNoTickBeforeItsFirstAttempt: a plan opened, the
+// console serving and the plan's loop started, its first attempt not yet
+// made (serve's mDNS start lies between): the loop takes no tick, so nothing
+// binds before the first attempt, and once it is made the loop takes its
+// ticks, reading the first attempt's socket again and binding no second.
+func TestThePlansLoopTakesNoTickBeforeItsFirstAttempt(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	box := newLANBox(t)
+	tick := make(chan time.Time)
+	ticked := make(chan struct{}, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	srv.PrepareConsoleLAN(ctx, testLANPlan(box, tick, &ConsoleLANSeams{Ticked: func() { ticked <- struct{}{} }}))
+	loop, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.ServeListener(ctx, loop) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-served:
+		case <-time.After(socketWait):
+			t.Errorf("the console did not stop within %v", socketWait)
+		}
+	})
+	select {
+	case tick <- time.Now():
+		t.Fatalf("the loop took a tick before the plan's first attempt (%d binds)", box.count())
+	case <-time.After(300 * time.Millisecond):
+	}
+	if st := srv.BeginConsoleLAN(ctx); st.State != ConsoleLANListening || box.count() != 1 {
+		t.Fatalf("the first attempt left %+v with %d binds, want listening on one", st, box.count())
+	}
+	select {
+	case tick <- time.Now():
+	case <-time.After(socketWait):
+		t.Fatal("the loop took no tick after the plan's first attempt")
+	}
+	select {
+	case <-ticked:
+	case <-time.After(socketWait):
+		t.Fatal("the loop did not finish its tick")
+	}
+	if n := box.count(); n != 1 {
+		t.Fatalf("%d binds once the first attempt and a tick had run, want the first attempt's alone", n)
+	}
+}
