@@ -541,10 +541,12 @@ v6.12, as B990 read it), while `profiles.json`'s `sharedReferenceIds` names `20b
 board, and under `auto` it plays native DSD wherever the kernel offers it. If its firmware offers
 DSD in front of a PCM-only chip, what plays is noise. In `decide` and `nativeOffered`
 (`internal/player/policy/policy.go`), these keep native off such a unit at a rate: the DAC's mode
-set to `convert` or `off`; a cap below the rate; a listener's latest answer for native at the rate,
-under the unit's firmware, that is `noise` or `nothing`, which the listening check (B12, bridge
-0.2.5) records; the probe refusing every native format the kernel lists at the rate; or the unit's
-IDs among `sharedReferenceIds`. Neither that list nor the policy changes for it.
+set to `dop`, `convert` or `off`; a cap below the rate; a listener's latest answer for native at the
+rate, under the unit's firmware, that is `noise` or `nothing`, which the listening check (B12,
+bridge 0.2.5) records; the probe refusing every native format the kernel lists at the rate; or the
+unit counting as a generic board's, its IDs among `sharedReferenceIds` or no profile database
+reading at all, while no listener's latest answer for native at the rate under its firmware is
+`clean`. Neither that list nor the policy changes for it.
 
 ### 3.3 Above the effective maximum
 
