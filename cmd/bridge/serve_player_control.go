@@ -1923,6 +1923,8 @@ func handoverOf(s *engine.Snapshot, playing bool) *admin.PlayerHandover {
 // nothing, and a player that never ran one is silent; a closed engine is
 // silent only once serve's player has said no session holds the device,
 // which it waits for within the bound, refusing release_unconfirmed past it.
+// Its operation ended meanwhile (a newer one, the request's end) is
+// cancelled, and the control's stop ends it unknown.
 func (c *consoleControl) silenceWithoutEngine(o *operation, why string, take bool, deadline time.Time) {
 	for why == reasonClosed {
 		if f, ok := c.p.closedEngine(); ok {
@@ -1943,9 +1945,17 @@ func (c *consoleControl) silenceWithoutEngine(o *operation, why string, take boo
 		select {
 		case <-c.p.closedKnown:
 		case <-t.C:
+		case <-o.endCh:
 		case <-c.quit:
+			t.Stop()
+			o.finishAs(admin.PlayerOpUnknown, "")
+			return
 		}
 		t.Stop()
+		if o.endedNow() {
+			o.finishAs(admin.PlayerOpCancelled, "")
+			return
+		}
 	}
 	o.finish(func(cap *capture) (string, string) {
 		if !silentOf(cap) {

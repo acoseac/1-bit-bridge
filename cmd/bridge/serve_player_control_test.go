@@ -1911,6 +1911,38 @@ func TestAClosedEngineIsSilentOnlyOnceItsSessionsWereLetGo(t *testing.T) {
 	}
 }
 
+// TestASwitchOutWaitingForAClosedEnginesFactsHearsItsEnd pins the closed
+// engine's wait (§3.1): a switch-out waiting for the facts of an engine that
+// closed is ended by a newer operation, cancelled, and the newer one is
+// answered before the facts are known; the control's stop ends the wait,
+// the switch-out's record final once the stop has joined it.
+func TestASwitchOutWaitingForAClosedEnginesFactsHearsItsEnd(t *testing.T) {
+	start := func(t *testing.T) (*ctlRig, chan admin.PlayerAnswer) {
+		r := newCtlRig(t, ctlOptions{seams: &controlSeams{barrier: 30 * time.Second, handlerWait: 2 * time.Second}})
+		wantRecord(t, "a replace", r.replace(r.paths(), 0, 0, true), admin.PlayerOpDone, "", "")
+		r.stopEngine()
+		t.Cleanup(func() { r.p.noteClosed(playerClosedFacts{Ended: true}) })
+		first := make(chan admin.PlayerAnswer, 1)
+		go func() { first <- r.switchOut(true) }()
+		waitEnded(t, r.c, opKindSwitchOut)
+		return r, first
+	}
+	t.Run("a newer operation", func(t *testing.T) {
+		r, first := start(t)
+		wantRecord(t, "a pause sent while the switch-out waits for the facts", r.command(admin.PlayerCmdPause, nil), admin.PlayerOpRefused,
+			wordNotRunning, admin.PlayerEffectNone)
+		wantRecord(t, "the switch-out a newer operation ended", <-first, admin.PlayerOpCancelled, "", "")
+	})
+	t.Run("the control's stop", func(t *testing.T) {
+		r, first := start(t)
+		r.c.stop()
+		if rec := r.c.recordOf(r.tab); rec.Kind != opKindSwitchOut || rec.Status == admin.PlayerOpRunning {
+			t.Fatalf("the switch-out once the control stopped: %s %s, want it ended", rec.Kind, rec.Status)
+		}
+		<-first
+	})
+}
+
 // TestTheTrackURIAndTheArtworkURLAreBuiltApart pins E8: with the DLNA
 // listener on another port than 7790, an entry's reference and its <res> are
 // on 7790 and its albumArtURI on the listener's port.
