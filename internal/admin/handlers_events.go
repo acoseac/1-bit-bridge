@@ -248,6 +248,37 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		return marshalAndPublish("upnpwalk", snap, &lastUPnPWalk)
 	}
 
+	// player is the bridge's own player's state (B634): sent when the latest
+	// publication's revision, or its epoch, differs from the last this
+	// connection sent, its bytes the publication's, encoded once by the
+	// publisher, so steady playback, which publishes nothing, sends nothing.
+	// A connection's first frame is the latest publication. Only where a
+	// control is wired and the bridge offers its player (controlRefusal):
+	// a bridge whose player is off, that is not Linux or that is public
+	// sends none, and the bar plays in the browser as it always has.
+	// playerWake is taken before the latest is read, so a publication in
+	// between wakes the loop; nil (never ready) where no player is offered.
+	var (
+		playerWake      <-chan struct{}
+		lastPlayerRev   uint64
+		lastPlayerEpoch string
+	)
+	publishPlayer := func() error {
+		c := s.deps.PlayerControl
+		playerWake = c.Wake()
+		pub, ok := c.Latest()
+		if !ok || (pub.Revision == lastPlayerRev && pub.Epoch == lastPlayerEpoch) {
+			return nil
+		}
+		lastPlayerRev, lastPlayerEpoch = pub.Revision, pub.Epoch
+		return publish("player", pub.Bytes)
+	}
+	if s.playerControlOffered() {
+		if err := publishPlayer(); err != nil {
+			return
+		}
+	}
+
 	// Initial snapshot — fires synchronously after headers so the
 	// page hydrates on connect without waiting for the first tick.
 	// Without this the dashboard would rely on its server-rendered
@@ -294,6 +325,10 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-playerWake:
+			if err := publishPlayer(); err != nil {
+				return
+			}
 		case <-fastTk.C:
 			scanning := s.deps.Scanner.IsScanning()
 			if scanning || wasScanning {

@@ -3292,6 +3292,9 @@ type serveOpts struct {
 	// production.
 	playerSeams  *servePlayerSeams
 	playerBounds servePlayerBounds
+	// playerControlSeams are a boot test's holds on the console's control of
+	// the player (B634); nil in production.
+	playerControlSeams *controlSeams
 	// playerOpenHome is a boot test's box for the player's OpenHome
 	// surface (its addresses and listeners) and its hold on it; the zero
 	// value is production's. Per invocation for tailscaleCLI's reason.
@@ -5271,6 +5274,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// started below.
 	playerHosts, playerHostsDLNA := newPlayerHosts(apiSrv.HealthEndpoints, cfg)
 	var player *bridgePlayer
+	// The console's control of the player (B634), built below over the same
+	// player: joined once the player has stopped, so every step an operation
+	// waits on has its answer, and before the store closes.
+	var playerControl *consoleControl
 	discoveryStopped := false
 	// Cover an early return before the DLNA teardown is registered. The
 	// full teardown below runs before upstream resolution is stopped.
@@ -5279,6 +5286,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			player.closeTones()
 			player.refuseOpenHome(context.Background())
 			player.stop()
+			if playerControl != nil {
+				playerControl.stop()
+			}
 		}
 	}()
 	player = startServePlayer(playerPlan, servePlayerWiring{
@@ -5324,6 +5334,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		Plan: playerPlan, Player: player, View: playerView, Boot: cfg,
 		GOOS: opts.playerGOOS, LockHeld: lockErr == nil, StateErr: playerStateErr,
 		Trees: opts.playerTrees, Store: manifestStore,
+	})
+	// The console's player bar drives the same player through its control
+	// (B634): operations run one at a time, every state ordered by one
+	// publisher's revision, the engine's queue edited as every OpenHome
+	// controller edits it, a console entry's reference on the first host an
+	// Insert would take (playerHosts).
+	playerControl = newConsoleControl(consoleControlWiring{
+		Plan: playerPlan, Player: player, View: playerConsole, Boot: cfg,
+		Live: cfgHolder.Load, Watch: cfgHolder.Changed, Store: manifestStore,
+		Hosts: playerHosts, GOOS: opts.playerGOOS, Seams: opts.playerControlSeams,
 	})
 	// The console's doctor checks the serving process's own access to the
 	// player's DAC node (B676), and says when the config names another DAC
@@ -5394,6 +5414,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	dlnaOwner := dlnaLC
 	if dlnaLC != nil && dlnaLC.server != nil {
 		playerHostsDLNA(dlnaLC.server)
+		playerControl.setDLNA(dlnaLC.server)
 	}
 	defer func() {
 		discoveryStopped = true
@@ -5428,6 +5449,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		}
 		if player != nil {
 			player.stop()
+		}
+		if playerControl != nil {
+			playerControl.stop()
 		}
 	}()
 	apiSrv.WithDLNA(dlnaEnabled)
@@ -6682,6 +6706,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		DoctorRun:             adminDoctorRunnerFor(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc), doctorDAC, hostLogs()),
 		OutputChecklist:       consoleOutputChecklist(checklistSrc),
 		PlayerOutput:          playerConsole,
+		PlayerControl:         playerControl,
 		AnalysisSweep:         analysisSweepClosure(analysisSweepState),
 		TriggerAnalysisSweep:  nudgeTriggerClosure(analysisNudge),
 		AnalysisSchemaVersion: analyze.WaveformSchemaVersion,

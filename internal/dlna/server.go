@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -506,7 +507,8 @@ func (s *Server) Start(ctx context.Context) error {
 	s.warnIfPinnedOffTheLAN(bound.Addr())
 	s.warnOfAPublicPin()
 	var listener net.Listener = servedOnlyListener{Listener: bound, served: s.served, log: s.log}
-	s.accepting.Store(&acceptState{served: s.served, bound: netAddrIP(bound.Addr()).Unmap()})
+	s.accepting.Store(&acceptState{served: s.served, bound: netAddrIP(bound.Addr()).Unmap(),
+		port: netAddrPort(bound.Addr()), artwork: s.cfg.Artwork != nil, base: s.serverURLFunc(bound.Addr())})
 	s.httpServer.Handler = s.handlerOn(bound.Addr())
 
 	// Run HTTP server in a goroutine. Serve() blocks until Shutdown()
@@ -641,10 +643,44 @@ func (s *Server) mediaServerRegistration(endpoints []AdvertiseEndpoint) SSDPRegi
 }
 
 // acceptState is the listener AcceptsOn answers for: the addresses it serves
-// and the address it is bound to, the unspecified address for a wildcard.
+// and the address it is bound to, the unspecified address for a wildcard; and
+// what ArtworkBase answers from: the port it bound, whether it mounts the
+// artwork route, and the base its own ContentDirectory builds a specifically
+// bound listener's URLs on (serverURLFunc).
 type acceptState struct {
-	served *servedAddrs
-	bound  netip.Addr
+	served  *servedAddrs
+	bound   netip.Addr
+	port    int
+	artwork bool
+	base    func(*http.Request) string
+}
+
+// netAddrPort is a's TCP port, 0 for an address that has none.
+func netAddrPort(a net.Addr) int {
+	if t, ok := a.(*net.TCPAddr); ok {
+		return t.Port
+	}
+	return 0
+}
+
+// ArtworkBase is the base an albumArtURI naming host is built on, from the
+// listener's own state (B634): while the listener runs, mounts its artwork
+// route (ServerConfig.Artwork) and takes connections on host (AcceptsOn), the
+// listener's own endpoint on host, on the port it bound; a listener bound to
+// one address gives that address's base, as its own ContentDirectory builds
+// it. False otherwise: before Start, once Stop begins, with no artwork route,
+// and for a host the listener takes no connection on, where an albumArtURI
+// would send a controller to a closed port or a refusal.
+func (s *Server) ArtworkBase(host netip.Addr) (string, bool) {
+	st := s.accepting.Load()
+	if st == nil || !st.artwork || st.port == 0 || !s.AcceptsOn(host) {
+		return "", false
+	}
+	if !st.bound.IsUnspecified() {
+		return st.base(nil), true
+	}
+	h := host.Unmap().WithZone("")
+	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(h.String(), strconv.Itoa(st.port))}).String(), true
 }
 
 // AcceptsOn reports whether the DLNA listener takes a connection on the

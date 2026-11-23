@@ -106,9 +106,27 @@ type DIDLTrackOpts struct {
 	// source-only (the common case).
 	Variants []VariantInfo
 
+	// Resources is which <res> elements the item carries (B634): the
+	// source's and the variants' (the zero value, Browse's), the source's
+	// alone, or none.
+	Resources DIDLResources
+
 	ServerURL string // base URL for constructing the absolute file URL
 	UserAgent string // for per-vendor MIME selection
 }
+
+// DIDLResources is which <res> elements an item carries.
+type DIDLResources int
+
+// The resource sets. ResSourceAndVariants is the zero value, what Browse and
+// Search write; the console's queue entries write the source's alone (a
+// rendition never stands in for the source), and, on a box with no LAN host,
+// none, so no URL in an entry sends a controller to a host it cannot reach.
+const (
+	ResSourceAndVariants DIDLResources = iota
+	ResSourceOnly
+	ResNone
+)
 
 // DIDLContainerOpts is the input DTO for `DIDLForContainer`. Containers
 // are the hierarchical browse nodes (Music / Artists / Albums / Tracks).
@@ -279,19 +297,23 @@ func DIDLForTrack(opts DIDLTrackOpts) string {
 	}
 	// The <res> element — text content is the file URL with NO
 	// surrounding whitespace (load-bearing per Phase 0 finding).
-	sb.WriteString(`<res `)
-	sb.WriteString(strings.Join(resAttrs, " "))
-	sb.WriteString(`>`)
-	sb.WriteString(escapeXMLText(fileURL))
-	sb.WriteString(`</res>`)
+	if opts.Resources != ResNone {
+		sb.WriteString(`<res `)
+		sb.WriteString(strings.Join(resAttrs, " "))
+		sb.WriteString(`>`)
+		sb.WriteString(escapeXMLText(fileURL))
+		sb.WriteString(`</res>`)
+	}
 
 	// Additional <res> elements for offline-cached variants, AFTER the
 	// source <res> so the bit-exact original stays the default pick.
 	// Ordered optimized → upscaled so a picky / entry-level renderer that
 	// rejects a hi-res or DSD source finds the broadly-playable 16-bit
 	// FLAC option immediately next.
-	for _, v := range orderedVariants(opts.Variants) {
-		sb.WriteString(variantResElement(opts, v))
+	if opts.Resources == ResSourceAndVariants {
+		for _, v := range orderedVariants(opts.Variants) {
+			sb.WriteString(variantResElement(opts, v))
+		}
 	}
 
 	sb.WriteString(`</item>`)
