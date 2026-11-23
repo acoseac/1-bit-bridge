@@ -931,12 +931,17 @@ func TestTheTransportTakesRepeatAllAlone(t *testing.T) {
 // TestShuffleIsNoControlOp pins R10: there is no shuffle command, and the
 // engine's shuffle stays off whatever the console sends.
 func TestShuffleIsNoControlOp(t *testing.T) {
-	if slices.Contains(admin.PlayerCommands(), "shuffle") {
-		t.Fatal("shuffle is a control command")
+	want := []string{admin.PlayerCmdPlay, admin.PlayerCmdPause, admin.PlayerCmdStop, admin.PlayerCmdNext, admin.PlayerCmdPrevious,
+		admin.PlayerCmdIndex, admin.PlayerCmdSeek, admin.PlayerCmdRepeat}
+	if got := admin.PlayerCommands(); !slices.Equal(got, want) || slices.Contains(got, "shuffle") {
+		t.Fatalf("the transport's commands %v, want %v and no shuffle", got, want)
 	}
 	r := newCtlRig(t, ctlOptions{})
-	_, call := transportCall(r.eng, admin.PlayerCommand{Command: "shuffle"}, nil)
-	_ = call
+	wantRecord(t, "a replace that plays", r.replace(r.paths(), 0, 0, true), admin.PlayerOpDone, "", "")
+	st := stateOf(t, r.c.Now(context.Background()))
+	if !slices.Contains(st.Commands, admin.PlayerCmdRepeat) || slices.Contains(st.Commands, "shuffle") {
+		t.Fatalf("the state offers %v, want repeat and no shuffle", st.Commands)
+	}
 	if r.eng.Snapshot().Shuffle() {
 		t.Fatal("the engine shuffles")
 	}
@@ -1706,7 +1711,10 @@ func TestNoArtworkURLOnAHostTheDLNAListenerDoesNotServe(t *testing.T) {
 	r := newCtlRig(t, ctlOptions{dlna: fixedArtwork{base: "http://10.0.0.9:7790", host: "10.0.0.9"}})
 	_ = r.store.UpsertTrack(context.Background(), &manifest.Track{Path: r.paths()[0], Title: "A", Codec: "FLAC", ArtworkMBID: "11111111-2222-4333-8444-555555555555"})
 	row := manifest.CatalogTrackRow{Path: r.paths()[0], Codec: "FLAC"}
-	e, _ := r.c.entryFor(context.Background(), r.paths()[0], dlna.TrackID("", r.paths()[0]), row, r.c.referenceHost())
+	e, word := r.c.entryFor(context.Background(), r.paths()[0], dlna.TrackID("", r.paths()[0]), row, r.c.referenceHost())
+	if word != "" || !strings.Contains(string(e.meta), "<dc:title>A</dc:title>") || !strings.Contains(string(e.meta), "<res ") {
+		t.Fatalf("the entry's metadata (%q): %s, want the ContentDirectory's item with its <res>", word, e.meta)
+	}
 	if strings.Contains(string(e.meta), "albumArtURI") {
 		t.Fatalf("an albumArtURI on a host the listener does not serve: %s", e.meta)
 	}
