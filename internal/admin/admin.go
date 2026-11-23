@@ -517,6 +517,12 @@ type Deps struct {
 	// wired here, and every route of it refusing.
 	PlayerOutput PlayerOutput
 
+	// PlayerControl is the bridge's own player as the console's player bar
+	// drives it (B634, handlers_player_control.go): cmd/bridge implements it
+	// over serve's player. Nil leaves every control route refusing
+	// (player_not_wired) and the event stream sending no player frame.
+	PlayerControl PlayerControl
+
 	// AnalysisSweep returns the serve-side auto-analysis sweeper's
 	// lifecycle snapshot (running / last sweep timestamps + counts /
 	// next due). Ephemeral "since process start" state recorded by
@@ -2036,6 +2042,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/output/player/openhome", s.apiPlayerOutputOpenHome)
 	mux.HandleFunc("POST /api/output/player/dac", s.apiPlayerOutputDAC)
 	mux.HandleFunc("POST /api/output/player/tone", s.apiPlayerOutputTone)
+	// The player bar's control of the bridge's own player (B634,
+	// handlers_player_control.go): operations run one at a time on the
+	// server, each with a record a tab reads back, every state ordered by
+	// the publisher's revision. They write no config and take no lock of the
+	// console's or bridge.yaml's; each refuses where no player is offered.
+	mux.HandleFunc("GET /api/output/player/now", s.apiPlayerControlNow)
+	mux.HandleFunc("GET /api/output/player/queue", s.apiPlayerControlQueue)
+	mux.HandleFunc("GET /api/output/player/operation", s.apiPlayerControlOperation)
+	mux.HandleFunc("POST /api/output/player/queue", s.apiPlayerControlReplace)
+	mux.HandleFunc("POST /api/output/player/queue/append", s.apiPlayerControlAppend)
+	mux.HandleFunc("POST /api/output/player/queue/delete", s.apiPlayerControlDelete)
+	mux.HandleFunc("POST /api/output/player/transport", s.apiPlayerControlTransport)
+	mux.HandleFunc("POST /api/output/player/switch-out", s.apiPlayerControlSwitchOut)
 	// Log export. All GET: reads, not mutations, so csrfGuard passes them
 	// through as it does every other read on this listener. The exports are
 	// downloads rather than JSON a cross-origin page could read back.

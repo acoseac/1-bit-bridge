@@ -54,6 +54,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `dlnaArtwork` in `/v1/health` is AND-gated (`dlnaEnabled && artworkDirs`),
   and iOS must gate its own emission on it, not on `dlnaServer`. No demo-mode
   branch is needed: the listener never starts in public mode.
+- **The ContentDirectory's item builder is exported with its two bases (`TrackInfo.DIDLItem`, `DIDLItemOpts`): Browse and Search pass the one server URL their request names as both, so their bytes are what they were, and the console's queue entries pass the track URI's base and the DLNA listener's own artwork endpoint (`Server.ArtworkBase`: only while the listener runs, mounts the artwork route and takes connections on that host) with the source's `<res>` alone, or none on a box with no LAN host (`DIDLResources`; B634).** **Don't build an item's DIDL outside this builder, or give an albumArtURI a base the listener does not answer on.** `TestTheBrowseItemIsTheSameBytesAfterTheExport` and `TestTheArtworkBaseIsTheListenersOwnEndpoint` pin it.
 - **The DLNA listener answers only to a Host that names THIS host, with 421
   for any other** (2026-09-29, backlog B170). It has no authentication, and
   what kept it to the LAN is that it is reached on the LAN: a page a LAN

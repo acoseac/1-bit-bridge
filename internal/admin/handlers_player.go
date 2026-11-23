@@ -840,6 +840,11 @@ type playerTrackDTO struct {
 	// hard block. Shared with the browse rows via fundamentalSkipReason
 	// so the two surfaces cannot disagree about what is impossible.
 	VariantSkip string `json:"variantSkip,omitempty"`
+
+	// Bridge is how the bridge's own player plays this track (B634,
+	// BridgeWayOf): additive, present while the player runs, absent
+	// otherwise. converted is to PCM, never bit-exact.
+	Bridge *PlayerBridgeWay `json:"bridge,omitempty"`
 }
 
 // playerVariantDTO is one cached sidecar as the UI needs it.
