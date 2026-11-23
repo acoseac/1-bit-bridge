@@ -1860,7 +1860,7 @@ func (s *Server) getEndpointsSnapshot(ctx context.Context) ([]adminEndpointEntry
 	if port == 0 {
 		return []adminEndpointEntry{}, nil
 	}
-	eps, err := endpointsWithin(ctx, s.deps.Endpoints)
+	eps, err := s.endpointsWithin(ctx)
 	if err != nil {
 		return nil, &endpointsErr{code: "request_ended", msg: "the request ended before the endpoint list was read"}
 	}

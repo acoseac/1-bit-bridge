@@ -259,7 +259,7 @@ func (s *Server) pairingEndpoints(ctx context.Context, cfg *config.Config) ([]ad
 	if _, ok := pairingPort(cfg); !ok || cfg.IsPublic() {
 		return nil, nil
 	}
-	return endpointsWithin(ctx, s.deps.Endpoints)
+	return s.endpointsWithin(ctx)
 }
 
 // declaredEndpointForHost returns the first customEndpoint whose host is
@@ -347,23 +347,26 @@ func advertisedEndpoints(provider func() []advertise.Endpoint) []advertise.Endpo
 	return provider()
 }
 
-// endpointsWithin is advertisedEndpoints waited for on ctx (backlog B989):
-// the provider, the API's list, takes no context, and its Tailscale status
-// read can wait behind another caller's under the API's lock and on the
-// embedded node up to its own bound, so it runs on a goroutine of its own and
-// to its end whatever ctx does. The shared read it makes, which /v1/health
-// takes too, is never cut short by a request, and what it finds is cached for
-// every caller; a request that ends meanwhile returns ctx's error at once. A
-// panic in the provider is raised again on the caller's goroutine while the
-// caller waits, as a direct call raised it, and logged with its stack where
-// the request had ended before it.
-func endpointsWithin(ctx context.Context, provider func() []advertise.Endpoint) ([]advertise.Endpoint, error) {
+// endpointsWithin is advertisedEndpoints of Deps.Endpoints waited for on ctx
+// (backlog B989): the provider, the API's list, takes no context, and its
+// Tailscale status read can wait behind another caller's under the API's lock
+// and on the embedded node up to its own bound, so it runs on a goroutine of
+// its own and to its end whatever ctx does. The shared read it makes, which
+// /v1/health takes too, is never cut short by a request, and what it finds is
+// cached for every caller; a request that ends meanwhile returns ctx's error
+// at once. A panic in the provider is raised again on the caller's goroutine
+// while the caller waits, as a direct call raised it, and logged with its
+// stack where the request had ended before it. The steps a test holds or
+// hears are Server.testEndpoints'.
+func (s *Server) endpointsWithin(ctx context.Context) ([]advertise.Endpoint, error) {
+	provider := s.deps.Endpoints
 	if provider == nil {
 		return nil, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	seams := s.testEndpoints.Load()
 	type answer struct {
 		eps      []advertise.Endpoint
 		panicked any
@@ -375,14 +378,16 @@ func endpointsWithin(ctx context.Context, provider func() []advertise.Endpoint) 
 			if p := recover(); p != nil {
 				a.panicked = p
 				if ctx.Err() != nil {
-					logger.Error("console: the endpoint list's provider panicked after its request had ended",
-						"stack", string(debug.Stack()))
+					logger.Error(endpointsPanicLine, "stack", string(debug.Stack()))
 				}
 			}
+			seams.claim()
 			done <- a
+			seams.end()
 		}()
 		a.eps = advertisedEndpoints(provider)
 	}()
+	seams.choose()
 	select {
 	case a := <-done:
 		if a.panicked != nil {
@@ -391,6 +396,45 @@ func endpointsWithin(ctx context.Context, provider func() []advertise.Endpoint) 
 		return a.eps, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// endpointsPanicLine is the line a panic of the endpoint list's provider is
+// logged with where no caller raises it again (endpointsWithin).
+const endpointsPanicLine = "console: the endpoint list's provider panicked, and its request had stopped waiting for it"
+
+// endpointsSeams are the steps of one wait for the endpoint list that a test
+// holds or hears (endpointsWithin, Server.testEndpoints); a nil func is a step
+// passed by.
+type endpointsSeams struct {
+	// choosing runs on the caller's goroutine just before it chooses
+	// between the provider's answer and its context's end.
+	choosing func()
+	// claiming runs on the provider's goroutine once the provider has
+	// returned or panicked, immediately before the goroutine's claim.
+	claiming func()
+	// ended runs on the provider's goroutine as its last step.
+	ended func()
+}
+
+// choose runs h's choosing step, where h has one.
+func (h *endpointsSeams) choose() {
+	if h != nil && h.choosing != nil {
+		h.choosing()
+	}
+}
+
+// claim runs h's claiming step, where h has one.
+func (h *endpointsSeams) claim() {
+	if h != nil && h.claiming != nil {
+		h.claiming()
+	}
+}
+
+// end runs h's ended step, where h has one.
+func (h *endpointsSeams) end() {
+	if h != nil && h.ended != nil {
+		h.ended()
 	}
 }
 

@@ -1603,6 +1603,13 @@ type Server struct {
 	// while the server serves.
 	testAfterLoginCheck atomic.Pointer[func()]
 
+	// testEndpoints, when set, holds or hears the steps of each wait for
+	// the endpoint list (endpointsWithin): the caller's choice, the
+	// provider's goroutine's claim and its end. Tests only: nil in
+	// production. An atomic pointer, as testAfterLoginCheck is, read once
+	// a wait, so a test may set it while the server serves.
+	testEndpoints atomic.Pointer[endpointsSeams]
+
 	// pageTmpls is one template bundle per page. Each bundle pre-parses
 	// layout.html + the page's own .html file so rendering is a single
 	// ExecuteTemplate("layout", …) call.
