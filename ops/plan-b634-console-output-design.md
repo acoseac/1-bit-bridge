@@ -240,11 +240,15 @@ Every console command is an operation of the control layer (`consoleControl`, §
 - **One at a time.** The control runs operations in their order of arrival. One that arrives while
   another runs ends the older one's steps not yet sent, and the older sends nothing more. Its step in
   flight, sent before, runs on in the engine ahead of the newer operation's commands, and its answer
-  finishes the older record. A Stop is sent at once: the engine takes it after that step, and a play
-  still waiting there is overtaken by it (`owner.go:549-570`; `doc.go:114-134`). Every other
-  operation first waits for that step's answer and the older record's end, so the steps of two
-  console operations never interleave, and the newer one starts once the older one's record says
-  how it ended.
+  finishes the older record. A Stop is sent at once, and the engine takes it in its order of
+  arrival: a step of an older operation in flight reaches the engine before it, or, past its check
+  and not yet sent, after it, and a play still waiting there is overtaken by it (`owner.go:549-570`;
+  `doc.go:114-134`). Every other operation first waits for every older one not yet ended, whatever
+  Stops came between, a Stop's own end among them: each one's step in flight answered and its
+  record's end, so the steps of two console operations never interleave, a step a Stop overtook in
+  flight included, and the newer one starts once every older one's record says how it ended
+  (round 2, S1: a switch-out that waited for a Stop alone let such a step's `PlayID` start the
+  bridge after its Pause).
 - **Steps never run on the request's context.** Each runs on a context the request's end does not
   end (`context.WithoutCancel`), under `engine.WithAdmission`, and the control waits for the engine's
   own answer, which every command the engine takes gets (§2.1) within the engine's own bounds
@@ -283,7 +287,11 @@ Every console command is an operation of the control layer (`consoleControl`, §
     session), its shutdown (`ReasonClosed`), and a start that failed after the command moved the
     selection or the seek state (K8: `Play`, `PlayIndex`, `Next`, `Previous` and a seek change
     them before the session starts, so `ReasonBackend`, `ReasonAllUnplayable`, `ReasonUnplayable`,
-    `ReasonTimeout` and the occurrence budget are effects not known). It is the engine's answer
+    `ReasonTimeout` and the occurrence budget are effects not known), and so is every refusal the
+    engine answers a play command with as a waiter, once its rule has run (`release_unconfirmed` at
+    the release's deadline, `output_unavailable` as the output goes, `maintenance` as a hold
+    begins, `afterRelease`'s refusals): it wraps `engine.ErrAfterChange`, whatever its reason
+    (round 2). It is the engine's answer
     that decides, never the count sent: a stale `DeleteAll` is sent, admitted and refused by the
     owner (`owner.go:601-602`), so `sent` is 1 and `effect` is `none`.
   - A request refused once it became an operation and before its first step
@@ -295,6 +303,12 @@ Every console command is an operation of the control layer (`consoleControl`, §
   - `silence`, for a switch-out: the revision of the publication that showed the bridge silent
     (§3.2). `handover`, for a switch-out that takes the bridge's queue: its track ids in order, the
     selected one's index, its position for PCM, and whether the bridge was playing.
+  - A record the publisher set final on its capture is read (a handler's answer past its wait, a
+    read back, a retry at the tab's mark) only with the publication that carries it, the revision
+    read after: waited for within 1 s, since the publisher makes it in that step, and read as
+    running past it, its silence dropped. An outcome no publication carries, the publisher having
+    ended before the evaluation or between it and its publication, is `unknown`, with no silence
+    and no handover (round 2, S2 to S4).
 - **Where records are kept, and the promise (G5).** The control keeps the record of each tab's last
   operation, for the 64 tabs that ran an operation most recently, and each tab's mark for the 4,096
   most recent. The last eight records, whatever their tab, go in every publication (§4.3), so a tab
@@ -564,13 +578,18 @@ beside its line); the backend's Wait left no device goroutine; and the engine's 
 no release unconfirmed (`serve_player.go:873-876`). Until they are known the barrier waits within
 its bound, and past it answers `refused` (`release_unconfirmed`); so do facts short of any of the
 four.
-The narrowed promise (§3.3) is then kept without counting a closed engine silent.
+The narrowed promise (§3.3) is then kept without counting a closed engine silent. An engine that
+closes under the barrier (its Run returned or its snapshot closing while the barrier settles, or
+its Pause answered closed) is judged on the same facts, the handover saying whether the bridge was
+playing when the barrier began, and the barrier's wait for them ends at its operation's end
+(`cancelled`) and at the control's stop (round 2).
 
 ### 3.2 The barrier, the one way the browser starts (G1, G8)
 
 `POST /api/output/player/switch-out`, with the operation's identity and `take`, runs on the server:
 
-1. It ends the older console operation's unsent steps, and waits for its step in flight (§2.3).
+1. It ends the unsent steps of every older console operation not yet ended, and waits for each to
+   end, a Stop's among them (§2.3).
 2. It reads the publication now. With `take`, its transport says whether the browser plays after:
    playing, starting, or a release that carries a play; without it, the browser's own state before
    its switch says so (§7.3, step 1). With no engine running it sends nothing: §3.1 decides the

@@ -60,6 +60,16 @@ points that bind them (S1 to S5), fixed on this branch once main's `9b66c2af` wa
    and an append finish cancelled before reading any of it. The rig holds a Start by its track's
    path since `ed1cc19f`, so no case spells the rig's address.
 
+### Found while building
+
+- **The control's stop could miss an operation it had admitted** (`a65ab12f`). `run` counted an
+  operation for the stop's join after `admit` returned, outside the control's lock, so a stop
+  that closed the control in between waited for nothing it had admitted. The first gate's
+  `make test` found it: under `-race` item 4's stop case reported the join's `Add` beside the
+  stop's `Wait`. `admit` now counts the operation in the step that admits it, under the lock the
+  stop closes the control under; `TestTheControlsStopJoinsAnOperationAdmittedJustBeforeIt` holds a
+  pause admitted and not yet started while the control stops.
+
 ### Red first
 
 Each item's cases run at the code before its fix, by an overlay of that commit's files
@@ -88,6 +98,9 @@ Each item's cases run at the code before its fix, by an overlay of that commit's
 - Item 7, at `a24303cd`: `TestACancelledPreparationLooksUpNothingMoreAndSendsNothing`, three and
   two lookups. The limits' cases and the route's hydration pass at the base, as cases of what was
   already right do; their controls are their pins.
+- The join, at `1419bb24` with the `admitted` seam at `run`'s start, before its count:
+  `TestTheControlsStopJoinsAnOperationAdmittedJustBeforeIt`, "the control's stop returned while
+  an operation it had admitted had not run".
 
 ### The controls
 
@@ -117,3 +130,4 @@ All red for the reason predicted but where the table says:
 | R7d | the preparation's ask between tracks | S5's two cases, three and two lookups |
 | R7e | a cancelled preparation finished cancelled | S5's two cases, refused `not_playable` |
 | R7f | the route's rows for the handover | `TestTheReadBackRouteHydratesItsHandoverThroughTheCatalog` |
+| RJ | the join counted in `admit` (counted in `run` again) | `TestTheControlsStopJoinsAnOperationAdmittedJustBeforeIt`, the stop returning at once |
