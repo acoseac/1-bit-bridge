@@ -314,8 +314,9 @@ func TestOnlyTheNewestPickMovesTheOutput(t *testing.T) { barScenario(t, 8) }
 // TestAStartReadsTheLatestStateAccepted pins R4: a switch-out's or a
 // barrier's done beside a state accepted since its silence that shows the
 // bridge playing starts nothing, and a refused switch-in judges silence on
-// the latest state accepted, never on its answer's.
-func TestAStartReadsTheLatestStateAccepted(t *testing.T) { barScenario(t, 3) }
+// the latest state accepted, never on its answer's: a bridge that plays, or
+// a hold that is not silent though nothing sounds, sends no barrier.
+func TestAStartReadsTheLatestStateAccepted(t *testing.T) { barScenario(t, 4) }
 
 // TestAStreamRecordWithoutItsWholeRecordIsReadBack pins R5: a published
 // record carries no handover and no tracks left out, so a switch-out's and a

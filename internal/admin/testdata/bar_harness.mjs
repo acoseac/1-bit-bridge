@@ -1329,6 +1329,22 @@ S.TestAStartReadsTheLatestStateAccepted = async () => {
     await settle();
     check("a refused switch-in, the bridge playing in the latest state: no barrier, nothing resumed", r.s.posts(ROUTES.switchOut).length === 0 && !r.b.calls.includes("resume") && r.v().line === WORDS.bridgePlaying, [r.s.posts(), r.b.calls, r.v().line]);
   }
+  {
+    // ...and a hold in the latest state, which its answer's did not show:
+    // not silent, though nothing sounds, so no barrier either.
+    const r = await started2({ browser: { playing: true } });
+    const g = gate();
+    r.s.on("POST", ROUTES.replace, async (e) => { await g.p; return answer(recOf(e, { kind: "replace", status: "refused", error: "stale", effect: "none", sent: 1, of: 4, last: "conflict" }), pub({ revision: 4, silent: true })); });
+    r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", status: "refused", error: "check", effect: "none" }), pub({ revision: 7, silent: false, hold: "check" })));
+    const p = r.out.pick("bridge");
+    await settle();
+    r.frame(pub({ revision: 6, silent: false, hold: "check" }));
+    await settle();
+    g.open();
+    await p;
+    await settle();
+    check("a refused switch-in, a hold in the latest state: no barrier, the hold's words", r.s.posts(ROUTES.switchOut).length === 0 && !r.b.calls.includes("resume") && r.v().line === "The DSD check is playing on the DAC: Stop ends it", [r.s.posts(), r.v().line]);
+  }
 };
 
 S.TestAStreamRecordWithoutItsWholeRecordIsReadBack = async () => {
