@@ -1044,6 +1044,15 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   .np-meta:has(.np-notice:not(:empty)) .np-sub { display: none; }
   .track { grid-template-columns: 2rem 1fr auto; }
   .track-meta, .track-dl, .track-dl-cell { display: none; }
+  /* The bridge's mode (B634): at 375px its transport (Previous, Play, Next,
+   * Stop: 182px) and its Queue, Output and Mute (112px) left the words'
+   * track 23px, and the 40px cover took all of it, so the title, the
+   * sub-line and every line the bridge says rendered 0px wide. The bridge
+   * paints no cover, and its Mute is disabled (its level is fixed), so both
+   * go: the cover's 40px and its 10px gap, and the Mute's 32px and its 8px
+   * gap, leave the words about 63px. */
+  .npbar[data-output="bridge"] .np-art,
+  .npbar[data-output="bridge"] .np-mute { display: none; }
 }
 
 /* ---- The bar's output (B634) ----------------------------------------

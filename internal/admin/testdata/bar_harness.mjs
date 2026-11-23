@@ -35,7 +35,7 @@ globalThis.sessionStorage = {
   removeItem: (k) => { store.delete(k); },
 };
 
-const { createOutput, listen, installOutput, PHASE, WORDS, ROUTES, CLOCK_HEADER, OUTPUT_KEY, OP_KEY } =
+const { createOutput, listen, installOutput, PHASE, WORDS, ROUTES, CLOCK_HEADER, OUTPUT_KEY, OP_KEY, opKey, READ_BACK_MS, REQUEST_MS, SAMPLE_RETRY_MS, QUEUE_RETRY_MS, START_WAIT_MS } =
   await import(new URL("output.js", dirURL));
 const { playFor } = await import(new URL("format.js", dirURL));
 
@@ -143,10 +143,10 @@ function browser(s, o = {}) {
 }
 
 let tabCounter = 0;
-function env(s, c, b) {
+function env(s, c, b, storage) {
   return {
     fetch: (u, i) => s.fetch(u, i),
-    storage: sessionStorage,
+    storage: storage || sessionStorage,
     random: (bytes) => { tabCounter += 1; for (let i = 0; i < bytes.length; i++) bytes[i] = (tabCounter * 31 + i) & 0xff; },
     now: c.now,
     perf: c.perf,
@@ -154,19 +154,43 @@ function env(s, c, b) {
   };
 }
 
-// rig is one tab: a fresh session storage (unless keep), a console, a clock,
-// a browser and the output over them, its GET now answering the latest
-// state the scenario set with the clock at send.
+// storageOf is a session storage of its own over m, as a copy of a tab
+// gets: what one writes the other never reads (R8).
+function storageOf(m) {
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => { m.set(k, String(v)); },
+    removeItem: (k) => { m.delete(k); },
+  };
+}
+
+// stored is session storage's record of operations not yet resolved, as
+// round 2 keeps them: the document's identity, and each operation by its
+// epoch, its tab and its count (R7).
+function stored(tab, seq, list) {
+  const pending = {};
+  for (const p of list) pending[opKey(p.epoch, p.tab, p.seq)] = { kind: "", handover: null, ...p };
+  return JSON.stringify({ tab, seq, pending });
+}
+
+// pendingIn is what a storage holds of operations not yet resolved.
+function pendingIn(m) {
+  try { return Object.keys(JSON.parse(m.get(OP_KEY) || "{}").pending || {}); } catch { return null; }
+}
+
+// rig is one tab: a fresh session storage (unless keep, or one of its own),
+// a console, a clock, a browser and the output over them, its GET now
+// answering the latest state the scenario set with the clock at send.
 function rig(o = {}) {
-  if (!o.keep) store.clear();
-  if (o.output) store.set(OUTPUT_KEY, o.output);
+  if (!o.keep && !o.storage) store.clear();
+  if (o.output) (o.storage || sessionStorage).setItem(OUTPUT_KEY, o.output);
   const c = clock();
   const s = server(c);
   const b = browser(s, o.browser || {});
   const r = { c, s, b, latest: o.latest || pub(), queueAnswer: null };
   s.on("GET", ROUTES.now, async () => ({ status: 200, body: r.latest, headers: { [CLOCK_HEADER]: new Date(c.now()).toISOString() } }));
   s.on("GET", ROUTES.queue, async () => r.queueAnswer || ({ body: { epoch: r.latest.epoch, readAt: r.latest.revision, queueRev: r.latest.queueRev, token: 1, selected: r.latest.selected, entries: [] } }));
-  r.out = createOutput(env(s, c, b));
+  r.out = createOutput(env(s, c, b, o.storage));
   r.serial = 0;
   r.open = () => { r.serial += 1; r.out.streamOpen(r.serial); };
   r.frame = (st) => r.out.frame(JSON.stringify(st), r.serial);
@@ -239,7 +263,7 @@ S.TestAReloadedTabFindsItsOperation = async () => {
   store.clear();
   const old = "ab".repeat(16);
   store.set(OUTPUT_KEY, "bridge");
-  store.set(OP_KEY, JSON.stringify({ tab: old, seq: 3, pending: { seq: 3, epoch: E1, role: "command" } }));
+  store.set(OP_KEY, stored(old, 3, [{ tab: old, seq: 3, epoch: E1, role: "command" }]));
   const r = rig({ keep: true, latest: playing({ revision: 6 }) });
   r.s.on("GET", ROUTES.operation, async (e) => ({ body: { epoch: E1, revision: 6, record: { tab: e.query.get("tab"), seq: Number(e.query.get("seq")), kind: "transport", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none" } } }));
   check("unconfirmed at boot with an operation inherited", r.v().phase === PHASE.unconfirmed, r.v().phase);
@@ -632,7 +656,7 @@ S.TestAReloadedTabReadsItsOperationBack = async () => {
   store.clear();
   const old = "cd".repeat(16);
   store.set(OUTPUT_KEY, "bridge");
-  store.set(OP_KEY, JSON.stringify({ tab: old, seq: 2, pending: { seq: 2, epoch: E1, role: "switch-out" } }));
+  store.set(OP_KEY, stored(old, 2, [{ tab: old, seq: 2, epoch: E1, role: "switch-out" }]));
   // Nine operations of other tabs: the tab's record is not in the stream's eight.
   const others = Array.from({ length: 8 }, (_, i) => ({ tab: String(i).repeat(32), seq: 1, kind: "transport", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none" }));
   const r = rig({ keep: true, latest: pub({ revision: 20, operations: others }) });
@@ -646,24 +670,26 @@ S.TestAReloadedTabReadsItsOperationBack = async () => {
 };
 
 S.TestARecoveredHandoverIsHistory = async () => {
+  // G8: this tab's own switch to this browser, its answer lost and its
+  // record read back done. (A record another document left is R8's,
+  // TestACopiedTabTakesTheMoveStoppedAndStartsNothing.)
   for (const sounding of [true, false]) {
-    store.clear();
-    const old = "ef".repeat(16);
-    store.set(OUTPUT_KEY, "bridge");
-    store.set(OP_KEY, JSON.stringify({ tab: old, seq: 1, pending: { seq: 1, epoch: E1, role: "switch-out" } }));
-    const latest = sounding ? playing({ revision: 30 }) : pub({ revision: 30, silent: true });
-    const r = rig({ keep: true, latest });
+    const r = await started({ output: "bridge", latest: playing({ revision: 3 }) });
     const handover = { tracks: [{ id: "x1", path: "Album/01 A.flac", track: { path: "Album/01 A.flac", title: "A" } }], selected: 0, position: 33, playing: true };
-    r.s.on("GET", ROUTES.operation, async () => ({ body: { epoch: E1, revision: 30, record: { tab: old, seq: 1, kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", silence: 12, handover } } }));
-    r.s.on("POST", ROUTES.switchOut, async () => answer({ tab: r.out.identity().tab, seq: r.out.identity().seq, kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", silence: 31 }, pub({ revision: 31 })));
-    r.open();
+    r.s.on("POST", ROUTES.switchOut, async (e) => (e.body.take ? "lost"
+      : answer({ tab: e.body.op.tab, seq: e.body.op.seq, kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", silence: 31 }, pub({ revision: 31 }))));
+    r.s.on("GET", ROUTES.operation, async (e) => ({ body: { epoch: E1, revision: 30, record: { tab: e.query.get("tab"), seq: Number(e.query.get("seq")), kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", silence: 12, handover } } }));
+    // Before the record is read back, the bridge plays again, or reads silent.
+    r.latest = sounding ? playing({ revision: 30 }) : pub({ revision: 30, silent: true });
     r.frame(r.latest);
+    await r.out.pick("browser");
     await settle();
-    check(`the handover taken, stopped (${sounding ? "the bridge plays again" : "the bridge silent"})`, r.b.calls.includes("take:false"), r.b.calls);
+    check(`the handover taken, stopped (${sounding ? "the bridge plays again" : "the bridge silent"})`, r.b.calls.includes("take:false") && r.b.taken?.position === 33, [r.b.calls, r.b.taken]);
+    const barriers = r.s.posts(ROUTES.switchOut).filter((e) => e.body.take === false);
     if (sounding) {
-      check("the bridge plays again: no barrier, nothing started, said", r.s.posts(ROUTES.switchOut).length === 0 && !r.b.calls.includes("start") && r.v().line === WORDS.bridgeAgain, [r.s.posts(), r.b.calls, r.v().line]);
+      check("the bridge plays again: no barrier, nothing started, said", barriers.length === 0 && !r.b.calls.includes("start") && r.v().line === WORDS.bridgeAgain, [r.s.posts(), r.b.calls, r.v().line]);
     } else {
-      check("the bridge silent: a new barrier, and the start on its done", r.s.posts(ROUTES.switchOut).length === 1 && r.b.calls.includes("start"), [r.s.posts(), r.b.calls]);
+      check("the bridge silent: a new barrier, and the start on its done", barriers.length === 1 && r.b.calls.includes("start"), [r.s.posts(), r.b.calls]);
     }
   }
 };
@@ -865,9 +891,24 @@ class El {
   get firstChild() { return this.children[0] || null; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   removeEventListener(t, fn) { this.listeners[t] = (this.listeners[t] || []).filter((x) => x !== fn); }
-  fire(t, e = {}) { for (const fn of [...(this.listeners[t] || [])]) fn({ type: t, target: this, ...e }); }
+  // fire runs the element's listeners, and a click and a keydown bubble to
+  // the document's, as a browser's do.
+  fire(t, e = {}) {
+    const ev = { type: t, target: this, ...e };
+    for (const fn of [...(this.listeners[t] || [])]) fn(ev);
+    if (t === "click" || t === "keydown") for (const fn of [...(globalThis.document?.listeners?.[t] || [])]) fn(ev);
+  }
   click() { if (!this.disabled) this.fire("click"); }
-  focus() {}
+  // The focus as a browser keeps it: on one element, and moved to the body
+  // when the element that holds it is disabled (the focus fixup rule).
+  focus() { if (globalThis.document) globalThis.document.activeElement = this; }
+  get disabled() { return !!this._disabled; }
+  set disabled(v) {
+    this._disabled = !!v;
+    if (v && globalThis.document && globalThis.document.activeElement === this) globalThis.document.activeElement = globalThis.document.body;
+  }
+  contains(n) { for (let x = n; x; x = x.parentNode) if (x === this) return true; return false; }
+  get isConnected() { let x = this; while (x.parentNode) x = x.parentNode; return x === globalThis.document?.body; }
   querySelector(sel) { const tag = sel.toUpperCase(); const walk = (n) => { for (const c of n.children) { if (c.tagName === tag) return c; const f = walk(c); if (f) return f; } return null; }; return walk(this); }
   closest() { return null; }
 }
@@ -898,13 +939,15 @@ function page() {
     body,
     documentElement: new El("html"),
     visibilityState: "visible",
+    activeElement: body,
+    listeners: {},
     createElement: (tag) => { if (tag === "audio") { const a = new AudioEl(); audios.push(a); return a; } return new El(tag); },
     createElementNS: (ns, tag) => new El(tag),
     createTextNode: textNode,
     getElementById: () => null,
     querySelector: () => null,
     querySelectorAll: () => [],
-    addEventListener() {},
+    addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); },
   };
   // navigator is a getter on node's global (as crypto is), so it is
   // replaced by defineProperty, never assigned.
@@ -932,10 +975,14 @@ async function pageRig(o = {}) {
   const b = { handover: audio.handover, hasQueue: audio.hasQueue, suspend: audio.suspend, resume: audio.resume, take: audio.take, start: audio.start, mediaSession: audio.setMediaSession };
   const out = createOutput(env(s, c, b));
   installOutput(out);
-  out.streamOpen(1);
-  out.frame(JSON.stringify(latest), 1);
+  // As boot.js wires it: every start of this browser asks the output (R1).
+  if (o.gate) audio.setStartGate(out.gateStart);
+  if (!o.noFrame) {
+    out.streamOpen(1);
+    out.frame(JSON.stringify(latest), 1);
+  }
   await settle();
-  return { ...p, audio, el, s, c, out, latest };
+  return { ...p, audio, el, s, c, out, latest, frame: (st) => out.frame(JSON.stringify(st), 1) };
 }
 
 const flac = (n, o = {}) => ({ path: `Album/0${n}.flac`, title: `T${n}`, codec: "FLAC", rateHz: 44100, bits: 16, duration: 200, play: { kind: "universal", contentType: "audio/flac" }, ...o });
@@ -1058,6 +1105,613 @@ S.TestTheBarDisablesWhatTheEngineDoesNotDo = async () => {
   const vol = r.byClass("np-vol");
   check("volume and mute disabled, the level fixed", vol.disabled === true && vol.title === WORDS.fixedLevel && off("Mute"), [vol.disabled, vol.title]);
   check("the seek disabled where none is offered", r.byClass("np-seek").disabled === true);
+};
+
+// ---- Round 2: the bar never plays in both places, never sticks moving ----
+
+const findAll = (root, pred) => { const out = []; const walk = (n) => { for (const c of n.children || []) { if (pred(c)) out.push(c); walk(c); } }; walk(root); return out; };
+const refusal = (error, st, status = 409, message) => ({ status, body: { error, message: message || `refused: ${error}`, ...(st ? { player: JSON.stringify(st) } : {}) } });
+const recOf = (e, o = {}) => ({ tab: e.body.op.tab, seq: e.body.op.seq, kind: "transport", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", ...o });
+const handoverOf = (o = {}) => ({ tracks: [{ id: "x1", path: "Album/01 A.flac", track: { path: "Album/01 A.flac", title: "A" } }, { id: "x2", path: "Album/02 B.flac", track: { path: "Album/02 B.flac", title: "B" } }], selected: 1, position: 61, playing: true, ...o });
+const readBackOf = (e, o = {}) => ({ body: { epoch: E1, revision: 9, record: { tab: e.query.get("tab"), seq: Number(e.query.get("seq")), kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", ...o } } });
+const started2 = (o) => started(o);
+
+S.TestARefusalBeforeAdmissionEndsTheSwitchToTheBridge = async () => {
+  // R2: a structured refusal with no record ends the switch, back on this
+  // browser with the refusal's line.
+  for (const k of [
+    { name: "epoch_changed", ans: () => refusal("epoch_changed", null), line: WORDS.epochChanged },
+    { name: "operation_conflict", ans: () => refusal("operation_conflict", null), line: WORDS.conflict },
+    { name: "body_too_large", ans: () => refusal("body_too_large", null, 413, "the request's body is larger than the 8 MiB the player's control takes"), line: "the request's body is larger than the 8 MiB the player's control takes" },
+  ]) {
+    const r = await started2({ browser: { playing: false } });
+    const before = r.out.identity().tab;
+    r.s.on("POST", ROUTES.replace, async () => k.ans());
+    await r.out.pick("bridge");
+    await settle();
+    check(`${k.name}: the switch ended on this browser, its line said`, r.v().output === "browser" && r.v().phase === PHASE.browser && r.v().line === k.line, [r.v().output, r.v().phase, r.v().line]);
+    check(`${k.name}: a browser that was not playing resumes nothing`, !r.b.calls.includes("resume") && r.s.posts(ROUTES.switchOut).length === 0, [r.b.calls, r.s.posts()]);
+    if (k.name === "operation_conflict") check("operation_conflict: a new identity, its count from 0", r.out.identity().tab !== before && r.out.identity().seq === 0, r.out.identity());
+  }
+  {
+    // A browser that was playing resumes, through the gate: a barrier's done.
+    const r = await started2({ browser: { playing: true } });
+    r.s.on("POST", ROUTES.replace, async () => refusal("bad_json", pub({ revision: 4, silent: true }), 400, "one JSON object, and nothing after it"));
+    r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 5 }), pub({ revision: 5 })));
+    await r.out.pick("bridge");
+    await settle();
+    check("a playing browser resumes only through the barrier, take false", r.s.posts(ROUTES.switchOut)[0]?.body.take === false && r.b.calls.includes("resume") && r.v().output === "browser", [r.s.posts(), r.b.calls]);
+  }
+  {
+    // No player offered: this browser is the output, and resumes at once.
+    const r = await started2({ browser: { playing: true } });
+    r.s.on("POST", ROUTES.replace, async () => refusal("player_not_offered", null, 409, "this bridge offers no player of its own"));
+    await r.out.pick("bridge");
+    await settle();
+    check("not offered: the browser's, no barrier, resumed", r.v().output === "browser" && r.v().notOffered && r.b.calls.includes("resume") && r.s.posts(ROUTES.switchOut).length === 0, [r.v().notOffered, r.b.calls, r.s.posts()]);
+  }
+  for (const k of [{ name: "an unclassified 5xx", ans: () => refusal("internal_failure", null, 500) }, { name: "a network error", ans: () => "lost" }]) {
+    // V2: neither proves the command never ran: unconfirmed, for its record.
+    const r = await started2({ browser: { playing: true } });
+    r.s.on("POST", ROUTES.replace, async () => k.ans());
+    r.s.on("GET", ROUTES.operation, async (e) => readBackOf(e, { kind: "replace", status: "running" }));
+    await r.out.pick("bridge");
+    await settle();
+    check(`${k.name}: unconfirmed, read back, nothing resumed`, r.v().phase === PHASE.unconfirmed && r.s.gets(ROUTES.operation).length >= 1 && !r.b.calls.includes("resume"), [r.v().phase, r.s.gets(ROUTES.operation).length, r.b.calls]);
+  }
+};
+
+S.TestARefusalBeforeAdmissionEndsTheSwitchToThisBrowserAndTheBarrier = async () => {
+  for (const k of [
+    { name: "epoch_changed", ans: () => refusal("epoch_changed", null), line: WORDS.epochChanged },
+    { name: "operation_conflict", ans: () => refusal("operation_conflict", null), line: WORDS.conflict },
+    { name: "bad_json", ans: () => refusal("bad_json", null, 400, "a JSON body is required"), line: "a JSON body is required" },
+  ]) {
+    const r = await started2({ output: "bridge", latest: playing({ revision: 3 }) });
+    r.s.on("POST", ROUTES.switchOut, async () => k.ans());
+    await r.out.pick("browser");
+    await settle();
+    check(`switch-out, ${k.name}: back on the bridge, its line said, nothing taken`, r.v().output === "bridge" && r.v().phase === PHASE.bridge && r.v().line === k.line && !r.b.calls.some((x) => x.startsWith("take")), [r.v().phase, r.v().line, r.b.calls]);
+  }
+  {
+    const r = await started2({ output: "bridge", latest: playing({ revision: 3 }) });
+    r.s.on("POST", ROUTES.switchOut, async () => refusal("player_not_offered", null, 409, "no player"));
+    await r.out.pick("browser");
+    await settle();
+    check("switch-out, not offered: this browser the output, nothing taken or started", r.v().output === "browser" && r.v().phase === PHASE.browser && !r.b.calls.some((x) => x.startsWith("take") || x === "start" || x === "resume"), [r.v().output, r.b.calls]);
+  }
+  {
+    const r = await started2({ output: "bridge", latest: playing({ revision: 3 }) });
+    r.s.on("POST", ROUTES.switchOut, async () => refusal("internal_failure", null, 500));
+    r.s.on("GET", ROUTES.operation, async (e) => readBackOf(e, { status: "running" }));
+    await r.out.pick("browser");
+    await settle();
+    check("switch-out, an unclassified 5xx: unconfirmed, read back", r.v().phase === PHASE.unconfirmed && r.s.gets(ROUTES.operation).length >= 1, r.v().phase);
+  }
+  {
+    // A barrier refused before it ran starts nothing, its line said.
+    const r = await started2({ latest: pub({ revision: 3, silent: true }) });
+    r.s.on("POST", ROUTES.switchOut, async () => refusal("epoch_changed", null));
+    let ran = 0;
+    r.out.gateStart(() => { ran += 1; });
+    await settle();
+    check("a barrier refused epoch_changed: nothing starts, said", ran === 0 && r.v().line === WORDS.epochChanged && r.v().phase === PHASE.browser, [ran, r.v().line]);
+  }
+};
+
+S.TestOnlyTheNewestPickMovesTheOutput = async () => {
+  {
+    // The hazard: the bridge picked, its answer slow; this browser picked,
+    // done; the first pick's late done moves nothing.
+    const r = await started2({ browser: { playing: true } });
+    const g = gate();
+    r.s.on("POST", ROUTES.replace, async (e) => { await g.p; return answer(recOf(e, { kind: "replace", sent: 4, of: 4 }), pub({ revision: 6 })); });
+    r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 5, handover: handoverOf() }), pub({ revision: 5 })));
+    const first = r.out.pick("bridge");
+    await settle();
+    await r.out.pick("browser");
+    await settle();
+    check("the newer pick, done: this browser takes the queue, playing", r.b.calls.includes("take:true") && r.v().output === "browser", [r.b.calls, r.v().output]);
+    const n = r.b.calls.length;
+    g.open();
+    await first;
+    await settle();
+    check("the older pick's late done moves neither the output, the phase nor the browser", r.v().output === "browser" && r.v().phase === PHASE.browser && r.b.calls.length === n, [r.v().output, r.v().phase, r.b.calls.slice(n)]);
+  }
+  {
+    // lost(): the older pick's answer lost while the newer one is out.
+    const r = await started2({ browser: { playing: true } });
+    const g1 = gate();
+    const g2 = gate();
+    r.s.on("POST", ROUTES.replace, async () => { await g1.p; return "lost"; });
+    r.s.on("POST", ROUTES.switchOut, async (e) => { await g2.p; return answer(recOf(e, { kind: "switch-out", silence: 5, handover: handoverOf() }), pub({ revision: 5 })); });
+    r.s.on("GET", ROUTES.operation, async (e) => readBackOf(e, { kind: "replace", status: "running" }));
+    const first = r.out.pick("bridge");
+    await settle();
+    const second = r.out.pick("browser");
+    await settle();
+    g1.open();
+    await first;
+    await settle();
+    check("the older pick's lost answer leaves the newer pick's phase", r.v().phase === PHASE.toBrowser, r.v().phase);
+    g2.open();
+    await second;
+    await settle();
+    check("the newer pick ends it", r.v().output === "browser" && r.b.calls.includes("take:true"), [r.v().output, r.b.calls]);
+  }
+  {
+    // unknown: the older pick's record read back gone, after the newer one.
+    const r = await started2({ browser: { playing: true } });
+    const g = gate();
+    r.s.on("POST", ROUTES.replace, async () => "lost");
+    r.s.on("GET", ROUTES.operation, async () => { await g.p; return { status: 404, body: { error: "operation_gone", epoch: E1, revision: 5 } }; });
+    r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 5, handover: handoverOf() }), pub({ revision: 5 })));
+    await r.out.pick("bridge");
+    await settle();
+    await r.out.pick("browser");
+    await settle();
+    g.open();
+    await settle();
+    check("the older pick's record gone: this browser stays the output", r.v().output === "browser" && r.v().phase === PHASE.browser, [r.v().output, r.v().phase]);
+  }
+  {
+    // A refusal before admission of the older pick: no resume, no line.
+    const r = await started2({ browser: { playing: true } });
+    const g = gate();
+    r.s.on("POST", ROUTES.replace, async () => { await g.p; return refusal("epoch_changed", null); });
+    r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 5, handover: handoverOf() }), pub({ revision: 5 })));
+    const first = r.out.pick("bridge");
+    await settle();
+    await r.out.pick("browser");
+    await settle();
+    const n = r.b.calls.length;
+    g.open();
+    await first;
+    await settle();
+    check("the older pick refused: nothing resumed, no barrier, the newer pick's line kept", r.b.calls.length === n && r.s.posts(ROUTES.switchOut).length === 1 && r.v().line === "", [r.b.calls.slice(n), r.s.posts(), r.v().line]);
+  }
+  {
+    // V11: a switch-in that ends at once (nothing in the browser) is a
+    // pick: the older switch-out's record read back moves nothing.
+    const r = await started2({ output: "bridge", latest: playing({ revision: 3 }), browser: { queue: [] } });
+    const g = gate();
+    r.s.on("POST", ROUTES.switchOut, async () => "lost");
+    r.s.on("GET", ROUTES.operation, async (e) => { await g.p; return readBackOf(e, { silence: 5, handover: handoverOf() }); });
+    await r.out.pick("browser");
+    await settle();
+    check("the switch-out lost: unconfirmed", r.v().phase === PHASE.unconfirmed, r.v().phase);
+    await r.out.pick("bridge");
+    await settle();
+    g.open();
+    await settle();
+    check("the newer pick, at once: the bridge stays the output, nothing taken", r.v().output === "bridge" && r.v().phase === PHASE.bridge && !r.b.calls.some((x) => x.startsWith("take")), [r.v().output, r.v().phase, r.b.calls]);
+  }
+};
+
+S.TestAStartReadsTheLatestStateAccepted = async () => {
+  {
+    const r = await started2({ output: "bridge", latest: playing({ revision: 3 }) });
+    const g = gate();
+    r.s.on("POST", ROUTES.switchOut, async (e) => { await g.p; return answer(recOf(e, { kind: "switch-out", silence: 5, handover: handoverOf() }), pub({ revision: 5 })); });
+    const p = r.out.pick("browser");
+    await settle();
+    r.frame(playing({ revision: 6 }));
+    await settle();
+    g.open();
+    await p;
+    await settle();
+    check("switch-out done, the bridge playing again since: the queue taken stopped, said", r.b.calls.includes("take:false") && !r.b.calls.includes("take:true") && r.v().line === WORDS.bridgeAgain && r.v().output === "browser", [r.b.calls, r.v().line]);
+  }
+  {
+    const r = await started2({ latest: pub({ revision: 3, silent: true }) });
+    const g = gate();
+    r.s.on("POST", ROUTES.switchOut, async (e) => { await g.p; return answer(recOf(e, { kind: "switch-out", silence: 5 }), pub({ revision: 5 })); });
+    let ran = 0;
+    r.out.gateStart(() => { ran += 1; });
+    await settle();
+    r.frame(playing({ revision: 6 }));
+    await settle();
+    g.open();
+    await settle();
+    check("a barrier's done, the bridge playing again since: nothing starts", ran === 0 && r.v().line === WORDS.bridgeAgain, [ran, r.v().line]);
+  }
+  {
+    const r = await started2({ browser: { playing: true } });
+    const g = gate();
+    r.s.on("POST", ROUTES.replace, async (e) => { await g.p; return answer(recOf(e, { kind: "replace", status: "refused", error: "stale", effect: "none", sent: 1, of: 4, last: "conflict" }), pub({ revision: 4, silent: true })); });
+    const p = r.out.pick("bridge");
+    await settle();
+    r.frame(playing({ revision: 6 }));
+    await settle();
+    g.open();
+    await p;
+    await settle();
+    check("a refused switch-in, the bridge playing in the latest state: no barrier, nothing resumed", r.s.posts(ROUTES.switchOut).length === 0 && !r.b.calls.includes("resume") && r.v().line === WORDS.bridgePlaying, [r.s.posts(), r.b.calls, r.v().line]);
+  }
+};
+
+S.TestAStreamRecordWithoutItsWholeRecordIsReadBack = async () => {
+  {
+    const r = await started2({ output: "bridge", latest: playing({ revision: 3 }) });
+    const g = gate();
+    let asked = 0;
+    r.s.on("POST", ROUTES.switchOut, async () => "lost");
+    r.s.on("GET", ROUTES.operation, async (e) => {
+      asked += 1;
+      if (asked === 1) return readBackOf(e, { status: "running" });
+      await g.p;
+      return readBackOf(e, { silence: 6, handover: handoverOf({ position: 33, playing: false }) });
+    });
+    await r.out.pick("browser");
+    await settle();
+    const id = r.out.identity();
+    r.frame(pub({ revision: 7, silent: true, operations: [{ tab: id.tab, seq: id.seq, kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", silence: 6 }] }));
+    await settle();
+    check("a switch-out's record on the stream, its handover left out: nothing taken, read back", !r.b.calls.some((x) => x.startsWith("take")) && asked >= 2 && r.v().phase === PHASE.unconfirmed, [r.b.calls, asked, r.v().phase]);
+    g.open();
+    await settle();
+    check("the record read back whole completes it, its handover taken stopped", r.b.calls.includes("take:false") && r.b.taken?.position === 33 && r.v().output === "browser", [r.b.calls, r.b.taken]);
+  }
+  {
+    const r = await started2({ output: "bridge", latest: playing({ revision: 3 }) });
+    let asked = 0;
+    r.s.on("POST", ROUTES.replace, async () => "lost");
+    r.s.on("GET", ROUTES.operation, async (e) => {
+      asked += 1;
+      if (asked === 1) return readBackOf(e, { kind: "replace", status: "running" });
+      return readBackOf(e, { kind: "replace", sent: 3, of: 3, leftOut: [{ path: "R/01 X.flac", word: "routed" }] });
+    });
+    await r.out.replace({ tracks: ["A/01.flac", "R/01 X.flac"] }, { start: 0, play: true });
+    await settle();
+    const id = r.out.identity();
+    r.frame(playing({ revision: 8, operations: [{ tab: id.tab, seq: id.seq, kind: "replace", status: "done", effect: "some", sent: 3, of: 3, last: "ok", release: "none" }] }));
+    await settle();
+    check("a replace's record on the stream, what it left out left out: read back whole, and said", asked >= 2 && /left out/.test(r.v().line), [asked, r.v().line]);
+  }
+};
+
+S.TestARequestUnansweredPast30SecondsIsUnconfirmed = async () => {
+  for (const order of ["the late answer first", "the read back first"]) {
+    const r = await started2({ output: "bridge", latest: playing({ revision: 3 }) });
+    const ga = gate();
+    const gr = gate();
+    r.s.on("POST", ROUTES.switchOut, async (e) => { await ga.p; return answer(recOf(e, { kind: "switch-out", silence: 5, handover: handoverOf() }), pub({ revision: 5 })); });
+    r.s.on("GET", ROUTES.operation, async (e) => { await gr.p; return readBackOf(e, { silence: 5, handover: handoverOf({ playing: false }) }); });
+    const p = r.out.pick("browser");
+    await settle();
+    r.c.advance(REQUEST_MS);
+    r.out.tick();
+    await settle();
+    check(`${order}: past 30 s, unconfirmed and read back`, r.v().phase === PHASE.unconfirmed && r.s.gets(ROUTES.operation).length === 1, [r.v().phase, r.s.gets(ROUTES.operation).length]);
+    if (order === "the late answer first") {
+      ga.open();
+      await p;
+      await settle();
+      check("the late done, its answer not read: nothing taken, still unconfirmed", !r.b.calls.some((x) => x.startsWith("take")) && r.v().phase === PHASE.unconfirmed, [r.b.calls, r.v().phase]);
+      gr.open();
+      await settle();
+    } else {
+      gr.open();
+      await settle();
+      ga.open();
+      await p;
+      await settle();
+    }
+    check(`${order}: the record read back resolves it, once, stopped`, r.b.calls.filter((x) => x.startsWith("take")).length === 1 && r.b.calls.includes("take:false"), r.b.calls);
+  }
+};
+
+S.TestEveryUnresolvedOperationIsKeptUntilItResolves = async () => {
+  {
+    // V3: a conflict while an older operation is unresolved, then the
+    // records of both identities.
+    const r = await started2({ output: "bridge", latest: playing({ revision: 3 }) });
+    let n = 0;
+    r.s.on("POST", ROUTES.transport, async () => { n += 1; return n === 2 ? refusal("operation_conflict", null) : "lost"; });
+    r.s.on("GET", ROUTES.operation, async (e) => readBackOf(e, { kind: "transport", status: "running" }));
+    const t1 = r.out.identity().tab;
+    await r.out.command("next");
+    await r.out.command("pause");
+    await settle();
+    const t2 = r.out.identity().tab;
+    await r.out.command("play");
+    await settle();
+    check("a new identity, the older identity's operation kept beside the new one's", t2 !== t1 && pendingIn(store)?.length === 2, [t1, t2, pendingIn(store)]);
+    r.frame(playing({ revision: 4, operations: [
+      { tab: t2, seq: 1, kind: "transport", command: "play", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none" },
+      { tab: t1, seq: 1, kind: "transport", command: "next", status: "refused", error: "stale", effect: "none", sent: 1, of: 1, last: "conflict", release: "none" },
+    ] }));
+    await settle();
+    check("each resolved by its own record, the older identity's too", pendingIn(store)?.length === 0 && r.v().line === WORDS.stale && r.v().phase === PHASE.bridge, [pendingIn(store), r.v().line, r.v().phase]);
+  }
+  {
+    // A reload, then another: each reads the inherited operation back
+    // until it resolves.
+    store.clear();
+    const old = "ab".repeat(16);
+    store.set(OUTPUT_KEY, "bridge");
+    store.set(OP_KEY, stored(old, 3, [{ tab: old, seq: 3, epoch: E1, role: "command" }]));
+    for (const doc of ["the first reload", "the second"]) {
+      const r = rig({ keep: true, latest: playing({ revision: 6 }) });
+      r.s.on("GET", ROUTES.operation, async (e) => readBackOf(e, { kind: "transport", status: "running" }));
+      r.open();
+      r.frame(r.latest);
+      await settle();
+      const rb = r.s.gets(ROUTES.operation)[0];
+      check(`${doc} reads the inherited operation back`, rb && rb.query.get("tab") === old && rb.query.get("seq") === "3", rb && rb.query.toString());
+    }
+  }
+};
+
+S.TestACopiedTabTakesTheMoveStoppedAndStartsNothing = async () => {
+  const ma = new Map();
+  const a = rig({ storage: storageOf(ma), output: "bridge", latest: playing({ revision: 3 }) });
+  a.open();
+  a.frame(a.latest);
+  await settle();
+  const ga = gate();
+  let recordA = null;
+  a.s.on("POST", ROUTES.switchOut, async (e) => {
+    recordA = recOf(e, { kind: "switch-out", status: "running", effect: "none", sent: 0, last: "" });
+    await ga.p;
+    recordA = { ...recordA, status: "done", effect: "some", sent: 1, last: "ok", silence: 5, handover: handoverOf() };
+    return answer(recordA, pub({ revision: 5 }));
+  });
+  const pa = a.out.pick("browser");
+  await settle();
+  // A copy of the tab: its session storage, A's operation in it.
+  const b = rig({ storage: storageOf(new Map(ma)), latest: playing({ revision: 3 }) });
+  b.s.on("GET", ROUTES.operation, async () => ({ body: { epoch: E1, revision: 5, record: recordA } }));
+  b.open();
+  b.frame(b.latest);
+  await settle();
+  check("the copy reads the operation back, its record still running", b.s.gets(ROUTES.operation).length >= 1 && b.v().phase === PHASE.unconfirmed, [b.s.gets(ROUTES.operation).length, b.v().phase]);
+  ga.open();
+  await pa;
+  await settle();
+  check("the tab that sent it takes the queue, playing", a.b.calls.includes("take:true"), a.b.calls);
+  b.frame(pub({ revision: 5, silent: true }));
+  b.c.advance(READ_BACK_MS);
+  b.out.tick();
+  await settle();
+  check("the copy takes what it moved, stopped", b.v().output === "browser" && b.b.calls.includes("take:false"), [b.v().output, b.b.calls]);
+  check("and starts nothing: no barrier, no start, no resume, no take to play", b.s.posts().length === 0 && !b.b.calls.some((x) => x === "start" || x === "resume" || x === "take:true"), [b.s.posts(), b.b.calls]);
+  check("and says to press Play", b.v().line === WORDS.pressPlay, b.v().line);
+};
+
+S.TestACopiedTabsRecoveredSwitchInStartsNothing = async () => {
+  const ma = new Map();
+  const a = rig({ storage: storageOf(ma), latest: pub({ revision: 3, silent: true }), browser: { playing: true } });
+  a.open();
+  a.frame(a.latest);
+  await settle();
+  const ga = gate();
+  let recordA = null;
+  a.s.on("POST", ROUTES.replace, async (e) => {
+    recordA = recOf(e, { kind: "replace", status: "running", effect: "none", sent: 0, of: 4, last: "" });
+    await ga.p;
+    recordA = { ...recordA, status: "refused", error: "stale", effect: "none", sent: 1, last: "conflict" };
+    return answer(recordA, pub({ revision: 4, silent: true }));
+  });
+  a.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 6 }), pub({ revision: 6 })));
+  const pa = a.out.pick("bridge");
+  await settle();
+  const b = rig({ storage: storageOf(new Map(ma)), latest: pub({ revision: 3, silent: true }) });
+  b.s.on("GET", ROUTES.operation, async () => ({ body: { epoch: E1, revision: 4, record: recordA } }));
+  b.open();
+  b.frame(b.latest);
+  await settle();
+  ga.open();
+  await pa;
+  await settle();
+  check("the tab that sent it resumes, through its own barrier", a.b.calls.includes("resume"), a.b.calls);
+  b.c.advance(READ_BACK_MS);
+  b.out.tick();
+  await settle();
+  check("the copy: this browser the output", b.v().output === "browser" && b.v().phase === PHASE.browser, [b.v().output, b.v().phase]);
+  check("the copy plays nothing: no barrier, no resume, no take to play, no start", b.s.posts().length === 0 && !b.b.calls.some((x) => x === "resume" || x === "start" || x === "take:true"), [b.s.posts(), b.b.calls]);
+};
+
+S.TestARecoveredSwitchOutThatDidNotFinishSaysHowItEnded = async () => {
+  for (const k of [
+    { status: "changed", line: WORDS.wentOn },
+    { status: "refused", error: "check", line: "The DSD check is playing on the DAC: Stop ends it" },
+    { status: "unknown", line: WORDS.pickAgain },
+  ]) {
+    store.clear();
+    const old = "fa".repeat(16);
+    store.set(OUTPUT_KEY, "bridge");
+    store.set(OP_KEY, stored(old, 1, [{ tab: old, seq: 1, epoch: E1, role: "switch-out" }]));
+    const r = rig({ keep: true, latest: playing({ revision: 9 }) });
+    r.s.on("GET", ROUTES.operation, async (e) => readBackOf(e, { status: k.status, error: k.error || "" }));
+    r.open();
+    r.frame(r.latest);
+    await settle();
+    check(`a switch-out read back ${k.status}: on the bridge, its words said`, r.v().output === "bridge" && r.v().phase === PHASE.bridge && r.v().line === k.line && !r.b.calls.some((x) => x.startsWith("take")), [r.v().phase, r.v().line]);
+  }
+};
+
+S.TestAFailedQueueReadIsAskedAgain = async () => {
+  const r = rig({ output: "bridge", latest: playing({ revision: 3, queueRev: 3, length: 1 }) });
+  let reads = 0;
+  r.s.on("GET", ROUTES.queue, async () => { reads += 1; if (reads === 1) return "lost"; return { body: { epoch: E1, readAt: 3, queueRev: 3, token: 1, selected: 11, entries: [{ id: 11, path: "Album/01 A.flac" }] } }; });
+  r.open();
+  r.frame(r.latest);
+  await settle();
+  check("the first read failed: no queue", r.v().queue === null && reads === 1, [r.v().queue, reads]);
+  r.c.advance(QUEUE_RETRY_MS);
+  r.out.tick();
+  await settle();
+  check("asked again with no new state: the queue read", reads === 2 && r.v().queue?.entries?.length === 1, [reads, r.v().queue]);
+};
+
+// ---- Round 2's page cases: the shipped audio.js, nowplaying.js and the gate ----
+
+S.TestEveryStartOfThisBrowserGoesThroughTheGate = async () => {
+  const r = await barPage({ gate: true, saved: { queue: [flac(1), flac(2)], index: 0, at: 0, shuffle: false, repeat: "off" }, latest: playing({ revision: 3 }) });
+  r.out.subscribe(() => {});
+  await settle();
+  const quiet = () => r.el.paused && r.s.posts().length === 0;
+  r.audio.playQueue([flac(3)], 0);
+  await settle();
+  check("a row's click beside the bridge playing: nothing plays, nothing sent, the queue kept, said", quiet() && r.audio.snapshot().queue[0].path === "Album/01.flac" && r.out.view().line === WORDS.bridgePlaying, [r.el.paused, r.s.posts(), r.out.view().line]);
+  r.find("Play").click();
+  await settle();
+  check("Play beside the bridge playing: nothing plays", quiet(), [r.el.paused, r.s.posts()]);
+  r.find("Next").click();
+  await settle();
+  check("Next beside the bridge playing: nothing plays, nothing moves", quiet() && r.audio.snapshot().index === 0, [r.el.paused, r.audio.snapshot().index]);
+  session.handlers.play?.();
+  session.handlers.nexttrack?.();
+  await settle();
+  check("a lock-screen Play or Next beside the bridge playing: nothing plays", quiet(), [r.el.paused, r.s.posts()]);
+  // The bridge stops: Play runs the barrier, and plays on its done alone.
+  r.frame(pub({ revision: 4, silent: true }));
+  const g = gate();
+  r.s.on("POST", ROUTES.switchOut, async (e) => { await g.p; return answer({ tab: e.body.op.tab, seq: e.body.op.seq, kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", silence: 5 }, pub({ revision: 5 })); });
+  r.find("Play").click();
+  await settle();
+  const so = r.s.posts(ROUTES.switchOut)[0];
+  check("beside a bridge that does not sound, Play asks the barrier, take false, and waits", so && so.body.take === false && r.el.paused, [so && so.body, r.el.paused]);
+  g.open();
+  await settle();
+  check("and plays on its done", !r.el.paused, r.el.paused);
+  const posts = r.s.posts().length;
+  r.find("Pause").click();
+  check("Pause never waits: paused at once, nothing sent", r.el.paused && r.s.posts().length === posts, [r.el.paused, r.s.posts().length]);
+};
+
+S.TestAStartWaitsToKnowWhetherAPlayerIsOffered = async () => {
+  // A box that offers no player sends no frame: GET now's typed refusal says so.
+  const r = await pageRig({ gate: true, noFrame: true });
+  let calls = 0;
+  const g = gate();
+  r.s.on("GET", ROUTES.now, async () => { calls += 1; if (calls === 1) return "lost"; await g.p; return { status: 409, body: { error: "player_not_offered", message: "no player" } }; });
+  await r.out.sampleNow();
+  await settle();
+  r.audio.playQueue([flac(1)], 0);
+  await settle();
+  check("not known yet: the start waits, and says so", r.el.paused && r.out.view().line === WORDS.startWaits, [r.el.paused, r.out.view().line]);
+  r.c.advance(SAMPLE_RETRY_MS);
+  r.out.tick();
+  await settle();
+  check("a failed first GET now is asked again", calls === 2, calls);
+  g.open();
+  await settle();
+  check("no player offered: the start goes on in this browser, nothing sent", !r.el.paused && r.s.posts().length === 0, [r.el.paused, r.s.posts()]);
+};
+
+S.TestAStartBeforeTheFirstFrameWaitsForTheEpoch = async () => {
+  const r = await pageRig({ gate: true, noFrame: true, latest: pub({ revision: 2, silent: true }) });
+  await r.out.sampleNow();
+  await settle();
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer({ tab: e.body.op.tab, seq: e.body.op.seq, kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", silence: 3 }, pub({ revision: 3 })));
+  r.audio.playQueue([flac(1)], 0);
+  await settle();
+  r.c.advance(START_WAIT_MS);
+  r.out.tick();
+  await settle();
+  check("a start that never learns the epoch: dropped, said", r.el.paused && r.s.posts().length === 0 && r.out.view().line === WORDS.startUnanswered, [r.el.paused, r.out.view().line]);
+  r.audio.playQueue([flac(1)], 0);
+  await settle();
+  check("offered, no epoch yet: the start waits, nothing sent", r.el.paused && r.s.posts().length === 0 && r.out.view().line === WORDS.startWaits, [r.el.paused, r.s.posts()]);
+  r.out.streamOpen(1);
+  r.frame(pub({ revision: 2, silent: true }));
+  await settle();
+  check("the first frame: the barrier, then the start on its done", r.s.posts(ROUTES.switchOut)[0]?.body.take === false && !r.el.paused, [r.s.posts(), r.el.paused]);
+};
+
+S.TestADeferredStartAsksItsPermitAgain = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const r = await pageRig({ gate: true, latest: playing({ revision: 3 }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer({ tab: e.body.op.tab, seq: e.body.op.seq, kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", silence: 5,
+    handover: { tracks: [{ id: "x1", path: "Album/01.flac", track: flac(1) }], selected: 0, position: 30, playing: true } }, pub({ revision: 5 })));
+  await r.out.pick("browser");
+  await settle();
+  check("the barrier's done: the queue taken, its play waiting for the metadata", r.el.paused && !!r.el.getAttribute("src"), [r.el.paused, r.el.getAttribute("src")]);
+  r.frame(playing({ revision: 6 }));
+  await settle();
+  r.el.metadata(200);
+  await settle();
+  check("the bridge playing since: the deferred play plays nothing", r.el.paused, r.el.paused);
+};
+
+S.TestADeferredStartPlaysWhileItsPermitHolds = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const r = await pageRig({ gate: true, latest: playing({ revision: 3 }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer({ tab: e.body.op.tab, seq: e.body.op.seq, kind: "switch-out", status: "done", effect: "some", sent: 1, of: 1, last: "ok", release: "none", silence: 5,
+    handover: { tracks: [{ id: "x1", path: "Album/01.flac", track: flac(1) }], selected: 0, position: 30, playing: true } }, pub({ revision: 5 })));
+  await r.out.pick("browser");
+  await settle();
+  check("the barrier's done: its play waiting for the metadata", r.el.paused, r.el.paused);
+  r.el.metadata(200);
+  await settle();
+  check("nothing newer: it plays, from its position", !r.el.paused && r.el.currentTime === 30, [r.el.paused, r.el.currentTime]);
+};
+
+S.TestAPositionalPickWaitsForTheQueueItNames = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const r = await barPage({ latest: playing({ revision: 3, queueRev: 3, length: 2 }) });
+  r.out.subscribe(() => {});
+  let reads = 0;
+  const g = gate();
+  r.s.on("GET", ROUTES.queue, async () => {
+    reads += 1;
+    if (reads === 1) return { body: { epoch: E1, readAt: 4, queueRev: 4, token: 2, selected: 11, entries: [{ id: 11, path: "Album/01 A.flac" }, { id: 12, path: "Album/02 B.flac" }] } };
+    await g.p;
+    return { body: { epoch: E1, readAt: 5, queueRev: 5, token: 3, selected: 11, entries: [{ id: 21, path: "Album/09 New.flac" }, { id: 11, path: "Album/01 A.flac" }, { id: 12, path: "Album/02 B.flac" }] } };
+  });
+  r.frame(playing({ revision: 4, queueRev: 4, length: 2 }));
+  await settle();
+  r.find("Queue").click();
+  await settle();
+  const rows = () => findAll(r.body, (n) => n.tagName === "BUTTON" && n.classList.contains("np-queue-title"));
+  check("the queue drawn: its rows enabled", rows().length === 2 && rows().every((b) => !b.disabled), rows().map((b) => b.disabled));
+  r.frame(playing({ revision: 5, queueRev: 5, length: 3 }));
+  await settle();
+  check("behind the state's queueRev: every row disabled", rows().length === 2 && rows().every((b) => b.disabled), rows().map((b) => b.disabled));
+  rows()[0].fire("click");
+  await settle();
+  check("a pick by position sends nothing, and says why", r.s.posts(ROUTES.transport).length === 0 && r.out.view().line === WORDS.queueBehind, [r.s.posts(), r.out.view().line]);
+  g.open();
+  await settle();
+  check("the queue read: the rows enabled again", rows().length === 3 && rows().every((b) => !b.disabled), rows().map((b) => b.disabled));
+};
+
+S.TestTheMenuAndTheQueueCloseOnEscapeAndOutsideClicks = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const r = await barPage({ latest: playing({ revision: 3 }) });
+  r.out.subscribe(() => {});
+  await settle();
+  const panel = findAll(r.body, (n) => n.attrs?.id === "np-queue")[0];
+  const menu = findAll(r.body, (n) => n.attrs?.id === "np-output-menu")[0];
+  const qbtn = r.find("Queue");
+  qbtn.click();
+  check("the queue opens", panel && !panel.hidden, panel?.hidden);
+  panel.fire("keydown", { key: "Escape" });
+  check("Escape closes the queue, its focus on the Queue button", panel.hidden && document.activeElement === qbtn, [panel.hidden, document.activeElement?.attrs?.["aria-label"]]);
+  qbtn.click();
+  panel.fire("click");
+  check("a click inside the queue leaves it open", !panel.hidden, panel.hidden);
+  r.body.fire("click");
+  check("a click outside closes the queue", panel.hidden, panel.hidden);
+  r.find("Output: the bridge's player").click();
+  check("the menu opens", !menu.hidden, menu.hidden);
+  r.body.fire("click");
+  check("a click outside closes the menu", menu.hidden, menu.hidden);
+};
+
+S.TestAPickThatGoesDisabledHandsItsFocusToTheOtherPick = async () => {
+  const r = await barPage({ latest: pub({ revision: 3, silent: true }) });
+  r.out.subscribe(() => {});
+  await settle();
+  r.find("Output: this browser").click();
+  await settle();
+  const [browserPick, bridgePick] = findAll(r.body, (n) => n.tagName === "BUTTON" && n.classList.contains("np-pick"));
+  check("the menu opens on the bridge's pick", document.activeElement === bridgePick, document.activeElement?.className);
+  r.frame(pub({ revision: 4, silent: true, hold: "check" }));
+  await settle();
+  check("its pick disabled, the focus on the other pick, inside the menu", bridgePick.disabled && document.activeElement === browserPick, [bridgePick.disabled, document.activeElement?.className]);
 };
 
 const name = scenarioName;

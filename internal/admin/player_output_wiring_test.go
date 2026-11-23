@@ -117,6 +117,226 @@ func TestEveryRowDecidesByTheOutputChosen(t *testing.T) {
 	}
 }
 
+// The functions of audio.js that play the element, each named for why: a
+// new play anywhere else fails TestEveryStartOfThisBrowserAsksTheGate, and
+// is to be routed through the gate or added here with its reason.
+var audioPlaySites = map[string]string{
+	"load":       "a start's load, with autoplay, run by a start the gate let through or by a continuation",
+	"loadAt":     "a start's play deferred to the track's metadata, which asks the start's permit again (V4)",
+	"playNow":    "toggle's play and start's, each run by the gate or by the barrier's done",
+	"advanceNow": "repeat-one's replay at a track's end, a continuation",
+	"onError":    "the retry after a network or decode error, which asks the start's permit again",
+}
+
+// The exported functions of audio.js that reach a play of the element, by
+// how: gated asks the start gate first (requestStart); afterBarrier is
+// called by output.js alone, on a barrier's done, with its permit;
+// continues keeps playing what plays.
+var audioStarts = map[string]string{
+	"playQueue": "gated",
+	"toggle":    "gated",
+	"advance":   "gated",
+	"take":      "afterBarrier",
+	"resume":    "afterBarrier",
+	"start":     "afterBarrier",
+	"removeAt":  "continues",
+	"init":      "continues",
+}
+
+// jsTopFunctions is every top-level function of src by name: its body (to
+// the next one's start) and whether it is exported.
+func jsTopFunctions(src string) map[string]struct {
+	body     string
+	exported bool
+} {
+	out := map[string]struct {
+		body     string
+		exported bool
+	}{}
+	locs := barFnRe.FindAllStringSubmatchIndex(src, -1)
+	for i, loc := range locs {
+		end := len(src)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		head := src[loc[0]:loc[1]]
+		out[src[loc[2]:loc[3]]] = struct {
+			body     string
+			exported bool
+		}{src[loc[0]:end], strings.HasPrefix(head, "export")}
+	}
+	return out
+}
+
+// TestEveryStartOfThisBrowserAsksTheGate pins R1 at the source, on every
+// host: in audio.js every exported function that reaches a play of the
+// element (its body, or a function of the module it calls) asks the start
+// gate first, or is one of the barrier's continuations output.js calls with
+// a permit, or keeps playing what plays; every play is in a function
+// audioPlaySites names; the MediaSession's handlers start through toggle and
+// advance alone; no other player module plays an element or calls take,
+// resume or start of audio.js; output.js hands each of those a permit, or
+// takes a queue stopped; and boot.js wires the gate before the bar mounts.
+// TestEveryStartOfThisBrowserGoesThroughTheGate runs the wiring under node.
+func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
+	src := stripJSComments(readFile(t, "static/player/audio.js"))
+	fns := jsTopFunctions(src)
+	if len(fns) < 30 {
+		t.Fatalf("only %d functions found in audio.js: the reader has stopped finding them", len(fns))
+	}
+	plays := map[string]bool{}
+	for name, f := range fns {
+		if strings.Contains(f.body, ".play(") {
+			plays[name] = true
+			if _, ok := audioPlaySites[name]; !ok {
+				t.Errorf("audio.js's %s plays the element and is no play site this test names: route it through the gate, or name it with its reason", name)
+			}
+		}
+	}
+	for name := range audioPlaySites {
+		if !plays[name] {
+			t.Errorf("audioPlaySites names %s, which plays nothing now: take it off the list", name)
+		}
+	}
+	// reach is whether a function reaches a play through the module's calls.
+	// A call of a start this test names is accounted for where that start is
+	// checked (a gated one asks the gate; init's listeners are the element's
+	// own continuations), so reach does not go through one.
+	memo := map[string]int{}
+	var reach func(string) bool
+	reach = func(name string) bool {
+		switch memo[name] {
+		case 1:
+			return false
+		case 2:
+			return true
+		}
+		memo[name] = 1
+		if plays[name] {
+			memo[name] = 2
+			return true
+		}
+		for callee := range fns {
+			if _, named := audioStarts[callee]; named || callee == name {
+				continue
+			}
+			if regexp.MustCompile(`(?:^|[^\w$.])`+regexp.QuoteMeta(callee)+`\(`).MatchString(fns[name].body) && reach(callee) {
+				memo[name] = 2
+				return true
+			}
+		}
+		return false
+	}
+	for name, f := range fns {
+		how, named := audioStarts[name]
+		if !named {
+			if f.exported && reach(name) {
+				t.Errorf("audio.js's %s reaches a play and is no start this test names: ask the start gate in it", name)
+			}
+			continue
+		}
+		if !f.exported {
+			t.Errorf("audioStarts names %s, which audio.js does not export", name)
+			continue
+		}
+		switch how {
+		case "gated":
+			if !strings.Contains(f.body, "requestStart(") {
+				t.Errorf("audio.js's %s starts the element without asking the start gate", name)
+			}
+		case "afterBarrier":
+			if !regexp.MustCompile(`function\s+` + name + `\([^)]*\bpermit\b`).MatchString(f.body) {
+				t.Errorf("audio.js's %s takes no permit for the plays it defers", name)
+			}
+		}
+	}
+	ms := fns["wireMediaSession"].body
+	for _, want := range []string{`set("play", () => toggle())`, `set("pause", () => toggle())`, `set("previoustrack", () => advance(-1))`, `set("nexttrack", () => advance(1))`} {
+		if !strings.Contains(ms, want) {
+			t.Errorf("the MediaSession's handlers lack %s", want)
+		}
+	}
+	for _, f := range []string{"views.js", "nowplaying.js", "trackmarks.js", "ui.js", "variants.js", "api.js", "format.js", "boot.js", "output.js"} {
+		other := stripJSComments(readFile(t, "static/player/"+f))
+		if strings.Contains(other, ".play(") {
+			t.Errorf("%s plays an element: every start of this browser is audio.js's, through the gate", f)
+		}
+		if m := regexp.MustCompile(`audio\.(?:take|resume|start)\(`).FindString(other); m != "" {
+			t.Errorf("%s calls %s: only output.js, on a barrier's done, starts the browser that way", f, m)
+		}
+	}
+	out := stripJSComments(readFile(t, "static/player/output.js"))
+	for _, m := range regexp.MustCompile(`env\.browser\?\.(take|resume|start)\?\.\(([^)]*)\)`).FindAllStringSubmatch(out, -1) {
+		args := m[2]
+		if strings.HasSuffix(args, "permit") || (m[1] == "take" && strings.HasSuffix(args, ", false")) {
+			continue
+		}
+		t.Errorf("output.js calls the browser's %s(%s): a start hands its permit, and a queue taken without one is taken stopped", m[1], args)
+	}
+	boot := extractJSFunction(t, stripJSComments(readFile(t, "static/player/boot.js")), "boot")
+	gateAt, mountAt := strings.Index(boot, "audio.setStartGate(output.gateStart)"), strings.Index(boot, "mountBar();")
+	if gateAt < 0 || mountAt < 0 || gateAt > mountAt {
+		t.Error("boot.js does not wire the start gate before the bar mounts")
+	}
+}
+
+// TestThePhoneBarKeepsItsWordsWithTheBridgeChosen pins R10 at the source: in
+// a max-width 640px block, with the bridge chosen, the bar draws neither the
+// cover, which the bridge never paints, nor the Mute, which it disables
+// (the level is fixed), so the words keep about 63px at 375px; the bar says
+// which output it shows (data-output) and the Mute carries np-mute. The
+// browser session measures .np-meta's width.
+func TestThePhoneBarKeepsItsWordsWithTheBridgeChosen(t *testing.T) {
+	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
+	found := false
+	for _, block := range cssMediaBlocks(css, "(max-width: 640px)") {
+		rule := regexp.MustCompile(`\.npbar\[data-output="bridge"\] \.np-art,\s*\.npbar\[data-output="bridge"\] \.np-mute\s*\{\s*display:\s*none;\s*\}`)
+		if rule.MatchString(block) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no max-width 640px block hides the cover and the Mute with the bridge chosen")
+	}
+	np := stripJSComments(readFile(t, "static/player/nowplaying.js"))
+	for _, want := range []string{`refs.mute.classList.add("np-mute")`, `bar.dataset.output = "bridge"`, `bar.dataset.output = "browser"`, `refs.art = el("div", { class: "np-art" })`} {
+		if !strings.Contains(np, want) {
+			t.Errorf("nowplaying.js lacks %s", want)
+		}
+	}
+}
+
+// cssMediaBlocks is the body of every @media block of css whose query is
+// query, found by its braces.
+func cssMediaBlocks(css, query string) []string {
+	var out []string
+	head := "@media " + query
+	for i := strings.Index(css, head); i >= 0; {
+		open := strings.Index(css[i:], "{")
+		if open < 0 {
+			break
+		}
+		depth, j := 0, i+open
+		for ; j < len(css); j++ {
+			if css[j] == '{' {
+				depth++
+			} else if css[j] == '}' {
+				depth--
+				if depth == 0 {
+					break
+				}
+			}
+		}
+		out = append(out, css[i+open:j])
+		next := strings.Index(css[j:], head)
+		if next < 0 {
+			break
+		}
+		i = j + next
+	}
+	return out
+}
+
 // barStateExempt are the state's fields the bar must not act on, each
 // forbidden as an input by the design: at, a capture's time, never the
 // clock's offset (M1: the offset is GET now's X-Bridge-Clock samples

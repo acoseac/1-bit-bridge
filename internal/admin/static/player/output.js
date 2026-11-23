@@ -63,6 +63,17 @@ export const RECONNECT_POLL_MS = 2000;
 export const READ_BACK_MS = 2000;
 /** A client clock that jumps by more than this against the monotonic one. */
 export const CLOCK_JUMP_MS = 1000;
+/** A request unanswered this long is lost: its operation unconfirmed (§7.2, R6). */
+export const REQUEST_MS = 30000;
+/** How long a start of this browser waits to know whether a player is offered. */
+export const START_WAIT_MS = 10000;
+/** How often a queue that is behind its state is read again, at most (C4). */
+export const QUEUE_RETRY_MS = 2000;
+
+/** opKey names an operation by its epoch, its tab and its count (V3). */
+export function opKey(epoch, tab, seq) {
+  return `${epoch}/${tab}/${seq}`;
+}
 
 /** The phases of §7.2. */
 export const PHASE = {
@@ -76,6 +87,25 @@ export const PHASE = {
 // The answers a request gets that say no player is offered here (K1): the
 // bar then plays in the browser as it always has.
 const NOT_OFFERED = new Set(["player_not_wired", "player_not_available", "player_not_supported", "player_not_offered"]);
+
+// The structured refusals the console answers before a command becomes an
+// operation, with no record: proof it never ran (R2, V2, V8). From the code:
+// the not-offered words (controlRefusal); the body's bounds and shapes
+// (decodeControlBody, checkTracks, the routes' own checks: body_too_large,
+// bad_json, too_many_tracks, bad_track, bad_operation, bad_generation,
+// bad_command); the catalog's and a playlist's read before the operation
+// (expandTracks: catalog_unavailable, internal); csrfGuard's cross_origin;
+// and the control's admission (admit: epoch_changed, replayed,
+// operation_conflict, and player_not_running for a control that has
+// closed). Any other answer without a record, a network failure or a body
+// that is not JSON proves nothing: the operation stays unconfirmed, for its
+// record to say how it ended.
+const NEVER_RAN = new Set([
+  ...NOT_OFFERED,
+  "body_too_large", "bad_json", "too_many_tracks", "bad_track", "bad_operation", "bad_generation", "bad_command",
+  "catalog_unavailable", "internal", "cross_origin",
+  "epoch_changed", "replayed", "operation_conflict", "player_not_running",
+]);
 
 // ---- The bar's words ----
 
@@ -103,6 +133,10 @@ export const WORDS = {
   noRepeatOne: "The bridge's player repeats the whole queue or nothing",
   fixedLevel: "Fixed level: set it on the DAC or the amplifier",
   nothing: "Nothing playing",
+  startWaits: "Waiting to hear from the bridge's player before this browser plays…",
+  startUnanswered: "The bridge's player has not answered: press play again",
+  pressPlay: "The move to this browser finished before this page loaded: press Play to start it here",
+  queueBehind: "The bridge's queue is being read again: pick an entry once it shows",
 };
 
 /** Why the bridge's player cannot be picked, from the state (§7.1). */
@@ -348,19 +382,31 @@ export function createOutput(env) {
   let sampleInFlight = false;
   let lastSampleAsk = -Infinity;
   let drift = null;
-  // Whether this box offers its player: null not known, true, false (K1).
+  // Whether this box offers its player: null not known, true, false (K1),
+  // from GET now's answer, which a box that offers none answers with its
+  // typed refusal and no frame ever follows, or from a frame (V6).
   let offered = null;
-  // The identity (M2, P2) and the operations in flight.
+  // The identity (M2, P2) and the operations not yet resolved, each keyed by
+  // its epoch, its tab and its count (V3): this document's own (ops), and
+  // those an earlier document left, which session storage carried in
+  // (inherited, V9).
   let tab = "";
   let seq = 0;
   const ops = new Map();
-  let inherited = null;
+  const inherited = new Map();
   let readBackAt = -Infinity;
-  // The output and the phase (§7.2).
+  // The output and the phase (§7.2), and the count of the picks made here:
+  // only a switch sent under the newest pick moves the output (R3).
   let output = readOutput();
   let phase = output === "bridge" ? PHASE.bridge : PHASE.browser;
   let line = "";
   let lastPoll = -Infinity;
+  let pickGen = 0;
+  // A start of this browser waiting to know whether a player is offered, and
+  // the newest start the barrier in flight runs (R1, V7).
+  let waiting = null;
+  let startPending = null;
+  let lastQueueAsk = -Infinity;
 
   const now = () => env.now();
 
@@ -393,9 +439,18 @@ export function createOutput(env) {
     return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
   }
 
-  function storeIdentity(pending) {
+  // storeIdentity keeps this document's identity and every operation not yet
+  // resolved, its own and the ones it inherited, each by its key, so a
+  // reload, or a second one, still reads each back (R7).
+  function storeIdentity() {
+    const pending = {};
+    for (const m of [inherited, ops]) {
+      for (const [k, e] of m) {
+        pending[k] = { epoch: e.epoch, tab: e.tab, seq: e.seq, role: e.role, kind: e.kind || "", handover: e.handover || null };
+      }
+    }
     try {
-      env.storage.setItem(OP_KEY, JSON.stringify({ tab, seq, pending: pending || null }));
+      env.storage.setItem(OP_KEY, JSON.stringify({ tab, seq, pending }));
     } catch { /* private mode: the operation still runs, a reload cannot read it back */ }
   }
 
@@ -404,25 +459,31 @@ export function createOutput(env) {
     try {
       stored = JSON.parse(env.storage.getItem(OP_KEY) || "null");
     } catch { stored = null; }
-    const p = stored?.pending;
-    if (p && typeof stored.tab === "string" && /^[0-9a-f]{32}$/.test(stored.tab) && p.seq > 0 && typeof p.epoch === "string") {
-      inherited = { tab: stored.tab, seq: p.seq, epoch: p.epoch, role: p.role, handover: p.handover || null };
+    const pending = stored && typeof stored.pending === "object" && stored.pending ? stored.pending : {};
+    for (const p of Object.values(pending)) {
+      if (!p || typeof p.tab !== "string" || !/^[0-9a-f]{32}$/.test(p.tab) || !(p.seq > 0) || typeof p.epoch !== "string") continue;
+      const e = { key: opKey(p.epoch, p.tab, p.seq), epoch: p.epoch, tab: p.tab, seq: p.seq, role: p.role, kind: p.kind || "",
+        handover: p.handover || null, inherited: true, pick: 0 };
+      inherited.set(e.key, e);
     }
     // A document's own commands go under an identity of its own: two tabs
-    // started from one session storage never share an operation (M2).
+    // started from one session storage never share an operation (M2). The
+    // operations it inherited stay stored until each resolves (R7).
     tab = newTab();
     seq = 0;
-    storeIdentity(null);
-    if (inherited) {
+    storeIdentity();
+    if (inherited.size) {
       phase = PHASE.unconfirmed;
       line = WORDS.unconfirmed;
     }
   }
 
+  // freshIdentity is a new identity after operation_conflict, its count from
+  // 0; the operations not yet resolved are kept, each by its own key (R7, V3).
   function freshIdentity() {
     tab = newTab();
     seq = 0;
-    storeIdentity(null);
+    storeIdentity();
   }
 
   // ---- The order (§4.2) ----
@@ -471,16 +532,14 @@ export function createOutput(env) {
     resetSamples();
     // An operation of another epoch never ran here, or ran in a serve that
     // has ended: its outcome is not known (§2.3).
-    for (const [s, op] of ops) {
-      if (op.epoch !== e) {
-        ops.delete(s);
-        settleUnknown(op);
+    for (const m of [ops, inherited]) {
+      for (const [k, op] of [...m]) {
+        if (op.epoch !== e) {
+          m.delete(k);
+          storeIdentity();
+          settleUnknown(op);
+        }
       }
-    }
-    if (inherited && inherited.epoch !== e) {
-      const inh = inherited;
-      inherited = null;
-      settleUnknown({ role: inh.role, inherited: true, handover: inh.handover });
     }
   }
 
@@ -491,8 +550,9 @@ export function createOutput(env) {
     state = st;
     offered = true;
     if (!queue || st.queueRev > queue.readAt) readQueue();
-    for (const rec of st.operations || []) noteRecord(rec, "stream");
-    if (inherited && st.epoch === inherited.epoch) readBack();
+    for (const rec of st.operations || []) noteRecord(st, rec);
+    if ([...inherited.values()].some((e) => e.epoch === st.epoch)) readBack();
+    flushWaiting();
     if (output === "browser" && phase === PHASE.browser) {
       // While this browser plays, a publication showing the bridge playing
       // puts §3.3's line on the bar; the console stops neither.
@@ -524,6 +584,7 @@ export function createOutput(env) {
       return;
     }
     queueReading = true;
+    lastQueueAsk = env.perf();
     const askedIn = epoch;
     let q = null;
     try {
@@ -576,8 +637,12 @@ export function createOutput(env) {
     // and its state both (P7, P8).
     if (ask.conn !== conn || ask.gen !== samplingGen || ask.epoch !== epoch) return;
     if (!r.ok) {
+      // GET now's typed refusal is what says no player is offered here: a
+      // box without one sends no frame at all (V6). A start waiting to know
+      // goes on in this browser at once.
       if (body && NOT_OFFERED.has(body.error)) {
         offered = false;
+        flushWaiting();
         emit();
       }
       return;
@@ -636,77 +701,118 @@ export function createOutput(env) {
     emit();
   }
 
-  // ---- Operations (§2.3) ----
+  // ---- Operations (§2.3; round 2: R2, R5, R6, R7, V1, V2, V3, V10) ----
+
+  // current says whether entry is still this document's own operation, in
+  // flight or unconfirmed, and its answer still one to read: not resolved,
+  // not dropped with its epoch, not past the bar's 30 s (V1, V10).
+  function current(entry) {
+    return ops.get(entry.key) === entry && !entry.expired;
+  }
+
+  // live says whether entry, its own or inherited, is not yet resolved.
+  function live(entry) {
+    return (entry.inherited ? inherited : ops).get(entry.key) === entry;
+  }
+
+  // ours says whether entry may still move the output, the phase or the
+  // browser: only an operation sent under the newest pick (R3, V11).
+  function ours(entry) {
+    return entry.pick === pickGen;
+  }
+
+  // drop removes entry, resolved, from what is kept and stored (R7).
+  function drop(entry) {
+    (entry.inherited ? inherited : ops).delete(entry.key);
+    storeIdentity();
+  }
 
   async function send(route, body, op) {
     if (!epoch) {
-      line = "The bridge's player has not been read yet";
+      // No epoch, so no operation can be named: refused here, before it
+      // was sent, and ended as a refusal is (R2).
+      const words = "The bridge's player has not been read yet";
+      line = words;
+      op.refused?.({ error: "no_epoch" }, words, true);
       emit();
       return { refused: "no_epoch" };
     }
     seq += 1;
-    const id = { tab, seq, epoch };
-    const entry = { ...op, seq, epoch, tab, inFlight: true, records: [] };
-    ops.set(seq, entry);
-    storeIdentity({ seq, epoch, role: op.role, handover: op.handover || null });
-    let r;
+    const entry = { ...op, key: opKey(epoch, tab, seq), seq, epoch, tab, pick: pickGen, inFlight: true, sentAt: env.perf(), records: [] };
+    ops.set(entry.key, entry);
+    storeIdentity();
     let ans = null;
     try {
-      r = await env.fetch(route, {
+      const r = await env.fetch(route, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify({ op: id, ...body }),
+        body: JSON.stringify({ op: { tab: entry.tab, seq: entry.seq, epoch: entry.epoch }, ...body }),
       });
+      // An answer past the bar's 30 s, or to an operation its epoch's end
+      // settled, is not read: its record resolves it (V1, V10).
+      if (!current(entry)) return { stale: true };
       ans = await r.json();
     } catch {
       ans = null;
     }
+    if (!current(entry)) return { stale: true };
     entry.inFlight = false;
     if (!ans || typeof ans !== "object") {
       lost(entry);
       return { lost: true };
     }
     const st = ans.player ? parse(ans.player) : null;
-    if (!ans.record) {
-      // Refused before it became an operation: it never ran.
-      ops.delete(entry.seq);
-      storeIdentity(null);
-      if (st) offer(st, "answer");
-      if (ans.error === "operation_conflict") {
-        freshIdentity();
-        line = WORDS.conflict;
-      } else if (ans.error === "epoch_changed") {
-        line = WORDS.epochChanged;
-      } else if (NOT_OFFERED.has(ans.error)) {
-        offered = false;
-        line = ans.message || "";
-      } else {
-        line = ans.message || refusedWord(ans.error);
-      }
-      entry.refusal?.(ans);
-      emit();
-      return { refused: ans.error };
-    }
     // The state the answer carries, ordered as the rest; a held answer's
     // record is processed whatever the state's revision (J10).
     if (st) offer(st, "answer");
+    if (!ans.record) {
+      if (!NEVER_RAN.has(ans.error)) {
+        // An answer with no record that proves nothing: the command may have
+        // run, so its record says how it ended (V2).
+        lost(entry);
+        return { lost: true, error: ans.error || "" };
+      }
+      // Refused before it became an operation: it never ran (R2).
+      ops.delete(entry.key);
+      let words;
+      if (ans.error === "operation_conflict") {
+        freshIdentity();
+        words = WORDS.conflict;
+      } else if (ans.error === "epoch_changed") {
+        words = WORDS.epochChanged;
+      } else if (NOT_OFFERED.has(ans.error)) {
+        offered = false;
+        words = ans.message || "";
+      } else {
+        words = ans.message || refusedWord(ans.error);
+      }
+      storeIdentity();
+      const mine = ours(entry);
+      if (mine) line = words;
+      entry.refused?.(ans, words, mine);
+      emit();
+      return { refused: ans.error };
+    }
     const rec = ans.record;
     if (rec.status === "running") {
       lost(entry);
       return { running: true, record: rec };
     }
-    finish(entry, rec, "answer", st);
+    finish(entry, rec, "answer");
     return { record: rec };
   }
 
   function lost(entry) {
-    if (!ops.has(entry.seq)) return;
+    if (!live(entry)) return;
     entry.lost = true;
-    phase = PHASE.unconfirmed;
-    line = WORDS.unconfirmed;
+    entry.inFlight = false;
+    if (ours(entry)) {
+      phase = PHASE.unconfirmed;
+      line = WORDS.unconfirmed;
+    }
     for (const r of entry.records) {
       if (r.status !== "running") {
-        finish(entry, r.rec || r, "stream", state);
+        settleFromStream(entry, r);
         return;
       }
     }
@@ -714,128 +820,221 @@ export function createOutput(env) {
     emit();
   }
 
-  // noteRecord takes a record from the stream's eight: an operation in
-  // flight keeps it until its own answer decides; one whose answer was lost
-  // is decided by it.
-  function noteRecord(rec, how) {
-    if (!rec || rec.tab !== tab) return;
-    const entry = ops.get(rec.seq);
-    if (!entry || rec.status === "running") return;
+  // noteRecord takes a record from the stream's eight, named by the
+  // publication's epoch and its own tab and count (V3): an operation in
+  // flight keeps it until its own answer decides; one whose answer was lost,
+  // and one an earlier document left, are decided by it.
+  function noteRecord(st, rec) {
+    if (!rec || rec.status === "running") return;
+    const key = opKey(st.epoch, rec.tab, rec.seq);
+    const entry = ops.get(key) || inherited.get(key);
+    if (!entry) return;
     if (entry.inFlight) {
       entry.records.push(rec);
       return;
     }
-    if (entry.lost) finish(entry, rec, how, state);
+    if (entry.inherited || entry.lost) settleFromStream(entry, rec);
   }
 
-  async function readBack() {
-    if (now() - readBackAt < READ_BACK_MS) return;
+  // A published record carries no handover and no tracks left out (the
+  // control's recentRecords): an operation that needs them is completed by
+  // its record read back whole, and by nothing else (R5).
+  function needsWhole(entry) {
+    return entry.role === "switch-out" || entry.role === "switch-in" || (entry.role === "edit" && entry.kind !== "delete");
+  }
+
+  function settleFromStream(entry, rec) {
+    if (needsWhole(entry)) {
+      readBack(true);
+      return;
+    }
+    if (entry.inherited) finishInherited(entry, rec);
+    else finish(entry, rec, "stream");
+  }
+
+  async function readBack(force) {
+    if (!force && now() - readBackAt < READ_BACK_MS) return;
     readBackAt = now();
     const targets = [];
-    for (const entry of ops.values()) {
-      if (entry.lost) targets.push({ tab: entry.tab, seq: entry.seq, epoch: entry.epoch, entry });
-    }
-    if (inherited && inherited.epoch === epoch) targets.push({ ...inherited, inherited: true });
-    for (const t of targets) {
-      let r;
+    for (const e of ops.values()) if (e.lost && e.epoch === epoch) targets.push(e);
+    for (const e of inherited.values()) if (e.epoch === epoch) targets.push(e);
+    for (const e of targets) {
       let ans = null;
       try {
-        r = await env.fetch(`${ROUTES.operation}?epoch=${encodeURIComponent(t.epoch)}&tab=${encodeURIComponent(t.tab)}&seq=${t.seq}`,
+        const r = await env.fetch(`${ROUTES.operation}?epoch=${encodeURIComponent(e.epoch)}&tab=${encodeURIComponent(e.tab)}&seq=${e.seq}`,
           { headers: { accept: "application/json" } });
         ans = await r.json();
       } catch { continue; }
-      if (!ans) continue;
+      if (!ans || !live(e)) continue;
       if (ans.error === "operation_gone" || ans.error === "epoch_changed") {
-        if (t.inherited) {
-          inherited = null;
-          settleUnknown({ role: t.role, inherited: true, handover: t.handover }, ans.error === "operation_gone" ? WORDS.gone : WORDS.epochChanged);
-        } else if (ops.has(t.seq)) {
-          ops.delete(t.seq);
-          settleUnknown(t.entry, ans.error === "operation_gone" ? WORDS.gone : WORDS.epochChanged);
-        }
+        drop(e);
+        settleUnknown(e, ans.error === "operation_gone" ? WORDS.gone : WORDS.epochChanged);
         continue;
       }
       const rec = ans.record;
       if (!rec || rec.status === "running") continue;
-      if (t.inherited) {
-        if (!inherited || inherited.seq !== t.seq) continue;
-        inherited = null;
-        finishInherited(t, rec);
-      } else if (ops.has(t.seq)) {
-        finish(t.entry, rec, "readback", state);
-      }
+      if (e.inherited) finishInherited(e, rec);
+      else finish(e, rec, "readback");
     }
     emit();
   }
 
-  function finish(entry, rec, how, st) {
-    if (!ops.has(entry.seq)) return;
-    ops.delete(entry.seq);
-    storeIdentity(null);
-    entry.done?.(rec, how, st || state);
+  function finish(entry, rec, how) {
+    if (ops.get(entry.key) !== entry) return;
+    ops.delete(entry.key);
+    storeIdentity();
+    // The state the done reads is the latest accepted, never an answer
+    // the order refused (R4).
+    entry.done?.(rec, how, ours(entry));
     emit();
   }
 
+  // settleUnknown ends an operation whose record is not kept, or of a serve
+  // that has ended: its caller has dropped it.
   function settleUnknown(entry, words) {
-    storeIdentity(null);
-    if (entry?.unknown) entry.unknown(words);
-    else if (entry?.inherited) {
-      // An inherited operation whose record is not kept, or of a serve that
-      // has ended: the state as it is, and the pick to make again.
-      phase = output === "bridge" ? PHASE.bridge : PHASE.browser;
-      line = words || WORDS.pickAgain;
-      if (entry.handover && entry.role === "switch-out") {
-        env.browser?.take?.(entry.handover, false);
+    if (entry.inherited) {
+      if (ours(entry)) {
+        phase = output === "bridge" ? PHASE.bridge : PHASE.browser;
+        line = words || WORDS.pickAgain;
       }
+    } else {
+      entry.unknown?.(words, ours(entry));
     }
     emit();
   }
 
-  function finishInherited(t, rec) {
-    // A record read back is history (G8): what it moved is taken, and only a
-    // barrier answered now starts anything.
-    if (t.role === "switch-out" && rec.status === "done") {
-      const h = handoverOf(rec);
-      setOutput("browser");
-      phase = PHASE.browser;
-      if (h) env.browser?.take?.(h, false);
-      if (state && bridgeSounds(state)) {
-        line = WORDS.bridgeAgain;
-        emit();
-        return;
-      }
-      line = "";
-      if (h?.playing) barrier(() => env.browser?.start?.());
+  // finishInherited ends an operation an earlier document left, its record
+  // read back here (a reload, or a copy of this tab, whose session storage
+  // carried it in): what it moved is taken, stopped, and nothing starts, the
+  // reader's Play going through the gate; its record's words say how it
+  // ended (R8, V5, V9, C1).
+  function finishInherited(e, rec) {
+    if (inherited.get(e.key) !== e) return;
+    drop(e);
+    if (!ours(e)) {
       emit();
       return;
     }
-    if (t.role === "switch-in") {
-      resolveSwitchIn(rec, state, t.handover);
+    if (e.role === "switch-out") {
+      if (rec.status === "done") {
+        const h = handoverOf(rec);
+        setOutput("browser");
+        phase = PHASE.browser;
+        if (h) env.browser?.take?.(h, false);
+        line = state && bridgeSounds(state) ? WORDS.bridgeAgain : (h?.playing ? WORDS.pressPlay : "");
+      } else {
+        phase = PHASE.bridge;
+        line = switchOutWord(rec);
+      }
+      emit();
+      return;
+    }
+    if (e.role === "switch-in") {
+      resolveSwitchIn(rec, e.handover, { recovered: true });
       return;
     }
     phase = output === "bridge" ? PHASE.bridge : PHASE.browser;
-    line = rec.status === "done" ? "" : (rec.error ? refusedWord(rec.error) : "");
+    line = recordLine(rec);
     emit();
+  }
+
+  // ---- The gate: every start of this browser (R1, R4, V4, V6, V7) ----
+
+  // gateStart is how this browser starts, whatever asked (a row, Play, Next,
+  // a lock-screen control, a resume after a refused move): run, given a
+  // permit its later plays ask again (V4), only where no player is offered,
+  // or on a barrier's done answered now beside a bridge that does not
+  // sound. Before GET now or a frame has said whether a player is offered,
+  // and with one offered before its epoch is known, the start waits; a
+  // bridge that sounds refuses it, with its line. A pause never comes here.
+  function gateStart(run) {
+    if (offered === false) {
+      run(null);
+      return;
+    }
+    if (offered !== true || !epoch || !state) {
+      waiting = { run, at: env.perf() };
+      line = WORDS.startWaits;
+      emit();
+      return;
+    }
+    decideStart(run);
+  }
+
+  function flushWaiting() {
+    if (!waiting) return;
+    if (offered !== false && (offered !== true || !epoch || !state)) return;
+    const w = waiting;
+    waiting = null;
+    if (line === WORDS.startWaits) line = "";
+    if (offered === false) w.run(null);
+    else decideStart(w.run);
+  }
+
+  function decideStart(run) {
+    if (output !== "browser") return;
+    if (bridgeSounds(state)) {
+      line = WORDS.bridgePlaying;
+      emit();
+      return;
+    }
+    // One barrier at a time: a start asked while one is out replaces the
+    // start it runs.
+    if (startPending) {
+      startPending.run = run;
+      return;
+    }
+    const pending = { run };
+    startPending = pending;
+    void barrier((permit) => {
+      if (startPending === pending) startPending = null;
+      pending.run(permit);
+    }).finally(() => {
+      if (startPending === pending) startPending = null;
+    });
+  }
+
+  // permitFor is a start's permit: true while no newer pick came, this
+  // browser is the output, and no state newer than the barrier's silence,
+  // or of another epoch, shows the bridge sounding (R3, R4, V4).
+  function permitFor(silence, gen) {
+    const ep = epoch;
+    return () => {
+      if (gen !== pickGen || output !== "browser") return false;
+      if (!state) return true;
+      if (state.epoch !== ep || state.revision > silence) return !bridgeSounds(state);
+      return true;
+    };
   }
 
   // ---- The barrier (§3.2) ----
 
-  // barrier runs the switch-out with take false, and calls start on its done
-  // answered now, and on nothing else.
+  // barrier runs the switch-out with take false, and calls start with its
+  // permit on its done answered now, and on nothing else; a newer pick, or a
+  // state newer than its silence that shows the bridge playing, starts
+  // nothing (R3, R4).
   function barrier(start) {
     return send(ROUTES.switchOut, { take: false }, {
       role: "barrier",
-      done(rec, how) {
+      done(rec, how, mine) {
+        if (!mine) return;
         // Its done, answered now, with the revision of the publication that
         // showed the bridge silent: that alone starts the browser.
         if (rec.status === "done" && how === "answer" && rec.silence > 0) {
-          start();
+          const permit = permitFor(rec.silence, pickGen);
+          if (!permit()) {
+            line = WORDS.bridgeAgain;
+            return;
+          }
+          start(permit);
           return;
         }
         phase = PHASE.browser;
         line = rec.status === "done" ? "" : barrierWord(rec);
       },
-      unknown(words) { phase = PHASE.browser; line = words || WORDS.pickAgain; },
+      unknown(words, mine) { if (mine) { phase = PHASE.browser; line = words || WORDS.pickAgain; } },
+      // Refused before it ran: nothing starts, the refusal's line said (R2).
+      refused(ans, words, mine) { if (mine) phase = PHASE.browser; },
     });
   }
 
@@ -870,13 +1069,23 @@ export function createOutput(env) {
     if (h.position > 0 && h.pcm) body.position = h.position;
     return send(ROUTES.replace, body, {
       role: "switch-in",
+      kind: "replace",
       handover: h,
-      done(rec, how, st) { resolveSwitchIn(rec, st, h); },
-      unknown(words) { phase = PHASE.bridge; line = words || WORDS.pickAgain; },
+      done(rec, how, mine) { if (mine) resolveSwitchIn(rec, h); },
+      unknown(words, mine) { if (mine) { phase = PHASE.bridge; line = words || WORDS.pickAgain; } },
+      // Refused before it ran: back to this browser, its line said, which
+      // resumes only through the gate, and only if it was playing (R2).
+      refused(ans, words, mine) {
+        if (!mine) return;
+        setOutput("browser");
+        phase = PHASE.browser;
+        line = words;
+        if (h.playing) gateStart((permit) => env.browser?.resume?.(h, permit));
+      },
     });
   }
 
-  function resolveSwitchIn(rec, st, h) {
+  function resolveSwitchIn(rec, h, { recovered = false } = {}) {
     if (rec.status === "done") {
       setOutput("bridge");
       phase = PHASE.bridge;
@@ -888,25 +1097,33 @@ export function createOutput(env) {
     if (rec.effect === "none") {
       // Refused with nothing changed (G9: the engine's answer decides, never
       // the count sent): back to the browser, which resumes only through
-      // the barrier, and only beside a bridge that reads silent (G1).
+      // the gate, only beside a bridge that reads silent in the latest state
+      // accepted (G1, R4), and never for a document that only read the
+      // record back (R8, V5).
       setOutput("browser");
       phase = PHASE.browser;
       const why = rec.status === "refused" ? refusedWord(rec.error) : "";
+      const st = state;
       if (st && !st.silent) {
         line = st.hold && st.hold !== "none" ? holdWord(st.hold) : WORDS.bridgePlaying;
         emit();
         return;
       }
+      if (recovered) {
+        line = [why, h?.playing ? "press Play to start this browser" : ""].filter(Boolean).join(": ");
+        emit();
+        return;
+      }
       line = why;
       emit();
-      if (h?.playing) barrier(() => env.browser?.resume?.(h));
+      if (h?.playing) gateStart((permit) => env.browser?.resume?.(h, permit));
       return;
     }
     // Changed, a later step refused, or cancelled: the switch happened in
     // part, so the bar is on the bridge and the browser stays stopped.
     setOutput("bridge");
     phase = PHASE.bridge;
-    line = rec.status === "changed" ? partialLine(rec, st, plannedOf(rec, h?.playing)) : (rec.status === "refused" ? refusedWord(rec.error) : WORDS.pickAgain);
+    line = rec.status === "changed" ? partialLine(rec, state, plannedOf(rec, h?.playing)) : (rec.status === "refused" ? refusedWord(rec.error) : WORDS.pickAgain);
     emit();
   }
 
@@ -926,25 +1143,67 @@ export function createOutput(env) {
     emit();
     return send(ROUTES.switchOut, { take: true }, {
       role: "switch-out",
-      done(rec, how) {
+      done(rec, how, mine) {
+        if (!mine) return;
         if (rec.status === "done" && how === "answer" && rec.silence > 0) {
           const h = handoverOf(rec);
           setOutput("browser");
           phase = PHASE.browser;
+          const permit = permitFor(rec.silence, pickGen);
+          // A state accepted since the silence that shows the bridge playing
+          // again: the queue taken stopped, and said (R4).
+          if (!permit()) {
+            line = WORDS.bridgeAgain;
+            if (h) env.browser?.take?.(h, false);
+            return;
+          }
           line = "";
-          if (h) env.browser?.take?.(h, !!h.playing);
+          if (h) env.browser?.take?.(h, !!h.playing, permit);
           return;
         }
         if (rec.status === "done") {
-          // Seen on the stream or read back: history (G8).
-          finishInherited({ role: "switch-out" }, rec);
+          // Read back whole after its answer was lost: history (G8).
+          recoverSwitchOut(rec);
           return;
         }
         phase = PHASE.bridge;
-        line = rec.status === "changed" ? WORDS.wentOn : (rec.status === "refused" ? refusedWord(rec.error) : WORDS.pickAgain);
+        line = switchOutWord(rec);
       },
-      unknown(words) { phase = PHASE.bridge; line = words || WORDS.pickAgain; },
+      unknown(words, mine) { if (mine) { phase = PHASE.bridge; line = words || WORDS.pickAgain; } },
+      // Refused before it ran: back on the bridge, its line said; where no
+      // player is offered, this browser is the output, nothing started (R2).
+      refused(ans, words, mine) {
+        if (!mine) return;
+        if (NOT_OFFERED.has(ans.error)) {
+          setOutput("browser");
+          phase = PHASE.browser;
+          return;
+        }
+        phase = PHASE.bridge;
+      },
     });
+  }
+
+  function switchOutWord(rec) {
+    if (rec.status === "changed") return WORDS.wentOn;
+    if (rec.status === "refused") return refusedWord(rec.error);
+    return WORDS.pickAgain;
+  }
+
+  // recoverSwitchOut is this document's own switch-out, its answer lost and
+  // its record read back done: what it moved is taken, and only a barrier
+  // answered now, beside a bridge that does not sound, starts it (G8).
+  function recoverSwitchOut(rec) {
+    const h = handoverOf(rec);
+    setOutput("browser");
+    phase = PHASE.browser;
+    if (h) env.browser?.take?.(h, false);
+    if (state && bridgeSounds(state)) {
+      line = WORDS.bridgeAgain;
+      return;
+    }
+    line = "";
+    if (h?.playing) gateStart((permit) => env.browser?.start?.(permit));
   }
 
   function handoverOf(rec) {
@@ -967,17 +1226,35 @@ export function createOutput(env) {
     return !!(st && st.offered && st.hold === "none" && st.release?.state === "confirmed");
   }
 
+  // pick moves the output, a pick at a time: each takes the next pick
+  // generation, so only the newest switch moves the output, the phase or
+  // the browser (R3). A re-pick from unconfirmed supersedes.
   function pick(which) {
     if (which === "bridge") {
       if (output === "bridge" && phase !== PHASE.unconfirmed) return Promise.resolve({ already: true });
       if (!canPick()) return Promise.resolve({ refused: "not_offered" });
+      pickGen += 1;
+      waiting = null;
       return switchIn();
     }
     if (output === "browser" && phase === PHASE.browser) return Promise.resolve({ already: true });
+    pickGen += 1;
     return switchOut();
   }
 
+  // queueBehind says whether the queue the bar drew is older than the state's
+  // last change of it: a positional command would then pick from a queue
+  // the tab never drew (R9, V12).
+  function queueBehind() {
+    return !queue || !state || queue.readAt < state.queueRev;
+  }
+
   function command(cmd, args = {}) {
+    if (cmd === "index" && queueBehind()) {
+      line = WORDS.queueBehind;
+      emit();
+      return Promise.resolve({ refused: "queue_behind" });
+    }
     const body = { command: cmd };
     if (cmd !== "pause" && cmd !== "stop") body.at = state?.generation || "";
     if (cmd === "index") body.index = args.index;
@@ -985,27 +1262,30 @@ export function createOutput(env) {
     if (cmd === "repeat") body.on = !!args.on;
     return send(ROUTES.transport, body, {
       role: "command",
-      done(rec) {
+      done(rec, how, mine) {
+        if (!mine) return;
         line = rec.error === "stale" ? WORDS.stale : recordLine(rec);
         if (phase === PHASE.unconfirmed) phase = PHASE.bridge;
       },
-      unknown(words) { phase = PHASE.bridge; line = words || ""; },
+      unknown(words, mine) { if (mine) { phase = PHASE.bridge; line = words || ""; } },
     });
   }
 
-  function edit(route, scope, extra = {}) {
+  function edit(route, kind, scope, extra = {}) {
     const body = { at: state?.generation || "", ...scope, ...extra };
     return send(route, body, {
       role: "edit",
-      done(rec, how, st) {
+      kind,
+      done(rec, how, mine) {
+        if (!mine) return;
         if (phase === PHASE.unconfirmed) phase = PHASE.bridge;
         if (rec.status === "done") line = leftOutLine(rec, scope.tracks?.length) || windowLine(rec) || releaseLine(rec);
-        else if (rec.status === "changed") line = partialLine(rec, st, plannedOf(rec, extra.play));
+        else if (rec.status === "changed") line = partialLine(rec, state, plannedOf(rec, extra.play));
         else if (rec.error === "stale") line = WORDS.stale;
         else if (rec.error === "queue_full") line = roomLine(rec) || refusedWord(rec.error);
         else line = recordLine(rec);
       },
-      unknown(words) { phase = PHASE.bridge; line = words || ""; },
+      unknown(words, mine) { if (mine) { phase = PHASE.bridge; line = words || ""; } },
     });
   }
 
@@ -1014,14 +1294,14 @@ export function createOutput(env) {
   function replace(scope, { start = 0, position = 0, play = true } = {}) {
     const extra = { start, play };
     if (position > 0) extra.position = Math.floor(position);
-    return edit(ROUTES.replace, scope, extra);
+    return edit(ROUTES.replace, "replace", scope, extra);
   }
 
-  function append(scope) { return edit(ROUTES.append, scope); }
+  function append(scope) { return edit(ROUTES.append, "append", scope); }
 
-  function remove(entry) { return edit(ROUTES.remove, { entry }); }
+  function remove(entry) { return edit(ROUTES.remove, "delete", { entry }); }
 
-  // ---- The ticks and the resets (M1, P7) ----
+  // ---- The ticks and the resets (M1, P7, R6, V6, C4) ----
 
   function tick() {
     const d = env.now() - env.perf();
@@ -1030,15 +1310,30 @@ export function createOutput(env) {
       drift = d;
       resetSamples();
     }
-    if (offered && offset === null && !sampleInFlight && env.perf() - lastSampleAsk >= SAMPLE_RETRY_MS) sampleNow();
+    // GET now is asked again within 5 s while it has not said whether a
+    // player is offered, or while the clock is unsampled (V6).
+    if (offered !== false && offset === null && !sampleInFlight && env.perf() - lastSampleAsk >= SAMPLE_RETRY_MS) sampleNow();
     if (reconnecting && output === "bridge" && env.perf() - lastPoll >= RECONNECT_POLL_MS) {
       lastPoll = env.perf();
       sampleNow();
     }
-    if (ops.size || inherited) {
-      for (const e of ops.values()) if (e.lost) { readBack(); break; }
-      if (inherited && inherited.epoch === epoch) readBack();
+    // A request unanswered past the bar's 30 s is lost: unconfirmed, its
+    // record to say how it ended, its answer not read if it comes (R6, V1).
+    for (const e of [...ops.values()]) {
+      if (e.inFlight && env.perf() - e.sentAt >= REQUEST_MS) {
+        e.expired = true;
+        lost(e);
+      }
     }
+    // A queue that is behind its state, its read failed or overtaken, is
+    // read again (C4).
+    if (state && !queueReading && queueBehind() && env.perf() - lastQueueAsk >= QUEUE_RETRY_MS) readQueue();
+    if (waiting && env.perf() - waiting.at >= START_WAIT_MS) {
+      waiting = null;
+      line = WORDS.startUnanswered;
+      emit();
+    }
+    if ([...ops.values()].some((e) => e.lost) || [...inherited.values()].some((e) => e.epoch === epoch)) readBack();
   }
 
   // resume is a page shown again (visibilitychange to visible, pageshow
@@ -1062,6 +1357,7 @@ export function createOutput(env) {
       notOffered: offered === false,
       state,
       queue,
+      queueBehind: queueBehind(),
       line,
       reconnecting,
       sampled: offset !== null,
@@ -1090,6 +1386,8 @@ export function createOutput(env) {
     tick,
     resume,
     position,
+    gateStart,
     identity: () => ({ tab, seq }),
+    pending: () => [...inherited.keys(), ...ops.keys()],
   };
 }

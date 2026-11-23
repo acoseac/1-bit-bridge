@@ -199,10 +199,12 @@ func TestAnOlderQueueReadNeverWinsOverANewerFrame(t *testing.T) { barScenario(t,
 // handover included.
 func TestAReloadedTabReadsItsOperationBack(t *testing.T) { barScenario(t, 1) }
 
-// TestARecoveredHandoverIsHistory pins G8: a switch-out read back done is
-// history: its handover is taken into the browser, stopped, and the browser
-// starts only on a new barrier's done where the bridge reads silent, and
-// not at all where it plays again.
+// TestARecoveredHandoverIsHistory pins G8: this tab's own switch-out, its
+// answer lost and its record read back done, is history: its handover is
+// taken into the browser, stopped, and the browser starts only on a new
+// barrier's done where the bridge reads silent, and not at all where it
+// plays again. A record another document left is R8's
+// (TestACopiedTabTakesTheMoveStoppedAndStartsNothing): it starts nothing.
 func TestARecoveredHandoverIsHistory(t *testing.T) { barScenario(t, 4) }
 
 // TestARefusedSwitchInReadsNothingChangedFromItsEffect pins G9: a switch to
@@ -283,3 +285,111 @@ func TestTheBarShowsItsEmptyStripWhereThePlayerIsOffered(t *testing.T) { barScen
 // are enabled, Stop shown, shuffle, volume and mute disabled with their
 // words, repeat two states.
 func TestTheBarDisablesWhatTheEngineDoesNotDo(t *testing.T) { barScenario(t, 7) }
+
+// Round 2 (B634 PR 2): the bar never plays in both places, and never sticks
+// moving.
+
+// TestARefusalBeforeAdmissionEndsTheSwitchToTheBridge pins R2 and V2: a
+// switch to the bridge refused before it became an operation (epoch_changed,
+// operation_conflict with its new identity, a body's bound, the not-offered
+// words) ends back on this browser with the refusal's line, the browser
+// resumed only through the gate and only because it played; an unclassified
+// 5xx and a network error prove nothing and leave it unconfirmed.
+func TestARefusalBeforeAdmissionEndsTheSwitchToTheBridge(t *testing.T) { barScenario(t, 11) }
+
+// TestARefusalBeforeAdmissionEndsTheSwitchToThisBrowserAndTheBarrier pins R2
+// for the switch to this browser (back on the bridge with its line, or this
+// browser the output where no player is offered) and for the barrier, which
+// starts nothing.
+func TestARefusalBeforeAdmissionEndsTheSwitchToThisBrowserAndTheBarrier(t *testing.T) {
+	barScenario(t, 6)
+}
+
+// TestOnlyTheNewestPickMovesTheOutput pins R3 and V11: a switch superseded by
+// a newer pick moves neither the output, the phase nor the browser, whether
+// it ends done, lost, gone, refused before admission, or behind a pick of
+// the bridge that ended at once.
+func TestOnlyTheNewestPickMovesTheOutput(t *testing.T) { barScenario(t, 8) }
+
+// TestAStartReadsTheLatestStateAccepted pins R4: a switch-out's or a
+// barrier's done beside a state accepted since its silence that shows the
+// bridge playing starts nothing, and a refused switch-in judges silence on
+// the latest state accepted, never on its answer's.
+func TestAStartReadsTheLatestStateAccepted(t *testing.T) { barScenario(t, 3) }
+
+// TestAStreamRecordWithoutItsWholeRecordIsReadBack pins R5: a published
+// record carries no handover and no tracks left out, so a switch-out's and a
+// replace's is completed by its record read back whole alone.
+func TestAStreamRecordWithoutItsWholeRecordIsReadBack(t *testing.T) { barScenario(t, 3) }
+
+// TestARequestUnansweredPast30SecondsIsUnconfirmed pins R6 and V1: a request
+// 30 s old is lost, unconfirmed and read back, and its late answer, before
+// or after the read back resolves it, is not read.
+func TestARequestUnansweredPast30SecondsIsUnconfirmed(t *testing.T) { barScenario(t, 5) }
+
+// TestEveryUnresolvedOperationIsKeptUntilItResolves pins R7 and V3: a
+// conflict keeps the older identity's operation, each resolved by its own
+// record by epoch, tab and count; and an inherited operation stays stored,
+// read back by each reload, until it resolves.
+func TestEveryUnresolvedOperationIsKeptUntilItResolves(t *testing.T) { barScenario(t, 4) }
+
+// TestACopiedTabTakesTheMoveStoppedAndStartsNothing pins R8 and V9: a copy
+// of a tab, its session storage carrying a switch-out the original sent,
+// reads it back, past the read back's throttle, takes the handover stopped
+// and sends no barrier and starts nothing; the reader presses Play.
+func TestACopiedTabTakesTheMoveStoppedAndStartsNothing(t *testing.T) { barScenario(t, 5) }
+
+// TestACopiedTabsRecoveredSwitchInStartsNothing pins V5: a copy's recovered
+// switch-in, refused with nothing changed, makes this browser the output and
+// plays nothing, by no resume, no take to play and no start.
+func TestACopiedTabsRecoveredSwitchInStartsNothing(t *testing.T) { barScenario(t, 3) }
+
+// TestARecoveredSwitchOutThatDidNotFinishSaysHowItEnded pins C1: an
+// inherited switch-out read back changed, refused or unknown stays on the
+// bridge in its record's words.
+func TestARecoveredSwitchOutThatDidNotFinishSaysHowItEnded(t *testing.T) { barScenario(t, 3) }
+
+// TestAFailedQueueReadIsAskedAgain pins C4: a queue read that failed is read
+// again with no new state to prompt it.
+func TestAFailedQueueReadIsAskedAgain(t *testing.T) { barScenario(t, 2) }
+
+// TestEveryStartOfThisBrowserGoesThroughTheGate pins R1 and V7 through the
+// shipped audio.js and nowplaying.js with the gate wired as boot.js wires
+// it: a row's play, Play, Next and the lock screen's Play and Next start
+// nothing beside the bridge playing; beside a bridge that does not sound a
+// start plays on the barrier's done alone; Pause never waits.
+func TestEveryStartOfThisBrowserGoesThroughTheGate(t *testing.T) { barScenario(t, 7) }
+
+// TestAStartWaitsToKnowWhetherAPlayerIsOffered pins V6: on a box that sends
+// no frame a start waits for GET now, which a failed first answer asks
+// again, and goes on in this browser on its typed refusal.
+func TestAStartWaitsToKnowWhetherAPlayerIsOffered(t *testing.T) { barScenario(t, 3) }
+
+// TestAStartBeforeTheFirstFrameWaitsForTheEpoch pins V7: with a player
+// offered and no epoch yet a start waits for the first frame, and one that
+// never comes drops it with its line.
+func TestAStartBeforeTheFirstFrameWaitsForTheEpoch(t *testing.T) { barScenario(t, 3) }
+
+// TestADeferredStartAsksItsPermitAgain pins V4: a start's play deferred to
+// the track's metadata plays nothing once a newer state shows the bridge
+// playing.
+func TestADeferredStartAsksItsPermitAgain(t *testing.T) { barScenario(t, 2) }
+
+// TestADeferredStartPlaysWhileItsPermitHolds is V4's other side: with nothing
+// newer the deferred play plays, from its position.
+func TestADeferredStartPlaysWhileItsPermitHolds(t *testing.T) { barScenario(t, 2) }
+
+// TestAPositionalPickWaitsForTheQueueItNames pins R9 and V12: while the queue
+// the panel drew is behind the state's queueRev every row's pick is disabled
+// and a pick by position sends nothing, until the queue is read.
+func TestAPositionalPickWaitsForTheQueueItNames(t *testing.T) { barScenario(t, 4) }
+
+// TestTheMenuAndTheQueueCloseOnEscapeAndOutsideClicks pins C8: Escape closes
+// the queue, its focus back on its button, and a click outside closes the
+// queue and the output menu, one inside leaving it open.
+func TestTheMenuAndTheQueueCloseOnEscapeAndOutsideClicks(t *testing.T) { barScenario(t, 6) }
+
+// TestAPickThatGoesDisabledHandsItsFocusToTheOtherPick pins C9: the bridge's
+// pick disabled while it holds the focus gives the focus to this browser's
+// pick, inside the open menu, never to the page.
+func TestAPickThatGoesDisabledHandsItsFocusToTheOtherPick(t *testing.T) { barScenario(t, 2) }

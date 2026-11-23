@@ -43,8 +43,12 @@ const gen = () => generation;
 
 function boot() {
   audio.init();
-  // The bar's output (B634) before the bar, which reads it as it mounts.
-  installOutput(createOutput(browserOutputEnv()));
+  // The bar's output (B634) before the bar, which reads it as it mounts; and
+  // every start of this browser asks it first, before anything can start
+  // (round 2, R1).
+  const output = createOutput(browserOutputEnv());
+  installOutput(output);
+  audio.setStartGate(output.gateStart);
   mountBar();
   wireGlobal();
   wireOutput();

@@ -138,6 +138,10 @@ export function mount() {
     swapIcon(refs.mute, next === 0 ? "vol-mute" : "vol");
     refs.mute.setAttribute("aria-label", next === 0 ? "Unmute" : "Mute");
   }, "small");
+  // Named for the phone's layout with the bridge chosen, where a Mute that
+  // is disabled (the bridge's level is fixed) gives its width to the words
+  // (round 2, R10).
+  refs.mute.classList.add("np-mute");
   refs.lastVolume = 1;
   setVolumeFill(1);
 
@@ -148,6 +152,13 @@ export function mount() {
   refs.panel = el("div", { class: "np-queue", attrs: { id: "np-queue", role: "region", "aria-label": "The bridge's queue" } });
   refs.panel.hidden = true;
   refs.queueBtn.setAttribute("aria-controls", "np-queue");
+  // Escape closes the queue, its focus back on the Queue button (C8).
+  refs.panel.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closeQueue();
+      refs.queueBtn.focus();
+    }
+  });
 
   buildOutputMenu();
 
@@ -167,6 +178,14 @@ export function mount() {
   document.body.appendChild(refs.menu);
   document.body.appendChild(refs.panel);
   document.body.classList.add("has-player-bar");
+
+  // A click outside the open menu or the open queue closes it, as Escape
+  // does; a click on its own button is that button's toggle (C8).
+  document.addEventListener("click", (e) => {
+    const t = e.target;
+    if (!refs.menu.hidden && !refs.menu.contains(t) && !refs.output.contains(t)) closeMenu();
+    if (!refs.panel.hidden && !refs.panel.contains(t) && !refs.queueBtn.contains(t)) closeQueue();
+  });
 
   audio.subscribe(() => render());
   out()?.subscribe(() => render());
@@ -250,7 +269,12 @@ function paintOutputButton(o) {
   refs.pickBridge.setAttribute("aria-pressed", String(bridge));
   refs.pickBridgeName.textContent = dacName ? `The bridge's player: ${dacName}` : "The bridge's player";
   refs.pickBridgeLine.textContent = bridgeLine(o);
-  setDisabled(refs.pickBridge, !o || (!o.canPick && !bridge));
+  const off = !o || (!o.canPick && !bridge);
+  // A pick that goes disabled while it holds the focus would hand the focus
+  // to the page, out of the open menu and its Escape: it goes to the other
+  // pick first (C9).
+  if (off && document.activeElement === refs.pickBridge) refs.pickBrowser.focus();
+  setDisabled(refs.pickBridge, off);
 }
 
 /** What the bridge's player is doing, or why it cannot be picked (§7.1). */
@@ -300,6 +324,11 @@ function toggleQueue() {
   render();
 }
 
+function closeQueue() {
+  refs.panel.hidden = true;
+  refs.queueBtn.setAttribute("aria-expanded", "false");
+}
+
 let panelKey = "";
 function paintPanel(o) {
   const show = bridgeChosen(o);
@@ -313,7 +342,12 @@ function paintPanel(o) {
   const q = o.queue;
   const st = o.state;
   const heard = st?.track?.entry || 0;
-  const key = JSON.stringify([q?.readAt, st?.selected, heard, [...o.commands]]);
+  // A row's index names the queue this panel drew: while that is behind the
+  // state's last change of the queue, a pick by position is disabled (and
+  // the output refuses it), and the panel redraws as soon as queueRev
+  // moves, before the queue is read again (R9, V12).
+  const behind = !!o.queueBehind;
+  const key = JSON.stringify([q?.readAt, st?.queueRev, behind, st?.selected, heard, [...o.commands]]);
   if (key === panelKey) return;
   panelKey = key;
   clear(refs.panel);
@@ -327,10 +361,10 @@ function paintPanel(o) {
     const row = el("li", { class: `np-queue-row${e.id === heard || (!heard && e.id === st?.selected) ? " np-queue-current" : ""}` });
     const play = el("button", {
       class: "np-queue-title", text: name,
-      attrs: { type: "button", "aria-current": e.id === heard ? "true" : null },
+      attrs: { type: "button", "aria-current": e.id === heard ? "true" : null, title: behind ? WORDS.queueBehind : null },
       on: { click: () => out()?.command("index", { index: i }) },
     });
-    setDisabled(play, !o.commands.has("index"));
+    setDisabled(play, !o.commands.has("index") || behind);
     row.appendChild(play);
     if (e.word) row.appendChild(el("span", { class: "chip chip-warn", text: queueWord(e.word) }));
     else if (st?.transport === "stopped" && e.id === st.lastStop?.entry && STOP_WORDS[st.lastStop.reason]) {

@@ -47,8 +47,9 @@ function shuffleButton(tracks, albumArt) {
     on: {
       click: () => {
         if (chosenOutput() === "bridge") return;
-        audio.setShuffle(true);
-        audio.playQueue(tracks, 0, { albumArt });
+        // Shuffle on and play, as one start the gate lets through or
+        // refuses whole (R1).
+        audio.playQueue(tracks, 0, { albumArt, shuffle: true });
       },
     },
   });

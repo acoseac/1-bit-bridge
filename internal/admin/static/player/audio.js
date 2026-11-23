@@ -61,8 +61,35 @@ const PROBE_TIMEOUT_MS = 4000;
 
 // The position a suspended browser keeps (B634): read from the element
 // before its source was let go, which resets the element's own, so the
-// saved queue keeps it until something loads again (§7.3, step 1).
+// saved queue keeps it until something loads again (§7.3, step 1); and
+// whether it was playing, which a pick of the bridge made again while the
+// first is unconfirmed hands over as it was (R3).
 let heldAt = null;
+let heldPlaying = false;
+
+// The start gate (B634 round 2, R1): output.js's gateStart, set by boot.js
+// before the bar mounts. Every start of the element asks it (playQueue,
+// toggle's play, an advance a reader asks for, the MediaSession's handlers,
+// which call those), and runs only as it says, handed a permit that a later
+// play of that start asks again (V4). A pause never asks it, nor do the
+// element's own end of a track, a skip past one that cannot play, and
+// removeAt, which keep playing what plays.
+let startGate = null;
+// The permit of the start playing now, which the retry after an error asks.
+let startPermit = null;
+
+/** setStartGate makes gate the one way the element starts. */
+export function setStartGate(gate) {
+  startGate = gate;
+}
+
+function requestStart(run) {
+  if (!startGate) {
+    run(null);
+    return;
+  }
+  startGate(run);
+}
 
 // Whether the browser's MediaSession handlers are set: cleared while the
 // bridge's player is the bar's output (§7.5).
@@ -230,6 +257,14 @@ function onError() {
     default: { // 2 network / 3 decode — retry once, then surface.
       if (!track._retried) {
         track._retried = true;
+        // A retry is a play of the start that failed: it asks that start's
+        // permit again (V4).
+        if (startPermit && !startPermit()) {
+          state.playing = false;
+          state.loading = false;
+          emit();
+          return;
+        }
         const busted = state.el.src + (state.el.src.includes("?") ? "&" : "?") + "_r=" + Date.now();
         state.el.src = busted;
         state.el.load();
@@ -345,11 +380,19 @@ function markUnplayable(track) {
   if (track.play) track.play.kind = "none";
 }
 
-/** Replace the queue and start at `start`. */
-export function playQueue(tracks, start = 0, { albumArt = null } = {}) {
+/**
+ * Replace the queue and start at `start`, shuffled where shuffle says, once
+ * the start gate lets it (R1): refused, nothing changes.
+ */
+export function playQueue(tracks, start = 0, { albumArt = null, shuffle } = {}) {
+  requestStart((permit) => playQueueNow(tracks, start, { albumArt, shuffle, permit }));
+}
+
+function playQueueNow(tracks, start, { albumArt, shuffle, permit }) {
   init();
   state.queue = tracks.filter(Boolean).map((t) => ({ ...t }));
   state.albumArt = albumArt;
+  if (shuffle !== undefined) state.shuffle = !!shuffle;
   state.skipped = 0;
   state.error = "";
   reshuffle();
@@ -363,7 +406,7 @@ export function playQueue(tracks, start = 0, { albumArt = null } = {}) {
     emit();
     return;
   }
-  load(idx, { autoplay: true });
+  load(idx, { autoplay: true, permit });
 }
 
 /** Append without disturbing what's playing. */
@@ -416,13 +459,16 @@ function playableAt(i) {
   return t && resolvePlayable(t, audioURL) !== null;
 }
 
-function load(index, { autoplay }) {
+function load(index, { autoplay, permit }) {
   const track = state.queue[index];
   if (!track) return;
   const target = resolvePlayable(track, audioURL);
   if (!target) return;
   playbackGen += 1;
   heldAt = null;
+  // A start's permit stays the playback's, through the tracks it advances
+  // to, until another start replaces it.
+  if (permit !== undefined) startPermit = permit;
   state.index = index;
   state.degraded = target.degraded;
   state.seekable = true;
@@ -580,7 +626,22 @@ function peek(delta) {
   return state.queue[i];
 }
 
+/**
+ * Move delta tracks and play there. A reader's advance (Next, Previous, a
+ * lock-screen control) starts the element and asks the start gate (R1); the
+ * element's own end of a track and a skip past one that cannot play
+ * (`auto`) keep playing what plays, and do not.
+ */
 export function advance(delta, { auto = false } = {}) {
+  if (state.index < 0) return;
+  if (auto) {
+    advanceNow(delta, { auto: true });
+    return;
+  }
+  requestStart((permit) => advanceNow(delta, { permit }));
+}
+
+function advanceNow(delta, { auto = false, permit } = {}) {
   if (state.index < 0) return;
   if (auto && state.repeat === "one") {
     // Re-seek rather than reassigning src: no round-trip, no decode
@@ -609,7 +670,7 @@ export function advance(delta, { auto = false } = {}) {
   const playable = nextPlayableFrom(nextIndex, delta);
   if (playable < 0) { stopAtEnd(); return; }
   if (!auto) state.skipped = 0;
-  load(playable, { autoplay: true });
+  load(playable, { autoplay: true, permit });
 }
 
 // nextPlayableFrom walks the queue from `start` in the direction of
@@ -662,11 +723,15 @@ function stopAtEnd() {
   emit();
 }
 
+/** Pause at once, or play through the start gate (R1, V7). */
 export function toggle() {
   init();
   if (state.index < 0) return;
-  if (state.el.paused) void state.el.play().catch(() => {});
-  else state.el.pause();
+  if (!state.el.paused) {
+    state.el.pause();
+    return;
+  }
+  requestStart((permit) => playNow(permit));
 }
 
 export function seek(seconds) {
@@ -767,15 +832,18 @@ function reshuffle() {
  * The browser's handover: its queue as listed (never a shuffle order), its
  * current track, whether it plays and its position in whole seconds, read
  * from the player's own state BEFORE the source is let go (G11), since
- * letting go resets the element's position.
+ * letting go resets the element's position. A browser already suspended for
+ * the bridge (a pick of the bridge made again while the first is
+ * unconfirmed, R3) hands over what it held when it stopped.
  */
 export function handover() {
   const track = state.index >= 0 ? state.queue[state.index] : null;
+  const held = heldAt !== null;
   return {
     queue: state.queue.map((t) => ({ ...t })),
     index: state.index,
-    playing: state.playing,
-    position: state.el ? Math.floor(state.el.currentTime || 0) : 0,
+    playing: held ? heldPlaying : state.playing,
+    position: held ? heldAt : (state.el ? Math.floor(state.el.currentTime || 0) : 0),
     pcm: !!track && !track.isDsd,
   };
 }
@@ -794,6 +862,7 @@ export function hasQueue() {
 export function suspend(h) {
   playbackGen += 1;
   heldAt = h && h.position > 0 ? h.position : 0;
+  heldPlaying = !!h?.playing;
   state.el?.pause();
   state.playing = false;
   state.loading = false;
@@ -805,14 +874,16 @@ export function suspend(h) {
 
 /**
  * Load the track at index and, for a position, seek the element there
- * before it plays, so nothing of the track's start is heard (§7.4).
+ * before it plays, so nothing of the track's start is heard (§7.4). A play
+ * the metadata defers asks the start's permit again just before it (V4):
+ * a newer pick, or a state showing the bridge playing since, plays nothing.
  */
-function loadAt(index, { autoplay, at }) {
+function loadAt(index, { autoplay, at, permit }) {
   if (!(at > 0)) {
-    load(index, { autoplay });
+    load(index, { autoplay, permit });
     return;
   }
-  load(index, { autoplay: false });
+  load(index, { autoplay: false, permit });
   const mine = playbackGen;
   state.loading = !!autoplay;
   state.el.addEventListener("loadedmetadata", function once() {
@@ -820,6 +891,12 @@ function loadAt(index, { autoplay, at }) {
     if (mine !== playbackGen) return;
     if (Number.isFinite(state.el.duration)) state.el.currentTime = Math.min(at, state.el.duration);
     if (!autoplay) return;
+    if (permit && !permit()) {
+      state.playing = false;
+      state.loading = false;
+      emit();
+      return;
+    }
     state.el.play().catch((e) => {
       if (mine !== playbackGen) return;
       state.playing = false;
@@ -833,22 +910,23 @@ function loadAt(index, { autoplay, at }) {
 
 /**
  * The browser's resume of its own queue at the position it read before it
- * stopped: called only on a barrier's done answered now (§3.2, G1).
+ * stopped: called only on a barrier's done answered now (§3.2, G1), with
+ * its permit.
  */
-export function resume(h) {
+export function resume(h, permit) {
   init();
   if (!h || h.index < 0 || !state.queue[h.index]) return;
-  loadAt(h.index, { autoplay: !!h.playing, at: h.pcm ? h.position : 0 });
+  loadAt(h.index, { autoplay: !!h.playing, at: h.pcm ? h.position : 0, permit });
 }
 
 /**
  * The browser takes the bridge's queue (a switch-out's handover): its
  * tracks, the selected one current and, for PCM, its position; it plays
- * only where play says, which output.js decides on a barrier's done. A
- * selected track this browser cannot play stays shown, paused, with its
- * reason, and Next moves to one it plays (§7.4).
+ * only where play says, which output.js decides on a barrier's done, with
+ * its permit. A selected track this browser cannot play stays shown,
+ * paused, with its reason, and Next moves to one it plays (§7.4).
  */
-export function take(h, play) {
+export function take(h, play, permit) {
   init();
   playbackGen += 1;
   heldAt = null;
@@ -877,17 +955,25 @@ export function take(h, play) {
   }
   // The position where the handover has one: PCM's, which the element seeks
   // to before it plays; a DSD track's FLAC sidecar is seekable here too.
-  loadAt(idx, { autoplay: !!play, at: h.position > 0 ? h.position : 0 });
+  loadAt(idx, { autoplay: !!play, at: h.position > 0 ? h.position : 0, permit });
 }
 
-/** Start what the browser holds: called only on a barrier's done (G8). */
-export function start() {
+/**
+ * Start what the browser holds: on a barrier's done (G8), with its permit,
+ * or for a toggle's play the start gate let through (R1).
+ */
+export function start(permit) {
   init();
+  playNow(permit);
+}
+
+function playNow(permit) {
   if (state.index < 0 || !state.queue[state.index]) return;
   if (!state.el.getAttribute("src")) {
-    loadAt(state.index, { autoplay: true, at: heldAt || 0 });
+    loadAt(state.index, { autoplay: true, at: heldAt || 0, permit });
     return;
   }
+  if (permit !== undefined) startPermit = permit;
   void state.el.play().catch(() => {});
 }
 
