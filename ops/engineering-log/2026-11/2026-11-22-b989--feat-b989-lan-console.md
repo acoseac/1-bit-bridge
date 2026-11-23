@@ -391,3 +391,29 @@ On `14f9d028`, with `GOTOOLCHAIN=go1.27.3` and `GOPROXY=off`, `TMPDIR` below `.t
 
 PROTOCOL.md's SHA-256 did not move this round:
 `b3198929371b3041340a168f19f955cefe9786f159120f396f70e42e91e60c7d`.
+
+### Round 4
+
+CI on round 3's head failed three tests, in two cases; nothing else failed.
+
+- The upload page's two node drivers assigned `globalThis.crypto`, which Node 24 defines with a
+  getter alone, so the assignment threw in the module's strict mode before the shipped functions
+  ran (macOS, Windows and the race leg; this host has no node, so the drivers' node halves skip
+  here and CI runs them). Each driver now defines every global it sets
+  (`Object.defineProperty`, writable and configurable): `crypto`, and in the note's driver
+  `document` and `isSecureContext` too. Read here, not run.
+- The refused handed listener's test went through the startup helpers, which read an exit that
+  follows the banner as a failed start; serve prints its banner before it reads the refusal, and
+  on macOS the exit came first to the helper's look. The test takes a path of its own now: serve
+  on a goroutine it drains (`drainServeOnCleanup`), its return waited for and its exit code read
+  once, then the refusal's line, the one stand-in bound before it, and its listener's close. The
+  helpers and every other test are unchanged.
+
+`9b98c15f` holds both. The control, `AbortConsoleLAN()` taken out of the refusal's branch, went
+red at the listener check alone (the socket taking connections after serve's way out), as
+predicted. Runs on `9b98c15f`: the refused listener's test `-count=20`, passed; the two page
+tests, their structural halves passed and their node halves skipped; the release-tag vets for
+darwin/arm64, windows/amd64, linux/386 and linux/arm, clean; and the gate, `make fmt vet test
+build-all` in one build-slot session taken at once, passed in 2,097 s (cmd/bridge 1,781 s,
+manifest 1,617 s, admin 1,309 s, backup 662 s), 38 small packages answered from its test cache.
+The macOS order and the node halves are CI's to verify.
