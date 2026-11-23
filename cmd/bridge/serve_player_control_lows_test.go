@@ -102,8 +102,8 @@ func (s failingLookupStore) GetTrack(ctx context.Context, path string) (*manifes
 
 // cancelHook is a hook that ends ctx's request and waits until its handler
 // has returned (returned), which ends the operation's unsent steps first; a
-// request that does not return by the test's deadline hands the case's
-// premise to the test's goroutine (premise) and lets the hook go.
+// request that does not return by premiseGiveUp hands the case's premise to
+// the test's goroutine (premise) and lets the hook go.
 func cancelHook(t *testing.T, cancel context.CancelFunc, returned <-chan struct{}, premise chan<- string) func() {
 	var once sync.Once
 	return func() {
@@ -111,11 +111,22 @@ func cancelHook(t *testing.T, cancel context.CancelFunc, returned <-chan struct{
 			cancel()
 			select {
 			case <-returned:
-			case <-serveGiveUp(t):
+			case <-premiseGiveUp(t):
 				premise <- "the request whose end the hook made never returned: the case's premise, its operation's unsent steps ended, does not hold"
 			}
 		})
 	}
+}
+
+// premiseGiveUp fires a second before serveGiveUp, so a hook that gives up
+// on its premise is heard before a wait on the test's goroutine gives up on
+// what that premise was for; never where the test binary has no deadline.
+func premiseGiveUp(t *testing.T) <-chan time.Time {
+	at := serveGiveUpTime(t)
+	if at.IsZero() {
+		return nil
+	}
+	return firesAt(at.Add(-time.Second))
 }
 
 // TestACancelInsideTheLastLookupIsCancelled pins L1 (M4, P5): an operation
