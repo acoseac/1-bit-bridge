@@ -2398,6 +2398,13 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 
 	s.lockPairingWrite()
 	defer s.mu.Unlock()
+	// A request whose context has ended when the lock is held mints nothing
+	// (backlog B997's second round): it may have waited here behind another
+	// pairing write, or come down a path that reads no endpoint list. Nobody
+	// reads an answer.
+	if r.Context().Err() != nil {
+		return
+	}
 
 	rawToken, tok, err := s.deps.Auth.Mint(req.Name)
 	if err != nil {
