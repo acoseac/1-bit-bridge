@@ -818,6 +818,161 @@ func TestEveryLimitIsCheckedBeforeDeleteAll(t *testing.T) {
 	}
 }
 
+// TestATagOverTheEnginesLimitIsLeftOutBeforeDeleteAll pins the metadata's own
+// limit (§6.2): a track whose tag makes its item larger than the 64 KiB an
+// Insert takes is left out metadata_too_large before anything is changed, so
+// a list of it alone is refused with nothing sent and the queue as it was.
+func TestATagOverTheEnginesLimitIsLeftOutBeforeDeleteAll(t *testing.T) {
+	long := ctlTrack{path: "Album/04 Long.flac", codec: "FLAC", title: strings.Repeat("a", engine.MaxMetadataBytes), rate: 44100, seconds: 10}
+	r := newCtlRig(t, ctlOptions{tracks: append(slices.Clone(defaultCtlTracks), long)})
+	wantRecord(t, "the first replace", r.replace(r.paths(), 0, 0, false), admin.PlayerOpDone, "", "")
+	before := r.refs()
+	rec := wantRecord(t, "a replace of a track whose tag is over the limit", r.replace([]string{long.path}, 0, 0, true), admin.PlayerOpRefused,
+		wordNotPlayable, admin.PlayerEffectNone)
+	if rec.Sent != 0 || len(rec.LeftOut) != 1 || rec.LeftOut[0].Path != long.path || rec.LeftOut[0].Word != wordMetadataTooBig {
+		t.Fatalf("sent %d, left out %+v; want nothing sent and the track left out %s", rec.Sent, rec.LeftOut, wordMetadataTooBig)
+	}
+	if !slices.Equal(r.refs(), before) {
+		t.Fatalf("the queue changed: %v, was %v", r.refs(), before)
+	}
+}
+
+// TestTheWindowGivesUpMetadataPastTheQueuesTotal pins §6.3's metadata bound:
+// a window whose entries' metadata totals over the queue's 16 MiB gives up
+// entries from its far end after the start track first, then from its far
+// end before it, the start track always in it and the rest within the
+// bound.
+func TestTheWindowGivesUpMetadataPastTheQueuesTotal(t *testing.T) {
+	list := func(n, size int) []entryIn {
+		out := make([]entryIn, n)
+		for i := range out {
+			out[i] = entryIn{meta: make([]byte, size), index: i}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name                  string
+		entries               []entryIn
+		start, wantLo, wantHi int
+	}{
+		{"after the start track first", list(engine.MaxEntries, 20000), 500, 0, 837},
+		{"then before it", list(engine.MaxEntries, 20000), 950, 113, 950},
+		{"fewer entries, each near its own limit", list(300, 64000), 150, 0, 261},
+	} {
+		lo, hi := window(tc.entries, tc.start)
+		total := 0
+		for _, e := range tc.entries[lo : hi+1] {
+			total += len(e.meta)
+		}
+		if lo != tc.wantLo || hi != tc.wantHi || total > engine.MaxTotalMetadataBytes || tc.start < lo || tc.start > hi {
+			t.Errorf("%s: window [%d, %d] of %d bytes, want [%d, %d] within %d", tc.name, lo, hi, total, tc.wantLo, tc.wantHi, engine.MaxTotalMetadataBytes)
+		}
+	}
+}
+
+// TestAReferenceOverTheLimitIsLeftOut pins the reference's limit: an entry
+// whose canonical URI on the host it would be written on is longer than the
+// 128 bytes a track's reference takes is left out reference_too_long, and one
+// of exactly 128 bytes is taken.
+func TestAReferenceOverTheLimitIsLeftOut(t *testing.T) {
+	r := newCtlRig(t, ctlOptions{})
+	path := defaultCtlTracks[0].path
+	id := dlna.TrackID("", path)
+	fixed := len("http://") + len("/dlna/file/") + len(id) + len(":7790")
+	for _, tc := range []struct {
+		hostLen int
+		word    string
+	}{{trackref.MaxLength - fixed, ""}, {trackref.MaxLength - fixed + 1, wordReferenceLong}} {
+		host := refHost{host: strings.Repeat("h", tc.hostLen) + ":7790"}
+		e, word := r.c.entryFor(context.Background(), path, id, manifest.CatalogTrackRow{}, host)
+		if word != tc.word || (word == "" && len(e.ref.String()) != trackref.MaxLength) {
+			t.Errorf("a reference of %d bytes: word %q (%q), want %q", fixed+tc.hostLen, word, e.ref.String(), tc.word)
+		}
+	}
+}
+
+// lookupStore is the library index counting the rows it reads whole, a hook
+// run on each read once armed.
+type lookupStore struct {
+	controlStore
+	n     *atomic.Int32
+	armed *atomic.Bool
+	hook  func()
+}
+
+func (s lookupStore) GetTrack(ctx context.Context, path string) (*manifest.Track, error) {
+	if s.armed.Load() {
+		s.n.Add(1)
+		s.hook()
+	}
+	return s.controlStore.GetTrack(ctx, path)
+}
+
+// TestACancelledPreparationLooksUpNothingMoreAndSendsNothing pins S5: an
+// operation whose request ends while its preparation checks its tracks stops
+// at the next track, its preparation saying it was cancelled: no further
+// lookup, no engine step, the record cancelled with no partial result read;
+// a replace cancelled before its start track is checked, and an append
+// before its second track is.
+func TestACancelledPreparationLooksUpNothingMoreAndSendsNothing(t *testing.T) {
+	paths := []string{defaultCtlTracks[0].path, defaultCtlTracks[1].path, defaultCtlTracks[2].path}
+	for _, tc := range []struct {
+		name   string
+		append bool
+	}{{name: "a replace"}, {name: "an append", append: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var n atomic.Int32
+			var armed atomic.Bool
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			returned := make(chan struct{})
+			var once sync.Once
+			hook := func() {
+				once.Do(func() {
+					cancel()
+					select {
+					case <-returned:
+					case <-time.After(10 * time.Second):
+					}
+				})
+			}
+			r := newCtlRig(t, ctlOptions{store: func(cs controlStore) controlStore { return lookupStore{cs, &n, &armed, hook} }})
+			wantRecord(t, "the first replace", r.replace(paths[:1], 0, 0, false), admin.PlayerOpDone, "", "")
+			before := r.refs()
+			armed.Store(true)
+			op := r.op()
+			go func() {
+				if tc.append {
+					r.c.Append(ctx, admin.PlayerAppend{Op: op, Digest: r.digest(), At: r.gen(), Tracks: paths[1:]})
+				} else {
+					r.c.Replace(ctx, admin.PlayerReplace{Op: op, Digest: r.digest(), At: r.gen(), Tracks: paths, Start: 2, Play: true})
+				}
+				close(returned)
+			}()
+			var rec *admin.PlayerRecord
+			for rec == nil {
+				wake := r.c.Wake()
+				if rb := r.c.Operation(r.c.epoch, r.tab, op.Seq); rb.Record != nil && rb.Record.Status != admin.PlayerOpRunning {
+					rec = rb.Record
+					break
+				}
+				select {
+				case <-wake:
+				case <-serveGiveUp(t):
+					t.Fatal("the cancelled operation never ended")
+				}
+			}
+			if rec.Status != admin.PlayerOpCancelled || rec.Sent != 0 || len(rec.LeftOut) != 0 || n.Load() != 1 {
+				t.Fatalf("the operation: %s, sent %d, left out %v, %d lookups; want cancelled, nothing sent or left out, the one lookup before its end",
+					rec.Status, rec.Sent, rec.LeftOut, n.Load())
+			}
+			if !slices.Equal(r.refs(), before) {
+				t.Fatalf("the queue changed: %v, was %v", r.refs(), before)
+			}
+		})
+	}
+}
+
 // rowFailingStore is the library index with one track's row failing to read
 // and another's gone since the catalog's read.
 type rowFailingStore struct {

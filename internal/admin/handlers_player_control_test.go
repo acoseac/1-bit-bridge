@@ -35,6 +35,9 @@ type fakeControl struct {
 	answer  PlayerAnswer
 	pub     PlayerPublication
 	wake    chan struct{}
+	// handoverPaths are the library paths a read back names its record's
+	// handover's tracks by.
+	handoverPaths []string
 }
 
 func newFakeControl() *fakeControl {
@@ -94,7 +97,7 @@ func (f *fakeControl) SwitchOut(context.Context, PlayerSwitchOut) PlayerAnswer {
 }
 func (f *fakeControl) Operation(epoch, tab string, seq uint64) PlayerReadBack {
 	f.count("operation")
-	return PlayerReadBack{Epoch: f.pub.Epoch, Revision: f.pub.Revision, Record: f.answer.Record}
+	return PlayerReadBack{Epoch: f.pub.Epoch, Revision: f.pub.Revision, Record: f.answer.Record, HandoverPaths: f.handoverPaths}
 }
 
 // The identity and the generation a test's bodies carry.
@@ -444,6 +447,55 @@ func TestEachExcludedDeploymentSaysNoPlayerIsOfferedHere(t *testing.T) {
 			t.Fatalf("a public bridge offers its player: %+v", srv.controlRefusal())
 		}
 	})
+}
+
+// TestTheReadBackRouteHydratesItsHandoverThroughTheCatalog pins the read
+// back's hydration in the route itself: GET /api/output/player/operation
+// answers each of the record's handover tracks with its catalog row, found by
+// the library path the control named it by, its id and its path beside it;
+// a track whose path no row holds any more, and one the control could name
+// by no path, answer no row and track_gone, in their places.
+func TestTheReadBackRouteHydratesItsHandoverThroughTheCatalog(t *testing.T) {
+	srv, fake, _ := newControlTestServer(t)
+	for i, p := range []string{"Mix/Album/01.flac", "Mix/Album/02.flac"} {
+		tr := &manifest.Track{Path: p, Title: []string{"One", "Two"}[i], Album: "Album", AlbumArtist: "Artist", Artist: "Artist", Codec: "FLAC",
+			Size: 1000, ModTime: time.Unix(1, 0)}
+		if err := srv.deps.Manifest.UpsertTrack(t.Context(), tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fake.answer = PlayerAnswer{Record: &PlayerRecord{Tab: strings.Repeat("ab", 16), Seq: 1, Kind: "switch-out", Status: PlayerOpDone,
+		Handover: &PlayerHandover{Tracks: []string{"id1", "id2", "id3", "id4"}, Selected: 1, Playing: true}}}
+	fake.handoverPaths = []string{"Mix/Album/01.flac", "Mix/Album/02.flac", "Mix/Album/gone.flac", ""}
+	w, body := playerGet(t, srv, "/api/output/player/operation?tab="+strings.Repeat("ab", 16)+"&seq=1&epoch="+strings.Repeat("e", 32))
+	if w.Code != http.StatusOK {
+		t.Fatalf("the read back = %d: %s", w.Code, w.Body.String())
+	}
+	rec, _ := body["record"].(map[string]any)
+	h, _ := rec["handover"].(map[string]any)
+	tracks, _ := h["tracks"].([]any)
+	if len(tracks) != 4 || h["selected"] != float64(1) || h["playing"] != true {
+		t.Fatalf("the handover %v, want its four tracks, the second selected, playing", h)
+	}
+	for i, want := range []struct{ id, path, title, word string }{
+		{"id1", "Mix/Album/01.flac", "One", ""},
+		{"id2", "Mix/Album/02.flac", "Two", ""},
+		{"id3", "Mix/Album/gone.flac", "", "track_gone"},
+		{"id4", "", "", "track_gone"},
+	} {
+		e, _ := tracks[i].(map[string]any)
+		row, _ := e["track"].(map[string]any)
+		path, _ := e["path"].(string)
+		word, _ := e["word"].(string)
+		switch {
+		case e["id"] != want.id || path != want.path || word != want.word:
+			t.Fatalf("track %d: %v, want id %s, path %q, word %q", i, e, want.id, want.path, want.word)
+		case want.title == "" && e["track"] != nil:
+			t.Fatalf("track %d: a row %v for a track with none", i, e["track"])
+		case want.title != "" && (row == nil || row["title"] != want.title || row["path"] != want.path):
+			t.Fatalf("track %d: row %v, want the catalog's row titled %s", i, row, want.title)
+		}
+	}
 }
 
 // TestTheCatalogSaysWhatTheBridgesPlayerPlays pins §6.7: each catalog row

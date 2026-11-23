@@ -1190,10 +1190,12 @@ type entryIn struct {
 }
 
 // prepared is what an edit's checks made of its list: the entries that pass,
-// and what was left out, with its words.
+// and what was left out, with its words; or cancelled, the operation's unsent
+// steps ended before the checks were through, and nothing else.
 type prepared struct {
-	entries []entryIn
-	leftOut []admin.PlayerLeftOut
+	entries   []entryIn
+	leftOut   []admin.PlayerLeftOut
+	cancelled bool
 }
 
 // prepare checks every track of tracks, and none of the engine (§6.2): its
@@ -1202,9 +1204,13 @@ type prepared struct {
 // function), its reference (canonical, on the first host an Insert would
 // take, within the engine's 128 bytes) and its metadata (the ContentDirectory's
 // item, XML 1.0 text within the engine's 64 KiB). A track that fails is left
-// out with its word.
-func (c *consoleControl) prepare(ctx context.Context, tracks []string) prepared {
+// out with its word. o's unsent steps ended before a track is checked stop
+// the checks there: the preparation is cancelled, and holds nothing else.
+func (c *consoleControl) prepare(ctx context.Context, o *operation, tracks []string) prepared {
 	var out prepared
+	if o.endedNow() {
+		return prepared{cancelled: true}
+	}
 	distinct := []string{}
 	seen := map[string]bool{}
 	for _, t := range tracks {
@@ -1232,6 +1238,9 @@ func (c *consoleControl) prepare(ctx context.Context, tracks []string) prepared 
 	}
 	checked := map[string]verdict{}
 	for _, path := range distinct {
+		if o.endedNow() {
+			return prepared{cancelled: true}
+		}
 		row, ok := rows[path]
 		if !ok {
 			checked[path] = verdict{word: wordNotInLibrary}
@@ -1492,7 +1501,11 @@ func (c *consoleControl) runReplace(o *operation, eng *engine.Engine, r admin.Pl
 		o.finishAs(admin.PlayerOpRefused, wordStale)
 		return
 	}
-	prep := c.prepare(context.Background(), r.Tracks)
+	prep := c.prepare(context.Background(), o, r.Tracks)
+	if prep.cancelled {
+		o.finishAs(admin.PlayerOpCancelled, "")
+		return
+	}
 	o.set(func(rec *admin.PlayerRecord) { rec.LeftOut = prep.leftOut })
 	start := -1
 	for i, e := range prep.entries {
@@ -1721,7 +1734,11 @@ func (c *consoleControl) runAppend(o *operation, eng *engine.Engine, r admin.Pla
 		o.finishAs(admin.PlayerOpRefused, wordStale)
 		return
 	}
-	prep := c.prepare(context.Background(), r.Tracks)
+	prep := c.prepare(context.Background(), o, r.Tracks)
+	if prep.cancelled {
+		o.finishAs(admin.PlayerOpCancelled, "")
+		return
+	}
 	o.set(func(rec *admin.PlayerRecord) { rec.LeftOut = prep.leftOut; rec.Of = len(prep.entries) })
 	if len(prep.entries) == 0 {
 		o.finishAs(admin.PlayerOpRefused, wordNotPlayable)
