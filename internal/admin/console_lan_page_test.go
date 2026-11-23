@@ -160,7 +160,9 @@ func TestAnUploadWithoutSubtleCryptoSendsNoDigestAndSaysSo(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; the digest half executes the shipped client source")
 	}
-	driver := `globalThis.crypto = {};
+	// Node defines crypto on globalThis with a getter alone, and a module
+	// runs strict, so an assignment throws: the driver defines it.
+	driver := `Object.defineProperty(globalThis, "crypto", { value: {}, configurable: true, writable: true });
 ` + extractJSFunction(t, src, "chunkDigestHeaders") + `
 (async () => {
   const h = await chunkDigestHeaders(new Uint8Array([1, 2, 3]));
@@ -201,16 +203,19 @@ func TestTheUploadPageSaysChunksAreCheckedForLengthOnly(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; the note's half executes the shipped client source")
 	}
+	// Each global the driver sets is defined, never assigned: Node defines
+	// crypto with a getter alone, and a module runs strict.
 	driver := extractJSFunction(t, src, "uploadLengthOnlyNoteText") + extractJSFunction(t, src, "uploadLengthOnlyNote") + `
+const setGlobal = (name, value) => Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
 const el = { textContent: "", hidden: true };
-globalThis.document = { getElementById: () => el };
+setGlobal("document", { getElementById: () => el });
 const out = [];
-globalThis.isSecureContext = false;
-globalThis.crypto = {};
+setGlobal("isSecureContext", false);
+setGlobal("crypto", {});
 uploadLengthOnlyNote();
 out.push({ text: el.textContent, hidden: el.hidden });
-globalThis.isSecureContext = true;
-globalThis.crypto = { subtle: {} };
+setGlobal("isSecureContext", true);
+setGlobal("crypto", { subtle: {} });
 uploadLengthOnlyNote();
 out.push({ text: el.textContent, hidden: el.hidden });
 process.stdout.write(JSON.stringify(out));

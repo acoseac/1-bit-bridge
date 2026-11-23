@@ -747,7 +747,12 @@ func (l boundFirstListener) Addr() net.Addr {
 // and exits 1; the home-network socket, bound before the refusal (the handed
 // listener's address is read only once the box's stand-in is bound), is
 // retired on that way out, so once serve has returned its listener takes no
-// connection (backlog B989, its second and third rounds).
+// connection (backlog B989, its second to fourth rounds). The refusal is this
+// case's expected end, so it takes a path of its own, not the startup
+// helpers': serve prints its banner before it reads the refusal, so the
+// banner proves neither the retirement nor serve's end, and a helper reads an
+// exit that follows the banner as a failed start. The case waits for serve's
+// return, reads its exit code once, and only then asks the listener.
 func TestAHandedConsoleListenerThatIsRefusedRetiresTheLANSocket(t *testing.T) {
 	adminLn := holdAdmin(t)
 	cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
@@ -762,18 +767,27 @@ func TestAHandedConsoleListenerThatIsRefusedRetiresTheLANSocket(t *testing.T) {
 		return l, err
 	}
 	other := boundFirstListener{Listener: holdAdmin(t), bound: bound}
-	served := serveWithOpts(t, serveOpts{configPath: cfg, adminListener: other, tailscaleCLI: noTailscaleCLI(),
-		consoleLAN: seams})
+	ctx, cancel := context.WithCancel(context.Background())
+	stdout, stderr := &safeBuffer{}, &safeBuffer{}
+	done := make(chan int, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		done <- runServe(ctx, serveOpts{configPath: cfg, adminListener: other, tailscaleCLI: noTailscaleCLI(),
+			consoleLAN: seams}, stdout, stderr)
+	}()
+	drainServeOnCleanup(t, cancel, exited, done, stderr)
 	select {
-	case code := <-served.done:
+	case code := <-done:
 		if code != 1 {
-			t.Fatalf("serve exited %d with its console listener refused, want 1; stderr=%s", code, served.stderr.String())
+			t.Fatalf("serve exited %d with its console listener refused, want 1; stdout=%s\nstderr=%s",
+				code, stdout.String(), stderr.String())
 		}
 	case <-serveGiveUp(t):
-		t.Fatalf("serve did not exit with its console listener refused; stderr=%s", served.stderr.String())
+		t.Fatalf("serve did not exit with its console listener refused; stdout=%s\nstderr=%s", stdout.String(), stderr.String())
 	}
-	if !strings.Contains(served.stderr.String(), "admin server: admin listen") {
-		t.Fatalf("serve did not say it refused the listener: %s", served.stderr.String())
+	if !strings.Contains(stderr.String(), "admin server: admin listen") {
+		t.Fatalf("serve did not say it refused the listener: %s", stderr.String())
 	}
 	box.mu.Lock()
 	reals := append([]net.Listener(nil), box.reals...)
