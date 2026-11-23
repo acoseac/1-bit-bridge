@@ -26,8 +26,10 @@ func Hold(index int, ipv6 bool) func(network, address string, c syscall.RawConn)
 
 // HostModel reads the interface table of IPv4, or of IPv6 where ipv6, in one
 // GetIpInterfaceTable call: each row's interface index and its weak host
-// send, weak host receive and forwarding flags. A table that does not read
-// is ReasonHostModelUnreadable.
+// send, weak host receive and forwarding flags, read from the table's bytes
+// at the native row size (parseInterfaceTable), never by indexing x/sys's row
+// type, which is 8 bytes longer. A table that does not read is
+// ReasonHostModelUnreadable.
 func HostModel(ipv6 bool) (Table, error) {
 	family := uint16(windows.AF_INET)
 	if ipv6 {
@@ -38,21 +40,15 @@ func HostModel(ipv6 bool) (Table, error) {
 		return nil, &RefusalError{Reason: ReasonHostModelUnreadable, Err: fmt.Errorf("GetIpInterfaceTable: %w", err)}
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(tab))
-	rows := unsafe.Slice(&tab.Table[0], tab.NumEntries)
-	out := make(Table, 0, len(rows))
-	for i := range rows {
-		out = append(out, Row{
-			Index:           int(rows[i].InterfaceIndex),
-			WeakHostSend:    rows[i].WeakHostSend != 0,
-			WeakHostReceive: rows[i].WeakHostReceive != 0,
-			Forwarding:      rows[i].ForwardingEnabled != 0,
-		})
-	}
-	return out, nil
+	return parseInterfaceTable(unsafe.Slice((*byte)(unsafe.Pointer(tab)),
+		interfaceTableRowsAt+interfaceRowSize*int(tab.NumEntries)))
 }
 
 // hostModelEntry reads one interface's row with GetIpInterfaceEntry, the
-// second API §9.5's qualification compares the table's rows with.
+// second API §9.5's qualification compares the table's rows with. It keeps
+// x/sys's row type: GetIpInterfaceEntry writes the native row's 168 bytes into
+// its 176, and the four fields read here lie below offset 164, where the two
+// layouts agree (they part at TransmitOffload).
 func hostModelEntry(index int, ipv6 bool) (Row, error) {
 	family := uint16(windows.AF_INET)
 	if ipv6 {

@@ -15,8 +15,10 @@ import (
 // flags those GetIpInterfaceEntry gives for it, and JudgeStrongHost decides
 // on the rows read. It records the runner's rows and a reading's cost in its
 // log (§3.4, §10.4) and asserts no particular answer of them, since a
-// runner's own adapters may forward. A table that does not read fails where
-// CI is set.
+// runner's own adapters may forward. Where CI is set, a table that does not
+// read fails, and so does a reading that is not whole: an interface whose
+// addresses do not read, or one holding an address of the family with no row
+// in the table, each asked of the rows' indexes directly.
 func TestTheStrongHostModelIsReadFromTheStack(t *testing.T) {
 	ifs, err := net.Interfaces()
 	if err != nil {
@@ -58,6 +60,9 @@ func TestTheStrongHostModelIsReadFromTheStack(t *testing.T) {
 		for _, in := range ifs {
 			addrs, err := in.Addrs()
 			if err != nil {
+				if os.Getenv("CI") != "" {
+					t.Fatalf("CI: the addresses of interface %d (%s) did not read: %v", in.Index, in.Name, err)
+				}
 				continue
 			}
 			for _, a := range addrs {
@@ -65,6 +70,21 @@ func TestTheStrongHostModelIsReadFromTheStack(t *testing.T) {
 					addressed = append(addressed, in.Index)
 					break
 				}
+			}
+		}
+		rowed := map[int]bool{}
+		for _, row := range table {
+			rowed[row.Index] = true
+		}
+		for _, index := range addressed {
+			if rowed[index] {
+				continue
+			}
+			if os.Getenv("CI") != "" {
+				t.Errorf("CI: interface %d (%s) holds an address of the family (ipv6=%v) and has no row in the table",
+					index, names[index], ipv6)
+			} else {
+				t.Logf("  interface %d (%s) holds an address of the family and has no row in the table", index, names[index])
 			}
 		}
 		if len(addressed) > 0 {
