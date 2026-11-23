@@ -28,15 +28,23 @@ import (
 const tailnetHeldTestName = "box.example.ts.net"
 
 // heldTailnet is the embedded node's status read, held until the case lets it
-// go, counting the reads asked and those that returned.
+// go, counting the reads asked and those that returned; back is closed once
+// the first read has returned.
 type heldTailnet struct {
 	asked   chan struct{}
 	release chan struct{}
+	back    chan struct{}
 	once    sync.Once
+	backed  sync.Once
 
 	mu       sync.Mutex
 	calls    int
 	returned int
+}
+
+// newHeldTailnet is a status read held until release is closed.
+func newHeldTailnet() *heldTailnet {
+	return &heldTailnet{asked: make(chan struct{}), release: make(chan struct{}), back: make(chan struct{})}
 }
 
 func (h *heldTailnet) Status() admin.TailscaleStatus {
@@ -48,6 +56,7 @@ func (h *heldTailnet) Status() admin.TailscaleStatus {
 	h.mu.Lock()
 	h.returned++
 	h.mu.Unlock()
+	h.backed.Do(func() { close(h.back) })
 	return admin.TailscaleStatus{BackendState: "Running", MagicDNSName: tailnetHeldTestName + "."}
 }
 
@@ -65,6 +74,14 @@ func (h *heldTailnet) counts() (calls, returned int) {
 // server's, over one config: the API's listen port is 7788 and its Tailscale
 // mode tsnet, so the list asks the API's shared status read.
 func consoleBesideTheAPI(t *testing.T, status admin.TailscaleProvider) (*admin.Server, *api.Server) {
+	t.Helper()
+	srv, apiSrv, _ := consoleBesideTheAPIIssuing(t, status, nil)
+	return srv, apiSrv
+}
+
+// consoleBesideTheAPIIssuing is consoleBesideTheAPI with codes issuing the
+// pairing links' one-time codes, and the device tokens' store it writes.
+func consoleBesideTheAPIIssuing(t *testing.T, status admin.TailscaleProvider, codes admin.PairingCodeIssuer) (*admin.Server, *api.Server, *auth.Store) {
 	t.Helper()
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "Music")
@@ -103,12 +120,12 @@ func consoleBesideTheAPI(t *testing.T, status admin.TailscaleProvider) (*admin.S
 	srv, err := admin.New(admin.Deps{
 		CfgHolder: config.NewRuntimeConfig(cfg), CfgPath: cfgPath, Auth: tokens, Manifest: store,
 		Scanner: manifest.NewScanner(cfg.LibraryRoots, store, ""), Resolver: bridgefs.New(cfg.LibraryRoots),
-		StartedAt: time.Now(), Restart: func() {}, Endpoints: apiSrv.ReachableEndpoints,
+		StartedAt: time.Now(), Restart: func() {}, Endpoints: apiSrv.ReachableEndpoints, PairingCodes: codes,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return srv, apiSrv
+	return srv, apiSrv, tokens
 }
 
 // askEndpoints serves GET /api/endpoints on ctx, on a goroutine of its own, and
@@ -132,7 +149,7 @@ func askEndpoints(srv *admin.Server, ctx context.Context) <-chan int {
 // once let go it answers once for every caller, and /v1/health's list carries
 // the tailnet's name it found, never the empty status of a read cut short.
 func TestACancelledEndpointsWaitLeavesTheHealthReadWhole(t *testing.T) {
-	held := &heldTailnet{asked: make(chan struct{}), release: make(chan struct{})}
+	held := newHeldTailnet()
 	var releaseOnce sync.Once
 	letGo := func() { releaseOnce.Do(func() { close(held.release) }) }
 	t.Cleanup(letGo)
