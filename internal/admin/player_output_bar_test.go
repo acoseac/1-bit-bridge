@@ -428,6 +428,16 @@ func TestPlaybackLetGoWithNoPlayerOfferedAsksTheGateToGoOn(t *testing.T) { barSc
 // its barrier, the reader's Pause before the answer, neither plays nor moves.
 func TestAContinuationBehindABarrierStopsForAPause(t *testing.T) { barScenario(t, 2) }
 
+// TestAContinuationBehindABarrierStopsForTheBrowsersOwnPause pins Q3 and Q8:
+// the browser's own pause of the element, like the reader's, ends what this
+// browser means to play, so a skip waiting on its barrier plays nothing.
+func TestAContinuationBehindABarrierStopsForTheBrowsersOwnPause(t *testing.T) { barScenario(t, 2) }
+
+// TestAContinuationNeverDisplacesAStartTheReaderAsked pins S1: a track's end
+// while the reader's row waits on its barrier replays nothing, and the row
+// plays on the barrier's done.
+func TestAContinuationNeverDisplacesAStartTheReaderAsked(t *testing.T) { barScenario(t, 3) }
+
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start
 // on the barrier's done, and the skip moves nothing of it.

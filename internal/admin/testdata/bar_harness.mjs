@@ -1938,6 +1938,39 @@ S.TestAContinuationBehindABarrierStopsForAPause = async () => {
     r.el.plays.length === plays && r.audio.snapshot().index === 0 && !r.audio.snapshot().playing, [r.el.plays.slice(plays), r.audio.snapshot().index, r.audio.snapshot().playing]);
 };
 
+S.TestAContinuationBehindABarrierStopsForTheBrowsersOwnPause = async () => {
+  // Q3, Q8: the browser's own pause (a headset unplugged, another tab's
+  // audio) ends what this browser means to play, as the reader's does.
+  const { r, held } = await skipWaiting();
+  const plays = r.el.plays.length;
+  r.el.pause();
+  await settle();
+  held.open();
+  await settle();
+  check("paused by the browser before the barrier's answer: the skip neither plays nor moves",
+    r.el.plays.length === plays && r.audio.snapshot().index === 0 && r.el.paused, [r.el.plays.slice(plays), r.audio.snapshot().index, r.el.paused]);
+};
+
+S.TestAContinuationNeverDisplacesAStartTheReaderAsked = async () => {
+  // S1: a row the reader played waits on its barrier; the old track's end
+  // (a repeat-one replay, asked as a start is) does not take its place.
+  const r = await gatedPlaying();
+  r.audio.cycleRepeat();
+  r.audio.cycleRepeat();
+  const held = gate();
+  r.hold = held;
+  r.audio.playQueue([flac(7), flac(8)], 0);
+  await settle();
+  check("the reader's row waits on its barrier", r.s.posts(ROUTES.switchOut).length === 2 && r.audio.snapshot().track?.path === "Album/01.flac", [r.s.posts(ROUTES.switchOut).length, r.audio.snapshot().track?.path]);
+  const plays = r.el.plays.length;
+  r.el.end();
+  await settle();
+  check("the old track's end meanwhile replays nothing and sends nothing", r.el.plays.length === plays && r.el.paused && r.s.posts(ROUTES.switchOut).length === 2, [r.el.plays.slice(plays), r.el.paused, r.s.posts(ROUTES.switchOut).length]);
+  held.open();
+  await settle();
+  check("on the barrier's done the reader's row plays", r.audio.snapshot().track?.path === "Album/07.flac" && /07\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused, [r.audio.snapshot().track?.path, r.el.plays]);
+};
+
 S.TestAContinuationBehindABarrierLeavesAReplacedQueueAlone = async () => {
   // Q3: a queue the reader replaced meanwhile is the start the barrier
   // runs, and the skip moves nothing of it.
