@@ -44,6 +44,7 @@ const (
 	ReasonStoppedServing   = "stopped_serving"
 	ReasonStopping         = "stopping"
 	ReasonReopening        = "reopening"
+	ReasonStarting         = "starting"
 )
 
 // State is the home-network socket as the serving process reports it, the
@@ -94,7 +95,7 @@ func ReasonWords(reason, a string, port int, iface string) string {
 	case ReasonAddressNotOnBox:
 		return a + " is not on this box"
 	case ReasonAddressOnTwo:
-		return a + " is on more than one interface"
+		return a + " is held more than once on this box, on two interfaces or twice on one"
 	case ReasonAddressNoNetwork:
 		return a + " has no network on its interface (its mask is no prefix)"
 	case ReasonAddressOnTunnel:
@@ -124,6 +125,10 @@ func ReasonWords(reason, a string, port int, iface string) string {
 		return "the home-network socket stopped serving"
 	case ReasonStopping:
 		return "the bridge is stopping"
+	case ReasonStarting:
+		return "the bridge is starting"
+	case ReasonReopening:
+		return "the home-network socket is being reopened: the box's network changed"
 	case ReasonBindFailed:
 		return "the console could not listen on " + a + " at port " + strconv.Itoa(port)
 	}
@@ -140,13 +145,17 @@ func ReasonHint(reason, iface string) string {
 	case ReasonAddressNotOnBox:
 		return "give the box this address (a fixed address, or a DHCP reservation), or set adminLANAddress to an address it holds"
 	case ReasonAddressOnTwo:
-		return "keep the address on one interface"
+		return "keep the address once, on one interface"
 	case ReasonAddressNoNetwork:
 		return "give the address its network's mask on its interface"
 	case ReasonAddressOnTunnel:
 		return "give adminLANAddress the box's address on its home-network interface"
 	case ReasonInterfaceDown:
 		return "bring the interface up; the bridge tries again every 5 s"
+	case ReasonReopening:
+		return "the bridge reads the box again and binds within 5 s"
+	case ReasonStarting:
+		return "the bridge opens it once its start has finished"
 	case ReasonInterfaceNotStrongHost:
 		who := "that interface"
 		if iface != "" {

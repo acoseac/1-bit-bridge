@@ -496,3 +496,43 @@ func TestAnAddressHeldTwiceOnOneInterfaceIsSaidSo(t *testing.T) {
 		t.Fatalf("the hint %q does not say to hold the address once", hint)
 	}
 }
+
+// TestAPlanBetweenItsOpeningAndItsFirstAttemptSaysTheBridgeIsStarting: a
+// plan opened and not yet begun (serve's mDNS start lies between the two)
+// reads waiting, starting, in words of its own, and has bound nothing; the
+// first attempt says what it found, and a second makes none; a plan whose
+// stop came first binds nothing at its first attempt.
+func TestAPlanBetweenItsOpeningAndItsFirstAttemptSaysTheBridgeIsStarting(t *testing.T) {
+	t.Run("begun", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		box := newLANBox(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		srv.PrepareConsoleLAN(ctx, testLANPlan(box, make(chan time.Time), &ConsoleLANSeams{}))
+		t.Cleanup(srv.AbortConsoleLAN)
+		if st := srv.ConsoleLAN(); st.State != ConsoleLANWaiting || st.Reason != consolelan.ReasonStarting || box.count() != 0 {
+			t.Fatalf("a plan opened and not begun reads %+v with %d binds, want waiting %s and none", st, box.count(), consolelan.ReasonStarting)
+		}
+		if words := consolelan.ReasonWords(consolelan.ReasonStarting, testLANAddr, 7789, ""); words != "the bridge is starting" {
+			t.Fatalf("the starting reason's words are %q", words)
+		}
+		if st := srv.BeginConsoleLAN(ctx); st.State != ConsoleLANListening || box.count() != 1 {
+			t.Fatalf("the first attempt left %+v with %d binds, want listening on one", st, box.count())
+		}
+		srv.BeginConsoleLAN(ctx)
+		if n := box.count(); n != 1 {
+			t.Fatalf("a second BeginConsoleLAN bound again: %d binds", n)
+		}
+	})
+	t.Run("stopped first", func(t *testing.T) {
+		srv, _, _ := newTestServer(t)
+		box := newLANBox(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		srv.PrepareConsoleLAN(ctx, testLANPlan(box, make(chan time.Time), &ConsoleLANSeams{}))
+		srv.AbortConsoleLAN()
+		if st := srv.BeginConsoleLAN(ctx); st.State != ConsoleLANWaiting || st.Reason != consolelan.ReasonStopping || box.count() != 0 {
+			t.Fatalf("a first attempt after the stop left %+v with %d binds, want waiting %s and none", st, box.count(), consolelan.ReasonStopping)
+		}
+	})
+}

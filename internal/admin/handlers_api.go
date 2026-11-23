@@ -767,16 +767,18 @@ func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 // getStatsSnapshot is the shared builder for the dashboard stats
 // payload. Used by both the REST handler (apiStats) and the SSE
 // handler (apiEvents). Cheap reads only — no DB writes, no external
-// network. Suitable for sub-second polling. The DB reads are bounded by
-// snapshotDBTimeout and degrade to the last-good statsDBPart on
-// error/timeout so a tick during lock contention doesn't flash zeros.
-func (s *Server) getStatsSnapshot(context.Context) statsResponse {
+// network. Suitable for sub-second polling. The DB reads wait on ctx, the
+// request's (an event stream's ends at its socket's retirement and at the
+// shutdown, backlog B989), bounded by snapshotDBTimeout, and degrade to the
+// last-good statsDBPart on error/timeout so a tick during lock contention
+// doesn't flash zeros.
+func (s *Server) getStatsSnapshot(ctx context.Context) statsResponse {
 	cfg := s.deps.CfgHolder.Load()
 	now := time.Now().UTC()
 
-	// No request context here (the SSE publisher also calls this), so a
-	// wedged read would otherwise block that goroutine indefinitely.
-	ctx, cancel := context.WithTimeout(context.Background(), snapshotDBTimeout)
+	// Bounded as well as the request's, so a wedged read cannot hold the
+	// stream that waits for it longer than the read's own bound.
+	ctx, cancel := context.WithTimeout(ctx, snapshotDBTimeout)
 	defer cancel()
 	part, err := s.readStatsDBPart(ctx)
 	s.statsMu.Lock()
@@ -1092,14 +1094,15 @@ type sourcesResponse struct {
 // started bridge before any stats read, since the SSE initial-emit runs
 // publishStats before publishSources — runs the same readStatsDBPart the
 // stats path uses (it holds the two counts we need), warms the cache for
-// subsequent calls, and degrades to the last-good part on a read error. It
+// subsequent calls, and degrades to the last-good part on a read error. Its
+// read waits on ctx, the request's, bounded by snapshotDBTimeout. It
 // deliberately does NOT route through getStatsSnapshot: that also does a
 // scanner-status read and an auth-store lock we don't need here (Gemini on
 // PR #510). It used to name an os.Stat on the DB file as a third reason —
 // #948 removed that when it dropped `dbBytes`, whose value /api/diagnostics
 // already served. The decision is unchanged; the evidence for it had gone
 // stale, which is the class #955 swept and this one outlived.
-func (s *Server) trackSourceCounts(context.Context) (total, routed int) {
+func (s *Server) trackSourceCounts(ctx context.Context) (total, routed int) {
 	s.statsMu.Lock()
 	warm := s.statsDBValid
 	if warm {
@@ -1109,7 +1112,7 @@ func (s *Server) trackSourceCounts(context.Context) (total, routed int) {
 	if warm {
 		return total, routed
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), snapshotDBTimeout)
+	ctx, cancel := context.WithTimeout(ctx, snapshotDBTimeout)
 	defer cancel()
 	part, err := s.readStatsDBPart(ctx)
 	s.statsMu.Lock()

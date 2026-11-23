@@ -7057,14 +7057,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 
 	adminCtx, adminCancel := context.WithCancel(context.Background())
 	defer adminCancel()
-	// The console on the home network (backlog B989): its first attempt is
-	// made here, synchronously, before the console's goroutine starts, so
-	// the banner says what happened; the loop that retries and reads the
-	// box again runs from ServeListener, which stops it and retires the
-	// socket at the shutdown. A bind that fails never reaches adminErr: the
-	// console serves loopback alone and says why.
+	// The console on the home network (backlog B989): its plan is opened
+	// here, before the console's goroutine starts, so the loop ServeListener
+	// starts is the plan's, and its first attempt is made once the mDNS
+	// responder's start has answered (BeginConsoleLAN, below), so the first
+	// reading holds the box's .local name exactly while the responder runs.
+	// The loop that retries and reads the box again runs from ServeListener,
+	// which stops it and retires the socket at the shutdown; every other way
+	// out of the console's goroutine retires it first (AbortConsoleLAN). A
+	// bind that fails never reaches adminErr: the console serves loopback
+	// alone and says why.
 	consoleLANSeamsNow := opts.consoleLAN.over(consoleLANProduction(func() bool { return mdnsLife.Load().Running() }))
-	consoleLANState := adminSrv.OpenConsoleLAN(adminCtx, consoleLANPlanFor(cfg, consoleLANSeamsNow))
+	adminSrv.PrepareConsoleLAN(adminCtx, consoleLANPlanFor(cfg, consoleLANSeamsNow))
 	adminErr := make(chan error, 1)
 	bgWriters.Add(1)
 	go func() {
@@ -7073,6 +7077,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			want := adminListenAddress(cfg)
 			lis, aerr := adoptHandedListener(opts.adminListener, want)
 			if aerr != nil {
+				adminSrv.AbortConsoleLAN()
 				adminErr <- fmt.Errorf("admin listen %s: %w", want, aerr)
 				return
 			}
@@ -7179,7 +7184,6 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		fmt.Fprintf(stdout, "Library: %q (roots: %v)\n", cfg.LibraryName, cfg.LibraryRoots)
 		fmt.Fprintf(stdout, "TLS fingerprint (pin this on the iOS side):\n  %s\n", fingerprint)
 		fmt.Fprintf(stdout, "Admin console: %s — add library folders, pair devices, view stats\n", operatorAdminURL(cfg, adminScheme))
-		consoleLANBanner(stdout, consoleLANState, consoleLANPortOf(cfg))
 	}
 
 	// Advertise on mDNS so iOS clients on the same LAN auto-discover
@@ -7226,6 +7230,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	}
 	if ml := mdnsLife.Load(); ml != nil {
 		defer ml.Close()
+	}
+	// The home-network socket's first attempt, now that the responder's
+	// start has answered (backlog B989), and the banner's line on it.
+	consoleLANState := adminSrv.BeginConsoleLAN(adminCtx)
+	if !cfg.IsPublic() {
+		consoleLANBanner(stdout, consoleLANState, consoleLANPortOf(cfg))
 	}
 
 	var lanH3 *lanHTTP3

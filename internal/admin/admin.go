@@ -2262,6 +2262,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
+		// Every way out of serve retires the home-network socket first, and
+		// ServeListener, whose shutdown would, never runs (backlog B989).
+		s.AbortConsoleLAN()
 		return fmt.Errorf("admin listen %s: %w", addr, err)
 	}
 	return s.ServeListener(ctx, lis)
@@ -2394,9 +2397,7 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 		// The loopback socket's failure stops serve (adminErr); the
 		// home-network socket is closed on that way out, by the same
 		// one window.
-		if c := s.consoleLAN; c != nil {
-			c.stopAndRetire(time.Now().Add(s.shutdownWindow()))
-		}
+		s.AbortConsoleLAN()
 		// errors.Is, not ==: net/http returns ErrServerClosed unwrapped today,
 		// so this is behaviour-identical now — but a wrapped one would read as
 		// a real listener failure and turn a clean shutdown into an error

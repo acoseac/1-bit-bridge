@@ -131,7 +131,8 @@ type ConsoleLANSeams struct {
 	Released func(left int)
 	// Ticked runs once the loop has done what a tick asked, whatever it was.
 	Ticked func()
-	// RetirementEnded runs once a retirement's wait has ended.
+	// RetirementEnded runs once a retirement's wait has ended and it no
+	// longer counts as under way.
 	RetirementEnded func()
 }
 
@@ -212,29 +213,54 @@ type consoleLAN struct {
 	closing       bool
 	closeDeadline time.Time
 	lastSaid      string
+	// retiring counts the retirements under way, from a retirement's first
+	// section until its wait for what it admitted has ended: no tick binds
+	// while one runs, and the stop joins each within its one deadline.
+	retiring int
 
 	state atomic.Pointer[ConsoleLANState]
 
 	stop     chan struct{}
 	loopDone chan struct{}
 	started  bool
+	// first is closed once the plan's first attempt has run, or would make
+	// none: the loop takes no tick before it (BeginConsoleLAN).
+	first     chan struct{}
+	firstOnce sync.Once
 }
 
-// OpenConsoleLAN makes the plan's first attempt synchronously, so serve's
-// banner can say what happened, and returns the state it left. The loop that
-// retries and reads again starts with ServeListener, which stops it, retires
-// the socket and shuts both sockets down under one deadline. A nil plan is
-// no posture. Call once, before ServeListener.
+// OpenConsoleLAN opens the plan and makes its first attempt synchronously
+// (PrepareConsoleLAN, then BeginConsoleLAN), and returns the state it left.
+// The loop that retries and reads again starts with ServeListener, which
+// stops it, retires the socket and shuts both sockets down under one
+// deadline. A nil plan is no posture. Call once, before ServeListener.
 func (s *Server) OpenConsoleLAN(ctx context.Context, plan *ConsoleLANPlan) ConsoleLANState {
 	if plan == nil {
 		return s.ConsoleLAN()
 	}
-	c := &consoleLAN{s: s, plan: *plan, stop: make(chan struct{}), loopDone: make(chan struct{})}
+	s.PrepareConsoleLAN(ctx, plan)
+	return s.BeginConsoleLAN(ctx)
+}
+
+// PrepareConsoleLAN opens the plan and decides its hold, and makes no
+// attempt: serve prepares it before the console's goroutine starts, so the
+// loop ServeListener starts is the plan's, and makes the first attempt once
+// the mDNS responder's start has answered (BeginConsoleLAN), so the first
+// reading holds the .local name exactly while the responder runs and the
+// loop's first tick finds no change in it. A nil plan is no posture. Call
+// once, before ServeListener.
+func (s *Server) PrepareConsoleLAN(ctx context.Context, plan *ConsoleLANPlan) ConsoleLANState {
+	if plan == nil {
+		return s.ConsoleLAN()
+	}
+	c := &consoleLAN{s: s, plan: *plan, stop: make(chan struct{}), loopDone: make(chan struct{}),
+		first: make(chan struct{})}
 	c.cond = sync.NewCond(&c.mu)
 	s.consoleLAN = c
 	if !plan.Address.IsValid() {
 		st := c.base(ConsoleLANOff, "")
 		c.state.Store(&st)
+		c.firstOnce.Do(func() { close(c.first) })
 		return st
 	}
 	goos := plan.GOOS
@@ -244,22 +270,49 @@ func (s *Server) OpenConsoleLAN(ctx context.Context, plan *ConsoleLANPlan) Conso
 	hold, err := consolelan.Decide(goos, plan.Address.Is6())
 	if err != nil {
 		c.setWaiting(reasonOf(err), err)
+		c.firstOnce.Do(func() { close(c.first) })
 		return c.State()
 	}
 	c.hold = hold
-	c.attempt(ctx)
+	// Until the first attempt, the surfaces say the bridge is starting.
+	st := c.base(ConsoleLANWaiting, consolelan.ReasonStarting)
+	c.mu.Lock()
+	c.state.Store(&st)
+	c.mu.Unlock()
+	return st
+}
+
+// BeginConsoleLAN makes the prepared plan's first attempt, once, and returns
+// the state it left; the loop takes its first tick after it. It attempts
+// nothing once the console's stop has begun (AbortConsoleLAN, or
+// ServeListener's shutdown), and nothing where no plan runs.
+func (s *Server) BeginConsoleLAN(ctx context.Context) ConsoleLANState {
+	c := s.consoleLAN
+	if c == nil {
+		return s.ConsoleLAN()
+	}
+	c.firstOnce.Do(func() {
+		defer close(c.first)
+		c.mu.Lock()
+		closing := c.closing
+		c.mu.Unlock()
+		if !closing {
+			c.attempt(ctx)
+		}
+	})
 	return c.State()
 }
 
-// PrepareConsoleLAN, BeginConsoleLAN and AbortConsoleLAN are round 2's
-// names, with today's behaviour (a names-only shim the change replaces).
-func (s *Server) PrepareConsoleLAN(ctx context.Context, plan *ConsoleLANPlan) ConsoleLANState {
-	return s.OpenConsoleLAN(ctx, plan)
+// AbortConsoleLAN retires the home-network socket on a way out of serve that
+// ServeListener's shutdown does not take: the loopback socket's bind failed,
+// a listener serve was handed was refused, or the loopback socket stopped
+// serving. It stops the plan within the console's one shutdown window, as
+// that shutdown does (I7). Nothing where no plan runs.
+func (s *Server) AbortConsoleLAN() {
+	if c := s.consoleLAN; c != nil {
+		c.stopAndRetire(time.Now().Add(s.shutdownWindow()))
+	}
 }
-
-func (s *Server) BeginConsoleLAN(context.Context) ConsoleLANState { return s.ConsoleLAN() }
-
-func (s *Server) AbortConsoleLAN() {}
 
 // ConsoleLAN is the home-network socket's state, off where no plan runs
 // (or no console exists yet: a nil s).
@@ -591,20 +644,27 @@ func (c *consoleLAN) retireWait() time.Duration {
 }
 
 // retire retires p (F1, I2, I8), in this order: in one critical section it
-// marks the policy retired, no longer current, and cancels its context, so a
-// request admitted before has its context ended (an event stream, waiting on
-// its context or on a snapshot it waits for on that context, returns) and
-// one after is refused; then it closes the server, which closes its
-// listener, waits for its Serve and closes every connection it tracks, so a
-// stream blocked in a write ends too; then it waits for the handlers its
-// policy admitted until deadline. A second retirement of p does it again,
+// marks the policy retired, no longer current, the state waiting with the
+// retirement's reason where p was current, counts the retirement under way
+// and cancels the policy's context, so a request admitted before has its
+// context ended (an event stream, waiting on its context or on a snapshot it
+// waits for on that context, returns) and one after is refused; then it
+// closes the server, which closes its listener, waits for its Serve and
+// closes every connection it tracks, so a stream blocked in a write ends
+// too; then it waits for the handlers its policy admitted until deadline,
+// and only then counts itself out. A second retirement of p does it again,
 // which changes nothing.
 func (c *consoleLAN) retire(p *lanPolicy, cause string, deadline time.Time) {
 	c.mu.Lock()
 	p.retired = true
 	if c.current == p {
 		c.current = nil
+		// Nothing is served under p from here on: the surfaces read the
+		// reason the socket is closing for until an attempt says otherwise.
+		st := c.base(ConsoleLANWaiting, retiredReason(cause))
+		c.state.Store(&st)
 	}
+	c.retiring++
 	p.cancel()
 	c.mu.Unlock()
 	if sm := c.plan.Seams; sm != nil && sm.RetirementMarked != nil {
@@ -620,9 +680,25 @@ func (c *consoleLAN) retire(p *lanPolicy, cause string, deadline time.Time) {
 		sm.RetirementClosed()
 	}
 	c.waitHandlers(p, deadline)
+	c.mu.Lock()
+	c.retiring--
+	c.cond.Broadcast()
+	c.mu.Unlock()
 	if sm := c.plan.Seams; sm != nil && sm.RetirementEnded != nil {
 		sm.RetirementEnded()
 	}
+}
+
+// retiredReason is the waiting state's reason while a retirement for cause
+// runs.
+func retiredReason(cause string) string {
+	switch cause {
+	case causeShutdown:
+		return consolelan.ReasonStopping
+	case causeStoppedServing:
+		return consolelan.ReasonStoppedServing
+	}
+	return consolelan.ReasonReopening
 }
 
 // waitHandlers waits until p's count is 0 or deadline has passed, the stop's
@@ -651,16 +727,12 @@ func (c *consoleLAN) waitHandlers(p *lanPolicy, deadline time.Time) {
 }
 
 // retireForFailure retires a socket whose Serve failed, from its goroutine,
-// as the loop retires one (the plan's §3.6), then reads waiting where no
-// socket bound meanwhile; the loop binds again at its next tick.
+// as the loop retires one (the plan's §3.6): the retirement's section says
+// stopped_serving, and the loop binds again at its first tick once the
+// retirement has ended, whose attempt says what it found. Nothing is stored
+// after the retirement, so no newer reason is replaced by it.
 func (c *consoleLAN) retireForFailure(p *lanPolicy) {
 	c.retire(p, causeStoppedServing, time.Now().Add(c.retireWait()))
-	st := c.base(ConsoleLANWaiting, consolelan.ReasonStoppedServing)
-	c.mu.Lock()
-	if c.current == nil && !c.closing {
-		c.state.Store(&st)
-	}
-	c.mu.Unlock()
 }
 
 // tick is one interval of the loop: a waiting plan attempts again; a
@@ -672,12 +744,18 @@ func (c *consoleLAN) tick(ctx context.Context) {
 		return // not_supported_here: nothing at run time changes the answer
 	}
 	c.mu.Lock()
-	p, closing := c.current, c.closing
+	p, closing, retiring := c.current, c.closing, c.retiring
 	c.mu.Unlock()
 	if closing {
 		return
 	}
 	if p == nil {
+		// A retirement under way, a failure's on its Serve's goroutine, still
+		// has connections to close and handlers to wait for: no socket binds
+		// before it has ended (the plan's §3.6); a tick after it binds.
+		if retiring > 0 {
+			return
+		}
 		c.attempt(ctx)
 		return
 	}
@@ -707,10 +785,10 @@ func (c *consoleLAN) tick(ctx context.Context) {
 		sm.BeforeFreshReading()
 	}
 	c.mu.Lock()
-	closing = c.closing
+	closing, retiring = c.closing, c.retiring
 	c.lastSaid = ""
 	c.mu.Unlock()
-	if closing {
+	if closing || retiring > 0 {
 		return
 	}
 	c.attempt(ctx)
@@ -731,6 +809,13 @@ func (c *consoleLAN) startLoop(ctx context.Context) {
 	c.started = true
 	go func() {
 		defer close(c.loopDone)
+		select {
+		case <-c.first:
+		case <-c.stop:
+			return
+		case <-ctx.Done():
+			return
+		}
 		var tick <-chan time.Time
 		if c.plan.Tick != nil {
 			tick = c.plan.Tick
@@ -756,9 +841,10 @@ func (c *consoleLAN) startLoop(ctx context.Context) {
 }
 
 // stopAndRetire stops the loop and joins it, so no bind follows the stop,
-// then retires the socket through the fence, all within deadline, the one
-// deadline the console's shutdown shares (I7): a retirement under way at the
-// stop waits no longer than it.
+// then retires the socket through the fence and joins every retirement
+// under way, a failure's on its Serve's goroutine included, all within
+// deadline, the one deadline the console's shutdown shares (I7): a
+// retirement under way at the stop waits no longer than it.
 func (c *consoleLAN) stopAndRetire(deadline time.Time) {
 	c.mu.Lock()
 	if c.closing {
@@ -787,6 +873,15 @@ func (c *consoleLAN) stopAndRetire(deadline time.Time) {
 	c.mu.Unlock()
 	if p != nil {
 		c.retire(p, causeShutdown, deadline)
+	}
+	c.mu.Lock()
+	for c.retiring > 0 && time.Now().Before(deadline) {
+		c.cond.Wait()
+	}
+	left := c.retiring
+	c.mu.Unlock()
+	if left > 0 {
+		logger.Warn("console: a retirement of the home-network socket outlived the stop's window", "count", left)
 	}
 	if c.plan.Address.IsValid() {
 		st := c.base(ConsoleLANWaiting, consolelan.ReasonStopping)

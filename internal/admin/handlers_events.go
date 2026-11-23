@@ -43,10 +43,13 @@ import (
 // bookkeeping needed — the stdlib does the right thing once BaseContext
 // is set. On the home-network socket (backlog B989) the context is the
 // socket's policy's, which its retirement cancels first; every snapshot
-// this stream waits for is waited for on that context (the composition
-// and enrichment flights included), so the stream returns at the
-// cancellation; a stream blocked in a write ends at the retirement's
-// close of its connection, which comes next.
+// this stream waits for on the store or the tailnet is waited for on that
+// context (the stats reads, the sources' counts, the composition and
+// enrichment flights, the upscale and analysis counts, and the tailnet's
+// status where its provider reads on a context, as serve's does), so the
+// stream returns at the cancellation; the others read memory, the box's
+// interfaces or the updater's state. A stream blocked in a write ends at
+// the retirement's close of its connection, which comes next.
 //
 // Concurrency: per-client tickers, no broker / fan-out. Admin is a
 // single-user loopback console; even with several browser tabs the
