@@ -36,9 +36,10 @@ func (c *countedCodes) Issue(tokenID, tokenHash string) (string, error) {
 }
 
 // askPairing serves a POST of body to path on ctx, on a goroutine of its own:
-// done is closed once the handler has returned, its answer then in rec.
-func askPairing(srv *admin.Server, ctx context.Context, path, body string) (rec *httptest.ResponseRecorder, done <-chan struct{}) {
-	rec = httptest.NewRecorder()
+// done is closed once the handler has returned, its answer then in rec, and
+// every call that wrote to it in rec.Writes.
+func askPairing(srv *admin.Server, ctx context.Context, path, body string) (rec *admin.WriteCallRecorder, done <-chan struct{}) {
+	rec = admin.NewWriteCallRecorder()
 	finished := make(chan struct{})
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)).WithContext(ctx)
 	req.RemoteAddr, req.Host = "127.0.0.1:51000", "127.0.0.1:7789"
@@ -52,11 +53,13 @@ func askPairing(srv *admin.Server, ctx context.Context, path, body string) (rec 
 
 // TestAPairingRequestThatEndsWhileItsListWaitsChangesNoCredential: the mint
 // and the rotation, each with the API's shared Tailscale status read held
-// under its endpoint list, return as soon as their request ends, answering
-// nothing: no token is minted or rotated and no code issued, the rotated
-// token's secret and its code from before still work, and the status read
-// they left stays held, then runs to its end once let go and is cached whole,
-// /v1/health's list carrying the tailnet's name it found, asked once.
+// under its endpoint list, return as soon as their request ends, writing
+// nothing to their response (no WriteHeader, Write, WriteString or Flush:
+// admin.WriteCallRecorder): no token is minted or rotated and no code issued,
+// the rotated token's secret and its code from before still work, and the
+// status read they left stays held, then runs to its end once let go and is
+// cached whole, /v1/health's list carrying the tailnet's name it found, asked
+// once.
 func TestAPairingRequestThatEndsWhileItsListWaitsChangesNoCredential(t *testing.T) {
 	const dial = "https://box.local:7788"
 	for _, route := range []string{"mint", "rotate"} {
@@ -104,8 +107,8 @@ func TestAPairingRequestThatEndsWhileItsListWaitsChangesNoCredential(t *testing.
 			case <-time.After(5 * time.Second):
 				t.Fatalf("the %s did not return when its request ended: its endpoint list was not waited for on the request's context", route)
 			}
-			if rec.Body.Len() != 0 {
-				t.Errorf("the %s answered %d %q to a request that had ended, want nothing", route, rec.Code, rec.Body.String())
+			if len(rec.Writes) != 0 {
+				t.Errorf("the %s wrote %v to a request that had ended, want nothing written", route, rec.Writes)
 			}
 			switch route {
 			case "mint":

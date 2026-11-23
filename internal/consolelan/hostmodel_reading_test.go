@@ -174,32 +174,39 @@ func mixedInterfaces() []readInterface {
 // an address of the family as a *net.IPNet and one holding it only as a
 // *net.IPAddr (an anycast address on Windows) are both in the set that must
 // have rows, in IPv4 and in IPv6, and the anycast-only interface's missing row
-// is a mismatch.
+// is a mismatch. Each family is a subtest of its own, so a fatal failure in
+// one leaves the other to run.
 func TestTheExpectedSetTakesBothAddressTypesInBothFamilies(t *testing.T) {
 	for _, ipv6 := range []bool{false, true} {
-		unicast, anycast := 1, 2
+		family := "ipv4"
 		if ipv6 {
-			unicast, anycast = 3, 4
+			family = "ipv6"
 		}
-		out, err := reconcileHostModel(ipv6, func() hostModelReading {
-			return readingOf(mixedInterfaces(), unicast, anycast)
+		t.Run(family, func(t *testing.T) {
+			unicast, anycast := 1, 2
+			if ipv6 {
+				unicast, anycast = 3, 4
+			}
+			out, err := reconcileHostModel(ipv6, func() hostModelReading {
+				return readingOf(mixedInterfaces(), unicast, anycast)
+			})
+			if err != nil || len(out.mismatches) != 0 {
+				t.Fatalf("ipv6=%v: a reading with a row for each addressed interface gave %v and mismatches %v", ipv6, err, out.mismatches)
+			}
+			if want := []int{unicast, anycast}; !slices.Equal(out.addressed, want) {
+				t.Errorf("ipv6=%v: the interfaces holding an address of the family read %v, want %v", ipv6, out.addressed, want)
+			}
+			out, err = reconcileHostModel(ipv6, func() hostModelReading {
+				return readingOf(mixedInterfaces(), unicast)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			missing := fmt.Sprintf("interface %d (%s) holds an address of the family", anycast, mixedInterfaces()[anycast-1].name)
+			if len(out.mismatches) != 1 || !strings.Contains(out.mismatches[0].text, missing) || !out.mismatches[0].ciOnly {
+				t.Errorf("ipv6=%v: a table missing the anycast-only interface's row gave the mismatches %v, want one naming it", ipv6, out.mismatches)
+			}
 		})
-		if err != nil || len(out.mismatches) != 0 {
-			t.Fatalf("ipv6=%v: a reading with a row for each addressed interface gave %v and mismatches %v", ipv6, err, out.mismatches)
-		}
-		if want := []int{unicast, anycast}; !slices.Equal(out.addressed, want) {
-			t.Errorf("ipv6=%v: the interfaces holding an address of the family read %v, want %v", ipv6, out.addressed, want)
-		}
-		out, err = reconcileHostModel(ipv6, func() hostModelReading {
-			return readingOf(mixedInterfaces(), unicast)
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		missing := fmt.Sprintf("interface %d (%s) holds an address of the family", anycast, mixedInterfaces()[anycast-1].name)
-		if len(out.mismatches) != 1 || !strings.Contains(out.mismatches[0].text, missing) || !out.mismatches[0].ciOnly {
-			t.Errorf("ipv6=%v: a table missing the anycast-only interface's row gave the mismatches %v, want one naming it", ipv6, out.mismatches)
-		}
 	}
 }
 

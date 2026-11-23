@@ -149,22 +149,25 @@ func askEndpoints(srv *admin.Server, ctx context.Context) <-chan int {
 // read itself, the API's shared one, runs to its end on no request's context:
 // once let go it answers once for every caller, and /v1/health's list carries
 // the tailnet's name it found, never the empty status of a read cut short.
-// Neither request ends before the second's read waits behind the first's at
-// the API's status lock, which the API tells the case
-// (OnTailscaleStatusWaitForTest): the one place that read waits (backlog
-// B997), so the case cannot pass without the queue it is about.
+// Neither request ends before the second's read has found the API's status
+// lock held, which the API tells the case just before that read calls Lock
+// (OnTailscaleStatusLockFoundHeldForTest), the first's read holding the lock
+// in the held status until the case lets it go: the one place that read can
+// wait (backlog B997), so the case cannot pass without the contention it is
+// about. The hook says the lock was found held, not that the second read has
+// begun to wait for it.
 func TestACancelledEndpointsWaitLeavesTheHealthReadWhole(t *testing.T) {
 	held := newHeldTailnet()
 	var releaseOnce sync.Once
 	letGo := func() { releaseOnce.Do(func() { close(held.release) }) }
 	t.Cleanup(letGo)
 	srv, apiSrv := consoleBesideTheAPI(t, held)
-	var waits atomic.Int32
-	waiting := make(chan struct{})
-	var waitingOnce sync.Once
-	apiSrv.OnTailscaleStatusWaitForTest(func() {
-		waits.Add(1)
-		waitingOnce.Do(func() { close(waiting) })
+	var found atomic.Int32
+	foundHeld := make(chan struct{})
+	var foundOnce sync.Once
+	apiSrv.OnTailscaleStatusLockFoundHeldForTest(func() {
+		found.Add(1)
+		foundOnce.Do(func() { close(foundHeld) })
 	})
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	defer cancel1()
@@ -178,11 +181,11 @@ func TestACancelledEndpointsWaitLeavesTheHealthReadWhole(t *testing.T) {
 	defer cancel2()
 	second := askEndpoints(srv, ctx2)
 	select {
-	case <-waiting:
+	case <-foundHeld:
 	case <-time.After(10 * time.Second):
 	}
-	if n := waits.Load(); n != 1 {
-		t.Fatalf("before the cancellations %d reads waited at the API's status lock behind the held one, want the second request's", n)
+	if n := found.Load(); n != 1 {
+		t.Fatalf("before the cancellations %d reads found the API's status lock held, want the second request's", n)
 	}
 	for i, w := range []struct {
 		cancel context.CancelFunc

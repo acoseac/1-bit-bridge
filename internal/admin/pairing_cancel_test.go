@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -97,13 +98,53 @@ func (r *pairingRig) handler() http.HandlerFunc {
 	return r.srv.apiTokensMint
 }
 
-// requireNothingWritten fails unless the handler answered nothing and changed
+// WriteCallRecorder is an httptest.ResponseRecorder that notes, in order,
+// every call that writes to the response: WriteHeader, Write, WriteString and
+// Flush, each overriding the method the embedded recorder would promote, so
+// none reaches the recorder unnoted. A check that a handler wrote nothing
+// reads Writes, never the recorder alone: NewRecorder's Code is 200 before
+// anything is written, and a WriteHeader(200) with no body moves neither Body,
+// Flushed nor the header map. Exported for the pairing discovery case of
+// package admin_test.
+type WriteCallRecorder struct {
+	*httptest.ResponseRecorder
+	// Writes holds each call as it was made, its argument quoted.
+	Writes []string
+}
+
+// NewWriteCallRecorder is a WriteCallRecorder over httptest.NewRecorder.
+func NewWriteCallRecorder() *WriteCallRecorder {
+	return &WriteCallRecorder{ResponseRecorder: httptest.NewRecorder()}
+}
+
+func (w *WriteCallRecorder) WriteHeader(code int) {
+	w.Writes = append(w.Writes, fmt.Sprintf("WriteHeader(%d)", code))
+	w.ResponseRecorder.WriteHeader(code)
+}
+
+func (w *WriteCallRecorder) Write(b []byte) (int, error) {
+	w.Writes = append(w.Writes, fmt.Sprintf("Write(%q)", b))
+	return w.ResponseRecorder.Write(b)
+}
+
+func (w *WriteCallRecorder) WriteString(s string) (int, error) {
+	w.Writes = append(w.Writes, fmt.Sprintf("WriteString(%q)", s))
+	return w.ResponseRecorder.WriteString(s)
+}
+
+func (w *WriteCallRecorder) Flush() {
+	w.Writes = append(w.Writes, "Flush()")
+	w.ResponseRecorder.Flush()
+}
+
+// requireNothingWritten fails unless the handler wrote nothing to its response
+// (no WriteHeader, Write, WriteString or Flush: WriteCallRecorder) and changed
 // no credential: no token made or rotated and no code issued, the rotated
 // token's secret and its code from before still working.
-func (r *pairingRig) requireNothingWritten(t *testing.T, rec *httptest.ResponseRecorder) {
+func (r *pairingRig) requireNothingWritten(t *testing.T, rec *WriteCallRecorder) {
 	t.Helper()
-	if rec.Body.Len() != 0 {
-		t.Errorf("the %s answered %d %q to a request that had ended, want nothing", r.route, rec.Code, rec.Body.String())
+	if len(rec.Writes) != 0 {
+		t.Errorf("the %s wrote %v to a request that had ended, want nothing written", r.route, rec.Writes)
 	}
 	tokens := r.srv.deps.Auth.List()
 	switch r.route {
@@ -136,7 +177,8 @@ func (r *pairingRig) requireNothingWritten(t *testing.T, rec *httptest.ResponseR
 // TestAPairingRequestEndedWhileItWaitsForTheLockWritesNothing: the mint and
 // the rotation, their endpoint list read, find the console's lock held by the
 // case (testPairingWriteWaits tells it so), and their request ends there; let
-// go, each returns having answered nothing and changed no credential.
+// go, each returns having written nothing to its response and changed no
+// credential.
 func TestAPairingRequestEndedWhileItWaitsForTheLockWritesNothing(t *testing.T) {
 	for _, route := range pairingRoutes {
 		t.Run(route, func(t *testing.T) {
@@ -152,7 +194,7 @@ func TestAPairingRequestEndedWhileItWaitsForTheLockWritesNothing(t *testing.T) {
 			r.srv.mu.Lock()
 			var released sync.Once
 			release := func() { released.Do(r.srv.mu.Unlock) }
-			rec, done := httptest.NewRecorder(), make(chan struct{})
+			rec, done := NewWriteCallRecorder(), make(chan struct{})
 			go func() {
 				defer close(done)
 				r.srv.Handler().ServeHTTP(rec, r.request(ctx))
@@ -210,7 +252,7 @@ func TestAnEndedPairingRequestOnAPathThatReadsNoListWritesNothing(t *testing.T) 
 				path.set(r)
 				ctx, cancel := context.WithCancel(context.Background())
 				cancel()
-				rec := httptest.NewRecorder()
+				rec := NewWriteCallRecorder()
 				r.handler()(rec, r.request(ctx))
 				r.requireNothingWritten(t, rec)
 				if n := asked.Load(); n != 0 {
