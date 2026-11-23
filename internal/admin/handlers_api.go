@@ -1794,8 +1794,14 @@ type adminEndpointEntry struct {
 // see the list of addresses; iOS sees per-URL reachability via
 // the unified probe (paired iOS PR #150).
 func (s *Server) apiEndpoints(w http.ResponseWriter, r *http.Request) {
-	out, err := s.getEndpointsSnapshot()
+	out, err := s.getEndpointsSnapshot(r.Context())
 	if err != nil {
+		if r.Context().Err() != nil {
+			// The request ended while the list was read: its client left, or
+			// its socket's retirement or the shutdown ended it. Nobody reads
+			// an answer.
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.code, err.msg)
 		return
 	}
@@ -1817,13 +1823,16 @@ func (e *endpointsErr) Error() string { return e.code + ": " + e.msg }
 // computed fresh on each call (see apiEndpoints for the source) so a
 // just-connected Tailscale interface (or a just-dropped LAN one) is
 // reflected immediately. Shared by apiEndpoints (REST) and
-// apiEvents (SSE).
+// apiEvents (SSE), each with its request's context, which the list is
+// waited for on (endpointsWithin): an event stream's ends at its socket's
+// retirement and at the shutdown (backlog B989).
 //
 // Returns (entries, nil) on success, ([], nil) for the deliberate
 // `:0` test-binding case, or (nil, *endpointsErr) on listen-address
-// parse failure. The error type is opaque to callers — REST maps
-// to 500 + short code; SSE just skips the publish.
-func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
+// parse failure, or once ctx has ended before the list was read. The
+// error type is opaque to callers — REST maps to 500 + short code; SSE
+// just skips the publish, or ends on an ended context.
+func (s *Server) getEndpointsSnapshot(ctx context.Context) ([]adminEndpointEntry, *endpointsErr) {
 	cfg := s.deps.CfgHolder.Load()
 	_, portStr, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil {
@@ -1851,7 +1860,10 @@ func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
 	if port == 0 {
 		return []adminEndpointEntry{}, nil
 	}
-	eps := advertisedEndpoints(s.deps.Endpoints)
+	eps, err := endpointsWithin(ctx, s.deps.Endpoints)
+	if err != nil {
+		return nil, &endpointsErr{code: "request_ended", msg: "the request ended before the endpoint list was read"}
+	}
 	out := make([]adminEndpointEntry, 0, len(eps))
 	for _, e := range eps {
 		out = append(out, adminEndpointEntry{

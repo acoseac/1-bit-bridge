@@ -45,10 +45,11 @@ import (
 // socket's policy's, which its retirement cancels first; every snapshot
 // this stream waits for on the store or the tailnet is waited for on that
 // context (the stats reads, the sources' counts, the composition and
-// enrichment flights, the upscale and analysis counts, and the tailnet's
-// status where its provider reads on a context, as serve's does), so the
-// stream returns at the cancellation; the others read memory, the box's
-// interfaces or the updater's state. A stream blocked in a write ends at
+// enrichment flights, the upscale and analysis counts, the tailnet's status
+// where its provider reads on a context, as serve's does, and the endpoint
+// list, whose provider takes none, on a goroutine of its own:
+// endpointsWithin), so the stream returns at the cancellation; the others
+// read memory or the updater's state. A stream blocked in a write ends at
 // the retirement's close of its connection, which comes next.
 //
 // Concurrency: per-client tickers, no broker / fan-out. Admin is a
@@ -169,8 +170,11 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	publishEndpoints := func() error {
-		snap, eErr := s.getEndpointsSnapshot()
+		snap, eErr := s.getEndpointsSnapshot(ctx)
 		if eErr != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			// Mirror REST behaviour: log + skip. We can't surface a
 			// 5xx mid-stream, so the operator sees the last good list
 			// until the listen-address misconfig is fixed.

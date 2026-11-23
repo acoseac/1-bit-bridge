@@ -2,11 +2,13 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net"
 	"net/netip"
 	"net/url"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -313,6 +315,53 @@ func advertisedEndpoints(provider func() []advertise.Endpoint) []advertise.Endpo
 		return nil
 	}
 	return provider()
+}
+
+// endpointsWithin is advertisedEndpoints waited for on ctx (backlog B989):
+// the provider, the API's list, takes no context, and its Tailscale status
+// read can wait behind another caller's under the API's lock and on the
+// embedded node up to its own bound, so it runs on a goroutine of its own and
+// to its end whatever ctx does. The shared read it makes, which /v1/health
+// takes too, is never cut short by a request, and what it finds is cached for
+// every caller; a request that ends meanwhile returns ctx's error at once. A
+// panic in the provider is raised again on the caller's goroutine while the
+// caller waits, as a direct call raised it, and logged with its stack where
+// the request had ended before it.
+func endpointsWithin(ctx context.Context, provider func() []advertise.Endpoint) ([]advertise.Endpoint, error) {
+	if provider == nil {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	type answer struct {
+		eps      []advertise.Endpoint
+		panicked any
+	}
+	done := make(chan answer, 1)
+	go func() {
+		var a answer
+		defer func() {
+			if p := recover(); p != nil {
+				a.panicked = p
+				if ctx.Err() != nil {
+					logger.Error("console: the endpoint list's provider panicked after its request had ended",
+						"stack", string(debug.Stack()))
+				}
+			}
+			done <- a
+		}()
+		a.eps = provider()
+	}()
+	select {
+	case a := <-done:
+		if a.panicked != nil {
+			panic(a.panicked)
+		}
+		return a.eps, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // ensurePrimaryFirst is the response-boundary defence-in-depth that
