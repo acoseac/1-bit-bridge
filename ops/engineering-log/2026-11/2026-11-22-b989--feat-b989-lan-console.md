@@ -19,7 +19,12 @@ the shared build slot.
   found by a negative control (below).
 - `1140d3f4`: the routed client's CI job, `console-lan-routed`, and its site in the build-site
   census.
-- this record, with the rules, the docs and PROTOCOL.md's sentence.
+- `7a5a3e71`: this record, with the rules, the docs and PROTOCOL.md's sentence.
+- `39ff5c25`: the source guards' findings in the new tests (two import keepers, a doc comment
+  on the wrong declaration).
+- `6f38a0cd`: the changed-config check's structural test through init's save seam (the gate's
+  red, below).
+- the runs, in this section's last part.
 
 ### Red first
 
@@ -138,4 +143,24 @@ log), the macOS leg's hold (`TestTheConsolesHoldScopesItsRepliesOnMacOS`), the r
 
 ### Runs
 
-The gate and the checks are recorded in the next section once they have run.
+- The gate, `make fmt vet test build-all` in one build-slot session (`-p 4`, `-race`,
+  `-timeout 45m`). Its first run, at `39ff5c25`, failed after 2,128 s on one test,
+  `TestTheChangedConfigCheckIsTheStepBeforeSave` (cmd/bridge, 1,789 s; every other package
+  passed): the structural test of init's save found initCmd calling `initSave`, the seam the
+  rollback warning's test observes the save by, where it looked for `saveInitConfig`. `6f38a0cd`
+  holds the test to the seam (initCmd saves once, through `initSave`, which makes no call but
+  `initHost.save` or `saveInitConfig`, production's `initHost.save` being `saveInitConfig`) and
+  corrects its long form; a direct call past the seam, a step inside it and another production
+  save each turned it red. The second run, at `6f38a0cd`, passed in 2,176 s: the race suite
+  (cmd/bridge 1,826 s, manifest 1,681 s, admin 1,356 s, backup 678 s), the build-site census
+  and build-all's six targets. It answered 38 small packages, unchanged since the first run,
+  from that run's test cache; those 38 then passed fresh (`-count=1 -race`, 44 s in the slot).
+- Vets with the release tags for darwin/arm64, windows/amd64, linux/386 and linux/arm: clean.
+- `make docs-check`'s seven steps, one at a time: clean.
+- cmd/bridge's source guards (the cited test names, the docblocks, the import keepers, the
+  drains, the census): clean once `39ff5c25` fixed their findings.
+- `scripts/qualification-version -base ab898b41 -head HEAD`: OK.
+- The routed client's test was not run here, with no root; CI's `console-lan-routed` runs it.
+- PROTOCOL.md's one changed sentence, the install endpoint's trust boundary, leaves its
+  SHA-256 `e8be1877cadf31d4d8a02608d9c5b5f6cb4fd26757abc705a4ea3a244317e26e`, which the iOS
+  app's mirror copies; no wire change, `ProtocolVersion` unchanged.
