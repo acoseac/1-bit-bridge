@@ -218,7 +218,12 @@ func TestOutputsQualificationFacts(t *testing.T) {
 	}
 }
 
-// dopOpens counts and refuses every open a backend asks, by kind.
+// errDACRefuses is the refusal dopOpens answers every open with: a start whose
+// error wraps it reached the DAC's open before it returned.
+var errDACRefuses = errors.New("the test's DAC refuses every open")
+
+// dopOpens counts and refuses every open a backend asks, by kind, with
+// errDACRefuses.
 type dopOpens struct {
 	mu     sync.Mutex
 	native []alsapcm.DSDConfig
@@ -229,14 +234,14 @@ func (o *dopOpens) openNative(_ context.Context, c alsapcm.DSDConfig) (*alsapcm.
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.native = append(o.native, c)
-	return nil, errors.New("the test's DAC refuses every open")
+	return nil, errDACRefuses
 }
 
 func (o *dopOpens) openSink(_ context.Context, c alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.pcm = append(o.pcm, c)
-	return nil, errors.New("the test's DAC refuses every open")
+	return nil, errDACRefuses
 }
 
 func (o *dopOpens) counts() ([]alsapcm.DSDConfig, []alsapcm.SinkConfig) {

@@ -15,6 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
@@ -225,7 +226,9 @@ func TestAnExplicitOffSurvivesAsTheDefault(t *testing.T) {
 // record's digest and waits for nothing. Since the cutover (B7) no record is
 // read, and since B990 the acknowledgement gates no rate: the effective policy
 // serve wired publishes native at every rate the GO bar offers, DSD64 on its
-// listener's clean answer, and DSD128 and DSD256 go on to the DAC's open.
+// listener's clean answer, and a start at DSD128 or DSD256 reaches the DAC's
+// native open at its rate, whose refusal (errDACRefuses) is the start's
+// error, and asks no PCM open.
 func TestAMigratedApprovalCoversOnlyItsRates(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -242,13 +245,23 @@ func TestAMigratedApprovalCoversOnlyItsRates(t *testing.T) {
 	availableOutput(t, eng)
 	fill := func(ch, i int) byte { return byte(i + ch) }
 	content := dopContents{"dsd128": playbacktest.DSF(dsdstate.DSD128, 0.1, fill), "dsd256": playbacktest.DSF(dsdstate.DSD256, 0.1, fill)}
-	b := policyBackendOf(t, wiredPlayback(t, standIn), content, &dopOpens{})
+	opens := &dopOpens{}
+	b := policyBackendOf(t, wiredPlayback(t, standIn), content, opens)
 	if p := b.Policy(); ratesPublished(p) != everyRateNative || p.Reason != "" || firstRung(p) != "listener_confirmed" {
 		t.Errorf("the effective policy after the migration publishes %s(reason %q, DSD64 at %q), want native at every rate, DSD64 listener confirmed", ratesPublished(p), p.Reason, firstRung(p))
 	}
-	for i, ref := range []string{"dsd128", "dsd256"} {
-		if err := startOn(t, b, engine.SessionID(i+1), ref); unplayable(err) != "" {
-			t.Errorf("%s, a rate the record did not approve: refused %q (%v), want it admitted to the DAC's open", ref, unplayable(err), err)
+	for i, rate := range []struct {
+		ref     string
+		bitRate int
+	}{{"dsd128", dsdstate.DSD128}, {"dsd256", dsdstate.DSD256}} {
+		// The opener answers errDACRefuses alone, so a start that returns it
+		// reached the open before it returned, and the opens are read now.
+		if err := startOn(t, b, engine.SessionID(i+1), rate.ref); !errors.Is(err, errDACRefuses) {
+			t.Errorf("%s, a rate the record did not approve: %v (refused %q), want the DAC's open reached and its refusal returned", rate.ref, err, unplayable(err))
+		}
+		native, pcm := opens.counts()
+		if len(native) != i+1 || native[i].Kind != format.KindNativeDSD || native[i].BitRate != rate.bitRate || len(pcm) != 0 {
+			t.Errorf("%s asked %d native opens (%+v) and %d PCM opens, want one more native open at %d and no PCM open", rate.ref, len(native), native, len(pcm), rate.bitRate)
 		}
 	}
 	if code := ps.stopServe(t); code != 0 {
