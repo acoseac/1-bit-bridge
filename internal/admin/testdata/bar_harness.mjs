@@ -16,7 +16,11 @@ const check = (name, cond, detail) => {
   if (cond) R.pass.push(name);
   else R.fail.push({ name, detail: detail === undefined ? "" : JSON.stringify(detail) });
 };
-const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setTimeout(r, 0)); };
+// The clock's own timers, which a case that holds audio.js's (longTimers)
+// leaves to settle.
+const realTimeout = globalThis.setTimeout;
+const realClear = globalThis.clearTimeout;
+const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => realTimeout(r, 0)); };
 
 // ---- The page the modules see (enough for import, then each case's own) ----
 
@@ -914,20 +918,34 @@ class El {
 }
 function textNode(s) { const t = new El("#text"); t.own = String(s); return t; }
 
+// The element's media state as the HTML spec moves it, as far as the cases
+// need it (round 3, Q6): load() pauses the element with no pause event and
+// resets its position, as the media element load algorithm does; a track's
+// end pauses it, firing pause and then ended (end()); every play() is
+// recorded with the source it played (plays).
 class AudioEl extends El {
   constructor() {
     super("audio");
-    this.currentTime = 0; this.duration = NaN; this.paused = true; this.readyState = 0; this.error = null;
-    this.buffered = { length: 0 }; this.playbackRate = 1; this.volume = 1; this.preload = "none"; this._src = "";
+    this.currentTime = 0; this.duration = NaN; this.paused = true; this.readyState = 0; this.error = null; this.ended = false;
+    this.buffered = { length: 0 }; this.playbackRate = 1; this.volume = 1; this.preload = "none"; this._src = ""; this.plays = [];
   }
   get src() { return this._src; }
   set src(v) { this._src = String(v); this.attrs.src = String(v); }
   canPlayType(ct) { return /flac|wav|mpeg|mp4|aac/.test(ct) ? "probably" : ""; }
-  load() { this.currentTime = 0; this.duration = NaN; this.readyState = 0; }
-  play() { this.paused = false; this.fire("play"); return Promise.resolve(); }
+  load() { this.currentTime = 0; this.duration = NaN; this.readyState = 0; this.paused = true; this.ended = false; this.error = null; }
+  play() { this.plays.push(this._src); this.ended = false; this.paused = false; this.fire("play"); return Promise.resolve(); }
   pause() { if (!this.paused) { this.paused = true; this.fire("pause"); } }
   // metadata is the browser's loadedmetadata for the source it holds.
   metadata(duration) { this.duration = duration; this.readyState = 1; this.fire("loadedmetadata"); }
+  // end is the playback's end: paused, pause fired, then ended.
+  end() {
+    if (Number.isFinite(this.duration)) this.currentTime = this.duration;
+    this.ended = true;
+    if (!this.paused) { this.paused = true; this.fire("pause"); }
+    this.fire("ended");
+  }
+  // fail is a media error of code at the source it holds, fired as error.
+  fail(code) { this.error = { code }; this.fire("error"); }
 }
 
 const session = { handlers: {}, metadata: undefined, playbackState: "", setActionHandler(a, fn) { this.handlers[a] = fn; }, setPositionState() {} };
@@ -975,8 +993,12 @@ async function pageRig(o = {}) {
   const b = { handover: audio.handover, hasQueue: audio.hasQueue, suspend: audio.suspend, resume: audio.resume, take: audio.take, start: audio.start, mediaSession: audio.setMediaSession };
   const out = createOutput(env(s, c, b));
   installOutput(out);
-  // As boot.js wires it: every start of this browser asks the output (R1).
-  if (o.gate) audio.setStartGate(out.gateStart);
+  // As boot.js wires it: every start of this browser asks the output (R1),
+  // and so does what playback does by itself (round 3, S1).
+  if (o.gate) {
+    audio.setStartGate(out.gateStart);
+    audio.setContinueGate?.(out.gateContinue);
+  }
   if (!o.noFrame) {
     out.streamOpen(1);
     out.frame(JSON.stringify(latest), 1);
@@ -987,6 +1009,25 @@ async function pageRig(o = {}) {
 
 const flac = (n, o = {}) => ({ path: `Album/0${n}.flac`, title: `T${n}`, codec: "FLAC", rateHz: 44100, bits: 16, duration: 200, play: { kind: "universal", contentType: "audio/flac" }, ...o });
 const dsd = (n, o = {}) => ({ path: `DSD/0${n}.dsf`, title: `D${n}`, codec: "DSF", isDsd: true, rateHz: 2822400, duration: 200, play: { kind: "none", contentType: "audio/x-dsf" }, ...o });
+
+// longTimers holds every timer of a second or more that the modules arm (the
+// skip past a source that cannot play, its probe's deadline) until the case
+// fires it; a shorter one runs as it would.
+function longTimers() {
+  const held = new Map();
+  let id = 1e6;
+  globalThis.setTimeout = (fn, ms, ...a) => {
+    if (!(ms >= 1000)) return realTimeout(fn, ms, ...a);
+    id += 1;
+    held.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.clearTimeout = (t) => { if (!held.delete(t)) realClear(t); };
+  return {
+    count: (ms) => [...held.values()].filter((t) => t.ms === ms).length,
+    fire(ms) { for (const [k, t] of [...held]) if (t.ms === ms) { held.delete(k); t.fn(); } },
+  };
+}
 
 S.TestTheSwitchReadsTheBrowsersHandoverBeforeItLetsGoOfItsSource = async () => {
   const r = await pageRig();
