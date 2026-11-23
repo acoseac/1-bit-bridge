@@ -120,8 +120,8 @@ function continueStart(run, { fresh = false } = {}) {
   const gen = playbackGen;
   let ran = false;
   const go = (permit) => {
-    ran = true;
     if (gen !== playbackGen || !intent) return;
+    ran = true;
     run(permit);
   };
   const permit = fresh ? null : startPermit;
