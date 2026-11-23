@@ -306,3 +306,70 @@ On `9a8dabdd`, with `GOTOOLCHAIN=go1.27.3` and `GOPROXY=off`, `TMPDIR` below `.t
 
 PROTOCOL.md's SHA-256 after the merge, for the iOS app's mirror:
 `b3198929371b3041340a168f19f955cefe9786f159120f396f70e42e91e60c7d`.
+
+### Round 3
+
+The third round's brief: the endpoint list ends with its request, and two tests made exact.
+Of round 2's review findings one was confirmed by line and two test points were tightened; the
+other four were refuted, and their reasons are not repeated here.
+
+#### The commits
+
+- `a7c56541`: the endpoint list's tests first.
+- `8a87c6cd`: the change.
+- `37bd6771`: two tests made exact.
+- this record, then the runs, in this section's last part.
+
+#### The endpoint list (item 1)
+
+GET /api/endpoints and the event stream read the endpoint list through `endpointsWithin`. Its
+provider (`Deps.Endpoints`, serve's `api.Server.ReachableEndpoints`) takes no context, and its
+Tailscale status read waits under the API's lock (`cachedTailscaleStatus` holds
+`tailscaleStatusMu` across the provider's call) and on the embedded node up to
+`adminStatusTimeout`; so the provider runs on a goroutine of its own and to its end, while the
+request waits for it on its own context and returns at once when that ends, behind another
+caller's read as in front of one. The API's cache is left as it is: its shared read takes no
+request's context, so a console wait that ends can neither cut it short nor leave an empty status
+cached, and its other callers (`/v1/health`, the pairing QR's alternates, the player's hosts)
+read it as before. A panic in the provider is raised again on the waiting caller's goroutine, as a
+direct call raised it, and logged with its stack once its request had ended. The REST route
+answers nothing once its request has ended; the stream ends there.
+
+#### Red first
+
+At `a7c56541`, on round 2's code: the snapshot test's two endpoint-list cases, the stream's and
+GET /api/endpoints', red on "the request did not end at the retirement's section", their provider
+still held; the shared-read test red on "request 2: the console's wait for its endpoint list did
+not end with its request's context". The endpoint cases have their own expectation (their
+provider takes no context, so it stays held while the request ends), so their control fails on
+the request's end alone.
+
+#### Two tests made exact (item 2)
+
+- The shutdown's join is two cases. With the handler let go before the stop's deadline, the stop
+  finishes before that deadline with the retirement's count back to zero and its connections
+  closed. With the handler held past it, the stop finishes within its one window and the
+  retirement ends just after, its bounded wait said once; the count at the stop's return is no
+  assertion there, the stop's wait being bounded by its deadline by design.
+- The refused handed listener's test reads that listener's address only once the box's stand-in
+  is bound (`boundFirstListener`), so the refusal always follows the bind, and a precondition
+  asks for that one stand-in.
+
+#### The controls
+
+Seven mutations of copies (`go test -overlay`), each red for its own reason, as predicted in
+writing before the run: the endpoint list read with no context wait (the two endpoint cases on
+the request's end alone, the shared-read test on its first wait); the API's cache keeping an
+empty status (`/v1/health`'s list without the tailnet's name); the API's cache keeping nothing
+(the status asked twice); the stop joining no retirement (both shutdown cases at the stop's
+first 300 ms); a retirement's wait not ended by the stop's deadline, and a retirement counted
+out before its wait (the deadline case alone, the retirement not ended once the deadline had
+passed); the handed listener's refusal with no startup abort (the socket taking connections
+after serve's way out).
+
+#### Runs
+
+To be filled once they have run.
+
+PROTOCOL.md's SHA-256 did not move this round:
+`b3198929371b3041340a168f19f955cefe9786f159120f396f70e42e91e60c7d`.
