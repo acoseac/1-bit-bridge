@@ -164,3 +164,131 @@ log), the macOS leg's hold (`TestTheConsolesHoldScopesItsRepliesOnMacOS`), the r
 - PROTOCOL.md's one changed sentence, the install endpoint's trust boundary, leaves its
   SHA-256 `e8be1877cadf31d4d8a02608d9c5b5f6cb4fd26757abc705a4ea3a244317e26e`, which the iOS
   app's mirror copies; no wire change, `ProtocolVersion` unchanged.
+
+### Round 2
+
+The second round's brief: the home-network socket's lifecycle, closed on every way out. Main
+had moved to `9b66c2af` (B990, #1553, which changed PROTOCOL.md too); it was merged first, with
+a merge commit (`c62d68c9`), clean, PROTOCOL.md merged by git. The rule is `cli-serve.md`'s
+bullet on serve's ways out; `auth-tls.md`'s B989 bullet stands as written.
+
+#### The commits
+
+- `c62d68c9`: main merged.
+- `dd950897`: the tests first, with a names-only shim: the startup's split
+  (`PrepareConsoleLAN`, `BeginConsoleLAN`, `AbortConsoleLAN`), a seam at a retirement's end,
+  the stats reads' seam, the new reason code, the snapshot reads' context parameters (ignored
+  there), the tailnet status read on a context (`Status` there) and serve's mDNS start seam.
+- `2a128d95`: the change.
+- `476d38ce`: the loop's wait for the first attempt, tested.
+- `ada7bc1d`: a tick's own rebind asks the retirement count no more.
+- this record and the rule, then the runs, in this section's last part.
+
+#### What the round changed
+
+- A loopback bind that fails (`Serve`), a handed console listener serve refuses, and the
+  loopback socket's failure after its start retire the home-network socket through one startup
+  abort, `admin.Server.AbortConsoleLAN`, within the console's one shutdown window (items 1 and
+  N4); runServe takes no defer for it.
+- A retirement counts itself under way (`consoleLAN.retiring`, under the plan's mutex) from its
+  first section until its wait for what it admitted has ended. A tick that finds no socket
+  binds nothing while one runs (item 2), and the stop joins every retirement under way within
+  its one deadline, so it cannot finish before a failure's retirement has closed its
+  connections and ended its bounded wait (N1). A tick that has just retired its own socket
+  rebinds on its fresh reading as before: the count's one reader is the tick that finds none.
+- The retirement's first section stores the waiting state with its reason, so no surface reads
+  listening while nothing is served: `reopening` for a reading that changed (a new code),
+  `stopped_serving` for a failure, `stopping` for the stop (item 3). A failure's retirement
+  stores nothing after it, so a retry's newer reason is never replaced (N3, its second option).
+- The plan is opened before the console's goroutine (`PrepareConsoleLAN`) and its first attempt
+  made once the mDNS responder's start has answered (`BeginConsoleLAN`, after the lifecycle's
+  `Set`), the `Running()` gate on the name kept (N2). The loop takes no tick before the first
+  attempt (`consoleLAN.first`); between the two the state reads waiting, `starting` (a new
+  code), so no surface words an empty reason; a first attempt once the stop has begun makes
+  none. The banner's home-network line now follows the mDNS line.
+- The stats reads (`getStatsSnapshot`), the sources' cold read (`trackSourceCounts`) and the
+  tailnet's status (`getTailscaleSnapshot`) wait on the request's context, bounded as before
+  (`snapshotDBTimeout`, `adminStatusTimeout`): serve's provider gains `StatusContext` beside
+  `Status`, which the health path keeps calling, and no status read calls `RefreshNow` (N6).
+  `handlers_events.go`'s comment says which snapshots wait on the stream's context and which
+  read memory, the box's interfaces or the updater's state.
+- `address_on_two_interfaces` is worded for both cases, held more than once on this box, on two
+  interfaces or twice on one, and its hint says to keep the address once, on one interface
+  (item 4d).
+- The Windows table through the listener (4a) and the private class behind a prefix wider than
+  it (4b) were behaviour already: their tests pin it, red under their controls alone.
+
+#### The mDNS check (item 4e)
+
+Checked first, on the merged tree: serve made the plan's first attempt before it started the
+responder, so with mDNS on the first reading held no `.local` name, the responder then answered
+one, and a clean start's first tick found the name changed and retired the socket. The
+tests-first commit's three starts show it: with a responder that starts, two binds and the
+line `console: the home-network socket is retired` with `cause=name_changed`; with mDNS off and
+with a responder that fails to start, one bind and no name, before the change as after it.
+
+#### Red first
+
+At `dd950897`, each test run with `-v`, every red on its own assertion:
+
+- `TestALoopbackBindThatFailsRetiresTheLANSocket`: Serve returned its bind's failure with the
+  socket still listening.
+- `TestAHandedConsoleListenerThatIsRefusedRetiresTheLANSocket`: the socket took connections
+  after serve exited 1.
+- `TestNoSocketBindsWhileAFailuresRetirementIsUnderWay`: two sockets bound while the failure's
+  retirement was held.
+- `TestTheStateSaysNotListeningFromTheRetirementsFirstSection`: listening while each of its
+  three retirements ran.
+- `TestARetryAfterAFailuresRetirementKeepsItsOwnReason`: `stopped_serving` stored over the
+  retry's `address_not_on_this_box`.
+- `TestAShutdownJoinsAFailuresRetirementUnderWay`: the stop finished while the failure's
+  retirement was held, its connections open.
+- `TestEachSnapshotReadEndsWithItsRequestsContext`: in each of its six cases the held read ended
+  on no context, and the request did not end at the retirement's section.
+- `TestTheTailnetTilesStatusEndsWithItsCallersContext`: the read returned after 5.0 s, its own
+  bound.
+- `TestTheConsolesFirstReadingFollowsTheResponderStart`: the responder that starts, as above.
+- `TestAnAddressHeldTwiceOnOneInterfaceIsSaidSo`: the words said "is on more than one
+  interface".
+
+Green there by design: the Windows table's and the private class's tests (4a, 4b), N2's starts
+with mDNS off and with a responder that fails, and the failure test, which waits for its
+retirement's end since this round (N5). Added with the change, red under their controls:
+`TestAPlanBetweenItsOpeningAndItsFirstAttemptSaysTheBridgeIsStarting` and
+`TestThePlansLoopTakesNoTickBeforeItsFirstAttempt`.
+
+#### The controls
+
+Twenty mutations, each of a copy (`go test -overlay`), each red on its named tests for its own
+reason, the tree clean after: no startup abort in Serve's failed bind (R2-01) or in the handed
+listener's refusal (R2-02); a tick that finds no socket binding while a retirement runs
+(R2-03); no state stored in the retirement's section, all three ways out red (R2-04); the
+failure's late store put back (R2-05); the stop joining no retirement (R2-06); a retirement
+counted out before its wait (R2-07); serve's first attempt before the responder's start, the
+starting responder's case red (R2-08); the loop taking ticks before the first attempt (R2-09);
+the stats reads, the sources' cold read and the tailnet's status each on a context of their
+own, their two cases red each (R2-10 to R2-12), and serve's status read on one (R2-13); a
+Windows table whose read fails keeping the socket (R2-14); a missing row closing the console
+for good, red at the whole reading after it (R2-15; a first mutation, the hold dropped, bound
+with no hold and went red one phase early, so it was replaced); the class check left out, the
+four rows of a prefix wider than its class red (R2-16); the two-interface words as before
+(R2-17); no starting state (R2-18); a first attempt after the stop, which bound and closed a
+socket (R2-19); and the abort's own doubled window (R2-20).
+
+#### Where the round went past the brief's lines
+
+- N3 took its second option: the late store dropped, item 3's early store saying the failure.
+- `reopening` and `starting` are new reason codes of `GET /api/console`, the console's alone:
+  no `/v1` field changed, PROTOCOL.md and `ProtocolVersion` unchanged.
+- The tick's guard is the brief's one, on the tick that finds no socket; a second, after a
+  tick's own retirement, was dropped as past the lines named (`ada7bc1d`).
+- `StatusContext` is an optional interface of the console's, so the API's provider and its tests
+  are untouched.
+- The banner's home-network line moved after the mDNS line, the first attempt's place.
+
+#### Runs
+
+To be filled once they have run.
+
+PROTOCOL.md's SHA-256 after the merge, for the iOS app's mirror:
+`b3198929371b3041340a168f19f955cefe9786f159120f396f70e42e91e60c7d`.
