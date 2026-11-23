@@ -37,7 +37,7 @@ func (c *countedCodes) Issue(tokenID, tokenHash string) (string, error) {
 
 // askPairing serves a POST of body to path on ctx, on a goroutine of its own:
 // done is closed once the handler has returned, its answer then in rec, and
-// every call that wrote to it in rec.Writes.
+// every call that wrote to it in the copy rec.Writes() takes.
 func askPairing(srv *admin.Server, ctx context.Context, path, body string) (rec *admin.WriteCallRecorder, done <-chan struct{}) {
 	rec = admin.NewWriteCallRecorder()
 	finished := make(chan struct{})
@@ -107,8 +107,8 @@ func TestAPairingRequestThatEndsWhileItsListWaitsChangesNoCredential(t *testing.
 			case <-time.After(5 * time.Second):
 				t.Fatalf("the %s did not return when its request ended: its endpoint list was not waited for on the request's context", route)
 			}
-			if len(rec.Writes) != 0 {
-				t.Errorf("the %s wrote %v to a request that had ended, want nothing written", route, rec.Writes)
+			if writes := rec.Writes(); len(writes) != 0 {
+				t.Errorf("the %s wrote %v to a request that had ended, want nothing written", route, writes)
 			}
 			switch route {
 			case "mint":

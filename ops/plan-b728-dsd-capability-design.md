@@ -535,8 +535,9 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (Â
   rates.
 
 **A residual: XMOS's vendor ID** (B993, 2026-11-23; amended the same day, B999: the state's gate,
-the mode that applies and the probe's clause; and by bridge lows 18: the rates, the generic-board
-clause's reach and `decide`'s last branch). Linux's `sound/usb/quirks.c` sets
+the mode that applies and the probe's clause; by bridge lows 18: the rates, the generic-board
+clause's reach and `decide`'s last branch; and by bridge lows 19: the database the IDs' sentence
+holds under). Linux's `sound/usb/quirks.c` sets
 `QUIRK_FLAG_DSD_RAW` for every XMOS device, vendor `20b1`, by one vendor-wide `VENDOR_FLG` (at
 v6.12, as B990 read it), while `profiles.json`'s `sharedReferenceIds` names `20b1:0010` alone. A
 `20b1` unit that no profile knows and whose product ID is not `0010` is therefore on no generic
@@ -555,13 +556,15 @@ two-channel altset of the bound PCM device that holds the format's frame rate fo
 of it for the two 32-bit formats and a 16th for `DSD_U16_LE`, among its rates or inside its range;
 one the probe did not refuse, accepted or not probed, stays offered); or no profile database
 reading (`Inputs.Profiles` nil, under which `genericBridge` counts every unit as a generic board's)
-while no listener's latest answer for native at the rate under its firmware is `clean`. Its IDs
-never make such a unit a generic board's, since of `20b1`'s IDs the embedded `sharedReferenceIds`
-names `20b1:0010` alone; and in production the database is absent only where the embedded one does
-not load: `dsdPolicyFor` (`cmd/bridge/serve_player_dsd.go`), which builds the backend's policy for
-serve's player and for `bridge output play`, gives it the embedded `profiles.json`
-(`dacprofile.Default()`) and leaves it nil, logging why, only where that does not load. So on such
-a unit that last clause keeps native off only in a build whose embedded database does not load.
+while no listener's latest answer for native at the rate under its firmware is `clean`. Under the
+embedded `profiles.json` that production passes (`dsdPolicyFor`), such a unit's IDs never make it a
+generic board's, since of `20b1`'s IDs its `sharedReferenceIds` names `20b1:0010` alone;
+`genericBridge` reads whatever `Inputs.Profiles` holds. In production the database is absent only
+where the embedded one does not load: `dsdPolicyFor` (`cmd/bridge/serve_player_dsd.go`), which
+builds the backend's policy for serve's player and for `bridge output play`, gives it the embedded
+`profiles.json` (`dacprofile.Default()`) and leaves it nil, logging why, only where that does not
+load. So on such a unit that last clause keeps native off only in a build whose embedded database
+does not load.
 Neither `sharedReferenceIds` nor the policy changes for the residual. `decide`'s last branch, which
 refuses a mode none of the five as `dsd_state_unreadable`, is not among those conditions: it guards
 against a state built in memory with another mode, since `dsdstate`'s check refuses one at each

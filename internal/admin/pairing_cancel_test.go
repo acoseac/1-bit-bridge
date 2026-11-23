@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -104,12 +105,18 @@ func (r *pairingRig) handler() http.HandlerFunc {
 // none reaches the recorder unnoted. A check that a handler wrote nothing
 // reads Writes, never the recorder alone: NewRecorder's Code is 200 before
 // anything is written, and a WriteHeader(200) with no body moves neither Body,
-// Flushed nor the header map. Exported for the pairing discovery case of
-// package admin_test.
+// Flushed nor the header map. One mutex orders the calls and the check: each
+// of the four holds it across its note and its call into the embedded
+// recorder, which is not safe for concurrent use either, and Writes copies the
+// notes under it, so a write a handler leaves to a goroutine of its own,
+// during or after the handler, is read as a call made, never as a data race.
+// Exported for the pairing discovery case of package admin_test.
 type WriteCallRecorder struct {
 	*httptest.ResponseRecorder
-	// Writes holds each call as it was made, its argument quoted.
-	Writes []string
+	// mu guards writes and every call into the embedded recorder.
+	mu sync.Mutex
+	// writes holds each call as it was made, its argument quoted.
+	writes []string
 }
 
 // NewWriteCallRecorder is a WriteCallRecorder over httptest.NewRecorder.
@@ -117,34 +124,51 @@ func NewWriteCallRecorder() *WriteCallRecorder {
 	return &WriteCallRecorder{ResponseRecorder: httptest.NewRecorder()}
 }
 
+// Writes is a copy of the calls noted so far, in the order they were made,
+// taken under the recorder's mutex.
+func (w *WriteCallRecorder) Writes() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.writes)
+}
+
 func (w *WriteCallRecorder) WriteHeader(code int) {
-	w.Writes = append(w.Writes, fmt.Sprintf("WriteHeader(%d)", code))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes = append(w.writes, fmt.Sprintf("WriteHeader(%d)", code))
 	w.ResponseRecorder.WriteHeader(code)
 }
 
 func (w *WriteCallRecorder) Write(b []byte) (int, error) {
-	w.Writes = append(w.Writes, fmt.Sprintf("Write(%q)", b))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes = append(w.writes, fmt.Sprintf("Write(%q)", b))
 	return w.ResponseRecorder.Write(b)
 }
 
 func (w *WriteCallRecorder) WriteString(s string) (int, error) {
-	w.Writes = append(w.Writes, fmt.Sprintf("WriteString(%q)", s))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes = append(w.writes, fmt.Sprintf("WriteString(%q)", s))
 	return w.ResponseRecorder.WriteString(s)
 }
 
 func (w *WriteCallRecorder) Flush() {
-	w.Writes = append(w.Writes, "Flush()")
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes = append(w.writes, "Flush()")
 	w.ResponseRecorder.Flush()
 }
 
 // requireNothingWritten fails unless the handler wrote nothing to its response
-// (no WriteHeader, Write, WriteString or Flush: WriteCallRecorder) and changed
-// no credential: no token made or rotated and no code issued, the rotated
-// token's secret and its code from before still working.
+// (no WriteHeader, Write, WriteString or Flush: WriteCallRecorder, read from
+// the copy its Writes takes under its mutex) and changed no credential: no
+// token made or rotated and no code issued, the rotated token's secret and its
+// code from before still working.
 func (r *pairingRig) requireNothingWritten(t *testing.T, rec *WriteCallRecorder) {
 	t.Helper()
-	if len(rec.Writes) != 0 {
-		t.Errorf("the %s wrote %v to a request that had ended, want nothing written", r.route, rec.Writes)
+	if writes := rec.Writes(); len(writes) != 0 {
+		t.Errorf("the %s wrote %v to a request that had ended, want nothing written", r.route, writes)
 	}
 	tokens := r.srv.deps.Auth.List()
 	switch r.route {
@@ -260,5 +284,45 @@ func TestAnEndedPairingRequestOnAPathThatReadsNoListWritesNothing(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+// TestTheWriteCallRecorderNotesCallsMadeOnAnotherGoroutine: a goroutine makes
+// each call WriteCallRecorder notes while the test reads Writes, nothing
+// ordering a read after any call, as a check would read beside a write a
+// handler left to a goroutine of its own. Every copy read is the calls made so
+// far, in order, and under -race the recorder's mutex leaves nothing to
+// report; once the goroutine has ended, Writes holds the four calls and the
+// embedded recorder what they wrote.
+func TestTheWriteCallRecorderNotesCallsMadeOnAnotherGoroutine(t *testing.T) {
+	want := []string{"WriteHeader(202)", `Write("a")`, `WriteString("b")`, "Flush()"}
+	rec := NewWriteCallRecorder()
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		rec.WriteHeader(http.StatusAccepted)
+		_, _ = rec.Write([]byte("a"))
+		_, _ = rec.WriteString("b")
+		rec.Flush()
+	}()
+	var stray []string
+	for range 1000 {
+		if got := rec.Writes(); stray == nil && (len(got) > len(want) || !slices.Equal(got, want[:len(got)])) {
+			stray = got
+		}
+	}
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the goroutine making the calls had not ended 10 s after the reads")
+	}
+	if stray != nil {
+		t.Errorf("a copy read while the calls were made is %q, want the calls made so far of %q", stray, want)
+	}
+	if got := rec.Writes(); !slices.Equal(got, want) {
+		t.Errorf("Writes holds %q once the goroutine has ended, want %q", got, want)
+	}
+	if rec.Code != http.StatusAccepted || rec.Body.String() != "ab" || !rec.Flushed {
+		t.Errorf("the embedded recorder holds code %d, body %q and flushed %v, want 202, \"ab\" and true", rec.Code, rec.Body.String(), rec.Flushed)
 	}
 }

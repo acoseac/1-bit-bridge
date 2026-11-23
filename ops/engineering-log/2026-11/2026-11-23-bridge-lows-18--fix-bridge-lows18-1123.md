@@ -37,10 +37,13 @@ Each was checked against the code and the files before anything changed.
    as a generic board's (its IDs among `sharedReferenceIds`, or no profile
    database reading)", as B990's long form had it and the other two copies in
    their words, named two ways where, for a `20b1` unit no profile knows whose
-   product ID is not `0010`, the shipped code leaves one. Of `20b1`'s IDs the
-   embedded `sharedReferenceIds` names `20b1:0010` alone, so such a unit's IDs
-   never make it a generic board's; and the database is absent only where the
-   embedded one does not load, `dsdPolicyFor` giving the backend
+   product ID is not `0010`, the shipped code leaves one. Under the embedded
+   `profiles.json` that production passes (`dsdPolicyFor`), such a unit's IDs
+   never make it a generic board's, since of `20b1`'s IDs its
+   `sharedReferenceIds` names `20b1:0010` alone; `genericBridge` reads
+   whatever `Inputs.Profiles` holds (that sentence as bridge lows 19 scoped
+   it); and the database is absent only where the embedded one does not load,
+   `dsdPolicyFor` giving the backend
    `dacprofile.Default()` for serve's player and for `bridge output play`, and
    leaving it nil, with a Warn line, only on that function's error. Each copy
    now names that one way, no profile database reading, and says that in
@@ -72,8 +75,9 @@ never its edits. In item 6 of
 - `:54-56` before, `:58-63` now: "the unit counting as a generic board's (its
   IDs in the shared-reference list, or no profile database reading)" is now
   "no profile database reading, under which every unit counts as a generic
-  board's", with why such a unit's IDs never make it one and where production
-  meets an absent database.
+  board's", with why such a unit's IDs never make it one under the embedded
+  database production passes (scoped so by bridge lows 19) and where
+  production meets an absent database.
 
 Its other lines are unchanged.
 
@@ -130,8 +134,11 @@ Beside them:
 What they give: the list is the policy's at DSD64, DSD128 and DSD256, and at
 any other rate both the backend and `Set.At` refuse every transport whatever
 the mode; a `20b1` unit no profile knows whose product ID is not `0010` counts
-as a generic board's only with `Profiles` nil, which in production is a build
-whose embedded database does not load; and no state the store holds, nor one
+as a generic board's, in production, only with `Profiles` nil, which is a build
+whose embedded database does not load: `genericBridge` reads whatever
+`Inputs.Profiles` holds, and production passes the embedded `profiles.json`
+(`dsdPolicyFor`), or nothing where it does not load (scoped so by bridge lows
+19); and no state the store holds, nor one
 a write left, names a mode outside the five, so `decide`'s last branch guards
 only a state built in memory.
 
