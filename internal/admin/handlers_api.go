@@ -2396,7 +2396,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
+	s.lockPairingWrite()
 	defer s.mu.Unlock()
 
 	rawToken, tok, err := s.deps.Auth.Mint(req.Name)

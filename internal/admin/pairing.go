@@ -263,6 +263,21 @@ func (s *Server) pairingEndpoints(ctx context.Context, cfg *config.Config) ([]ad
 	return s.endpointsWithin(ctx)
 }
 
+// lockPairingWrite takes the console's lock (Server.mu) for a pairing write,
+// the mint's or the rotation's, once its endpoint list is read. A test that
+// holds the lock is told, through testPairingWriteWaits, that the write found
+// it held and waits for it; a lock found free tells it nothing. With no hook,
+// as in production, it is mu.Lock.
+func (s *Server) lockPairingWrite() {
+	if waits := s.testPairingWriteWaits; waits != nil {
+		if s.mu.TryLock() {
+			return
+		}
+		waits()
+	}
+	s.mu.Lock()
+}
+
 // declaredEndpointForHost returns the first customEndpoint whose host is
 // `host`, or "" when the operator has declared none for it.
 //

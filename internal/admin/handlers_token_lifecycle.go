@@ -71,7 +71,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
+	s.lockPairingWrite()
 	defer s.mu.Unlock()
 
 	rawToken, tok, err := s.deps.Auth.Rotate(id)

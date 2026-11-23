@@ -1582,6 +1582,13 @@ type Server struct {
 	// server serves anything, as the two fields above are.
 	testPlayerWriteWaits func()
 
+	// testPairingWriteWaits, when set, is told each time a pairing write
+	// (the mint, the rotation) finds mu held once its endpoint list is
+	// read and is about to wait for it (lockPairingWrite). Tests only: nil
+	// in production, and set before the server serves anything, as the
+	// fields above are.
+	testPairingWriteWaits func()
+
 	// testSettingsWriteWaits, when set, is told each time a settings PATCH
 	// finds mu held and is about to wait for it (lockSettingsWrite), after
 	// its look at the update check's switch. Tests only: nil in production,
