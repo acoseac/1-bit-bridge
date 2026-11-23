@@ -214,26 +214,31 @@ func (p *publisher) serve(a captureAsk) {
 }
 
 // ask hands the publisher kind's ask, and waits for its publication, or for
-// ctx's end or the publisher's, answering the latest publication then.
-func (p *publisher) ask(ctx context.Context, kind askKind, eval func(*capture)) publication {
+// ctx's end or the publisher's, answering the latest publication then, and
+// whether the ask's own publication was made. An ask the publisher ended
+// before taking is not evaluated, and one it ended while serving (between its
+// evaluation and its publication) is not published: no capture of the
+// caller's stands in for the publisher's, so a final ask that reports none
+// made is the publisher unavailable, never an outcome its eval decided.
+func (p *publisher) ask(ctx context.Context, kind askKind, eval func(*capture)) (publication, bool) {
 	a := captureAsk{kind: kind, eval: eval, reply: make(chan publication, 1)}
 	select {
 	case p.asks <- a:
 	case <-p.done:
-		if kind == askFinal && eval != nil {
-			// The publisher has stopped: the record is set final on a capture
-			// of the caller's, and the latest publication answers.
-			eval(p.capture())
-		}
-		return p.latestPub()
+		return p.latestPub(), false
 	case <-ctx.Done():
-		return p.latestPub()
+		return p.latestPub(), false
 	}
 	select {
 	case pub := <-a.reply:
-		return pub
+		return pub, true
 	case <-p.done:
-		return p.latestPub()
+		select {
+		case pub := <-a.reply:
+			return pub, true
+		default:
+		}
+		return p.latestPub(), false
 	}
 }
 

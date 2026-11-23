@@ -51,13 +51,16 @@ import (
 // in every publication.
 
 // The control's bounds: the records and marks it keeps, how long a handler
-// waits for its operation before it answers running, the barrier's bound, the
-// margin a replace without play waits for a release past the engine's own
-// deadline, the seek's tries, and the window's reach before the start track.
+// waits for its operation before it answers running, how long a read waits
+// for the publication of a record it found final (the publisher makes it in
+// the step that set the record final), the barrier's bound, the margin a
+// replace without play waits for a release past the engine's own deadline,
+// the seek's tries, and the window's reach before the start track.
 const (
 	controlRecordTabs  = 64
 	controlMarkTabs    = 4096
 	controlHandlerWait = 30 * time.Second
+	controlPublishWait = time.Second
 	controlBarrier     = 10 * time.Second
 	controlReleaseGap  = 500 * time.Millisecond
 	controlSeekTries   = 3
@@ -138,8 +141,13 @@ type controlSeams struct {
 	// afterFinal runs on the operation's goroutine once the publication that
 	// answers it is made, before its end is signalled, with its kind.
 	afterFinal func(kind string)
+	// readRecord runs in a read of a record (published) between its read of
+	// the record and its read of the publication; awaitPublication before it
+	// waits for the publication of a record it found final, with its kind.
+	readRecord       func()
+	awaitPublication func(kind string)
 	// Bounds in place of production's, where set.
-	handlerWait, barrier, releaseGap time.Duration
+	handlerWait, barrier, releaseGap, publishWait time.Duration
 }
 
 // consoleControlWiring is what serve hands the console's control.
@@ -273,12 +281,20 @@ func (c *consoleControl) Lists() bool { return c.plan.lists }
 
 func (c *consoleControl) now() time.Time { return c.clock() }
 
-// handlerWait, barrierBound and releaseGap are the control's bounds.
+// handlerWait, publishWait, barrierBound and releaseGap are the control's
+// bounds.
 func (c *consoleControl) handlerWait() time.Duration {
 	if s := c.seams; s != nil && s.handlerWait > 0 {
 		return s.handlerWait
 	}
 	return controlHandlerWait
+}
+
+func (c *consoleControl) publishWait() time.Duration {
+	if s := c.seams; s != nil && s.publishWait > 0 {
+		return s.publishWait
+	}
+	return controlPublishWait
 }
 
 func (c *consoleControl) barrierBound() time.Duration {
@@ -421,7 +437,8 @@ func (c *consoleControl) recentRecords() []admin.PlayerRecord {
 
 // Now is a publication captured now.
 func (c *consoleControl) Now(ctx context.Context) admin.PlayerPublication {
-	return c.pub.ask(ctx, askRead, nil).PlayerPublication
+	pub, _ := c.pub.ask(ctx, askRead, nil)
+	return pub.PlayerPublication
 }
 
 // Latest is the latest publication.
@@ -436,7 +453,7 @@ func (c *consoleControl) Wake() <-chan struct{} { return c.pub.wakeCh() }
 // Queue is the queue of a publication captured now, each entry named by the
 // library path its reference names (the resolver's StoredPath), or its word.
 func (c *consoleControl) Queue(ctx context.Context) admin.PlayerQueue {
-	pub := c.pub.ask(ctx, askRead, nil)
+	pub, _ := c.pub.ask(ctx, askRead, nil)
 	q := admin.PlayerQueue{Epoch: pub.Epoch, ReadAt: pub.Revision, QueueRev: pub.QueueRev, Entries: []admin.PlayerQueueEntry{}}
 	s := pub.snap
 	if s == nil {
@@ -555,25 +572,27 @@ func (o *operation) endedNow() bool {
 // record, sets its tab's mark and puts it in the control's order, ending the
 // older operation's unsent steps: in that order, another epoch is
 // epoch_changed, a count below the tab's mark replayed, one at the mark
-// answers its record (another command under it operation_conflict while the
-// record is kept, operation_gone once it is not), and one above it is a new
-// operation. Only a new operation is admitted, ending the unsent steps of
-// every older one not yet ended; prevs are those older ones, whose ends every
-// operation but a Stop waits for, a Stop's among them: each one's step in
-// flight answered and its record final (it sends nothing more once ended), so
-// the steps of two operations never interleave, a step a Stop overtook in
-// flight included, and the newer one starts once every older one's record
-// says how it ended.
-func (c *consoleControl) admit(op admin.PlayerOp, digest [32]byte, kind, command string) (o *operation, prevs []*operation, a admin.PlayerAnswer, ok bool) {
+// answers its record, again (another command under it operation_conflict
+// while the record is kept, operation_gone once it is not), which its caller
+// reads with its publication once the lock is let go (retried), and one above
+// it is a new operation. Only a new operation is admitted, ending the unsent
+// steps of every older one not yet ended; prevs are those older ones, whose
+// ends every operation but a Stop waits for, a Stop's among them: each one's
+// step in flight answered and its record final (it sends nothing more once
+// ended), so the steps of two operations never interleave, a step a Stop
+// overtook in flight included, and the newer one starts once every older
+// one's record says how it ended.
+func (c *consoleControl) admit(op admin.PlayerOp, digest [32]byte, kind, command string) (o *operation, prevs []*operation, again *opRecord,
+	a admin.PlayerAnswer, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	refuse := func(code string, status int) (*operation, []*operation, admin.PlayerAnswer, bool) {
-		return nil, nil, admin.PlayerAnswer{Refused: code, Status: status, Player: c.pub.latestPub().PlayerPublication}, false
+	refuse := func(code string, status int) (*operation, []*operation, *opRecord, admin.PlayerAnswer, bool) {
+		return nil, nil, nil, admin.PlayerAnswer{Refused: code, Status: status, Player: c.pub.latestPub().PlayerPublication}, false
 	}
 	switch {
 	case c.closed:
 		ans := admin.PlayerAnswer{Refused: wordNotRunning, Reason: reasonClosed, Status: http.StatusConflict, Player: c.pub.latestPub().PlayerPublication}
-		return nil, nil, ans, false
+		return nil, nil, nil, ans, false
 	case op.Epoch != c.epoch:
 		return refuse("epoch_changed", http.StatusConflict)
 	}
@@ -589,9 +608,7 @@ func (c *consoleControl) admit(op admin.PlayerOp, digest [32]byte, kind, command
 		if r.digest != digest {
 			return refuse("operation_conflict", http.StatusConflict)
 		}
-		rec := r.rec
-		ans := admin.PlayerAnswer{Record: &rec, Player: c.pub.latestPub().PlayerPublication}
-		return nil, nil, ans, false
+		return nil, nil, r, admin.PlayerAnswer{}, false
 	}
 	c.order++
 	c.marks[op.Tab] = markEntry{seq: op.Seq, order: c.order}
@@ -617,7 +634,7 @@ func (c *consoleControl) admit(op admin.PlayerOp, digest [32]byte, kind, command
 		prevs = slices.Clone(c.unfinished)
 	}
 	c.unfinished = append(c.unfinished, o)
-	return o, prevs, admin.PlayerAnswer{}, true
+	return o, prevs, nil, admin.PlayerAnswer{}, true
 }
 
 // evictMark drops the oldest tab's mark; the caller holds mu.
@@ -828,11 +845,14 @@ func (o *operation) finish(eval func(cap *capture) (status, word string)) {
 // outcome: final, o's record is set final within that capture and published
 // under the next revision, which answers o; not final (a barrier whose
 // answering capture found the bridge sounding again), the record stays
-// running and the capture is published all the same. It reports whether o
-// ended.
+// running and the capture is published all the same. A publisher that ended
+// before it published that capture (it stopped, or panicked between the
+// evaluation and the publication) is unavailable: o ends unknown, whatever
+// eval found, its silence and handover dropped, since no publication carries
+// them. It reports whether o ended.
 func (o *operation) settleOn(eval func(cap *capture) (final bool, status, word string)) bool {
 	final := false
-	pub := o.c.pub.ask(context.Background(), askFinal, func(cap *capture) {
+	pub, published := o.c.pub.ask(context.Background(), askFinal, func(cap *capture) {
 		f, status, word := eval(cap)
 		if !f {
 			return
@@ -845,6 +865,15 @@ func (o *operation) settleOn(eval func(cap *capture) (final bool, status, word s
 		o.r.final = true
 		o.c.mu.Unlock()
 	})
+	if !published {
+		final = true
+		o.c.mu.Lock()
+		r := &o.r.rec
+		r.Status, r.Error, r.Silence, r.Handover = admin.PlayerOpUnknown, "", 0, nil
+		r.Effect = o.effect()
+		o.r.final = true
+		o.c.mu.Unlock()
+	}
 	if !final {
 		return false
 	}
@@ -926,26 +955,65 @@ func (c *consoleControl) run(ctx context.Context, o *operation, prevs []*operati
 	return c.answer(o)
 }
 
-// answer is o's record as it stands and its publication: the one its end
-// published, or, while it runs, the latest; a handover's tracks named by
-// their library paths.
-func (c *consoleControl) answer(o *operation) admin.PlayerAnswer {
-	rec := o.record()
-	pub := c.pub.latestPub()
-	select {
-	case <-o.done:
-		pub = o.pub
-	default:
+// published is r's record as a read takes it, never before the publication
+// that carries it (J1): a record still running as it stands; a final one once
+// the publication its end made is (its operation's done closed, the record
+// read again then), waited for within publishWait, since the publisher makes
+// it in the step that set the record final; one whose publication is not made
+// by then reads as running, its final words dropped. It reports whether the
+// record is final with its publication made: the caller reads the revision it
+// answers with only after this returns. The caller holds no lock.
+func (c *consoleControl) published(r *opRecord) (rec admin.PlayerRecord, settled bool) {
+	c.mu.Lock()
+	rec, final, o := r.rec, r.final, r.op
+	c.mu.Unlock()
+	if s := c.seams; s != nil && s.readRecord != nil {
+		s.readRecord()
 	}
-	a := admin.PlayerAnswer{Record: &rec, Player: pub.PlayerPublication}
-	if h := rec.Handover; h != nil {
-		a.HandoverPaths = c.handoverPaths(h.Tracks)
+	if !final || o == nil {
+		return rec, false
 	}
-	return a
+	if !signalled(o.done) {
+		if s := c.seams; s != nil && s.awaitPublication != nil {
+			s.awaitPublication(rec.Kind)
+		}
+		t := time.NewTimer(c.publishWait())
+		select {
+		case <-o.done:
+		case <-t.C:
+		}
+		t.Stop()
+		if !signalled(o.done) {
+			rec.Status, rec.Error, rec.Silence, rec.Handover = admin.PlayerOpRunning, "", 0, nil
+			return rec, false
+		}
+	}
+	c.mu.Lock()
+	rec = r.rec
+	c.mu.Unlock()
+	return rec, true
 }
 
-// withHandover is a's handover's tracks named by their library paths, for a
-// request at its tab's mark answered with the record it names.
+// answer is o's record and its publication (published): the one its end
+// made, or, while its record runs, the latest, read after the record; a
+// handover's tracks named by their library paths.
+func (c *consoleControl) answer(o *operation) admin.PlayerAnswer {
+	rec, settled := c.published(o.r)
+	pub := c.pub.latestPub()
+	if settled {
+		pub = o.pub
+	}
+	return c.withHandover(admin.PlayerAnswer{Record: &rec, Player: pub.PlayerPublication})
+}
+
+// retried is the answer to a request at its tab's mark: the record it names
+// (published) and the latest publication, read after it.
+func (c *consoleControl) retried(r *opRecord) admin.PlayerAnswer {
+	rec, _ := c.published(r)
+	return c.withHandover(admin.PlayerAnswer{Record: &rec, Player: c.pub.latestPub().PlayerPublication})
+}
+
+// withHandover is a's handover's tracks named by their library paths.
 func (c *consoleControl) withHandover(a admin.PlayerAnswer) admin.PlayerAnswer {
 	if a.Record != nil && a.Record.Handover != nil {
 		a.HandoverPaths = c.handoverPaths(a.Record.Handover.Tracks)
@@ -966,24 +1034,21 @@ func (c *consoleControl) handoverPaths(ids []string) []string {
 	return out
 }
 
-// Operation is a tab's last record read back, in epoch.
+// Operation is a tab's last record read back, in epoch, with the revision of
+// the latest publication read after the record's (published).
 func (c *consoleControl) Operation(epoch, tab string, seq uint64) admin.PlayerReadBack {
-	rev := c.pub.latestPub().Revision
 	if epoch != c.epoch {
-		return admin.PlayerReadBack{Refused: "epoch_changed", Epoch: c.epoch, Revision: rev}
+		return admin.PlayerReadBack{Refused: "epoch_changed", Epoch: c.epoch, Revision: c.pub.latestPub().Revision}
 	}
 	c.mu.Lock()
 	r := c.records[tab]
-	var rec admin.PlayerRecord
 	found := r != nil && r.rec.Seq == seq
-	if found {
-		rec = r.rec
-	}
 	c.mu.Unlock()
 	if !found {
-		return admin.PlayerReadBack{Refused: "operation_gone", Epoch: c.epoch, Revision: rev}
+		return admin.PlayerReadBack{Refused: "operation_gone", Epoch: c.epoch, Revision: c.pub.latestPub().Revision}
 	}
-	rb := admin.PlayerReadBack{Epoch: c.epoch, Revision: rev, Record: &rec}
+	rec, _ := c.published(r)
+	rb := admin.PlayerReadBack{Epoch: c.epoch, Revision: c.pub.latestPub().Revision, Record: &rec}
 	if h := rec.Handover; h != nil {
 		rb.HandoverPaths = c.handoverPaths(h.Tracks)
 	}
@@ -995,9 +1060,12 @@ func (c *consoleControl) Operation(epoch, tab string, seq uint64) admin.PlayerRe
 // then body.
 func (c *consoleControl) begin(ctx context.Context, op admin.PlayerOp, digest [32]byte, kind, command string,
 	body func(o *operation, eng *engine.Engine)) admin.PlayerAnswer {
-	o, prevs, refusal, ok := c.admit(op, digest, kind, command)
-	if !ok {
-		return c.withHandover(refusal)
+	o, prevs, again, refusal, ok := c.admit(op, digest, kind, command)
+	switch {
+	case again != nil:
+		return c.retried(again)
+	case !ok:
+		return refusal
 	}
 	return c.run(ctx, o, prevs, func(o *operation) {
 		eng, why := c.runningEngine()
@@ -1721,9 +1789,12 @@ func (c *consoleControl) runAppend(o *operation, eng *engine.Engine, r admin.Pla
 // console's own Pause, sent whatever the bridge reads, and the bridge's
 // silence published after it, from the capture that answers (J1).
 func (c *consoleControl) SwitchOut(ctx context.Context, r admin.PlayerSwitchOut) admin.PlayerAnswer {
-	o, prevs, refusal, ok := c.admit(r.Op, r.Digest, opKindSwitchOut, "")
-	if !ok {
-		return c.withHandover(refusal)
+	o, prevs, again, refusal, ok := c.admit(r.Op, r.Digest, opKindSwitchOut, "")
+	switch {
+	case again != nil:
+		return c.retried(again)
+	case !ok:
+		return refusal
 	}
 	return c.run(ctx, o, prevs, func(o *operation) { c.runSwitchOut(o, r.Take) })
 }

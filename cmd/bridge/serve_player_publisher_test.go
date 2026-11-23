@@ -222,6 +222,246 @@ func TestARevisionIsAssignedOnlyToTheCaptureItNames(t *testing.T) {
 	}
 }
 
+// finalHold is a hold at the publisher's seam on the publication that carries
+// a switch-out's final record: the first publish once the newest operation's
+// record, a switch-out's, is final, the seam coming after the evaluation that
+// set it so. With panics it panics there instead, the publisher ending
+// between the evaluation and the publication.
+type finalHold struct {
+	c       atomic.Pointer[consoleControl]
+	armed   atomic.Bool
+	panics  bool
+	held    chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newFinalHold(panics bool) *finalHold {
+	return &finalHold{panics: panics, held: make(chan struct{}), release: make(chan struct{})}
+}
+
+// seam is the publisher's beforePublish.
+func (h *finalHold) seam() {
+	c := h.c.Load()
+	if c == nil || !h.armed.Load() {
+		return
+	}
+	c.mu.Lock()
+	n := len(c.recent)
+	final := n > 0 && c.recent[n-1].final && c.recent[n-1].rec.Kind == opKindSwitchOut
+	c.mu.Unlock()
+	if !final || !h.armed.CompareAndSwap(true, false) {
+		return
+	}
+	close(h.held)
+	if h.panics {
+		panic("the test's publisher ends between the evaluation and the publication")
+	}
+	<-h.release
+}
+
+// rig is a rig whose publisher h holds, armed, its release in the rig's
+// cleanups' first.
+func (h *finalHold) rig(t *testing.T, seams *controlSeams) *ctlRig {
+	seams.beforePublish = h.seam
+	r := newCtlRig(t, ctlOptions{seams: seams})
+	h.c.Store(r.c)
+	h.armed.Store(true)
+	t.Cleanup(h.letGo)
+	return r
+}
+
+func (h *finalHold) letGo() { h.once.Do(func() { close(h.release) }) }
+
+// wait waits for the hold.
+func (h *finalHold) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.held:
+	case <-serveGiveUp(t):
+		t.Fatal("no switch-out's final publication was held")
+	}
+}
+
+// wantCarried requires a's record to be no later than its publication: a
+// final record's silence a revision the answer's publication has reached.
+func wantCarried(t *testing.T, what string, a admin.PlayerAnswer, status string) {
+	t.Helper()
+	if a.Record == nil {
+		t.Fatalf("%s: no record (%+v)", what, a)
+	}
+	if a.Record.Silence > a.Player.Revision {
+		t.Fatalf("%s: a %s record of silence %d answered with publication %d, made before it", what, a.Record.Status, a.Record.Silence, a.Player.Revision)
+	}
+	if a.Record.Status != status {
+		t.Fatalf("%s: status %s (silence %d at %d), want %s", what, a.Record.Status, a.Record.Silence, a.Player.Revision, status)
+	}
+}
+
+// TestAFinalRecordIsReadOnlyWithItsPublication pins item 3 of round 2 and its
+// retries (J1): a switch-out's record set final on the publisher's capture
+// and its publication held at the seam after that evaluation. The handler's
+// answer past its wait, and a retry of the same identity and digest, read
+// the record with a publication that carries it: held past the read's own
+// wait, the record reads running, its silence dropped; made while the read
+// waits, the record reads done with its own publication.
+func TestAFinalRecordIsReadOnlyWithItsPublication(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		retry, atWait bool
+	}{
+		{name: "the answer, the publication held past its wait"},
+		{name: "the answer, the publication made while it waits", atWait: true},
+		{name: "a retry, the publication held past its wait", retry: true},
+		{name: "a retry, the publication made while it waits", retry: true, atWait: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFinalHold(false)
+			wait := 20 * time.Second
+			if !tc.retry {
+				wait = 200 * time.Millisecond
+			}
+			r := h.rig(t, &controlSeams{handlerWait: wait, publishWait: 300 * time.Millisecond})
+			if tc.atWait {
+				r.c.seams.awaitPublication = func(kind string) {
+					if kind == opKindSwitchOut {
+						h.letGo()
+					}
+				}
+			}
+			sw := admin.PlayerSwitchOut{Op: r.op(), Digest: r.digest(), Take: true}
+			first := make(chan admin.PlayerAnswer, 1)
+			go func() { first <- r.c.SwitchOut(context.Background(), sw) }()
+			h.wait(t)
+			want := admin.PlayerOpRunning
+			if tc.atWait {
+				want = admin.PlayerOpDone
+			}
+			if tc.retry {
+				wantCarried(t, "a retry while the final publication is held", r.c.SwitchOut(context.Background(), sw), want)
+				h.letGo()
+				wantCarried(t, "the first request", <-first, admin.PlayerOpDone)
+			} else {
+				wantCarried(t, "the answer past the handler's wait", <-first, want)
+				h.letGo()
+			}
+			rb := waitReadBack(t, r)
+			if rb.Record.Status != admin.PlayerOpDone || rb.Record.Silence == 0 || rb.Record.Silence > rb.Revision {
+				t.Fatalf("the read back once published: %s, silence %d at %d; want done with a silence it has reached", rb.Record.Status, rb.Record.Silence, rb.Revision)
+			}
+		})
+	}
+}
+
+// waitReadBack reads the rig's tab's first operation back until it is no
+// longer running, until the test's deadline.
+func waitReadBack(t *testing.T, r *ctlRig) admin.PlayerReadBack {
+	t.Helper()
+	for {
+		rb := r.c.Operation(r.c.epoch, r.tab, 1)
+		if rb.Record != nil && rb.Record.Status != admin.PlayerOpRunning {
+			return rb
+		}
+		select {
+		case <-r.c.Wake():
+		case <-serveGiveUp(t):
+			t.Fatalf("the operation never ended: %+v", rb.Record)
+		}
+	}
+}
+
+// TestAReadBackReadsItsRevisionAfterTheRecordsPublication pins S3: a read back
+// held between its two reads while the record's final publication is made
+// and its operation ends answers a revision that publication has reached,
+// whichever of the two it read first.
+func TestAReadBackReadsItsRevisionAfterTheRecordsPublication(t *testing.T) {
+	h := newFinalHold(false)
+	r := h.rig(t, &controlSeams{})
+	sw := admin.PlayerSwitchOut{Op: r.op(), Digest: r.digest(), Take: true}
+	first := make(chan admin.PlayerAnswer, 1)
+	go func() { first <- r.c.SwitchOut(context.Background(), sw) }()
+	h.wait(t)
+	var parked atomic.Bool
+	parked.Store(true)
+	at, readGo := make(chan struct{}), make(chan struct{})
+	var letRead sync.Once
+	freeRead := func() { letRead.Do(func() { close(readGo) }) }
+	t.Cleanup(freeRead)
+	r.c.seams.readRecord = func() {
+		if parked.CompareAndSwap(true, false) {
+			close(at)
+			<-readGo
+		}
+	}
+	read := make(chan admin.PlayerReadBack, 1)
+	go func() { read <- r.c.Operation(r.c.epoch, r.tab, 1) }()
+	select {
+	case <-at:
+	case <-serveGiveUp(t):
+		t.Fatal("the read back was never held between its reads")
+	}
+	h.letGo()
+	wantCarried(t, "the switch-out", <-first, admin.PlayerOpDone)
+	freeRead()
+	rb := <-read
+	if rb.Record == nil || rb.Record.Status != admin.PlayerOpDone || rb.Record.Silence > rb.Revision {
+		t.Fatalf("the read back held across the publication: %+v at %d; want done with a silence it has reached", rb.Record, rb.Revision)
+	}
+}
+
+// TestASwitchOutThePublisherNeverPublishedIsUnknown pins S4: a publisher that
+// ends before the switch-out's final evaluation, or between that evaluation
+// and its publication, publishes nothing that carries the outcome, so the
+// switch-out ends unknown, with no silence and no handover: an unpublished
+// fallback never authorizes silence.
+func TestASwitchOutThePublisherNeverPublishedIsUnknown(t *testing.T) {
+	t.Run("the publisher ended before the final evaluation", func(t *testing.T) {
+		r := newCtlRig(t, ctlOptions{seams: &controlSeams{}})
+		at, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		var parked atomic.Bool
+		free := func() { once.Do(func() { close(release) }) }
+		t.Cleanup(free)
+		r.c.seams.afterSilence = func() {
+			if parked.CompareAndSwap(false, true) {
+				close(at)
+				<-release
+			}
+		}
+		switched := make(chan admin.PlayerAnswer, 1)
+		go func() { switched <- r.switchOut(true) }()
+		select {
+		case <-at:
+		case <-serveGiveUp(t):
+			t.Fatal("the switch-out never observed the bridge silent")
+		}
+		if !r.c.pub.stop(controlStopBound) {
+			t.Fatal("the publisher did not stop")
+		}
+		free()
+		a := <-switched
+		wantCarried(t, "the switch-out", a, admin.PlayerOpUnknown)
+		if a.Record.Silence != 0 || a.Record.Handover != nil {
+			t.Fatalf("the switch-out the publisher never published: silence %d, handover %+v; want neither", a.Record.Silence, a.Record.Handover)
+		}
+	})
+	t.Run("the publisher ended between the evaluation and the publication", func(t *testing.T) {
+		h := newFinalHold(true)
+		r := h.rig(t, &controlSeams{})
+		a := r.switchOut(true)
+		h.wait(t)
+		wantCarried(t, "the switch-out", a, admin.PlayerOpUnknown)
+		if a.Record.Silence != 0 || a.Record.Handover != nil {
+			t.Fatalf("the switch-out the publisher never published: silence %d, handover %+v; want neither", a.Record.Silence, a.Record.Handover)
+		}
+		select {
+		case <-r.c.pub.done:
+		default:
+			t.Fatal("the publisher still runs: the panic did not end it")
+		}
+	})
+}
+
 // TestTheAnchorKeepsItsIDAndTimeThroughChangesThatMoveNoPosition pins §4.4:
 // during steady playback another controller's repeat change, its append and
 // an output report each publish what they change with the same anchor, its
