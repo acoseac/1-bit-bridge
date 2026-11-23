@@ -39,7 +39,8 @@ records. No server change, route, protocol field or server state.
   and so does a play a start or a continuation lets go on. A load that does not, the reader's
   pause and the browser's own pause (any pause but the end's), `suspend`, `clearQueue`, the stop
   at the queue's end and a restored queue each clear it. The retry keeps it from before the
-  reload and plays only with it. The skip's timer reads it where it read `state.playing`.
+  reload and plays only with it. The skip's timer reads it beside `state.playing`, which it read
+  already and `TestFailureAutoAdvanceIsGuarded` pins.
 - **S3 (Q2, Q9).** A barrier's latch is released first by every end of its operation (its done
   however it came, unknown, refused) and by a newer pick, never by its request's promise. A
   barrier resolved after its answer was lost starts nothing and says "This browser did not start:
@@ -90,12 +91,16 @@ predicted in writing before its run, at the commit that made its item: all as pr
   `ed603a62` fixes it, and the control, run again, is red only where a retry with no intent asks
   for a barrier.
 
-Run again at the round's last code commit (`c4dfef67`), every control is as predicted, with two
+Run again at `c4dfef67`, the round's last item, every control is as predicted, with two
 exceptions:
 
 - The S1 control that silences `gateContinue`'s line is also red at
   `TestARetryPlaysOnlyWhatThisBrowserMeantToPlay`, a later case that reads that line too.
 - The pick's latch control was anchored again after S4 changed `newPick`; it is red as predicted.
+
+A run of the whole package before the gate found `TestFailureAutoAdvanceIsGuarded` red: S1 had
+read the intent in place of the skip timer's `state.playing`, which that test pins, and which a
+browser that rejects a failed source's play clears. `daa7e2ea` asks both.
 
 Five more controls edit the tracked modules for the structural guard and restore them from
 memory: all red, the tree clean after each.
