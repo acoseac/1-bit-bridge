@@ -2592,8 +2592,11 @@ Windows-runner check, distinct from portable race-test results.
   file that changed, as it did before, rather than hold every other writer
   off while it waits on the operator; no writer that takes the lock can land
   between the check and the save. `TestTheChangedConfigCheckIsTheStepBeforeSave`
-  pins it by the syntax tree (initCmd calls `saveInitConfig` once and
-  neither the check nor `cfg.Save` itself; in `saveInitConfig` the lock
+  pins it by the syntax tree (initCmd saves once, through `initSave`, the
+  save's seam since backlog B989, which calls `initHost.save` or
+  `saveInitConfig` and nothing else, production's `initHost.save` being
+  `saveInitConfig`, and calls neither the check nor `cfg.Save` itself; in
+  `saveInitConfig` the lock
   comes before the check and the check directly before the save), and
   `TestInitRefusesAConfigThatChangedWhileItRan` the refusal. The save then
   compares the file once more just before its rename (the turn's own
