@@ -56,8 +56,9 @@ type ctlOptions struct {
 	engSeams   *engine.Seams
 	// holdRelease holds every Release of the stand-in until it is closed.
 	holdRelease chan struct{}
-	// holdStart holds a Start of the reference it names until its channel is
-	// closed (playerStandIn.holdStart).
+	// holdStart holds a Start of the library path it names, by its entry's
+	// reference on the control's reference host, until its channel is closed
+	// (playerStandIn.holdStart).
 	holdStart map[string]chan struct{}
 	// noOutput leaves the engine's output unknown.
 	noOutput bool
@@ -187,7 +188,7 @@ func newCtlRig(t *testing.T, o ctlOptions) *ctlRig {
 	}
 	r.res = res
 	r.standIn = newPlayerStandIn()
-	r.standIn.holdRelease, r.standIn.holdStart = o.holdRelease, o.holdStart
+	r.standIn.holdRelease = o.holdRelease
 	d := engine.Details{Frames: 44100 * 180, RateHz: 44100, Bits: 16, Channels: 2, Codec: "FLAC", Lossless: true}
 	if o.details != nil {
 		d = *o.details
@@ -237,6 +238,14 @@ func newCtlRig(t *testing.T, o ctlOptions) *ctlRig {
 		GOOS: "linux", Seams: seams})
 	if o.dlna != nil {
 		r.c.setDLNA(o.dlna)
+	}
+	if len(o.holdStart) > 0 {
+		// Set before any command reaches the engine, whose Start reads it.
+		host := r.c.referenceHost().host
+		r.standIn.holdStart = map[string]chan struct{}{}
+		for path, ch := range o.holdStart {
+			r.standIn.holdStart["http://"+host+"/dlna/file/"+dlna.TrackID("", path)] = ch
+		}
 	}
 	t.Cleanup(r.c.stop)
 	drainLoopOnCleanup(t, r.stopRun, r.runDone, "the rig's engine")
@@ -1555,9 +1564,8 @@ func TestARefusalThroughThePlayWaiterIsAnEffectNotKnown(t *testing.T) {
 		{"output_unavailable as the output goes", string(engine.ReasonOutputUnavailable), func(r *ctlRig) { r.report(2, false, "") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			first := "http://192.168.1.20:7790/dlna/file/" + dlna.TrackID("", defaultCtlTracks[0].path)
 			hold := make(chan struct{})
-			r := newCtlRig(t, ctlOptions{holdStart: map[string]chan struct{}{first: hold}})
+			r := newCtlRig(t, ctlOptions{holdStart: map[string]chan struct{}{defaultCtlTracks[0].path: hold}})
 			t.Cleanup(func() { close(hold) })
 			wantRecord(t, "a replace", r.replace(r.paths(), 0, 0, false), admin.PlayerOpDone, "", "")
 			indexed := make(chan admin.PlayerAnswer, 1)
