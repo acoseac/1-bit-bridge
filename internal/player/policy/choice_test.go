@@ -475,17 +475,25 @@ func TestAWriteOverAStateThatDidNotReadSeesTheDACsOffers(t *testing.T) {
 	}
 }
 
-// TestAFirmwareThatDoesNotReadHoldsNoAcknowledgement: every acknowledgement
-// and confirmation is held under the unit's firmware, so a unit whose firmware
-// does not read takes the choice and records neither: nothing false is held
-// under no firmware.
+// TestAFirmwareThatDoesNotReadHoldsNoAcknowledgement: every acknowledgement,
+// confirmation and listener answer is held under a firmware, so a unit whose
+// firmware does not read takes the choice and records neither consent, and a
+// write that would be DoP's retry clears none of its answers (B990): nothing
+// false is held, and nothing is cleared, under no firmware.
 func TestAFirmwareThatDoesNotReadHoldsNoAcknowledgement(t *testing.T) {
 	r := newRig(t)
 	r.unitBCD = ""
+	r.hear(dsdstate.TransportDoP, dsd64, dsdstate.AnswerNoise)
+	r.hear(dsdstate.TransportDoP, dsd128, dsdstate.AnswerNothing)
+	r.hear(dsdstate.TransportNative, dsd64, dsdstate.AnswerNoise)
+	seeded := sortedAnswers(r.listener...)
 	st := choose(t, r.inputs(), Choice{Mode: dsdstate.ModeDoP, ConfirmDoP: true, FirstUseAcknowledged: true})
 	d := dacOfState(t, st)
 	if d.Choice == nil || d.Choice.Mode != dsdstate.ModeDoP || d.DoPConfirmed != nil || len(d.FirstUse) != 0 {
 		t.Errorf("a write on a unit whose firmware does not read: %+v, want the choice alone", d)
+	}
+	if got := sortedAnswers(d.Listener...); !reflect.DeepEqual(got, seeded) {
+		t.Errorf("dop's retry on a unit whose firmware does not read: the answers %+v, want every one kept, %+v", got, seeded)
 	}
 }
 
