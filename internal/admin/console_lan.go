@@ -785,10 +785,10 @@ func (c *consoleLAN) tick(ctx context.Context) {
 		sm.BeforeFreshReading()
 	}
 	c.mu.Lock()
-	closing, retiring = c.closing, c.retiring
+	closing = c.closing
 	c.lastSaid = ""
 	c.mu.Unlock()
-	if closing || retiring > 0 {
+	if closing {
 		return
 	}
 	c.attempt(ctx)
