@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/consolelan"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
@@ -290,6 +291,7 @@ type heldRead struct {
 
 	mu  sync.Mutex
 	n   int
+	out int
 	err error
 }
 
@@ -308,6 +310,11 @@ func (h *heldRead) wait(ctx context.Context) error {
 		return errors.New("refused before the read the case holds")
 	}
 	h.in <- struct{}{}
+	defer func() {
+		h.mu.Lock()
+		h.out++
+		h.mu.Unlock()
+	}()
 	select {
 	case <-ctx.Done():
 		h.mu.Lock()
@@ -317,6 +324,13 @@ func (h *heldRead) wait(ctx context.Context) error {
 	case <-h.hold:
 		return errors.New("let go by the case")
 	}
+}
+
+// returned reports whether the held read has returned.
+func (h *heldRead) returned() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.out > 0
 }
 
 func (h *heldRead) endedOn() error {
@@ -345,23 +359,37 @@ func (heldTailscale) RefreshNow(context.Context) TailscaleStatus { return Tailsc
 // sources' cold read and the tailnet's status, each held in an event stream
 // and in its REST route, end with the request's context, which the
 // retirement's section cancels: the request ends there, before its
-// connection is closed, and never merely at the read's own timeout.
+// connection is closed, and never merely at the read's own timeout. The
+// endpoint list's provider takes no context (the API's list, behind its
+// shared Tailscale status read): held, it stays held, and the request ends at
+// the retirement's section all the same.
 func TestEachSnapshotReadEndsWithItsRequestsContext(t *testing.T) {
 	stats := func(srv *Server, h *heldRead) { srv.testStatsRead = h.wait }
 	tailnet := func(srv *Server, h *heldRead) { srv.deps.Tailscale = heldTailscale{h} }
+	endpoints := func(srv *Server, h *heldRead) {
+		srv.deps.Endpoints = func() []advertise.Endpoint {
+			_ = h.wait(context.Background())
+			return nil
+		}
+	}
 	for _, c := range []struct {
 		name string
 		path string // the REST route, or "" for the event stream
 		skip int
 		wire func(*Server, *heldRead)
+		// contextFree: the held read takes no context, so it stays held
+		// while the request ends.
+		contextFree bool
 	}{
-		{"the stats read in the event stream", "", 0, stats},
-		{"the stats read in GET /api/stats", "/api/stats", 0, stats},
+		{"the stats read in the event stream", "", 0, stats, false},
+		{"the stats read in GET /api/stats", "/api/stats", 0, stats, false},
 		// The stream's stats read refused, so its sources read is the cold one.
-		{"the sources' cold read in the event stream", "", 1, stats},
-		{"the sources' cold read in GET /api/sources", "/api/sources", 0, stats},
-		{"the tailnet's status in the event stream", "", 0, tailnet},
-		{"the tailnet's status in GET /api/tailscale/status", "/api/tailscale/status", 0, tailnet},
+		{"the sources' cold read in the event stream", "", 1, stats, false},
+		{"the sources' cold read in GET /api/sources", "/api/sources", 0, stats, false},
+		{"the tailnet's status in the event stream", "", 0, tailnet, false},
+		{"the tailnet's status in GET /api/tailscale/status", "/api/tailscale/status", 0, tailnet, false},
+		{"the endpoint list in the event stream", "", 0, endpoints, true},
+		{"the endpoint list in GET /api/endpoints", "/api/endpoints", 0, endpoints, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			seams := &ConsoleLANSeams{}
@@ -399,11 +427,15 @@ func TestEachSnapshotReadEndsWithItsRequestsContext(t *testing.T) {
 				endedAtMark = left == 0
 			case <-time.After(time.Second):
 			}
-			err := h.endedOn()
+			err, heldOut := h.endedOn(), h.returned()
 			letGoRead()
 			letGo()
 			r.waitStep(stepped)
-			if !errors.Is(err, context.Canceled) {
+			if c.contextFree {
+				if heldOut {
+					t.Fatalf("the held provider returned (%v) before the case let it go", err)
+				}
+			} else if !errors.Is(err, context.Canceled) {
 				t.Fatalf("the held read ended on %v, want its request's context, which the retirement cancels", err)
 			}
 			if !endedAtMark {
