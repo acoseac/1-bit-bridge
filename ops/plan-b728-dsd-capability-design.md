@@ -535,25 +535,37 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (Â
   rates.
 
 **A residual: XMOS's vendor ID** (B993, 2026-11-23; amended the same day, B999: the state's gate,
-the mode that applies and the probe's clause). Linux's `sound/usb/quirks.c` sets
+the mode that applies and the probe's clause; and by bridge lows 18: the rates, the generic-board
+clause's reach and `decide`'s last branch). Linux's `sound/usb/quirks.c` sets
 `QUIRK_FLAG_DSD_RAW` for every XMOS device, vendor `20b1`, by one vendor-wide `VENDOR_FLG` (at
 v6.12, as B990 read it), while `profiles.json`'s `sharedReferenceIds` names `20b1:0010` alone. A
 `20b1` unit that no profile knows and whose product ID is not `0010` is therefore on no generic
-board, and under `auto` it plays native DSD wherever the kernel offers it. If its firmware offers
-DSD in front of a PCM-only chip, what plays is noise. In `Effective`
-(`internal/player/policy/policy.go`), a DSD state that does not read refuses every rate before
-`nativeOffered` or `decide` is asked. Once the state reads, these keep native off such a unit at a
-rate, in `decide` and `nativeOffered`: the mode that applies (the DAC's own choice, or `defaultMode`
-for a DAC with none) set to `dop`, `convert` or `off`; a cap below the rate; a listener's latest
-answer for native at the rate, under the unit's firmware, that is `noise` or `nothing`, which the
+board, and under `auto` it plays native DSD at DSD64, DSD128 or DSD256 wherever the kernel offers
+it. If its firmware offers DSD in front of a PCM-only chip, what plays is noise. Those three are the
+rates `Effective` (`internal/player/policy/policy.go`) decides (`dsdRates`), and the conditions
+below hold at them; `Set.At` refuses DSD512 and every other rate as `rate_not_supported`, whatever
+the mode. In `Effective`, a DSD state that does not read refuses every rate before `nativeOffered`
+or `decide` is asked. Once the state reads, these keep native off such a unit at a rate, in
+`decide` and `nativeOffered`: the mode that applies (the DAC's own choice, or `defaultMode` for a
+DAC with none) set to `dop`, `convert` or `off`; a cap below the rate; a listener's latest answer
+for native at the rate, under the unit's firmware, that is `noise` or `nothing`, which the
 listening check (B12, bridge 0.2.5) records; no eligible native tuple at the rate, or every eligible
 one refused by the probe (an eligible tuple: `DSD_U32_BE`, `DSD_U32_LE` or `DSD_U16_LE`, listed by a
 two-channel altset of the bound PCM device that holds the format's frame rate for the rate, a 32nd
 of it for the two 32-bit formats and a 16th for `DSD_U16_LE`, among its rates or inside its range;
-one the probe did not refuse, accepted or not probed, stays offered); or the unit counting as a
-generic board's, its IDs among `sharedReferenceIds` or no profile database reading at all, while no
-listener's latest answer for native at the rate under its firmware is `clean`. Neither that list nor
-the policy changes for it.
+one the probe did not refuse, accepted or not probed, stays offered); or no profile database
+reading (`Inputs.Profiles` nil, under which `genericBridge` counts every unit as a generic board's)
+while no listener's latest answer for native at the rate under its firmware is `clean`. Its IDs
+never make such a unit a generic board's, since of `20b1`'s IDs the embedded `sharedReferenceIds`
+names `20b1:0010` alone; and in production the database is absent only where the embedded one does
+not load: `dsdPolicyFor` (`cmd/bridge/serve_player_dsd.go`), which builds the backend's policy for
+serve's player and for `bridge output play`, gives it the embedded `profiles.json`
+(`dacprofile.Default()`) and leaves it nil, logging why, only where that does not load. So on such
+a unit that last clause keeps native off only in a build whose embedded database does not load.
+Neither `sharedReferenceIds` nor the policy changes for the residual. `decide`'s last branch, which
+refuses a mode none of the five as `dsd_state_unreadable`, is not among those conditions: it guards
+against a state built in memory with another mode, since `dsdstate`'s check refuses one at each
+decode and each write.
 
 ### 3.3 Above the effective maximum
 
