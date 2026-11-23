@@ -115,6 +115,18 @@ own (below the table), red too:
 | M30 | (J1) the barrier judged on its answering capture | `TestTheSwitchOutsAnswerIsTheCaptureThatSawSilence`: the answer not silent |
 | M31 | the release a replace's DeleteAll began, read before it | `TestAPausedReplaceWaitsForTheReleaseItBegan`: release none (M25 red again on the fixed code) |
 
+### Runs
+
+On `84fc0170`, in one build-slot session: `make fmt` (no change), `make vet`, `make test` in
+2,111 s (92 packages ok; `cmd/bridge` 1,924 s of its 45 minutes, `internal/manifest` 1,657 s,
+`internal/admin` 1,364 s), `make build-all` in 24 s; `go vet ./...` for darwin/arm64,
+windows/amd64, linux/arm and linux/386; and `-race -count=50` of the 26 race and publisher cases,
+in two lanes of 25, 735 s. Two earlier sessions failed, each for a finding above: the first
+(`8f1388ff`) three cases under `-race`, the medium seam; the second (`3f5d24d9`) the replace's
+release. Beside them: `make docs-check`'s seven steps; `verify_moves.py --base` (three entries
+moved, the design's edits declared); the `cmd/bridge` source guards; and
+`scripts/qualification-version -base ab898b41`, OK. `PROTOCOL.md` is unchanged.
+
 ### The records' room
 
 At this branch's base the five rules files measured as the design's table had them at `808b19ad`
