@@ -41,7 +41,16 @@ import (
 // bridge shuts down, all in-flight SSE handlers see ctx.Done() within
 // the existing 5 s graceful-shutdown window. No per-handler bgScans
 // bookkeeping needed — the stdlib does the right thing once BaseContext
-// is set.
+// is set. On the home-network socket (backlog B989) the context is the
+// socket's policy's, which its retirement cancels first; every snapshot
+// this stream waits for on the store or the tailnet is waited for on that
+// context (the stats reads, the sources' counts, the composition and
+// enrichment flights, the upscale and analysis counts, the tailnet's status
+// where its provider reads on a context, as serve's does, and the endpoint
+// list, whose provider takes none, on a goroutine of its own:
+// endpointsWithin), so the stream returns at the cancellation; the others
+// read memory or the updater's state. A stream blocked in a write ends at
+// the retirement's close of its connection, which comes next.
 //
 // Concurrency: per-client tickers, no broker / fan-out. Admin is a
 // single-user loopback console; even with several browser tabs the
@@ -57,12 +66,14 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// origin browser context on the same loopback (a random tab the
 	// operator visited) could otherwise open and hold SSE connections
 	// indefinitely. Reuse the same origin allowlist csrfGuard applies
-	// to mutations: Origin-when-present must match AdminAddress; absent
+	// to mutations: Origin-when-present must match the request's own
+	// socket (originMatches: AdminAddress on loopback, the socket's own
+	// authority on the home network, backlog B989); absent
 	// Origin is allowed (curl, fetch from the admin UI itself in some
 	// browsers). Qodo on PR #107.
 	if origin := r.Header.Get("Origin"); origin != "" {
-		if !s.originMatchesAdmin(origin) {
-			s.writeCrossOriginRefusal(w)
+		if !s.originMatches(r, origin) {
+			s.writeCrossOriginRefusal(w, r)
 			return
 		}
 	}
@@ -79,10 +90,10 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	h.Set("Cache-Control", "no-cache, no-store, no-transform")
 	h.Set("Connection", "keep-alive")
 	// X-Accel-Buffering disables response buffering in nginx-class
-	// reverse proxies. The admin listener binds loopback by default
-	// (no proxy in the path), but this is cheap defense in depth for
-	// any future "expose admin via Tailscale" deployment that puts
-	// the listener behind nginx.
+	// reverse proxies. The loopback console has no proxy in its path,
+	// nor does the home-network socket, which answers only its own
+	// authority (backlog B989), but this is cheap defense in depth for a
+	// public-mode console behind nginx.
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
@@ -155,12 +166,15 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	publishStats := func() error {
-		return marshalAndPublish("stats", s.getStatsSSESnapshot(), &lastStats)
+		return marshalAndPublish("stats", s.getStatsSSESnapshot(ctx), &lastStats)
 	}
 
 	publishEndpoints := func() error {
-		snap, eErr := s.getEndpointsSnapshot()
+		snap, eErr := s.getEndpointsSnapshot(ctx)
 		if eErr != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			// Mirror REST behaviour: log + skip. We can't surface a
 			// 5xx mid-stream, so the operator sees the last good list
 			// until the listen-address misconfig is fixed.
@@ -179,14 +193,18 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	publishTailscale := func() error {
-		return marshalAndPublish("tailscale", s.getTailscaleSnapshot(), &lastTailscale)
+		return marshalAndPublish("tailscale", s.getTailscaleSnapshot(ctx), &lastTailscale)
 	}
 
 	// composition (dashboard master-quality breakdown) is TTL-cached +
 	// single-flighted in getCompositionSnapshot, so this stays cheap even
 	// though the underlying scan is a full-table json_extract.
 	publishComposition := func() error {
-		return marshalAndPublish("composition", s.getCompositionSnapshot(), &lastComposition)
+		snap, ok := s.getCompositionSnapshot(ctx)
+		if !ok {
+			return ctx.Err()
+		}
+		return marshalAndPublish("composition", snap, &lastComposition)
 	}
 
 	// sources (dashboard filesystem-vs-UPnP-upstream track breakdown) rides
@@ -205,7 +223,11 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	// TTL-cached + single-flighted in getEnrichmentSnapshot, so it stays cheap
 	// even though the underlying matched/missing split is a full-table scan.
 	publishEnrichment := func() error {
-		return marshalAndPublish("enrichment", s.getEnrichmentSnapshot(), &lastEnrichment)
+		snap, ok := s.getEnrichmentSnapshotCtx(ctx)
+		if !ok {
+			return ctx.Err()
+		}
+		return marshalAndPublish("enrichment", snap, &lastEnrichment)
 	}
 
 	// upscale + analysis telemetry — these replace the Settings page's

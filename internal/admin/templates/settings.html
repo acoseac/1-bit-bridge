@@ -614,7 +614,10 @@
           {{else}}
           Must be a loopback address (127.0.0.1, ::1, or localhost). Non-loopback
           values are rejected — the admin console has no auth in loopback mode,
-          so the loopback bind IS the security boundary.
+          so the loopback bind IS the security boundary. Where
+          <code>adminLANAddress</code> (or <code>BRIDGE_ADMIN_LAN_ADDRESS</code>)
+          is set, the console also answers at that home-network address on this
+          port, with no password; a port changed here moves both at the restart.
           {{end}}
         </small>
       </div>

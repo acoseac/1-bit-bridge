@@ -674,7 +674,7 @@ type settingsResponse struct {
 // --- GET /api/stats ---
 
 func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.getStatsSnapshot())
+	writeJSON(w, http.StatusOK, s.getStatsSnapshot(r.Context()))
 }
 
 // snapshotDBTimeout bounds the best-effort DB reads behind the dashboard
@@ -728,6 +728,11 @@ type statsDBPart struct {
 // total + variant rollup consistent. (Gemini on PR #443.)
 func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 	var p statsDBPart
+	if h := s.testStatsRead; h != nil {
+		if err := h(ctx); err != nil {
+			return statsDBPart{}, err
+		}
+	}
 	rollup, err := s.deps.Manifest.RollupByPrefix(ctx, "")
 	if err != nil {
 		return statsDBPart{}, fmt.Errorf("library rollup: %w", err)
@@ -762,16 +767,18 @@ func (s *Server) readStatsDBPart(ctx context.Context) (statsDBPart, error) {
 // getStatsSnapshot is the shared builder for the dashboard stats
 // payload. Used by both the REST handler (apiStats) and the SSE
 // handler (apiEvents). Cheap reads only — no DB writes, no external
-// network. Suitable for sub-second polling. The DB reads are bounded by
-// snapshotDBTimeout and degrade to the last-good statsDBPart on
-// error/timeout so a tick during lock contention doesn't flash zeros.
-func (s *Server) getStatsSnapshot() statsResponse {
+// network. Suitable for sub-second polling. The DB reads wait on ctx, the
+// request's (an event stream's ends at its socket's retirement and at the
+// shutdown, backlog B989), bounded by snapshotDBTimeout, and degrade to the
+// last-good statsDBPart on error/timeout so a tick during lock contention
+// doesn't flash zeros.
+func (s *Server) getStatsSnapshot(ctx context.Context) statsResponse {
 	cfg := s.deps.CfgHolder.Load()
 	now := time.Now().UTC()
 
-	// No request context here (the SSE publisher also calls this), so a
-	// wedged read would otherwise block that goroutine indefinitely.
-	ctx, cancel := context.WithTimeout(context.Background(), snapshotDBTimeout)
+	// Bounded as well as the request's, so a wedged read cannot hold the
+	// stream that waits for it longer than the read's own bound.
+	ctx, cancel := context.WithTimeout(ctx, snapshotDBTimeout)
 	defer cancel()
 	part, err := s.readStatsDBPart(ctx)
 	s.statsMu.Lock()
@@ -820,8 +827,8 @@ func (s *Server) getStatsSnapshot() statsResponse {
 // template, which was true until #948 removed StartedAt from this
 // payload as a field with no reader. `UptimeSec` itself stays because
 // `bridge status` prints it off the non-SSE form.
-func (s *Server) getStatsSSESnapshot() statsResponse {
-	snap := s.getStatsSnapshot()
+func (s *Server) getStatsSSESnapshot(ctx context.Context) statsResponse {
+	snap := s.getStatsSnapshot(ctx)
 	snap.UptimeSec = 0
 	return snap
 }
@@ -972,18 +979,28 @@ const compositionDBTimeout = 60 * time.Second
 // SSE connections hitting the 30s tick (or initial-emit) after expiry
 // collapse to ONE scan, not N concurrent ones. Best-effort: a SQL error
 // serves the last good snapshot rather than failing the tile.
-func (s *Server) getCompositionSnapshot() compositionResponse {
+//
+// The caller waits on its own ctx (backlog B989, I11): an event stream's
+// request context, which a home-network socket's retirement cancels, so a
+// stream waiting here returns at the cancellation. The flight itself is
+// shared and keeps its own bound, compositionDBTimeout, for the callers
+// still waiting on it. ok is false when ctx ended before the snapshot came.
+func (s *Server) getCompositionSnapshot(ctx context.Context) (compositionResponse, bool) {
 	if s.deps.Manifest == nil {
-		return compositionResponse{}
+		return compositionResponse{}, true
 	}
 	s.compositionMu.Lock()
 	if !s.compositionAt.IsZero() && time.Since(s.compositionAt) < compositionCacheTTL {
 		snap := s.composition
 		s.compositionMu.Unlock()
-		return snap
+		return snap, true
 	}
 	s.compositionMu.Unlock()
-	v, _, _ := s.compositionSF.Do("composition", func() (any, error) {
+	hold := s.testCompositionFlight
+	ch := s.compositionSF.DoChan("composition", func() (any, error) {
+		if hold != nil {
+			hold()
+		}
 		// Re-check under the flight: a prior flight may have refreshed
 		// the cache while this caller was queued behind Do.
 		s.compositionMu.Lock()
@@ -993,9 +1010,9 @@ func (s *Server) getCompositionSnapshot() compositionResponse {
 			return snap, nil
 		}
 		s.compositionMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), compositionDBTimeout)
+		fctx, cancel := context.WithTimeout(context.Background(), compositionDBTimeout)
 		defer cancel()
-		groups, err := s.deps.Manifest.FormatDistribution(ctx)
+		groups, err := s.deps.Manifest.FormatDistribution(fctx)
 		if err != nil {
 			logger.Warn("composition: format distribution", "err", err)
 			s.compositionMu.Lock()
@@ -1004,7 +1021,7 @@ func (s *Server) getCompositionSnapshot() compositionResponse {
 			return snap, nil
 		}
 		snap := buildComposition(groups)
-		gated, err := s.deps.Manifest.CountGatedFormatTracks(ctx)
+		gated, err := s.deps.Manifest.CountGatedFormatTracks(fctx)
 		if err != nil {
 			// The count belongs to the snapshot it is computed with, so
 			// a failed count serves the last good snapshot whole, as a
@@ -1022,10 +1039,15 @@ func (s *Server) getCompositionSnapshot() compositionResponse {
 		s.compositionMu.Unlock()
 		return snap, nil
 	})
-	if snap, ok := v.(compositionResponse); ok {
-		return snap
+	select {
+	case res := <-ch:
+		if snap, ok := res.Val.(compositionResponse); ok {
+			return snap, true
+		}
+		return compositionResponse{}, true
+	case <-ctx.Done():
+		return compositionResponse{}, false
 	}
-	return compositionResponse{}
 }
 
 // --- library sources (dashboard filesystem-vs-UPnP breakdown) ---
@@ -1072,14 +1094,15 @@ type sourcesResponse struct {
 // started bridge before any stats read, since the SSE initial-emit runs
 // publishStats before publishSources — runs the same readStatsDBPart the
 // stats path uses (it holds the two counts we need), warms the cache for
-// subsequent calls, and degrades to the last-good part on a read error. It
+// subsequent calls, and degrades to the last-good part on a read error. Its
+// read waits on ctx, the request's, bounded by snapshotDBTimeout. It
 // deliberately does NOT route through getStatsSnapshot: that also does a
 // scanner-status read and an auth-store lock we don't need here (Gemini on
 // PR #510). It used to name an os.Stat on the DB file as a third reason —
 // #948 removed that when it dropped `dbBytes`, whose value /api/diagnostics
 // already served. The decision is unchanged; the evidence for it had gone
 // stale, which is the class #955 swept and this one outlived.
-func (s *Server) trackSourceCounts() (total, routed int) {
+func (s *Server) trackSourceCounts(ctx context.Context) (total, routed int) {
 	s.statsMu.Lock()
 	warm := s.statsDBValid
 	if warm {
@@ -1089,7 +1112,7 @@ func (s *Server) trackSourceCounts() (total, routed int) {
 	if warm {
 		return total, routed
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), snapshotDBTimeout)
+	ctx, cancel := context.WithTimeout(ctx, snapshotDBTimeout)
 	defer cancel()
 	part, err := s.readStatsDBPart(ctx)
 	s.statsMu.Lock()
@@ -1128,7 +1151,7 @@ func (s *Server) trackSourceCounts() (total, routed int) {
 // (rows whose upstream was just removed, pre-reap) that app.js renders as
 // "Other UPnP sources".
 func (s *Server) getSourcesSnapshot(ctx context.Context) sourcesResponse {
-	total, routed := s.trackSourceCounts()
+	total, routed := s.trackSourceCounts(ctx)
 	if routed > total {
 		routed = total
 	}
@@ -1279,7 +1302,19 @@ const enrichmentDBTimeout = 60 * time.Second
 // marshalled bytes only change when data changes — SSE diff-suppression
 // stays stable.
 func (s *Server) getEnrichmentSnapshot() enrichmentResponse {
-	return s.decorateEnrichment(s.getEnrichmentBreakdownPart())
+	snap, _ := s.getEnrichmentSnapshotCtx(context.Background())
+	return snap
+}
+
+// getEnrichmentSnapshotCtx is getEnrichmentSnapshot for a caller that waits
+// on its own ctx (backlog B989, I11): each flight it waits for is waited
+// for on ctx, and ok is false when ctx ended first.
+func (s *Server) getEnrichmentSnapshotCtx(ctx context.Context) (enrichmentResponse, bool) {
+	part, ok := s.getEnrichmentBreakdownPart(ctx)
+	if !ok {
+		return enrichmentResponse{}, false
+	}
+	return s.decorateEnrichment(ctx, part)
 }
 
 // freshEnrichmentSnapshot reads the breakdown DIRECTLY, bypassing both the TTL
@@ -1311,49 +1346,54 @@ func (s *Server) freshEnrichmentSnapshot(ctx context.Context) enrichmentResponse
 		logger.Warn("enrichment: fresh breakdown", "err", err)
 		return s.getEnrichmentSnapshot()
 	}
-	return s.decorateEnrichment(enrichmentResponse{
+	snap, _ := s.decorateEnrichment(ctx, enrichmentResponse{
 		Pending:            pending,
 		Matched:            matched,
 		Missing:            missing,
 		LastEnrichedAt:     last,
 		EtaSecondsEstimate: int64(math.Round((float64(pending) / avgTracksPerAlbum) * enrichPaceSeconds)),
 	})
+	return snap
 }
 
 // decorateEnrichment fills the config-derived source label and the Atlas meta
 // facets onto a breakdown. The meta facets keep their own 60s cache — the retry
 // does not move them the way it moves pending/matched/missing.
-func (s *Server) decorateEnrichment(snap enrichmentResponse) enrichmentResponse {
+func (s *Server) decorateEnrichment(ctx context.Context, snap enrichmentResponse) (enrichmentResponse, bool) {
 	if cfg := s.deps.CfgHolder.Load(); cfg != nil {
 		snap.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
 		st := enrichmentStateOf(cfg)
 		snap.Off, snap.DeezerOff, snap.HarvestActive = !st.on, !st.deezerOn, st.harvestActive
 	}
-	meta := s.getEnrichmentMetaSnapshot()
+	meta, ok := s.getEnrichmentMetaSnapshot(ctx)
+	if !ok {
+		return enrichmentResponse{}, false
+	}
 	snap.ArtistImages = meta.ArtistImages
 	snap.ArtistBios = meta.ArtistBios
 	snap.AlbumDescriptions = meta.AlbumDescriptions
 	snap.Booklets = meta.Booklets
-	return snap
+	return snap, true
 }
 
 // getEnrichmentBreakdownPart returns the cached enrichment breakdown, recomputing
 // via a full-table scan only when the cache is older than enrichmentCacheTTL. The
 // recompute is single-flighted so concurrent SSE ticks / initial-emits collapse
 // to ONE scan. Best-effort: a SQL error serves the last good snapshot rather
-// than failing the card. Mirrors getCompositionSnapshot.
-func (s *Server) getEnrichmentBreakdownPart() enrichmentResponse {
+// than failing the card. Mirrors getCompositionSnapshot, its caller's
+// wait on its own ctx included (ok false when ctx ended first).
+func (s *Server) getEnrichmentBreakdownPart(ctx context.Context) (enrichmentResponse, bool) {
 	if s.deps.Manifest == nil {
-		return enrichmentResponse{}
+		return enrichmentResponse{}, true
 	}
 	s.enrichmentMu.Lock()
 	if !s.enrichmentAt.IsZero() && time.Since(s.enrichmentAt) < enrichmentCacheTTL {
 		snap := s.enrichment
 		s.enrichmentMu.Unlock()
-		return snap
+		return snap, true
 	}
 	s.enrichmentMu.Unlock()
-	v, _, _ := s.enrichmentSF.Do("enrichment", func() (any, error) {
+	ch := s.enrichmentSF.DoChan("enrichment", func() (any, error) {
 		// Re-check under the flight: a prior flight may have refreshed the
 		// cache while this caller was queued behind Do.
 		s.enrichmentMu.Lock()
@@ -1363,9 +1403,9 @@ func (s *Server) getEnrichmentBreakdownPart() enrichmentResponse {
 			return snap, nil
 		}
 		s.enrichmentMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), enrichmentDBTimeout)
+		fctx, cancel := context.WithTimeout(context.Background(), enrichmentDBTimeout)
 		defer cancel()
-		pending, matched, missing, last, err := s.deps.Manifest.EnrichmentBreakdown(ctx)
+		pending, matched, missing, last, err := s.deps.Manifest.EnrichmentBreakdown(fctx)
 		if err != nil {
 			logger.Warn("enrichment: breakdown", "err", err)
 			s.enrichmentMu.Lock()
@@ -1386,10 +1426,15 @@ func (s *Server) getEnrichmentBreakdownPart() enrichmentResponse {
 		s.enrichmentMu.Unlock()
 		return snap, nil
 	})
-	if snap, ok := v.(enrichmentResponse); ok {
-		return snap
+	select {
+	case res := <-ch:
+		if snap, ok := res.Val.(enrichmentResponse); ok {
+			return snap, true
+		}
+		return enrichmentResponse{}, true
+	case <-ctx.Done():
+		return enrichmentResponse{}, false
 	}
-	return enrichmentResponse{}
 }
 
 // enrichmentMetaCacheTTL bounds how long the coverage stats (artist images /
@@ -1401,18 +1446,19 @@ const enrichmentMetaCacheTTL = 60 * time.Second
 // only when older than enrichmentMetaCacheTTL. Single-flighted + last-good
 // on error, mirroring getCompositionSnapshot. Facets whose data source is
 // unavailable stay nil so the wire field is omitted rather than zero-lying.
-func (s *Server) getEnrichmentMetaSnapshot() enrichmentMetaPart {
+// The caller waits on its own ctx, as getCompositionSnapshot's does.
+func (s *Server) getEnrichmentMetaSnapshot(ctx context.Context) (enrichmentMetaPart, bool) {
 	if s.deps.Manifest == nil {
-		return enrichmentMetaPart{}
+		return enrichmentMetaPart{}, true
 	}
 	s.enrichmentMetaMu.Lock()
 	if !s.enrichmentMetaAt.IsZero() && time.Since(s.enrichmentMetaAt) < enrichmentMetaCacheTTL {
 		snap := s.enrichmentMeta
 		s.enrichmentMetaMu.Unlock()
-		return snap
+		return snap, true
 	}
 	s.enrichmentMetaMu.Unlock()
-	v, _, _ := s.enrichmentMetaSF.Do("enrichment-meta", func() (any, error) {
+	ch := s.enrichmentMetaSF.DoChan("enrichment-meta", func() (any, error) {
 		// Re-check under the flight: a prior flight may have refreshed the
 		// cache while this caller was queued behind Do.
 		s.enrichmentMetaMu.Lock()
@@ -1422,9 +1468,9 @@ func (s *Server) getEnrichmentMetaSnapshot() enrichmentMetaPart {
 			return snap, nil
 		}
 		s.enrichmentMetaMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), enrichmentDBTimeout)
+		fctx, cancel := context.WithTimeout(context.Background(), enrichmentDBTimeout)
 		defer cancel()
-		snap, ok := s.computeEnrichmentMeta(ctx)
+		snap, ok := s.computeEnrichmentMeta(fctx)
 		if !ok {
 			s.enrichmentMetaMu.Lock()
 			snap = s.enrichmentMeta // last good (possibly zero)
@@ -1437,10 +1483,15 @@ func (s *Server) getEnrichmentMetaSnapshot() enrichmentMetaPart {
 		s.enrichmentMetaMu.Unlock()
 		return snap, nil
 	})
-	if snap, ok := v.(enrichmentMetaPart); ok {
-		return snap
+	select {
+	case res := <-ch:
+		if snap, ok := res.Val.(enrichmentMetaPart); ok {
+			return snap, true
+		}
+		return enrichmentMetaPart{}, true
+	case <-ctx.Done():
+		return enrichmentMetaPart{}, false
 	}
-	return enrichmentMetaPart{}
 }
 
 // computeEnrichmentMeta builds a fresh coverage snapshot (the singleflight
@@ -1743,8 +1794,14 @@ type adminEndpointEntry struct {
 // see the list of addresses; iOS sees per-URL reachability via
 // the unified probe (paired iOS PR #150).
 func (s *Server) apiEndpoints(w http.ResponseWriter, r *http.Request) {
-	out, err := s.getEndpointsSnapshot()
+	out, err := s.getEndpointsSnapshot(r.Context())
 	if err != nil {
+		if r.Context().Err() != nil {
+			// The request ended while the list was read: its client left, or
+			// its socket's retirement or the shutdown ended it. Nobody reads
+			// an answer.
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.code, err.msg)
 		return
 	}
@@ -1766,13 +1823,16 @@ func (e *endpointsErr) Error() string { return e.code + ": " + e.msg }
 // computed fresh on each call (see apiEndpoints for the source) so a
 // just-connected Tailscale interface (or a just-dropped LAN one) is
 // reflected immediately. Shared by apiEndpoints (REST) and
-// apiEvents (SSE).
+// apiEvents (SSE), each with its request's context, which the list is
+// waited for on (endpointsWithin): an event stream's ends at its socket's
+// retirement and at the shutdown (backlog B989).
 //
 // Returns (entries, nil) on success, ([], nil) for the deliberate
 // `:0` test-binding case, or (nil, *endpointsErr) on listen-address
-// parse failure. The error type is opaque to callers — REST maps
-// to 500 + short code; SSE just skips the publish.
-func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
+// parse failure, or once ctx has ended before the list was read. The
+// error type is opaque to callers — REST maps to 500 + short code; SSE
+// just skips the publish, or ends on an ended context.
+func (s *Server) getEndpointsSnapshot(ctx context.Context) ([]adminEndpointEntry, *endpointsErr) {
 	cfg := s.deps.CfgHolder.Load()
 	_, portStr, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil {
@@ -1800,7 +1860,10 @@ func (s *Server) getEndpointsSnapshot() ([]adminEndpointEntry, *endpointsErr) {
 	if port == 0 {
 		return []adminEndpointEntry{}, nil
 	}
-	eps := advertisedEndpoints(s.deps.Endpoints)
+	eps, err := endpointsWithin(ctx, s.deps.Endpoints)
+	if err != nil {
+		return nil, &endpointsErr{code: "request_ended", msg: "the request ended before the endpoint list was read"}
+	}
 	out := make([]adminEndpointEntry, 0, len(eps))
 	for _, e := range eps {
 		out = append(out, adminEndpointEntry{

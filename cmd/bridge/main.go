@@ -3215,11 +3215,21 @@ type serveOpts struct {
 	// test that leaves mDNS on pins the responder to loopback, so it
 	// answers nothing on the LAN. Per invocation for tailscaleCLI's reason.
 	mdnsPick func() (*net.Interface, error)
+	// mdnsStart stands in for the responder's start (bridgemdns.Advertise).
+	// Nil in production. A boot test forces a responder that fails to start.
+	mdnsStart mdnsStartFunc
 	// beforeAdminServe runs immediately before ServeListener on the
 	// handed admin path. Nil in production. A test holds serve there,
 	// where the port already accepts and the console does not yet
 	// (backlog B313).
 	beforeAdminServe func()
+	// consoleLAN stands in, field by field, for the home-network socket's
+	// production reading, hold, Windows table, bind, .local name and tick
+	// (backlog B989, consoleLANProduction): a field left zero is
+	// production's. No boot test binds the host's LAN addresses: each hands
+	// a reading and a bind of its own. Per invocation for tailscaleCLI's
+	// reason.
+	consoleLAN consoleLANSeams
 	// dataDirTryLock stands in for fsutil.TryLock on the data dir's lock
 	// file (lockServeDataDirWith). Nil (the kernel's answer) everywhere
 	// but the boot tests, which answer what a filesystem that keeps no
@@ -6618,6 +6628,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		LoopbackErr:     outLoop.StartErr,
 		Tokens:          store.List,
 	}
+	// The console's doctor reads its own process's home-network socket
+	// (backlog B989) through this, set once the console exists.
+	var consoleLANServer atomic.Pointer[admin.Server]
 	adminSrv, err := admin.New(admin.Deps{
 		CfgHolder:    cfgHolder,
 		CfgPath:      absCfgPath,
@@ -6703,7 +6716,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// Ports this process bound, so the console's preflight answers
 		// the port checks from knowledge rather than a bind probe that
 		// can only fail against our own listeners.
-		DoctorRun:             adminDoctorRunnerFor(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc), doctorDAC, hostLogs()),
+		DoctorRun: adminDoctorRunnerForServing(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc), doctorDAC, hostLogs(),
+			func() admin.ConsoleLANState { return consoleLANServer.Load().ConsoleLAN() }),
 		OutputChecklist:       consoleOutputChecklist(checklistSrc),
 		PlayerOutput:          playerConsole,
 		PlayerControl:         playerControl,
@@ -7051,6 +7065,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// Drain the post-scan nudge into the player's catalog invalidation.
 	// Started here, after adminSrv exists; the nudge channel's buffer
 	// carries anything fired in the gap.
+	consoleLANServer.Store(adminSrv)
 	startCatalogInvalidator(scanCtx, catalogNudge, adminSrv)
 
 	// Build the player's library snapshot ahead of the first request.
@@ -7067,6 +7082,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 
 	adminCtx, adminCancel := context.WithCancel(context.Background())
 	defer adminCancel()
+	// The console on the home network (backlog B989): its plan is opened
+	// here, before the console's goroutine starts, so the loop ServeListener
+	// starts is the plan's, and its first attempt is made once the mDNS
+	// responder's start has answered (BeginConsoleLAN, below), so the first
+	// reading holds the box's .local name exactly while the responder runs.
+	// The loop that retries and reads the box again runs from ServeListener,
+	// which stops it and retires the socket at the shutdown; every other way
+	// out of the console's goroutine retires it first (AbortConsoleLAN). A
+	// bind that fails never reaches adminErr: the console serves loopback
+	// alone and says why.
+	consoleLANSeamsNow := opts.consoleLAN.over(consoleLANProduction(func() bool { return mdnsLife.Load().Running() }))
+	adminSrv.PrepareConsoleLAN(adminCtx, consoleLANPlanFor(cfg, consoleLANSeamsNow))
 	adminErr := make(chan error, 1)
 	bgWriters.Add(1)
 	go func() {
@@ -7075,6 +7102,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			want := adminListenAddress(cfg)
 			lis, aerr := adoptHandedListener(opts.adminListener, want)
 			if aerr != nil {
+				adminSrv.AbortConsoleLAN()
 				adminErr <- fmt.Errorf("admin listen %s: %w", want, aerr)
 				return
 			}
@@ -7208,6 +7236,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		}
 		ml := newMDNSLifecycle(boundAddr.Port, version.ProtocolVersion, nameSource, stdout, stderr)
 		ml.pick = opts.mdnsPick
+		ml.start = opts.mdnsStart
 		// Resolve the effective initial state. Catch-up apply:
 		// if an admin PATCH arrived during the pre-listener
 		// window, mdnsDesired carries its target value — that
@@ -7226,6 +7255,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	}
 	if ml := mdnsLife.Load(); ml != nil {
 		defer ml.Close()
+	}
+	// The home-network socket's first attempt, now that the responder's
+	// start has answered (backlog B989), and the banner's line on it.
+	consoleLANState := adminSrv.BeginConsoleLAN(adminCtx)
+	if !cfg.IsPublic() {
+		consoleLANBanner(stdout, consoleLANState, consoleLANPortOf(cfg))
 	}
 
 	var lanH3 *lanHTTP3

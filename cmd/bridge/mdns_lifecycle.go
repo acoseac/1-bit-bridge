@@ -49,11 +49,14 @@ type mdnsLifecycle struct {
 	pick func() (*net.Interface, error)
 	// start starts the responder; nil is bridgemdns.Advertise. A test forces
 	// a startup failure with it.
-	start func(bridgemdns.Config) (*bridgemdns.Advertiser, error)
+	start mdnsStartFunc
 
 	mu         sync.Mutex
 	advertiser *bridgemdns.Advertiser
 }
+
+// mdnsStartFunc starts the responder, as bridgemdns.Advertise does.
+type mdnsStartFunc = func(bridgemdns.Config) (*bridgemdns.Advertiser, error)
 
 // newMDNSLifecycle constructs the lifecycle helper. The
 // `nameSource` closure is invoked at every Set(true) so a
@@ -67,6 +70,18 @@ func newMDNSLifecycle(port, protocolVersion int, nameSource func() string, stdou
 		stdout:          stdout,
 		stderr:          stderr,
 	}
+}
+
+// Running reports whether the responder runs now: the console's
+// home-network socket answers to the box's `.local` name only while it does
+// (backlog B989, I10).
+func (m *mdnsLifecycle) Running() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.advertiser != nil
 }
 
 // Set is the hot-reload entry point. `enabled=true` starts the

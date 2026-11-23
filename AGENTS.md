@@ -168,8 +168,9 @@ automation is unaffected.
 
 Runtime shape: two listeners — the **client API** on `:7788` (HTTPS, H2+H3,
 bearer auth) and the **admin console** on `127.0.0.1:7789` (loopback-only, no
-auth in default `loopback` deployment mode; bcrypt session login in `public`
-mode). iOS never talks to the admin listener.
+auth in default `loopback` deployment mode, unless the operator also opens it
+on the home network with `adminLANAddress`, still with no auth; bcrypt session
+login in `public` mode). iOS never talks to the admin listener.
 
 ## Wire protocol & the mirror-PR rule
 
@@ -275,7 +276,11 @@ mode). iOS never talks to the admin listener.
   theatre. Loopback means the request's source AND its `Host`: a Host
   that names another host is a 421 (`loopbackHostOnly`), since a page that
   re-points its own name at 127.0.0.1 is otherwise same-origin with the
-  console. Don't expose admin behind Tailscale/reverse-proxy in loopback
+  console. The one way beyond loopback in loopback mode is the operator's
+  `adminLANAddress` (B989): a second socket at a private address of the box,
+  held by the kernel to that address's interface, answering its own network
+  alone, with no login (`.claude/rules/auth-tls.md`). Don't expose admin
+  behind Tailscale/reverse-proxy in loopback
   mode; `public` mode (VPS) is the supported non-loopback posture and gates
   everything behind `adminauth`, `/metrics` included: a scraper without a
   session needs its address in `metrics.allowCidrs` and a direct connection,

@@ -2651,7 +2651,7 @@ Releases that don't ship `release-meta.json` (any pre-Phase-C build) are treated
 
 The manual `bridge update --override-client-floor` flag bypasses the gate; the auto-installer never sets it.
 
-**Trust boundary:** the install endpoint is admin-loopback only (same trust model as every other admin route — see `internal/admin/admin.go` doc comment). There is intentionally no remote-trigger install from iOS. Operators install at the bridge host. The iOS app's role is awareness.
+**Trust boundary:** the install endpoint is the admin console's (same trust model as every other admin route — see `internal/admin/admin.go` doc comment), which a loopback bridge serves on loopback and, where its operator opened it there (`adminLANAddress`), on the home network with no login. There is intentionally no remote-trigger install from iOS. Operators install at the bridge host. The iOS app's role is awareness.
 
 ### Client version reporting
 

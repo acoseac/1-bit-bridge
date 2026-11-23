@@ -72,6 +72,80 @@ func HostInterfaces() ([]Interface, error) {
 	return out, nil
 }
 
+// UnreadableError is a reading of the box's interfaces that is not whole
+// (ReadInterfacesFrom): the listing itself, or one interface's addresses,
+// did not read, or an address of one is no IP. Interface is the
+// interface's name, "" for the listing.
+type UnreadableError struct {
+	Interface string
+	Err       error
+}
+
+func (e *UnreadableError) Error() string {
+	if e.Interface == "" {
+		return "the box's interfaces could not be listed: " + e.Err.Error()
+	}
+	return "the addresses of interface " + e.Interface + " could not be read: " + e.Err.Error()
+}
+
+func (e *UnreadableError) Unwrap() error { return e.Err }
+
+// errNoIP is an interface address that names no IP.
+var errNoIP = errNotAnIP("an address of it is no IP address")
+
+type errNotAnIP string
+
+func (e errNotAnIP) Error() string { return string(e) }
+
+// ReadInterfacesFrom lists the interfaces list gives, each with the
+// addresses addrs reads for it, as a whole or not at all (backlog B989's
+// D12): an interface whose addresses do not read, or one of whose addresses
+// is no IP, fails the whole reading with an *UnreadableError naming it,
+// where HostInterfaces lists such an interface with none. An address that is
+// no *net.IPNet, which HostInterfaces skips, is kept as the address alone,
+// with no on-link network, as prefixOf keeps one whose mask is no prefix.
+// The console's home-network socket reads the box through it, since a
+// reading that cannot establish what the box holds must close that socket.
+func ReadInterfacesFrom(list func() ([]net.Interface, error), addrs func(net.Interface) ([]net.Addr, error)) ([]Interface, error) {
+	ifs, err := list()
+	if err != nil {
+		return nil, &UnreadableError{Err: err}
+	}
+	out := make([]Interface, 0, len(ifs))
+	for i := range ifs {
+		in := Interface{Name: ifs[i].Name, Index: ifs[i].Index, Flags: ifs[i].Flags}
+		as, err := addrs(ifs[i])
+		if err != nil {
+			return nil, &UnreadableError{Interface: ifs[i].Name, Err: err}
+		}
+		for _, a := range as {
+			var p netip.Prefix
+			var ok bool
+			switch v := a.(type) {
+			case *net.IPNet:
+				p, ok = prefixOf(v)
+			case *net.IPAddr:
+				var ip netip.Addr
+				if ip, ok = netip.AddrFromSlice(v.IP); ok {
+					ip = ip.Unmap()
+					p = netip.PrefixFrom(ip, ip.BitLen())
+				}
+			}
+			if !ok {
+				return nil, &UnreadableError{Interface: ifs[i].Name, Err: errNoIP}
+			}
+			in.Addrs = append(in.Addrs, p)
+		}
+		out = append(out, in)
+	}
+	return out, nil
+}
+
+// ReadInterfaces is ReadInterfacesFrom over this host's interfaces.
+func ReadInterfaces() ([]Interface, error) {
+	return ReadInterfacesFrom(net.Interfaces, func(i net.Interface) ([]net.Addr, error) { return i.Addrs() })
+}
+
 // prefixOf is an interface address as the address and its on-link prefix:
 // unmapped, so an IPv4 address in its 16-byte form is an IPv4 address, with
 // a 4-byte mask or a 16-byte one. A mask that is not a prefix (no single run

@@ -441,6 +441,13 @@ func buildDoctorDepsRun(ctx context.Context, cfgPath string, absentIsPreSetup bo
 			// playback (B676): bridge doctor's own, beside the running
 			// bridge's groups, or the serving process's, in the console.
 			d.PlayerDAC = doctorPlayerDAC(cfg, dacHost)
+			// Where the console answers (backlog B989): bridge doctor asks the
+			// running bridge, and reads the file and its own environment
+			// apart; the console's doctor hands its own process's state
+			// (adminDoctorRunnerServing), so it asks nothing here.
+			if !logs.console {
+				d.ConsoleLAN = doctorConsoleLAN(ctx, d.ConfigFile.Path, cfg)
+			}
 			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
 			d.UpscaleEnabled = cfg.Upscale.Enabled
 			d.UpscaleTargetBits = cfg.Upscale.EffectiveTargetBits()
@@ -1140,6 +1147,12 @@ func adminDoctorRunnerFor(cfgPath string, ownedPorts []int, checklist func(conte
 	return adminDoctorRunnerWith(cfgPath, ownedPorts, checklist, dacHost, logs, doctor.NewRootProbes())
 }
 
+// adminDoctorRunnerForServing is adminDoctorRunnerFor with the serving
+// process's home-network socket, serve's (adminDoctorRunnerServing).
+func adminDoctorRunnerForServing(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost, logs logsHost, lan func() admin.ConsoleLANState) func(context.Context) *admin.DoctorReport {
+	return adminDoctorRunnerServing(cfgPath, ownedPorts, checklist, dacHost, logs, doctor.NewRootProbes(), lan)
+}
+
 // adminDoctorRunnerWith is adminDoctorRunnerFor over probes, the runner's
 // works on the library roots (backlog B650): made once, with the runner, and
 // kept across its runs, whose Deps it rebuilds every time, so a root whose
@@ -1149,9 +1162,22 @@ func adminDoctorRunnerFor(cfgPath string, ownedPorts []int, checklist func(conte
 // Each run is stopped by its request's context. A test hands it probes whose
 // roots it stands in for.
 func adminDoctorRunnerWith(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost, logs logsHost, probes *doctor.RootProbes) func(context.Context) *admin.DoctorReport {
+	return adminDoctorRunnerServing(cfgPath, ownedPorts, checklist, dacHost, logs, probes, nil)
+}
+
+// adminDoctorRunnerServing is adminDoctorRunnerWith with the serving
+// process's home-network socket (backlog B989): lan, when set, is that
+// socket's state now, which the console's doctor reports beside what the
+// file says now; nil reports nothing of it.
+func adminDoctorRunnerServing(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost, logs logsHost, probes *doctor.RootProbes, lan func() admin.ConsoleLANState) func(context.Context) *admin.DoctorReport {
 	return func(ctx context.Context) *admin.DoctorReport {
 		d := buildDoctorDepsRun(ctx, cfgPath, false, dacHost, doctorLogs{host: logs, console: true}, probes.BeginRun())
 		d.OwnedPorts = ownedPorts
+		// From what the run's own load set (the port, the posture), never a
+		// second load, which could wait on a root the run's works bound.
+		if lan != nil && d.ConfigFile != nil && d.ConfigFile.LoadErr == nil && d.ConfigFile.Path != "" && d.DataDir != "" {
+			d.ConsoleLAN = servingConsoleLAN(d.ConfigFile.Path, d.PublicMode, d.AdminPort, lan())
+		}
 		// The player checklist from the serving process's own source, the
 		// one the dashboard's panel shows, rather than the one-shot outputs
 		// builder `bridge doctor` uses: /api/doctor runs on every settings

@@ -237,8 +237,11 @@ func TestTheDiagnosticsMetricsPointerSaysWhoMayScrape(t *testing.T) {
 	}
 
 	loop, _, _ := newTestServer(t)
-	if got := page(t, loop, ""); !strings.Contains(got, "loopback listener only") {
-		t.Error("loopback-mode pointer no longer says the listener is loopback-only")
+	// Loopback, and the home-network socket where one is open (backlog
+	// B989): the console's own listeners, which a scraper elsewhere cannot
+	// reach.
+	if got := page(t, loop, ""); !strings.Contains(got, "on this console's own listeners only: loopback, and the home-network address") {
+		t.Error("loopback-mode pointer no longer says which listeners serve it")
 	}
 
 	pub, store, _ := newPublicTestServer(t, "test-password-123")

@@ -118,7 +118,7 @@ func TestTheCompositionSaysHowManyWavPackAndMonkeysAudioFilesTheLibraryHolds(t *
 			t.Fatal(err)
 		}
 	}
-	snap := srv.getCompositionSnapshot()
+	snap, _ := srv.getCompositionSnapshot(ctx)
 	if snap.WavPackAPE != 3 {
 		t.Errorf("wavpackApe = %d, want 3", snap.WavPackAPE)
 	}

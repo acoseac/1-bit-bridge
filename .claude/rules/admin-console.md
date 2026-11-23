@@ -20,8 +20,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   exposes `e.code`. In loopback mode that message names the admin
   listener's host and port — never the page URL's — and an equal-port SSH
   tunnel example (`[::1]` when bound there; empty/unspecified host falls
-  back to `127.0.0.1`). **Don't widen `originMatchesLoopbackMode` to admit
+  back to `127.0.0.1`), and on the home-network socket that socket's own
+  URL (B989). **Don't widen `originMatchesLoopbackMode` to admit
   another local port** (B193 / B471); fix the tunnel instead.
+- **A page the home-network socket served (B989) says what its plain HTTP costs: the pairing dialog warns before Generate token, Rotate's confirmation before its request, each pointing at the bridge's own machine or an SSH tunnel, and the upload page says its chunks are checked for length only, no SubtleCrypto running there; the page knows its socket from its data (`pageSocket`), never from `isSecureContext`** (the posture's rules are `auth-tls.md`'s). `TestThePairingDialogWarnsBeforeGenerateOnTheLANSocket`, `TestARotationOnTheLANSocketWarnsBeforeItIsSent` and `TestTheUploadPageSaysChunksAreCheckedForLengthOnly` pin it.
 - **The cert tiles grade and PHRASE from one number.** #952 gave all three
   one ladder (`certExpiryBadge`, which returns `expired` for `left <= 0`)
   and left each tile's wording alone — wording written against the

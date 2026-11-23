@@ -137,6 +137,10 @@ type priorInstallFile struct {
 	// moves it off (warnKeptEndpointsOnAMovedPort).
 	ListenAddress string `yaml:"listenAddress"`
 	AdminAddress  string `yaml:"adminAddress,omitempty"`
+	// AdminLANAddress is kept where the addresses are kept, while it still
+	// passes its check against the admin address the rewrite writes
+	// (lanAddressARewriteKeeps, backlog B989).
+	AdminLANAddress string `yaml:"adminLANAddress,omitempty"`
 	// Enrich is the enrich block's two switches, which a rewrite keeps where
 	// the file writes them off, and its two base URLs, which it keeps where
 	// Load takes them (priorEnrich).
