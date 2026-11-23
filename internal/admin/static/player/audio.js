@@ -307,18 +307,24 @@ function onError() {
     default: { // 2 network / 3 decode — retry once, then surface.
       if (!track._retried) {
         track._retried = true;
-        // A retry is a play of the start that failed: it asks that start's
-        // permit again (V4).
-        if (startPermit && !startPermit()) {
+        // The reload pauses the element, so whether the retry plays is what
+        // this browser meant before it (S2, Q8): a take made stopped, or a
+        // queue restored at load, plays nothing; playback goes on as a
+        // continuation, its start's permit asked again (V4, Q1).
+        const wanted = intent;
+        const busted = state.el.src + (state.el.src.includes("?") ? "&" : "?") + "_r=" + Date.now();
+        state.el.src = busted;
+        state.el.load();
+        if (!wanted) {
           state.playing = false;
           state.loading = false;
           emit();
           return;
         }
-        const busted = state.el.src + (state.el.src.includes("?") ? "&" : "?") + "_r=" + Date.now();
-        state.el.src = busted;
-        state.el.load();
-        void state.el.play().catch(() => {});
+        continueStart((permit) => {
+          startPermit = permit;
+          void state.el.play().catch(() => {});
+        });
         return;
       }
       state.error = `Playback failed for "${track.title || track.path}".`;

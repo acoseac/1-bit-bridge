@@ -438,6 +438,16 @@ func TestAContinuationBehindABarrierStopsForTheBrowsersOwnPause(t *testing.T) { 
 // plays on the barrier's done.
 func TestAContinuationNeverDisplacesAStartTheReaderAsked(t *testing.T) { barScenario(t, 3) }
 
+// TestARetryPlaysOnlyWhatThisBrowserMeantToPlay pins S2, Q6 and Q8: the
+// retry after a network error reloads the source, which pauses the element,
+// and plays nothing for a take made stopped, plays again what played, and
+// plays nothing where a state since shows the bridge playing.
+func TestARetryPlaysOnlyWhatThisBrowserMeantToPlay(t *testing.T) { barScenario(t, 4) }
+
+// TestARestoredQueuesRetryPlaysNothing pins S2: a queue restored paused at
+// page load plays nothing when its source fails and is retried.
+func TestARestoredQueuesRetryPlaysNothing(t *testing.T) { barScenario(t, 2) }
+
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start
 // on the barrier's done, and the skip moves nothing of it.

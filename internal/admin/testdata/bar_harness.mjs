@@ -1985,6 +1985,55 @@ S.TestAContinuationBehindABarrierLeavesAReplacedQueueAlone = async () => {
     s.queue.length === 2 && s.track?.path === "Album/07.flac" && s.index === 0 && /07\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused, [s.queue.length, s.track?.path, s.index, r.el.plays]);
 };
 
+S.TestARetryPlaysOnlyWhatThisBrowserMeantToPlay = async () => {
+  // S2, Q6, Q8: the retry after a network or decode error reloads the
+  // source, which pauses the element; it plays only where this browser
+  // meant to play, and asks the start's permit again.
+  const r = await gatedPlaying();
+  // A take made stopped, as output.js makes one beside a bridge that plays
+  // again: its metadata in, then a Range fetch fails.
+  r.audio.take({ queue: [flac(4), flac(5), flac(6)], index: 0, position: 30, playing: true }, false);
+  r.el.metadata(200);
+  await settle();
+  let plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  check("a take made stopped meets a network error: the retry plays nothing", r.el.paused && r.el.plays.length === plays && !r.audio.snapshot().playing, [r.el.paused, r.el.plays.slice(plays)]);
+  // Playing, through the gate: the retry plays again, under its permit.
+  r.audio.advance(1);
+  await settle();
+  r.el.metadata(200);
+  plays = r.el.plays.length;
+  check("Next plays the next track, through a barrier", !r.el.paused && r.audio.snapshot().track?.path === "Album/05.flac", [r.el.paused, r.audio.snapshot().track?.path]);
+  r.el.fail(2);
+  await settle();
+  check("a playing track meets a network error: the retry reloads it, paused by the reload, and plays it again",
+    !r.el.paused && r.el.plays.length === plays + 1 && /05\.flac.*_r=/.test(r.el.plays.at(-1) || ""), [r.el.paused, r.el.plays.slice(plays)]);
+  // Playing, then a state that shows the bridge playing: the permit refuses.
+  r.audio.advance(1);
+  await settle();
+  r.el.metadata(200);
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  check("the bridge playing since: the retry plays nothing, said", r.el.paused && r.el.plays.length === plays && r.out.view().line === WORDS.bridgePlaying,
+    [r.el.paused, r.el.plays.slice(plays), r.out.view().line]);
+};
+
+S.TestARestoredQueuesRetryPlaysNothing = async () => {
+  // S2: a queue restored at page load, paused, whose metadata is in when a
+  // Range fetch fails.
+  const r = await pageRig({ gate: true, saved: { queue: [flac(1), flac(2)], index: 0, at: 40, shuffle: false, repeat: "off" }, latest: playing({ revision: 3 }) });
+  r.el.metadata(200);
+  await settle();
+  check("restored paused at its position", r.el.paused && r.el.currentTime === 40 && r.el.plays.length === 0, [r.el.paused, r.el.currentTime]);
+  r.el.fail(2);
+  await settle();
+  check("its retry plays nothing", r.el.paused && r.el.plays.length === 0 && !r.audio.snapshot().playing, [r.el.paused, r.el.plays]);
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });

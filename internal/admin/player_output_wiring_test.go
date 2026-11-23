@@ -125,7 +125,7 @@ var audioPlaySites = map[string]string{
 	"loadAt":     "a start's play deferred to the track's metadata, which asks the start's permit again (V4)",
 	"playNow":    "toggle's play and start's, each run by the gate or by the barrier's done, and a removed row's successor's, run by continueStart",
 	"advanceNow": "repeat-one's replay, run by a continuation continueStart let go on",
-	"onError":    "the retry after a network or decode error, which asks the start's permit again",
+	"onError":    "the retry after a network or decode error, run by a continuation continueStart lets go on, only of what this browser meant to play (S2)",
 }
 
 // The exported functions of audio.js that reach a play of the element, by
@@ -149,6 +149,7 @@ var audioContinuations = map[string]string{
 	"init":              "a track's end, the element's ended",
 	"handleSourceError": "the skip past a source that cannot play",
 	"removeAt":          "a removed row's successor",
+	"onError":           "the retry after a network or decode error",
 }
 
 // jsTopFunctions is every top-level function of src by name: its body (to
