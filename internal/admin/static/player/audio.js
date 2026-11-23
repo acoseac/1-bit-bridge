@@ -391,11 +391,12 @@ async function handleSourceError(track, src) {
   // different object at the same position.
   setTimeout(() => {
     // Both conditions: the generation catches a different track, a
-    // replaced queue and a re-load of this same one, while the intent
-    // catches a plain pause, which changes no track at all. The skip starts
-    // the element anew, so it asks the gate as a start does, and both are
-    // asked again once the gate lets it go on (S1, Q3).
-    if (intent && at === playbackGen) {
+    // replaced queue and a re-load of this same one, while `playing` and the
+    // intent catch a plain pause, which changes no track at all (the intent
+    // the reader's before its pause event lands). The skip starts the
+    // element anew, so it asks the gate as a start does, and the generation
+    // and the intent are asked again once the gate lets it go on (S1, Q3).
+    if (state.playing && intent && at === playbackGen) {
       continueStart((permit) => advanceNow(1, { auto: true, permit }), { fresh: true });
     }
   }, 1200);
