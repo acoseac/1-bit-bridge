@@ -394,3 +394,41 @@ func TestTheMenuAndTheQueueCloseOnEscapeAndOutsideClicks(t *testing.T) { barScen
 // pick disabled while it holds the focus gives the focus to this browser's
 // pick, inside the open menu, never to the page.
 func TestAPickThatGoesDisabledHandsItsFocusToTheOtherPick(t *testing.T) { barScenario(t, 2) }
+
+// Round 3 (B634 PR 2): no start outside the gate, no latch that outlives its
+// barrier.
+
+// TestASkipPastATrackThatCannotPlayAsksTheGate pins S1 and Q5: the skip past
+// a source that played and then could not, its probe done, starts the next
+// track only as a start does, on a barrier of its own beside a silent
+// bridge, and plays nothing beside a bridge that plays, saying so.
+func TestASkipPastATrackThatCannotPlayAsksTheGate(t *testing.T) { barScenario(t, 4) }
+
+// TestATracksEndAsksItsStartsPermitAgain pins S1: the next track at a
+// track's end plays at once on its start's permit, and nothing where a state
+// since shows the bridge playing, the bar saying so.
+func TestATracksEndAsksItsStartsPermitAgain(t *testing.T) { barScenario(t, 3) }
+
+// TestARepeatOneReplayAsksTheGate pins S1 and Q5: a repeat-one replay starts
+// the element its end paused only as a start does, on a barrier of its own,
+// and plays nothing beside a bridge that plays.
+func TestARepeatOneReplayAsksTheGate(t *testing.T) { barScenario(t, 4) }
+
+// TestARemovedRowsSuccessorAsksTheGate pins S1 and Q5: the row that plays
+// removed, its successor plays on a barrier of its own, and beside a bridge
+// that plays it is loaded and stays paused, the bar saying so.
+func TestARemovedRowsSuccessorAsksTheGate(t *testing.T) { barScenario(t, 3) }
+
+// TestPlaybackLetGoWithNoPlayerOfferedAsksTheGateToGoOn pins Q1: playback a
+// start let go on where no player was offered holds no permit, so once a
+// player is offered and plays, its next track plays nothing.
+func TestPlaybackLetGoWithNoPlayerOfferedAsksTheGateToGoOn(t *testing.T) { barScenario(t, 4) }
+
+// TestAContinuationBehindABarrierStopsForAPause pins Q3: a skip waiting on
+// its barrier, the reader's Pause before the answer, neither plays nor moves.
+func TestAContinuationBehindABarrierStopsForAPause(t *testing.T) { barScenario(t, 2) }
+
+// TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
+// the reader replaced while a skip waits on its barrier plays from its start
+// on the barrier's done, and the skip moves nothing of it.
+func TestAContinuationBehindABarrierLeavesAReplacedQueueAlone(t *testing.T) { barScenario(t, 3) }

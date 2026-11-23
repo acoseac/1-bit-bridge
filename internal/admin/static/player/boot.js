@@ -45,10 +45,11 @@ function boot() {
   audio.init();
   // The bar's output (B634) before the bar, which reads it as it mounts; and
   // every start of this browser asks it first, before anything can start
-  // (round 2, R1).
+  // (round 2, R1), and so does what playback does by itself (round 3, S1).
   const output = createOutput(browserOutputEnv());
   installOutput(output);
   audio.setStartGate(output.gateStart);
+  audio.setContinueGate(output.gateContinue);
   mountBar();
   wireGlobal();
   wireOutput();

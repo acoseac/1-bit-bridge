@@ -15,6 +15,10 @@
 //   browser starts on the `done` the barrier answers to this tab NOW, and on
 //   nothing else: never on a refusal's publication, a Pause's answer or a
 //   record read back, which is history (§3.2, G1, G8).
+// - What playback does by itself goes on only through gateContinue (round 3,
+//   S1): the next track at a track's end and the retry after an error on
+//   their start's permit, asked again; a skip past a track that cannot play,
+//   a repeat-one replay and a removed row's successor as a start is asked.
 // - Every command is an operation named by this document's tab, its count and
 //   the epoch it was sent in, stored before its request goes. It is resolved
 //   by its record (the answer, the stream's last eight, or a read back), never
@@ -947,18 +951,40 @@ export function createOutput(env) {
   // sound. Before GET now or a frame has said whether a player is offered,
   // and with one offered before its epoch is known, the start waits; a
   // bridge that sounds refuses it, with its line. A pause never comes here.
-  function gateStart(run) {
+  // A continuation (round 3, S1) is asked as a start is, and never displaces
+  // a start the reader asked for, which supersedes it.
+  function gateStart(run, { continuation = false } = {}) {
     if (offered === false) {
       run(null);
       return;
     }
     if (offered !== true || !epoch || !state) {
-      waiting = { run, at: env.perf() };
+      if (continuation && waiting && !waiting.continuation) return;
+      waiting = { run, at: env.perf(), continuation };
       line = WORDS.startWaits;
       emit();
       return;
     }
-    decideStart(run);
+    decideStart(run, continuation);
+  }
+
+  // gateContinue is how playback this browser was let start goes on by
+  // itself (round 3, S1, Q1, Q7: audio.js's continueStart): the permit its
+  // start was given is asked again, and the bar says why where it no longer
+  // holds; with no permit to ask (a start let go on where no player was
+  // offered, or a continuation that starts the element anew) it is asked as
+  // a start is.
+  function gateContinue(permit, run) {
+    if (typeof permit === "function") {
+      if (permit()) {
+        run(permit);
+        return;
+      }
+      if (output === "browser" && bridgeSounds(state)) line = WORDS.bridgePlaying;
+      emit();
+      return;
+    }
+    gateStart(run, { continuation: true });
   }
 
   function flushWaiting() {
@@ -968,10 +994,10 @@ export function createOutput(env) {
     waiting = null;
     if (line === WORDS.startWaits) line = "";
     if (offered === false) w.run(null);
-    else decideStart(w.run);
+    else decideStart(w.run, w.continuation);
   }
 
-  function decideStart(run) {
+  function decideStart(run, continuation = false) {
     if (output !== "browser") return;
     if (bridgeSounds(state)) {
       line = WORDS.bridgePlaying;
@@ -979,12 +1005,15 @@ export function createOutput(env) {
       return;
     }
     // One barrier at a time: a start asked while one is out replaces the
-    // start it runs.
+    // start it runs; a continuation replaces only another continuation.
     if (startPending) {
-      startPending.run = run;
+      if (!continuation || startPending.continuation) {
+        startPending.run = run;
+        startPending.continuation = continuation;
+      }
       return;
     }
-    const pending = { run };
+    const pending = { run, continuation };
     startPending = pending;
     void barrier((permit) => {
       if (startPending === pending) startPending = null;
@@ -1387,6 +1416,7 @@ export function createOutput(env) {
     resume,
     position,
     gateStart,
+    gateContinue,
     identity: () => ({ tab, seq }),
     pending: () => [...inherited.keys(), ...ops.keys()],
   };

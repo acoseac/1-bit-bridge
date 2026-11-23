@@ -1772,6 +1772,186 @@ S.TestAPickThatGoesDisabledHandsItsFocusToTheOtherPick = async () => {
   check("its pick disabled, the focus on the other pick, inside the menu", bridgePick.disabled && document.activeElement === browserPick, [bridgePick.disabled, document.activeElement?.className]);
 };
 
+// ---- Round 3: no start outside the gate, no latch that outlives its barrier ----
+
+// gatedPlaying is a page with the gate wired as boot.js wires it, the bridge
+// silent, every barrier answering done at a revision of its own (r.hold
+// holds the next one until the case lets it go), and this browser playing
+// tracks from a row's start through the gate, its metadata in.
+async function gatedPlaying(o = {}) {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }), ...o });
+  let n = 0;
+  r.hold = null;
+  r.s.on("POST", ROUTES.switchOut, async (e) => {
+    n += 1;
+    const rev = 3 + n;
+    const g = r.hold;
+    r.hold = null;
+    if (g) await g.p;
+    return answer(recOf(e, { kind: "switch-out", silence: rev }), pub({ revision: rev, silent: true }));
+  });
+  r.audio.playQueue(o.tracks || [flac(1), flac(2), flac(3)], 0);
+  await settle();
+  r.el.metadata(200);
+  await settle();
+  return r;
+}
+
+S.TestASkipPastATrackThatCannotPlayAsksTheGate = async () => {
+  // S1, Q5: a source that played, then cannot, its probe done.
+  const t = longTimers();
+  globalThis.fetch = async () => ({ ok: true, status: 200 });
+  const r = await gatedPlaying();
+  r.el.fail(4);
+  await settle();
+  check("a source that cannot play: its probe done, the skip scheduled", t.count(1200) === 1, t.count(1200));
+  t.fire(1200);
+  await settle();
+  check("beside a silent bridge the skip goes through a barrier of its own, and plays the next track on its done",
+    r.s.posts(ROUTES.switchOut).length === 2 && !r.el.paused && r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || ""),
+    [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.audio.snapshot().index, r.el.plays]);
+  r.el.metadata(200);
+  r.el.fail(4);
+  await settle();
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  const plays = r.el.plays.length;
+  t.fire(1200);
+  await settle();
+  check("the bridge playing since: the skip plays nothing and moves nothing",
+    r.el.plays.length === plays && r.audio.snapshot().index === 1 && r.s.posts(ROUTES.switchOut).length === 2,
+    [r.el.plays.slice(plays), r.audio.snapshot().index, r.s.posts(ROUTES.switchOut).length]);
+  check("and the bar says so, this browser stopped", r.out.view().line === WORDS.bridgePlaying && !r.audio.snapshot().playing, [r.out.view().line, r.audio.snapshot().playing]);
+};
+
+S.TestATracksEndAsksItsStartsPermitAgain = async () => {
+  // S1: the next track at a track's end goes on its start's permit, asked again.
+  const r = await gatedPlaying();
+  const posts = r.s.posts().length;
+  r.el.end();
+  await settle();
+  check("a track's end with nothing newer: the next track plays at once on its start's permit, no barrier",
+    !r.el.paused && r.audio.snapshot().index === 1 && r.s.posts().length === posts, [r.el.paused, r.audio.snapshot().index, r.s.posts().length - posts]);
+  r.el.metadata(200);
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.end();
+  await settle();
+  check("a track's end beside the bridge playing since: the next track plays nothing",
+    r.el.paused && r.el.plays.length === plays && r.audio.snapshot().index === 1 && r.s.posts().length === posts, [r.el.paused, r.el.plays.slice(plays), r.audio.snapshot().index]);
+  check("and the bar says so, this browser stopped", r.out.view().line === WORDS.bridgePlaying && !r.audio.snapshot().playing, [r.out.view().line, r.audio.snapshot().playing]);
+};
+
+S.TestARepeatOneReplayAsksTheGate = async () => {
+  // S1, Q5: the replay starts the element its end paused, as a start does.
+  const r = await gatedPlaying();
+  r.audio.cycleRepeat();
+  r.audio.cycleRepeat();
+  check("repeat one", r.audio.snapshot().repeat === "one", r.audio.snapshot().repeat);
+  r.el.end();
+  await settle();
+  check("its end beside a silent bridge: the replay goes through a barrier of its own and plays on its done, from the start",
+    r.s.posts(ROUTES.switchOut).length === 2 && !r.el.paused && r.el.currentTime === 0 && r.audio.snapshot().index === 0, [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.el.currentTime]);
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.end();
+  await settle();
+  check("its end beside the bridge playing since: the replay plays nothing", r.el.paused && r.el.plays.length === plays && r.s.posts(ROUTES.switchOut).length === 2, [r.el.paused, r.el.plays.slice(plays)]);
+  check("and the bar says so", r.out.view().line === WORDS.bridgePlaying, r.out.view().line);
+};
+
+S.TestARemovedRowsSuccessorAsksTheGate = async () => {
+  // S1, Q5: the row that plays removed, its successor starts as a start does.
+  const r = await gatedPlaying();
+  r.audio.removeAt(0);
+  await settle();
+  check("the playing row removed beside a silent bridge: its successor plays on a barrier of its own",
+    r.s.posts(ROUTES.switchOut).length === 2 && !r.el.paused && r.audio.snapshot().track?.path === "Album/02.flac" && /02\.flac/.test(r.el.plays.at(-1) || ""),
+    [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.audio.snapshot().track?.path, r.el.plays]);
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  const plays = r.el.plays.length;
+  r.audio.removeAt(0);
+  await settle();
+  check("the playing row removed beside the bridge playing since: its successor is loaded and stays paused",
+    r.el.paused && r.el.plays.length === plays && r.audio.snapshot().track?.path === "Album/03.flac" && /03\.flac/.test(r.el.src),
+    [r.el.paused, r.el.plays.slice(plays), r.audio.snapshot().track?.path, r.el.src]);
+  check("and the bar says so, this browser stopped", r.out.view().line === WORDS.bridgePlaying && !r.audio.snapshot().playing, [r.out.view().line, r.audio.snapshot().playing]);
+};
+
+S.TestPlaybackLetGoWithNoPlayerOfferedAsksTheGateToGoOn = async () => {
+  // Q1: a start let go on where no player was offered holds no permit, and
+  // a null permit is no pass: what follows asks the gate.
+  const r = await pageRig({ gate: true, noFrame: true });
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_offered", message: "no player" } }));
+  await r.out.sampleNow();
+  await settle();
+  r.audio.playQueue([flac(1), flac(2), flac(3)], 0);
+  await settle();
+  r.el.metadata(200);
+  check("no player offered: the start goes on at once, nothing sent", !r.el.paused && r.s.posts().length === 0, [r.el.paused, r.s.posts()]);
+  r.el.end();
+  await settle();
+  check("and so does its end", !r.el.paused && r.audio.snapshot().index === 1 && r.s.posts().length === 0, [r.el.paused, r.audio.snapshot().index, r.s.posts()]);
+  r.el.metadata(200);
+  // The bridge's player comes up, playing for another controller: a new
+  // epoch's first frame.
+  r.out.streamOpen(1);
+  r.frame(playing({ epoch: E2, revision: 1 }));
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.end();
+  await settle();
+  check("a player offered since, playing: the next track plays nothing",
+    r.el.paused && r.el.plays.length === plays && r.audio.snapshot().index === 1 && r.s.posts().length === 0, [r.el.paused, r.el.plays.slice(plays), r.audio.snapshot().index]);
+  check("and the bar says so", r.out.view().line === WORDS.bridgePlaying, r.out.view().line);
+};
+
+// skipWaiting is gatedPlaying's first track failing, its skip fired and
+// waiting on a barrier the case holds.
+async function skipWaiting() {
+  const t = longTimers();
+  globalThis.fetch = async () => ({ ok: true, status: 200 });
+  const r = await gatedPlaying();
+  r.el.fail(4);
+  await settle();
+  const held = gate();
+  r.hold = held;
+  t.fire(1200);
+  await settle();
+  check("the skip waits on a barrier of its own", r.s.posts(ROUTES.switchOut).length === 2 && r.audio.snapshot().index === 0, [r.s.posts(ROUTES.switchOut).length, r.audio.snapshot().index]);
+  return { r, held };
+}
+
+S.TestAContinuationBehindABarrierStopsForAPause = async () => {
+  // Q3: the continuation asks again, when it runs, whether this browser
+  // still means to play what it continues.
+  const { r, held } = await skipWaiting();
+  const plays = r.el.plays.length;
+  r.audio.toggle();
+  await settle();
+  held.open();
+  await settle();
+  check("paused before the barrier's answer: the skip neither plays nor moves",
+    r.el.plays.length === plays && r.audio.snapshot().index === 0 && !r.audio.snapshot().playing, [r.el.plays.slice(plays), r.audio.snapshot().index, r.audio.snapshot().playing]);
+};
+
+S.TestAContinuationBehindABarrierLeavesAReplacedQueueAlone = async () => {
+  // Q3: a queue the reader replaced meanwhile is the start the barrier
+  // runs, and the skip moves nothing of it.
+  const { r, held } = await skipWaiting();
+  r.audio.playQueue([flac(7), flac(8)], 0);
+  await settle();
+  check("the replacement waits on the same barrier, nothing sent again", r.s.posts(ROUTES.switchOut).length === 2 && r.audio.snapshot().track?.path === "Album/01.flac", [r.s.posts(ROUTES.switchOut).length, r.audio.snapshot().track?.path]);
+  held.open();
+  await settle();
+  const s = r.audio.snapshot();
+  check("on the barrier's done the replacement plays from its start, and the skip moves nothing",
+    s.queue.length === 2 && s.track?.path === "Album/07.flac" && s.index === 0 && /07\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused, [s.queue.length, s.track?.path, s.index, r.el.plays]);
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });

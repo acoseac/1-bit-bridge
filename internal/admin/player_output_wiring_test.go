@@ -121,17 +121,17 @@ func TestEveryRowDecidesByTheOutputChosen(t *testing.T) {
 // new play anywhere else fails TestEveryStartOfThisBrowserAsksTheGate, and
 // is to be routed through the gate or added here with its reason.
 var audioPlaySites = map[string]string{
-	"load":       "a start's load, with autoplay, run by a start the gate let through or by a continuation",
+	"load":       "a start's load, with autoplay, run by a start the gate let through or by a continuation continueStart let go on",
 	"loadAt":     "a start's play deferred to the track's metadata, which asks the start's permit again (V4)",
-	"playNow":    "toggle's play and start's, each run by the gate or by the barrier's done",
-	"advanceNow": "repeat-one's replay at a track's end, a continuation",
+	"playNow":    "toggle's play and start's, each run by the gate or by the barrier's done, and a removed row's successor's, run by continueStart",
+	"advanceNow": "repeat-one's replay, run by a continuation continueStart let go on",
 	"onError":    "the retry after a network or decode error, which asks the start's permit again",
 }
 
 // The exported functions of audio.js that reach a play of the element, by
 // how: gated asks the start gate first (requestStart); afterBarrier is
 // called by output.js alone, on a barrier's done, with its permit;
-// continues keeps playing what plays.
+// continued goes on by itself only through continueStart (round 3, S1).
 var audioStarts = map[string]string{
 	"playQueue": "gated",
 	"toggle":    "gated",
@@ -139,8 +139,16 @@ var audioStarts = map[string]string{
 	"take":      "afterBarrier",
 	"resume":    "afterBarrier",
 	"start":     "afterBarrier",
-	"removeAt":  "continues",
-	"init":      "continues",
+	"removeAt":  "continued",
+	"init":      "continued",
+}
+
+// The continuations of audio.js, each by the function that makes it: what
+// playback does by itself, through continueStart alone (round 3, S1).
+var audioContinuations = map[string]string{
+	"init":              "a track's end, the element's ended",
+	"handleSourceError": "the skip past a source that cannot play",
+	"removeAt":          "a removed row's successor",
 }
 
 // jsTopFunctions is every top-level function of src by name: its body (to
@@ -250,6 +258,25 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 			}
 		}
 	}
+	// Round 3 (S1, Q1, Q3): every continuation goes on through continueStart,
+	// which asks the continuation gate with its start's permit (none for a
+	// fresh one) and asks again, when the gate lets it go on, whether the
+	// playback it continues is still the one this browser means to play; and
+	// nothing calls the old way on (advance with auto).
+	for name, why := range audioContinuations {
+		if !strings.Contains(fns[name].body, "continueStart(") {
+			t.Errorf("audio.js's %s (%s) goes on without continueStart", name, why)
+		}
+	}
+	cont := fns["continueStart"].body
+	for _, want := range []string{"const permit = fresh ? null : startPermit;", "continueGate(permit, go)", "if (gen !== playbackGen || !intent) return;"} {
+		if !strings.Contains(cont, want) {
+			t.Errorf("continueStart lacks %s", want)
+		}
+	}
+	if m := regexp.MustCompile(`[^\w$.]advance\([^()]*,`).FindString(src); m != "" {
+		t.Errorf("audio.js calls advance with an option (%s): what playback does by itself goes on through continueStart", m)
+	}
 	ms := fns["wireMediaSession"].body
 	for _, want := range []string{`set("play", () => toggle())`, `set("pause", () => toggle())`, `set("previoustrack", () => advance(-1))`, `set("nexttrack", () => advance(1))`} {
 		if !strings.Contains(ms, want) {
@@ -277,6 +304,10 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 	gateAt, mountAt := strings.Index(boot, "audio.setStartGate(output.gateStart)"), strings.Index(boot, "mountBar();")
 	if gateAt < 0 || mountAt < 0 || gateAt > mountAt {
 		t.Error("boot.js does not wire the start gate before the bar mounts")
+	}
+	contAt := strings.Index(boot, "audio.setContinueGate(output.gateContinue)")
+	if contAt < 0 || contAt > mountAt {
+		t.Error("boot.js does not wire the continuation gate before the bar mounts")
 	}
 }
 
