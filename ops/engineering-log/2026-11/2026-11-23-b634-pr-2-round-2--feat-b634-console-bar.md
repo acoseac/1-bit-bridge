@@ -108,6 +108,27 @@ after each: all red at their named cases. Two needed their case sharpened first:
   masked it. It is now shown by a hold in the latest state, which is not silent though nothing
   sounds.
 
+### The runs
+
+Each through the shared build lock, on `GOTOOLCHAIN=go1.27.3` with `GOPROXY=off`.
+
+- `make fmt vet test build-all docs-check`, one session. The first, at `db0db736`, failed in
+  `make test` at PR 1's `TestARefusalThroughThePlayWaiterIsAnEffectNotKnown`, its maintenance case:
+  "enter maintenance: generation_conflict". The case reads the engine's generation once its Start is
+  parked and enters maintenance with it, so the generation moved between the two. Round 2 changed no
+  server code or test, and round 1's two gates passed the case. Its cause is not established here,
+  and the round's budget takes no server change, so it is left for its own follow-up. The second
+  session: exit 0 in 1,955 s, 93 packages ok, the six cross-builds and docs-check with its
+  self-tests; `make fmt` rewrote nothing.
+- The release-tag vets, `make vet` for linux/arm, linux/386, windows/amd64, windows/arm64 and
+  linux/amd64: exit 0, 4 to 6 s each.
+- The source guards, run by name with `-v`: `TestNoConsoleControlDisablesItselfOutsideSetDisabled`,
+  `TestPlayerEmittedClassesAreStyled`, `TestTrackSubgridColumnsMatchTheRow`,
+  `TestAppJSHasNoCallsToDeletedHelpers`, `TestByteFormattersAgree`, `TestEveryCitedTestNameExists`
+  and `TestNoBlankKeepers` pass.
+- `scripts/qualification-version -base a79c69b2 -head HEAD`: OK.
+- No race run: the server did not change.
+
 ### Residuals
 
 - Two documents of one tab coordinate nothing beyond R8's rule; a cross-tab lock or channel is not
