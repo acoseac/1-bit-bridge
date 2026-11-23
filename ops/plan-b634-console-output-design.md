@@ -820,10 +820,21 @@ seek, a stall). Otherwise every publication carries the same anchor, its id and 
 steady playback publishes nothing (`.claude/rules/admin-console.md`, the SSE stream's bullet).
 
 The bar extrapolates from the anchor's own time, never from a frame's arrival: the position is
-`seconds + (now − (at + offset))`, `offset` being the client's clock less the server's, taken as the
-least `received − capture time` over the epoch's publications. A frame for another change (a repeat
-setting, a queue update) carries the same anchor and moves nothing; a reconnection's first frame
-carries it too, and the position goes on where it was. Round 1 extrapolated from each frame's
+`seconds + (now − (at + offset))` while the anchor advances and names the entry heard, capped at the
+track's length, `offset` being the client's clock less the server's. The offset comes from `GET now`
+alone (PR 2's brief, M1): each answer carries the server's clock as it is sent, `X-Bridge-Clock`
+(`time.RFC3339Nano`, UTC, the control's `Clock`, which stamps every capture's `at`), and `offset` is
+the least `received − X-Bridge-Clock` over the samples of the current epoch and stream connection.
+It is never `received − at`: a publication's `at` is its capture's time, and steady playback
+publishes nothing, so a tab that opens on an anchor 100 s old would take that age for clock skew and
+show the anchor's seconds for ever. The bar samples on load and at each stream connection, and shows
+the anchor's seconds, unextrapolated, until a sample lands; a sample asked under an earlier
+connection, epoch or sampling generation is dropped whole, its state and its clock (P7, P8); one
+that fails extrapolates nothing and is asked again at most every 5 s; and the samples are forgotten
+and asked again at a new epoch, a new connection, `visibilitychange` to visible, a `pageshow` from
+the back/forward cache and a jump of the page's clock past a second. A frame for another change (a
+repeat setting, a queue update) carries the same anchor and moves nothing; a reconnection's first
+frame carries it too, and the position goes on where it was. Round 1 extrapolated from each frame's
 arrival, so a repeat change during steady playback took the position back to the anchor's seconds.
 
 ### 4.5 The cases (C3, E5, G2, G3, G4, G12)
