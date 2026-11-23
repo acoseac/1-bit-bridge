@@ -184,6 +184,89 @@ export function unplayableReason(track) {
   return "May not play in this browser";
 }
 
+// ---- The bridge's player (B634) ----
+
+const DSD_RATES = { 2822400: "DSD64", 5644800: "DSD128", 11289600: "DSD256", 22579200: "DSD512" };
+
+/** "DSD128" for a DSD rate in Hz, "DSD" for one this table does not name. */
+export function dsdName(rateHz) {
+  return DSD_RATES[rateHz] || "DSD";
+}
+
+/** Why the bridge's player does not play a track: the row's bridge.reason (§6.7). */
+const BRIDGE_WHY = {
+  routed: "On another server: the bridge's player plays this bridge's own files",
+  sacd_virtual_track: "An SACD image's track: the bridge's player plays it from the image's own files",
+  unknown_container: "WavPack or Monkey's Audio: the bridge's player does not play it",
+  lossy_refused: "Lossy: the bridge's player plays lossless files",
+  not_a_container: "Not a file the bridge's player plays",
+  dsd_rate_not_played: "A DSD rate the bridge's DAC does not take",
+};
+
+export function bridgeWhy(reason) {
+  return BRIDGE_WHY[reason] || (reason ? `Not playable on the bridge's player (${reason})` : "Not playable on the bridge's player");
+}
+
+/**
+ * The chip a row carries for the bridge's player: its DSD way ("DSD64,
+ * native", "DSD128, DoP", "DSD256, converted to PCM": converted is never
+ * called bit-exact), nothing for PCM it plays, or why it does not.
+ */
+export function bridgeWayChip(track) {
+  const b = track?.bridge;
+  if (!b) return "";
+  switch (b.way) {
+    case "native": return `${dsdName(track.rateHz)}, native`;
+    case "dop": return `${dsdName(track.rateHz)}, DoP`;
+    case "converted": return `${dsdName(track.rateHz)}, converted to PCM`;
+    case "pcm": return "";
+  }
+  return bridgeWhy(b.reason);
+}
+
+/**
+ * The one decision of a row's playability for the chosen output (§7.6):
+ * the browser's (its play field, as it always was) or the bridge's player's
+ * (its bridge field, which the catalog carries while the player runs). It
+ * answers whether the row plays, and the chip it carries when it does not,
+ * or the way it plays on the bridge.
+ */
+export function playFor(track, output) {
+  if (output === "bridge") {
+    const b = track?.bridge;
+    if (!b) return { playable: false, chip: "The bridge's player has not said what it plays", why: true };
+    if (b.way === "none") return { playable: false, chip: bridgeWhy(b.reason), why: true };
+    return { playable: true, chip: bridgeWayChip(track), why: false };
+  }
+  const playable = !track?.play || track.play.kind !== "none";
+  return { playable, chip: playable ? "" : unplayableReason(track), why: !playable };
+}
+
+/**
+ * The bar's chip for what the bridge's DAC receives (§4.3): the codec and
+ * the PCM it is, or the DSD rate and its way. Converted DSD says so, and is
+ * never called bit-exact.
+ */
+export function signalChip(track, signal) {
+  if (!track) return "";
+  // The backend names native DSD's transport by no word at all ("").
+  const kind = signal?.transport || "";
+  const rate = track.rateHz;
+  const dsd = track.codec === "DSD" || track.bits === 1;
+  if (dsd || kind === "dop" || kind === "converted") {
+    const name = dsdName(rate);
+    if (signal && (kind === "" || kind === "native")) return `${name} native`;
+    if (kind === "dop") return `${name} DoP`;
+    if (kind === "converted") {
+      const khz = signal.rateHz ? (signal.rateHz / 1000).toFixed(signal.rateHz % 1000 ? 1 : 0) : "";
+      return khz ? `${name} converted to PCM ${khz}/${signal.validBits || ""}`.replace(/\/$/, "") : `${name} converted to PCM`;
+    }
+    return name;
+  }
+  const chip = formatChip({ codec: track.codec, rateHz: rate, bits: track.bits });
+  return track.channels > 2 ? `${chip} · ${track.channels} ch` : chip;
+}
+
 /**
  * "3d ago" for an RFC3339 stamp, or "" for a missing / unparseable one.
  *

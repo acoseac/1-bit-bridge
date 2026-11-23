@@ -12,6 +12,7 @@
 // of opening a second one.
 
 import * as audio from "./audio.js";
+import { createOutput, installOutput, currentOutput, listen } from "./output.js";
 import { mount as mountBar } from "./nowplaying.js";
 import { el, clear, announce } from "./ui.js";
 import { wireVariantRefresh, clearVariantRefresh } from "./variants.js";
@@ -42,8 +43,11 @@ const gen = () => generation;
 
 function boot() {
   audio.init();
+  // The bar's output (B634) before the bar, which reads it as it mounts.
+  installOutput(createOutput(browserOutputEnv()));
   mountBar();
   wireGlobal();
+  wireOutput();
 
   // Expose the shell-mount + route entry points so the admin boost router
   // (app.js) can re-mount the player after it swaps the shell back into
@@ -53,6 +57,41 @@ function boot() {
   window.__player = { isPlayerPath, mountShell, route };
 
   if (document.getElementById("player-root")) mountShell();
+}
+
+// browserOutputEnv is what the bar's output runs over in a page: the
+// browser's fetch, session storage and clocks, and audio.js's halves of the
+// switch between the two outputs.
+function browserOutputEnv() {
+  return {
+    fetch: (url, init) => fetch(url, init),
+    storage: sessionStorage,
+    random: (b) => crypto.getRandomValues(b),
+    now: () => Date.now(),
+    perf: () => performance.now(),
+    browser: {
+      handover: audio.handover,
+      hasQueue: audio.hasQueue,
+      suspend: audio.suspend,
+      resume: audio.resume,
+      take: audio.take,
+      start: audio.start,
+      mediaSession: audio.setMediaSession,
+    },
+  };
+}
+
+// wireOutput hands the output what reaches the page for it: app.js's
+// player frames and its stream's lifecycle (a connection's serial at each
+// open, its errors), a page shown again (its clock's samples taken again),
+// and redraws the route in place when the output picked changes, its rows
+// following the output (§7.6). Once, like wireGlobal.
+function wireOutput() {
+  const o = currentOutput();
+  listen(o, { win: window, doc: document, onOutput: () => route() });
+  // GET now on load: the clock's first sample, and whether this box offers
+  // its player at all (a box that does not answers so at once: K1).
+  o.sampleNow();
 }
 
 // wireGlobal registers the listeners that must live for the whole session.

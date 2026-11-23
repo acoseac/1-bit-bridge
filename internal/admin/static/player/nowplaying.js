@@ -17,16 +17,38 @@
 // render as COLOUR emoji, so `color: var(--accent)` never reached them
 // and the active state was invisible — the reported "repeat looks the
 // same whether it is on or off" was that, not a missing rule.
+//
+// The bar plays to one of two outputs (B634): this browser, or the
+// bridge's own player, picked with the output button in its right zone.
+// With the bridge's player chosen the bar shows the engine's state, as
+// output.js orders it, and enables only the commands the engine takes now;
+// shuffle, repeat-one, volume and mute are disabled with their words, Stop
+// is shown, and a Queue button opens the engine's queue. On a box that
+// offers its player the bar stays, as an empty strip, with nothing chosen,
+// so the bridge's player can be picked before any track is (§7.1).
 
-import { el, clear, link } from "./ui.js";
-import { duration, formatChip } from "./format.js";
+import { el, clear, link, setDisabled } from "./ui.js";
+import { duration, formatChip, signalChip } from "./format.js";
 import * as audio from "./audio.js";
+import { currentOutput, PHASE, WORDS, PROMISE, ROUTES, whyWord, holdWord } from "./output.js";
 
 let bar = null;
 let refs = {};
 
 /** Human name for each repeat mode, used as the button's accessible name. */
 const REPEAT_LABEL = { off: "Repeat off", all: "Repeat all", one: "Repeat this track" };
+
+/** The bridge's player repeats the whole queue or nothing (§7.5). */
+const BRIDGE_REPEAT_LABEL = { off: "Repeat off", all: "Repeat all" };
+
+/** The output the bar drives now. */
+function out() {
+  return currentOutput();
+}
+
+function bridgeChosen(o) {
+  return !!o && o.output === "bridge" && !o.notOffered;
+}
 
 export function mount() {
   if (bar) return;
@@ -42,9 +64,13 @@ export function mount() {
   refs.art = el("div", { class: "np-art" });
   refs.title = el("span", { class: "np-title" });
   refs.sub = el("span", { class: "np-sub" });
-  refs.prev = iconButton("Previous", "prev", () => audio.advance(-1));
-  refs.play = iconButton("Play", "play", () => audio.toggle(), "play");
-  refs.next = iconButton("Next", "next", () => audio.advance(1));
+  refs.prev = iconButton("Previous", "prev", () => onPrevious());
+  refs.play = iconButton("Play", "play", () => onPlay(), "play");
+  refs.next = iconButton("Next", "next", () => onNext());
+  // Stop is the bridge's alone: it lets the DAC go at once, where a pause
+  // lets it go after 30 s, and it ends the DSD check (§7.5).
+  refs.stop = iconButton("Stop", "stop", () => out()?.command("stop"));
+  refs.stop.hidden = true;
   refs.elapsed = el("span", { class: "np-time", text: "0:00" });
   refs.total = el("span", { class: "np-time np-time-total", text: "0:00" });
 
@@ -58,20 +84,29 @@ export function mount() {
   let scrubbing = false;
   refs.seek.addEventListener("input", () => { scrubbing = true; setProgress(refs.seek.value / 1000); });
   refs.seek.addEventListener("change", () => {
-    const s = audio.snapshot();
-    if (s.duration > 0) audio.seek((refs.seek.value / 1000) * s.duration);
+    const o = out()?.view();
+    if (bridgeChosen(o)) {
+      const d = o.state?.track?.duration || 0;
+      if (d > 0) out().command("seek", { seconds: (refs.seek.value / 1000) * d });
+    } else {
+      const s = audio.snapshot();
+      if (s.duration > 0) audio.seek((refs.seek.value / 1000) * s.duration);
+    }
     scrubbing = false;
   });
   refs.isScrubbing = () => scrubbing;
 
-  refs.shuffle = iconButton("Shuffle", "shuffle", () => audio.setShuffle(!audio.snapshot().shuffle), "toggle");
-  refs.repeat = iconButton("Repeat off", "repeat", () => audio.cycleRepeat(), "toggle");
+  refs.shuffle = iconButton("Shuffle", "shuffle", () => {
+    if (!bridgeChosen(out()?.view())) audio.setShuffle(!audio.snapshot().shuffle);
+  }, "toggle");
+  refs.repeat = iconButton("Repeat off", "repeat", () => onRepeat(), "toggle");
   refs.chip = el("span", { class: "np-chip" });
   // Polite, not assertive: this line carries "loading", "playing a
   // converted copy" and the playback errors, none of which should
   // interrupt what a screen reader is already saying. It is the only
   // place any of those were ever stated, and until now none of them
-  // were announced at all.
+  // were announced at all. The bridge's lines (a hold, the DAC away, an
+  // operation's outcome) are said here too.
   refs.notice = el("span", { class: "np-notice", attrs: { "aria-live": "polite" } });
 
   // Volume is desktop-only: iOS Safari ignores audio.volume outright,
@@ -106,22 +141,222 @@ export function mount() {
   refs.lastVolume = 1;
   setVolumeFill(1);
 
+  // The engine's queue, while the bridge's player is chosen (§7.5).
+  refs.queueBtn = iconButton("Queue", "queue", () => toggleQueue(), "small");
+  refs.queueBtn.hidden = true;
+  refs.queueBtn.setAttribute("aria-expanded", "false");
+  refs.panel = el("div", { class: "np-queue", attrs: { id: "np-queue", role: "region", "aria-label": "The bridge's queue" } });
+  refs.panel.hidden = true;
+  refs.queueBtn.setAttribute("aria-controls", "np-queue");
+
+  buildOutputMenu();
+
   bar.append(
     refs.rail,
     el("div", { class: "np-now" },
       refs.art,
       el("div", { class: "np-meta" }, refs.title, refs.sub, refs.notice)),
     el("div", { class: "np-center" },
-      el("div", { class: "np-transport" }, refs.shuffle, refs.prev, refs.play, refs.next, refs.repeat),
+      el("div", { class: "np-transport" }, refs.shuffle, refs.prev, refs.play, refs.next, refs.stop, refs.repeat),
       el("div", { class: "np-scrub" }, refs.elapsed, refs.seek, refs.total)),
-    el("div", { class: "np-extra" }, refs.chip, refs.mute, refs.volume),
+    el("div", { class: "np-extra" }, refs.chip, refs.queueBtn, refs.output, refs.mute, refs.volume),
   );
+  // The menu and the queue panel are the bar's siblings: the bar clips its
+  // children.
   document.body.appendChild(bar);
+  document.body.appendChild(refs.menu);
+  document.body.appendChild(refs.panel);
   document.body.classList.add("has-player-bar");
 
-  audio.subscribe(apply);
+  audio.subscribe(() => render());
+  out()?.subscribe(() => render());
   setInterval(tick, 500);
 }
+
+// ---- The output button and its menu (§7.1) ----
+
+function buildOutputMenu() {
+  refs.output = iconButton("Output: this browser", "output", () => toggleMenu(), "small");
+  refs.output.setAttribute("aria-haspopup", "true");
+  refs.output.setAttribute("aria-expanded", "false");
+  refs.output.setAttribute("aria-controls", "np-output-menu");
+  refs.menu = el("div", { class: "np-menu", attrs: { id: "np-output-menu", role: "group", "aria-label": "Output" } });
+  refs.menu.hidden = true;
+  refs.pickBrowser = el("button", {
+    class: "np-pick", text: "This browser",
+    attrs: { type: "button", "aria-pressed": "true" },
+    on: { click: () => pickOutput("browser") },
+  });
+  refs.pickBridgeName = el("span", { class: "np-pick-name", text: "The bridge's player" });
+  refs.pickBridgeLine = el("span", { class: "np-pick-line" });
+  refs.pickBridge = el("button", {
+    class: "np-pick",
+    attrs: { type: "button", "aria-pressed": "false" },
+    on: { click: () => pickOutput("bridge") },
+  }, refs.pickBridgeName, refs.pickBridgeLine);
+  refs.menuHelp = el("p", { class: "np-menu-help", text: PROMISE });
+  refs.menu.append(refs.pickBrowser, refs.pickBridge, refs.menuHelp);
+  refs.menu.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closeMenu();
+      refs.output.focus();
+    }
+  });
+}
+
+function toggleMenu() {
+  if (refs.menu.hidden) openMenu();
+  else closeMenu();
+}
+
+function openMenu() {
+  refs.menu.hidden = false;
+  refs.output.setAttribute("aria-expanded", "true");
+  readDACName();
+  render();
+  (refs.pickBridge.disabled ? refs.pickBrowser : refs.pickBridge).focus();
+}
+
+function closeMenu() {
+  refs.menu.hidden = true;
+  refs.output.setAttribute("aria-expanded", "false");
+}
+
+// The DAC's name, from the Player page's status, read when the menu opens.
+let dacName = "";
+async function readDACName() {
+  try {
+    const r = await fetch(ROUTES.status, { headers: { accept: "application/json" } });
+    if (!r.ok) return;
+    const s = await r.json();
+    dacName = s?.running?.dac?.name || "";
+    render();
+  } catch { /* the menu says the player's state without the name */ }
+}
+
+function pickOutput(which) {
+  closeMenu();
+  out()?.pick(which);
+  refs.output.focus();
+}
+
+function paintOutputButton(o) {
+  const bridge = bridgeChosen(o);
+  refs.output.hidden = !o || !o.offered;
+  refs.output.setAttribute("aria-label", bridge ? "Output: the bridge's player" : "Output: this browser");
+  refs.output.title = bridge ? "Output: the bridge's player" : "Output: this browser";
+  refs.output.classList.toggle("np-btn-active", bridge);
+  refs.pickBrowser.setAttribute("aria-pressed", String(!bridge));
+  refs.pickBridge.setAttribute("aria-pressed", String(bridge));
+  refs.pickBridgeName.textContent = dacName ? `The bridge's player: ${dacName}` : "The bridge's player";
+  refs.pickBridgeLine.textContent = bridgeLine(o);
+  setDisabled(refs.pickBridge, !o || (!o.canPick && !bridge));
+}
+
+/** What the bridge's player is doing, or why it cannot be picked (§7.1). */
+function bridgeLine(o) {
+  if (!o?.state) return "";
+  if (!o.canPick && o.output !== "bridge") return o.pickWhy;
+  const st = o.state;
+  const title = st.track?.title || st.track?.path || "";
+  if (st.transport === "playing") return title ? `playing «${title}»` : "playing";
+  if (st.transport === "paused") return title ? `paused on «${title}»` : "paused";
+  return "stopped";
+}
+
+// ---- The controls ----
+
+function onPlay() {
+  const o = out()?.view();
+  if (!bridgeChosen(o)) {
+    audio.toggle();
+    return;
+  }
+  const playing = o.state?.transport === "playing";
+  out().command(playing ? "pause" : "play");
+}
+
+function onPrevious() {
+  if (bridgeChosen(out()?.view())) out().command("previous");
+  else audio.advance(-1);
+}
+
+function onNext() {
+  if (bridgeChosen(out()?.view())) out().command("next");
+  else audio.advance(1);
+}
+
+function onRepeat() {
+  const o = out()?.view();
+  if (bridgeChosen(o)) out().command("repeat", { on: !o.state?.repeat });
+  else audio.cycleRepeat();
+}
+
+// ---- The queue panel (§7.5) ----
+
+function toggleQueue() {
+  refs.panel.hidden = !refs.panel.hidden;
+  refs.queueBtn.setAttribute("aria-expanded", String(!refs.panel.hidden));
+  render();
+}
+
+let panelKey = "";
+function paintPanel(o) {
+  const show = bridgeChosen(o);
+  refs.queueBtn.hidden = !show;
+  if (!show) {
+    refs.panel.hidden = true;
+    refs.queueBtn.setAttribute("aria-expanded", "false");
+    return;
+  }
+  if (refs.panel.hidden) return;
+  const q = o.queue;
+  const st = o.state;
+  const heard = st?.track?.entry || 0;
+  const key = JSON.stringify([q?.readAt, st?.selected, heard, [...o.commands]]);
+  if (key === panelKey) return;
+  panelKey = key;
+  clear(refs.panel);
+  if (!q || !q.entries?.length) {
+    refs.panel.appendChild(el("p", { class: "np-queue-empty", text: "The bridge's queue is empty" }));
+    return;
+  }
+  const list = el("ol", { class: "np-queue-list" });
+  q.entries.forEach((e, i) => {
+    const name = e.track?.title || e.path || e.word || `Entry ${e.id}`;
+    const row = el("li", { class: `np-queue-row${e.id === heard || (!heard && e.id === st?.selected) ? " np-queue-current" : ""}` });
+    const play = el("button", {
+      class: "np-queue-title", text: name,
+      attrs: { type: "button", "aria-current": e.id === heard ? "true" : null },
+      on: { click: () => out()?.command("index", { index: i }) },
+    });
+    setDisabled(play, !o.commands.has("index"));
+    row.appendChild(play);
+    if (e.word) row.appendChild(el("span", { class: "chip chip-warn", text: queueWord(e.word) }));
+    else if (st?.transport === "stopped" && e.id === st.lastStop?.entry && STOP_WORDS[st.lastStop.reason]) {
+      row.appendChild(el("span", { class: "chip chip-warn", text: "Stopped here" }));
+    }
+    const del = el("button", {
+      class: "np-queue-remove", text: "Remove",
+      attrs: { type: "button", "aria-label": `Remove ${name} from the bridge's queue` },
+      on: { click: () => out()?.remove(e.id) },
+    });
+    setDisabled(del, !o.commands.has("delete"));
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+  refs.panel.appendChild(list);
+}
+
+function queueWord(word) {
+  return {
+    track_gone: "No longer in the library",
+    not_in_library: "Not in this library",
+    missing_file: "The file is missing",
+  }[word] || word.replaceAll("_", " ");
+}
+
+// ---- Painting ----
 
 /** Drive both the scrubber fill and the mobile rail from one value. */
 function setProgress(frac) {
@@ -155,6 +390,12 @@ function setVolumeFill(frac) {
 }
 
 function tick() {
+  const o = out()?.view();
+  out()?.tick();
+  if (bridgeChosen(o)) {
+    tickBridge(o);
+    return;
+  }
   const s = audio.snapshot();
   if (!s.track) return;
   refs.elapsed.textContent = duration(s.currentTime) || "0:00";
@@ -179,14 +420,48 @@ function tick() {
   }
 }
 
-function apply(s) {
+/** The bridge's position: the anchor's own, as output.js extrapolates it (§4.4). */
+function tickBridge(o) {
+  const d = o.state?.track?.duration || 0;
+  const p = out().position();
+  refs.elapsed.textContent = duration(p ?? 0) || "0:00";
+  refs.total.textContent = d > 0 ? duration(d) : "—";
+  setBuffered(0);
+  if (!refs.isScrubbing()) {
+    const frac = d > 0 && p !== null ? p / d : 0;
+    refs.seek.value = String(Math.round(frac * 1000));
+    setProgress(frac);
+  }
+}
+
+function render() {
   if (!bar) return;
-  bar.hidden = !s.track;
-  if (!s.track) {
+  const o = out()?.view() || null;
+  if (bridgeChosen(o)) renderBridge(o);
+  else renderBrowser(audio.snapshot(), o);
+  if (!refs.menu.hidden) paintOutputButton(o);
+}
+
+function renderBrowser(s, o) {
+  bar.dataset.output = "browser";
+  showBridgeControls(false);
+  // On a box that offers its player the bar stays with nothing selected, a
+  // slim strip with the output button (§7.1); elsewhere it hides as it
+  // always has.
+  const strip = !s.track && !!o?.offered;
+  bar.hidden = !s.track && !strip;
+  bar.classList.toggle("npbar-empty", !s.track);
+  if (bar.hidden) {
     document.body.classList.remove("has-player-bar");
     return;
   }
   document.body.classList.add("has-player-bar");
+  paintOutputButton(o);
+  if (!s.track) {
+    paintEmpty();
+    paintLine(o?.line || "", false);
+    return;
+  }
 
   paintTrack(s);
 
@@ -218,13 +493,153 @@ function apply(s) {
   // report — typically a UPnP upstream that ignored the Range request.
   // Disabling the control is the honest move: a scrubber bound to an
   // unknown duration is a control that lies.
-  refs.seek.disabled = !s.seekable;
+  setDisabled(refs.seek, !s.seekable);
+  refs.seek.title = "";
   if (!s.seekable) {
     refs.total.textContent = "—";
     setProgress(0);
   }
 
-  paintNotice(s);
+  paintNotice(s, o?.line || "");
+}
+
+/** The bridge's player as the engine publishes it (§7.2, §7.5). */
+function renderBridge(o) {
+  bar.dataset.output = "bridge";
+  bar.hidden = false;
+  document.body.classList.add("has-player-bar");
+  showBridgeControls(true);
+  const st = o.state;
+  const moving = o.phase === PHASE.toBridge || o.phase === PHASE.toBrowser;
+  const can = (c) => !moving && o.commands.has(c);
+  const t = st?.track || null;
+  bar.classList.toggle("npbar-empty", !t);
+  paintBridgeTrack(o);
+
+  const playing = st?.transport === "playing";
+  swapIcon(refs.play, playing ? "pause" : "play");
+  refs.play.setAttribute("aria-label", playing ? "Pause" : "Play");
+  refs.play.classList.toggle("np-btn-busy", !!st?.starting);
+  setDisabled(refs.play, !can(playing ? "pause" : "play"));
+  setDisabled(refs.prev, !can("previous"));
+  setDisabled(refs.next, !can("next"));
+  setDisabled(refs.stop, !can("stop"));
+
+  const mode = st?.repeat ? "all" : "off";
+  refs.repeat.dataset.repeat = mode;
+  refs.repeat.setAttribute("aria-label", BRIDGE_REPEAT_LABEL[mode]);
+  refs.repeat.title = `${BRIDGE_REPEAT_LABEL[mode]}: ${WORDS.noRepeatOne}`;
+  swapIcon(refs.repeat, "repeat");
+  setDisabled(refs.repeat, !can("repeat"));
+
+  refs.shuffle.setAttribute("aria-pressed", "false");
+  refs.shuffle.title = WORDS.noShuffle;
+  setDisabled(refs.shuffle, true);
+
+  const dsd = t ? (t.codec === "DSD" || t.bits === 1) : false;
+  setDisabled(refs.seek, !(st?.seek && can("seek")));
+  refs.seek.title = dsd ? WORDS.noSeekDSD : "";
+
+  paintPanel(o);
+  paintOutputButton(o);
+  paintLine(bridgeNotice(o), false);
+  tickBridge(o);
+}
+
+/** Volume, mute and shuffle are the browser's; Stop and the queue the bridge's. */
+function showBridgeControls(bridge) {
+  refs.stop.hidden = !bridge;
+  refs.volume.title = bridge ? WORDS.fixedLevel : "";
+  refs.mute.title = bridge ? WORDS.fixedLevel : (refs.mute.getAttribute("aria-label") || "Mute");
+  setDisabled(refs.volume, bridge);
+  setDisabled(refs.mute, bridge);
+  if (!bridge) {
+    refs.shuffle.title = "Shuffle";
+    setDisabled(refs.shuffle, false);
+    setDisabled(refs.prev, false);
+    setDisabled(refs.next, false);
+    setDisabled(refs.play, false);
+    setDisabled(refs.repeat, false);
+    refs.queueBtn.hidden = true;
+    refs.panel.hidden = true;
+  }
+}
+
+/** The line the bridge's mode says: the phase, the line, a hold, the DAC away. */
+function bridgeNotice(o) {
+  const st = o.state;
+  if (o.phase === PHASE.toBridge) return WORDS.toBridge;
+  if (o.phase === PHASE.toBrowser) return WORDS.toBrowser;
+  const notes = [];
+  if (o.phase === PHASE.unconfirmed) notes.push(WORDS.unconfirmed);
+  if (o.reconnecting) notes.push(WORDS.reconnecting);
+  if (o.line && !notes.includes(o.line)) notes.push(o.line);
+  if (st) {
+    const hold = holdWord(st.hold);
+    if (hold && !notes.includes(hold)) notes.push(hold);
+    if (st.release?.state === "unconfirmed") {
+      notes.push(st.release.since ? `The DAC has not confirmed it is free (since ${clockTime(st.release.since)})` : "The DAC has not confirmed it is free");
+    }
+    if (!st.running && st.why) notes.push(whyWord(st.why));
+    else if (!st.offered && st.offeredWhy) notes.push(whyWord(st.offeredWhy));
+    if (st.tone) notes.push("The test tone is playing on the DAC");
+    if (st.lastAttempt?.seq > 0 && st.lastAttempt.failed && st.transport === "stopped") {
+      notes.push(st.lastAttempt.busy ? "The DAC is busy: another program plays to it"
+        : (st.lastAttempt.denied ? "The bridge may not open the DAC: its doctor says why" : "The last play did not start"));
+    } else if (st.transport === "stopped" && STOP_WORDS[st.lastStop?.reason]) {
+      notes.push(STOP_WORDS[st.lastStop.reason]);
+    }
+  }
+  return notes.join(" · ");
+}
+
+/** Why playback last stopped, where the bar has something to say of it. */
+const STOP_WORDS = {
+  xrun: "Playback stopped: the DAC ran out of samples",
+  disconnected: "Playback stopped: the DAC went away",
+  device_error: "Playback stopped: the DAC reported an error",
+  decode_failed: "Playback stopped: a track could not be decoded",
+  backend_failed: "Playback stopped: the player failed",
+  output_unavailable: "Playback stopped: the DAC is not available",
+  removed_entry_audible: "Playback stopped: the entry playing was removed",
+};
+
+/** HH:MM of an RFC 3339 time, in this browser's zone. */
+function clockTime(iso) {
+  const t = new Date(iso);
+  return Number.isNaN(t.getTime()) ? iso : t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** The engine's track, named by its library path and row, never a controller's metadata. */
+function paintBridgeTrack(o) {
+  const st = o.state;
+  const t = st?.track || null;
+  clear(refs.art);
+  clear(refs.title);
+  if (!t) {
+    refs.title.appendChild(document.createTextNode(st?.length > 0 ? "Stopped" : WORDS.nothing));
+    refs.sub.textContent = st?.length > 0 ? `${st.length} in the bridge's queue` : "";
+    refs.chip.textContent = "";
+    return;
+  }
+  const entry = o.queue?.entries?.find((e) => e.id === t.entry);
+  const albumId = entry?.track?.albumId;
+  const name = t.named ? (t.title || t.path) : (t.path || "A track this library does not name");
+  refs.title.appendChild(albumId ? link(`/album/${albumId}`, { text: name }) : document.createTextNode(name));
+  refs.sub.textContent = [t.artist, t.album].filter(Boolean).join(" — ");
+  refs.chip.textContent = signalChip(t, st.signal);
+  // What the DAC is handed, for a reader who asks: its format, its
+  // channels and the sink's state.
+  const sig = st.signal;
+  refs.chip.title = sig ? [sig.format, sig.channels ? `${sig.channels} ch` : "", sig.state].filter(Boolean).join(" · ") : "";
+}
+
+function paintEmpty() {
+  clear(refs.art);
+  clear(refs.title);
+  refs.title.appendChild(document.createTextNode(WORDS.nothing));
+  refs.sub.textContent = "";
+  refs.chip.textContent = "";
 }
 
 /** The cover, the title, the artist and the format chip. */
@@ -254,9 +669,10 @@ function paintTrack(s) {
 
 /**
  * The one line that says what is true about this playback right now:
- * waiting, playing something converted, unseekable, or failed.
+ * waiting, playing something converted, unseekable, or failed, and the
+ * output's own line (the bridge playing too, an outcome) beside them.
  */
-function paintNotice(s) {
+function paintNotice(s, outputLine) {
   const notes = [];
   // Two words for two different waits, because the reader can tell them
   // apart and the distinction is what makes the line worth reading: at
@@ -266,14 +682,18 @@ function paintNotice(s) {
   if (s.degraded) notes.push("playing a converted copy");
   if (!s.seekable) notes.push("seeking unavailable for this source");
   if (s.error) notes.push(s.error);
-  const notice = notes.join(" · ");
+  if (outputLine) notes.push(outputLine);
+  paintLine(notes.join(" · "), !!s.error);
+}
+
+function paintLine(notice, isError) {
   // Compared before writing. apply() runs on every throttled timeupdate,
   // and assigning textContent replaces the text node whether or not the
   // string differs — which an aria-live region reads as a fresh
   // announcement, so an unguarded write would say "Loading…" once a
   // second for as long as the wait lasted.
   if (refs.notice.textContent !== notice) refs.notice.textContent = notice;
-  refs.notice.classList.toggle("np-notice-error", !!s.error);
+  refs.notice.classList.toggle("np-notice-error", isError);
 }
 
 /**

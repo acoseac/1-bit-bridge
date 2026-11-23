@@ -59,6 +59,15 @@ let playbackGen = 0;
 // would hold up the skip.
 const PROBE_TIMEOUT_MS = 4000;
 
+// The position a suspended browser keeps (B634): read from the element
+// before its source was let go, which resets the element's own, so the
+// saved queue keeps it until something loads again (§7.3, step 1).
+let heldAt = null;
+
+// Whether the browser's MediaSession handlers are set: cleared while the
+// bridge's player is the bar's output (§7.5).
+let sessionActive = true;
+
 export function subscribe(fn) {
   listeners.add(fn);
   fn(snapshot());
@@ -413,6 +422,7 @@ function load(index, { autoplay }) {
   const target = resolvePlayable(track, audioURL);
   if (!target) return;
   playbackGen += 1;
+  heldAt = null;
   state.index = index;
   state.degraded = target.degraded;
   state.seekable = true;
@@ -748,11 +758,170 @@ function reshuffle() {
   state.shuffleOrder = order;
 }
 
+// ---- The bar's output (B634) ----
+//
+// The switch to the bridge's player and back (§7.3, §7.4). output.js
+// decides; these are the browser's halves of it.
+
+/**
+ * The browser's handover: its queue as listed (never a shuffle order), its
+ * current track, whether it plays and its position in whole seconds, read
+ * from the player's own state BEFORE the source is let go (G11), since
+ * letting go resets the element's position.
+ */
+export function handover() {
+  const track = state.index >= 0 ? state.queue[state.index] : null;
+  return {
+    queue: state.queue.map((t) => ({ ...t })),
+    index: state.index,
+    playing: state.playing,
+    position: state.el ? Math.floor(state.el.currentTime || 0) : 0,
+    pcm: !!track && !track.isDsd,
+  };
+}
+
+/** Whether the browser holds a queue to hand over. */
+export function hasQueue() {
+  return state.queue.length > 0;
+}
+
+/**
+ * Stop the browser for the bridge: everything that was pending against the
+ * track it played is now stale (a failure probe, a play rejection, the
+ * restored position's seek: M3, P6), its source is let go, and the saved
+ * queue keeps the position the handover read, not the element's reset one.
+ */
+export function suspend(h) {
+  playbackGen += 1;
+  heldAt = h && h.position > 0 ? h.position : 0;
+  state.el?.pause();
+  state.playing = false;
+  state.loading = false;
+  abandon(state.el);
+  cancelPrime();
+  persist();
+  emit();
+}
+
+/**
+ * Load the track at index and, for a position, seek the element there
+ * before it plays, so nothing of the track's start is heard (§7.4).
+ */
+function loadAt(index, { autoplay, at }) {
+  if (!(at > 0)) {
+    load(index, { autoplay });
+    return;
+  }
+  load(index, { autoplay: false });
+  const mine = playbackGen;
+  state.loading = !!autoplay;
+  state.el.addEventListener("loadedmetadata", function once() {
+    state.el.removeEventListener("loadedmetadata", once);
+    if (mine !== playbackGen) return;
+    if (Number.isFinite(state.el.duration)) state.el.currentTime = Math.min(at, state.el.duration);
+    if (!autoplay) return;
+    state.el.play().catch((e) => {
+      if (mine !== playbackGen) return;
+      state.playing = false;
+      state.loading = false;
+      if (e?.name === "NotAllowedError") state.error = "Press play to start.";
+      emit();
+    });
+  });
+  emit();
+}
+
+/**
+ * The browser's resume of its own queue at the position it read before it
+ * stopped: called only on a barrier's done answered now (§3.2, G1).
+ */
+export function resume(h) {
+  init();
+  if (!h || h.index < 0 || !state.queue[h.index]) return;
+  loadAt(h.index, { autoplay: !!h.playing, at: h.pcm ? h.position : 0 });
+}
+
+/**
+ * The browser takes the bridge's queue (a switch-out's handover): its
+ * tracks, the selected one current and, for PCM, its position; it plays
+ * only where play says, which output.js decides on a barrier's done. A
+ * selected track this browser cannot play stays shown, paused, with its
+ * reason, and Next moves to one it plays (§7.4).
+ */
+export function take(h, play) {
+  init();
+  playbackGen += 1;
+  heldAt = null;
+  state.queue = (h?.queue || []).filter(Boolean).map((t) => ({ ...t }));
+  state.skipped = 0;
+  state.error = "";
+  reshuffle();
+  const idx = h && h.index >= 0 && h.index < state.queue.length ? h.index : clampIndex(0);
+  const track = state.queue[idx];
+  if (!track) {
+    state.index = -1;
+    persist();
+    emit();
+    return;
+  }
+  if (!resolvePlayable(track, audioURL)) {
+    state.index = idx;
+    state.playing = false;
+    state.loading = false;
+    abandon(state.el);
+    state.error = `"${track.title || track.path}" is not playable in this browser.`;
+    updateMetadata(track);
+    persist();
+    emit();
+    return;
+  }
+  // The position where the handover has one: PCM's, which the element seeks
+  // to before it plays; a DSD track's FLAC sidecar is seekable here too.
+  loadAt(idx, { autoplay: !!play, at: h.position > 0 ? h.position : 0 });
+}
+
+/** Start what the browser holds: called only on a barrier's done (G8). */
+export function start() {
+  init();
+  if (state.index < 0 || !state.queue[state.index]) return;
+  if (!state.el.getAttribute("src")) {
+    loadAt(state.index, { autoplay: true, at: heldAt || 0 });
+    return;
+  }
+  void state.el.play().catch(() => {});
+}
+
+/**
+ * The MediaSession while an output is chosen: the browser's handlers,
+ * metadata and playback state with this browser, and none of them with the
+ * bridge's player, whose sound is not this page's (§7.5).
+ */
+export function setMediaSession(active) {
+  sessionActive = !!active;
+  const ms = navigator.mediaSession;
+  if (!ms) return;
+  if (!sessionActive) {
+    for (const action of SESSION_ACTIONS) {
+      try { ms.setActionHandler(action, null); } catch { /* unsupported action */ }
+    }
+    ms.metadata = null;
+    ms.playbackState = "none";
+    return;
+  }
+  wireMediaSession();
+  const track = state.index >= 0 ? state.queue[state.index] : null;
+  if (track) updateMetadata(track);
+  ms.playbackState = state.playing ? "playing" : "paused";
+}
+
 // ---- MediaSession ----
+
+/** Every action the browser sets a handler for. */
+const SESSION_ACTIONS = ["play", "pause", "previoustrack", "nexttrack", "stop", "seekto", "seekbackward", "seekforward"];
 
 function wireMediaSession() {
   const ms = navigator.mediaSession;
-  if (!ms) return;
+  if (!ms || !sessionActive) return;
   const set = (action, fn) => {
     try { ms.setActionHandler(action, fn); } catch { /* unsupported action */ }
   };
@@ -768,7 +937,7 @@ function wireMediaSession() {
 
 function updateMetadata(track) {
   const ms = navigator.mediaSession;
-  if (!ms || !window.MediaMetadata) return;
+  if (!ms || !window.MediaMetadata || !sessionActive) return;
   const artwork = state.albumArt ? [{ src: state.albumArt, sizes: "500x500", type: "image/jpeg" }] : [];
   ms.metadata = new MediaMetadata({
     title: track.title || track.path,
@@ -779,7 +948,7 @@ function updateMetadata(track) {
 }
 
 function setSessionState(s) {
-  if (navigator.mediaSession) navigator.mediaSession.playbackState = s;
+  if (navigator.mediaSession && sessionActive) navigator.mediaSession.playbackState = s;
 }
 
 // Throttled to ~1 Hz: spamming setPositionState makes some OS widgets
@@ -805,9 +974,12 @@ function updatePositionState() {
 
 function persist() {
   try {
+    // A suspended browser keeps the position its handover read: its
+    // element's was reset when the source was let go (§7.3, step 1).
+    const at = heldAt !== null ? heldAt : (state.el ? state.el.currentTime : 0);
     sessionStorage.setItem(STORE_KEY, JSON.stringify({
       queue: state.queue, index: state.index, shuffle: state.shuffle,
-      repeat: state.repeat, at: state.el ? state.el.currentTime : 0,
+      repeat: state.repeat, at,
       albumArt: state.albumArt,
     }));
   } catch { /* private mode / quota — playback still works */ }
@@ -830,8 +1002,13 @@ function restore() {
   if (!target) return;
   state.index = idx;
   state.el.src = target.url;
+  // Generation-guarded, as every continuation of playback is: a switch of
+  // the bar's output, or any later load, makes this seek stale, and it must
+  // not seek another track to this one's position (P6).
+  const mine = playbackGen;
   state.el.addEventListener("loadedmetadata", function once() {
     state.el.removeEventListener("loadedmetadata", once);
+    if (mine !== playbackGen) return;
     if (saved.at > 0 && Number.isFinite(state.el.duration)) state.el.currentTime = saved.at;
   });
   updateMetadata(track);
