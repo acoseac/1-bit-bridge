@@ -53,11 +53,9 @@ func TestPairAlternatesPrependsPrimary(t *testing.T) {
 	// URL — our pairAlternates helper is what ensures it lands first.
 	// Test with a non-default listen address just to exercise the port
 	// parse.
-	advertised := func() []advertise.Endpoint {
-		return []advertise.Endpoint{
-			{URL: "https://192.168.1.10:7788", Class: advertise.ClassLANv4},
-			{URL: "https://homepc.local:7788", Class: advertise.ClassMDNSHost},
-		}
+	advertised := []advertise.Endpoint{
+		{URL: "https://192.168.1.10:7788", Class: advertise.ClassLANv4},
+		{URL: "https://homepc.local:7788", Class: advertise.ClassMDNSHost},
 	}
 	got := pairAlternates("https://user-chose-this:9999", &config.Config{ListenAddress: "127.0.0.1:7788"}, advertised)
 	if len(got) != 3 {

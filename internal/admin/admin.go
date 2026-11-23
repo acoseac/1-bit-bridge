@@ -1582,6 +1582,13 @@ type Server struct {
 	// server serves anything, as the two fields above are.
 	testPlayerWriteWaits func()
 
+	// testPairingWriteWaits, when set, is told each time a pairing write
+	// (the mint, the rotation) finds mu held once its endpoint list is
+	// read and is about to wait for it (lockPairingWrite). Tests only: nil
+	// in production, and set before the server serves anything, as the
+	// fields above are.
+	testPairingWriteWaits func()
+
 	// testSettingsWriteWaits, when set, is told each time a settings PATCH
 	// finds mu held and is about to wait for it (lockSettingsWrite), after
 	// its look at the update check's switch. Tests only: nil in production,
@@ -1602,6 +1609,13 @@ type Server struct {
 	// pointer, as the scanner's hooks are, so a test may set or clear it
 	// while the server serves.
 	testAfterLoginCheck atomic.Pointer[func()]
+
+	// testEndpoints, when set, holds or hears the steps of each wait for
+	// the endpoint list (endpointsWithin): the caller's choice, the
+	// provider's goroutine's claim and its end. Tests only: nil in
+	// production. An atomic pointer, as testAfterLoginCheck is, read once
+	// a wait, so a test may set it while the server serves.
+	testEndpoints atomic.Pointer[endpointsSeams]
 
 	// pageTmpls is one template bundle per page. Each bundle pre-parses
 	// layout.html + the page's own .html file so rendering is a single
