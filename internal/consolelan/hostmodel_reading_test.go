@@ -246,15 +246,58 @@ func TestAPersistentMismatchIsTheReadingsOnceTheAttemptsAreSpent(t *testing.T) {
 	}
 }
 
-// TestAReadingThatDoesNotReadEndsTheReconciliationAtOnce: a table that did not
-// read is no mismatch to retry: the reconciliation ends on that reading.
+// readingErrorSkips is how the live Windows test ends on a reading that did
+// not read (reconcileHostModel's error): where CI is set every such error
+// fails it, interfaces that did not read, a table that did not read and a
+// table with no row alike; outside CI a table that did not read skips it, as
+// before backlog B997, and the two others fail it.
+func readingErrorSkips(out hostModelOutcome, ci bool) bool {
+	return !ci && out.reading.tableErr != nil
+}
+
+// readingErrors are the three readings that do not read.
+var readingErrors = []struct {
+	name    string
+	reading hostModelReading
+	table   bool
+}{
+	{"the interfaces", hostModelReading{interfacesErr: errors.New("access denied")}, false},
+	{"the table", hostModelReading{interfaces: mixedInterfaces(), tableErr: errors.New("access denied")}, true},
+	{"a table with no row", hostModelReading{interfaces: mixedInterfaces(), entries: map[int]readEntry{}}, false},
+}
+
+// TestAReadingThatDoesNotReadEndsTheReconciliationAtOnce: interfaces that did
+// not read, a table that did not read and a table with no row are no mismatch
+// to retry: each ends the reconciliation on its first reading, with its error,
+// the bound's other attempts left unread.
 func TestAReadingThatDoesNotReadEndsTheReconciliationAtOnce(t *testing.T) {
-	reads := 0
-	_, err := reconcileHostModel(true, func() hostModelReading {
-		reads++
-		return hostModelReading{interfaces: mixedInterfaces(), tableErr: errors.New("access denied")}
-	})
-	if err == nil || reads != 1 {
-		t.Fatalf("a table that did not read ended the reconciliation with %v after %d readings, want its error after one", err, reads)
+	for _, re := range readingErrors {
+		reads := 0
+		out, err := reconcileHostModel(true, func() hostModelReading {
+			reads++
+			return re.reading
+		})
+		if err == nil || reads != 1 || out.attempts != 1 {
+			t.Errorf("%s: the reconciliation ended with %v after %d reading(s), want its error after one", re.name, err, reads)
+		}
+	}
+}
+
+// TestUnderCIEveryReadingThatDoesNotReadFailsTheLiveTest: where CI is set the
+// live Windows test fails on each of the three readings that do not read, after
+// the reconciliation has ended on it; outside CI it skips on a table that did
+// not read alone.
+func TestUnderCIEveryReadingThatDoesNotReadFailsTheLiveTest(t *testing.T) {
+	for _, re := range readingErrors {
+		out, err := reconcileHostModel(false, func() hostModelReading { return re.reading })
+		if err == nil {
+			t.Fatalf("%s: the reconciliation ended with no error", re.name)
+		}
+		if readingErrorSkips(out, true) {
+			t.Errorf("%s: under CI the live test skips, want it to fail", re.name)
+		}
+		if got := readingErrorSkips(out, false); got != re.table {
+			t.Errorf("%s: outside CI the live test skips: %v, want %v", re.name, got, re.table)
+		}
 	}
 }

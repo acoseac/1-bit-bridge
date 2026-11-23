@@ -15,13 +15,15 @@ import (
 // flags those GetIpInterfaceEntry gives for it, and JudgeStrongHost decides
 // on the rows read. It records the runner's rows and a reading's cost in its
 // log (§3.4, §10.4) and asserts no particular answer of them, since a
-// runner's own adapters may forward. Where CI is set, a table that does not
-// read fails, and so does a reading that is not whole: an interface whose
-// addresses do not read, or one holding an address of the family, a
-// *net.IPNet or an anycast *net.IPAddr, with no row in the table, each asked
-// of the rows' indexes directly. The interfaces, the table, each row's entry
-// and the addresses are separate observations, read again together up to
-// hostModelAttempts times before a mismatch between them fails
+// runner's own adapters may forward. Interfaces that do not read and a table
+// with no row fail it; a table that does not read fails it where CI is set
+// and skips it elsewhere (readingErrorSkips); each ends the reconciliation at
+// its first reading. Where CI is set a reading that is not whole fails it
+// too: an interface whose addresses do not read, or one holding an address
+// of the family, a *net.IPNet or an anycast *net.IPAddr, with no row in the
+// table, each asked of the rows' indexes directly. The interfaces, the table,
+// each row's entry and the addresses are separate observations, read again
+// together up to hostModelAttempts times before a mismatch between them fails
 // (reconcileHostModel, backlog B997).
 func TestTheStrongHostModelIsReadFromTheStack(t *testing.T) {
 	ci := os.Getenv("CI") != ""
@@ -34,11 +36,11 @@ func TestTheStrongHostModelIsReadFromTheStack(t *testing.T) {
 			return r
 		})
 		if err != nil {
-			if out.reading.tableErr != nil {
-				if ci {
-					t.Fatalf("CI: %v", err)
-				}
+			if readingErrorSkips(out, ci) {
 				t.Skip(err)
+			}
+			if ci {
+				t.Fatalf("CI: %v", err)
 			}
 			t.Fatal(err)
 		}
