@@ -458,3 +458,7 @@ steps, the source guards and `scripts/qualification-version -base 9b66c2af -head
 gate, in its own commit below. The live Windows reading runs only on CI's windows-latest leg, which
 verifies it. PROTOCOL.md's SHA-256 did not move:
 `b3198929371b3041340a168f19f955cefe9786f159120f396f70e42e91e60c7d`.
+
+The gate on `9b48b78a`, `make fmt vet test build-all` in one build-slot session taken at once, passed
+in 2,111 s (cmd/bridge 1,779 s, manifest 1,619 s, admin 1,310 s, backup 661 s), the build-site
+census and build-all's six targets with it, 37 small packages answered from its test cache.
