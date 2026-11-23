@@ -129,6 +129,9 @@ type controlSeams struct {
 	// beforePublish runs on the publisher's goroutine between a capture's
 	// reads and its publish.
 	beforePublish func()
+	// afterFinal runs on the operation's goroutine once the publication that
+	// answers it is made, before its end is signalled, with its kind.
+	afterFinal func(kind string)
 	// Bounds in place of production's, where set.
 	handlerWait, barrier, releaseGap time.Duration
 }
@@ -836,6 +839,9 @@ func (o *operation) settleOn(eval func(cap *capture) (final bool, status, word s
 		return false
 	}
 	o.pub = pub
+	if s := o.c.seams; s != nil && s.afterFinal != nil {
+		s.afterFinal(o.record().Kind)
+	}
 	o.c.mu.Lock()
 	if o.c.current == o {
 		o.c.current = nil

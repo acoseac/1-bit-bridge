@@ -1323,16 +1323,19 @@ func waitEnded(t *testing.T, c *consoleControl, kind string) {
 }
 
 // TestALostReplaceHeldBetweenStepsThenAnotherPickNeverPlaysBoth pins C1's
-// case: a replace held after its first insert, its connection dropped, and
-// then the bar's pick of this browser: the switch-out ends the replace's
+// case: a replace held after its first insert, past the handler's wait (its
+// answer running), its connection dropped after that, which no handler sees,
+// and then the bar's pick of this browser: the switch-out ends the replace's
 // unsent steps, no console insert and no play reaches the engine after the
 // switch-out's Pause, and the switch-out is done only once the replace's
 // record reads cancelled.
 func TestALostReplaceHeldBetweenStepsThenAnotherPickNeverPlaysBoth(t *testing.T) {
-	r := newCtlRig(t, ctlOptions{seams: &controlSeams{}})
+	r := newCtlRig(t, ctlOptions{seams: &controlSeams{handlerWait: 200 * time.Millisecond}})
 	at := make(chan struct{})
 	release := make(chan struct{})
-	var once sync.Once
+	var once, letGo sync.Once
+	free := func() { letGo.Do(func() { close(release) }) }
+	t.Cleanup(free)
 	var afterPause atomic.Int32
 	r.c.seams.afterStep = func(kind, step string, err error) {
 		switch {
@@ -1344,18 +1347,15 @@ func TestALostReplaceHeldBetweenStepsThenAnotherPickNeverPlaysBoth(t *testing.T)
 			t.Errorf("the replace sent %s after the switch-out's pause", step)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	replaced := make(chan admin.PlayerAnswer, 1)
-	go func() {
-		replaced <- r.c.Replace(ctx, admin.PlayerReplace{Op: r.op(), Digest: r.digest(), At: r.gen(), Tracks: r.paths(), Play: true})
-	}()
+	held := r.c.Replace(context.Background(), admin.PlayerReplace{Op: r.op(), Digest: r.digest(), At: r.gen(), Tracks: r.paths(), Play: true})
 	<-at
-	cancel()
-	<-replaced
+	if held.Record == nil || held.Record.Status != admin.PlayerOpRunning {
+		t.Fatalf("the replace held past the handler's wait answered %+v, want running", held.Record)
+	}
 	switched := make(chan admin.PlayerAnswer, 1)
 	go func() { switched <- r.switchOut(true) }()
 	waitEnded(t, r.c, opKindSwitchOut)
-	close(release)
+	free()
 	a := <-switched
 	wantRecord(t, "the switch-out", a, admin.PlayerOpDone, "", "")
 	if _, _, starts := r.standIn.counts(); starts != 0 {
@@ -1518,21 +1518,43 @@ func TestTheSwitchOutsAnswerIsTheCaptureThatSawSilence(t *testing.T) {
 
 // TestTheSwitchOutsQueueIsTheSilencesOwn pins C3: the answer's handover is
 // the queue of the capture that showed the silence, one capture; a cast
-// landed right after it shows in the next frame, never in the handover.
+// landed at the seam right after the answer's publication, before the
+// switch-out's end, shows in the next frame, never in the handover.
 func TestTheSwitchOutsQueueIsTheSilencesOwn(t *testing.T) {
 	r := newCtlRig(t, ctlOptions{seams: &controlSeams{}})
-	rec := wantRecord(t, "a replace", r.replace(r.paths(), 1, 0, true), admin.PlayerOpDone, "", "")
+	wantRecord(t, "a replace", r.replace(r.paths(), 1, 0, true), admin.PlayerOpDone, "", "")
+	var once sync.Once
+	r.c.seams.afterFinal = func(kind string) {
+		if kind != opKindSwitchOut {
+			return
+		}
+		once.Do(func() {
+			if err := r.eng.DeleteAll(context.Background()); err != nil {
+				t.Errorf("the cast's DeleteAll: %v", err)
+				return
+			}
+			ref, err := engine.NewReference("http://192.168.1.20:7790/dlna/file/" + dlna.TrackID("", r.paths()[2]))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if _, err := r.eng.InsertAfter(context.Background(), 0, ref, []byte("cast")); err != nil {
+				t.Errorf("the cast's insert: %v", err)
+			}
+		})
+	}
 	a := r.switchOut(true)
 	sw := wantRecord(t, "the switch-out", a, admin.PlayerOpDone, "", "")
 	if h := sw.Handover; h == nil || len(h.Tracks) != 3 || h.Selected != 1 || !h.Playing {
 		t.Fatalf("handover %+v, want the three tracks, the second selected, the bridge playing before", sw.Handover)
 	}
-	castInsert(t, r)
+	if st := stateOf(t, a.Player); st.Length != 3 {
+		t.Fatalf("the answer's publication holds %d entries, want the silence's three", st.Length)
+	}
 	pub := r.c.Now(context.Background())
 	if stateOf(t, pub).Length != 1 || pub.Revision <= a.Player.Revision {
 		t.Fatalf("the next publication: %+v, want the cast's queue after the answer's", stateOf(t, pub))
 	}
-	_ = rec
 }
 
 // TestTheHandoverPositionBelongsToItsTrack pins K2: a position is handed over
@@ -1749,7 +1771,7 @@ func TestTheConsolesMetadataIsTheContentDirectorysItem(t *testing.T) {
 // metadata is what an Insert takes (openhome.MetadataTaken).
 func TestTheConsolesMetadataIsXMLTextWhateverTheTags(t *testing.T) {
 	r := newCtlRig(t, ctlOptions{})
-	for _, title := range []string{"bad ￾ end", "bad ￿ end", "bad \xff end", "ctl \x01 end", "ok & <fine>"} {
+	for _, title := range []string{"bad \uFFFE end", "bad \uFFFF end", "bad \xff end", "ctl \x01 end", "ok & <fine>"} {
 		_ = r.store.UpsertTrack(context.Background(), &manifest.Track{Path: r.paths()[0], Title: title, Codec: "FLAC"})
 		row := manifest.CatalogTrackRow{Path: r.paths()[0], Codec: "FLAC"}
 		e, word := r.c.entryFor(context.Background(), r.paths()[0], dlna.TrackID("", r.paths()[0]), row, r.c.referenceHost())
