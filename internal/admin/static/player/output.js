@@ -139,6 +139,7 @@ export const WORDS = {
   nothing: "Nothing playing",
   startWaits: "Waiting to hear from the bridge's player before this browser plays…",
   startUnanswered: "The bridge's player has not answered: press play again",
+  startAgain: "This browser did not start: press Play again",
   pressPlay: "The move to this browser finished before this page loaded: press Play to start it here",
   queueBehind: "The bridge's queue is being read again: pick an entry once it shows",
 };
@@ -1015,12 +1016,14 @@ export function createOutput(env) {
     }
     const pending = { run, continuation };
     startPending = pending;
-    void barrier((permit) => {
+    // The latch lives as long as its barrier's operation: whatever resolves
+    // it lets go of the latch first, and nothing else does, the request's
+    // promise least of all, which a half-open connection never settles (S3,
+    // Q9).
+    const release = () => {
       if (startPending === pending) startPending = null;
-      pending.run(permit);
-    }).finally(() => {
-      if (startPending === pending) startPending = null;
-    });
+    };
+    void barrier((permit) => pending.run(permit), release);
   }
 
   // permitFor is a start's permit: true while no newer pick came, this
@@ -1041,11 +1044,12 @@ export function createOutput(env) {
   // barrier runs the switch-out with take false, and calls start with its
   // permit on its done answered now, and on nothing else; a newer pick, or a
   // state newer than its silence that shows the bridge playing, starts
-  // nothing (R3, R4).
-  function barrier(start) {
+  // nothing (R3, R4). Every end calls release first (S3, Q9).
+  function barrier(start, release) {
     return send(ROUTES.switchOut, { take: false }, {
       role: "barrier",
       done(rec, how, mine) {
+        release();
         if (!mine) return;
         // Its done, answered now, with the revision of the publication that
         // showed the bridge silent: that alone starts the browser.
@@ -1058,12 +1062,23 @@ export function createOutput(env) {
           start(permit);
           return;
         }
+        // A record read back or published after its answer was lost: it
+        // starts nothing, and Play needs a barrier of its own (Q2).
         phase = PHASE.browser;
-        line = rec.status === "done" ? "" : barrierWord(rec);
+        line = rec.status === "done" ? WORDS.startAgain : barrierWord(rec);
       },
-      unknown(words, mine) { if (mine) { phase = PHASE.browser; line = words || WORDS.pickAgain; } },
+      unknown(words, mine) {
+        release();
+        if (mine) {
+          phase = PHASE.browser;
+          line = words || WORDS.startAgain;
+        }
+      },
       // Refused before it ran: nothing starts, the refusal's line said (R2).
-      refused(ans, words, mine) { if (mine) phase = PHASE.browser; },
+      refused(ans, words, mine) {
+        release();
+        if (mine) phase = PHASE.browser;
+      },
     });
   }
 
@@ -1257,18 +1272,25 @@ export function createOutput(env) {
 
   // pick moves the output, a pick at a time: each takes the next pick
   // generation, so only the newest switch moves the output, the phase or
-  // the browser (R3). A re-pick from unconfirmed supersedes.
+  // the browser (R3). A re-pick from unconfirmed supersedes. A start this
+  // browser had waiting, or behind a barrier, is the older pick's: the pick
+  // lets go of it (Q9).
   function pick(which) {
     if (which === "bridge") {
       if (output === "bridge" && phase !== PHASE.unconfirmed) return Promise.resolve({ already: true });
       if (!canPick()) return Promise.resolve({ refused: "not_offered" });
-      pickGen += 1;
-      waiting = null;
+      newPick();
       return switchIn();
     }
     if (output === "browser" && phase === PHASE.browser) return Promise.resolve({ already: true });
-    pickGen += 1;
+    newPick();
     return switchOut();
+  }
+
+  function newPick() {
+    pickGen += 1;
+    waiting = null;
+    startPending = null;
   }
 
   // queueBehind says whether the queue the bar drew is older than the state's

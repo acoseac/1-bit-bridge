@@ -2036,6 +2036,66 @@ S.TestARestoredQueuesRetryPlaysNothing = async () => {
   check("its retry plays nothing and asks nothing", r.el.paused && r.el.plays.length === 0 && !r.audio.snapshot().playing && r.s.posts().length === 0, [r.el.paused, r.el.plays, r.s.posts()]);
 };
 
+// barrierRig is a tab beside a silent bridge whose first barrier's POST
+// never answers (a half-open connection) and whose later ones answer done
+// in the epoch the latest state names.
+async function barrierRig(o = {}) {
+  const r = await started2({ latest: pub({ revision: 3, silent: true }), ...o });
+  let n = 0;
+  r.s.on("POST", ROUTES.switchOut, async (e) => {
+    n += 1;
+    if (n === 1) return new Promise(() => {});
+    const ep = r.v().state?.epoch || E1;
+    return answer(recOf(e, { kind: "switch-out", silence: 30 + n }), pub({ epoch: ep, revision: 30 + n, silent: true }));
+  });
+  r.ran = 0;
+  r.out.gateStart(() => { r.ran += 1; });
+  await settle();
+  check("the barrier sent, unanswered", r.s.posts(ROUTES.switchOut).length === 1 && r.ran === 0, [r.s.posts(ROUTES.switchOut).length, r.ran]);
+  return r;
+}
+
+S.TestABarrierLostPastItsDeadlineFreesTheNextStart = async () => {
+  // S3, Q2, Q9: lost at 30 s, its record read back done: the latch goes
+  // with it, nothing starts, and the next start needs a barrier of its own.
+  const r = await barrierRig();
+  r.s.on("GET", ROUTES.operation, async (e) => readBackOf(e, { silence: 4 }));
+  r.c.advance(REQUEST_MS);
+  r.out.tick();
+  await settle();
+  check("past 30 s its record read back done: nothing starts, and the bar asks for Play again",
+    r.ran === 0 && r.s.gets(ROUTES.operation).length >= 1 && r.v().line === WORDS.startAgain && r.v().phase === PHASE.browser,
+    [r.ran, r.s.gets(ROUTES.operation).length, r.v().line, r.v().phase]);
+  r.out.gateStart(() => { r.ran += 1; });
+  await settle();
+  check("Play again sends a barrier of its own, and starts on its answer alone", r.s.posts(ROUTES.switchOut).length === 2 && r.ran === 1, [r.s.posts(ROUTES.switchOut).length, r.ran]);
+};
+
+S.TestEveryEndOfABarrierFreesTheNextStart = async () => {
+  // Q9: a barrier its epoch's end made unknown, and one a newer pick
+  // superseded, free the next start as its record does.
+  {
+    const r = await barrierRig();
+    r.out.streamError(r.serial);
+    r.open();
+    r.frame(pub({ epoch: E2, revision: 1, silent: true }));
+    await settle();
+    check("a restart makes it unknown: nothing starts, and the bar asks for Play again", r.ran === 0 && r.v().line === WORDS.startAgain, [r.ran, r.v().line]);
+    r.out.gateStart(() => { r.ran += 1; });
+    await settle();
+    check("the next start sends a barrier of its own in the new epoch, and starts on its answer", r.s.posts(ROUTES.switchOut).length === 2 && r.s.posts(ROUTES.switchOut)[1].body.op.epoch === E2 && r.ran === 1,
+      [r.s.posts(ROUTES.switchOut).map((e) => e.body.op.epoch), r.ran]);
+  }
+  {
+    const r = await barrierRig({ browser: { playing: true } });
+    r.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", status: "refused", error: "stale", effect: "none", sent: 1, of: 4, last: "conflict" }), pub({ revision: 4, silent: true })));
+    await r.out.pick("bridge");
+    await settle();
+    check("a pick of the bridge meanwhile, refused with nothing changed: the browser's resume sends a barrier of its own and resumes on its answer",
+      r.s.posts(ROUTES.switchOut).length === 2 && r.b.calls.includes("resume") && r.ran === 0 && r.v().output === "browser", [r.s.posts(ROUTES.switchOut).length, r.b.calls, r.ran]);
+  }
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });

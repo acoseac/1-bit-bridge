@@ -448,6 +448,17 @@ func TestARetryPlaysOnlyWhatThisBrowserMeantToPlay(t *testing.T) { barScenario(t
 // page load plays nothing when its source fails and is retried.
 func TestARestoredQueuesRetryPlaysNothing(t *testing.T) { barScenario(t, 2) }
 
+// TestABarrierLostPastItsDeadlineFreesTheNextStart pins S3, Q2 and Q9: a
+// barrier whose request never settles, lost at 30 s and read back done,
+// starts nothing, asks for Play again, and the next start sends a barrier of
+// its own and starts on its answer.
+func TestABarrierLostPastItsDeadlineFreesTheNextStart(t *testing.T) { barScenario(t, 3) }
+
+// TestEveryEndOfABarrierFreesTheNextStart pins Q9: a barrier a restart's new
+// epoch made unknown, and one a newer pick superseded, free the next start,
+// which sends a barrier of its own.
+func TestEveryEndOfABarrierFreesTheNextStart(t *testing.T) { barScenario(t, 5) }
+
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start
 // on the barrier's done, and the skip moves nothing of it.
