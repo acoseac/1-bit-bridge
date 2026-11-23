@@ -1943,6 +1943,79 @@ func TestASwitchOutWaitingForAClosedEnginesFactsHearsItsEnd(t *testing.T) {
 	})
 }
 
+// TestAnEngineThatClosesUnderTheBarrierIsJudgedByItsClosedFacts pins K7
+// under the barrier: a switch-out whose engine closes under it goes to the
+// closed engine's judgement, done on facts that say nothing is held, its
+// handover saying the bridge was playing when the barrier began: its settle
+// waiting on a release the stand-in holds (another controller's index from
+// playing) as the engine shows itself closing, and its Pause answered by an
+// engine closed after the barrier read it running.
+func TestAnEngineThatClosesUnderTheBarrierIsJudgedByItsClosedFacts(t *testing.T) {
+	wantHandedOver := func(t *testing.T, a admin.PlayerAnswer) {
+		t.Helper()
+		rec := wantRecord(t, "a switch-out whose engine closed under it", a, admin.PlayerOpDone, "", "")
+		if rec.Handover == nil || !rec.Handover.Playing || len(rec.Handover.Tracks) != 3 {
+			t.Fatalf("the handover %+v, want the queue, the bridge playing as the barrier began", rec.Handover)
+		}
+	}
+	t.Run("settle waiting on a held release", func(t *testing.T) {
+		hold := make(chan struct{})
+		var letGo, pausedOnce sync.Once
+		free := func() { letGo.Do(func() { close(hold) }) }
+		r := newCtlRig(t, ctlOptions{holdRelease: hold, seams: &controlSeams{barrier: 3 * time.Second}})
+		t.Cleanup(free)
+		wantRecord(t, "a replace and play", r.replace(r.paths(), 0, 0, true), admin.PlayerOpDone, "", "")
+		played := make(chan error, 1)
+		go func() { played <- r.eng.PlayIndex(context.Background(), 1) }()
+		r.await("another controller's index releasing", func(s *engine.Snapshot) bool { return s.State() == engine.Releasing })
+		paused := make(chan struct{})
+		r.c.seams.afterStep = func(kind, step string, err error) {
+			if kind == opKindSwitchOut && step == "pause" {
+				pausedOnce.Do(func() { close(paused) })
+			}
+		}
+		switched := make(chan admin.PlayerAnswer, 1)
+		go func() { switched <- r.switchOut(true) }()
+		select {
+		case <-paused:
+		case <-serveGiveUp(t):
+			t.Fatal("the switch-out sent no pause")
+		}
+		r.stopRun()
+		r.await("the engine closing", func(s *engine.Snapshot) bool { return s.Closed() })
+		r.p.noteClosed(playerClosedFacts{Ended: true})
+		wantHandedOver(t, <-switched)
+		free()
+		<-played
+	})
+	t.Run("the pause answered closed", func(t *testing.T) {
+		r := newCtlRig(t, ctlOptions{seams: &controlSeams{barrier: 3 * time.Second}})
+		wantRecord(t, "a replace and play", r.replace(r.paths(), 0, 0, true), admin.PlayerOpDone, "", "")
+		at, release := make(chan struct{}), make(chan struct{})
+		var parked atomic.Bool
+		var letGo sync.Once
+		free := func() { letGo.Do(func() { close(release) }) }
+		t.Cleanup(free)
+		r.c.seams.beforeSend = func(kind, step string) {
+			if kind == opKindSwitchOut && step == "pause" && parked.CompareAndSwap(false, true) {
+				close(at)
+				<-release
+			}
+		}
+		switched := make(chan admin.PlayerAnswer, 1)
+		go func() { switched <- r.switchOut(true) }()
+		select {
+		case <-at:
+		case <-serveGiveUp(t):
+			t.Fatal("the switch-out's pause was never held")
+		}
+		r.stopEngine()
+		r.p.noteClosed(playerClosedFacts{Ended: true})
+		free()
+		wantHandedOver(t, <-switched)
+	})
+}
+
 // TestTheTrackURIAndTheArtworkURLAreBuiltApart pins E8: with the DLNA
 // listener on another port than 7790, an entry's reference and its <res> are
 // on 7790 and its albumArtURI on the listener's port.

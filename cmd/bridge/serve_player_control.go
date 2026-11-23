@@ -1804,7 +1804,7 @@ func (c *consoleControl) runSwitchOut(o *operation, take bool) {
 	deadline := c.now().Add(c.barrierBound())
 	eng, why := c.runningEngine()
 	if eng == nil {
-		c.silenceWithoutEngine(o, why, take, deadline)
+		c.silenceWithoutEngine(o, why, take, deadline, false)
 		return
 	}
 	s := eng.Snapshot()
@@ -1816,13 +1816,18 @@ func (c *consoleControl) runSwitchOut(o *operation, take bool) {
 				o.finishErr(err)
 				return
 			case engine.ReasonOf(err) == engine.ReasonClosed:
-				o.finishAs(admin.PlayerOpUnknown, "")
+				// The engine closed under the barrier: silent on its closed
+				// facts alone, as where none runs (K7).
+				c.silenceWithoutEngine(o, reasonClosed, take, deadline, playing)
 				return
 			}
 		}
 		pauses++
 		verdict := c.settle(eng, deadline, o.endCh)
 		switch verdict {
+		case settleClosed:
+			c.silenceWithoutEngine(o, reasonClosed, take, deadline, playing)
+			return
 		case settleEnded:
 			o.finishAs(admin.PlayerOpCancelled, "")
 			return
@@ -1924,8 +1929,10 @@ func handoverOf(s *engine.Snapshot, playing bool) *admin.PlayerHandover {
 // silent only once serve's player has said no session holds the device,
 // which it waits for within the bound, refusing release_unconfirmed past it.
 // Its operation ended meanwhile (a newer one, the request's end) is
-// cancelled, and the control's stop ends it unknown.
-func (c *consoleControl) silenceWithoutEngine(o *operation, why string, take bool, deadline time.Time) {
+// cancelled, and the control's stop ends it unknown. playing is whether the
+// bridge was playing when the barrier began, which an engine that closed
+// under the barrier hands over.
+func (c *consoleControl) silenceWithoutEngine(o *operation, why string, take bool, deadline time.Time, playing bool) {
 	for why == reasonClosed {
 		if f, ok := c.p.closedEngine(); ok {
 			if !f.Silent() {
@@ -1961,7 +1968,7 @@ func (c *consoleControl) silenceWithoutEngine(o *operation, why string, take boo
 		if !silentOf(cap) {
 			return admin.PlayerOpRefused, string(engine.ReasonReleaseUnconfirmed)
 		}
-		c.handOver(o, cap, take, false)
+		c.handOver(o, cap, take, playing)
 		return admin.PlayerOpDone, ""
 	})
 }
@@ -1977,18 +1984,24 @@ const (
 	settleUnconfirmed
 	settleUnsettled
 	settleEnded
+	settleClosed
 )
 
 // settle waits, within deadline, for the engine to settle after the
 // barrier's Pause (not starting, not releasing) and judges it: silent,
 // playing, a hold, the tone in the device slot, a release that stays
 // unconfirmed to the bound (its acknowledgement may never come), or still
-// unsettled at the bound; or ended, once ended closes (a newer operation, the
+// unsettled at the bound; closed, once the engine has closed or its Run has
+// returned (its snapshot frozen after a panic), which only serve's player's
+// closed facts judge; or ended, once ended closes (a newer operation, the
 // request's end).
 func (c *consoleControl) settle(eng *engine.Engine, deadline time.Time, ended <-chan struct{}) settleVerdict {
 	for {
 		changed := eng.Changed()
 		s := eng.Snapshot()
+		if signalled(eng.Done()) || s.Closed() {
+			return settleClosed
+		}
 		tone := false
 		if tb := tonesOf(c.backend()); tb != nil {
 			tone = tb.ToneStatus().State != playback.ToneIdle
@@ -2018,6 +2031,7 @@ func (c *consoleControl) settle(eng *engine.Engine, deadline time.Time, ended <-
 		select {
 		case <-changed:
 		case <-t.C:
+		case <-eng.Done():
 		case <-c.quit:
 			t.Stop()
 			return settleUnsettled
