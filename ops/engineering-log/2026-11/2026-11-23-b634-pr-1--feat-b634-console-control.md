@@ -47,6 +47,21 @@ player frame, serve's wiring.
   `<res` as text in every file of the package and found a backquoted name in a comment of
   `dlna_wiring.go`; it now walks the AST's string literals.
 
+### Red first
+
+The 76 cases this PR adds, each run alone from a test binary built at the base's code: an overlay of
+the base's versions of every file the PR changes (with the two struct fields and the one `Deps`
+field the cases name added), names-only shims of the three files it adds (every function body
+replaced by one that returns its results' zero values), and shims of the four exported names it adds
+to `internal/dlna` and `internal/player/openhome`. 75 were red: the control's cases on its zero
+answers, the routes' and serve's on a 404, the builder's and the artwork base's on their empty
+answers. The 76th, `TestTheConsoleBuildsItsMetadataWithTheContentDirectorysBuilder`, reads its
+source from disk, which an overlay does not change; at the base the file is absent and the case
+fails at its parse. Two cases first passed there, `TestShuffleIsNoControlOp` and
+`TestNoArtworkURLOnAHostTheDLNAListenerDoesNotServe`, each asserting an absence alone; each now asks
+what is there as well (the transport's eight commands and repeat offered; the entry's item and its
+`<res>`), and both are red at the base.
+
 ### The controls
 
 Each the fix taken out as an uncommitted edit, its named cases run, the bytes put back from memory
