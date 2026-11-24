@@ -51,8 +51,8 @@ and "stop read" (between `StopCheck`'s two reads, under `b.mu`).
 
 At `2fc0eed0`: the four changed production files as that head has them, with the seam as a name and
 its calls where the base's steps are (and `CheckStopAnswering` in the empty branch, after its
-unlock); each test alone, `-watchdog 10s`. The predictions were written before the run; every one
-held.
+unlock); each test alone, the alsapcm package's with `-watchdog 10s`, the flag that package registers
+(the playback package registers none). The predictions were written before the run; every one held.
 
 | | Red at the base | Green at the base, as predicted |
 |---|---|---|

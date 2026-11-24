@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **59**. A native contact's
+These rules were first written at qualificationVersion 4; current version is **59**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -1108,8 +1108,8 @@ design's order, the precheck the routes take, the check's member of the read
 side, published at each transition, and the listener's answer), which no
 production path calls yet, and its tests through the real native and DoP sinks
 over the fake kernel in the guarded `internal/alsapcm`
-(`playback_dsd_check_answer_test.go`, `playback_dsd_check_races_test.go` from its
-round 2, and `playback_dsd_check_test.go`, which
+(`playback_dsd_check_answer_test.go`, `playback_dsd_check_races_test.go`, and
+`playback_dsd_check_test.go`, which
 gains a generic board's native check while no list reads and moves to the new
 API). No guarded production file changes, and no byte a DAC is given changes.
 Older harness evidence is invalid all the same, as at every bump. The harness

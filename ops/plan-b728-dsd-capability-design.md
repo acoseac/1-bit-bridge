@@ -1274,10 +1274,11 @@ safety half the app needs is on the bridge before the app's I4 ships.
   goroutines before it waits, refused by the pair it meets first (amended 2026-11-24, B12 PR 4a:
   the DAC, its key and token, then the tuple, the order the route answers in, each refusal
   carrying the pair it was decided on, and `CheckAdmits` the same predicate for the route's
-  precheck; round 2: its request's end and its hold's stop answered at once while its reading of
+  precheck; its request's end and its hold's stop answered at once while its reading of
   the box or its wait for the slot is held, every wake decided again in its one locked step,
   nothing granted past the wait's bound; a reading still waiting for the refreshes' lock as the
-  stop comes reads nothing, and a wake of that reading is refused in the slot's order: the request's
+  stop comes reads nothing, and a wake of that reading is refused in the slot's order, under the
+  backend's lock: the request's
   end, serve's stop, the stop, then `dac_unavailable` for a reading that failed), then by the
   supervisor's gate's word, the fence, a lease, a session or another check, waiting for a probe or a preempted tone as a Start's hold does; then,
   in its run, a fresh reading of the policy (the DoP gain among it) before the open, the locate,
@@ -1299,7 +1300,7 @@ safety half the app needs is on the bridge before the app's I4 ships.
   stop answers how that check's cleanup ended, `pending` until it answers, then `confirmed` or
   `failed`, and `Check` answers a handle of its own check that reads the same (amended
   2026-11-24, B12 PR 4a); that answer and the pair it carries are read in one step, where the check's
-  end is published and its slot given back together (round 2).
+  end is published and its slot given back together.
   With no check in the slot, the stop answers `none` with the pair published as it found the slot
   empty (amended 2026-11-24, B12 PR 4a).
 
@@ -1389,7 +1390,7 @@ admitted under, the identity its sink opened, and its completion time. PR 3 read
 `Backend.CheckStatus` alone. B12 PR 4a (amended 2026-11-24) publishes it as `dsdDAC.check` at each
 transition (§7.1) and writes the answer (`AnswerCheck`, §7.2's route's backend, PR 4b's route): a
 choice's path with a second decision, the check answerable, its age decided inside the state's one
-write by the clock read there (round 2); a write
+write by the clock read there; a write
 that reached the file makes the check `answered`, and a landed one holds the set as a landed choice
 does. A stopped or failed check has no completion time, so the answer's age refuses it as well as
 its phase.
