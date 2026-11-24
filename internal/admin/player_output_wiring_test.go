@@ -277,15 +277,32 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 		t.Errorf("audio.js calls advance with an option (%s): what playback does by itself goes on through continueStart", m)
 	}
 	// Round 4 (T1): a play the bar did not mark is the browser's own, which
-	// the play listener hands to ownPlay; ownPlay pauses the element before
-	// it asks the gate, as a fresh start (a null permit) with a drop.
-	if !strings.Contains(fns["init"].body, "if (!marks.length && continueGate) {\n      ownPlay();") {
-		t.Error("audio.js's play listener does not hand a play it did not mark to ownPlay")
+	// the play listener hands to ownPlay whatever the gate (round 5); ownPlay
+	// pauses the element before it asks the gate, as a fresh start (a null
+	// permit) with a drop.
+	if !strings.Contains(fns["init"].body, "if (!marks.length) {\n      ownPlay();") {
+		t.Error("audio.js's play listener does not hand every play it did not mark to ownPlay, whatever the gate")
 	}
 	own := fns["ownPlay"].body
 	pauseAt, askAt := strings.Index(own, "state.el.pause();"), strings.Index(own, "continueGate(null, go, drop);")
 	if pauseAt < 0 || askAt < 0 || pauseAt > askAt {
 		t.Error("ownPlay does not pause the element before it asks the gate as a fresh start")
+	}
+	// Round 5: a missing gate refuses. Each way a start asks its gate asks it
+	// only where it is wired, refusing otherwise, and runs nothing but
+	// through it.
+	for name, ask := range map[string][2]string{
+		"requestStart":  {"if (startGate) startGate(run);\n}", "run"},
+		"continueStart": {"if (continueGate) continueGate(permit, go, drop);\n  else drop();", "go"},
+		"ownPlay":       {"if (continueGate) continueGate(null, go, drop);\n  else drop();", "go"},
+	} {
+		body := fns[name].body
+		if !strings.Contains(body, ask[0]) {
+			t.Errorf("audio.js's %s does not refuse where its gate is missing: it lacks %q", name, ask[0])
+		}
+		if m := regexp.MustCompile(`(?:^|[^\w$.])` + ask[1] + `\(`).FindString(strings.Replace(body, ask[0], "", 1)); m != "" {
+			t.Errorf("audio.js's %s calls %s other than through its gate", name, strings.TrimSpace(m))
+		}
 	}
 	ms := fns["wireMediaSession"].body
 	for _, want := range []string{`set("play", () => toggle())`, `set("pause", () => toggle())`, `set("previoustrack", () => advance(-1))`, `set("nexttrack", () => advance(1))`} {

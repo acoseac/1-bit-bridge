@@ -116,12 +116,10 @@ export function setContinueGate(gate) {
   continueGate = gate;
 }
 
+// With no gate wired (a boot that failed before it wired them), every start
+// is refused, as a start the gate refuses is (round 5).
 function requestStart(run) {
-  if (!startGate) {
-    run(null);
-    return;
-  }
-  startGate(run);
+  if (startGate) startGate(run);
 }
 
 // continueStart is how playback goes on by itself (S1): run, handed the
@@ -156,7 +154,7 @@ function continueStart(run, { fresh = false } = {}) {
   };
   const permit = fresh ? null : startPermit;
   if (continueGate) continueGate(permit, go, drop);
-  else go(permit);
+  else drop();
   if (!ran) {
     state.playing = false;
     state.loading = false;
@@ -247,7 +245,8 @@ function ownPlay() {
     state.loading = false;
     emit();
   };
-  continueGate(null, go, drop);
+  if (continueGate) continueGate(null, go, drop);
+  else drop();
 }
 
 // Whether the browser's MediaSession handlers are set: cleared while the
@@ -341,8 +340,9 @@ export function init() {
   }
 
   state.el.addEventListener("play", () => {
-    // A play the bar did not mark is the browser's own, and asks the gate.
-    if (!marks.length && continueGate) {
+    // A play the bar did not mark is the browser's own, and asks the gate,
+    // refused where none is wired.
+    if (!marks.length) {
       ownPlay();
       return;
     }

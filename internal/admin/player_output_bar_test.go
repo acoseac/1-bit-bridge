@@ -549,6 +549,15 @@ func TestALoadClearsTheProtectivePausesCount(t *testing.T) { barScenario(t, 2) }
 // browser's resume at once, so the browser stays silent, the bar saying why.
 func TestALoadBesideASoundingBridgeLeavesTheBrowserSilent(t *testing.T) { barScenario(t, 2) }
 
+// TestAnUnwiredGateRefusesTheBrowsersOwnPlay pins that with no gate wired (a
+// boot that threw after the restore set a source) the browser's own play is
+// paused and refused, as a refused start is.
+func TestAnUnwiredGateRefusesTheBrowsersOwnPlay(t *testing.T) { barScenario(t, 2) }
+
+// TestAnUnwiredGateRefusesEveryStart pins that with no gate wired every start
+// is refused, the lock screen's Play and Next included.
+func TestAnUnwiredGateRefusesEveryStart(t *testing.T) { barScenario(t, 3) }
+
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start
 // on the barrier's done, and the skip moves nothing of it.

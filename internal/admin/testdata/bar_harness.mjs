@@ -1062,6 +1062,11 @@ async function pageRig(o = {}) {
   if (o.gate) {
     audio.setStartGate(out.gateStart);
     audio.setContinueGate?.(out.gateContinue);
+  } else if (!o.unwired) {
+    // A case about something else gets a gate that lets every start go on;
+    // `unwired` stands for a boot that failed before it wired either gate.
+    audio.setStartGate((run) => run(null));
+    audio.setContinueGate?.((permit, run) => run(permit));
   }
   if (!o.noFrame) {
     out.streamOpen(1);
@@ -2530,7 +2535,7 @@ S.TestADeferredStartWithNoPermitPlaysWhileNoPlayerIsOffered = async () => {
   check("still no player offered: the deferred play plays, from its position", !r.el.paused && r.el.currentTime === 42, [r.el.paused, r.el.currentTime]);
 };
 
-// ---- Round 5: a load leaves no protective pause counted ----
+// ---- Round 5: a load leaves no protective pause counted, and no gate means no start ----
 
 // oneTask lets the tasks queued so far run, and none of those they queue.
 const oneTask = () => new Promise((resolve) => realTimeout(resolve, 0));
@@ -2582,6 +2587,31 @@ S.TestALoadBesideASoundingBridgeLeavesTheBrowserSilent = async () => {
   await settle();
   check("beside the bridge playing the browser stays silent", r.el.paused && r.el.plays.length === plays, [r.el.paused, r.el.plays.slice(plays)]);
   check("and the bar says the bridge plays", r.out.view().line === WORDS.bridgePlaying, r.out.view().line);
+};
+
+// unwiredPage is a boot that threw after audio.init() restored a queue and
+// set its source, before it wired either gate.
+async function unwiredPage() {
+  const r = await pageRig({ unwired: true, noFrame: true, saved: { queue: [flac(1), flac(2)], index: 0, at: 0, shuffle: false, repeat: "off" } });
+  check("the restore set a source", !!r.el.getAttribute("src"), r.el.getAttribute("src"));
+  return r;
+}
+
+S.TestAnUnwiredGateRefusesTheBrowsersOwnPlay = async () => {
+  const r = await unwiredPage();
+  r.el.browserPlay();
+  await settle();
+  check("the browser's own play with no gate wired: the element ends paused", r.el.paused && !r.audio.snapshot().playing, [r.el.paused, r.audio.snapshot().playing]);
+};
+
+S.TestAnUnwiredGateRefusesEveryStart = async () => {
+  const r = await unwiredPage();
+  session.handlers.play?.();
+  await settle();
+  check("the lock screen's Play with no gate wired: nothing plays", r.el.paused && r.el.plays.length === 0, [r.el.paused, r.el.plays]);
+  session.handlers.nexttrack?.();
+  await settle();
+  check("and its Next: nothing plays and nothing moves", r.el.paused && r.el.plays.length === 0 && r.audio.snapshot().index === 0, [r.el.paused, r.el.plays, r.audio.snapshot().index]);
 };
 
 const name = scenarioName;
