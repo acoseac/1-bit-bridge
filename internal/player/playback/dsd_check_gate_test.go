@@ -68,8 +68,8 @@ func (c *checkTimers) next(t *testing.T, what string) *checkTimer {
 
 // checkBackend is a backend with an effective DSD policy that reads nothing
 // (no box, no state: no DAC published), its set computed once, so a check
-// passes its reading and meets the slot, where it is refused dac_changed at
-// the end; timers is its AfterFunc.
+// passes its reading and is refused dac_unavailable by the pair it meets,
+// before the slot; timers is its AfterFunc.
 func checkBackend(t *testing.T, timers *checkTimers) *Backend {
 	t.Helper()
 	b, err := New(Config{Resolver: nopResolver{}, Locator: noUnit{}, DSD: &DSDPolicy{}, AfterFunc: timers.afterFunc})
@@ -134,9 +134,9 @@ func slotAsIs(t *testing.T, b *Backend, rec *checkHold, what string) {
 // or changes the record, leaves a waiter or keeps the count, and each one past
 // the reading carries the pair it was decided on.
 func TestTheChecksGateReadsTheDeviceSlot(t *testing.T) {
-	asIs := func(b *Backend) CheckRequest { r, _ := publishedRequest(t, b); return r }
-	bad := func(edit func(*CheckRequest)) func(*Backend) CheckRequest {
-		return func(b *Backend) CheckRequest { r := asIs(b); edit(&r); return r }
+	asIs := func(t *testing.T, b *Backend) CheckRequest { r, _ := publishedRequest(t, b); return r }
+	bad := func(edit func(*CheckRequest)) func(*testing.T, *Backend) CheckRequest {
+		return func(t *testing.T, b *Backend) CheckRequest { r := asIs(t, b); edit(&r); return r }
 	}
 	otherToken := bad(func(r *CheckRequest) { r.DACToken = "t1-0123456789abcdef0123456789abcdef" })
 	open := func(*Backend) {}
@@ -148,7 +148,7 @@ func TestTheChecksGateReadsTheDeviceSlot(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		set  func(b *Backend)
-		req  func(b *Backend) CheckRequest
+		req  func(t *testing.T, b *Backend) CheckRequest
 		want string
 	}{
 		{"a transport that is not DSD's", open, bad(func(r *CheckRequest) { r.Transport = "pcm" }), CheckBadRequest},
@@ -181,7 +181,7 @@ func TestTheChecksGateReadsTheDeviceSlot(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := publishedBackend(t, newCheckTimers().afterFunc, fixtureBox{})
-			req := c.req(b)
+			req := c.req(t, b)
 			c.set(b)
 			// The last check's record, which a refusal leaves as it is.
 			rec := &checkHold{id: "the last check's"}
@@ -243,7 +243,7 @@ func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 		st  CheckStatus
 		err error
 	}
-	asked := func(b *Backend, ctx context.Context) <-chan answer {
+	asked := func(t *testing.T, b *Backend, ctx context.Context) <-chan answer {
 		ch := make(chan answer, 1)
 		req, _ := publishedRequest(t, b)
 		go func() {
@@ -252,7 +252,9 @@ func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 		}()
 		return ch
 	}
-	backend := func(timers *checkTimers) *Backend { return publishedBackend(t, timers.afterFunc, fixtureBox{}) }
+	backend := func(t *testing.T, timers *checkTimers) *Backend {
+		return publishedBackend(t, timers.afterFunc, fixtureBox{})
+	}
 	got := func(t *testing.T, ch <-chan answer) answer {
 		t.Helper()
 		select {
@@ -295,9 +297,9 @@ func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 	}
 	t.Run("a probe that ends", func(t *testing.T) {
 		timers := newCheckTimers()
-		b := backend(timers)
+		b := backend(t, timers)
 		p := probing(b)
-		ch := asked(b, context.Background())
+		ch := asked(t, b, context.Background())
 		tm := timers.next(t, "the check's wait for the probe")
 		waiting(t, b, tm, ProbeWait)
 		b.endProbe(p)
@@ -316,9 +318,9 @@ func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 	})
 	t.Run("a probe past ProbeWait", func(t *testing.T) {
 		timers := newCheckTimers()
-		b := backend(timers)
+		b := backend(t, timers)
 		probing(b)
-		ch := asked(b, context.Background())
+		ch := asked(t, b, context.Background())
 		tm := timers.next(t, "the check's wait for the probe")
 		waiting(t, b, tm, ProbeWait)
 		tm.f()
@@ -332,12 +334,12 @@ func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 	})
 	t.Run("a tone, ended and past ToneYield", func(t *testing.T) {
 		timers := newCheckTimers()
-		b := backend(timers)
+		b := backend(t, timers)
 		tn, why := b.reserveTone(context.Background(), toneRequest)
 		if tn == nil {
 			t.Fatalf("the tone was refused: %s", why)
 		}
-		ch := asked(b, context.Background())
+		ch := asked(t, b, context.Background())
 		tm := timers.next(t, "the check's wait for the tone")
 		waiting(t, b, tm, ToneYield)
 		if w := tn.ended(); w != TonePreempted {
@@ -354,10 +356,10 @@ func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 	})
 	t.Run("its request's end", func(t *testing.T) {
 		timers := newCheckTimers()
-		b := backend(timers)
+		b := backend(t, timers)
 		probing(b)
 		ctx, cancel := context.WithCancel(context.Background())
-		ch := asked(b, ctx)
+		ch := asked(t, b, ctx)
 		tm := timers.next(t, "the check's wait for the probe")
 		waiting(t, b, tm, ProbeWait)
 		cancel()

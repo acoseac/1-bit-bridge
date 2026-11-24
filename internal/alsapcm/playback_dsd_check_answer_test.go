@@ -147,7 +147,7 @@ func TestOnlyACompleteCheckIsAnswered(t *testing.T) {
 	clock := func(p *playback.DSDPolicy) {
 		p.Now = func() time.Time { return playbacktest.T0.Add(time.Duration(offset.Load())) }
 	}
-	refused := func(r *checkRig, id, what string) {
+	refused := func(t *testing.T, r *checkRig, id, what string) {
 		t.Helper()
 		writes := r.store.Writes()
 		res := r.answer(id, dsdstate.AnswerClean)
@@ -160,14 +160,14 @@ func TestOnlyACompleteCheckIsAnswered(t *testing.T) {
 	}
 	t.Run("an ID no check of this boot has", func(t *testing.T) {
 		r := newCheckRig(t, native, clock)
-		refused(r, "0123456789abcdef", "no check")
+		refused(t, r, "0123456789abcdef", "no check")
 	})
 	t.Run("a check that did not complete", func(t *testing.T) {
 		r := newCheckRig(t, native, clock)
 		c := r.playingCheck(dsdstate.TransportNative)
 		close(c.stop)
 		st := r.endedAs(playback.CheckStopped, playback.CheckStop, "the stopped check")
-		refused(r, st.ID, "a stopped check")
+		refused(t, r, st.ID, "a stopped check")
 	})
 	t.Run("a complete check, then again", func(t *testing.T) {
 		offset.Store(0)
@@ -187,14 +187,14 @@ func TestOnlyACompleteCheckIsAnswered(t *testing.T) {
 		if m := res.Policy.DSD.DAC.Check; m == nil || m.ID != st.ID || m.Phase != playback.CheckAnswered {
 			t.Errorf("the answer's pair publishes the check %+v; want it answered", m)
 		}
-		refused(r, st.ID, "a check answered already")
+		refused(t, r, st.ID, "a check answered already")
 	})
 	t.Run("a check completed eleven minutes ago", func(t *testing.T) {
 		offset.Store(0)
 		r := newCheckRig(t, native, clock)
 		st := r.completed()
 		offset.Store(int64(11 * time.Minute))
-		refused(r, st.ID, "a check completed eleven minutes ago")
+		refused(t, r, st.ID, "a check completed eleven minutes ago")
 	})
 	t.Run("a check completed exactly CheckAnswerable ago", func(t *testing.T) {
 		offset.Store(0)
@@ -375,7 +375,7 @@ func TestAFirmwareChangeBeforeTheAnswerMakesItUnanswerable(t *testing.T) {
 // carries none.
 func TestEveryCheckTransitionIsPublished(t *testing.T) {
 	native := playbacktest.ChoiceState(dsdstate.ModeNative)
-	published := func(r *checkRig, want playback.CheckPhase, reason playback.CheckReason, since uint64, gen uint64, what string) uint64 {
+	published := func(t *testing.T, r *checkRig, want playback.CheckPhase, reason playback.CheckReason, since uint64, gen uint64, what string) uint64 {
 		t.Helper()
 		p := r.be.Policy()
 		m := r.member()
@@ -394,35 +394,35 @@ func TestEveryCheckTransitionIsPublished(t *testing.T) {
 			t.Fatalf("a backend with no check publishes %+v", r.member())
 		}
 		c, p := r.preparingCheck()
-		seq := published(r, playback.CheckPreparing, "", before.Publication, before.Generation, "admitted")
+		seq := published(t, r, playback.CheckPreparing, "", before.Publication, before.Generation, "admitted")
 		p.letGo()
 		r.k.Await(t, "the check's writer to fill the hardware buffer and wait on the DAC", runningAndWaiting)
-		seq = published(r, playback.CheckPlaying, "", seq, before.Generation, "playing")
+		seq = published(t, r, playback.CheckPlaying, "", seq, before.Generation, "playing")
 		r.be.RefreshDSD(true)
 		if m := r.member(); m == nil || m.Phase != playback.CheckPlaying {
 			t.Errorf("a refresh's publication carries %+v; want the playing check", m)
 		}
 		r.k.Free()
 		r.endedAs(playback.CheckComplete, "", "the check")
-		seq = published(r, playback.CheckComplete, "", seq, before.Generation, "complete")
+		seq = published(t, r, playback.CheckComplete, "", seq, before.Generation, "complete")
 		r.k.Hold()
 		res := r.answer(c.st.ID, dsdstate.AnswerClean)
 		if res.Outcome != playback.ChoiceWritten {
 			t.Fatalf("the answer: %+v", res)
 		}
-		published(r, playback.CheckAnswered, "", seq, before.Generation, "answered")
+		published(t, r, playback.CheckAnswered, "", seq, before.Generation, "answered")
 	})
 	t.Run("stopped", func(t *testing.T) {
 		r := newCheckRig(t, native, nil)
 		before := r.be.Policy()
 		_, p := r.preparingCheck()
-		seq := published(r, playback.CheckPreparing, "", before.Publication, before.Generation, "admitted")
+		seq := published(t, r, playback.CheckPreparing, "", before.Publication, before.Generation, "admitted")
 		if cleanup, pol := r.be.StopCheck(bg); cleanup != playback.CheckCleanupConfirmed || pol.DSD.DAC.Check == nil || pol.DSD.DAC.Check.Phase != playback.CheckStopped {
 			t.Errorf("StopCheck answered %s with %+v; want confirmed, the check stopped", cleanup, pol.DSD.DAC.Check)
 		}
 		p.letGo()
 		r.joined("the stopped check")
-		published(r, playback.CheckStopped, playback.CheckDeleted, seq, before.Generation, "stopped")
+		published(t, r, playback.CheckStopped, playback.CheckDeleted, seq, before.Generation, "stopped")
 	})
 	t.Run("another unit's token", func(t *testing.T) {
 		r := newCheckRig(t, native, nil)
@@ -444,7 +444,7 @@ func TestEveryCheckTransitionIsPublished(t *testing.T) {
 // the close is held, the check published stopping; and none with no check.
 func TestAStopsAnswerSaysHowItsCleanupEnded(t *testing.T) {
 	native := playbacktest.ChoiceState(dsdstate.ModeNative)
-	stopped := func(r *checkRig, cleanup playback.CheckCleanup, phase playback.CheckPhase, what string) {
+	stopped := func(t *testing.T, r *checkRig, cleanup playback.CheckCleanup, phase playback.CheckPhase, what string) {
 		t.Helper()
 		got, pol := r.be.StopCheck(bg)
 		if got != cleanup {
@@ -464,7 +464,7 @@ func TestAStopsAnswerSaysHowItsCleanupEnded(t *testing.T) {
 		"confirmed": func(t *testing.T) {
 			r := newCheckRig(t, native, nil)
 			r.playingCheck(dsdstate.TransportNative)
-			stopped(r, playback.CheckCleanupConfirmed, playback.CheckStopped, "a check whose close answers")
+			stopped(t, r, playback.CheckCleanupConfirmed, playback.CheckStopped, "a check whose close answers")
 		},
 		"a close that answers an error": func(t *testing.T) {
 			r := newCheckRig(t, native, nil)
@@ -472,7 +472,7 @@ func TestAStopsAnswerSaysHowItsCleanupEnded(t *testing.T) {
 			r.cleanup = "close"
 			r.dsdRig.mu.Unlock()
 			r.playingCheck(dsdstate.TransportNative)
-			stopped(r, playback.CheckCleanupFailed, playback.CheckFailed, "a close that failed")
+			stopped(t, r, playback.CheckCleanupFailed, playback.CheckFailed, "a close that failed")
 			r.checkFenced("a close that failed")
 		},
 		"a cleanup that panicked": func(t *testing.T) {
