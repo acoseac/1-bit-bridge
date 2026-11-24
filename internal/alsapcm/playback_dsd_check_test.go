@@ -114,12 +114,13 @@ func (r *checkRig) holdPreparation() *parkAt {
 	return p
 }
 
-// checkCall is a check asked and its answer, with the stop signal of its
-// engine hold, which the test closes.
+// checkCall is a check asked and its answer, whether Check answered a handle
+// at all, with the stop signal of its engine hold, which the test closes.
 type checkCall struct {
-	st   playback.CheckStatus
-	err  error
-	stop chan struct{}
+	st     playback.CheckStatus
+	handle bool
+	err    error
+	stop   chan struct{}
 }
 
 // request is a check of transport at bitRate for the DAC the backend
@@ -140,7 +141,7 @@ func (r *checkRig) ask(req playback.CheckRequest, stop chan struct{}) checkCall 
 	ctx, cancel := within()
 	defer cancel()
 	h, err := r.be.Check(ctx, req)
-	return checkCall{st: statusOf(h), err: err, stop: stop}
+	return checkCall{st: statusOf(h), handle: h != nil, err: err, stop: stop}
 }
 
 // statusOf is the record Check's handle carries, none for no handle.

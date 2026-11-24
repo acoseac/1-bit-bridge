@@ -376,8 +376,9 @@ func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*CheckHan
 // left to finish and publish as a refresh does, taking no slot, and one still
 // waiting for the refreshes' lock as the stop signal comes reading nothing;
 // a request that has ended starts none. Every wake but the reading's success
-// is refused in the slot's order: the request's error, serve's stop, the
-// stop's word, then dac_unavailable for a reading that failed.
+// is refused in the slot's order, decided under b.mu: the request's error,
+// serve's stop, the stop's word, then dac_unavailable for a reading that
+// failed.
 func (b *Backend) readForCheck(ctx context.Context, req CheckRequest) error {
 	read := make(chan error, 1)
 	if ctx.Err() == nil && !signalled(req.Stop) {
@@ -398,10 +399,13 @@ func (b *Backend) readForCheck(ctx context.Context, req CheckRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	b.dsdStep("check refusing")
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	word := CheckDACUnavailable
 	switch {
+	case ctx.Err() != nil:
+		return ctx.Err()
 	case b.checksClosed:
 		word = string(CheckServeStopping)
 	case signalled(req.Stop):

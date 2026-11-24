@@ -254,8 +254,9 @@ type Seams struct {
 	// DSDStep runs as a step is reached, on its goroutine: "queued" as a
 	// reading (lockReading) finds the refreshes' lock held, before it waits,
 	// never blocking; "check read failed" as Check's admission's reading has
-	// answered an error, before its refusal; "stop read" between StopCheck's
-	// two reads, under b.mu. None may call the backend.
+	// answered an error, before its refusal; "check refusing" once the
+	// admission has found its request live, before b.mu; "stop read" between
+	// StopCheck's two reads, under b.mu. None may call the backend.
 	DSDStep func(step string)
 }
 

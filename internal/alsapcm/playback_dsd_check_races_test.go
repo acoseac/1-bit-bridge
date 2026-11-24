@@ -25,7 +25,7 @@ func (r *checkRig) askAsync(ctx context.Context, req playback.CheckRequest, stop
 	answer := make(chan checkCall, 1)
 	go func() {
 		h, err := r.be.Check(ctx, req)
-		answer <- checkCall{st: statusOf(h), err: err, stop: stop}
+		answer <- checkCall{st: statusOf(h), handle: h != nil, err: err, stop: stop}
 	}()
 	return answer
 }
@@ -435,8 +435,8 @@ func TestTheAdmissionsReadingKeepsTheRefusalsOrder(t *testing.T) {
 	refusedAs := func(t *testing.T, c checkCall, word string, epoch bool, what string) *playback.CheckRefused {
 		t.Helper()
 		var rf *playback.CheckRefused
-		if !errors.As(c.err, &rf) || rf.Word != word || rf.Epoch != epoch || !sameCheckStatus(c.st, playback.CheckStatus{}) {
-			t.Errorf("%s: the check answered %+v, %v; want refused %s, its epoch %v", what, c.st, c.err, word, epoch)
+		if !errors.As(c.err, &rf) || rf.Word != word || rf.Epoch != epoch || c.handle || !sameCheckStatus(c.st, playback.CheckStatus{}) {
+			t.Errorf("%s: the check answered %+v (a handle %v), %v; want refused %s, its epoch %v, no handle", what, c.st, c.handle, c.err, word, epoch)
 		}
 		return rf
 	}
@@ -467,9 +467,13 @@ func TestTheAdmissionsReadingKeepsTheRefusalsOrder(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		end  func(*checkBox, chan struct{})
+		// woken: the end wakes the admission's wait, so its refusal is
+		// received before the held reading is let go, which could otherwise
+		// answer first; serve's stop alone wakes nothing.
+		woken bool
 	}{
-		{"serve's stop before its stop signal", func(_ *checkBox, stop chan struct{}) { close(stop) }},
-		{"serve's stop before its reading fails", func(box *checkBox, _ chan struct{}) { box.panics.Store(true) }},
+		{"serve's stop before its stop signal", func(_ *checkBox, stop chan struct{}) { close(stop) }, true},
+		{"serve's stop before its reading fails", func(box *checkBox, _ chan struct{}) { box.panics.Store(true) }, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			box := &checkBox{}
@@ -481,8 +485,15 @@ func TestTheAdmissionsReadingKeepsTheRefusalsOrder(t *testing.T) {
 			awaitOrdered(t, p.in, "the admission's reading held in the box")
 			r.be.CloseChecks()
 			c.end(box, stop)
-			p.letGo()
-			refusedAs(t, receiveIn(t, answer, "the check's answer"), string(playback.CheckServeStopping), false, c.name)
+			var a checkCall
+			if c.woken {
+				a = receiveIn(t, answer, "the check's answer, its reading still held")
+				p.letGo()
+			} else {
+				p.letGo()
+				a = receiveIn(t, answer, "the check's answer")
+			}
+			refusedAs(t, a, string(playback.CheckServeStopping), false, c.name)
 			nothingOpened(t, r, c.name)
 		})
 	}
@@ -517,4 +528,82 @@ func TestTheAdmissionsReadingKeepsTheRefusalsOrder(t *testing.T) {
 		}
 		nothingOpened(t, r, "a reading that fails")
 	})
+}
+
+// TestARequestEndedBeforeTheRefusalsLockIsAnsweredWithItsError: a check whose
+// admission has found its request live and has yet to take the backend's lock
+// to decide its refusal answers its request's error once the request ends
+// meanwhile, whatever came beside it, the request asked again under that
+// lock first: after a reading that failed, the request's end then the stop
+// signal, the stop signal then the request's end, and serve's stop then the
+// request's end; after the stop signal's wake, the request's end. With the
+// request live until the refusal is received, the stop's word stands, after a
+// failed reading and after the stop signal's wake alike.
+func TestARequestEndedBeforeTheRefusalsLockIsAnsweredWithItsError(t *testing.T) {
+	native := playbacktest.ChoiceState(dsdstate.ModeNative)
+	type step func(r *checkRig, cancel context.CancelFunc, stop chan struct{})
+	ended := step(func(_ *checkRig, cancel context.CancelFunc, _ chan struct{}) { cancel() })
+	stopped := step(func(_ *checkRig, _ context.CancelFunc, stop chan struct{}) { close(stop) })
+	closed := step(func(r *checkRig, _ context.CancelFunc, _ chan struct{}) { r.be.CloseChecks() })
+	for _, c := range []struct {
+		name   string
+		failed bool   // the admission woken by a failed reading, else by the stop signal
+		steps  []step // made while the admission is held before the lock
+		want   string // the refusal's word, "" for the request's error
+	}{
+		{"a failed reading, the request's end then the stop signal", true, []step{ended, stopped}, ""},
+		{"a failed reading, the stop signal then the request's end", true, []step{stopped, ended}, ""},
+		{"a failed reading, serve's stop then the request's end", true, []step{closed, ended}, ""},
+		{"the stop signal's wake, then the request's end", false, []step{ended}, ""},
+		{"a failed reading, the stop signal, the request live", true, []step{stopped}, string(playback.CheckStop)},
+		{"the stop signal's wake, the request live", false, nil, string(playback.CheckStop)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			refusing := (*heldOnce)(nil)
+			box := &checkBox{}
+			r := newCheckRig(t, native, withCheckBox(box), func(o *rigOptions) {
+				o.seams = &playback.Seams{DSDStep: func(step string) {
+					if step == "check refusing" {
+						refusing.hold()
+					}
+				}}
+			})
+			refusing = newHeldOnce(t)
+			req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
+			ctx, cancel := context.WithCancel(bg)
+			defer cancel()
+			var p *parkAt
+			if c.failed {
+				box.panics.Store(true)
+			} else {
+				p = box.holdNext()
+				t.Cleanup(p.letGo)
+			}
+			answer := r.askAsync(ctx, req, stop)
+			if p != nil {
+				awaitOrdered(t, p.in, "the admission's reading held in the box")
+				close(stop)
+			}
+			awaitOrdered(t, refusing.in, "the admission past its live request, before the backend's lock")
+			for _, s := range c.steps {
+				s(r, cancel, stop)
+			}
+			refusing.release()
+			a := receiveIn(t, answer, "the check's answer")
+			switch {
+			case c.want == "" && (!errors.Is(a.err, context.Canceled) || a.handle || !sameCheckStatus(a.st, playback.CheckStatus{})):
+				t.Errorf("the check answered %+v (a handle %v), %v; want its request's error, no handle", a.st, a.handle, a.err)
+			case c.want != "" && (checkRefusal(a.err) != c.want || a.handle || !sameCheckStatus(a.st, playback.CheckStatus{})):
+				t.Errorf("the check answered %+v (a handle %v), %v; want refused %s, no handle", a.st, a.handle, a.err, c.want)
+			}
+			cancel()
+			if p != nil {
+				p.letGo()
+			}
+			r.joined(c.name)
+			if v := r.k.View(); v.Opens != 0 {
+				t.Errorf("%d opens asked; want none", v.Opens)
+			}
+		})
+	}
 }
