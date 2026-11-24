@@ -804,7 +804,7 @@ func TestAFailureAfterARepeatOneReplayStartsANewStreak(t *testing.T) { barScenar
 // TestAfterAnAbortTheButtonDoesWhatItShows pins that after a fetch the user
 // aborted (code 1), which fires no pause, the bar's Pause, still shown,
 // pauses and asks the gate nothing, and its Play, shown once stopped,
-// starts through the gate.
+// starts the track it showed through the gate.
 func TestAfterAnAbortTheButtonDoesWhatItShows(t *testing.T) { barScenario(t, 4) }
 
 // TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo pins that a start the lock
@@ -849,3 +849,10 @@ func TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnANoPlayerRefusal(t *tes
 func TestTheBrowsersOwnResumeAPauseOvertookAsksNothingWhereNoPlayerIsOffered(t *testing.T) {
 	barScenario(t, 3)
 }
+
+// TestAfterAnAbortThePausePressedShowsPlayAtOnce pins that after a fetch the
+// user aborted (code 1), the bar's Pause pressed shows Play at once, before
+// the element's pause event, and that Play pressed before that event asks the
+// gate once, plays the track the bar showed, and its intent outlives that
+// event: the track's end plays the next track.
+func TestAfterAnAbortThePausePressedShowsPlayAtOnce(t *testing.T) { barScenario(t, 4) }

@@ -3354,8 +3354,9 @@ S.TestAfterAnAbortTheButtonDoesWhatItShows = async () => {
   const [asked, sent, played] = [asks, r.s.posts(ROUTES.switchOut).length, r.el.plays.length];
   play?.click();
   await settle();
-  check("and Play starts through the gate, a barrier of its own", asks === asked + 1 && r.s.posts(ROUTES.switchOut).length === sent + 1 && !r.el.paused && r.el.plays.length === played + 1,
-    [asks - asked, r.s.posts(ROUTES.switchOut).length - sent, r.el.paused, r.el.plays.slice(played)]);
+  check("and Play starts through the gate, a barrier of its own, the track it showed", asks === asked + 1 && r.s.posts(ROUTES.switchOut).length === sent + 1 && !r.el.paused && r.el.plays.length === played + 1 &&
+    r.audio.snapshot().index === 0 && /01\.flac/.test(r.el.plays.at(-1) || ""),
+    [asks - asked, r.s.posts(ROUTES.switchOut).length - sent, r.el.paused, r.el.plays.slice(played), r.audio.snapshot().index]);
 };
 
 S.TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo = async () => {
@@ -3513,6 +3514,37 @@ S.TestTheBrowsersOwnResumeAPauseOvertookAsksNothingWhereNoPlayerIsOffered = asyn
   await settle();
   check("a resume of the browser's own made after the Pause still plays", !r.el.paused && r.audio.snapshot().playing && r.el.plays.length === plays + 3 && /01\.flac/.test(r.el.plays.at(-1) || ""),
     [r.el.paused, r.audio.snapshot().playing, r.el.plays.slice(plays)]);
+};
+
+S.TestAfterAnAbortThePausePressedShowsPlayAtOnce = async () => {
+  // A fetch the user aborted (code 1) fires abort and no pause. The bar's
+  // Pause pressed pauses and shows Play at once, before the element's pause
+  // event; that Play pressed before the event asks the gate once and plays
+  // the track the bar showed, and what it means to play goes on at its end.
+  const r = await gatedPlaying({ bar: true });
+  let asks = 0;
+  r.audio.setStartGate((run, o) => { asks += 1; r.out.gateStart(run, o); }, r.out.cancelStarts);
+  r.el.error = { code: 1 };
+  r.el.fire("abort");
+  await settle();
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  const plays = r.el.plays.length;
+  r.find("Pause")?.click();
+  const shown = r.find("Play") ? "Play" : (r.find("Pause") ? "Pause" : "");
+  check("pressed, the Pause pauses and shows Play at once, before its pause event, asking the gate nothing",
+    shown === "Play" && r.el.paused && asks === 0 && r.s.posts(ROUTES.switchOut).length === posts, [shown, r.el.paused, asks, r.s.posts(ROUTES.switchOut).length - posts]);
+  r.find(shown)?.click();
+  check("the control shown, pressed before that event, does what it shows: a Pause asks nothing, a Play one start",
+    (shown === "Pause" && asks === 0) || (shown === "Play" && asks === 1), [shown, asks]);
+  await settle();
+  const s = r.audio.snapshot();
+  check("one start, through a barrier of its own, plays the track the bar showed",
+    asks === 1 && r.s.posts(ROUTES.switchOut).length === posts + 1 && !r.el.paused && r.el.plays.length === plays + 1 && /01\.flac/.test(r.el.plays.at(-1) || "") && s.index === 0 && s.track?.path === "Album/01.flac",
+    [asks, r.s.posts(ROUTES.switchOut).length - posts, r.el.paused, r.el.plays.slice(plays), s.index, s.track?.path]);
+  r.el.end();
+  await settle();
+  check("and what it means to play goes on at the track's end", !r.el.paused && r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || ""),
+    [r.el.paused, r.audio.snapshot().index, r.el.plays.slice(plays)]);
 };
 
 const name = scenarioName;

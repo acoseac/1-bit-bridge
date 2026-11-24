@@ -89,11 +89,12 @@ let startPermit = null;
 // Whether this browser means to play what it holds (round 3, S2, Q8): set by
 // a load that means to play and by a play a start or a continuation lets
 // go on; cleared by a load that does not, a pause of the element other than
-// the one its end makes, the reader's explicit Pause, a start the reader asks
-// over a paused element (requestStart), suspend(), clearQueue(), the stop at
-// the queue's end and restore(). A continuation, and the retry after an
-// error, play only while it holds: the element cannot say it, since load()
-// pauses it and a track's end pauses it before `ended`.
+// the one its end makes or one a play has overtaken, the reader's explicit
+// Pause, a start the reader asks over a paused element (requestStart),
+// suspend(), clearQueue(), the stop at the queue's end and restore(). A
+// continuation, and the retry after an error, play only while it holds: the
+// element cannot say it, since load() pauses it and a track's end pauses it
+// before `ended`.
 let intent = false;
 // The marks of the bar's own plays whose `play` event has not come (round 4,
 // T1, W1): a play() on a paused element queues one `play` event, which takes
@@ -384,10 +385,12 @@ export function init() {
   state.el.addEventListener("pause", () => {
     // A pause, the reader's or the browser's own, ends what this browser
     // means to play; the one a track's end makes before its `ended` does not,
-    // nor the bar's protective pause of the browser's own play (W3).
+    // nor the bar's protective pause of the browser's own play (W3), nor one a
+    // play has overtaken by the time its event comes (the element playing
+    // again), which leaves that play's intent alone.
     const own = ownPauses > 0;
     if (own) ownPauses -= 1;
-    else if (!state.el.ended) {
+    else if (!state.el.ended && state.el.paused) {
       intent = false;
       readerAction();
     }
@@ -970,18 +973,14 @@ export function toggle() {
     emit();
     return;
   }
-  readerAction();
   // A fetch the user aborted (code 1) fires no pause and is no failure: the
   // bar's Pause still shown pauses, and Play over it once stopped is Play.
   const failed = state.el.error && state.el.error.code !== 1;
   if (!state.el.paused && !failed) {
-    // Before the element's pause event, which a browser fires a task later;
-    // the explicit Pause lets go of a start the gate holds, that event never.
-    intent = false;
-    state.el.pause();
-    startCancel?.();
+    pauseNow();
     return;
   }
+  readerAction();
   // Over a failed element Play is a start: when it runs, a source it cannot
   // use moves on, a network or decode error reloads, its retry there again.
   requestStart((permit) => {
@@ -994,14 +993,17 @@ export function toggle() {
   });
 }
 
-/** Pause at once: the lock screen's Pause, which a failed track never makes a start. */
+/** Pause at once: the bar's Pause and the lock screen's, which a failed track never makes a start. */
 function pauseNow() {
   readerAction();
   intent = false;
   if (!state.el.paused) state.el.pause();
+  // The explicit Pause lets go of a start the gate holds; the element's
+  // pause event, which a browser fires a task later, never does.
   startCancel?.();
-  // Shown stopped at once: a positioned handover's wait is paused already,
-  // and its element fires no pause event to say so.
+  // Shown stopped at once, before that event, so the Play the bar then shows
+  // is a Play; a positioned handover's wait is paused already, and its
+  // element fires no pause event to say so.
   state.playing = false;
   state.loading = false;
   emit();
