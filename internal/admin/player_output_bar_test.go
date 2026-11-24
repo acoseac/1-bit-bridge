@@ -519,6 +519,17 @@ func TestTheBrowsersOwnResumeNeverTakesAReadersPlace(t *testing.T) { barScenario
 // so, and end the intent, so nothing starts after them.
 func TestARejectedPlayEndsTheIntentToPlay(t *testing.T) { barScenario(t, 4) }
 
+// TestADeferredStartWithNoPermitAsksTheGateThatHoldsWhenItRuns pins W9: a
+// resume let go on where no player was offered, its play deferred to the
+// metadata, asks the gate as it is when the metadata comes, and a player
+// offered since that plays refuses it.
+func TestADeferredStartWithNoPermitAsksTheGateThatHoldsWhenItRuns(t *testing.T) { barScenario(t, 3) }
+
+// TestADeferredStartWithNoPermitPlaysWhileNoPlayerIsOffered is W9's other
+// side: with still no player offered the deferred play plays, from its
+// position.
+func TestADeferredStartWithNoPermitPlaysWhileNoPlayerIsOffered(t *testing.T) { barScenario(t, 2) }
+
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start
 // on the barrier's done, and the skip moves nothing of it.

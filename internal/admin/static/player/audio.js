@@ -1103,6 +1103,16 @@ function loadAt(index, { autoplay, at, permit }) {
       emit();
       return;
     }
+    // A start let go on where no player was offered holds no permit: its
+    // deferred play asks the gate as it is now, so a player offered since
+    // that plays refuses it (round 4, W9).
+    if (permit === null) {
+      continueStart((p) => {
+        startPermit = p;
+        playEl();
+      }, { fresh: true });
+      return;
+    }
     playEl();
   });
   emit();

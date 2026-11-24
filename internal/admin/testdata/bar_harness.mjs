@@ -2487,6 +2487,41 @@ S.TestARejectedPlayEndsTheIntentToPlay = async () => {
   check("its intent gone too: the next removal starts nothing", r.el.plays.length === plays && r.s.posts(ROUTES.switchOut).length === posts, [r.el.plays.slice(plays), r.s.posts(ROUTES.switchOut).length - posts]);
 };
 
+// notOfferedResume is a browser playing at 42 s whose pick of the bridge is
+// refused as not offered, so it resumes at once, with no permit, its play
+// deferred to the track's metadata.
+async function notOfferedResume() {
+  const r = await gatedPlaying();
+  r.el.currentTime = 42;
+  r.s.on("POST", ROUTES.replace, async () => refusal("player_not_offered", null, 409, "this bridge offers no player of its own"));
+  await r.out.pick("bridge");
+  await settle();
+  check("refused as not offered: this browser the output, its resume waiting for the metadata", r.out.view().output === "browser" && r.out.view().notOffered && r.el.paused, [r.out.view().output, r.out.view().notOffered, r.el.paused]);
+  return r;
+}
+
+S.TestADeferredStartWithNoPermitAsksTheGateThatHoldsWhenItRuns = async () => {
+  // W9: a player offered since, playing, before the metadata: the deferred
+  // play asks the gate as it is then, which refuses it.
+  const r = await notOfferedResume();
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.metadata(200);
+  await settle();
+  check("a player offered since that plays: the deferred play plays nothing", r.el.paused && r.el.plays.length === plays, [r.el.paused, r.el.plays.slice(plays)]);
+  check("and the bar says so", r.out.view().line === WORDS.bridgePlaying, r.out.view().line);
+};
+
+S.TestADeferredStartWithNoPermitPlaysWhileNoPlayerIsOffered = async () => {
+  // W9's other side: still no player offered at the metadata, it plays, from
+  // its position.
+  const r = await notOfferedResume();
+  r.el.metadata(200);
+  await settle();
+  check("still no player offered: the deferred play plays, from its position", !r.el.paused && r.el.currentTime === 42, [r.el.paused, r.el.currentTime]);
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });
