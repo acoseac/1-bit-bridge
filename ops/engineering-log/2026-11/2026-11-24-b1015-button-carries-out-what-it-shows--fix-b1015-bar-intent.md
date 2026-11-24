@@ -121,3 +121,29 @@ it ran, the whole harness run over it, all as predicted:
 And the structural test, by a prebuilt test binary over copies of the three files it reads: green
 at HEAD, red with the stop symbol taken out of the sprite, with a glyph the sprite lacks, with the
 reduced-motion rule hiding the glyph, and with the busy class no longer following the wait.
+
+### The runs
+
+At `697cb963`, in one session, on `GOTOOLCHAIN=go1.27.3` with `GOPROXY=off`, the release tags and
+node on the path, so the node cases ran: `make fmt` (it rewrote nothing); `make vet`, and with
+`GOOS` and `GOARCH` set for linux/arm, linux/386, linux/arm64, windows/amd64, windows/arm64 and
+darwin/arm64 (exit 0, 4 to 5 s each); `make docs-check`; `make test P=8` with `-count=1` (exit 0
+in 2,017 s, 93 packages ok: cmd/bridge 1,990.0 s, internal/manifest 1,658.4 s, internal/admin
+1,529.8 s, internal/backup 704.0 s); `make build-all` (25 s); then with `-v` the source guards by
+name, all passing and none skipped: the nineteen `2026-11-24-b1015--fix-b1015-bar-intent.md`
+names, `TestTheResumeWaitsCancelCueShowsUnderReducedMotion`, and
+`TestThePhoneBarKeepsItsWordsWithTheBridgeChosen`, which reads nowplaying.js, with cmd/bridge's
+`TestEveryCitedTestNameExists`, `TestNoBlankKeepers`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestEveryBackgroundGoroutineDrainsOnCleanup`; the thirty-one cases by name, that entry's nineteen
+and these twelve, all passing, none skipped; with `-race -count=20`, the six guards that entry's
+race run names and the thirty-one cases (exit 0 in 161 s); and the harness's 166 scenarios, every
+check passing. The tree was clean at the end.
+
+### Not run
+
+- No real browser ran these sequences. The harness's element queues the media element's play and
+  pause events as tasks, a load removing them, as the specification's load algorithm does; a
+  browser session should press the bar's Cancel resume while a resume of the browser's own waits
+  on the barrier and then cut the network, press the bar's Play just after the browser resumed the
+  track by itself with a row asked before it, resume after the lock screen's Pause just after an
+  interruption, and look at the button under reduced motion while a resume waits.
