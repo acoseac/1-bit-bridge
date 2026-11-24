@@ -186,9 +186,13 @@ function continueStart(run, { fresh = false } = {}) {
 
 // readerAction counts what the reader does to playback, and lets go of a
 // resume of the browser's own that waits on the gate (W4), and of its
-// spinner; the caller's own emit says so.
-function readerAction() {
+// spinner; the caller's own emit says so. A call of the reader's own tells the
+// output too, whose switch to this browser then takes nothing (B1015); a pause
+// event's (own false) tells it nothing: the reader's Pause told it as it was
+// pressed, and an interruption changes nothing for the switch.
+function readerAction(own = true) {
   actions += 1;
+  if (own) currentOutput()?.readerActed?.();
   if (resumeWait) {
     resumeWait = null;
     state.loading = false;
@@ -393,7 +397,7 @@ export function init() {
     if (own) ownPauses -= 1;
     else if (!state.el.ended && state.el.paused) {
       intent = false;
-      readerAction();
+      readerAction(false);
     }
     state.playing = false;
     state.loading = own && resumeWait !== null;
@@ -483,6 +487,10 @@ function onError() {
           emit();
           return;
         }
+        // A resume of the browser's own waiting on the gate plays the source
+        // reloaded once it is admitted, and nothing if it is cancelled or
+        // refused (B1015).
+        if (resumeWait) return;
         continueStart((permit) => {
           startPermit = permit;
           playEl();
@@ -972,7 +980,10 @@ export function toggle() {
   init();
   if (state.index < 0) return;
   if (resumeWait) {
-    // The browser's own resume waits on the gate: Play/Pause cancels it (W4).
+    // The browser's own resume waits on the gate: Play/Pause cancels it (W4),
+    // and with it what this browser meant to play, which an error's retry
+    // reads (B1015).
+    intent = false;
     readerAction();
     emit();
     return;
