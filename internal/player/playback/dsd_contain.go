@@ -37,8 +37,9 @@ func (b *Backend) refreshDSD(where string) (*dsdSet, error) {
 // lock ends with ctx (lockReading), the DSD check's: ctx's error, nothing
 // read, once it has, asked again once the lock is held, as a choice's write
 // asks it (takeChoiceReading), since lockReading takes a free lock without
-// looking at ctx.
-func (b *Backend) refreshDSDWithin(ctx context.Context, where string) (*dsdSet, error) {
+// looking at ctx; and there, before the box is read, the check's hold's stop
+// signal (nil for none): come, nothing read (errCheckStopped).
+func (b *Backend) refreshDSDWithin(ctx context.Context, stop <-chan struct{}, where string) (*dsdSet, error) {
 	if !b.lockReading(ctx) {
 		return nil, ctx.Err()
 	}
@@ -46,8 +47,14 @@ func (b *Backend) refreshDSDWithin(ctx context.Context, where string) (*dsdSet, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if signalled(stop) {
+		return nil, errCheckStopped
+	}
 	return b.refreshHeld(where)
 }
+
+// errCheckStopped is a check's reading its hold's stop signal came before.
+var errCheckStopped = errors.New("player backend: the DSD check was stopped before its reading")
 
 // refreshHeld is refreshDSD's reading, its lock held.
 func (b *Backend) refreshHeld(where string) (d *dsdSet, err error) {
@@ -77,7 +84,7 @@ func (b *Backend) containDSD(where string, r any) {
 		ss = append(ss, s)
 	}
 	if c := b.checking; c != nil {
-		c.end(CheckFailed, CheckBackendFailed)
+		b.endCheckLocked(c, CheckFailed, CheckBackendFailed)
 	}
 	b.mu.Unlock()
 	for _, s := range ss {
@@ -100,33 +107,39 @@ func (b *Backend) refreshDSDLocked() *dsdSet {
 // a read side that says another thing of the DAC is published beside it alone;
 // another set is published at the next generation, said once (logDSDSet), and
 // reconciled. Each pair stored takes the next publication (dsdPublished.seq);
-// a reading that changes nothing stores nothing, and moves nothing. stored,
-// when set, runs right after the pair is stored, or with the pair standing
-// where nothing changed, before the log, the Published seam and the
-// reconciliation. b.dsdMu is held.
+// a reading that changes nothing stores nothing, and moves nothing. The pair
+// is stored under b.mu, as every store of it is, a DSD check's transition's
+// among them (publishCheckLocked), with the check's member as its record
+// stands then (withCheckLocked), so no transition published since view was
+// made is dropped (B728 B12 PR 4). stored, when set, runs right after the
+// pair is stored, or with the pair standing where nothing changed, before the
+// log, the Published seam and the reconciliation. b.dsdMu is held.
 func (b *Backend) publishLocked(read time.Time, next *dsdSet, view DSDView, stored func(*dsdPublished)) *dsdSet {
 	b.dsdRead = read
 	cur := b.dsd.Load()
+	same := cur.same(next)
+	b.mu.Lock()
+	view = b.withCheckLocked(view)
 	pub := b.dsdPub.Load()
-	if cur.same(next) {
-		if !reflect.DeepEqual(pub.view, view) {
-			pub = &dsdPublished{set: cur, view: view, seq: pub.seq + 1}
-			b.dsdPub.Store(pub)
-		}
-		if stored != nil {
-			stored(pub)
-		}
+	switch {
+	case !same:
+		next.gen = cur.gen + 1
+		b.dsd.Store(next)
+		pub = &dsdPublished{set: next, view: view, seq: pub.seq + 1}
+		b.dsdPub.Store(pub)
+	case !reflect.DeepEqual(pub.view, view):
+		pub = &dsdPublished{set: cur, view: view, seq: pub.seq + 1}
+		b.dsdPub.Store(pub)
+	}
+	b.mu.Unlock()
+	if stored != nil {
+		stored(pub)
+	}
+	if same {
 		if b.dsdJudged != cur {
 			b.reconcileDSD(cur)
 		}
 		return cur
-	}
-	next.gen = cur.gen + 1
-	b.dsd.Store(next)
-	pub = &dsdPublished{set: next, view: view, seq: pub.seq + 1}
-	b.dsdPub.Store(pub)
-	if stored != nil {
-		stored(pub)
 	}
 	b.logDSDSet(next)
 	b.published()

@@ -3,12 +3,14 @@ package playback
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,8 +70,8 @@ func (c *checkTimers) next(t *testing.T, what string) *checkTimer {
 
 // checkBackend is a backend with an effective DSD policy that reads nothing
 // (no box, no state: no DAC published), its set computed once, so a check
-// passes its reading and meets the slot, where it is refused dac_changed at
-// the end; timers is its AfterFunc.
+// passes its reading and is refused dac_unavailable by the pair it meets,
+// before the slot; timers is its AfterFunc.
 func checkBackend(t *testing.T, timers *checkTimers) *Backend {
 	t.Helper()
 	b, err := New(Config{Resolver: nopResolver{}, Locator: noUnit{}, DSD: &DSDPolicy{}, AfterFunc: timers.afterFunc})
@@ -85,6 +87,14 @@ func checkBackend(t *testing.T, timers *checkTimers) *Backend {
 func checkRequest() CheckRequest {
 	return CheckRequest{DACKey: "d1-test", DACToken: "t1-0123456789abcdef0123456789abcdef", Transport: dsdstate.TransportNative,
 		BitRate: dsdstate.DSD64, Stop: make(chan struct{})}
+}
+
+// handleStatus is the record Check's handle carries, none for no handle.
+func handleStatus(h *CheckHandle) CheckStatus {
+	if h == nil {
+		return CheckStatus{}
+	}
+	return h.Status
 }
 
 // refusedWith reports the word err refuses a check with, "" for none.
@@ -116,50 +126,64 @@ func slotAsIs(t *testing.T, b *Backend, rec *checkHold, what string) {
 // anything is counted, for a request that is none (bad_request), on a backend
 // with no DSD policy (dsd_not_in_this_release) and once CloseChecks has run
 // (serve_stopping); then, counted, past its reading of the policy, in one
-// step under the backend's lock: the supervisor's gate shut, by its word (as
-// it starts, for each shut, and closed by serve's stop), a release never
+// step under the backend's lock, in the route's order (B728 B12 PR 4a): the
+// pair published, a read side that names no DAC (dac_unavailable) or another
+// key or token (dac_changed), and a tuple it does not play (its word) first,
+// whatever the slot says; then the supervisor's gate shut, by its word (as it
+// starts, for each shut, and closed by serve's stop), a release never
 // confirmed (release_unconfirmed), a choice's lease, a session's record, the
-// device's holder or another check (device_busy), and a slot free whose read
-// side names no DAC (dac_changed). No refusal makes, replaces or changes the
-// record, leaves a waiter or keeps the count.
+// device's holder or another check (device_busy). No refusal makes, replaces
+// or changes the record, leaves a waiter or keeps the count, and each one past
+// the reading carries the pair it was decided on.
 func TestTheChecksGateReadsTheDeviceSlot(t *testing.T) {
-	bad := func(edit func(*CheckRequest)) CheckRequest {
-		r := checkRequest()
-		edit(&r)
-		return r
+	asIs := func(t *testing.T, b *Backend) CheckRequest { r, _ := publishedRequest(t, b); return r }
+	bad := func(edit func(*CheckRequest)) func(*testing.T, *Backend) CheckRequest {
+		return func(t *testing.T, b *Backend) CheckRequest { r := asIs(t, b); edit(&r); return r }
 	}
-	open := func(b *Backend) { b.ToneOutput(true, "") }
+	otherToken := bad(func(r *CheckRequest) { r.DACToken = "t1-0123456789abcdef0123456789abcdef" })
+	open := func(*Backend) {}
+	starting := func(b *Backend) {
+		b.mu.Lock()
+		b.toneOpen, b.toneShut = false, ToneOutputUnknown
+		b.mu.Unlock()
+	}
 	for _, c := range []struct {
 		name string
 		set  func(b *Backend)
-		req  CheckRequest
+		req  func(t *testing.T, b *Backend) CheckRequest
 		want string
 	}{
 		{"a transport that is not DSD's", open, bad(func(r *CheckRequest) { r.Transport = "pcm" }), CheckBadRequest},
 		{"a rate the check does not play", open, bad(func(r *CheckRequest) { r.BitRate = 2822401 }), CheckBadRequest},
 		{"a token of no token's form", open, bad(func(r *CheckRequest) { r.DACToken = "t1-XYZ" }), CheckBadRequest},
 		{"no stop signal", open, bad(func(r *CheckRequest) { r.Stop = nil }), CheckBadRequest},
-		{"serve's stop", func(b *Backend) { open(b); b.CloseChecks() }, checkRequest(), string(CheckServeStopping)},
-		{"the gate as it starts", func(*Backend) {}, checkRequest(), string(ToneOutputUnknown)},
-		{"the gate shut withheld", func(b *Backend) { b.ToneOutput(false, ToneWithheld) }, checkRequest(), string(ToneWithheld)},
-		{"the gate shut for an output gone", func(b *Backend) { b.ToneOutput(false, ToneOutputUnavailable) }, checkRequest(), string(ToneOutputUnavailable)},
-		{"the gate shut for a unit that changed", func(b *Backend) { b.ToneOutput(false, ToneOutputChanged) }, checkRequest(), string(ToneOutputChanged)},
-		{"the gate shut for a report the engine did not take", func(b *Backend) { open(b); b.ToneOutput(false, ToneOutputUnknown) }, checkRequest(), string(ToneOutputUnknown)},
-		{"the gate shut for a stale snapshot", func(b *Backend) { b.ToneOutput(false, ToneSnapshotStale) }, checkRequest(), string(ToneSnapshotStale)},
-		{"the gate closed by the tones' stop", func(b *Backend) { open(b); b.CloseTones() }, checkRequest(), string(ToneServeStopping)},
-		{"a release never confirmed", func(b *Backend) { open(b); b.terminalUnconfirmed = true }, checkRequest(), string(CheckReleaseUnconfirmed)},
-		{"a choice's lease", func(b *Backend) { open(b); b.lease = &configLease{free: make(chan struct{})} }, checkRequest(), string(CheckDeviceBusy)},
-		{"a session's record", func(b *Backend) { open(b); b.sessions[1] = newSession(b, 1) }, checkRequest(), string(CheckDeviceBusy)},
-		{"the device's holder", func(b *Backend) { open(b); b.holder = newSession(b, 1) }, checkRequest(), string(CheckDeviceBusy)},
+		{"serve's stop", func(b *Backend) { b.CloseChecks() }, otherToken, string(CheckServeStopping)},
+		{"another key", open, bad(func(r *CheckRequest) { r.DACKey = "d1-another" }), CheckDACChanged},
+		{"a token another reading made", open, otherToken, CheckDACChanged},
+		{"a tuple the set plays the other way", open, bad(func(r *CheckRequest) { r.Transport = dsdstate.TransportDoP }), CheckOtherTransport},
+		{"a changed token beside a shut gate", func(b *Backend) { b.ToneOutput(false, ToneWithheld) }, otherToken, CheckDACChanged},
+		{"a changed token beside a lease", func(b *Backend) { b.lease = &configLease{free: make(chan struct{})} }, otherToken, CheckDACChanged},
+		{"a tuple the set plays the other way beside the fence", func(b *Backend) { b.terminalUnconfirmed = true },
+			bad(func(r *CheckRequest) { r.Transport = dsdstate.TransportDoP }), CheckOtherTransport},
+		{"the gate as it starts", starting, asIs, string(ToneOutputUnknown)},
+		{"the gate shut withheld", func(b *Backend) { b.ToneOutput(false, ToneWithheld) }, asIs, string(ToneWithheld)},
+		{"the gate shut for an output gone", func(b *Backend) { b.ToneOutput(false, ToneOutputUnavailable) }, asIs, string(ToneOutputUnavailable)},
+		{"the gate shut for a unit that changed", func(b *Backend) { b.ToneOutput(false, ToneOutputChanged) }, asIs, string(ToneOutputChanged)},
+		{"the gate shut for a report the engine did not take", func(b *Backend) { b.ToneOutput(false, ToneOutputUnknown) }, asIs, string(ToneOutputUnknown)},
+		{"the gate shut for a stale snapshot", func(b *Backend) { b.ToneOutput(false, ToneSnapshotStale) }, asIs, string(ToneSnapshotStale)},
+		{"the gate closed by the tones' stop", func(b *Backend) { b.CloseTones() }, asIs, string(ToneServeStopping)},
+		{"a release never confirmed", func(b *Backend) { b.terminalUnconfirmed = true }, asIs, string(CheckReleaseUnconfirmed)},
+		{"a choice's lease", func(b *Backend) { b.lease = &configLease{free: make(chan struct{})} }, asIs, string(CheckDeviceBusy)},
+		{"a session's record", func(b *Backend) { b.sessions[1] = newSession(b, 1) }, asIs, string(CheckDeviceBusy)},
+		{"the device's holder", func(b *Backend) { b.holder = newSession(b, 1) }, asIs, string(CheckDeviceBusy)},
 		{"another check", func(b *Backend) {
-			open(b)
 			ctx, cancel := context.WithCancelCause(context.Background())
 			b.checking = &checkHold{ctx: ctx, cancel: cancel, done: make(chan struct{})}
-		}, checkRequest(), string(CheckDeviceBusy)},
-		{"a free slot whose read side names no DAC", open, checkRequest(), CheckDACChanged},
+		}, asIs, string(CheckDeviceBusy)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			b := checkBackend(t, newCheckTimers())
+			b := publishedBackend(t, newCheckTimers().afterFunc, fixtureBox{})
+			req := c.req(t, b)
 			c.set(b)
 			// The last check's record, which a refusal leaves as it is.
 			rec := &checkHold{id: "the last check's"}
@@ -167,9 +191,14 @@ func TestTheChecksGateReadsTheDeviceSlot(t *testing.T) {
 			b.checkRec = rec
 			checking := b.checking
 			b.mu.Unlock()
-			st, err := b.Check(context.Background(), c.req)
-			if w := refusedWith(err); w != c.want || st != (CheckStatus{}) {
-				t.Errorf("the check answered %+v, %v; want refused %s", st, err, c.want)
+			h, err := b.Check(context.Background(), req)
+			if w := refusedWith(err); w != c.want || h != nil {
+				t.Errorf("the check answered %+v, %v; want refused %s", handleStatus(h), err, c.want)
+			}
+			var r *CheckRefused
+			if errors.As(err, &r) && c.want != CheckBadRequest && c.want != string(CheckServeStopping) &&
+				(!r.Epoch || r.Policy.Publication != b.Policy().Publication || r.Policy.DSD == nil || r.Policy.DSD.DAC == nil) {
+				t.Errorf("the refusal carries %+v (epoch %v); want the pair published as it was decided", r.Policy, r.Epoch)
 			}
 			b.mu.Lock()
 			if b.checking != checking {
@@ -180,6 +209,16 @@ func TestTheChecksGateReadsTheDeviceSlot(t *testing.T) {
 			slotAsIs(t, b, rec, c.name)
 		})
 	}
+	t.Run("a read side that names no DAC", func(t *testing.T) {
+		b := checkBackend(t, newCheckTimers())
+		b.ToneOutput(true, "")
+		h, err := b.Check(context.Background(), checkRequest())
+		var r *CheckRefused
+		if refusedWith(err) != CheckDACUnavailable || h != nil || !errors.As(err, &r) || !r.Epoch || r.Policy.DSD == nil || r.Policy.DSD.DAC != nil {
+			t.Errorf("the check answered %+v, %v; want refused dac_unavailable with the pair naming no DAC", handleStatus(h), err)
+		}
+		slotAsIs(t, b, nil, "no DAC")
+	})
 	t.Run("a backend with no DSD policy", func(t *testing.T) {
 		b, err := New(Config{Resolver: nopResolver{}, Locator: noUnit{}})
 		if err != nil {
@@ -198,21 +237,25 @@ func TestTheChecksGateReadsTheDeviceSlot(t *testing.T) {
 // the backend's goroutines from before its first wait, at most ProbeWait,
 // then refused device_busy; one that finds the console's tone there ends it
 // preempted and waits at most ToneYield; once the slot is free it is admitted
-// in the same step it stops waiting, here refused dac_changed with no DAC
-// published; its request's end ends the wait with its error. Every way out
-// stops its timer and leaves no waiter and no count.
+// in the same step it stops waiting, here a check of the DAC the backend
+// publishes, which runs to its end; its request's end ends the wait with its
+// error. Every way out stops its timer and leaves no waiter and no count.
 func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 	type answer struct {
 		st  CheckStatus
 		err error
 	}
-	asked := func(b *Backend, ctx context.Context) <-chan answer {
+	asked := func(t *testing.T, b *Backend, ctx context.Context) <-chan answer {
 		ch := make(chan answer, 1)
+		req, _ := publishedRequest(t, b)
 		go func() {
-			st, err := b.Check(ctx, checkRequest())
-			ch <- answer{st, err}
+			h, err := b.Check(ctx, req)
+			ch <- answer{handleStatus(h), err}
 		}()
 		return ch
+	}
+	backend := func(t *testing.T, timers *checkTimers) *Backend {
+		return publishedBackend(t, timers.afterFunc, fixtureBox{})
 	}
 	got := func(t *testing.T, ch <-chan answer) answer {
 		t.Helper()
@@ -256,25 +299,30 @@ func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 	}
 	t.Run("a probe that ends", func(t *testing.T) {
 		timers := newCheckTimers()
-		b := checkBackend(t, timers)
-		b.ToneOutput(true, "")
+		b := backend(t, timers)
 		p := probing(b)
-		ch := asked(b, context.Background())
+		ch := asked(t, b, context.Background())
 		tm := timers.next(t, "the check's wait for the probe")
 		waiting(t, b, tm, ProbeWait)
 		b.endProbe(p)
-		if a := got(t, ch); refusedWith(a.err) != CheckDACChanged {
-			t.Errorf("the check once the probe ended answered %+v, %v; want it admitted at the slot, dac_changed with no DAC", a.st, a.err)
+		if a := got(t, ch); a.err != nil || a.st.Phase != CheckPreparing {
+			t.Errorf("the check once the probe ended answered %+v, %v; want it admitted at the slot, preparing", a.st, a.err)
 		}
 		stopped(t, tm)
-		slotAsIs(t, b, nil, "once the probe ended")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := b.Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := b.CheckStatus(); st.Phase != CheckFailed || st.Reason != CheckOutputGone {
+			t.Errorf("the check admitted with no unit to locate ended %s %s; want failed output_gone", st.Phase, st.Reason)
+		}
 	})
 	t.Run("a probe past ProbeWait", func(t *testing.T) {
 		timers := newCheckTimers()
-		b := checkBackend(t, timers)
-		b.ToneOutput(true, "")
+		b := backend(t, timers)
 		probing(b)
-		ch := asked(b, context.Background())
+		ch := asked(t, b, context.Background())
 		tm := timers.next(t, "the check's wait for the probe")
 		waiting(t, b, tm, ProbeWait)
 		tm.f()
@@ -288,13 +336,12 @@ func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 	})
 	t.Run("a tone, ended and past ToneYield", func(t *testing.T) {
 		timers := newCheckTimers()
-		b := checkBackend(t, timers)
-		b.ToneOutput(true, "")
+		b := backend(t, timers)
 		tn, why := b.reserveTone(context.Background(), toneRequest)
 		if tn == nil {
 			t.Fatalf("the tone was refused: %s", why)
 		}
-		ch := asked(b, context.Background())
+		ch := asked(t, b, context.Background())
 		tm := timers.next(t, "the check's wait for the tone")
 		waiting(t, b, tm, ToneYield)
 		if w := tn.ended(); w != TonePreempted {
@@ -311,11 +358,10 @@ func TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters(t *testing.T) {
 	})
 	t.Run("its request's end", func(t *testing.T) {
 		timers := newCheckTimers()
-		b := checkBackend(t, timers)
-		b.ToneOutput(true, "")
+		b := backend(t, timers)
 		probing(b)
 		ctx, cancel := context.WithCancel(context.Background())
-		ch := asked(b, ctx)
+		ch := asked(t, b, ctx)
 		tm := timers.next(t, "the check's wait for the probe")
 		waiting(t, b, tm, ProbeWait)
 		cancel()
@@ -399,7 +445,7 @@ func TestWhatTheSlotRefusesWhileTheCheckHoldsIt(t *testing.T) {
 // TestTheChecksPhasesAndReasonsAreTheirLists pins the words PR 4's answer
 // publishes, in order: the phases, and the reasons, stopped's then failed's.
 func TestTheChecksPhasesAndReasonsAreTheirLists(t *testing.T) {
-	phases := []CheckPhase{"preparing", "playing", "complete", "stopping", "stopped", "failed"}
+	phases := []CheckPhase{"preparing", "playing", "complete", "answered", "stopping", "stopped", "failed"}
 	if got := CheckPhases(); !slices.Equal(got, phases) {
 		t.Errorf("CheckPhases() = %q; want %q", got, phases)
 	}
@@ -517,8 +563,8 @@ type checkAnswer struct {
 func askCheck(b *Backend, ctx context.Context, req CheckRequest) <-chan checkAnswer {
 	ch := make(chan checkAnswer, 1)
 	go func() {
-		st, err := b.Check(ctx, req)
-		ch <- checkAnswer{st, err}
+		h, err := b.Check(ctx, req)
+		ch <- checkAnswer{handleStatus(h), err}
 	}()
 	return ch
 }
@@ -548,13 +594,15 @@ func reached(t *testing.T, ch <-chan struct{}, what string) {
 // TestAnEndedRequestAdmitsNothing: a check whose request has ended is refused
 // with the request's error, leaving the slot, the waiters, the count and the
 // record as they were, wherever its request ends: before Check, the slot
-// free (where the read side names no DAC it was refused dac_changed) or the
+// free (where the read side names no DAC it was refused dac_unavailable) or the
 // console's tone in it, which it leaves playing, never preempted; during its
-// reading of the policy, the tone in the slot, asked under the backend's lock
-// before the slot is looked at; and as its wait for the slot ends, the probe
-// it waited for ended or its bound passed with the request's end ready beside
-// it: the wait's arming is held until both are ready, and each such case runs
-// in rounds, its select picking at random among the cases ready.
+// reading of the policy, the tone in the slot, answered while that reading is
+// still held, which goes on counted and, let go, takes no slot (before B728
+// B12 PR 4a it answered only once the reading ended); and as its wait for the
+// slot ends, the probe it waited for ended or its bound passed with the
+// request's end ready beside it: the wait's arming is held until both are
+// ready, and each such case runs 32 times, its select picking at random among
+// the cases ready.
 func TestAnEndedRequestAdmitsNothing(t *testing.T) {
 	ended := func() context.Context {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -618,8 +666,12 @@ func TestAnEndedRequestAdmitsNothing(t *testing.T) {
 		ch := askCheck(b, ctx, req)
 		reached(t, in, "the check's reading of the policy held in the box")
 		cancel()
-		letGo()
 		refusedEnded(t, answered(t, ch), "a request ended during its reading")
+		if n, _ := b.Running(); n != 1 {
+			t.Errorf("a request answered during its reading left %d goroutines counted; want the reading's own", n)
+		}
+		letGo()
+		joinedWithin(t, b, "the reading let go")
 		toneKept(t, b, tn, "a request ended during its reading")
 	})
 	for _, c := range []struct {
@@ -633,14 +685,14 @@ func TestAnEndedRequestAdmitsNothing(t *testing.T) {
 			for round := range 32 {
 				timers := newCheckTimers()
 				timers.hold = make(chan struct{})
-				b := checkBackend(t, timers)
-				b.ToneOutput(true, "")
+				b := publishedBackend(t, timers.afterFunc, fixtureBox{})
+				req, _ := publishedRequest(t, b)
 				p := &probeHold{done: make(chan struct{})}
 				b.mu.Lock()
 				b.probing = p
 				b.mu.Unlock()
 				ctx, cancel := context.WithCancel(context.Background())
-				ch := askCheck(b, ctx, checkRequest())
+				ch := askCheck(b, ctx, req)
 				tm := timers.next(t, "the check's wait for the probe")
 				c.ready(b, p, tm)
 				cancel()
@@ -721,19 +773,14 @@ func TestTheCheckAnswersItsOwnRecord(t *testing.T) {
 // admission, its run ended, each leaving nothing counted.
 func TestTheChecksCountIsGivenBackOnEveryWayOut(t *testing.T) {
 	t.Run("a panic in its wait for a probe", func(t *testing.T) {
-		b, err := New(Config{Resolver: nopResolver{}, Locator: noUnit{}, DSD: &DSDPolicy{},
-			AfterFunc: func(time.Duration, func()) func() bool { panic("the wait's timer") }})
-		if err != nil {
-			t.Fatal(err)
-		}
-		b.RefreshDSD(true)
-		b.ToneOutput(true, "")
+		b := publishedBackend(t, func(time.Duration, func()) func() bool { panic("the wait's timer") }, fixtureBox{})
+		req, _ := publishedRequest(t, b)
 		b.mu.Lock()
 		b.probing = &probeHold{done: make(chan struct{})}
 		b.mu.Unlock()
 		raised := func() (r any) {
 			defer func() { r = recover() }()
-			_, _ = b.Check(context.Background(), checkRequest())
+			_, _ = b.Check(context.Background(), req)
 			return nil
 		}()
 		if raised == nil {
@@ -779,4 +826,291 @@ func TestTheChecksCountIsGivenBackOnEveryWayOut(t *testing.T) {
 			t.Errorf("an admitted check's run ended left %d goroutines and %d writes counted", n, w)
 		}
 	})
+}
+
+// joinedWithin waits for every goroutine b started, under the watchdog.
+func joinedWithin(t *testing.T, b *Backend, what string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := b.Wait(ctx); err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
+// firmwareBox is fixtureBox whose unit reports the firmware bcd holds once it
+// is set: a firmware change, which makes the read side's token another.
+type firmwareBox struct {
+	fixtureBox
+	bcd atomic.Pointer[string]
+}
+
+func (f *firmwareBox) UnitModel(card int) (alsa.UnitModel, error) {
+	m, err := f.fixtureBox.UnitModel(card)
+	if v := f.bcd.Load(); v != nil {
+		m.BCDDevice = *v
+	}
+	return m, err
+}
+
+// probingIn puts a probe that has not ended in b's slot.
+func probingIn(b *Backend) *probeHold {
+	p := &probeHold{done: make(chan struct{})}
+	b.mu.Lock()
+	b.probing = p
+	b.mu.Unlock()
+	return p
+}
+
+// TestAStopBeforeTheSlotIsTakenEndsTheAdmission (B728 B12 PR 4a): a
+// check whose hold's stop signal comes before it takes the device slot is
+// refused with the stop's word, the record (the last check's), the waiters and
+// the count as they were: while it waits for the probe in the slot, at once;
+// and where the probe's end is ready beside the stop as its wait resumes, 32
+// times, its select picking at random, by the step that would take the slot.
+func TestAStopBeforeTheSlotIsTakenEndsTheAdmission(t *testing.T) {
+	asked := func(t *testing.T, hold bool) (*Backend, *probeHold, chan struct{}, *checkTimers, <-chan checkAnswer, *checkHold) {
+		t.Helper()
+		timers := newCheckTimers()
+		if hold {
+			timers.hold = make(chan struct{})
+		}
+		b := publishedBackend(t, timers.afterFunc, fixtureBox{})
+		req, stop := publishedRequest(t, b)
+		rec := &checkHold{id: "the last check's"}
+		b.mu.Lock()
+		b.checkRec = rec
+		b.mu.Unlock()
+		p := probingIn(b)
+		ch := askCheck(b, context.Background(), req)
+		timers.next(t, "the check's wait for the probe")
+		return b, p, stop, timers, ch, rec
+	}
+	stopped := func(t *testing.T, b *Backend, a checkAnswer, rec *checkHold, what string) {
+		t.Helper()
+		if refusedWith(a.err) != string(CheckStop) || a.st != (CheckStatus{}) {
+			t.Fatalf("%s: the check answered %+v, %v; want refused %s", what, a.st, a.err, CheckStop)
+		}
+		b.mu.Lock()
+		b.probing = nil
+		b.mu.Unlock()
+		slotAsIs(t, b, rec, what)
+	}
+	t.Run("while it waits for the probe", func(t *testing.T) {
+		b, p, stop, _, ch, rec := asked(t, false)
+		close(stop)
+		a := answered(t, ch)
+		b.endProbe(p)
+		stopped(t, b, a, rec, "a stop while it waits for the probe")
+	})
+	t.Run("as the probe it waits for ends", func(t *testing.T) {
+		for n := range 32 {
+			b, p, stop, timers, ch, rec := asked(t, true)
+			b.endProbe(p)
+			close(stop)
+			close(timers.hold)
+			stopped(t, b, answered(t, ch), rec, fmt.Sprintf("repetition %d: a stop ready beside the probe's end", n))
+		}
+	})
+}
+
+// TestTheSlotsBoundKeepsTheRefusalsOrder (B728 B12 PR 4a): a check
+// whose wait for the device slot passes its bound is refused in the step and
+// the order of every other refusal, by the pair published then, which its
+// refusal carries: dac_changed where a reading made another token while it
+// waited, device_busy where the token is the one it asked with; and nothing is
+// granted past the bound, where the probe's end is ready beside it as the wait
+// resumes, 32 times, its select picking at random.
+func TestTheSlotsBoundKeepsTheRefusalsOrder(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		firmware string
+		want     string
+	}{
+		{"a token another reading made while it waits", "0200", CheckDACChanged},
+		{"the token it asked with", "", string(CheckDeviceBusy)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			timers := newCheckTimers()
+			box := &firmwareBox{}
+			b := publishedBackend(t, timers.afterFunc, box)
+			req, _ := publishedRequest(t, b)
+			probingIn(b)
+			ch := askCheck(b, context.Background(), req)
+			tm := timers.next(t, "the check's wait for the probe")
+			if c.firmware != "" {
+				box.bcd.Store(&c.firmware)
+				b.RefreshDSD(true)
+			}
+			now := b.Policy()
+			if now.DSD == nil || now.DSD.DAC == nil || (now.DSD.DAC.Token != req.DACToken) != (c.firmware != "") {
+				t.Fatalf("the read side as the bound passes: %+v; want the token %v", now.DSD, c.firmware == "")
+			}
+			tm.f()
+			a := answered(t, ch)
+			var r *CheckRefused
+			if refusedWith(a.err) != c.want || !errors.As(a.err, &r) || !r.Epoch || r.Policy.Publication != now.Publication ||
+				r.Policy.DSD == nil || r.Policy.DSD.DAC == nil || r.Policy.DSD.DAC.Token != now.DSD.DAC.Token {
+				t.Errorf("the check past its bound answered %+v, %v; want refused %s with the pair published as the bound passed", a.st, a.err, c.want)
+			}
+			b.mu.Lock()
+			b.probing = nil
+			b.mu.Unlock()
+			slotAsIs(t, b, nil, c.name)
+		})
+	}
+	t.Run("the bound and the probe's end ready together", func(t *testing.T) {
+		for n := range 32 {
+			timers := newCheckTimers()
+			timers.hold = make(chan struct{})
+			b := publishedBackend(t, timers.afterFunc, fixtureBox{})
+			req, stop := publishedRequest(t, b)
+			p := probingIn(b)
+			ch := askCheck(b, context.Background(), req)
+			tm := timers.next(t, "the check's wait for the probe")
+			b.endProbe(p)
+			tm.f()
+			close(timers.hold)
+			if a := answered(t, ch); refusedWith(a.err) != string(CheckDeviceBusy) || a.st != (CheckStatus{}) {
+				if a.err == nil {
+					close(stop)
+					joinedWithin(t, b, "a check admitted past its bound")
+				}
+				t.Fatalf("repetition %d: a check whose bound passed as the slot was freed answered %+v, %v; want refused device_busy", n, a.st, a.err)
+			}
+			slotAsIs(t, b, nil, "the bound and the probe's end ready together")
+		}
+	})
+}
+
+// stopAnswer is StopCheck's answer.
+type stopAnswer struct {
+	cleanup CheckCleanup
+	policy  PlayerPolicy
+}
+
+// stopAsync asks b's StopCheck on a goroutine of its own.
+func stopAsync(b *Backend) <-chan stopAnswer {
+	ch := make(chan stopAnswer, 1)
+	go func() {
+		c, p := b.StopCheck(context.Background())
+		ch <- stopAnswer{c, p}
+	}()
+	return ch
+}
+
+// stopAnswered is StopCheck's answer, under the watchdog.
+func stopAnswered(t *testing.T, ch <-chan stopAnswer) stopAnswer {
+	t.Helper()
+	select {
+	case a := <-ch:
+		return a
+	case <-time.After(10 * time.Second):
+		t.Fatal("StopCheck never answered")
+		return stopAnswer{}
+	}
+}
+
+// gateOnce is a seam's hold: in closes as the first goroutine reaches it,
+// which waits until let.
+type gateOnce struct {
+	in, gate  chan struct{}
+	held, let sync.Once
+}
+
+func newGateOnce(t *testing.T) *gateOnce {
+	g := &gateOnce{in: make(chan struct{}), gate: make(chan struct{})}
+	t.Cleanup(g.release)
+	return g
+}
+
+func (g *gateOnce) hold() {
+	g.held.Do(func() { close(g.in) })
+	<-g.gate
+}
+
+func (g *gateOnce) release() { g.let.Do(func() { close(g.gate) }) }
+
+// TestAnEmptySlotsStopAnswersThePairItFound: StopCheck with no check in the
+// slot answers none with the pair published as its step found the slot empty:
+// a check admitted while StopCheck is held past that step leaves its answer
+// the publication it found, with no check in it; and on a backend with no DSD
+// policy, which admits no check, none with the backend's own policy.
+func TestAnEmptySlotsStopAnswersThePairItFound(t *testing.T) {
+	t.Run("a check admitted after its step", func(t *testing.T) {
+		b := publishedBackend(t, newCheckTimers().afterFunc, fixtureBox{})
+		answering := newGateOnce(t)
+		b.cfg.Seams = &Seams{CheckStopAnswering: answering.hold}
+		before := b.Policy()
+		answer := stopAsync(b)
+		reached(t, answering.in, "StopCheck past the step that found the slot empty")
+		req, stop := publishedRequest(t, b)
+		if _, err := b.Check(context.Background(), req); err != nil {
+			t.Fatalf("the check was refused: %v", err)
+		}
+		answering.release()
+		a := stopAnswered(t, answer)
+		if d := a.policy.DSD; a.cleanup != CheckCleanupNone || a.policy.Publication != before.Publication || d == nil || d.DAC == nil || d.DAC.Check != nil {
+			t.Errorf("StopCheck answered %s with the publication %d, its read side %+v; want none with the publication %d it found, no check in it",
+				a.cleanup, a.policy.Publication, d, before.Publication)
+		}
+		close(stop)
+		joinedWithin(t, b, "the check admitted after the empty slot's step")
+	})
+	t.Run("a backend with no DSD policy", func(t *testing.T) {
+		b, err := New(Config{Resolver: nopResolver{}, Locator: noUnit{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cleanup, p := b.StopCheck(context.Background())
+		if want := b.Policy(); cleanup != CheckCleanupNone || p.DSD != nil || p.BootID != want.BootID || p.Generation != want.Generation || p.Reason != want.Reason {
+			t.Errorf("StopCheck answered %s with %+v; want none with the backend's own policy, %+v", cleanup, p, want)
+		}
+	})
+}
+
+// TestAStopsTwoReadsHoldTheBackendsLock: StopCheck reads how its check's
+// cleanup ended and the pair published under the backend's lock, which the
+// publication of the check's end takes (endCheck): between the two reads,
+// StopCheck past its wait's bound and its check's run held short of its
+// cleanup, the lock is not to be had, so no end can be published between
+// them; let go, StopCheck answers pending beside the check stopping, and the
+// check, let go, ends stopped deleted.
+func TestAStopsTwoReadsHoldTheBackendsLock(t *testing.T) {
+	timers := newCheckTimers()
+	b := publishedBackend(t, timers.afterFunc, fixtureBox{})
+	preparing, reading := newGateOnce(t), newGateOnce(t)
+	b.cfg.Seams = &Seams{
+		CheckPreparing: func(context.Context) { preparing.hold() },
+		DSDStep: func(step string) {
+			if step == "stop read" {
+				reading.hold()
+			}
+		},
+	}
+	req, stop := publishedRequest(t, b)
+	h, err := b.Check(context.Background(), req)
+	if err != nil {
+		t.Fatalf("the check was refused: %v", err)
+	}
+	reached(t, preparing.in, "the check held short of its chime")
+	timers.next(t, "the check's preparation's bound")
+	answer := stopAsync(b)
+	timers.next(t, "StopCheck's wait").f()
+	reached(t, reading.in, "StopCheck between its two reads")
+	if b.mu.TryLock() {
+		b.mu.Unlock()
+		t.Error("the backend's lock was free between StopCheck's two reads, where the check's end could be published")
+	}
+	reading.release()
+	a := stopAnswered(t, answer)
+	if d := a.policy.DSD; a.cleanup != CheckCleanupPending || d == nil || d.DAC == nil || d.DAC.Check == nil || d.DAC.Check.ID != h.Status.ID || d.DAC.Check.Phase != CheckStopping {
+		t.Errorf("StopCheck answered %s with its read side %+v; want pending beside the check stopping", a.cleanup, d)
+	}
+	preparing.release()
+	close(stop)
+	joinedWithin(t, b, "the stopped check's end")
+	if st, _ := b.CheckStatus(); st.Phase != CheckStopped || st.Reason != CheckDeleted {
+		t.Errorf("the check ended %s %q; want stopped deleted", st.Phase, st.Reason)
+	}
 }

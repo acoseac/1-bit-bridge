@@ -445,6 +445,13 @@ func TestEveryChoiceOutcomeHasItsAnswer(t *testing.T) {
 	t.Run("playback's outcomes are the API's, and the handler names each", func(t *testing.T) {
 		r := tokenResolver{"playback": parseGoPackage(t, filepath.Join("..", "player", "playback")), "api": parseGoPackage(t, ".")}
 		backend := r.typed(t, "playback", "ChoiceOutcome")
+		// The DSD check's answer shares the write's path and its outcomes
+		// (B728 B12 PR 4a), and adds one of its own, which AnswerCheck alone
+		// returns and its route maps, never the PUT.
+		if !backend["check_not_answerable"] {
+			t.Fatalf("playback's outcomes %v lack the check's answer's own, check_not_answerable", backend)
+		}
+		delete(backend, "check_not_answerable")
 		ours := r.named(t, "api", "DSDChoice")
 		if !ours[DSDChoiceInternal] {
 			t.Fatalf("the API's outcomes %v lack internal", ours)

@@ -73,6 +73,9 @@ const (
 	ChoicePersistFailed          ChoiceOutcome = "persist_failed"
 	ChoicePersistUncertain       ChoiceOutcome = "persist_uncertain"
 	ChoiceStateUnreadable        ChoiceOutcome = "state_unreadable"
+	// ChoiceCheckNotAnswerable is a listener's answer to a DSD check that
+	// cannot be taken (AnswerCheck, B728 B12 PR 4).
+	ChoiceCheckNotAnswerable ChoiceOutcome = "check_not_answerable"
 )
 
 // refusalOutcomes are the policy's refusals by the outcome each is.
@@ -261,20 +264,47 @@ func (b *Backend) answerNow(o ChoiceOutcome, err error) ChoiceResult {
 	return ChoiceResult{Outcome: o, Policy: b.Policy(), Epoch: true, Err: err}
 }
 
-func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJournal) (res ChoiceResult) {
+func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJournal) ChoiceResult {
 	if req.Check() != nil {
 		return ChoiceResult{Outcome: ChoiceBadRequest}
 	}
 	j.to = req.Choice.Mode
+	return b.writeState(ctx, stateWrite{what: "a choice's write", key: req.DACKey, token: req.DACToken,
+		apply: func(s dsdstate.State, r *dsdReading, now time.Time) (dsdstate.State, error) {
+			return policy.Choose(r.inputs(s), req.Choice, now)
+		},
+		wrote: func(durable bool) {
+			if durable {
+				b.oweProbe()
+			}
+		}}, j)
+}
+
+// stateWrite is one write of the player's DSD state by a choice's path (B728
+// B9; a listener's answer to the DSD check, B12 PR 4): what it is, the DAC it
+// is for, its second decision past the fence ("" admits; nil for none), its
+// change of the state inside the store's one write, and what follows a write
+// that reached the file, durable or not.
+type stateWrite struct {
+	what  string
+	key   string
+	token DACToken
+	admit func(r *dsdReading) ChoiceOutcome
+	apply func(s dsdstate.State, r *dsdReading, now time.Time) (dsdstate.State, error)
+	wrote func(durable bool)
+}
+
+// writeState is w in the writes' turn, waited for at most until ctx ends
+// (persist_failed), as a write of the player's DSD state (dsdWrite) from
+// before the lease to its publication: the player's stop waits for it, and
+// once that stop has closed the writes none begins (persist_failed).
+func (b *Backend) writeState(ctx context.Context, w stateWrite, j *choiceJournal) (res ChoiceResult) {
 	if !b.takeChoiceTurn(ctx) {
 		j.why = "it could not begin within the request's time: another write held the turn"
 		return b.answerNow(ChoicePersistFailed, ctx.Err())
 	}
 	defer b.giveChoiceTurn()
-	// A write of the player's DSD state (dsdWrite) from before the lease to
-	// its publication: the player's stop waits for it, and once that stop has
-	// closed the writes none begins.
-	if !b.dsdWrite("a choice's write", func() { res = b.writeChoice(ctx, req, j) }) {
+	if !b.dsdWrite(w.what, func() { res = b.writeChoice(ctx, w, j) }) {
 		j.why = "the player's stop closed the writes of its DSD state"
 		return b.answerNow(ChoicePersistFailed, ErrDSDWritesClosed)
 	}
@@ -285,7 +315,7 @@ func (b *Backend) chooseDSD(ctx context.Context, req ChoiceRequest, j *choiceJou
 // state's one write, the publication and the answer (ChooseDSD). The reading's
 // hold ends on every way out (endChoiceReading), and the lease is let go after
 // it, a panic's way included, once the answer is captured.
-func (b *Backend) writeChoice(ctx context.Context, req ChoiceRequest, j *choiceJournal) ChoiceResult {
+func (b *Backend) writeChoice(ctx context.Context, w stateWrite, j *choiceJournal) ChoiceResult {
 	l, refused, err := b.takeLease(ctx, j)
 	if l == nil {
 		return b.answerNow(refused, err)
@@ -302,7 +332,7 @@ func (b *Backend) writeChoice(ctx context.Context, req ChoiceRequest, j *choiceJ
 		return b.answerNow(ChoicePersistFailed, err)
 	}
 	defer b.endChoiceReading(ctx)
-	res := b.publishChoice(ctx, rd, b.decideChoice(ctx, p, req, rd, j))
+	res := b.publishChoice(ctx, rd, b.decideChoice(ctx, p, w, rd, j))
 	b.choiceAnswered()
 	return res
 }
@@ -336,7 +366,9 @@ func (b *Backend) takeChoiceReading(ctx context.Context) (rd choiceRead, err err
 	rd.at = b.dsdNow()
 	rd.st = b.dsdState()
 	rd.r, rd.why = b.readBox()
+	b.mu.Lock()
 	b.choiceReading = true
+	b.mu.Unlock()
 	return rd, nil
 }
 
@@ -349,6 +381,7 @@ func (b *Backend) lockReading(ctx context.Context) bool {
 	if b.dsdMu.TryLock() {
 		return true
 	}
+	b.dsdStep("queued")
 	var owner atomic.Int32 // 1 the write's, 2 the waiter's
 	got := make(chan struct{})
 	b.spawn(func() {
@@ -371,15 +404,18 @@ func (b *Backend) lockReading(ctx context.Context) bool {
 
 // endChoiceReading ends a write's hold of its reading where its publication
 // did not (a panic on the way to it), and asks a refresh owed meanwhile of the
-// refreshes' goroutine. Its lock is taken whatever ctx says: only the first
-// wait follows the request (lockReading), and the reading's hold keeps the box
-// unread under the lock meanwhile.
+// refreshes' goroutine, a DSD check's transition's included (checkOwed). Its
+// lock is taken whatever ctx says: only the first wait follows the request
+// (lockReading), and the reading's hold keeps the box unread under the lock
+// meanwhile.
 func (b *Backend) endChoiceReading(ctx context.Context) {
 	b.dsdMu.Lock()
-	held, owed := b.choiceReading, b.refreshOwed
+	b.mu.Lock()
+	held, owed := b.choiceReading, b.refreshOwed || b.checkOwed
 	if held {
-		b.choiceReading, b.refreshOwed = false, false
+		b.choiceReading, b.refreshOwed, b.checkOwed = false, false, false
 	}
+	b.mu.Unlock()
 	b.dsdMu.Unlock()
 	if held && owed {
 		b.askChoiceRefresh(ctx)
@@ -396,9 +432,9 @@ type choiceDecision struct {
 	st      dsdstate.State
 }
 
-// decideChoice makes a write's checks after its reading (ChooseDSD), and the
-// state's one write.
-func (b *Backend) decideChoice(ctx context.Context, p *DSDPolicy, req ChoiceRequest, rd choiceRead, j *choiceJournal) choiceDecision {
+// decideChoice makes a write's checks after its reading (ChooseDSD), w's own
+// past the fence (stateWrite.admit), and the state's one write (w.apply).
+func (b *Backend) decideChoice(ctx context.Context, p *DSDPolicy, w stateWrite, rd choiceRead, j *choiceJournal) choiceDecision {
 	d := choiceDecision{st: rd.st}
 	if err := ctx.Err(); err != nil {
 		// The box's reading outlived the request's time: nothing is written,
@@ -413,7 +449,7 @@ func (b *Backend) decideChoice(ctx context.Context, p *DSDPolicy, req ChoiceRequ
 		return d
 	}
 	j.dac = wireKey(r.key, r.m.USB)
-	if j.dac != req.DACKey || !hmac.Equal([]byte(req.DACToken), []byte(r.token)) {
+	if j.dac != w.key || !hmac.Equal([]byte(w.token), []byte(r.token)) {
 		// Another DAC model, or a unit whose read side the write was not made
 		// from (another maker or firmware, another unit of the wire's key, or
 		// another boot's token): answered before anything is read of the
@@ -434,6 +470,12 @@ func (b *Backend) decideChoice(ctx context.Context, p *DSDPolicy, req ChoiceRequ
 		d.outcome, d.err = ChoicePersistUncertain, errChoiceFenced
 		return d
 	}
+	if w.admit != nil {
+		if o := w.admit(r); o != "" {
+			d.outcome = o
+			return d
+		}
+	}
 	if rd.st.Unreadable() {
 		j.from = dsdstate.ModeOff
 	} else {
@@ -444,7 +486,7 @@ func (b *Backend) decideChoice(ctx context.Context, p *DSDPolicy, req ChoiceRequ
 	ran := false
 	err := p.Store.Update(func(s *dsdstate.State) error {
 		decided, ran = s.Clone(), true
-		next, err := policy.Choose(r.inputs(*s), req.Choice, now)
+		next, err := w.apply(*s, r, now)
 		if err != nil {
 			return err
 		}
@@ -467,6 +509,8 @@ func (b *Backend) decideChoice(ctx context.Context, p *DSDPolicy, req ChoiceRequ
 			return d
 		}
 		d.outcome = ChoiceBadRequest
+	case errors.Is(err, errCheckNotAnswerable):
+		d.outcome = ChoiceCheckNotAnswerable
 	case errors.Is(err, dsdstate.ErrNotWritable):
 		j.why = "the player's DSD state file is refused in memory"
 		d.outcome, d.err = ChoiceStateUnreadable, err
@@ -480,12 +524,13 @@ func (b *Backend) decideChoice(ctx context.Context, p *DSDPolicy, req ChoiceRequ
 		// rolled back. A crash between the rename and the directory's sync may
 		// leave either choice in the file.
 		b.landedChoice.Store(&wrote)
+		w.wrote(false)
 		d.outcome, d.err = ChoicePersistUncertain, err
 	case err != nil:
 		j.why = "the state's write failed before it replaced the file"
 		d.outcome, d.err = ChoicePersistFailed, err
 	default:
-		b.oweProbe()
+		w.wrote(true)
 		d.outcome, d.st = ChoiceWritten, wrote
 	}
 	return d
@@ -516,7 +561,12 @@ func (b *Backend) publishChoice(ctx context.Context, rd choiceRead, d choiceDeci
 				b.containDSD("the publication of a choice's write", r)
 				owed = true
 			}
+			b.mu.Lock()
 			b.choiceReading = false
+			if b.checkOwed {
+				b.checkOwed, b.refreshOwed = false, true
+			}
+			b.mu.Unlock()
 			if b.refreshOwed {
 				b.refreshOwed, owed = false, true
 			}
@@ -525,8 +575,10 @@ func (b *Backend) publishChoice(ctx context.Context, rd choiceRead, d choiceDeci
 		b.publishLocked(rd.at, next, view, func(pub *dsdPublished) { res.Policy, res.Epoch = b.policyOf(pub), true })
 		b.choicePublished()
 		now, nowView := b.setOf(rd, b.dsdState())
+		b.mu.Lock()
+		defer b.mu.Unlock()
 		pub := b.dsdPub.Load()
-		return !pub.set.same(now) || !reflect.DeepEqual(pub.view, nowView)
+		return !pub.set.same(now) || !reflect.DeepEqual(pub.view, b.withCheckLocked(nowView))
 	}()
 	if owed {
 		b.askChoiceRefresh(ctx)
