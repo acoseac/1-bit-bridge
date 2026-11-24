@@ -597,11 +597,11 @@ func reached(t *testing.T, ch <-chan struct{}, what string) {
 // free (where the read side names no DAC it was refused dac_unavailable) or the
 // console's tone in it, which it leaves playing, never preempted; during its
 // reading of the policy, the tone in the slot, answered while that reading is
-// still held, which goes on counted and, let go, takes no slot (B728 B12 PR 4a
-// round 2: it answered only once the reading ended); and as its wait for the
+// still held, which goes on counted and, let go, takes no slot (before B728
+// B12 PR 4a it answered only once the reading ended); and as its wait for the
 // slot ends, the probe it waited for ended or its bound passed with the
 // request's end ready beside it: the wait's arming is held until both are
-// ready, and each such case runs in rounds, its select picking at random among
+// ready, and each such case runs 32 times, its select picking at random among
 // the cases ready.
 func TestAnEndedRequestAdmitsNothing(t *testing.T) {
 	ended := func() context.Context {
@@ -862,12 +862,12 @@ func probingIn(b *Backend) *probeHold {
 	return p
 }
 
-// TestAStopBeforeTheSlotIsTakenEndsTheAdmission (B728 B12 PR 4a round 2): a
+// TestAStopBeforeTheSlotIsTakenEndsTheAdmission (B728 B12 PR 4a): a
 // check whose hold's stop signal comes before it takes the device slot is
 // refused with the stop's word, the record (the last check's), the waiters and
 // the count as they were: while it waits for the probe in the slot, at once;
-// and where the probe's end is ready beside the stop as its wait resumes, in
-// rounds, its select picking at random, by the step that would take the slot.
+// and where the probe's end is ready beside the stop as its wait resumes, 32
+// times, its select picking at random, by the step that would take the slot.
 func TestAStopBeforeTheSlotIsTakenEndsTheAdmission(t *testing.T) {
 	asked := func(t *testing.T, hold bool) (*Backend, *probeHold, chan struct{}, *checkTimers, <-chan checkAnswer, *checkHold) {
 		t.Helper()
@@ -904,23 +904,23 @@ func TestAStopBeforeTheSlotIsTakenEndsTheAdmission(t *testing.T) {
 		stopped(t, b, a, rec, "a stop while it waits for the probe")
 	})
 	t.Run("as the probe it waits for ends", func(t *testing.T) {
-		for round := range 32 {
+		for n := range 32 {
 			b, p, stop, timers, ch, rec := asked(t, true)
 			b.endProbe(p)
 			close(stop)
 			close(timers.hold)
-			stopped(t, b, answered(t, ch), rec, fmt.Sprintf("round %d: a stop ready beside the probe's end", round))
+			stopped(t, b, answered(t, ch), rec, fmt.Sprintf("repetition %d: a stop ready beside the probe's end", n))
 		}
 	})
 }
 
-// TestTheSlotsBoundKeepsTheRefusalsOrder (B728 B12 PR 4a round 2): a check
+// TestTheSlotsBoundKeepsTheRefusalsOrder (B728 B12 PR 4a): a check
 // whose wait for the device slot passes its bound is refused in the step and
 // the order of every other refusal, by the pair published then, which its
 // refusal carries: dac_changed where a reading made another token while it
 // waited, device_busy where the token is the one it asked with; and nothing is
 // granted past the bound, where the probe's end is ready beside it as the wait
-// resumes, in rounds, its select picking at random.
+// resumes, 32 times, its select picking at random.
 func TestTheSlotsBoundKeepsTheRefusalsOrder(t *testing.T) {
 	for _, c := range []struct {
 		name     string
@@ -960,7 +960,7 @@ func TestTheSlotsBoundKeepsTheRefusalsOrder(t *testing.T) {
 		})
 	}
 	t.Run("the bound and the probe's end ready together", func(t *testing.T) {
-		for round := range 32 {
+		for n := range 32 {
 			timers := newCheckTimers()
 			timers.hold = make(chan struct{})
 			b := publishedBackend(t, timers.afterFunc, fixtureBox{})
@@ -976,7 +976,7 @@ func TestTheSlotsBoundKeepsTheRefusalsOrder(t *testing.T) {
 					close(stop)
 					joinedWithin(t, b, "a check admitted past its bound")
 				}
-				t.Fatalf("round %d: a check whose bound passed as the slot was freed answered %+v, %v; want refused device_busy", round, a.st, a.err)
+				t.Fatalf("repetition %d: a check whose bound passed as the slot was freed answered %+v, %v; want refused device_busy", n, a.st, a.err)
 			}
 			slotAsIs(t, b, nil, "the bound and the probe's end ready together")
 		}

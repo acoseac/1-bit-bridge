@@ -429,7 +429,7 @@ func signalled(ch <-chan struct{}) bool {
 // word it is refused with: dac_unavailable while pub names no DAC; dac_changed
 // for another key or token; then the set's plan at the rate, or, for a request
 // of its transport, the candidate a native_check_required refusal carries
-// there (policy.Plan.Candidate, B728 B12 PR 3 round 3), never one merely
+// there (policy.Plan.Candidate, B728 B12 PR 3), never one merely
 // offered (the rate's own refusal word, converted, other_transport).
 func checkAdmits(pub *dsdPublished, req CheckRequest) (p policy.Plan, byCandidate bool, word string) {
 	switch d := pub.view.DAC; {

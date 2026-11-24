@@ -456,7 +456,7 @@ func checkIdentity() policy.Identity {
 // names, behind the supervisor's gate: a tuple the set refuses is refused by
 // the set's word for the rate, DoP unconfirmed on a DAC no profile knows
 // among them (native chosen on one, whose IDs are a generic board's while no
-// list reads, B990, is its refusal's candidate's check, round 3: the row of
+// list reads, B990, is its refusal's candidate's check, B12 PR 3: the row of
 // its own below, which plays it to complete; on a list that names the board,
 // TestAGenericBoardsNativeCheckLetsItsAnswerBeEarned); a rate the set
 // converts (an unknown DAC under auto among them) is refused converted; one

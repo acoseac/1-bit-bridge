@@ -14,7 +14,7 @@ import (
 )
 
 // The DSD check's admission, stop and answer where an end and a step of the
-// backend meet (B728 B12 PR 4a round 2), through the backend and the real
+// backend meet (B728 B12 PR 4a), through the backend and the real
 // native sink over the fake kernel: a request's end and the hold's stop signal
 // answered while what the admission waits for is still held, a stop's answer
 // read as one snapshot of its check, and an answer's ten minutes measured
