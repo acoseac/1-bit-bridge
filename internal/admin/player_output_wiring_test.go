@@ -336,23 +336,30 @@ var consoleSoundPatterns = map[string]*regexp.Regexp{
 	"element markup":  regexp.MustCompile(`<(?:audio|video)\b`),
 }
 
+// soundSite is a site the census allows: how many finds it holds, and why.
+type soundSite struct {
+	n   int
+	why string
+}
+
 // consoleSoundSites is every site the census allows, by pattern, as
-// file:function with its reason; a site found and not named fails the
-// census, and so does a site named and no longer found.
-var consoleSoundSites = map[string]map[string]string{
+// file:function with its count of finds and its reason (round 5); a site
+// found and not named fails the census, and so does a site named and found
+// another number of times, none included.
+var consoleSoundSites = map[string]map[string]soundSite{
 	"play": {
-		"player/audio.js:playEl": "the one play the bar makes, marked for the play event it causes; a play with no mark is the browser's own and asks the gate (ownPlay)",
+		"player/audio.js:playEl": {1, "the one play the bar makes, marked for the play event it causes; a play with no mark is the browser's own and asks the gate (ownPlay)"},
 	},
 	"autoplay": {},
 	"media element": {
-		"player/audio.js:init":           "the bar's two elements: the one that plays, and the preloader, which is never played",
-		"player/format.js:engineCanPlay": "canPlayType's probe, never played",
+		"player/audio.js:init":           {2, "the bar's two elements: the one that plays, and the preloader, which is never played"},
+		"player/format.js:engineCanPlay": {1, "canPlayType's probe, never played"},
 	},
 	"Audio object":  {},
 	"audio context": {},
 	"session handler": {
-		"player/audio.js:setMediaSession":  "clears every handler while the bridge's player is the output",
-		"player/audio.js:wireMediaSession": "the browser's handlers, each start through toggle or advance (sessionHandlers)",
+		"player/audio.js:setMediaSession":  {1, "clears every handler while the bridge's player is the output"},
+		"player/audio.js:wireMediaSession": {1, "the browser's handlers, each start through toggle or advance (sessionHandlers)"},
 	},
 	"element markup": {},
 }
@@ -375,12 +382,12 @@ var sessionHandlers = []string{
 // W10), on every host: every file of the console's scripts under static/,
 // comments stripped, and the templates' markup, searched for what can make
 // the console sound, each find placed in the top-level function holding it;
-// only the sites consoleSoundSites names may hold one, and each it names
-// still does; and wireMediaSession sets exactly sessionHandlers.
+// only the sites consoleSoundSites names may hold one, each as many times as
+// it says (round 5); and wireMediaSession sets exactly sessionHandlers.
 func TestNoSoundSourceOfTheConsoleBypassesTheGate(t *testing.T) {
-	found := map[string]map[string]bool{}
+	found := map[string]map[string]int{}
 	for name := range consoleSoundPatterns {
-		found[name] = map[string]bool{}
+		found[name] = map[string]int{}
 	}
 	files := 0
 	err := filepath.WalkDir("static", func(path string, d fs.DirEntry, err error) error {
@@ -403,7 +410,7 @@ func TestNoSoundSourceOfTheConsoleBypassesTheGate(t *testing.T) {
 		}
 		for name, re := range consoleSoundPatterns {
 			for _, m := range re.FindAllStringIndex(src, -1) {
-				found[name][siteOf(m[0])] = true
+				found[name][siteOf(m[0])]++
 			}
 		}
 		return nil
@@ -420,19 +427,22 @@ func TestNoSoundSourceOfTheConsoleBypassesTheGate(t *testing.T) {
 	}
 	for _, path := range templates {
 		for _, name := range []string{"element markup", "autoplay"} {
-			if consoleSoundPatterns[name].MatchString(readFile(t, path)) {
-				found[name]["templates/"+filepath.Base(path)] = true
+			if n := len(consoleSoundPatterns[name].FindAllStringIndex(readFile(t, path), -1)); n > 0 {
+				found[name]["templates/"+filepath.Base(path)] += n
 			}
 		}
 	}
 	for name, sites := range found {
-		for site := range sites {
-			if _, ok := consoleSoundSites[name][site]; !ok {
+		for site, n := range sites {
+			allowed, ok := consoleSoundSites[name][site]
+			if !ok {
 				t.Errorf("%s at %s: no site the console's census allows; route it through audio.js's playEl and the gate, or name it with its reason", name, site)
+			} else if n != allowed.n {
+				t.Errorf("%s at %s: %d found, the census allows %d (%s): route the new one through audio.js's playEl and the gate, or count it with its reason", name, site, n, allowed.n, allowed.why)
 			}
 		}
 		for site := range consoleSoundSites[name] {
-			if !sites[site] {
+			if sites[site] == 0 {
 				t.Errorf("the census names %s at %s, which holds none now: take it off the list", name, site)
 			}
 		}
