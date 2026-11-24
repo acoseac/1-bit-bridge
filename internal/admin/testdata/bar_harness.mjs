@@ -2823,26 +2823,60 @@ S.TestAHandoverTakenStoppedWhoseSourceFailsStartsNothing = async () => {
     [r.audio.snapshot().index, r.el.plays, r.n]);
 };
 
+// gatesSeen wraps the page's two gates so a case reads what each was asked
+// and what each ran or dropped, in order: a start's ("start asked", "start
+// ran"), and what playback does by itself ("skip asked", "skip ran", "skip
+// dropped").
+function gatesSeen(r) {
+  const seen = [];
+  r.audio.setStartGate((run, o) => {
+    seen.push("start asked");
+    r.out.gateStart((p) => { seen.push("start ran"); run(p); }, o);
+  }, r.out.cancelStarts);
+  r.audio.setContinueGate((permit, run, drop) => {
+    seen.push("skip asked");
+    r.out.gateContinue(permit, (p) => { seen.push("skip ran"); run(p); }, () => { seen.push("skip dropped"); drop?.(); });
+  });
+  return seen;
+}
+
 S.TestPlayOverAFailedTrackStartsAgain = async () => {
-  const { r, held } = await skipWaiting();
-  check("the failed track shown stopped", !r.audio.snapshot().playing, r.audio.snapshot().playing);
+  // skipWaiting's steps, the gates watched before the skip asks: Play over
+  // the failed track takes the skip's place, and the barrier's answer runs
+  // the reader's start, never the skip.
+  const t = longTimers();
+  globalThis.fetch = async () => ({ ok: true, status: 200 });
+  const r = await gatedPlaying();
+  const seen = gatesSeen(r);
+  r.el.fail(4);
+  await settle();
+  const held = gate();
+  r.hold = held;
+  t.fire(1200);
+  await settle();
+  check("the failed track shown stopped, its skip waiting on a barrier of its own", !r.audio.snapshot().playing && r.s.posts(ROUTES.switchOut).length === 2 && seen.join() === "skip asked",
+    [r.audio.snapshot().playing, r.s.posts(ROUTES.switchOut).length, seen]);
   r.audio.toggle();
   await settle();
-  check("Play over it takes the skip's place behind the barrier, asking nothing more", r.s.posts(ROUTES.switchOut).length === 2, r.s.posts(ROUTES.switchOut).length);
+  check("Play over it takes the skip's place behind the barrier, asking nothing more", r.s.posts(ROUTES.switchOut).length === 2 && seen.join() === "skip asked,start asked,skip dropped",
+    [r.s.posts(ROUTES.switchOut).length, seen]);
   held.open();
   await settle();
-  check("on the barrier's done it plays the next playable track", r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused,
+  check("on the barrier's done the reader's start runs, the skip never", seen.join() === "skip asked,start asked,skip dropped,start ran", seen);
+  check("and plays the next playable track", r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused,
     [r.audio.snapshot().index, r.el.plays, r.el.paused]);
 };
 
-S.TestPlayOverATrackThatFailedForGoodReloadsIt = async () => {
+// reloadsAfter is Play over a track whose error (2, network; 3, decode) came
+// back after its retry: a start that reloads the track, its retry there again.
+const reloadsAfter = (code) => async () => {
   const r = await gatedPlaying();
-  r.el.fail(2);
+  r.el.fail(code);
   await settle();
   r.el.metadata(200);
   await settle();
-  check("a network error retried at once", /01\.flac.*_r=/.test(r.el.plays.at(-1) || "") && !r.el.paused, [r.el.plays, r.el.paused]);
-  r.el.fail(2);
+  check(`an error of code ${code} retried at once`, /01\.flac.*_r=/.test(r.el.plays.at(-1) || "") && !r.el.paused, [r.el.plays, r.el.paused]);
+  r.el.fail(code);
   await settle();
   check("a second one: it failed, said, stopped", r.audio.snapshot().error === 'Playback failed for "T1".' && !r.audio.snapshot().playing, [r.audio.snapshot().error, r.audio.snapshot().playing]);
   const plays = r.el.plays.length;
@@ -2852,23 +2886,33 @@ S.TestPlayOverATrackThatFailedForGoodReloadsIt = async () => {
     [r.el.plays.slice(plays), r.el.paused, r.audio.snapshot().error]);
   r.el.metadata(200);
   await settle();
-  r.el.fail(2);
+  r.el.fail(code);
   await settle();
   check("its automatic retry is there again", r.el.plays.length === plays + 2 && /01\.flac.*_r=/.test(r.el.plays.at(-1) || "") && r.audio.snapshot().error === "",
     [r.el.plays.slice(plays), r.audio.snapshot().error]);
 };
 
+S.TestPlayOverATrackThatFailedForGoodReloadsIt = reloadsAfter(2);
+S.TestPlayOverATrackThatFailedToDecodeForGoodReloadsIt = reloadsAfter(3);
+
 S.TestPlayOverAFailedLastTrackStopsAtTheEnd = async () => {
+  // The stop is the reader's Play's, seen before the skip's timer fires.
   const { r, t } = await failing({ tracks: [flac(1)] });
   r.el.fail(4);
   await settle();
   const plays = r.el.plays.length;
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  check("the failed last track shown stopped, its skip scheduled, its element not paused", !r.audio.snapshot().playing && t.count(1200) === 1 && !r.el.paused,
+    [r.audio.snapshot().playing, t.count(1200), r.el.paused]);
   r.audio.toggle();
   await settle();
+  check("Play over it, repeat off, before its skip: through a barrier it stops at the end and plays nothing",
+    r.s.posts(ROUTES.switchOut).length === posts + 1 && r.el.paused && !r.audio.snapshot().playing && r.el.plays.length === plays && r.audio.snapshot().index === 0,
+    [r.s.posts(ROUTES.switchOut).length - posts, r.el.paused, r.audio.snapshot().playing, r.el.plays.slice(plays), r.audio.snapshot().index]);
   t.fire(1200);
   await settle();
-  check("Play over the failed last track, repeat off: it stops at the end and plays nothing", r.el.paused && !r.audio.snapshot().playing && r.el.plays.length === plays && r.audio.snapshot().index === 0,
-    [r.el.paused, r.audio.snapshot().playing, r.el.plays.slice(plays), r.audio.snapshot().index]);
+  check("its skip then does nothing more", r.s.posts(ROUTES.switchOut).length === posts + 1 && r.el.plays.length === plays && r.el.paused,
+    [r.s.posts(ROUTES.switchOut).length - posts, r.el.plays.slice(plays), r.el.paused]);
 };
 
 S.TestTheLockScreensPauseOverAFailedTrackStaysAPause = async () => {

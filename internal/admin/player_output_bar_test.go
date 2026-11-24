@@ -665,17 +665,25 @@ func TestAHandoverTakenStoppedWhoseSourceFailsStartsNothing(t *testing.T) { barS
 
 // TestPlayOverAFailedTrackStartsAgain pins that the bar's Play over a track
 // whose source cannot play is a start: it takes the skip's place behind the
-// barrier and plays the next playable track on its done.
+// barrier, the skip let go of, and on its done the reader's start runs, the
+// skip never, and plays the next playable track; the gates are watched from
+// before the skip asks.
 func TestPlayOverAFailedTrackStartsAgain(t *testing.T) { barScenario(t, 4) }
 
 // TestPlayOverATrackThatFailedForGoodReloadsIt pins Play over a track whose
-// network error came back after its retry: a start that reloads the track,
-// its automatic retry there again.
+// network error (code 2) came back after its retry: a start that reloads the
+// track, its automatic retry there again.
 func TestPlayOverATrackThatFailedForGoodReloadsIt(t *testing.T) { barScenario(t, 4) }
 
+// TestPlayOverATrackThatFailedToDecodeForGoodReloadsIt is the same for a
+// decode error (code 3), each code's reload pinned by a case of its own.
+func TestPlayOverATrackThatFailedToDecodeForGoodReloadsIt(t *testing.T) { barScenario(t, 4) }
+
 // TestPlayOverAFailedLastTrackStopsAtTheEnd pins Play over the last track,
-// failed, with repeat off: it stops at the queue's end and plays nothing.
-func TestPlayOverAFailedLastTrackStopsAtTheEnd(t *testing.T) { barScenario(t, 1) }
+// failed, with repeat off: before its skip's timer fires, it stops at the
+// queue's end through a barrier and plays nothing, and the skip then does
+// nothing more.
+func TestPlayOverAFailedLastTrackStopsAtTheEnd(t *testing.T) { barScenario(t, 3) }
 
 // TestTheLockScreensPauseOverAFailedTrackStaysAPause pins that the
 // MediaSession's Pause is a pause, never Play/Pause: over a failed track
