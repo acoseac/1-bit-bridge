@@ -124,7 +124,7 @@ func slotAsIs(t *testing.T, b *Backend, rec *checkHold, what string) {
 // anything is counted, for a request that is none (bad_request), on a backend
 // with no DSD policy (dsd_not_in_this_release) and once CloseChecks has run
 // (serve_stopping); then, counted, past its reading of the policy, in one
-// step under the backend's lock, in PROTOCOL.md's order (B728 B12 PR 4): the
+// step under the backend's lock, in the route's order (B728 B12 PR 4a): the
 // pair published, a read side that names no DAC (dac_unavailable) or another
 // key or token (dac_changed), and a tuple it does not play (its word) first,
 // whatever the slot says; then the supervisor's gate shut, by its word (as it

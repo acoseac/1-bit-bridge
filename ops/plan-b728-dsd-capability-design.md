@@ -508,8 +508,8 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
   `listener_rejected`, `dop_gain_unverifiable`, `dop_gain_not_unity`, `dop_confirmation_required`,
   `dsd_rate_above_choice`.
 - **`native_check_required` carries a candidate** (B12 PR 3, round 3): the plan the row's
-  explicit `native` gives at r once the DAC is vouched for (`decide` asked again with vouched
-  true), where that is native: native offered, no rejection, r ≤ `maxBitRate`. The bridge's blind
+  explicit `native` gives at r once the DAC is vouched for (decide's explicit native
+  (`explicitNative`) asked again with vouched true), where that is native: native offered, no rejection, r ≤ `maxBitRate`. The bridge's blind
   spot is asked before the cap, so a rate above it is refused with the same word and carries
   none. No session plays a candidate, which is no row's plan; the DSD check of native at r plays it
   alone (§6.2), so the listener's clean answer at r that makes it the row's plan can be earned on
@@ -1253,7 +1253,9 @@ safety half the app needs is on the bridge before the app's I4 ships.
   be earned. A check so admitted is judged by the candidate as one the set's plan admitted is by
   that plan (§3.5): kept while the candidate published at its rate is its plan, on the identity it
   was admitted under, and ended `policy_changed` once it is gone or changed; no session's
-  reconciliation reads a candidate.
+  reconciliation reads a candidate. Each check is judged by the path that admitted it alone
+  (amended 2026-11-24, B12 PR 4a): one the candidate admitted is never kept through the set's
+  plan, nor one the set's plan admitted through a candidate.
 - **The hold comes first** (amended 2026-11-20, B12 PR 2). The engine's owner decides the check in
   the one step that grants its hold (`EnterCheck`): a choice's write in flight (its configuration
   reservation), another hold, an unconfirmed release and a DAC that is not there refuse it; and if
@@ -1268,9 +1270,12 @@ safety half the app needs is on the bridge before the app's I4 ships.
   `.claude/rules/player.md`; the check's hold in `.claude/rules/output.md`).
 - The backend then reads the DAC afresh, admits the tuple against that reading and takes the device
   slot (B12 PR 3); the route answers 202 only after all of that (B12 PR 4). Built in B12 PR 3
-  (amended 2026-11-22), inert until PR 4: `playback.Backend.Check`, counted among the backend's
-  goroutines before it waits, refused by the supervisor's gate's word, the fence, a lease, a
-  session or another check, waiting for a probe or a preempted tone as a Start's hold does; then,
+  (amended 2026-11-22), inert until PR 4b: `playback.Backend.Check`, counted among the backend's
+  goroutines before it waits, refused by the pair it meets first (amended 2026-11-24, B12 PR 4a:
+  the DAC, its key and token, then the tuple, the order the route answers in, each refusal
+  carrying the pair it was decided on, and `CheckAdmits` the same predicate for the route's
+  precheck), then by the
+  supervisor's gate's word, the fence, a lease, a session or another check, waiting for a probe or a preempted tone as a Start's hold does; then,
   in its run, a fresh reading of the policy (the DoP gain among it) before the open, the locate,
   the sink opened by the tuple's plan with the unit's check, the node's identity and the admission
   identity's compare, the activation judged as a session's, the prefill, the chime, the plan's
@@ -1286,7 +1291,10 @@ safety half the app needs is on the bridge before the app's I4 ships.
   and `playing` at 10 s, the harness's own bound for a contact
   (`ops/b470-native-qualification.md:33`), from the preparation's end to the drain's end, the fresh
   reading, the locate and the open included: 12 s in all. A stop's answer is bounded on its own
-  (`StopCheck`, 2 s); the cleanup it waits for can come later, the slot kept until it does.
+  (`StopCheck`, 2 s); the cleanup it waits for can come later, the slot kept until it does. The
+  stop answers how that check's cleanup ended, `pending` until it answers, then `confirmed` or
+  `failed`, and `Check` answers a handle of its own check that reads the same (amended
+  2026-11-24, B12 PR 4a).
 
 **The chime** (amended 2026-11-21, B12 PR 1: `internal/player/dsdchime`, inert until the
 backend's check, B12 PR 3, calls it):
@@ -1369,10 +1377,14 @@ Never recorded: who answered, beyond `app` or `console`; a device token; a seria
 
 The check's own state (amended 2026-11-22, B12 PR 3) is a record in memory, one boot's, one check at
 a time, the last kept: its opaque id, its tuple, its phase (`preparing`, `playing`, `complete`,
-`stopping`, `stopped`, `failed`; `answered` is PR 4's) and its reason, the token and the identity it
-was admitted under, and the identity its sink opened. PR 3 reads it through `Backend.CheckStatus`
-alone; PR 4 publishes it and writes the answer, which PR 3 does not: no member of the read side and
-no write of the listener's answer is PR 3's.
+`answered`, `stopping`, `stopped`, `failed`) and its reason, the token and the identity it was
+admitted under, the identity its sink opened, and its completion time. PR 3 read it through
+`Backend.CheckStatus` alone. B12 PR 4a (amended 2026-11-24) publishes it as `dsdDAC.check` at each
+transition (§7.1) and writes the answer (`AnswerCheck`, §7.2's route's backend, PR 4b's route): a
+choice's path with a second decision, the check answerable, before the state's one write; a write
+that reached the file makes the check `answered`, and a landed one holds the set as a landed choice
+does. A stopped or failed check has no completion time, so the answer's age refuses it as well as
+its phase.
 
 ## 7. The protocol
 
@@ -1409,7 +1421,7 @@ All additions are additive, and `ProtocolVersion` stays 1 (the `/v1/outputs` bul
       { "mode": "off", "offered": true }
     ],
     "firstUse": [ { "transport": "native", "state": "observed", "bitRates": [2822400] }, { "transport": "dop", "state": "pending" } ],
-    "check": null
+    "check": { "id": "…", "transport": "native", "bitRate": 2822400, "state": "complete" }
   },
   "playback": { "transport": "converted", "format": "S24_3LE", "rateHz": 176400, "validBits": 24, "logicalRate": 0,
     "converted": { "fromBitRate": 2822400, "filter": "dsdconv-1", "passbandHz": 30000, "dither": "none", "gainDB": 0, "clippedSamples": 0 } }
@@ -1462,7 +1474,10 @@ All additions are additive, and `ProtocolVersion` stays 1 (the `/v1/outputs` bul
 - **`dsdDAC`** (optional object): the bound DAC's key; its profile (id, name, caveats); the choice
   and its revision; the options for each mode (offered, rates with evidence, `needsConfirmation`,
   `blocked`); first use per transport, with `bitRates` listing the rates a migrated acknowledgement
-  covers (absent: every rate); and the running or last check. It is omitted while no DAC is
+  covers (absent: every rate); and the running or last check (`check`, optional and never
+  `null`: present while the publication's DAC token is the check's, each transition a
+  publication that moves `publication` and leaves `policyGeneration`; the backend builds it
+  since B12 PR 4a, amended 2026-11-24, and PR 4b serves it). It is omitted while no DAC is
   available.
 - **`playback`:** `transport` gains `converted`, with `format`, `rateHz` and `validBits` the PCM's,
   the plan's actual values, and `logicalRate` 0. A new optional `converted` object gives the plan's
@@ -1750,7 +1765,7 @@ B1 narrows the guard to the code that changes DSD bytes or the harness's evidenc
 | B4, the probe | `internal/alsapcm/` | 39 |
 | B7, the cutover | `internal/player/playback/native.go` and `edges.go` (plan construction) | the next free at its merge |
 | B11, conversion wired | `native.go`, whose DSD open (`internal/player/playback/native.go:23-74`) is where a convert plan branches off | the next free at its merge |
-| B12, the check | PR 0 (amended 2026-11-22, the native sink's panic containment): `internal/alsapcm/` (`sink_dsd.go`, `sink_dsd_open.go`, `sink_dsd_writer.go`, `device_native.go`, `device.go`, `doc.go` and the package's tests) and `native.go` (`DSDConfig.Log`, and the fence after an open that panicked with its node's close unconfirmed); then `native.go`, and `internal/alsapcm/` if the check needs a sink seam. PR 3 (amended 2026-11-22, the backend's check, inert): no guarded production file (no sink seam, `native.go` unchanged); its tests through the real sinks are under `internal/alsapcm/` (`playback_dsd_check_test.go`, and an opener stand-in in `playback_dsd_policy_test.go`'s rig), where the fake kernel is, so it owes a bump. The cut to PR 4: the routes, serve's adapter and its calls of `CloseChecks`, the answer's write, the read side's member, `PROTOCOL.md` and the iOS mirror. PR 4 wires the check only on PR 3's complete admission, identity, containment and cleanup guarantees | PR 0: 57 (main's 56, B972's, and one); PR 3: 58; the rest: the next free at its merge |
+| B12, the check | PR 0 (amended 2026-11-22, the native sink's panic containment): `internal/alsapcm/` (`sink_dsd.go`, `sink_dsd_open.go`, `sink_dsd_writer.go`, `device_native.go`, `device.go`, `doc.go` and the package's tests) and `native.go` (`DSDConfig.Log`, and the fence after an open that panicked with its node's close unconfirmed); then `native.go`, and `internal/alsapcm/` if the check needs a sink seam. PR 3 (amended 2026-11-22, the backend's check, inert): no guarded production file (no sink seam, `native.go` unchanged); its tests through the real sinks are under `internal/alsapcm/` (`playback_dsd_check_test.go`, and an opener stand-in in `playback_dsd_policy_test.go`'s rig), where the fake kernel is, so it owes a bump. PR 4a (amended 2026-11-24, the check's backend half of its routes: the pair's order, the precheck's predicate, the handle and the stop's answer, the read side's member and the answer's write): no guarded production file; its tests through the real sinks are under `internal/alsapcm/` (`playback_dsd_check_answer_test.go`, and rows of `playback_dsd_check_test.go`), so it owes a bump. The cut to PR 4b: the routes, serve's adapter and its calls of `CloseChecks`, `PROTOCOL.md` and the iOS mirror. PR 4 wires the check only on PR 3's complete admission, identity, containment and cleanup guarantees | PR 0: 57 (main's 56, B972's, and one); PR 3: 58; PR 4a: 59; the rest: the next free at its merge |
 | every other PR (B2, B5, B6, B8, B9, B10, B13) | none. Their code is in new packages or paths B1 unguards | unchanged |
 
 The rows after B3 plan no number: B735 took 37 on main and B3 takes 38, the numbers this table
@@ -2061,7 +2076,7 @@ with no acknowledgement and the retry are `TestAnExplicitChoiceIsWrittenWithoutA
 | B11 | bridge | Conversion in the player: `native.go`'s DSD open branches for a convert plan; continuous, abutting and reopen joins (DSD64 then DSD128 on one sink included); the join window held back and recomputed on a cut; the observation and Details from the plan (§4.1, §4.7, §4.8); the next free version at its merge; the rules at CLAUDE.md:91, `jobs.md:132`, `player.md:133-135` and `output.md`, and the claims bullet | B7, B10 | `TestAnUnknownDACPlaysDSDConverted`, `TestConvertedDSDReachesTheDACPackedByTheTable`, `TestConvertedTracksJoinContinuouslyAtOneRate`, `TestDSD64ThenDSD128ConvertedShareTheSink` (no reopen), `TestDeletingOrReplacingAPreparedConvertedSuccessor` (the three moments of §4.7, against the oracle), `TestStopDuringConversionIsBounded`, `TestTheClaimsAreThePlans` (a 44.1 kHz, 16-bit DAC is said to get 16 bits, 20 kHz and TPDF), `TestAConvertedTrackIsNotLossless`, `TestNoConvertedStreamIsServed` | player, hardware (CPU and xruns on a Pi 4 and a Pi 5, §4.6; a listening pass) |
 | B8 | bridge | The read side (§7.1): `dsdDAC` with first use and its `bitRates`, `evidence`, `converted` with each plan, `refused`, `warnings` (migration failures and a damaged state), the `converted` playback token and plan; no health flag yet; PROTOCOL.md; fixtures; the `wire.md` DSD bullet | B11 | `TestTheBridgeElementCarriesTheDACChoice`, `TestDSDOutputProtocolMembers` and `TestDSDOutputProtocolTokens` (new rows), `TestAConvertedEntryCarriesItsPlan`, `TestAMigrationFailureIsPublished`, `TestADamagedStateIsPublishedWithNoDAC`, `TestNoHealthFlagBeforeItsRoute`, `TestNoDACKeyOrModelCarriesASerialOrAPort`, the fixture exporter | standard, mirror (I1) |
 | B9 | bridge | The choice's write, made only while the player is stopped (the owner, 2026-11-10: "Stop playback to change DSD"), in three PRs. PR 1 (#1448, merged): #1434's native lifecycle fixes. PR 2: the backend's write (`ChooseDSD`: the configuration lease and `playback_not_stopped`, CAS, key binding, confirmation, acknowledgement, durable write, read-back, a landed write's intersection), and B853's refusal word. PR 3: `PUT /v1/outputs/{id}/dsd` (§7.2), the engine owner's stopped check and reservation, `dsd_choice_uncertain` on the wire, the `bridgeDSDChoice` flag, PROTOCOL.md and the `wire.md` bullet, paired with I4's mirror | B8 | PR 2: `TestEachStateThePlayerIsNotStoppedInRefusesTheWrite`, `TestAStartDuringAWritePlaysByTheChoiceItWrote`, `TestTheWritesChecksAreAnsweredInTheirOrder`, `TestTwoWritesOfOneRevisionLandOnce`, `TestALandedWriteIsUncertainAndPublishesWhatBothStatesPlay`, `TestDoPOnAnUnknownDACNeedsConfirmation`, `TestNativeOrDoPNeedsFirstUseAcknowledged`, `TestChoosingARejectedTransportAgainClearsTheRejection`, `TestAnAcknowledgementWidensAMigratedChoiceToEveryRate`, `TestAWriteClearsItsDACsWarnings`, `TestADSDEntryAfterAnOrdinaryRevocationIsRefusedForIt`; PR 3: `TestTheAnswerIsTheEffectiveChoice`, `TestTheChoiceFlagArrivesWithItsRoute`, a Play parked between the owner's check and its backend registration, the route classification and error-table guards | standard, mirror (I4) |
-| B12 | bridge | The check (§6.2, §7.2): admission by the effective policy, the chime modulated at its own rate, the `preparing` state, the answer, the `bridgeDSDCheck` flag; an OpenHome Stop ends a check; PROTOCOL.md; the next free version at its merge; the `openhome.md` rule and the check's bullet | B9, B11, and the chime, B12 PR 1 (`internal/player/dsdchime`: the fixtures' CIFF loop, inert, depending on nothing; amended 2026-11-21) | `TestTheCheckAdmitsOnlyWhatTheSetPlays` (red before: an offered tuple with first use unacknowledged, and unconfirmed DoP), `TestTheChimeIsModulatedAtItsOwnRate` (B12 PR 1: no repeated bits), `TestTheChimeHasItsShapeAtEveryRate` (B12 PR 1: the pads are `0x69`), `TestEveryStopEndsTheCheckWithinItsBound`, `TestTheCheckNeverAutoplays`, `TestOnlyACompleteCheckIsAnswered`, `TestANoiseAnswerRefusesTheTransportInEveryMode`, `TestTheCheckFlagArrivesWithItsRoute` | player, hardware (the owner hears the chime on a real DAC), mirror (I5) |
+| B12 | bridge | The check (§6.2, §7.2): admission by the effective policy, the chime modulated at its own rate, the `preparing` state, the answer, the `bridgeDSDCheck` flag; an OpenHome Stop ends a check; PROTOCOL.md; the next free version at its merge; the `openhome.md` rule and the check's bullet (amended 2026-11-24: PR 4 is split, PR 4a the check's backend half of its routes and PR 4b the routes, serve's adapter and PROTOCOL.md) | B9, B11, and the chime, B12 PR 1 (`internal/player/dsdchime`: the fixtures' CIFF loop, inert, depending on nothing; amended 2026-11-21) | `TestTheCheckAdmitsOnlyWhatTheSetPlays` (red before: an offered tuple with first use unacknowledged, and unconfirmed DoP), `TestTheChimeIsModulatedAtItsOwnRate` (B12 PR 1: no repeated bits), `TestTheChimeHasItsShapeAtEveryRate` (B12 PR 1: the pads are `0x69`), `TestEveryStopEndsTheCheckWithinItsBound`, `TestTheCheckNeverAutoplays`, `TestOnlyACompleteCheckIsAnswered`, `TestANoiseAnswerRefusesTheTransportInEveryMode`, `TestTheCheckFlagArrivesWithItsRoute` | player, hardware (the owner hears the chime on a real DAC), mirror (I5) |
 | B13 | bridge | The console's Player page shows and sets the per-DAC choice and evidence, with the same first-use sheet (`cmd/bridge/serve_player_console.go:517-559`, the wording at `:532`) | B9 | the console's view and write tests for each state | standard |
 | I1 | iOS | Mirror of B8: PROTOCOL.md copied; DTOs for `dsdDAC` with first use and its `bitRates`, `evidence`, `converted` with its plan, `refused`, `warnings`, and the `converted` playback token; fixtures | B8 | decode tests: a malformed new member withholds only its own object (I1's rule); `converted` reads as its own token | full suite |
 | I2 | iOS | R12 admits converted rates; the refusal copy (§7.6) | I1 | `testAConvertedRateIsEligibleUnderAFreshGrant`, `testAConvertedEntryFromAnotherEpochAdmitsNothing`, `testNoConvertedEntryKeepsTheRateRefused`, `testARefusedRateSaysItsReason` | full suite |

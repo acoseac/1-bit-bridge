@@ -283,7 +283,7 @@ func (b *Backend) checkEnter() bool {
 
 // reserveCheck reads the policy afresh within ctx (dac_unavailable where the
 // reading failed), then takes the device slot for req as a Start's hold takes
-// it, in one step under b.mu, in PROTOCOL.md's order: refused once CloseChecks
+// it, in one step under b.mu, in the route's order: refused once CloseChecks
 // has run; then as the pair published now admits req (checkAdmits: the DAC,
 // its key and token, the tuple); then while the supervisor's gate is shut
 // (its word), a release was never confirmed, or a choice's lease, a session's
