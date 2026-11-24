@@ -776,6 +776,23 @@ func TestAReaderPlaySupersedesAHandoversDeferredStart(t *testing.T) { barScenari
 // handover stopped and not starting.
 func TestARefusedReaderPlayDuringAHandoversWaitShowsItStopped(t *testing.T) { barScenario(t, 1) }
 
+// TestATrackThatPlaysToItsEndBreaksTheFailureStreak pins that a track that
+// played to its end breaks a streak of unplayable ones: an album of bad and
+// good tracks in turn reaches its sixth track, no stop said.
+func TestATrackThatPlaysToItsEndBreaksTheFailureStreak(t *testing.T) { barScenario(t, 1) }
+
+// TestThreeFailuresInARowStopOnTheThirdThoughEachHadItsPlayEvent pins that a
+// play event breaks no streak: three unplayable tracks in a row, each with
+// its play event before its error, stop on the third.
+func TestThreeFailuresInARowStopOnTheThirdThoughEachHadItsPlayEvent(t *testing.T) {
+	barScenario(t, 2)
+}
+
+// TestAFailureAfterARepeatOneReplayStartsANewStreak pins the streak under
+// repeat one: after two failures the third track plays to its end, and its
+// replay's failure schedules a skip as the first of a new streak.
+func TestAFailureAfterARepeatOneReplayStartsANewStreak(t *testing.T) { barScenario(t, 3) }
+
 // TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo pins that a start the lock
 // screen's Pause let go of holds no place behind its barrier: the browser's
 // own play then takes it and resumes what the browser held on its answer.

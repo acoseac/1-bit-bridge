@@ -397,7 +397,10 @@ export function init() {
   });
   // A track's end: the next track goes on its start's permit, asked again;
   // a repeat-one replay starts the element its end paused, as a start does.
+  // A track that played to its end breaks a streak of unplayable ones (a
+  // play event does not: one comes before a source's error).
   state.el.addEventListener("ended", () => {
+    state.skipped = 0;
     continueStart((permit) => advanceNow(1, { auto: true, permit }), { fresh: state.repeat === "one" });
   });
   state.el.addEventListener("timeupdate", throttle(() => {

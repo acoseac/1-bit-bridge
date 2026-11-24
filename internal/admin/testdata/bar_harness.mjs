@@ -3217,6 +3217,76 @@ S.TestARefusedReaderPlayDuringAHandoversWaitShowsItStopped = async () => {
     [r.el.currentTime, r.el.plays, r.el.paused, s.playing, s.loading]);
 };
 
+// failsAndSkips is the current track failing, its source refused, and its
+// skip fired, through a barrier of its own.
+async function failsAndSkips(r, t) {
+  r.el.fail(4);
+  await settle();
+  t.fire(1200);
+  await settle();
+}
+
+S.TestATrackThatPlaysToItsEndBreaksTheFailureStreak = async () => {
+  // Bad, good, bad, good, bad, good: each good track plays to its end, so no
+  // three failures come in a row and the album reaches its sixth track.
+  const { r, t } = await failing({ pend: true, tracks: [flac(1), flac(2), flac(3), flac(4), flac(5), flac(6)] });
+  for (let i = 0; i < 3; i++) {
+    await failsAndSkips(r, t);
+    r.el.metadata(200);
+    await settle();
+    if (i < 2) {
+      r.el.end();
+      await settle();
+    }
+  }
+  const s = r.audio.snapshot();
+  check("the sixth track plays, no stop said", s.index === 5 && /06\.flac/.test(r.el.plays.at(-1) || "") && s.playing && !/next tracks/.test(s.error),
+    [s.index, r.el.plays.at(-1), s.playing, s.error]);
+};
+
+S.TestThreeFailuresInARowStopOnTheThirdThoughEachHadItsPlayEvent = async () => {
+  // Each unplayable track's play event comes before its error: that play
+  // breaks no streak, and the third in a row stops, said.
+  const { r, t } = await failing({ pend: true, tracks: [flac(1), flac(2), flac(3), flac(4), flac(5)] });
+  let played = 0;
+  for (let i = 0; i < 3; i++) {
+    if (r.audio.snapshot().playing) played += 1;
+    r.el.fail(4);
+    await settle();
+    if (i < 2) {
+      t.fire(1200);
+      await settle();
+    }
+  }
+  const s = r.audio.snapshot();
+  check("each of the three had its play event before its error", played === 3, played);
+  check("the third in a row stops, said", s.index === 2 && !s.playing && t.count(1200) === 0 && /can't play in this browser/.test(s.error),
+    [s.index, s.playing, t.count(1200), s.error]);
+};
+
+S.TestAFailureAfterARepeatOneReplayStartsANewStreak = async () => {
+  // Repeat one: two tracks fail, the third plays to its end and is replayed,
+  // and its replay's failure is the first of a new streak, its skip scheduled.
+  const { r, t } = await failing({ pend: true, tracks: [flac(1), flac(2), flac(3), flac(4)] });
+  r.audio.cycleRepeat();
+  r.audio.cycleRepeat();
+  await failsAndSkips(r, t);
+  await failsAndSkips(r, t);
+  check("two failures skip to the third track", r.audio.snapshot().index === 2 && /03\.flac/.test(r.el.plays.at(-1) || ""), [r.audio.snapshot().index, r.el.plays]);
+  r.el.metadata(200);
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.end();
+  await settle();
+  check("it plays to its end and is replayed, from its start", r.el.plays.length === plays + 1 && /03\.flac/.test(r.el.plays.at(-1) || "") && r.el.currentTime === 0,
+    [r.el.plays.slice(plays), r.el.currentTime]);
+  r.el.fail(4);
+  await settle();
+  const s = r.audio.snapshot();
+  check("the replay's failure is the first of a new streak: its skip scheduled, no stop said", t.count(1200) === 1 && s.error === `Can't play "T3" in this browser.`,
+    [t.count(1200), s.error]);
+};
+
 S.TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo = async () => {
   // A row's start behind a held barrier, let go by the lock screen's Pause:
   // the browser's own play then takes that barrier, as it would take no
