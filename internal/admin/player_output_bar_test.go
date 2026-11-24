@@ -759,6 +759,23 @@ func TestAnExplicitPauseCancelsAStartWaitingOnItsBarrier(t *testing.T) { barScen
 // place behind the barrier, and a fresh Play then moves on.
 func TestAnExplicitPauseCancelsAPlayThatTookASkipsPlace(t *testing.T) { barScenario(t, 3) }
 
+// TestAPauseDuringAHandoversWaitStopsItsSpinner pins that the lock screen's
+// Pause over a positioned handover waiting for its metadata shows it stopped
+// and not starting at once, and that its metadata then plays nothing.
+func TestAPauseDuringAHandoversWaitStopsItsSpinner(t *testing.T) { barScenario(t, 3) }
+
+// TestAReaderPlaySupersedesAHandoversDeferredStart pins that the reader's
+// Play during a positioned handover's wait supersedes the play its metadata
+// defers: the metadata, first, seeks to the position and plays nothing, and
+// the Play plays once, there, when the gate lets it. The answer-first order
+// is TestAPlayBeforeAHandoversMetadataIsItsOnlyStart's.
+func TestAReaderPlaySupersedesAHandoversDeferredStart(t *testing.T) { barScenario(t, 2) }
+
+// TestARefusedReaderPlayDuringAHandoversWaitShowsItStopped pins that the same
+// Play, its barrier refused, leaves the seek, plays nothing, and shows the
+// handover stopped and not starting.
+func TestARefusedReaderPlayDuringAHandoversWaitShowsItStopped(t *testing.T) { barScenario(t, 1) }
+
 // TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo pins that a start the lock
 // screen's Pause let go of holds no place behind its barrier: the browser's
 // own play then takes it and resumes what the browser held on its answer.

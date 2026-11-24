@@ -121,9 +121,24 @@ export function setContinueGate(gate) {
 }
 
 // With no gate wired (a boot that failed before it wired them), every start
-// is refused, as a start the gate refuses is (round 5).
+// is refused, as a start the gate refuses is (round 5). A start asked over a
+// paused element supersedes what this browser meant to play there, a
+// positioned handover's play its metadata defers among it, which then only
+// seeks; one the gate never runs shows that element stopped (startDropped).
 function requestStart(run) {
-  if (startGate) startGate(run);
+  if (state.el?.paused) intent = false;
+  const gen = playbackGen;
+  if (startGate) startGate(run, { drop: () => startDropped(gen) });
+}
+
+// startDropped is a start of the reader's that never runs (refused, put
+// aside for another, let go of): over the paused element of the playback it
+// was asked in, the bar shows nothing starting, a handover's spinner gone.
+function startDropped(gen) {
+  if (gen !== playbackGen || !state.el.paused) return;
+  state.playing = false;
+  state.loading = false;
+  emit();
 }
 
 // continueStart is how playback goes on by itself (S1): run, handed the
@@ -977,6 +992,10 @@ function pauseNow() {
   intent = false;
   if (!state.el.paused) state.el.pause();
   startCancel?.();
+  // Shown stopped at once: a positioned handover's wait is paused already,
+  // and its element fires no pause event to say so.
+  state.playing = false;
+  state.loading = false;
   emit();
 }
 

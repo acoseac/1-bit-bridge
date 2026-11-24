@@ -3154,6 +3154,69 @@ S.TestAnExplicitPauseCancelsAPlayThatTookASkipsPlace = async () => {
     [r.audio.snapshot().index, r.el.plays.slice(plays), r.el.paused]);
 };
 
+// heldBarrier answers the next barriers when the case lets held go: done at
+// revision 20 beside a silent bridge, or refused under the DSD check.
+function heldBarrier(r, held, { refuse = false } = {}) {
+  r.s.on("POST", ROUTES.switchOut, async (e) => {
+    await held.p;
+    return refuse
+      ? answer(recOf(e, { kind: "switch-out", status: "refused", error: "check", effect: "none", last: "maintenance" }), pub({ revision: 20, silent: true, hold: "check" }))
+      : answer(recOf(e, { kind: "switch-out", silence: 20 }), pub({ revision: 20, silent: true }));
+  });
+}
+
+S.TestAPauseDuringAHandoversWaitStopsItsSpinner = async () => {
+  // A playing handover at 30 s waits for its metadata, shown starting; the
+  // lock screen's Pause shows it stopped at once, and its metadata then
+  // plays nothing.
+  const r = await handedOver(handoverAt30);
+  let shown = null;
+  r.audio.subscribe((s) => { shown = s; });
+  check("the handover waits for its metadata, shown starting", r.el.paused && shown?.loading === true, [r.el.paused, shown?.loading]);
+  session.handlers.pause();
+  check("the lock screen's Pause shows it stopped at once", shown && !shown.playing && !shown.loading && !r.audio.snapshot().loading, [shown?.playing, shown?.loading]);
+  await settle();
+  r.el.metadata(200);
+  await settle();
+  check("its metadata then plays nothing, and it stays shown stopped", r.el.plays.length === 0 && r.el.paused && !shown.playing && !shown.loading,
+    [r.el.plays, r.el.paused, shown.playing, shown.loading]);
+};
+
+S.TestAReaderPlaySupersedesAHandoversDeferredStart = async () => {
+  // The reader's Play during a positioned handover's wait, its barrier held:
+  // the metadata seeks and plays nothing, and the Play plays once admitted.
+  const r = await handedOver(handoverAt30);
+  const held = gate();
+  heldBarrier(r, held);
+  r.audio.toggle();
+  await settle();
+  r.el.metadata(200);
+  await settle();
+  check("the metadata first: the seek to 30 s and no play before the Play is admitted", r.el.currentTime === 30 && r.el.plays.length === 0 && r.el.paused,
+    [r.el.currentTime, r.el.plays, r.el.paused]);
+  held.open();
+  await settle();
+  check("admitted, the Play plays once, at 30 s", r.el.plays.length === 1 && !r.el.paused && r.el.currentTime === 30 && r.audio.snapshot().playing,
+    [r.el.plays, r.el.paused, r.el.currentTime, r.audio.snapshot().playing]);
+};
+
+S.TestARefusedReaderPlayDuringAHandoversWaitShowsItStopped = async () => {
+  // The same Play, its barrier refused: the seek stays, nothing plays, and
+  // the bar shows the handover stopped, its spinner gone.
+  const r = await handedOver(handoverAt30);
+  const held = gate();
+  heldBarrier(r, held, { refuse: true });
+  r.audio.toggle();
+  await settle();
+  r.el.metadata(200);
+  await settle();
+  held.open();
+  await settle();
+  const s = r.audio.snapshot();
+  check("refused: the seek to 30 s, no play, shown stopped and not starting", r.el.currentTime === 30 && r.el.plays.length === 0 && r.el.paused && !s.playing && !s.loading,
+    [r.el.currentTime, r.el.plays, r.el.paused, s.playing, s.loading]);
+};
+
 S.TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo = async () => {
   // A row's start behind a held barrier, let go by the lock screen's Pause:
   // the browser's own play then takes that barrier, as it would take no

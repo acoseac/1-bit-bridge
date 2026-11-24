@@ -332,7 +332,7 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 	// only where it is wired, refusing otherwise, and runs nothing but
 	// through it.
 	for name, ask := range map[string][2]string{
-		"requestStart":  {"if (startGate) startGate(run);\n}", "run"},
+		"requestStart":  {"if (startGate) startGate(run, { drop: () => startDropped(gen) });\n}", "run"},
 		"continueStart": {"if (continueGate) continueGate(permit, go, drop);\n  else drop();", "go"},
 		"ownPlay":       {"if (continueGate) continueGate(null, go, drop);\n  else drop();", "go"},
 	} {
