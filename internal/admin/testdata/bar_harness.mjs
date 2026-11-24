@@ -919,33 +919,87 @@ class El {
 function textNode(s) { const t = new El("#text"); t.own = String(s); return t; }
 
 // The element's media state as the HTML spec moves it, as far as the cases
-// need it (round 3, Q6): load() pauses the element with no pause event and
-// resets its position, as the media element load algorithm does; a track's
-// end pauses it, firing pause and then ended (end()); every play() is
-// recorded with the source it played (plays).
+// need it (round 3, Q6; round 4, W2): play() on a paused element flips
+// `paused` at once, and its `play` event and its promise's settlement come
+// later as queued media element tasks, in the browser's order; pause() flips
+// it at once and queues `pause` with the AbortError of every play still
+// pending; load() pauses the element with no event, removes the queued tasks,
+// refuses the pending plays (AbortError) and resets its position and error; a
+// track's end (end()) and a media error (fail()) are queued tasks too, an
+// error of code 4 refusing the pending plays (NotSupportedError). A play's
+// promise resolves after its event by default (playMode "resolve"), stays
+// pending until the case settles it ("pend": settlePlays()), or is refused at
+// once with NotAllowedError ("deny"). Every play() is recorded with the source
+// it played (plays).
+const domError = (name) => Object.assign(new Error(name), { name });
 class AudioEl extends El {
   constructor() {
     super("audio");
     this.currentTime = 0; this.duration = NaN; this.paused = true; this.readyState = 0; this.error = null; this.ended = false;
     this.buffered = { length: 0 }; this.playbackRate = 1; this.volume = 1; this.preload = "none"; this._src = ""; this.plays = [];
+    this.playMode = "resolve"; this.pending = []; this.tasks = [];
   }
   get src() { return this._src; }
   set src(v) { this._src = String(v); this.attrs.src = String(v); }
   canPlayType(ct) { return /flac|wav|mpeg|mp4|aac/.test(ct) ? "probably" : ""; }
-  load() { this.currentTime = 0; this.duration = NaN; this.readyState = 0; this.paused = true; this.ended = false; this.error = null; }
-  play() { this.plays.push(this._src); this.ended = false; this.paused = false; this.fire("play"); return Promise.resolve(); }
-  pause() { if (!this.paused) { this.paused = true; this.fire("pause"); } }
+  // task queues fn as a media element task, which a load() removes.
+  task(fn) {
+    const t = { live: true };
+    this.tasks.push(t);
+    realTimeout(() => { if (t.live) { t.live = false; fn(); } }, 0);
+  }
+  refusePlays(name) { const ps = this.pending; this.pending = []; for (const q of ps) q.reject(domError(name)); }
+  settlePlays() { const ps = this.pending; this.pending = []; for (const q of ps) q.resolve(); }
+  load() {
+    for (const t of this.tasks) t.live = false;
+    this.tasks = [];
+    this.currentTime = 0; this.duration = NaN; this.readyState = 0; this.ended = false; this.error = null;
+    if (!this.paused) this.paused = true;
+    this.refusePlays("AbortError");
+  }
+  play() {
+    this.plays.push(this._src);
+    if (this.playMode === "deny") return Promise.reject(domError("NotAllowedError"));
+    if (this.error?.code === 4) return Promise.reject(domError("NotSupportedError"));
+    const p = new Promise((resolve, reject) => this.pending.push({ resolve, reject }));
+    if (this.paused) {
+      this.paused = false;
+      this.ended = false;
+      this.task(() => this.fire("play"));
+    }
+    if (this.playMode === "resolve") this.task(() => this.settlePlays());
+    return p;
+  }
+  pause() {
+    if (this.paused) return;
+    this.paused = true;
+    const ps = this.pending;
+    this.pending = [];
+    this.task(() => { this.fire("pause"); for (const q of ps) q.reject(domError("AbortError")); });
+  }
   // metadata is the browser's loadedmetadata for the source it holds.
   metadata(duration) { this.duration = duration; this.readyState = 1; this.fire("loadedmetadata"); }
   // end is the playback's end: paused, pause fired, then ended.
   end() {
-    if (Number.isFinite(this.duration)) this.currentTime = this.duration;
-    this.ended = true;
-    if (!this.paused) { this.paused = true; this.fire("pause"); }
-    this.fire("ended");
+    this.task(() => {
+      if (Number.isFinite(this.duration)) this.currentTime = this.duration;
+      this.ended = true;
+      if (!this.paused) {
+        this.paused = true;
+        this.fire("pause");
+        this.refusePlays("AbortError");
+      }
+      this.fire("ended");
+    });
   }
   // fail is a media error of code at the source it holds, fired as error.
-  fail(code) { this.error = { code }; this.fire("error"); }
+  fail(code) {
+    this.task(() => {
+      this.error = { code };
+      this.fire("error");
+      if (code === 4) this.refusePlays("NotSupportedError");
+    });
+  }
 }
 
 const session = { handlers: {}, metadata: undefined, playbackState: "", setActionHandler(a, fn) { this.handlers[a] = fn; }, setPositionState() {} };
@@ -1798,7 +1852,11 @@ async function gatedPlaying(o = {}) {
 }
 
 S.TestASkipPastATrackThatCannotPlayAsksTheGate = async () => {
-  // S1, Q5: a source that played, then cannot, its probe done.
+  // S1, Q5: a source that played, then cannot, its probe done. The error
+  // comes after the metadata, its play already settled, an order that stands
+  // for the paths where a play's rejection was swallowed; a source a browser
+  // cannot play fails before its metadata and refuses its pending play,
+  // which no skip follows (round 4, W11: that order is the follow-up's).
   const t = longTimers();
   globalThis.fetch = async () => ({ ok: true, status: 200 });
   const r = await gatedPlaying();
@@ -1910,7 +1968,8 @@ S.TestPlaybackLetGoWithNoPlayerOfferedAsksTheGateToGoOn = async () => {
 };
 
 // skipWaiting is gatedPlaying's first track failing, its skip fired and
-// waiting on a barrier the case holds.
+// waiting on a barrier the case holds; its error comes after the metadata,
+// in TestASkipPastATrackThatCannotPlayAsksTheGate's order (round 4, W11).
 async function skipWaiting() {
   const t = longTimers();
   globalThis.fetch = async () => ({ ok: true, status: 200 });
