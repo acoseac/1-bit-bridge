@@ -2,6 +2,7 @@ package alsapcm_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -47,8 +48,9 @@ func (r *checkRig) probeHeld() (probed <-chan struct{}, letOpen func()) {
 // TestAnAdmissionsEndIsAnsweredWhileItsReadingIsHeld: a check whose request
 // ends while its admission's reading of the box is held is answered with the
 // request's error while that reading is still held, the reading counted until
-// it is let go; let go, it publishes as a refresh does and takes no slot:
-// nothing opened and no record made. Where the request ends once the check is
+// it is let go; let go, it publishes as a refresh does (here the firmware the
+// box reports by then, under a token of its own) and takes no slot: nothing
+// opened and no record made. Where the request ends once the check is
 // admitted, the check is the slot's and goes on; StopCheck ends it, stopped
 // deleted, its cleanup confirmed, nothing opened.
 func TestAnAdmissionsEndIsAnsweredWhileItsReadingIsHeld(t *testing.T) {
@@ -57,12 +59,15 @@ func TestAnAdmissionsEndIsAnsweredWhileItsReadingIsHeld(t *testing.T) {
 		box := &checkBox{}
 		r := newCheckRig(t, native, withCheckBox(box))
 		req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
+		before := r.be.Policy()
 		p := box.holdNext()
 		t.Cleanup(p.letGo)
 		ctx, cancel := context.WithCancel(bg)
 		defer cancel()
 		answer := r.askAsync(ctx, req, stop)
 		awaitOrdered(t, p.in, "the admission's reading held in the box")
+		firmware := "0200"
+		box.bcd.Store(&firmware)
 		cancel()
 		c := receiveIn(t, answer, "the check's answer while its reading is held")
 		if n, _ := r.be.Running(); n == 0 {
@@ -70,6 +75,9 @@ func TestAnAdmissionsEndIsAnsweredWhileItsReadingIsHeld(t *testing.T) {
 		}
 		p.letGo()
 		r.refusedEnded(c, "a request ended while its reading was held")
+		if now := r.be.Policy(); now.Publication <= before.Publication || now.DSD == nil || now.DSD.DAC == nil || now.DSD.DAC.Token == req.DACToken {
+			t.Errorf("once let go, the reading published %+v; want the firmware it read, under a token of its own", now.DSD)
+		}
 	})
 	t.Run("the request's end once the check is admitted", func(t *testing.T) {
 		r := newCheckRig(t, native, nil)
@@ -364,4 +372,149 @@ func TestAnAnswersAgeIsDecidedInTheStoresWrite(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAStoppedAdmissionsQueuedReadingReadsNothing: a check whose admission's
+// reading waits for the refreshes' lock, a refresh holding it across its own
+// reading of the box, and whose hold's stop signal then comes, its request's
+// context live, is refused with the stop's word at once; once that refresh is
+// let go and the backend's work joined, the box was read once past the rig's
+// setup, by that refresh alone: the queued reading, holding the lock at last,
+// read nothing.
+func TestAStoppedAdmissionsQueuedReadingReadsNothing(t *testing.T) {
+	queued := make(chan struct{})
+	var once sync.Once
+	box := &checkBox{}
+	r := newCheckRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), withCheckBox(box), func(o *rigOptions) {
+		o.seams = &playback.Seams{DSDStep: func(step string) {
+			if step == "queued" {
+				once.Do(func() { close(queued) })
+			}
+		}}
+	})
+	req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
+	setup := box.reads.Load()
+	p := box.holdNext()
+	t.Cleanup(p.letGo)
+	refreshed := make(chan struct{})
+	go func() {
+		defer close(refreshed)
+		r.be.RefreshDSD(true)
+	}()
+	awaitOrdered(t, p.in, "the refresh's reading held in the box")
+	answer := r.askAsync(bg, req, stop)
+	awaitOrdered(t, queued, "the admission's reading waiting for the refreshes' lock")
+	close(stop)
+	c := receiveIn(t, answer, "the check's answer while its reading waits for the lock")
+	if w := checkRefusal(c.err); w != string(playback.CheckStop) || !sameCheckStatus(c.st, playback.CheckStatus{}) {
+		t.Errorf("the check answered %+v, %v; want refused %s", c.st, c.err, playback.CheckStop)
+	}
+	p.letGo()
+	receiveIn(t, refreshed, "the refresh let go")
+	r.joined("the admission's reading once the lock was let go")
+	if n := box.reads.Load() - setup; n != 1 {
+		t.Errorf("the box was read %d times past the rig's setup; want the refresh's one reading", n)
+	}
+	if _, ok := r.be.CheckStatus(); ok {
+		t.Error("a check stopped before its reading made a record")
+	}
+}
+
+// TestTheAdmissionsReadingKeepsTheRefusalsOrder: a check refused as its
+// admission's reading of the policy answers, or as that reading's wait ends,
+// is refused in the order the slot refuses in: its request's error, serve's
+// stop (serve_stopping, no epoch), the stop's word, then dac_unavailable for a
+// reading that failed, with no handle and nothing opened: its request ended
+// and its stop signal come, both before Check (in rounds, its select picking
+// at random); serve's stop after Check's entry, before its stop signal or
+// before its reading fails; its stop signal once a failed reading's answer
+// has reached the admission and before its refusal is decided; and a reading
+// that fails, the admissible pair before it standing.
+func TestTheAdmissionsReadingKeepsTheRefusalsOrder(t *testing.T) {
+	native := playbacktest.ChoiceState(dsdstate.ModeNative)
+	refusedAs := func(t *testing.T, c checkCall, word string, epoch bool, what string) *playback.CheckRefused {
+		t.Helper()
+		var rf *playback.CheckRefused
+		if !errors.As(c.err, &rf) || rf.Word != word || rf.Epoch != epoch || !sameCheckStatus(c.st, playback.CheckStatus{}) {
+			t.Errorf("%s: the check answered %+v, %v; want refused %s, its epoch %v", what, c.st, c.err, word, epoch)
+		}
+		return rf
+	}
+	nothingOpened := func(t *testing.T, r *checkRig, what string) {
+		t.Helper()
+		r.joined(what)
+		if v := r.k.View(); v.Opens != 0 {
+			t.Errorf("%s: %d opens asked; want none", what, v.Opens)
+		}
+		if _, ok := r.be.CheckStatus(); ok {
+			t.Errorf("%s: a record was made", what)
+		}
+	}
+	t.Run("its request ended and its stop signal come before Check", func(t *testing.T) {
+		r := newCheckRig(t, native, nil)
+		for round := range 32 {
+			req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
+			close(stop)
+			ctx, cancel := context.WithCancel(bg)
+			cancel()
+			h, err := r.be.Check(ctx, req)
+			if !errors.Is(err, context.Canceled) || h != nil {
+				t.Fatalf("round %d: the check answered %+v, %v; want its request's error", round, statusOf(h), err)
+			}
+		}
+		nothingOpened(t, r, "checks whose request ended and whose stop signal came")
+	})
+	for _, c := range []struct {
+		name string
+		end  func(*checkBox, chan struct{})
+	}{
+		{"serve's stop before its stop signal", func(_ *checkBox, stop chan struct{}) { close(stop) }},
+		{"serve's stop before its reading fails", func(box *checkBox, _ chan struct{}) { box.panics.Store(true) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			box := &checkBox{}
+			r := newCheckRig(t, native, withCheckBox(box))
+			req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
+			p := box.holdNext()
+			t.Cleanup(p.letGo)
+			answer := r.askAsync(bg, req, stop)
+			awaitOrdered(t, p.in, "the admission's reading held in the box")
+			r.be.CloseChecks()
+			c.end(box, stop)
+			p.letGo()
+			refusedAs(t, receiveIn(t, answer, "the check's answer"), string(playback.CheckServeStopping), false, c.name)
+			nothingOpened(t, r, c.name)
+		})
+	}
+	t.Run("its stop signal once a failed reading has answered", func(t *testing.T) {
+		failed := (*heldOnce)(nil)
+		box := &checkBox{}
+		r := newCheckRig(t, native, withCheckBox(box), func(o *rigOptions) {
+			o.seams = &playback.Seams{DSDStep: func(step string) {
+				if step == "check read failed" {
+					failed.hold()
+				}
+			}}
+		})
+		failed = newHeldOnce(t)
+		req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
+		box.panics.Store(true)
+		answer := r.askAsync(bg, req, stop)
+		awaitOrdered(t, failed.in, "the failed reading's answer at the admission")
+		close(stop)
+		failed.release()
+		refusedAs(t, receiveIn(t, answer, "the check's answer"), string(playback.CheckStop), true, "its stop signal once a failed reading has answered")
+		nothingOpened(t, r, "its stop signal once a failed reading has answered")
+	})
+	t.Run("a reading that fails", func(t *testing.T) {
+		box := &checkBox{}
+		r := newCheckRig(t, native, withCheckBox(box))
+		req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
+		box.panics.Store(true)
+		rf := refusedAs(t, r.ask(req, stop), playback.CheckDACUnavailable, true, "a reading that fails")
+		if rf != nil && (rf.Policy.DSD == nil || rf.Policy.DSD.DAC == nil || rf.Policy.DSD.DAC.Token != req.DACToken) {
+			t.Errorf("the refusal carries %+v; want the admissible pair standing before the reading failed", rf.Policy.DSD)
+		}
+		nothingOpened(t, r, "a reading that fails")
+	})
 }

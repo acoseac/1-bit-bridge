@@ -384,13 +384,15 @@ func (r *checkRig) reusable(what string) {
 // checkBox is the rig's box whose next reading of the unit, once armed, is
 // held (holdNext) or panics (panics): a reading of the box under the
 // refreshes' lock that does not answer, or one that fails. reads counts the
-// readings of the unit.
+// readings of the unit, and the unit reports the firmware bcd holds once it
+// is set.
 type checkBox struct {
 	playback.DSDBox
 	mu     sync.Mutex
 	park   *parkAt
 	panics atomic.Bool
 	reads  atomic.Int64
+	bcd    atomic.Pointer[string]
 }
 
 func (b *checkBox) holdNext() *parkAt {
@@ -413,7 +415,11 @@ func (b *checkBox) UnitModel(card int) (alsa.UnitModel, error) {
 	if b.panics.CompareAndSwap(true, false) {
 		panic(panicValue)
 	}
-	return b.DSDBox.UnitModel(card)
+	m, err := b.DSDBox.UnitModel(card)
+	if v := b.bcd.Load(); v != nil {
+		m.BCDDevice = *v
+	}
+	return m, err
 }
 
 // withCheckBox puts box between the policy and the rig's box.
@@ -604,11 +610,13 @@ func TestAnEndedRequestOpensNothing(t *testing.T) {
 // confirmed, it is refused (device_busy; release_unconfirmed for the fence);
 // a probe in the slot is waited for at most ProbeWait and a tone is ended
 // preempted and waited for at most ToneYield, then device_busy, or admitted
-// once the slot is free. While it holds the slot, a probe is skipped
-// check_holds and stays owed, a tone is refused check_running, a choice's
-// write playback_not_stopped, and a Start waits ProbeWait for it, then
-// answers the device busy, the check going on. And the check's take voids
-// the answers of a probe that decides them after it, as a Start's does.
+// once the slot is free, the check opening the DAC itself after the probe's
+// open, its stop signal left open until then. While it holds the slot, a
+// probe is skipped check_holds and stays owed, a tone is refused
+// check_running, a choice's write playback_not_stopped, and a Start waits
+// ProbeWait for it, then answers the device busy, the check going on. And the
+// check's take voids the answers of a probe that decides them after it, as a
+// Start's does.
 func TestTheCheckOwnsTheSlotAgainstProbesAndTones(t *testing.T) {
 	native := playbacktest.ChoiceState(dsdstate.ModeNative)
 	cond := playback.ProbeConditions{Available: true, Fresh: true}
@@ -663,6 +671,7 @@ func TestTheCheckOwnsTheSlotAgainstProbesAndTones(t *testing.T) {
 	}
 	t.Run("a probe in the slot is waited for", func(t *testing.T) {
 		r := newCheckRig(t, native, nil)
+		opens := r.k.View().Opens
 		probed, letOpen := probeHeldOpen(r)
 		asked := make(chan checkCall, 1)
 		go func() { asked <- r.ask(r.request(dsdstate.TransportNative, playbacktest.DSD64)) }()
@@ -675,6 +684,7 @@ func TestTheCheckOwnsTheSlotAgainstProbesAndTones(t *testing.T) {
 		if c.err != nil {
 			t.Fatalf("the check once the probe ended answered %v", c.err)
 		}
+		r.k.Await(t, "the check's own open, after the probe's", func(v alsapcm.KernelView) bool { return v.Opens >= opens+2 })
 		close(c.stop)
 		r.endedAs(playback.CheckStopped, playback.CheckStop, "the check after the probe")
 	})

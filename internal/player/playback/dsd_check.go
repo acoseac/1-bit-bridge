@@ -372,15 +372,17 @@ func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*CheckHan
 // readForCheck reads the policy afresh for a check's admission on a goroutine
 // of the backend's, counted until that reading returns, and waits for it, its
 // request's end or its hold's stop signal, whichever comes first: an end
-// answers at once (the request's error, or the stop's word), the reading,
-// which no request can stop once it has begun, left to finish and publish as
-// a refresh does, taking no slot; a request that has ended starts none; a
-// reading that failed answers dac_unavailable.
+// answers at once, the reading, which no request can stop once it has begun,
+// left to finish and publish as a refresh does, taking no slot, and one still
+// waiting for the refreshes' lock as the stop signal comes reading nothing;
+// a request that has ended starts none. Every wake but the reading's success
+// is refused in the slot's order: the request's error, serve's stop, the
+// stop's word, then dac_unavailable for a reading that failed.
 func (b *Backend) readForCheck(ctx context.Context, req CheckRequest) error {
 	read := make(chan error, 1)
 	if ctx.Err() == nil && !signalled(req.Stop) {
 		b.spawn(func() {
-			_, err := b.refreshDSDWithin(ctx, "a DSD check's admission")
+			_, err := b.refreshDSDWithin(ctx, req.Stop, "a DSD check's admission")
 			read <- err
 		})
 	}
@@ -389,14 +391,23 @@ func (b *Backend) readForCheck(ctx context.Context, req CheckRequest) error {
 		if err == nil {
 			return nil
 		}
+		b.dsdStep("check read failed")
 	case <-ctx.Done():
 	case <-req.Stop:
-		return &CheckRefused{Word: string(CheckStop), Policy: b.Policy(), Epoch: true}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return &CheckRefused{Word: CheckDACUnavailable, Policy: b.Policy(), Epoch: true}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	word := CheckDACUnavailable
+	switch {
+	case b.checksClosed:
+		word = string(CheckServeStopping)
+	case signalled(req.Stop):
+		word = string(CheckStop)
+	}
+	return &CheckRefused{Word: word, Policy: b.policyOf(b.dsdPub.Load()), Epoch: word != string(CheckServeStopping)}
 }
 
 // signalled reports whether ch, nil for none, is closed.
@@ -599,7 +610,7 @@ func (b *Backend) checkNode(c *checkHold, u Unit, n alsapcm.NodeInfo, plan *engi
 // check judged against the set published now, so one a refresh beside it has
 // not reconciled yet is judged here.
 func (b *Backend) judgeCheckFresh(c *checkHold, where string) bool {
-	if _, err := b.refreshDSDWithin(c.ctx, where); err != nil {
+	if _, err := b.refreshDSDWithin(c.ctx, nil, where); err != nil {
 		return false
 	}
 	b.mu.Lock()
@@ -789,15 +800,20 @@ func checkFault(err error) CheckReason {
 // no check in the slot; pending while it has not answered, the slot still
 // the check's), with the pair published as it answers, the two read in one
 // step under b.mu, where endCheck publishes the end and closes done together.
+// With none, the pair is the one published as that step found the slot empty.
 func (b *Backend) StopCheck(ctx context.Context) (CheckCleanup, PlayerPolicy) {
 	b.mu.Lock()
-	c := b.checking
+	c, pub := b.checking, b.dsdPub.Load()
 	if c != nil {
 		b.endCheckLocked(c, CheckStopped, CheckDeleted)
 	}
 	b.mu.Unlock()
 	if c == nil {
-		return CheckCleanupNone, b.Policy()
+		b.checkStopAnswering()
+		if pub == nil { // a backend with no DSD policy, which admits no check
+			return CheckCleanupNone, b.Policy()
+		}
+		return CheckCleanupNone, b.policyOf(pub)
 	}
 	expired := make(chan struct{})
 	defer b.cfg.AfterFunc(CheckStopWait, func() { close(expired) })()
@@ -809,7 +825,9 @@ func (b *Backend) StopCheck(ctx context.Context) (CheckCleanup, PlayerPolicy) {
 	b.checkStopAnswering()
 	b.mu.Lock()
 	h := CheckHandle{c: c}
-	cleanup, pub := h.Cleanup(), b.dsdPub.Load()
+	cleanup := h.Cleanup()
+	b.dsdStep("stop read")
+	pub = b.dsdPub.Load()
 	b.mu.Unlock()
 	return cleanup, b.policyOf(pub)
 }
@@ -1008,5 +1026,12 @@ func (b *Backend) checkEnded() {
 func (b *Backend) checkStopAnswering() {
 	if sm := b.cfg.Seams; sm != nil && sm.CheckStopAnswering != nil {
 		sm.CheckStopAnswering()
+	}
+}
+
+// dsdStep is the DSDStep seam.
+func (b *Backend) dsdStep(step string) {
+	if sm := b.cfg.Seams; sm != nil && sm.DSDStep != nil {
+		sm.DSDStep(step)
 	}
 }

@@ -248,8 +248,15 @@ type Seams struct {
 	// CheckEnded runs on the DSD check's goroutine once its end is published
 	// and its slot given back (endCheck), before its cause and its line;
 	// CheckStopAnswering on StopCheck's caller once its wait is over, before
-	// it reads its answer. Each may block, and neither may call the backend.
+	// it reads its answer, or once it found the slot empty, before it answers.
+	// Each may block, and neither may call the backend.
 	CheckEnded, CheckStopAnswering func()
+	// DSDStep runs as a step is reached, on its goroutine: "queued" as a
+	// reading (lockReading) finds the refreshes' lock held, before it waits,
+	// never blocking; "check read failed" as Check's admission's reading has
+	// answered an error, before its refusal; "stop read" between StopCheck's
+	// two reads, under b.mu. None may call the backend.
+	DSDStep func(step string)
 }
 
 // reconcilingPermission is the ReconcilingPermission seam.

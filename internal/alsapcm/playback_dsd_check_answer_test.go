@@ -531,9 +531,8 @@ func TestAStopsAnswerSaysHowItsCleanupEnded(t *testing.T) {
 // record and the pair its admission made (preparing), its Done and its
 // Cleanup: while a check's close is held in the kernel, its own Done open and
 // its Cleanup pending, an earlier check's Done closed and its Cleanup
-// confirmed; once that close answers, the same Done closed and its Cleanup
-// confirmed (B728 B12 PR 4a round 2: a Done closed from the start passed this
-// test before).
+// confirmed; once that close answers, the channel its Done gave while the
+// close was held is closed, and its Cleanup confirmed.
 func TestEachCheckHasItsOwnHandle(t *testing.T) {
 	r := newCheckRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), nil)
 	ctx, cancel := within()
@@ -565,8 +564,9 @@ func TestEachCheckHasItsOwnHandle(t *testing.T) {
 	t.Cleanup(letClose)
 	close(stop)
 	awaitOrdered(t, parked, "the second check's close held in the kernel")
+	done := second.Done()
 	select {
-	case <-second.Done():
+	case <-done:
 		t.Error("the second check's Done is closed while its close is held")
 	default:
 	}
@@ -580,7 +580,7 @@ func TestEachCheckHasItsOwnHandle(t *testing.T) {
 		t.Errorf("two checks share the ID %s", second.Status.ID)
 	}
 	letClose()
-	receiveIn(t, second.Done(), "the second check's Done once its close answered")
+	receiveIn(t, done, "the channel the second check's Done gave while its close was held, once that close answered")
 	if got := second.Cleanup(); got != playback.CheckCleanupConfirmed {
 		t.Errorf("the second check's cleanup reads %s once its close answered; want confirmed", got)
 	}

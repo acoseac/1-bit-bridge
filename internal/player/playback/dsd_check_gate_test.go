@@ -982,3 +982,135 @@ func TestTheSlotsBoundKeepsTheRefusalsOrder(t *testing.T) {
 		}
 	})
 }
+
+// stopAnswer is StopCheck's answer.
+type stopAnswer struct {
+	cleanup CheckCleanup
+	policy  PlayerPolicy
+}
+
+// stopAsync asks b's StopCheck on a goroutine of its own.
+func stopAsync(b *Backend) <-chan stopAnswer {
+	ch := make(chan stopAnswer, 1)
+	go func() {
+		c, p := b.StopCheck(context.Background())
+		ch <- stopAnswer{c, p}
+	}()
+	return ch
+}
+
+// stopAnswered is StopCheck's answer, under the watchdog.
+func stopAnswered(t *testing.T, ch <-chan stopAnswer) stopAnswer {
+	t.Helper()
+	select {
+	case a := <-ch:
+		return a
+	case <-time.After(10 * time.Second):
+		t.Fatal("StopCheck never answered")
+		return stopAnswer{}
+	}
+}
+
+// gateOnce is a seam's hold: in closes as the first goroutine reaches it,
+// which waits until let.
+type gateOnce struct {
+	in, gate  chan struct{}
+	held, let sync.Once
+}
+
+func newGateOnce(t *testing.T) *gateOnce {
+	g := &gateOnce{in: make(chan struct{}), gate: make(chan struct{})}
+	t.Cleanup(g.release)
+	return g
+}
+
+func (g *gateOnce) hold() {
+	g.held.Do(func() { close(g.in) })
+	<-g.gate
+}
+
+func (g *gateOnce) release() { g.let.Do(func() { close(g.gate) }) }
+
+// TestAnEmptySlotsStopAnswersThePairItFound: StopCheck with no check in the
+// slot answers none with the pair published as its step found the slot empty:
+// a check admitted while StopCheck is held past that step leaves its answer
+// the publication it found, with no check in it; and on a backend with no DSD
+// policy, which admits no check, none with the backend's own policy.
+func TestAnEmptySlotsStopAnswersThePairItFound(t *testing.T) {
+	t.Run("a check admitted after its step", func(t *testing.T) {
+		b := publishedBackend(t, newCheckTimers().afterFunc, fixtureBox{})
+		answering := newGateOnce(t)
+		b.cfg.Seams = &Seams{CheckStopAnswering: answering.hold}
+		before := b.Policy()
+		answer := stopAsync(b)
+		reached(t, answering.in, "StopCheck past the step that found the slot empty")
+		req, stop := publishedRequest(t, b)
+		if _, err := b.Check(context.Background(), req); err != nil {
+			t.Fatalf("the check was refused: %v", err)
+		}
+		answering.release()
+		a := stopAnswered(t, answer)
+		if d := a.policy.DSD; a.cleanup != CheckCleanupNone || a.policy.Publication != before.Publication || d == nil || d.DAC == nil || d.DAC.Check != nil {
+			t.Errorf("StopCheck answered %s with the publication %d, its read side %+v; want none with the publication %d it found, no check in it",
+				a.cleanup, a.policy.Publication, d, before.Publication)
+		}
+		close(stop)
+		joinedWithin(t, b, "the check admitted after the empty slot's step")
+	})
+	t.Run("a backend with no DSD policy", func(t *testing.T) {
+		b, err := New(Config{Resolver: nopResolver{}, Locator: noUnit{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cleanup, p := b.StopCheck(context.Background())
+		if want := b.Policy(); cleanup != CheckCleanupNone || p.DSD != nil || p.BootID != want.BootID || p.Generation != want.Generation || p.Reason != want.Reason {
+			t.Errorf("StopCheck answered %s with %+v; want none with the backend's own policy, %+v", cleanup, p, want)
+		}
+	})
+}
+
+// TestAStopsTwoReadsHoldTheBackendsLock: StopCheck reads how its check's
+// cleanup ended and the pair published under the backend's lock, which the
+// publication of the check's end takes (endCheck): between the two reads,
+// StopCheck past its wait's bound and its check's run held short of its
+// cleanup, the lock is not to be had, so no end can be published between
+// them; let go, StopCheck answers pending beside the check stopping, and the
+// check, let go, ends stopped deleted.
+func TestAStopsTwoReadsHoldTheBackendsLock(t *testing.T) {
+	timers := newCheckTimers()
+	b := publishedBackend(t, timers.afterFunc, fixtureBox{})
+	preparing, reading := newGateOnce(t), newGateOnce(t)
+	b.cfg.Seams = &Seams{
+		CheckPreparing: func(context.Context) { preparing.hold() },
+		DSDStep: func(step string) {
+			if step == "stop read" {
+				reading.hold()
+			}
+		},
+	}
+	req, stop := publishedRequest(t, b)
+	h, err := b.Check(context.Background(), req)
+	if err != nil {
+		t.Fatalf("the check was refused: %v", err)
+	}
+	reached(t, preparing.in, "the check held short of its chime")
+	timers.next(t, "the check's preparation's bound")
+	answer := stopAsync(b)
+	timers.next(t, "StopCheck's wait").f()
+	reached(t, reading.in, "StopCheck between its two reads")
+	if b.mu.TryLock() {
+		b.mu.Unlock()
+		t.Error("the backend's lock was free between StopCheck's two reads, where the check's end could be published")
+	}
+	reading.release()
+	a := stopAnswered(t, answer)
+	if d := a.policy.DSD; a.cleanup != CheckCleanupPending || d == nil || d.DAC == nil || d.DAC.Check == nil || d.DAC.Check.ID != h.Status.ID || d.DAC.Check.Phase != CheckStopping {
+		t.Errorf("StopCheck answered %s with its read side %+v; want pending beside the check stopping", a.cleanup, d)
+	}
+	preparing.release()
+	close(stop)
+	joinedWithin(t, b, "the stopped check's end")
+	if st, _ := b.CheckStatus(); st.Phase != CheckStopped || st.Reason != CheckDeleted {
+		t.Errorf("the check ended %s %q; want stopped deleted", st.Phase, st.Reason)
+	}
+}

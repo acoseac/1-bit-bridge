@@ -37,8 +37,9 @@ func (b *Backend) refreshDSD(where string) (*dsdSet, error) {
 // lock ends with ctx (lockReading), the DSD check's: ctx's error, nothing
 // read, once it has, asked again once the lock is held, as a choice's write
 // asks it (takeChoiceReading), since lockReading takes a free lock without
-// looking at ctx.
-func (b *Backend) refreshDSDWithin(ctx context.Context, where string) (*dsdSet, error) {
+// looking at ctx; and there, before the box is read, the check's hold's stop
+// signal (nil for none): come, nothing read (errCheckStopped).
+func (b *Backend) refreshDSDWithin(ctx context.Context, stop <-chan struct{}, where string) (*dsdSet, error) {
 	if !b.lockReading(ctx) {
 		return nil, ctx.Err()
 	}
@@ -46,8 +47,14 @@ func (b *Backend) refreshDSDWithin(ctx context.Context, where string) (*dsdSet, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if signalled(stop) {
+		return nil, errCheckStopped
+	}
 	return b.refreshHeld(where)
 }
+
+// errCheckStopped is a check's reading its hold's stop signal came before.
+var errCheckStopped = errors.New("player backend: the DSD check was stopped before its reading")
 
 // refreshHeld is refreshDSD's reading, its lock held.
 func (b *Backend) refreshHeld(where string) (d *dsdSet, err error) {

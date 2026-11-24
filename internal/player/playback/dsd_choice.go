@@ -381,6 +381,7 @@ func (b *Backend) lockReading(ctx context.Context) bool {
 	if b.dsdMu.TryLock() {
 		return true
 	}
+	b.dsdStep("queued")
 	var owner atomic.Int32 // 1 the write's, 2 the waiter's
 	got := make(chan struct{})
 	b.spawn(func() {
