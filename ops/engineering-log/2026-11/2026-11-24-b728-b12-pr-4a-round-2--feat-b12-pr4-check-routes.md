@@ -62,7 +62,7 @@ publication and `done`'s close, `CheckStopAnswering` before `StopCheck`'s reads)
 
 Each a mutated copy of `dsd_check.go` at `123d9f27` given to `go test` by `-overlay`, no tracked
 file edited, run over every check test of both packages (round 1's and round 2's), predictions
-written first. Twelve controls, each red exactly where predicted and nowhere else:
+written first. Ten controls, each red exactly where predicted and nowhere else:
 
 | | Mutation | Red |
 |---|---|---|
