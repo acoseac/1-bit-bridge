@@ -163,10 +163,14 @@ function continueStart(run, { fresh = false } = {}) {
 }
 
 // readerAction counts what the reader does to playback, and lets go of a
-// resume of the browser's own that waits on the gate (W4).
+// resume of the browser's own that waits on the gate (W4), and of its
+// spinner; the caller's own emit says so.
 function readerAction() {
   actions += 1;
-  resumeWait = null;
+  if (resumeWait) {
+    resumeWait = null;
+    state.loading = false;
+  }
 }
 
 // playEl is the one way the bar plays the element (round 4, T1): it marks
@@ -200,11 +204,11 @@ function loadEl(el) {
   el.load();
 }
 
-// playRefused: a refusal that leaves the element paused (NotAllowedError, a
-// source the browser cannot use) ends the intent; an AbortError (a pause, the
-// bar's protective one included, or a load) changes nothing more (W8).
+// playRefused: a refusal that leaves the element paused (NotAllowedError) ends
+// the intent; an AbortError (a pause, the bar's protective one included, or a
+// load) and a NotSupportedError, whose error skips it, change nothing (W8).
 function playRefused(e, at) {
-  if (at !== playbackGen || e?.name === "AbortError") return;
+  if (at !== playbackGen || e?.name === "AbortError" || e?.name === "NotSupportedError") return;
   intent = false;
   state.playing = false;
   state.loading = false;
@@ -428,8 +432,10 @@ function onError() {
       return;
     case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED — see handleSourceError.
       // The probe below is a round trip, and a spinner left up across it
-      // says "still coming" about a source we already know did not load.
-      setLoading(false);
+      // says "still coming" about a source we already know did not load;
+      // nothing plays, and the bar's Play over it starts again (toggle).
+      state.playing = state.loading = false;
+      emit();
       void handleSourceError(track, state.el.src);
       return;
     default: { // 2 network / 3 decode — retry once, then surface.
@@ -456,6 +462,8 @@ function onError() {
         return;
       }
       state.error = `Playback failed for "${track.title || track.path}".`;
+      // Its retry's barrier may still answer: it plays nothing over this.
+      intent = false;
       state.playing = false;
       state.loading = false;
       emit();
@@ -498,6 +506,7 @@ async function handleSourceError(track, src) {
     state.error = reason === "decode"
       ? `The next tracks can't play in this browser. Use Download on the ones you want.`
       : `The next tracks could not be loaded. Check the source is reachable.`;
+    intent = false;
     state.playing = false;
     state.loading = false;
     emit();
@@ -519,13 +528,14 @@ async function handleSourceError(track, src) {
   // different object at the same position.
   setTimeout(() => {
     // Both conditions: the generation catches a different track, a
-    // replaced queue and a re-load of this same one, while `playing` and the
-    // intent catch a plain pause, which changes no track at all (the intent
-    // the reader's before its pause event lands). The skip starts the
-    // element anew, so it asks the gate as a start does, and the generation
-    // and the intent are asked again once the gate lets it go on (S1, Q3).
-    if (state.playing && intent && at === playbackGen) {
-      continueStart((permit) => advanceNow(1, { auto: true, permit }), { fresh: true });
+    // replaced queue and a re-load of this same one, while the intent
+    // catches a plain pause (the reader's before its pause event lands),
+    // which a source refused before any play event never shows as `playing`.
+    // The skip starts the element anew, under repeat one too, so it asks the
+    // gate as a start does, and the generation and the intent are asked again
+    // once the gate lets it go on (S1, Q3).
+    if (intent && at === playbackGen) {
+      continueStart((permit) => advanceNow(1, { auto: true, skip: true, permit }), { fresh: true });
     }
   }, 1200);
 }
@@ -573,6 +583,7 @@ function markUnplayable(track) {
  */
 export function playQueue(tracks, start = 0, { albumArt = null, shuffle } = {}) {
   readerAction();
+  emit();
   requestStart((permit) => playQueueNow(tracks, start, { albumArt, shuffle, permit }));
 }
 
@@ -610,15 +621,20 @@ export function enqueue(tracks) {
 
 export function removeAt(i) {
   if (i < 0 || i >= state.queue.length) return;
-  readerAction();
   state.queue.splice(i, 1);
   if (i < state.index) state.index -= 1;
   else if (i === state.index) {
-    // The row that plays is gone: its successor is loaded stopped, and plays
-    // only as a start does, through the gate (S1).
+    // The row that plays is gone (no other removal is the reader's action):
+    // its successor is loaded stopped, and plays only as a start does,
+    // through the gate (S1); with none, the queue points at no track.
+    readerAction();
     const play = intent;
     const next = clampIndex(state.index);
-    load(next, { autoplay: false });
+    if (next < 0) {
+      intent = state.playing = state.loading = false;
+      state.index = -1;
+      abandon(state.el);
+    } else load(next, { autoplay: false });
     if (play && next >= 0) {
       intent = true;
       continueStart((permit) => playNow(permit), { fresh: true });
@@ -831,12 +847,13 @@ function peek(delta) {
 export function advance(delta) {
   if (state.index < 0) return;
   readerAction();
+  emit();
   requestStart((permit) => advanceNow(delta, { permit }));
 }
 
-function advanceNow(delta, { auto = false, permit } = {}) {
+function advanceNow(delta, { auto = false, skip = false, permit } = {}) {
   if (state.index < 0) return;
-  if (auto && state.repeat === "one") {
+  if (auto && !skip && state.repeat === "one") {
     // Re-seek rather than reassigning src: no round-trip, no decode
     // restart.
     if (permit !== undefined) startPermit = permit;
@@ -926,18 +943,34 @@ export function toggle() {
   if (resumeWait) {
     // The browser's own resume waits on the gate: Play/Pause cancels it (W4).
     readerAction();
-    state.loading = false;
     emit();
     return;
   }
   readerAction();
-  if (!state.el.paused) {
+  if (!state.el.paused && !state.el.error) {
     // Before the element's pause event, which a browser fires a task later.
     intent = false;
     state.el.pause();
     return;
   }
-  requestStart((permit) => playNow(permit));
+  // Over a failed element Play is a start: when it runs, a source it cannot
+  // use moves on, a network or decode error reloads, its retry there again.
+  requestStart((permit) => {
+    const code = state.el.error?.code;
+    if (code === 4) return advanceNow(1, { permit });
+    if (code !== 2 && code !== 3) return playNow(permit);
+    delete state.queue[state.index]?._retried;
+    state.skipped = 0;
+    load(state.index, { autoplay: true, permit });
+  });
+}
+
+/** Pause at once: the lock screen's Pause, which a failed track never makes a start. */
+function pauseNow() {
+  readerAction();
+  intent = false;
+  if (!state.el.paused) state.el.pause();
+  emit();
 }
 
 export function seek(seconds) {
@@ -1099,7 +1132,8 @@ function loadAt(index, { autoplay, at, permit }) {
     state.el.removeEventListener("loadedmetadata", once);
     if (mine !== playbackGen) return;
     if (Number.isFinite(state.el.duration)) state.el.currentTime = Math.min(at, state.el.duration);
-    if (!autoplay) return;
+    // One start a playback: none once the reader's Play plays it, or a pause.
+    if (!autoplay || !intent || !state.el.paused) return;
     if (permit && !permit()) {
       // Refused, it ends what this browser meant to play (round 4, T2).
       intent = false;
@@ -1230,7 +1264,7 @@ function wireMediaSession() {
     try { ms.setActionHandler(action, fn); } catch { /* unsupported action */ }
   };
   set("play", () => toggle());
-  set("pause", () => toggle());
+  set("pause", () => pauseNow());
   set("previoustrack", () => advance(-1));
   set("nexttrack", () => advance(1));
   set("stop", () => clearQueue());

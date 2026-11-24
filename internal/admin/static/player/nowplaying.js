@@ -196,11 +196,19 @@ export function mount() {
 
 function buildOutputMenu() {
   refs.output = iconButton("Output: this browser", "output", () => toggleMenu(), "small");
-  refs.output.setAttribute("aria-haspopup", "true");
   refs.output.setAttribute("aria-expanded", "false");
   refs.output.setAttribute("aria-controls", "np-output-menu");
-  refs.menu = el("div", { class: "np-menu", attrs: { id: "np-output-menu", role: "group", "aria-label": "Output" } });
+  refs.menu = el("div", { class: "np-menu", attrs: { id: "np-output-menu", role: "group", "aria-label": "Output", tabindex: "-1" } });
   refs.menu.hidden = true;
+  // The focus leaving the menu (focusable, so a click on its words keeps it)
+  // closes it, for the Output button too, whose press keeps the focus so that
+  // its click closes it once.
+  refs.menu.addEventListener("focusout", (e) => {
+    if (!refs.menu.hidden && !refs.menu.contains(e.relatedTarget)) closeMenu();
+  });
+  refs.output.addEventListener("mousedown", (e) => {
+    if (!refs.menu.hidden) e.preventDefault();
+  });
   refs.pickBrowser = el("button", {
     class: "np-pick", text: "This browser",
     attrs: { type: "button", "aria-pressed": "true" },

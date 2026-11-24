@@ -1294,17 +1294,22 @@ export function createOutput(env) {
     if (h?.playing) gateStart((permit) => env.browser?.start?.(permit));
   }
 
+  // handoverOf keeps the entries with a track: a selected one with none gives
+  // way to the next kept, from its start, and with none after it is stopped.
   function handoverOf(rec) {
     const ho = rec?.handover;
     if (!ho || !Array.isArray(ho.tracks)) return null;
     const queue = [];
     let index = -1;
+    let gone = false;
     ho.tracks.forEach((t, i) => {
+      if (i === ho.selected) gone = !t?.track;
       if (!t?.track) return;
-      if (i === ho.selected) index = queue.length;
+      if (i === ho.selected || (gone && index < 0)) index = queue.length;
       queue.push(t.track);
     });
-    return { queue, index, position: ho.position || 0, playing: !!ho.playing };
+    const after = !gone || index >= 0;
+    return { queue, index: after ? index : (queue.length ? 0 : -1), position: gone ? 0 : ho.position || 0, playing: !!ho.playing && after };
   }
 
   // ---- The picks and the commands ----

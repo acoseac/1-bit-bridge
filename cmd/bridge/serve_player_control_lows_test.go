@@ -60,10 +60,17 @@ func reached(t *testing.T, ch <-chan struct{}, what string) {
 
 // readBackEnded reads the rig's tab's operation seq back until its record is
 // no longer running, until the test's deadline, or fails with what premise
-// carries first: a hook's failure, handed to the test's goroutine.
+// carries first: a hook's failure, handed to the test's goroutine, asked
+// before each read, so a record that ended beside it is never taken for the
+// case's outcome.
 func readBackEnded(t *testing.T, r *ctlRig, seq uint64, premise <-chan string) admin.PlayerRecord {
 	t.Helper()
 	for {
+		select {
+		case msg := <-premise:
+			t.Fatal(msg)
+		default:
+		}
 		wake := r.c.Wake()
 		if rb := r.c.Operation(r.c.epoch, r.tab, seq); rb.Record != nil && rb.Record.Status != admin.PlayerOpRunning {
 			return *rb.Record

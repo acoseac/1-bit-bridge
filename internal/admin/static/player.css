@@ -1081,13 +1081,16 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .np-menu { display: flex; flex-direction: column; gap: var(--space-2); }
 .np-menu[hidden], .np-queue[hidden] { display: none; }
 .np-pick {
+  position: relative;
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
-  min-width: 0; text-align: left; padding: 8px 10px; border-radius: 12px;
+  min-width: 0; text-align: left; padding: 8px 30px 8px 10px; border-radius: 12px;
   border: 1px solid transparent; background: transparent; color: inherit;
   font: inherit; cursor: pointer;
 }
 .np-pick:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
 .np-pick[aria-pressed="true"] { border-color: var(--accent); }
+/* The chosen pick's check, which the focus ring, alike to its border, lacks. */
+.np-pick[aria-pressed="true"]::after { content: "\2713"; position: absolute; top: 8px; right: 10px; color: var(--accent); font-weight: 600; }
 .np-pick:disabled { opacity: .5; cursor: default; }
 .np-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .np-pick-name { font-weight: 600; font-size: 0.9rem; max-width: 100%; overflow-wrap: anywhere; }

@@ -130,6 +130,8 @@ var audioPlaySites = map[string]string{
 // how: gated asks the start gate first (requestStart); afterBarrier is
 // called by output.js alone, on a barrier's done, with its permit;
 // continued goes on by itself only through continueStart (round 3, S1).
+// A function whose every play is handed to a gate (removeAt's successor,
+// through continueStart) is no start: reach finds none in it.
 var audioStarts = map[string]string{
 	"playQueue": "gated",
 	"toggle":    "gated",
@@ -137,8 +139,42 @@ var audioStarts = map[string]string{
 	"take":      "afterBarrier",
 	"resume":    "afterBarrier",
 	"start":     "afterBarrier",
-	"removeAt":  "continued",
 	"init":      "continued",
+}
+
+// audioGateCallRe starts a call that hands what it runs to a gate, a start
+// (requestStart) or what playback does by itself (continueStart), and
+// audioStoppedLoadRe a load that plays nothing: the calls inside either are
+// the gate's, or no play, and reach does not follow them.
+var (
+	audioGateCallRe    = regexp.MustCompile(`(?:^|[^\w$.])(?:requestStart|continueStart)\(`)
+	audioStoppedLoadRe = regexp.MustCompile(`(?:^|[^\w$.])load\([^()]*\{\s*autoplay:\s*false\s*\}\)`)
+)
+
+// withoutGatedCalls is body with the arguments of every gate call blanked,
+// to their closing parenthesis, and every stopped load taken out.
+func withoutGatedCalls(body string) string {
+	body = audioStoppedLoadRe.ReplaceAllString(body, " ")
+	var b strings.Builder
+	for {
+		loc := audioGateCallRe.FindStringIndex(body)
+		if loc == nil {
+			b.WriteString(body)
+			return b.String()
+		}
+		b.WriteString(body[:loc[1]])
+		depth, i := 1, loc[1]
+		for ; i < len(body) && depth > 0; i++ {
+			switch body[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+		}
+		b.WriteString(")")
+		body = body[i:]
+	}
 }
 
 // The continuations of audio.js, each by the function that makes it: what
@@ -205,10 +241,13 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 			t.Errorf("audioPlaySites names %s, which plays nothing now: take it off the list", name)
 		}
 	}
-	// reach is whether a function reaches a play through the module's calls.
-	// A call of a start this test names is accounted for where that start is
-	// checked (a gated one asks the gate; init's listeners are the element's
-	// own continuations), so reach does not go through one.
+	// reach is whether a function reaches a play through the module's calls,
+	// outside what it hands a gate. A call of a gated start is accounted for
+	// where that start is checked (it asks the gate), and init's listeners are
+	// the element's own continuations, so reach does not go through either;
+	// it does go through a start output.js alone calls after its barrier, so
+	// a function that calls one without a permit (start(), take(h, true))
+	// reaches a play.
 	memo := map[string]int{}
 	var reach func(string) bool
 	reach = func(name string) bool {
@@ -223,11 +262,12 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 			memo[name] = 2
 			return true
 		}
+		body := withoutGatedCalls(fns[name].body)
 		for callee := range fns {
-			if _, named := audioStarts[callee]; named || callee == name {
+			if how := audioStarts[callee]; how == "gated" || callee == "init" || callee == name {
 				continue
 			}
-			if regexp.MustCompile(`(?:^|[^\w$.])`+regexp.QuoteMeta(callee)+`\(`).MatchString(fns[name].body) && reach(callee) {
+			if regexp.MustCompile(`(?:^|[^\w$.])`+regexp.QuoteMeta(callee)+`\(`).MatchString(body) && reach(callee) {
 				memo[name] = 2
 				return true
 			}
@@ -305,7 +345,7 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 		}
 	}
 	ms := fns["wireMediaSession"].body
-	for _, want := range []string{`set("play", () => toggle())`, `set("pause", () => toggle())`, `set("previoustrack", () => advance(-1))`, `set("nexttrack", () => advance(1))`} {
+	for _, want := range []string{`set("play", () => toggle())`, `set("pause", () => pauseNow())`, `set("previoustrack", () => advance(-1))`, `set("nexttrack", () => advance(1))`} {
 		if !strings.Contains(ms, want) {
 			t.Errorf("the MediaSession's handlers lack %s", want)
 		}
@@ -382,11 +422,12 @@ var consoleSoundSites = map[string]map[string]soundSite{
 }
 
 // sessionHandlers is every MediaSession handler wireMediaSession sets, as
-// written: its starts go through toggle and advance, which ask the gate, and
-// nothing else it does plays.
+// written: its starts go through toggle and advance, which ask the gate, its
+// Pause pauses and never starts (pauseNow, never toggle, which is a start over
+// a failed track), and nothing else it does plays.
 var sessionHandlers = []string{
 	`set("play", () => toggle());`,
-	`set("pause", () => toggle());`,
+	`set("pause", () => pauseNow());`,
 	`set("previoustrack", () => advance(-1));`,
 	`set("nexttrack", () => advance(1));`,
 	`set("stop", () => clearQueue());`,
@@ -498,6 +539,24 @@ func TestThePhoneBarKeepsItsWordsWithTheBridgeChosen(t *testing.T) {
 	for _, want := range []string{`refs.mute.classList.add("np-mute")`, `bar.dataset.output = "bridge"`, `bar.dataset.output = "browser"`, `refs.art = el("div", { class: "np-art" })`} {
 		if !strings.Contains(np, want) {
 			t.Errorf("nowplaying.js lacks %s", want)
+		}
+	}
+}
+
+// TestTheChosenPickCarriesAMarkTheFocusRingLacks pins at the source that the
+// output menu's chosen pick says so by a mark of its own, a check drawn
+// after its words, which the focus ring does not draw: the menu opens on the
+// bridge's pick, so a ring alike to the chosen pick's border read as the
+// choice. The browser session sees the two apart.
+func TestTheChosenPickCarriesAMarkTheFocusRingLacks(t *testing.T) {
+	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
+	chosen := regexp.MustCompile(`\.np-pick\[aria-pressed="true"\]::after\s*\{([^}]*)\}`).FindStringSubmatch(css)
+	if chosen == nil || !regexp.MustCompile(`\bcontent:\s*"[^"]+"`).MatchString(chosen[1]) {
+		t.Fatal("the chosen pick draws no mark of its own: a pick that holds the focus reads as the chosen one")
+	}
+	for _, m := range regexp.MustCompile(`\.np-pick:focus-visible[^{]*\{([^}]*)\}`).FindAllStringSubmatch(css, -1) {
+		if strings.Contains(m[0], "::after") || strings.Contains(m[1], "content:") {
+			t.Errorf("the focus ring draws the chosen pick's mark: %s", m[0])
 		}
 	}
 }

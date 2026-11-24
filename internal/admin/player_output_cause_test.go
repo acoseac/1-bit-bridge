@@ -2,7 +2,6 @@ package admin
 
 import (
 	"encoding/json"
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -59,10 +58,7 @@ console.log(JSON.stringify(out));
 // than guess. The permission sentence is the page's and the doctor names the
 // rest; neither sentence shows beside the other.
 func TestThePlayerPageSaysWhyItsLastPlayFailed(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; this test executes the shipped console source")
-	}
+	node := barNode(t)
 	type harnessCase struct {
 		Name    string        `json:"name"`
 		Running PlayerRunning `json:"running"`
