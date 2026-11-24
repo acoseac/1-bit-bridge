@@ -124,6 +124,30 @@ Seven controls edit the tracked modules for the census and restore them from mem
 `play()`, an Audio object (the brief's two), autoplay, a Web Audio context, a third element, a
 handler that plays, and autoplay markup. All were red, the tree clean after each.
 
+### The runs
+
+Each through the shared build lock, on `GOTOOLCHAIN=go1.27.3` with `GOPROXY=off` and node v24.22.3
+on the path.
+
+- `make fmt vet test build-all docs-check` and the rest in one session, at `998568f4`:
+  - `make fmt` rewrote nothing.
+  - `make vet`, and the same for linux/arm, linux/386, windows/amd64, windows/arm64 and
+    darwin/arm64: exit 0, 2 to 5 s each.
+  - `make docs-check` and its self-tests: exit 0.
+  - `scripts/qualification-version -base a79c69b2 -head HEAD`: OK.
+  - `make test` at `P=8`: exit 0 in 2,014 s, 93 packages ok, cmd/bridge 1,982 s, internal/admin
+    1,516 s.
+  - The harness's cases by name with `-v`: 89 of 89 PASS, none skipped.
+  - `make build-all`: exit 0 in 26 s. The tree was clean after.
+- The source guards, run by name before it: `TestNoConsoleControlDisablesItselfOutsideSetDisabled`,
+  `TestPlayerEmittedClassesAreStyled`, `TestTrackSubgridColumnsMatchTheRow`,
+  `TestAppJSHasNoCallsToDeletedHelpers`, `TestByteFormattersAgree`,
+  `TestEveryStartOfThisBrowserAsksTheGate`, `TestNoSoundSourceOfTheConsoleBypassesTheGate`,
+  `TestEveryCitedTestNameExists`, `TestNoBlankKeepers` and
+  `TestNoDocblockNamesAnotherDeclaration` pass.
+- internal/admin whole, without `-race`, at `d36d53ef` (T1): ok in 351 s.
+- No other race run: the server did not change.
+
 ### Residuals
 
 - Whether `play` fires when a call ends, and whether sound escapes before the handler's pause, is
