@@ -72,8 +72,11 @@ let heldPlaying = false;
 // before the bar mounts. Every start of the element asks it (playQueue,
 // toggle's play, an advance a reader asks for, the MediaSession's handlers,
 // which call those), and runs only as it says, handed a permit that a later
-// play of that start asks again (V4). A pause never asks it.
+// play of that start asks again (V4). A pause never asks it; the reader's
+// explicit Pause (the bar's, the lock screen's) lets go of the starts it
+// holds, through startCancel, set beside it (output.js's cancelStarts).
 let startGate = null;
+let startCancel = null;
 // The continuation gate (round 3, S1, Q7): output.js's gateContinue, set by
 // boot.js beside the start gate. What playback does by itself asks it
 // (continueStart): the next track at a track's end and the retry after an
@@ -106,9 +109,10 @@ let resumeWait = null;
 // the browser's own goes on only where it has not moved (W4).
 let actions = 0;
 
-/** setStartGate makes gate the one way the element starts. */
-export function setStartGate(gate) {
+/** setStartGate makes gate the one way the element starts, and cancel what lets go of the starts it holds. */
+export function setStartGate(gate, cancel = null) {
   startGate = gate;
+  startCancel = cancel;
 }
 
 /** setContinueGate makes gate the one way playback goes on by itself. */
@@ -948,9 +952,11 @@ export function toggle() {
   }
   readerAction();
   if (!state.el.paused && !state.el.error) {
-    // Before the element's pause event, which a browser fires a task later.
+    // Before the element's pause event, which a browser fires a task later;
+    // the explicit Pause lets go of a start the gate holds, that event never.
     intent = false;
     state.el.pause();
+    startCancel?.();
     return;
   }
   // Over a failed element Play is a start: when it runs, a source it cannot
@@ -970,6 +976,7 @@ function pauseNow() {
   readerAction();
   intent = false;
   if (!state.el.paused) state.el.pause();
+  startCancel?.();
   emit();
 }
 

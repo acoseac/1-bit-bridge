@@ -368,9 +368,9 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 		t.Errorf("output.js calls the browser's %s(%s): a start hands its permit, and a queue taken without one is taken stopped", m[1], args)
 	}
 	boot := extractJSFunction(t, stripJSComments(readFile(t, "static/player/boot.js")), "boot")
-	gateAt, mountAt := strings.Index(boot, "audio.setStartGate(output.gateStart)"), strings.Index(boot, "mountBar();")
+	gateAt, mountAt := strings.Index(boot, "audio.setStartGate(output.gateStart, output.cancelStarts)"), strings.Index(boot, "mountBar();")
 	if gateAt < 0 || mountAt < 0 || gateAt > mountAt {
-		t.Error("boot.js does not wire the start gate before the bar mounts")
+		t.Error("boot.js does not wire the start gate and its cancel before the bar mounts")
 	}
 	contAt := strings.Index(boot, "audio.setContinueGate(output.gateContinue)")
 	if contAt < 0 || contAt > mountAt {

@@ -738,3 +738,35 @@ func TestTheOutputMenuClosesAsTheFocusLeavesIt(t *testing.T) { barScenario(t, 5)
 // TestTheOutputButtonClaimsNoPopup pins that the Output button carries no
 // aria-haspopup: its menu is a group of buttons, no menu role.
 func TestTheOutputButtonClaimsNoPopup(t *testing.T) { barScenario(t, 2) }
+
+// An explicit Pause, a handover's wait, the failure streak and an abort
+// (B1005's second round).
+
+// TestAnExplicitPauseCancelsAStartWaitingForTheEpoch pins that the lock
+// screen's Pause lets go of a row's start waiting for the epoch: the first
+// frame then sends no barrier and plays nothing, the selection the browser
+// held stays, no wait is left to time out, and a fresh Play still plays.
+func TestAnExplicitPauseCancelsAStartWaitingForTheEpoch(t *testing.T) { barScenario(t, 6) }
+
+// TestAnExplicitPauseCancelsAStartWaitingOnItsBarrier pins that the lock
+// screen's Pause and the bar's Pause each let go of a row's start waiting on
+// its barrier: the barrier's answer plays nothing, the selection stays, and a
+// fresh Play plays what the browser held.
+func TestAnExplicitPauseCancelsAStartWaitingOnItsBarrier(t *testing.T) { barScenario(t, 6) }
+
+// TestAnExplicitPauseCancelsAPlayThatTookASkipsPlace pins that the lock
+// screen's Pause lets go of a Play over a failed track that took its skip's
+// place behind the barrier, and a fresh Play then moves on.
+func TestAnExplicitPauseCancelsAPlayThatTookASkipsPlace(t *testing.T) { barScenario(t, 3) }
+
+// TestABarrierWhoseStartAPauseLetGoEndsQuietly pins that a barrier whose
+// start the lock screen's Pause let go of, lost at 30 s and read back done,
+// brings the bar back to this browser's phase with no line of a start, plays
+// nothing, and a Play after it still plays.
+func TestABarrierWhoseStartAPauseLetGoEndsQuietly(t *testing.T) { barScenario(t, 2) }
+
+// TestAPlayAfterAnExplicitPauseOutlivesThatPausesEvent pins that the cancel
+// is the explicit Pause's, never the element's pause event: a fresh Play made
+// before that event takes the barrier in flight and plays on its answer, its
+// intent going on at the track's end.
+func TestAPlayAfterAnExplicitPauseOutlivesThatPausesEvent(t *testing.T) { barScenario(t, 3) }

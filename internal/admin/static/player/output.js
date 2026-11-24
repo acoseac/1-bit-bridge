@@ -1030,9 +1030,10 @@ export function createOutput(env) {
       return;
     }
     // One barrier at a time: a start asked while one is out replaces the
-    // start it runs; a continuation replaces only another continuation.
+    // start it runs; a continuation replaces only another continuation, or
+    // a start an explicit Pause let go of (cancelStarts).
     if (startPending) {
-      if (!continuation || startPending.continuation) {
+      if (!continuation || startPending.continuation || !startPending.run) {
         const replaced = { drop: startPending.drop };
         startPending.run = run;
         startPending.continuation = continuation;
@@ -1052,7 +1053,23 @@ export function createOutput(env) {
     const release = () => {
       if (startPending === pending) startPending = null;
     };
-    void barrier((permit) => pending.run(permit), release, () => dropOf(pending));
+    void barrier((permit) => pending.run(permit), release, () => dropOf(pending), () => !pending.run);
+  }
+
+  // cancelStarts is the reader's explicit Pause (audio.js's pauseNow and the
+  // bar's Pause; never the element's pause event): a start waiting for the
+  // epoch is let go, sending nothing, and one behind the barrier in flight
+  // runs nothing when it answers, unless a start asked since takes its place.
+  function cancelStarts() {
+    const w = waiting;
+    waiting = null;
+    if (w && line === WORDS.startWaits) line = "";
+    dropOf(w);
+    if (startPending) {
+      startPending.run = null;
+      dropOf(startPending);
+    }
+    emit();
   }
 
   // permitFor is a start's permit: true while no newer pick came, this
@@ -1074,14 +1091,25 @@ export function createOutput(env) {
   // permit on its done answered now, and on nothing else; a newer pick, or a
   // state newer than its silence that shows the bridge playing, starts
   // nothing (R3, R4). Every end calls release first (S3, Q9), and every end
-  // that starts nothing calls drop (round 4, W6).
-  function barrier(start, release, drop) {
+  // that starts nothing calls drop (round 4, W6); one whose start an
+  // explicit Pause let go of (idle) ends quietly: this browser's phase, its
+  // unconfirmed line gone, nothing started and nothing said of the start.
+  function barrier(start, release, drop, idle) {
+    const quiet = () => {
+      phase = PHASE.browser;
+      if (line === WORDS.unconfirmed) line = "";
+      drop();
+    };
     return send(ROUTES.switchOut, { take: false }, {
       role: "barrier",
       done(rec, how, mine) {
         release();
         if (!mine) {
           drop();
+          return;
+        }
+        if (idle()) {
+          quiet();
           return;
         }
         // Its done, answered now, with the revision of the publication that
@@ -1104,6 +1132,10 @@ export function createOutput(env) {
       },
       unknown(words, mine) {
         release();
+        if (mine && idle()) {
+          quiet();
+          return;
+        }
         if (mine) {
           phase = PHASE.browser;
           line = words || WORDS.startAgain;
@@ -1117,6 +1149,10 @@ export function createOutput(env) {
         release();
         if (!mine) {
           drop();
+          return;
+        }
+        if (idle()) {
+          quiet();
           return;
         }
         phase = PHASE.browser;
@@ -1495,6 +1531,7 @@ export function createOutput(env) {
     position,
     gateStart,
     gateContinue,
+    cancelStarts,
     // Whether the bar's line says the bridge's player plays, which a play
     // the browser refuses then says nothing beside (round 4, W8).
     refusalShown: () => [WORDS.bridgePlaying, WORDS.bridgeAgain, WORDS.bridgeToo].includes(line),
