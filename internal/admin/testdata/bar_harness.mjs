@@ -1922,7 +1922,9 @@ S.TestARepeatOneReplayAsksTheGate = async () => {
 
 S.TestARemovedRowsSuccessorAsksTheGate = async () => {
   // S1, Q5: the row that plays removed, its successor starts as a start does.
-  const r = await gatedPlaying();
+  // Round 4 (T2, W7): four playable tracks, so the last removal still leaves
+  // a successor to start.
+  const r = await gatedPlaying({ tracks: [flac(1), flac(2), flac(3), flac(4)] });
   r.audio.removeAt(0);
   await settle();
   check("the playing row removed beside a silent bridge: its successor plays on a barrier of its own",
@@ -1937,6 +1939,67 @@ S.TestARemovedRowsSuccessorAsksTheGate = async () => {
     r.el.paused && r.el.plays.length === plays && r.audio.snapshot().track?.path === "Album/03.flac" && /03\.flac/.test(r.el.src),
     [r.el.paused, r.el.plays.slice(plays), r.audio.snapshot().track?.path, r.el.src]);
   check("and the bar says so, this browser stopped", r.out.view().line === WORDS.bridgePlaying && !r.audio.snapshot().playing, [r.out.view().line, r.audio.snapshot().playing]);
+  // T2: that refusal ended what this browser meant to play, so with the
+  // bridge silent again the next removal starts nothing.
+  r.frame(pub({ revision: 21, silent: true }));
+  await settle();
+  const after = r.el.plays.length;
+  r.audio.removeAt(0);
+  await settle();
+  check("the bridge silent again, the row removed once more: nothing plays and no barrier is asked",
+    r.el.paused && r.el.plays.length === after && r.s.posts(ROUTES.switchOut).length === 2 && r.audio.snapshot().track?.path === "Album/04.flac",
+    [r.el.paused, r.el.plays.slice(after), r.s.posts(ROUTES.switchOut).length, r.audio.snapshot().track?.path]);
+};
+
+S.TestARefusedContinuationEndsTheIntentToPlay = async () => {
+  // T2, W6: a continuation refused at once (its permit no longer holds) and
+  // one its barrier refuses later each end what this browser meant to play;
+  // a held barrier that answers done still plays its continuation.
+  const r = await gatedPlaying({ tracks: [flac(1), flac(2), flac(3), flac(4), flac(5)] });
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  r.el.end();
+  await settle();
+  r.frame(pub({ revision: 21, silent: true }));
+  await settle();
+  let plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  check("refused at once at a track's end: the retry after an error, the bridge silent since, plays nothing",
+    r.el.plays.length === plays && r.s.posts(ROUTES.switchOut).length === 1 && !r.audio.snapshot().playing, [r.el.plays.slice(plays), r.s.posts(ROUTES.switchOut).length]);
+  // The reader's Play, through the gate: playing again.
+  r.audio.toggle();
+  await settle();
+  check("the reader's Play plays again, on a barrier", !r.el.paused && r.s.posts(ROUTES.switchOut).length === 2, [r.el.paused, r.s.posts(ROUTES.switchOut).length]);
+  // A removed row's successor waits on a barrier the bridge's start
+  // overtakes: refused later, at its done.
+  const held = gate();
+  r.hold = held;
+  r.audio.removeAt(0);
+  await settle();
+  r.frame(playing({ revision: 30 }));
+  await settle();
+  held.open();
+  await settle();
+  r.frame(pub({ revision: 31, silent: true }));
+  await settle();
+  plays = r.el.plays.length;
+  r.audio.removeAt(0);
+  await settle();
+  check("refused at its barrier's done: the next removal, the bridge silent since, starts nothing",
+    r.el.plays.length === plays && r.s.posts(ROUTES.switchOut).length === 3 && r.el.paused, [r.el.plays.slice(plays), r.s.posts(ROUTES.switchOut).length]);
+  // The reader's Play again, then a removal whose held barrier answers done.
+  r.audio.toggle();
+  await settle();
+  const held2 = gate();
+  r.hold = held2;
+  plays = r.el.plays.length;
+  r.audio.removeAt(0);
+  await settle();
+  held2.open();
+  await settle();
+  check("a held barrier that answers done: the successor plays", r.el.plays.length === plays + 1 && !r.el.paused && r.audio.snapshot().track?.path === "Album/04.flac",
+    [r.el.plays.slice(plays), r.el.paused, r.audio.snapshot().track?.path]);
 };
 
 S.TestPlaybackLetGoWithNoPlayerOfferedAsksTheGateToGoOn = async () => {

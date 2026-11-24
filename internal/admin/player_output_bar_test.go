@@ -416,8 +416,17 @@ func TestARepeatOneReplayAsksTheGate(t *testing.T) { barScenario(t, 4) }
 
 // TestARemovedRowsSuccessorAsksTheGate pins S1 and Q5: the row that plays
 // removed, its successor plays on a barrier of its own, and beside a bridge
-// that plays it is loaded and stays paused, the bar saying so.
-func TestARemovedRowsSuccessorAsksTheGate(t *testing.T) { barScenario(t, 3) }
+// that plays it is loaded and stays paused, the bar saying so; and round 4's
+// T2 and W7: that refusal ends the intent, so the next removal, the bridge
+// silent again, starts nothing.
+func TestARemovedRowsSuccessorAsksTheGate(t *testing.T) { barScenario(t, 4) }
+
+// TestARefusedContinuationEndsTheIntentToPlay pins round 4's T2 and W6: a
+// continuation refused at once, and one its barrier refuses at its done, end
+// what this browser meant to play, so nothing starts once the bridge is
+// silent again; a held barrier that answers done still plays its
+// continuation.
+func TestARefusedContinuationEndsTheIntentToPlay(t *testing.T) { barScenario(t, 4) }
 
 // TestPlaybackLetGoWithNoPlayerOfferedAsksTheGateToGoOn pins Q1: playback a
 // start let go on where no player was offered holds no permit, so once a

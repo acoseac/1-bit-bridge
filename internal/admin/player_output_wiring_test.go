@@ -270,7 +270,7 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 		}
 	}
 	cont := fns["continueStart"].body
-	for _, want := range []string{"const permit = fresh ? null : startPermit;", "continueGate(permit, go)", "if (gen !== playbackGen || !intent) return;"} {
+	for _, want := range []string{"const permit = fresh ? null : startPermit;", "continueGate(permit, go, drop)", "if (gen !== playbackGen || !intent) return;"} {
 		if !strings.Contains(cont, want) {
 			t.Errorf("continueStart lacks %s", want)
 		}

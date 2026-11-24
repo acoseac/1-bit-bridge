@@ -119,13 +119,28 @@ function requestStart(run) {
 function continueStart(run, { fresh = false } = {}) {
   const gen = playbackGen;
   let ran = false;
+  let settled = false;
   const go = (permit) => {
+    if (settled) return;
+    settled = true;
     if (gen !== playbackGen || !intent) return;
     ran = true;
     run(permit);
   };
+  // Refused, or put aside for another start: the continuation ends, and
+  // with it what this browser meant to play, for this playback alone, so an
+  // older one's refusal clears no newer intent (round 4, T2, W6).
+  const drop = () => {
+    if (settled) return;
+    settled = true;
+    if (gen !== playbackGen) return;
+    intent = false;
+    state.playing = false;
+    state.loading = false;
+    emit();
+  };
   const permit = fresh ? null : startPermit;
-  if (continueGate) continueGate(permit, go);
+  if (continueGate) continueGate(permit, go, drop);
   else go(permit);
   if (!ran) {
     state.playing = false;

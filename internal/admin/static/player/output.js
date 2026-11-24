@@ -958,20 +958,34 @@ export function createOutput(env) {
   // and with one offered before its epoch is known, the start waits; a
   // bridge that sounds refuses it, with its line. A pause never comes here.
   // A continuation (round 3, S1) is asked as a start is, and never displaces
-  // a start the reader asked for, which supersedes it.
-  function gateStart(run, { continuation = false } = {}) {
+  // a start the reader asked for, which supersedes it. Whatever asks may hand
+  // a drop, which every way that never runs it calls, once: a refusal, a
+  // start that replaced it, a pick, the wait's end (round 4, W6).
+  function gateStart(run, { continuation = false, drop } = {}) {
     if (offered === false) {
       run(null);
       return;
     }
     if (offered !== true || !epoch || !state) {
-      if (continuation && waiting && !waiting.continuation) return;
-      waiting = { run, at: env.perf(), continuation };
+      if (continuation && waiting && !waiting.continuation) {
+        drop?.();
+        return;
+      }
+      const replaced = waiting;
+      waiting = { run, at: env.perf(), continuation, drop };
       line = WORDS.startWaits;
+      dropOf(replaced);
       emit();
       return;
     }
-    decideStart(run, continuation);
+    decideStart(run, continuation, drop);
+  }
+
+  // dropOf calls the drop a request handed, at most once.
+  function dropOf(holder) {
+    const d = holder?.drop;
+    if (holder) holder.drop = null;
+    d?.();
   }
 
   // gateContinue is how playback this browser was let start goes on by
@@ -980,17 +994,18 @@ export function createOutput(env) {
   // holds; with no permit to ask (a start let go on where no player was
   // offered, or a continuation that starts the element anew) it is asked as
   // a start is.
-  function gateContinue(permit, run) {
+  function gateContinue(permit, run, drop) {
     if (typeof permit === "function") {
       if (permit()) {
         run(permit);
         return;
       }
       if (output === "browser" && bridgeSounds(state)) line = WORDS.bridgePlaying;
+      drop?.();
       emit();
       return;
     }
-    gateStart(run, { continuation: true });
+    gateStart(run, { continuation: true, drop });
   }
 
   function flushWaiting() {
@@ -1000,13 +1015,17 @@ export function createOutput(env) {
     waiting = null;
     if (line === WORDS.startWaits) line = "";
     if (offered === false) w.run(null);
-    else decideStart(w.run, w.continuation);
+    else decideStart(w.run, w.continuation, w.drop);
   }
 
-  function decideStart(run, continuation = false) {
-    if (output !== "browser") return;
+  function decideStart(run, continuation = false, drop) {
+    if (output !== "browser") {
+      drop?.();
+      return;
+    }
     if (bridgeSounds(state)) {
       line = WORDS.bridgePlaying;
+      drop?.();
       emit();
       return;
     }
@@ -1014,12 +1033,17 @@ export function createOutput(env) {
     // start it runs; a continuation replaces only another continuation.
     if (startPending) {
       if (!continuation || startPending.continuation) {
+        const replaced = { drop: startPending.drop };
         startPending.run = run;
         startPending.continuation = continuation;
+        startPending.drop = drop;
+        dropOf(replaced);
+      } else {
+        drop?.();
       }
       return;
     }
-    const pending = { run, continuation };
+    const pending = { run, continuation, drop };
     startPending = pending;
     // The latch lives as long as its barrier's operation: whatever resolves
     // it lets go of the latch first, and nothing else does, the request's
@@ -1028,7 +1052,7 @@ export function createOutput(env) {
     const release = () => {
       if (startPending === pending) startPending = null;
     };
-    void barrier((permit) => pending.run(permit), release);
+    void barrier((permit) => pending.run(permit), release, () => dropOf(pending));
   }
 
   // permitFor is a start's permit: true while no newer pick came, this
@@ -1049,19 +1073,24 @@ export function createOutput(env) {
   // barrier runs the switch-out with take false, and calls start with its
   // permit on its done answered now, and on nothing else; a newer pick, or a
   // state newer than its silence that shows the bridge playing, starts
-  // nothing (R3, R4). Every end calls release first (S3, Q9).
-  function barrier(start, release) {
+  // nothing (R3, R4). Every end calls release first (S3, Q9), and every end
+  // that starts nothing calls drop (round 4, W6).
+  function barrier(start, release, drop) {
     return send(ROUTES.switchOut, { take: false }, {
       role: "barrier",
       done(rec, how, mine) {
         release();
-        if (!mine) return;
+        if (!mine) {
+          drop();
+          return;
+        }
         // Its done, answered now, with the revision of the publication that
         // showed the bridge silent: that alone starts the browser.
         if (rec.status === "done" && how === "answer" && rec.silence > 0) {
           const permit = permitFor(rec.silence, pickGen);
           if (!permit()) {
             line = WORDS.bridgeAgain;
+            drop();
             return;
           }
           start(permit);
@@ -1071,6 +1100,7 @@ export function createOutput(env) {
         // starts nothing, and Play needs a barrier of its own (Q2).
         phase = PHASE.browser;
         line = rec.status === "done" ? WORDS.startAgain : barrierWord(rec);
+        drop();
       },
       unknown(words, mine) {
         release();
@@ -1078,15 +1108,20 @@ export function createOutput(env) {
           phase = PHASE.browser;
           line = words || WORDS.startAgain;
         }
+        drop();
       },
       // Refused before it ran: nothing starts, the refusal's line said (R2);
       // but refused for no player, none is offered, and the start goes on in
       // this browser as a start does where none is (round 3).
       refused(ans, words, mine) {
         release();
-        if (!mine) return;
+        if (!mine) {
+          drop();
+          return;
+        }
         phase = PHASE.browser;
         if (NOT_OFFERED.has(ans.error)) start(null);
+        else drop();
       },
     });
   }
@@ -1298,8 +1333,10 @@ export function createOutput(env) {
 
   function newPick() {
     pickGen += 1;
+    const dropped = [waiting, startPending];
     waiting = null;
     startPending = null;
+    for (const h of dropped) dropOf(h);
     // Stored at once: a pick that sends nothing still supersedes, across a
     // reload too (S4, Q10).
     storeIdentity();
@@ -1392,8 +1429,10 @@ export function createOutput(env) {
     // read again (C4).
     if (state && !queueReading && queueBehind() && env.perf() - lastQueueAsk >= QUEUE_RETRY_MS) readQueue();
     if (waiting && env.perf() - waiting.at >= START_WAIT_MS) {
+      const w = waiting;
       waiting = null;
       line = WORDS.startUnanswered;
+      dropOf(w);
       emit();
     }
     if ([...ops.values()].some((e) => e.lost) || [...inherited.values()].some((e) => e.epoch === epoch)) readBack();
