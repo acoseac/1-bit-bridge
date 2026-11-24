@@ -989,3 +989,74 @@ func TestARemovedPlayingRowsSuccessorTakesThePlaceOfAWaitingStartTheRemovalOutda
 // waiting on its barrier, each followed by the removal of the track it was
 // for, play nothing, and a Play after them plays.
 func TestAStartAskedBeforeTheReadersLastActionPlaysNothing(t *testing.T) { barScenario(t, 5) }
+
+// The bar's button carries out what it shows before it returns (B1015).
+
+// TestCancellingAResumeWaitEndsWhatItsRetryWouldPlay pins that the bar's click
+// over a resume of the browser's own waiting on its barrier ends what this
+// browser meant to play: a network error after it plays nothing, before the
+// barrier's answer or after it.
+func TestCancellingAResumeWaitEndsWhatItsRetryWouldPlay(t *testing.T) { barScenario(t, 3) }
+
+// TestAnErrorWhileAResumeWaitsPlaysOnlyOnItsAdmission pins the other order: a
+// network error while the resume waits plays nothing until the barrier's
+// answer, which plays the reloaded track once, and with the bar's click over
+// the wait after the error, nothing at all.
+func TestAnErrorWhileAResumeWaitsPlaysOnlyOnItsAdmission(t *testing.T) { barScenario(t, 3) }
+
+// TestACancelledResumeLeavesTheElementPausedThoughTheBrowserPlaysAgain pins
+// that the click over the wait leaves the element paused at once, though the
+// browser played it again before that play's event: the event then asks
+// nothing, and the barrier's answer replays nothing.
+func TestACancelledResumeLeavesTheElementPausedThoughTheBrowserPlaysAgain(t *testing.T) {
+	barScenario(t, 2)
+}
+
+// TestTheBarsPlayOverTheBrowsersOwnPlaySupersedesAnOlderRow pins that the bar's
+// Play shown over the track the browser resumed, its play event still to
+// come, is the reader's start: it takes the place of a row asked before it,
+// and the barrier's answer plays the track shown, never the row.
+func TestTheBarsPlayOverTheBrowsersOwnPlaySupersedesAnOlderRow(t *testing.T) { barScenario(t, 2) }
+
+// TestTheLockScreensPlayOverTheBrowsersOwnPlayLeavesTheRowToPlay pins that the
+// lock screen's Play there does nothing, the element playing: the row asked
+// before it plays once.
+func TestTheLockScreensPlayOverTheBrowsersOwnPlayLeavesTheRowToPlay(t *testing.T) { barScenario(t, 2) }
+
+// TestADoubleClickOfTheBarsPlayStartsOnce pins that a second click on the Play
+// still shown over the bar's own start, let start and its play event still to
+// come, neither pauses nor starts again.
+func TestADoubleClickOfTheBarsPlayStartsOnce(t *testing.T) { barScenario(t, 2) }
+
+// TestAResumeAfterAPauseOutlivesAnOlderInterruptionsEvent pins that an
+// interruption's event older than the lock screen's Pause and the resumes
+// around it, all before any event, leaves the resume made after the Pause
+// waiting until its barrier's answer, which plays the track once.
+func TestAResumeAfterAPauseOutlivesAnOlderInterruptionsEvent(t *testing.T) { barScenario(t, 2) }
+
+// TestAResumeAmidTheBrowsersOwnInterruptionsKeepsItsWait pins that a wait made
+// amid the browser's interruption, resume, interruption and resume, all before
+// any event, lives until its barrier's answer, which plays the track once.
+func TestAResumeAmidTheBrowsersOwnInterruptionsKeepsItsWait(t *testing.T) { barScenario(t, 2) }
+
+// TestAnInterruptionAfterAResumeWaitsEndsTheWait pins that the browser's play
+// and pause made after a resume's wait has settled end that wait: its
+// barrier's answer replays nothing.
+func TestAnInterruptionAfterAResumeWaitsEndsTheWait(t *testing.T) { barScenario(t, 2) }
+
+// TestTheResumeWaitsButtonSaysCancelResume pins that the bar's button says what
+// its click does while a resume of the browser's own waits: Cancel resume, by
+// its name, its title and a stop's glyph; activated, Play again, and the
+// barrier's answer starts nothing. TestTheResumeWaitsCancelCueShowsUnderReducedMotion
+// holds that glyph to the sprite and the reduced-motion rules.
+func TestTheResumeWaitsButtonSaysCancelResume(t *testing.T) { barScenario(t, 3) }
+
+// TestAResumeAdmittedAtOnceNeverSaysCancelResume pins that a resume the gate
+// admits at once, no player offered, leaves the bar saying no Cancel resume
+// before the element's events come.
+func TestAResumeAdmittedAtOnceNeverSaysCancelResume(t *testing.T) { barScenario(t, 2) }
+
+// TestNextOrARowDuringAResumeWaitStartsOnlyTheReadersChoice pins that Next, or
+// a row, while a resume of the browser's own waits ends the wait, and the
+// barrier's answer plays only the reader's choice.
+func TestNextOrARowDuringAResumeWaitStartsOnlyTheReadersChoice(t *testing.T) { barScenario(t, 4) }

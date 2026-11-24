@@ -801,6 +801,37 @@ func TestThePhoneBarKeepsItsWordsWithTheBridgeChosen(t *testing.T) {
 	}
 }
 
+// TestTheResumeWaitsCancelCueShowsUnderReducedMotion holds the glyph the bar's
+// button shows while a resume of the browser's own waits (B1015), which
+// TestTheResumeWaitsButtonSaysCancelResume reads off the button under node,
+// to what ships: the sprite in layout.html holds that symbol, the button
+// carries the busy class while it waits, and the reduced-motion rules show
+// the glyph in place of the ring, so the reader who asks for no motion sees
+// the cancel cue and no Play.
+func TestTheResumeWaitsCancelCueShowsUnderReducedMotion(t *testing.T) {
+	np := stripJSComments(readFile(t, "static/player/nowplaying.js"))
+	m := regexp.MustCompile(`s\.resumeWaits \? "([a-z][\w-]*)"`).FindStringSubmatch(np)
+	if m == nil {
+		t.Fatal("nowplaying.js names no glyph for a resume's wait (s.resumeWaits ? \"…\"): the test has stopped reading it")
+	}
+	if !strings.Contains(readFile(t, filepath.Join("templates", "layout.html")), `<g id="i-np-`+m[1]+`">`) {
+		t.Errorf("the sprite holds no i-np-%s, the glyph the button shows while a resume waits", m[1])
+	}
+	if !strings.Contains(np, `refs.play.classList.toggle("np-btn-busy", s.loading)`) {
+		t.Error("the bar's button no longer carries the busy class while it waits, which the reduced-motion rules read")
+	}
+	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
+	reveal := regexp.MustCompile(`\.np-btn-busy \.np-ico\s*\{\s*visibility:\s*visible;\s*\}`)
+	noRing := regexp.MustCompile(`\.np-btn-busy::after\s*\{\s*content:\s*none;\s*\}`)
+	found := false
+	for _, block := range cssMediaBlocks(css, "(prefers-reduced-motion: reduce)") {
+		found = found || (reveal.MatchString(block) && noRing.MatchString(block))
+	}
+	if !found {
+		t.Error("no reduced-motion block shows the busy button's glyph and hides its ring")
+	}
+}
+
 // TestTheChosenPickCarriesAMarkTheFocusRingLacks pins at the source that the
 // output menu's chosen pick says so by a mark of its own, a check drawn
 // after its words, which the focus ring does not draw: the menu opens on the

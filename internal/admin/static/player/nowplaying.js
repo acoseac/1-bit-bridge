@@ -508,9 +508,13 @@ function renderBrowser(s, o) {
   paintTrack(s);
 
   // What it shows is what it does: audio.js's toggle reads the same
-  // predicate (B1015).
-  swapIcon(refs.play, s.pauseShown ? "pause" : "play");
-  refs.play.setAttribute("aria-label", s.pauseShown ? "Pause" : "Play");
+  // predicates (B1015). Over a resume of the browser's own waiting on the
+  // gate its click cancels the wait, so it says Cancel resume, with a stop's
+  // glyph, which the reduced-motion rule shows in place of the ring.
+  const action = s.resumeWaits ? "Cancel resume" : (s.pauseShown ? "Pause" : "Play");
+  swapIcon(refs.play, s.resumeWaits ? "stop" : (s.pauseShown ? "pause" : "play"));
+  refs.play.setAttribute("aria-label", action);
+  refs.play.title = action;
   // The button keeps the NAME of the action it performs — it still
   // pauses, and a reader who has decided against the wait needs that to
   // be true. Only its paint says "waiting", which is what the sighted
@@ -563,6 +567,7 @@ function renderBridge(o) {
   const playing = st?.transport === "playing";
   swapIcon(refs.play, playing ? "pause" : "play");
   refs.play.setAttribute("aria-label", playing ? "Pause" : "Play");
+  refs.play.title = playing ? "Pause" : "Play";
   refs.play.classList.toggle("np-btn-busy", !!st?.starting);
   setDisabled(refs.play, !can(playing ? "pause" : "play"));
   setDisabled(refs.prev, !can("previous"));

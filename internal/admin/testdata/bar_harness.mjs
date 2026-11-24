@@ -4125,6 +4125,275 @@ S.TestAStartAskedBeforeTheReadersLastActionPlaysNothing = async () => {
     [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.el.plays]);
 };
 
+// ---- The bar's button carries out what it shows before it returns ----
+
+// microtasks lets every promise settled so far run its reactions, and none of
+// the element's tasks: a barrier answered at once lands, its play's event
+// still to come.
+const microtasks = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+
+// resumeWaitsOvertaken is the browser pausing the element that plays and
+// resuming it in one go, before either event, the next barrier held: its
+// pause event finds the element playing again, and its play event pauses the
+// element and asks the gate, which waits on that barrier.
+async function resumeWaitsOvertaken(r) {
+  const held = gate();
+  r.hold = held;
+  r.el.pause();
+  r.el.browserPlay();
+  await settle();
+  return held;
+}
+
+S.TestCancellingAResumeWaitEndsWhatItsRetryWouldPlay = async () => {
+  // The bar's click over a resume of the browser's own that waits ends it,
+  // and with it what this browser meant to play: a network error after it
+  // reloads the track and plays nothing, before the barrier's answer or after.
+  const r = await gatedPlaying({ bar: true });
+  const held = await resumeWaitsOvertaken(r);
+  const plays = r.el.plays.length;
+  check("the resume waits on its barrier, the element paused", r.el.paused && r.audio.snapshot().loading, [r.el.paused, r.audio.snapshot().loading]);
+  r.byClass("np-btn-play").click();
+  r.el.fail(2);
+  await settle();
+  check("the click, then a network error: its retry plays nothing", r.el.plays.length === plays && r.el.paused, [r.el.plays.slice(plays), r.el.paused]);
+  held.open();
+  await settle();
+  check("and the barrier's answer plays nothing", r.el.plays.length === plays && r.el.paused && !r.audio.snapshot().playing,
+    [r.el.plays.slice(plays), r.el.paused, r.audio.snapshot().playing]);
+};
+
+S.TestAnErrorWhileAResumeWaitsPlaysOnlyOnItsAdmission = async () => {
+  // A network error while the resume waits, its barrier held: the retry
+  // reloads the track and plays nothing until the barrier's answer, which
+  // plays it once. On track 2, the same error, then the bar's click over the
+  // wait: the barrier's answer plays nothing.
+  const r = await gatedPlaying({ bar: true });
+  let held = await resumeWaitsOvertaken(r);
+  let plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  check("a network error while the resume waits: nothing plays", r.el.plays.length === plays && r.el.paused, [r.el.plays.slice(plays), r.el.paused]);
+  held.open();
+  await settle();
+  check("the barrier's answer plays the reloaded track once", r.el.plays.length === plays + 1 && !r.el.paused && /01\.flac.*_r=/.test(r.el.plays.at(-1) || ""),
+    [r.el.plays.slice(plays), r.el.paused]);
+  r.audio.advance(1);
+  await settle();
+  r.el.metadata(200);
+  held = await resumeWaitsOvertaken(r);
+  plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  r.byClass("np-btn-play").click();
+  held.open();
+  await settle();
+  check("on track 2, the error, then the click over the wait: nothing plays", r.audio.snapshot().index === 1 && r.el.plays.length === plays && r.el.paused,
+    [r.audio.snapshot().index, r.el.plays.slice(plays), r.el.paused]);
+};
+
+S.TestACancelledResumeLeavesTheElementPausedThoughTheBrowserPlaysAgain = async () => {
+  // While the resume waits the browser plays the element again, its event
+  // still to come, and the bar's click over the wait comes in that gap: the
+  // element is paused at once, so that play's event asks nothing, and the
+  // barrier's answer replays nothing.
+  const r = await gatedPlaying({ bar: true });
+  const held = await browserResumeWaits(r);
+  const plays = r.el.plays.length;
+  r.el.browserPlay();
+  r.byClass("np-btn-play").click();
+  check("the click over the wait leaves the element paused at once", r.el.paused, r.el.paused);
+  await settle();
+  held.open();
+  await settle();
+  check("that play's event asks nothing, and the barrier's answer replays nothing", r.el.paused && r.el.plays.length === plays + 1 && !r.audio.snapshot().playing,
+    [r.el.paused, r.el.plays.slice(plays), r.audio.snapshot().playing]);
+};
+
+// rowOverTheBrowsersPlay is track 1 paused, row 7's start waiting on its
+// barrier, held, and the browser's own play of track 1 made, its event
+// still to come: the bar still shows Play.
+async function rowOverTheBrowsersPlay() {
+  const r = await gatedPlaying({ bar: true });
+  r.find("Pause").click();
+  await settle();
+  const held = gate();
+  r.hold = held;
+  r.audio.playQueue([flac(7), flac(8)], 0);
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.browserPlay();
+  check("track 1 shown, row 7 waiting on its barrier, the browser's play still to come", r.audio.snapshot().track?.path === "Album/01.flac" && !!r.find("Play") &&
+    r.s.posts(ROUTES.switchOut).length === 2 && !r.el.paused, [r.audio.snapshot().track?.path, !!r.find("Play"), r.s.posts(ROUTES.switchOut).length, r.el.paused]);
+  return { r, held, plays };
+}
+
+S.TestTheBarsPlayOverTheBrowsersOwnPlaySupersedesAnOlderRow = async () => {
+  // The Play shown over the track the browser resumed is the reader's start:
+  // it takes row 7's place behind the barrier, and the answer plays track 1.
+  const { r, held, plays } = await rowOverTheBrowsersPlay();
+  r.find("Play").click();
+  await settle();
+  held.open();
+  await settle();
+  const after = r.el.plays.slice(plays + 1);
+  check("the barrier's answer plays track 1 through the gate, never row 7", !r.el.paused && after.length === 1 && /01\.flac/.test(after[0]) &&
+    r.audio.snapshot().track?.path === "Album/01.flac" && r.s.posts(ROUTES.switchOut).length === 2, [r.el.paused, after, r.audio.snapshot().track?.path]);
+};
+
+S.TestTheLockScreensPlayOverTheBrowsersOwnPlayLeavesTheRowToPlay = async () => {
+  // The lock screen's Play there does nothing: the element plays, and the
+  // barrier's answer plays row 7 once.
+  const { r, held, plays } = await rowOverTheBrowsersPlay();
+  session.handlers.play();
+  await settle();
+  held.open();
+  await settle();
+  const after = r.el.plays.slice(plays + 1);
+  check("the barrier's answer plays row 7 once", !r.el.paused && after.length === 1 && /07\.flac/.test(after[0]) && r.audio.snapshot().track?.path === "Album/07.flac",
+    [r.el.paused, after, r.audio.snapshot().track?.path]);
+};
+
+S.TestADoubleClickOfTheBarsPlayStartsOnce = async () => {
+  // The bar's Play let start, its play event still to come: a second click
+  // on the Play still shown neither pauses nor starts again.
+  const r = await gatedPlaying({ bar: true });
+  r.find("Pause").click();
+  await settle();
+  const [posts, plays] = [r.s.posts(ROUTES.switchOut).length, r.el.plays.length];
+  r.find("Play").click();
+  await microtasks();
+  check("the first click's start admitted, its play event still to come", !r.el.paused && r.el.plays.length === plays + 1 && !!r.find("Play"),
+    [r.el.paused, r.el.plays.slice(plays), !!r.find("Play")]);
+  r.find("Play")?.click();
+  await settle();
+  check("the second click neither pauses nor starts again", !r.el.paused && r.el.plays.length === plays + 1 && r.s.posts(ROUTES.switchOut).length === posts + 1 && r.audio.snapshot().playing,
+    [r.el.paused, r.el.plays.slice(plays), r.s.posts(ROUTES.switchOut).length - posts, r.audio.snapshot().playing]);
+};
+
+S.TestAResumeAfterAPauseOutlivesAnOlderInterruptionsEvent = async () => {
+  // Track 1 playing: the browser pauses it for an interruption and resumes
+  // it, the lock screen's Pause comes, and the browser resumes it again, all
+  // before any event, the resume's barrier held. The interruption's event,
+  // the oldest, comes first: the wait lives until the barrier's answer,
+  // which plays track 1 once.
+  const r = await gatedPlaying();
+  const held = gate();
+  r.hold = held;
+  const [posts, plays] = [r.s.posts(ROUTES.switchOut).length, r.el.plays.length];
+  r.el.pause();
+  r.el.browserPlay();
+  session.handlers.pause();
+  r.el.browserPlay();
+  await settle();
+  check("every event run: the resume waits on its barrier, shown starting", r.el.paused && r.audio.snapshot().loading && r.s.posts(ROUTES.switchOut).length === posts + 1,
+    [r.el.paused, r.audio.snapshot().loading, r.s.posts(ROUTES.switchOut).length - posts]);
+  held.open();
+  await settle();
+  check("the barrier's answer plays track 1 once, through the gate", !r.el.paused && r.el.plays.length === plays + 3 && /01\.flac/.test(r.el.plays.at(-1) || ""),
+    [r.el.paused, r.el.plays.slice(plays)]);
+};
+
+S.TestAResumeAmidTheBrowsersOwnInterruptionsKeepsItsWait = async () => {
+  // Interruption, resume, interruption, resume, all before any event, the
+  // last a resume: the wait made amid them lives until the barrier's answer,
+  // which plays track 1 once.
+  const r = await gatedPlaying();
+  const held = gate();
+  r.hold = held;
+  const plays = r.el.plays.length;
+  r.el.pause();
+  r.el.browserPlay();
+  r.el.pause();
+  r.el.browserPlay();
+  await settle();
+  check("every event run: the resume waits, shown starting", r.el.paused && r.audio.snapshot().loading, [r.el.paused, r.audio.snapshot().loading]);
+  held.open();
+  await settle();
+  check("the barrier's answer plays track 1 once", !r.el.paused && r.el.plays.length === plays + 3 && /01\.flac/.test(r.el.plays.at(-1) || ""), [r.el.paused, r.el.plays.slice(plays)]);
+};
+
+S.TestAnInterruptionAfterAResumeWaitsEndsTheWait = async () => {
+  // A resume of the browser's own waits on its barrier, its events run; then
+  // the browser plays the element and pauses it again before either event:
+  // that later interruption ends the wait, and the barrier's answer plays
+  // nothing.
+  const r = await gatedPlaying();
+  const held = await browserResumeWaits(r);
+  const plays = r.el.plays.length;
+  r.el.browserPlay();
+  r.el.pause();
+  await settle();
+  check("the later interruption ends the wait, its spinner gone", r.el.paused && !r.audio.snapshot().loading, [r.el.paused, r.audio.snapshot().loading]);
+  held.open();
+  await settle();
+  check("and the barrier's answer replays nothing", r.el.paused && r.el.plays.length === plays + 1, [r.el.paused, r.el.plays.slice(plays)]);
+};
+
+S.TestTheResumeWaitsButtonSaysCancelResume = async () => {
+  // While a resume of the browser's own waits on its barrier the bar's
+  // button says what its click does, "Cancel resume", by its name, its title
+  // and a stop's glyph (the cue the reduced-motion rule shows in place of
+  // the ring); activated, it lets the wait go: Play again, and the barrier's
+  // answer starts nothing.
+  const r = await gatedPlaying({ bar: true });
+  const btn = r.byClass("np-btn-play");
+  const use = btn.querySelector("use");
+  const held = await browserResumeWaits(r);
+  check("while the resume waits: Cancel resume, by name, title and glyph, shown busy",
+    btn.attrs["aria-label"] === "Cancel resume" && btn.title === "Cancel resume" && use?.attrs.href === "#i-np-stop" && btn.classList.contains("np-btn-busy"),
+    [btn.attrs["aria-label"], btn.title, use?.attrs.href, btn.className]);
+  const plays = r.el.plays.length;
+  btn.click();
+  check("activated: Play again, by name, title and glyph, no longer busy",
+    btn.attrs["aria-label"] === "Play" && btn.title === "Play" && use?.attrs.href === "#i-np-play" && !btn.classList.contains("np-btn-busy"),
+    [btn.attrs["aria-label"], btn.title, use?.attrs.href, btn.className]);
+  held.open();
+  await settle();
+  check("and the barrier's answer starts nothing", r.el.paused && r.el.plays.length === plays && btn.attrs["aria-label"] === "Play",
+    [r.el.paused, r.el.plays.slice(plays), btn.attrs["aria-label"]]);
+};
+
+S.TestAResumeAdmittedAtOnceNeverSaysCancelResume = async () => {
+  // No player offered, so the gate lets the browser's own resume go on at
+  // once: right after that admission, before the element's events, the bar
+  // no longer says Cancel resume.
+  const r = await barPage({ gate: true, noFrame: true });
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_offered", message: "no player" } }));
+  await r.out.sampleNow();
+  await settle();
+  r.audio.playQueue([flac(1), flac(2)], 0);
+  await settle();
+  r.el.metadata(200);
+  r.find("Pause").click();
+  await settle();
+  const btn = r.byClass("np-btn-play");
+  r.el.browserPlay();
+  await oneTask();
+  check("admitted at once: the bar does not say Cancel resume", btn.attrs["aria-label"] !== "Cancel resume" && btn.title !== "Cancel resume",
+    [btn.attrs["aria-label"], btn.title]);
+  await settle();
+  check("and the resume plays", !r.el.paused && r.audio.snapshot().playing, [r.el.paused, r.audio.snapshot().playing]);
+};
+
+S.TestNextOrARowDuringAResumeWaitStartsOnlyTheReadersChoice = async () => {
+  // Next, then a row, each while a resume of the browser's own waits on its
+  // barrier: the reader's action ends the wait, and the barrier's answer
+  // plays only what the reader chose.
+  const r = await gatedPlaying();
+  for (const [how, act, want] of [["Next", () => r.audio.advance(1), /02\.flac/], ["a row", () => r.audio.playQueue([flac(7)], 0), /07\.flac/]]) {
+    const held = await browserResumeWaits(r);
+    const plays = r.el.plays.length;
+    act();
+    await settle();
+    check(`${how} while the resume waits ends the wait`, !r.audio.snapshot().resumeWaits && r.el.paused, [r.audio.snapshot().resumeWaits, r.el.paused]);
+    held.open();
+    await settle();
+    check(`${how}: the barrier's answer plays the reader's choice once, never the resume`, !r.el.paused && r.el.plays.length === plays + 1 && want.test(r.el.plays.at(-1) || ""),
+      [r.el.paused, r.el.plays.slice(plays)]);
+  }
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });

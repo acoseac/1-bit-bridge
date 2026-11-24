@@ -92,10 +92,11 @@ let startPermit = null;
 // go on; cleared by a load that does not, the browser's own pause of the
 // element, other than the one its end makes or one a play has overtaken, the
 // reader's explicit Pause, a start the reader asks over a paused element
-// (requestStart), suspend(), clearQueue(), the stop at the queue's end and
-// restore(). A continuation, and the retry after an error, play only while it
-// holds: the element cannot say it, since load() pauses it and a track's end
-// pauses it before `ended`.
+// (requestStart), a resume of the browser's own until the gate lets it go on,
+// suspend(), clearQueue(), the stop at the queue's end and restore(). A
+// continuation, and the retry after an error, play only while it holds: the
+// element cannot say it, since load() pauses it and a track's end pauses it
+// before `ended`.
 let intent = false;
 // The marks of the bar's own plays whose `play` event has not come (round 4,
 // T1, W1): a play() on a paused element queues one `play` event, which takes
@@ -110,6 +111,9 @@ const marks = [];
 // discards them all, as it removes their events. A `pause` event with no
 // record is the browser's own.
 const pauses = [];
+// Whether the last `pause` event came with the element playing again: the
+// browser's own changes were still arriving as the bar read them (B1015).
+let pauseOvertaken = false;
 // The browser's own play waiting on the gate, if one does.
 let resumeWait = null;
 
@@ -231,6 +235,7 @@ function loadEl(el) {
   if (el === state.el) {
     marks.length = 0;
     pauses.length = 0;
+    pauseOvertaken = false;
   }
   el.load();
 }
@@ -270,7 +275,12 @@ function ownPlay() {
   state.el.pause();
   const gen = playbackGen;
   const asked = readerGen();
-  const wait = {};
+  // Until the gate lets it go on, this browser means to play nothing, so no
+  // retry after an error plays it (B1015). A wait made while the browser's
+  // own changes were still arriving (amid) cannot tell its protective pause's
+  // event from an older pause of the browser's still to come.
+  const wait = { amid: pauseOvertaken };
+  intent = false;
   resumeWait = wait;
   state.playing = false;
   state.loading = true;
@@ -281,6 +291,9 @@ function ownPlay() {
     if (permit !== undefined) startPermit = permit;
     intent = true;
     playEl();
+    // Said at once: a gate that lets it go on at once answers before the
+    // element's events, which would repaint the bar.
+    emit();
   };
   const drop = () => {
     if (resumeWait !== wait) return;
@@ -315,6 +328,7 @@ export function snapshot() {
     index: state.index,
     playing: state.playing,
     pauseShown: pauseShown(),
+    resumeWaits: resumeWait !== null,
     loading: state.loading,
     shuffle: state.shuffle,
     repeat: state.repeat,
@@ -407,11 +421,17 @@ export function init() {
     // this browser means to play and a resume of the browser's own that
     // waits; not the pause a track's end makes before its `ended`, nor one a
     // play has overtaken by the time its event comes (the element playing
-    // again). No pause is the reader's action (B1015).
+    // again). No pause is the reader's action (B1015). A wait made amid the
+    // browser's own changes is let go by no pause event: an older pause of
+    // the browser's, still queued when its protective pause was made, comes
+    // first and takes that pause's record, so the order of the events cannot
+    // tell an older pause from a newer one; the reader's action or the gate's
+    // answer ends that wait.
     if (!pauses.shift() && !state.el.ended && state.el.paused) {
       intent = false;
-      resumeWait = null;
+      if (!resumeWait?.amid) resumeWait = null;
     }
+    pauseOvertaken = !state.el.paused;
     state.playing = false;
     state.loading = resumeWait !== null;
     setSessionState("paused");
@@ -1003,28 +1023,25 @@ function pauseShown() {
 }
 
 /**
- * Play/Pause, doing what the reader sees (B1015). The bar's (toggle()): over
- * a resume of the browser's own waiting on the gate, which the bar shows
- * starting, it lets the wait go; where the bar shows Pause it pauses; where it
- * shows Play it plays, through the start gate. The lock screen's Play (play)
- * never pauses and keeps a resume's wait. Neither plays over an element that
- * plays already, its play event still to come.
+ * Play/Pause, doing what the reader sees before it returns (B1015). The bar's
+ * (toggle()): over a resume of the browser's own waiting on the gate, shown as
+ * Cancel resume, it pauses, the wait gone with what this browser meant to
+ * play; where the bar shows Pause it pauses; where it shows Play it plays,
+ * through the start gate, over the browser's own play still to come too, but
+ * not over the bar's own (a double click). The lock screen's Play (play)
+ * never pauses, keeps a resume's wait and does nothing over an element that
+ * plays.
  */
 export function toggle({ play = false } = {}) {
   init();
   if (state.index < 0) return;
-  if (resumeWait) {
-    if (!play) {
-      readerAction();
-      emit();
-    }
-    return;
-  }
-  if (!play && pauseShown()) {
+  if (!play && (resumeWait || pauseShown())) {
     pauseNow();
     return;
   }
-  if (!state.el.paused && !failedEl()) return;
+  // A Play the bar shows over the browser's own play is the reader's start,
+  // which takes the place of a row asked before it.
+  if (resumeWait || (!state.el.paused && !failedEl() && (play || marks.length > 0))) return;
   readerAction();
   // Over a failed element Play is a start: when it runs, a source it cannot
   // use moves on, a network or decode error reloads, its retry there again.
