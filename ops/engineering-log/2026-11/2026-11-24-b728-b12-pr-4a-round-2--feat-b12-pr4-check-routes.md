@@ -85,6 +85,34 @@ written first. Twelve controls, each red exactly where predicted and nowhere els
   which it now does within the deadline while the reading is held, then answer DELETE, ending an
   admitted check through `StopCheck`.
 
+### Runs
+
+On the build host, `go1.27.3` with the release tags, `TMPDIR` under the worktree's `.tmp`:
+
+- The gate, in one build slot session at `7f771d9a`: `make fmt` (nothing rewritten), `make vet`,
+  `make test` (`-race -p 4 -count=1 ./...`: 2,127 s, 93 packages ok, none failed; cmd/bridge
+  1,957 s, internal/manifest 1,618 s, internal/admin 1,408 s), `make build-all` (26 s), `make
+  docs-check`, and `go vet ./...` for GOOS linux, darwin and windows: each exit 0, the tree clean
+  after.
+- Before it, alone: the playback, alsapcm and api packages whole, without the race detector (the
+  gate ran them with it; alsapcm's tests drive the backend, api's censuses read playback's
+  source), the round's tests by name, and cmd/bridge's source guards
+  (`TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`, `TestNoBlankKeepers`,
+  `TestEveryBackgroundGoroutineDrainsOnCleanup`) with `make docs-check` over the records.
+- `-race -count=50`, pinned to half the host's cores, each lane alone: five playback tests (250
+  passes: the round's three, and `TestTheCheckWaitsForAProbeOrAToneAmongTheWaiters` and
+  `TestTheChecksCountIsGivenBackOnEveryWayOut`, whose admission path changed) and eight alsapcm
+  tests (400: the round's five, and `TestAnEndedRequestOpensNothing`,
+  `TestServesStopWaitsForEveryCheckItCounted` and `TestTheCheckOwnsTheSlotAgainstProbesAndTones`);
+  none failed.
+- Both native-integration overlays as CI runs them, at `7f771d9a`: 16 `TestNativeIntegration`
+  tests in cmd/bridge and 33 in playback passed, every one CI requires among them.
+- `scripts/qualification-version -base da3c1098 -head HEAD`: OK, at version 59.
+- The iOS fixture exporters (manifest, API, cmd/bridge, `-p=1`) at `7f771d9a` and at the base: the
+  same six files, three byte-identical (`dsd_outputs.json`, `dsd_dac_outputs.json`,
+  `dsd_choice_answers.json`) and the other three identical once their clock times are masked;
+  against round 1's export, the same but for the provenance's commit. No golden was written.
+
 ### What is owed
 
 As round 1's entry: PR 4b (with item 1's half, the hold's release and 204 within DELETE's
