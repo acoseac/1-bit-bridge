@@ -143,6 +143,32 @@ that commit, all thirteen as predicted. The design's four route controls (the ro
 flag, the engine's hold skipped, the 202 before the grant, DELETE's 204 before the release) and item
 7's are PR 4b's: there is no route or adapter here to mutate.
 
+### Runs
+
+On the build host, `go1.27.3` with the release tags, `TMPDIR` under the worktree's `.tmp`:
+
+- The gate, in one build slot session at `1e48359d`: `make fmt` (nothing rewritten), `make vet`,
+  `make test` (`-race -p 4 -count=1 ./...`: 2,134 s, 93 packages ok, none failed; cmd/bridge
+  1,951 s, internal/manifest 1,619 s, internal/admin 1,408 s), `make build-all` (43 s), `make
+  docs-check`, and `go vet ./...` for GOOS linux, darwin and windows: each exit 0, the tree clean
+  after.
+- Before it, alone: every package whose tests import a changed one (the library resolver,
+  dsdstate, qualification and its two scripts, policy, playbacktest, playback, api, alsapcm,
+  hotplug and binding), cmd/bridge's DSD, check, tone, golden, player, output and serve tests, and
+  its source guards (`TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`,
+  `TestNoBlankKeepers`, `TestEveryBackgroundGoroutineDrainsOnCleanup`). The api run is where the
+  census of the choice's outcomes was red (Decisions).
+- `-race -count=50`, pinned to half the host's cores: the eight playback tests (400 passes), the
+  thirteen alsapcm tests (650) and the census (50); none failed.
+- Both native-integration overlays as CI runs them: 16 `TestNativeIntegration` tests in
+  cmd/bridge and 33 in playback passed, every one CI requires among them.
+- `scripts/qualification-version -base da3c1098 -head HEAD`: OK, at version 59.
+- The iOS fixture exporters (manifest, API, cmd/bridge, `-p=1`) at HEAD and at the base: the same
+  six files, three byte-identical (`dsd_outputs.json`, `dsd_dac_outputs.json`,
+  `dsd_choice_answers.json`), and the manifest's two and the provenance identical once their clock
+  times are masked. No golden was
+  written: nothing PR 4a adds reaches the wire.
+
 ### What is owed
 
 - PR 4b: the three routes and their body checks, serve's adapter (the engine's hold before the
