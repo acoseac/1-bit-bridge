@@ -3430,6 +3430,91 @@ S.TestAPlayAfterAnExplicitPauseOutlivesThatPausesEvent = async () => {
   check("and what it means to play goes on at the track's end", !r.el.paused && r.audio.snapshot().index === 1, [r.el.paused, r.audio.snapshot().index]);
 };
 
+// ---- A resume a pause overtook, the bar's Pause shown at once, and a Stop ----
+
+// overtakenResume is track 1 paused by the reader while a row's start waits
+// on its barrier, held; the browser's own resume of track 1 queues its play
+// event, and the lock screen's Pause comes before that event, so the event
+// runs, the barrier answers as it ends (reply), and the Pause's own pause
+// event comes last. plays counts the plays before the browser's own.
+async function overtakenResume(reply) {
+  const r = await gatedPlaying();
+  r.audio.toggle();
+  await settle();
+  const held = gate();
+  r.s.on("POST", ROUTES.switchOut, async (e) => {
+    await held.p;
+    return reply(e);
+  });
+  r.audio.playQueue([flac(7), flac(8)], 0);
+  await settle();
+  check("track 1 paused, the row's start waits on its barrier", r.el.paused && r.audio.snapshot().track?.path === "Album/01.flac" && r.s.posts(ROUTES.switchOut).length === 2,
+    [r.el.paused, r.audio.snapshot().track?.path, r.s.posts(ROUTES.switchOut).length]);
+  const plays = r.el.plays.length;
+  r.el.browserPlay();
+  session.handlers.pause();
+  r.el.addEventListener("play", function once() {
+    r.el.removeEventListener("play", once);
+    held.open();
+  });
+  await settle();
+  return { r, plays };
+}
+
+// overtakenResumeEnds checks what that resume leaves: track 1 not played
+// again, the row the Pause let go of not played, and nothing played after
+// the browser's own, track 1 selected, paused and shown stopped.
+function overtakenResumeEnds(r, plays, how) {
+  const after = r.el.plays.slice(plays + 1);
+  const s = r.audio.snapshot();
+  check(`${how}: the paused track is not played again`, !after.some((src) => /01\.flac/.test(src)), after);
+  check(`${how}: the row the Pause let go of is not played`, !after.some((src) => /07\.flac/.test(src)), after);
+  check(`${how}: nothing plays after the browser's own, track 1 selected, paused and shown stopped`,
+    r.el.plays.length === plays + 1 && r.el.paused && s.index === 0 && s.track?.path === "Album/01.flac" && !s.playing && !s.loading,
+    [r.el.plays.slice(plays), r.el.paused, s.index, s.track?.path, s.playing, s.loading]);
+}
+
+S.TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnItsBarriersDone = async () => {
+  const { r, plays } = await overtakenResume((e) => answer(recOf(e, { kind: "switch-out", silence: 20 }), pub({ revision: 20, silent: true })));
+  overtakenResumeEnds(r, plays, "the barrier answered done beside a silent bridge");
+};
+
+S.TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnANoPlayerRefusal = async () => {
+  const { r, plays } = await overtakenResume(() => refusal("player_not_offered", null, 409, "this bridge offers no player of its own"));
+  check("the barrier refused as no player offered", r.out.view().notOffered, r.out.view().notOffered);
+  overtakenResumeEnds(r, plays, "the barrier refused as no player offered");
+};
+
+S.TestTheBrowsersOwnResumeAPauseOvertookAsksNothingWhereNoPlayerIsOffered = async () => {
+  // No player offered, so the gate lets a start go on at once: the browser's
+  // own resume of the paused track, its play event queued before the lock
+  // screen's Pause, asks nothing when that event comes; a resume of the
+  // browser's own made after the Pause still plays.
+  const r = await pageRig({ gate: true, noFrame: true });
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_offered", message: "no player" } }));
+  await r.out.sampleNow();
+  await settle();
+  r.audio.playQueue([flac(1), flac(2)], 0);
+  await settle();
+  r.el.metadata(200);
+  r.audio.toggle();
+  await settle();
+  check("no player offered, track 1 paused", r.out.view().notOffered && r.el.paused && r.audio.snapshot().track?.path === "Album/01.flac",
+    [r.out.view().notOffered, r.el.paused, r.audio.snapshot().track?.path]);
+  const plays = r.el.plays.length;
+  r.el.browserPlay();
+  session.handlers.pause();
+  await settle();
+  const s = r.audio.snapshot();
+  check("the resume the Pause overtook asks nothing: no play after the browser's own, paused and shown stopped",
+    r.el.plays.length === plays + 1 && r.el.paused && !s.playing && !s.loading && s.track?.path === "Album/01.flac",
+    [r.el.plays.slice(plays), r.el.paused, s.playing, s.loading, s.track?.path]);
+  r.el.browserPlay();
+  await settle();
+  check("a resume of the browser's own made after the Pause still plays", !r.el.paused && r.audio.snapshot().playing && r.el.plays.length === plays + 3 && /01\.flac/.test(r.el.plays.at(-1) || ""),
+    [r.el.paused, r.audio.snapshot().playing, r.el.plays.slice(plays)]);
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });

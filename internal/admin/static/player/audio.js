@@ -242,12 +242,13 @@ function playRefused(e, at) {
 // asked as a fresh start with a continuation's priority (W5): admitted, it
 // resumes through playEl where the playback is the same and the reader has
 // done nothing since; refused, it stays paused, the intent gone, the bar
-// saying why. Meanwhile the bar shows it starting.
+// saying why. Meanwhile the bar shows it starting. A play a pause has
+// overtaken by the time its event comes (the element paused again: the
+// reader's Pause, a stop) asks nothing; that pause's own event says the rest.
 function ownPlay() {
-  if (!state.el.paused) {
-    ownPauses += 1;
-    state.el.pause();
-  }
+  if (state.el.paused) return;
+  ownPauses += 1;
+  state.el.pause();
   const gen = playbackGen;
   const acts = actions;
   const wait = {};

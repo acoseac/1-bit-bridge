@@ -823,3 +823,29 @@ func TestABarrierWhoseStartAPauseLetGoEndsQuietly(t *testing.T) { barScenario(t,
 // before that event takes the barrier in flight and plays on its answer, its
 // intent going on at the track's end.
 func TestAPlayAfterAnExplicitPauseOutlivesThatPausesEvent(t *testing.T) { barScenario(t, 3) }
+
+// A resume a pause overtook, the bar's Pause shown at once, and a Stop.
+
+// TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnItsBarriersDone pins
+// that the browser's own resume of a paused track, its play event queued
+// before the lock screen's Pause while a row's start waits on its barrier,
+// asks nothing when that event comes: the barrier's done, beside a silent
+// bridge, plays neither that track nor the row the Pause let go of.
+func TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnItsBarriersDone(t *testing.T) {
+	barScenario(t, 4)
+}
+
+// TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnANoPlayerRefusal pins
+// the same with the barrier refused as no player offered, a refusal that
+// lets a start it holds go on in this browser.
+func TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnANoPlayerRefusal(t *testing.T) {
+	barScenario(t, 5)
+}
+
+// TestTheBrowsersOwnResumeAPauseOvertookAsksNothingWhereNoPlayerIsOffered
+// pins it where the gate already knows no player is offered and would let it
+// go on at once, and that a resume of the browser's own made after the Pause
+// still plays.
+func TestTheBrowsersOwnResumeAPauseOvertookAsksNothingWhereNoPlayerIsOffered(t *testing.T) {
+	barScenario(t, 3)
+}
