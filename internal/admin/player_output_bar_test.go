@@ -480,6 +480,45 @@ func TestAReloadKeepsANewerPicksSupersession(t *testing.T) { barScenario(t, 6) }
 // is offered.
 func TestABarrierRefusedForNoPlayerLetsItsStartGoOn(t *testing.T) { barScenario(t, 2) }
 
+// Round 4 (B634 PR 2): no play the bar did not start sounds outside the gate.
+
+// TestTheBrowsersOwnResumeBesideAPlayingBridgeStaysPaused pins T1(a): the
+// browser's own resume of the element after its own pause, the bridge
+// playing since, is paused at once, the bar playing nothing and saying why.
+func TestTheBrowsersOwnResumeBesideAPlayingBridgeStaysPaused(t *testing.T) { barScenario(t, 3) }
+
+// TestTheBrowsersOwnResumeBesideASilentBridgeGoesThroughTheGate pins T1(b):
+// beside a silent bridge the browser's own resume plays again through a
+// barrier and one play of the bar's, and the intent it sets carries the
+// album on at the track's end.
+func TestTheBrowsersOwnResumeBesideASilentBridgeGoesThroughTheGate(t *testing.T) { barScenario(t, 2) }
+
+// TestAPlayMarkLivesOnlyUntilItsEventOrItsSettlement pins T1(c) and W1: a
+// play the browser refuses, and one on an element already playing, leave no
+// mark a later play of the browser's own could take.
+func TestAPlayMarkLivesOnlyUntilItsEventOrItsSettlement(t *testing.T) { barScenario(t, 4) }
+
+// TestTheBrowsersOwnResumeWaitingOnItsGateEndsForTheReader pins T1(d) and
+// W4: the browser's own resume waiting on its barrier is shown starting, the
+// reader's Play/Pause cancels it, and a queue replaced meanwhile plays in
+// its place.
+func TestTheBrowsersOwnResumeWaitingOnItsGateEndsForTheReader(t *testing.T) { barScenario(t, 4) }
+
+// TestAnAdmittedResumeOfTheBrowsersOwnGoesOnAtTheTracksEnd pins W3: the
+// protective pause cancels nothing, so with no player offered an admitted
+// resume plays on to the next track at the track's end.
+func TestAnAdmittedResumeOfTheBrowsersOwnGoesOnAtTheTracksEnd(t *testing.T) { barScenario(t, 2) }
+
+// TestTheBrowsersOwnResumeNeverTakesAReadersPlace pins W5: the browser's own
+// resume while the reader's row waits on its barrier takes nothing of it, and
+// the row plays on the barrier's done.
+func TestTheBrowsersOwnResumeNeverTakesAReadersPlace(t *testing.T) { barScenario(t, 2) }
+
+// TestARejectedPlayEndsTheIntentToPlay pins W8: the retry's play and a
+// repeat-one replay the browser refuses each leave the element paused, say
+// so, and end the intent, so nothing starts after them.
+func TestARejectedPlayEndsTheIntentToPlay(t *testing.T) { barScenario(t, 4) }
+
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start
 // on the barrier's done, and the skip moves nothing of it.

@@ -1490,6 +1490,9 @@ export function createOutput(env) {
     position,
     gateStart,
     gateContinue,
+    // Whether the bar's line says the bridge's player plays, which a play
+    // the browser refuses then says nothing beside (round 4, W8).
+    refusalShown: () => [WORDS.bridgePlaying, WORDS.bridgeAgain, WORDS.bridgeToo].includes(line),
     identity: () => ({ tab, seq }),
     pending: () => [...inherited.keys(), ...ops.keys()],
   };

@@ -121,11 +121,7 @@ func TestEveryRowDecidesByTheOutputChosen(t *testing.T) {
 // new play anywhere else fails TestEveryStartOfThisBrowserAsksTheGate, and
 // is to be routed through the gate or added here with its reason.
 var audioPlaySites = map[string]string{
-	"load":       "a start's load, with autoplay, run by a start the gate let through or by a continuation continueStart let go on",
-	"loadAt":     "a start's play deferred to the track's metadata, which asks the start's permit again (V4)",
-	"playNow":    "toggle's play and start's, each run by the gate or by the barrier's done, and a removed row's successor's, run by continueStart",
-	"advanceNow": "repeat-one's replay, run by a continuation continueStart let go on",
-	"onError":    "the retry after a network or decode error, run by a continuation continueStart lets go on, only of what this browser meant to play (S2)",
+	"playEl": "the one play the bar makes (round 4, T1), marked for the play event it causes, called by a start the gate let through, a continuation continueStart let go on, or an admitted resume of the browser's own",
 }
 
 // The exported functions of audio.js that reach a play of the element, by
@@ -277,6 +273,17 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 	}
 	if m := regexp.MustCompile(`[^\w$.]advance\([^()]*,`).FindString(src); m != "" {
 		t.Errorf("audio.js calls advance with an option (%s): what playback does by itself goes on through continueStart", m)
+	}
+	// Round 4 (T1): a play the bar did not mark is the browser's own, which
+	// the play listener hands to ownPlay; ownPlay pauses the element before
+	// it asks the gate, as a fresh start (a null permit) with a drop.
+	if !strings.Contains(fns["init"].body, "if (!marks.length && continueGate) {\n      ownPlay();") {
+		t.Error("audio.js's play listener does not hand a play it did not mark to ownPlay")
+	}
+	own := fns["ownPlay"].body
+	pauseAt, askAt := strings.Index(own, "state.el.pause();"), strings.Index(own, "continueGate(null, go, drop);")
+	if pauseAt < 0 || askAt < 0 || pauseAt > askAt {
+		t.Error("ownPlay does not pause the element before it asks the gate as a fresh start")
 	}
 	ms := fns["wireMediaSession"].body
 	for _, want := range []string{`set("play", () => toggle())`, `set("pause", () => toggle())`, `set("previoustrack", () => advance(-1))`, `set("nexttrack", () => advance(1))`} {

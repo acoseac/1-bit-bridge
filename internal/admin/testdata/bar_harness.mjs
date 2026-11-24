@@ -967,7 +967,14 @@ class AudioEl extends El {
       this.ended = false;
       this.task(() => this.fire("play"));
     }
-    if (this.playMode === "resolve") this.task(() => this.settlePlays());
+    // "Resolve": the element can play, so the promises pending now are taken
+    // and resolved by a task of their own (the spec's notify about playing);
+    // a later play's are not.
+    if (this.playMode === "resolve") {
+      const taken = this.pending;
+      this.pending = [];
+      this.task(() => { for (const q of taken) q.resolve(); });
+    }
     return p;
   }
   pause() {
@@ -977,6 +984,9 @@ class AudioEl extends El {
     this.pending = [];
     this.task(() => { this.fire("pause"); for (const q of ps) q.reject(domError("AbortError")); });
   }
+  // browserPlay is the browser's own play (a call ending, the audio focus
+  // given back): no page script holds its promise.
+  browserPlay() { this.play().catch(() => {}); }
   // metadata is the browser's loadedmetadata for the source it holds.
   metadata(duration) { this.duration = duration; this.readyState = 1; this.fire("loadedmetadata"); }
   // end is the playback's end: paused, pause fired, then ended.
@@ -2293,6 +2303,188 @@ S.TestABarrierRefusedForNoPlayerLetsItsStartGoOn = async () => {
   r.out.gateStart(() => { ran += 1; });
   await settle();
   check("and the next start goes on at once, nothing sent", ran === 2 && r.s.posts(ROUTES.switchOut).length === 1, [ran, r.s.posts(ROUTES.switchOut).length]);
+};
+
+// ---- Round 4: no play the bar did not start sounds outside the gate ----
+//
+// The browser's own pause and resume (a call, another app's audio) are the
+// element's pause() and play() called by the case, never through audio.js.
+
+S.TestTheBrowsersOwnResumeBesideAPlayingBridgeStaysPaused = async () => {
+  // T1(a): another controller starts the bridge while a call has the
+  // browser paused; the call ends and the browser resumes by itself.
+  const r = await gatedPlaying();
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  r.el.pause();
+  await settle();
+  const plays = r.el.plays.length;
+  const posts = r.s.posts().length;
+  r.el.browserPlay();
+  await settle();
+  check("the browser's own resume beside the bridge playing: the element ends paused", r.el.paused && !r.audio.snapshot().playing, [r.el.paused, r.audio.snapshot().playing]);
+  check("no play of the bar's after it, nothing sent", r.el.plays.length === plays + 1 && r.s.posts().length === posts, [r.el.plays.slice(plays), r.s.posts().length - posts]);
+  check("and the bar says the bridge plays", r.out.view().line === WORDS.bridgePlaying, r.out.view().line);
+};
+
+S.TestTheBrowsersOwnResumeBesideASilentBridgeGoesThroughTheGate = async () => {
+  // T1(b): the same beside a silent bridge: one barrier, then one play of
+  // the bar's, and the intent it sets carries the album on.
+  const r = await gatedPlaying();
+  r.el.pause();
+  await settle();
+  const plays = r.el.plays.length;
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  r.el.browserPlay();
+  await settle();
+  check("beside a silent bridge the browser's own resume plays again through a barrier and one play of the bar's",
+    !r.el.paused && r.s.posts(ROUTES.switchOut).length === posts + 1 && r.el.plays.length === plays + 2, [r.el.paused, r.s.posts(ROUTES.switchOut).length - posts, r.el.plays.slice(plays)]);
+  r.el.end();
+  await settle();
+  check("its intent set: the track's end plays the next track", !r.el.paused && r.audio.snapshot().index === 1, [r.el.paused, r.audio.snapshot().index]);
+};
+
+S.TestAPlayMarkLivesOnlyUntilItsEventOrItsSettlement = async () => {
+  // T1(c), W1: a play the browser refuses at once, and one made on an
+  // element already playing, leave no mark a later play of the browser's
+  // own could take.
+  const r = await gatedPlaying();
+  r.audio.toggle();
+  await settle();
+  r.el.playMode = "deny";
+  r.audio.toggle();
+  await settle();
+  check("the reader's Play, refused by the browser: paused, and said", r.el.paused && !r.audio.snapshot().playing && r.audio.snapshot().error === "Press play to start.",
+    [r.el.paused, r.audio.snapshot().playing, r.audio.snapshot().error]);
+  r.el.playMode = "resolve";
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  r.el.browserPlay();
+  await settle();
+  check("a refused play left no mark: the browser's own play beside the bridge playing ends paused", r.el.paused, r.el.paused);
+  r.frame(pub({ revision: 21, silent: true }));
+  await settle();
+  r.audio.toggle();
+  await settle();
+  check("the reader's Play again: playing", !r.el.paused, r.el.paused);
+  r.audio.start();
+  await settle();
+  r.frame(playing({ revision: 22 }));
+  await settle();
+  r.el.pause();
+  await settle();
+  r.el.browserPlay();
+  await settle();
+  check("a play on an element already playing left no mark: the browser's own play ends paused", r.el.paused, r.el.paused);
+};
+
+S.TestTheBrowsersOwnResumeWaitingOnItsGateEndsForTheReader = async () => {
+  // T1(d), W4: while the browser's own resume waits on its barrier the bar
+  // shows it starting; the reader's Play/Pause cancels it, and a queue the
+  // reader replaces meanwhile plays in its place.
+  const r = await gatedPlaying();
+  r.el.pause();
+  await settle();
+  const h1 = gate();
+  r.hold = h1;
+  r.el.browserPlay();
+  await settle();
+  check("the browser's own resume waits on a barrier, the element paused, shown starting", r.el.paused && r.audio.snapshot().loading && r.s.posts(ROUTES.switchOut).length === 2,
+    [r.el.paused, r.audio.snapshot().loading, r.s.posts(ROUTES.switchOut).length]);
+  const plays = r.el.plays.length;
+  r.audio.toggle();
+  await settle();
+  check("the reader's Play/Pause while it waits cancels it, asking nothing", !r.audio.snapshot().loading && r.s.posts(ROUTES.switchOut).length === 2, [r.audio.snapshot().loading, r.s.posts(ROUTES.switchOut).length]);
+  h1.open();
+  await settle();
+  check("its barrier's answer then resumes nothing", r.el.paused && r.el.plays.length === plays, [r.el.paused, r.el.plays.slice(plays)]);
+  r.audio.toggle();
+  await settle();
+  r.el.pause();
+  await settle();
+  const h2 = gate();
+  r.hold = h2;
+  r.el.browserPlay();
+  await settle();
+  const before = r.el.plays.length;
+  r.audio.playQueue([flac(7), flac(8)], 0);
+  await settle();
+  h2.open();
+  await settle();
+  const s = r.audio.snapshot();
+  check("a queue replaced while it waits: the replacement plays, the old track never resumes",
+    s.track?.path === "Album/07.flac" && !r.el.paused && r.el.plays.slice(before).every((src) => /07\.flac/.test(src)) && r.el.plays.length === before + 1, [s.track?.path, r.el.paused, r.el.plays.slice(before)]);
+};
+
+S.TestAnAdmittedResumeOfTheBrowsersOwnGoesOnAtTheTracksEnd = async () => {
+  // W3: the protective pause is no cancellation: with no player offered the
+  // browser's own resume is admitted at once, and once every queued event
+  // has run the track's end still plays the next one.
+  const r = await pageRig({ gate: true, noFrame: true });
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_offered", message: "no player" } }));
+  await r.out.sampleNow();
+  await settle();
+  r.audio.playQueue([flac(1), flac(2)], 0);
+  await settle();
+  r.el.metadata(200);
+  r.el.pause();
+  await settle();
+  r.el.browserPlay();
+  await settle();
+  check("no player offered: the browser's own resume is admitted, playing", !r.el.paused && r.audio.snapshot().playing, [r.el.paused, r.audio.snapshot().playing]);
+  r.el.end();
+  await settle();
+  check("every queued event run, the track's end plays the next track", !r.el.paused && r.audio.snapshot().index === 1, [r.el.paused, r.audio.snapshot().index]);
+};
+
+S.TestTheBrowsersOwnResumeNeverTakesAReadersPlace = async () => {
+  // W5: a row the reader played waits on its barrier; the old track's own
+  // resume asks with a continuation's priority and takes nothing of it.
+  const r = await gatedPlaying();
+  const held = gate();
+  r.hold = held;
+  r.audio.playQueue([flac(7), flac(8)], 0);
+  await settle();
+  r.el.pause();
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.browserPlay();
+  await settle();
+  check("the old track's own resume while the reader's row waits: paused, no play of the bar's", r.el.paused && r.el.plays.length === plays + 1, [r.el.paused, r.el.plays.slice(plays)]);
+  held.open();
+  await settle();
+  check("the barrier's done plays the reader's row", r.audio.snapshot().track?.path === "Album/07.flac" && !r.el.paused && /07\.flac/.test(r.el.plays.at(-1) || ""), [r.audio.snapshot().track?.path, r.el.plays]);
+};
+
+S.TestARejectedPlayEndsTheIntentToPlay = async () => {
+  // W8: a play the browser refuses ends what this browser meant to play,
+  // wherever the bar made it: the retry after an error, a repeat-one replay.
+  const r = await gatedPlaying({ tracks: [flac(1), flac(2), flac(3), flac(4), flac(5)] });
+  r.el.playMode = "deny";
+  r.el.fail(2);
+  await settle();
+  check("the retry's play refused: paused, not playing, said", r.el.paused && !r.audio.snapshot().playing && r.audio.snapshot().error === "Press play to start.",
+    [r.el.paused, r.audio.snapshot().playing, r.audio.snapshot().error]);
+  r.el.playMode = "resolve";
+  let plays = r.el.plays.length;
+  let posts = r.s.posts(ROUTES.switchOut).length;
+  r.audio.removeAt(0);
+  await settle();
+  check("its intent gone: the removed row's successor starts nothing", r.el.plays.length === plays && r.s.posts(ROUTES.switchOut).length === posts, [r.el.plays.slice(plays), r.s.posts(ROUTES.switchOut).length - posts]);
+  r.audio.toggle();
+  await settle();
+  r.audio.cycleRepeat();
+  r.audio.cycleRepeat();
+  r.el.playMode = "deny";
+  r.el.end();
+  await settle();
+  check("a repeat-one replay refused: paused, said", r.el.paused && r.audio.snapshot().error === "Press play to start.", [r.el.paused, r.audio.snapshot().error]);
+  r.el.playMode = "resolve";
+  plays = r.el.plays.length;
+  posts = r.s.posts(ROUTES.switchOut).length;
+  r.audio.removeAt(0);
+  await settle();
+  check("its intent gone too: the next removal starts nothing", r.el.plays.length === plays && r.s.posts(ROUTES.switchOut).length === posts, [r.el.plays.slice(plays), r.s.posts(ROUTES.switchOut).length - posts]);
 };
 
 const name = scenarioName;
