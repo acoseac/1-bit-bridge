@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"io/fs"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -316,6 +318,134 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 	contAt := strings.Index(boot, "audio.setContinueGate(output.gateContinue)")
 	if contAt < 0 || contAt > mountAt {
 		t.Error("boot.js does not wire the continuation gate before the bar mounts")
+	}
+}
+
+// consoleSoundPatterns are what can make the console sound, by name (round
+// 4, T4, W10): a media element's play() (a property read such as track.play
+// takes no parenthesis), autoplay by property, attribute or markup (never an
+// option key such as { autoplay: … }), an audio or video element made, an
+// Audio object, a Web Audio context, and a MediaSession handler.
+var consoleSoundPatterns = map[string]*regexp.Regexp{
+	"play":            regexp.MustCompile(`\.play\(`),
+	"autoplay":        regexp.MustCompile(`\.autoplay\s*=|setAttribute\(\s*["']autoplay["']|<(?:audio|video)\b[^>]*\bautoplay\b`),
+	"media element":   regexp.MustCompile(`createElement\(\s*["'](?:audio|video)["']`),
+	"Audio object":    regexp.MustCompile(`\bnew\s+Audio\s*\(`),
+	"audio context":   regexp.MustCompile(`\b(?:webkit)?AudioContext\b`),
+	"session handler": regexp.MustCompile(`\bsetActionHandler\s*\(`),
+	"element markup":  regexp.MustCompile(`<(?:audio|video)\b`),
+}
+
+// consoleSoundSites is every site the census allows, by pattern, as
+// file:function with its reason; a site found and not named fails the
+// census, and so does a site named and no longer found.
+var consoleSoundSites = map[string]map[string]string{
+	"play": {
+		"player/audio.js:playEl": "the one play the bar makes, marked for the play event it causes; a play with no mark is the browser's own and asks the gate (ownPlay)",
+	},
+	"autoplay": {},
+	"media element": {
+		"player/audio.js:init":           "the bar's two elements: the one that plays, and the preloader, which is never played",
+		"player/format.js:engineCanPlay": "canPlayType's probe, never played",
+	},
+	"Audio object":  {},
+	"audio context": {},
+	"session handler": {
+		"player/audio.js:setMediaSession":  "clears every handler while the bridge's player is the output",
+		"player/audio.js:wireMediaSession": "the browser's handlers, each start through toggle or advance (sessionHandlers)",
+	},
+	"element markup": {},
+}
+
+// sessionHandlers is every MediaSession handler wireMediaSession sets, as
+// written: its starts go through toggle and advance, which ask the gate, and
+// nothing else it does plays.
+var sessionHandlers = []string{
+	`set("play", () => toggle());`,
+	`set("pause", () => toggle());`,
+	`set("previoustrack", () => advance(-1));`,
+	`set("nexttrack", () => advance(1));`,
+	`set("stop", () => clearQueue());`,
+	`set("seekto", (d) => { if (d && typeof d.seekTime === "number") seek(d.seekTime); });`,
+	`set("seekbackward", (d) => seek(state.el.currentTime - (d?.seekOffset || 10)));`,
+	`set("seekforward", (d) => seek(state.el.currentTime + (d?.seekOffset || 10)));`,
+}
+
+// TestNoSoundSourceOfTheConsoleBypassesTheGate is round 4's census (T4,
+// W10), on every host: every file of the console's scripts under static/,
+// comments stripped, and the templates' markup, searched for what can make
+// the console sound, each find placed in the top-level function holding it;
+// only the sites consoleSoundSites names may hold one, and each it names
+// still does; and wireMediaSession sets exactly sessionHandlers.
+func TestNoSoundSourceOfTheConsoleBypassesTheGate(t *testing.T) {
+	found := map[string]map[string]bool{}
+	for name := range consoleSoundPatterns {
+		found[name] = map[string]bool{}
+	}
+	files := 0
+	err := filepath.WalkDir("static", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".js") {
+			return err
+		}
+		files++
+		rel := filepath.ToSlash(strings.TrimPrefix(path, "static"+string(filepath.Separator)))
+		src := stripJSComments(readConsoleJS(t, path))
+		locs := barFnRe.FindAllStringSubmatchIndex(src, -1)
+		siteOf := func(at int) string {
+			fn := "(top level)"
+			for _, loc := range locs {
+				if loc[0] > at {
+					break
+				}
+				fn = src[loc[2]:loc[3]]
+			}
+			return rel + ":" + fn
+		}
+		for name, re := range consoleSoundPatterns {
+			for _, m := range re.FindAllStringIndex(src, -1) {
+				found[name][siteOf(m[0])] = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files < 10 {
+		t.Fatalf("only %d scripts found under static/: the census has stopped reading them", files)
+	}
+	templates, err := filepath.Glob(filepath.Join("templates", "*.html"))
+	if err != nil || len(templates) == 0 {
+		t.Fatalf("no templates found (%v): the census has stopped reading their markup", err)
+	}
+	for _, path := range templates {
+		for _, name := range []string{"element markup", "autoplay"} {
+			if consoleSoundPatterns[name].MatchString(readFile(t, path)) {
+				found[name]["templates/"+filepath.Base(path)] = true
+			}
+		}
+	}
+	for name, sites := range found {
+		for site := range sites {
+			if _, ok := consoleSoundSites[name][site]; !ok {
+				t.Errorf("%s at %s: no site the console's census allows; route it through audio.js's playEl and the gate, or name it with its reason", name, site)
+			}
+		}
+		for site := range consoleSoundSites[name] {
+			if !sites[site] {
+				t.Errorf("the census names %s at %s, which holds none now: take it off the list", name, site)
+			}
+		}
+	}
+	ms := jsTopFunctions(stripJSComments(readFile(t, "static/player/audio.js")))["wireMediaSession"].body
+	sets := regexp.MustCompile(`(?m)^\s*set\(.*$`).FindAllString(ms, -1)
+	if len(sets) != len(sessionHandlers) {
+		t.Errorf("wireMediaSession sets %d handlers, the census names %d: %q", len(sets), len(sessionHandlers), sets)
+	}
+	for _, want := range sessionHandlers {
+		if !strings.Contains(ms, want) {
+			t.Errorf("wireMediaSession does not set %s", want)
+		}
 	}
 }
 

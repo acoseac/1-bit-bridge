@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -11,7 +12,8 @@ import (
 // The player bar's output (B634, PR 2): the shipped output.js, format.js,
 // audio.js and nowplaying.js under node, case by case
 // (testdata/bar_harness.mjs), and app.js's forwarding of the event stream's
-// lifecycle. A host without node skips these cases; CI runs them. Each case
+// lifecycle. A host without node skips these cases; under CI they fail
+// without it, so they always run there. Each case
 // is one scenario of the harness, named as the test is, which reports named
 // checks: the test fails on any check that failed, and on fewer checks than
 // the scenario makes (a scenario that stopped checking anything).
@@ -31,6 +33,11 @@ func barScenario(t *testing.T, checks int) {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
+		// Under CI the harness runs or the case fails, so a CI green means
+		// the cases ran (round 4, T5).
+		if os.Getenv("CI") != "" {
+			t.Fatal("node not installed under CI: the bar's cases run there, never skip")
+		}
 		t.Skip("node not installed; this test executes the shipped player modules")
 	}
 	harness, err := filepath.Abs(filepath.Join("testdata", "bar_harness.mjs"))
