@@ -6,6 +6,7 @@
 
 import { audioURL } from "./api.js";
 import { resolvePlayable, formatChip } from "./format.js";
+import { currentOutput } from "./output.js";
 
 const STORE_KEY = "bridge-player-queue";
 
@@ -58,6 +59,199 @@ let playbackGen = 0;
 // decides which of four messages the reader gets, and a stalled probe
 // would hold up the skip.
 const PROBE_TIMEOUT_MS = 4000;
+
+// The position a suspended browser keeps (B634): read from the element
+// before its source was let go, which resets the element's own, so the
+// saved queue keeps it until something loads again (§7.3, step 1); and
+// whether it was playing, which a pick of the bridge made again while the
+// first is unconfirmed hands over as it was (R3).
+let heldAt = null;
+let heldPlaying = false;
+
+// The start gate (B634 round 2, R1): output.js's gateStart, set by boot.js
+// before the bar mounts. Every start of the element asks it (playQueue,
+// toggle's play, an advance a reader asks for, the MediaSession's handlers,
+// which call those), and runs only as it says, handed a permit that a later
+// play of that start asks again (V4). A pause never asks it.
+let startGate = null;
+// The continuation gate (round 3, S1, Q7): output.js's gateContinue, set by
+// boot.js beside the start gate. What playback does by itself asks it
+// (continueStart): the next track at a track's end and the retry after an
+// error, with their start's permit; a skip past a track that cannot play, a
+// repeat-one replay and a removed row's successor, which start the element
+// anew, with none, as a start is asked.
+let continueGate = null;
+// The permit of the start playing now, which a continuation asks again.
+let startPermit = null;
+// Whether this browser means to play what it holds (round 3, S2, Q8): set by
+// a load that means to play and by a play a start or a continuation lets
+// go on; cleared by a load that does not, a pause of the element other than
+// the one its end makes, suspend(), clearQueue(), the stop at the queue's
+// end and restore(). A continuation, and the retry after an error, play only
+// while it holds: the element cannot say it, since load() pauses it and a
+// track's end pauses it before `ended`.
+let intent = false;
+// The marks of the bar's own plays whose `play` event has not come (round 4,
+// T1, W1): a play() on a paused element queues one `play` event, which takes
+// the oldest mark; one on a playing element queues none and leaves none. A
+// mark goes with its play's promise once that settles, and every load takes
+// them all, since the load algorithm removes the events they wait for.
+const marks = [];
+// The protective pauses of the browser's own plays, whose `pause` events are
+// the bar's own (W3), and the one such play waiting on the gate (W4).
+let ownPauses = 0;
+let resumeWait = null;
+// What the reader does to playback (a transport call, a pick's suspend or
+// take) and a pause that is not the bar's own move this count; a resume of
+// the browser's own goes on only where it has not moved (W4).
+let actions = 0;
+
+/** setStartGate makes gate the one way the element starts. */
+export function setStartGate(gate) {
+  startGate = gate;
+}
+
+/** setContinueGate makes gate the one way playback goes on by itself. */
+export function setContinueGate(gate) {
+  continueGate = gate;
+}
+
+// With no gate wired (a boot that failed before it wired them), every start
+// is refused, as a start the gate refuses is (round 5).
+function requestStart(run) {
+  if (startGate) startGate(run);
+}
+
+// continueStart is how playback goes on by itself (S1): run, handed the
+// permit to play under, once the continuation gate lets it, and only while
+// the playback it continues is the one this browser still means to play (no
+// load since, no pause), asked again when it runs, since a barrier's round
+// trip lies between (Q3). A fresh continuation starts the element anew, so it
+// hands the gate no permit and is asked as a start is (Q1). Until it runs the
+// browser shows itself stopped; refused, it stays so, the bar saying why.
+function continueStart(run, { fresh = false } = {}) {
+  const gen = playbackGen;
+  let ran = false;
+  let settled = false;
+  const go = (permit) => {
+    if (settled) return;
+    settled = true;
+    if (gen !== playbackGen || !intent) return;
+    ran = true;
+    run(permit);
+  };
+  // Refused, or put aside for another start: the continuation ends, and
+  // with it what this browser meant to play, for this playback alone, so an
+  // older one's refusal clears no newer intent (round 4, T2, W6).
+  const drop = () => {
+    if (settled) return;
+    settled = true;
+    if (gen !== playbackGen) return;
+    intent = false;
+    state.playing = false;
+    state.loading = false;
+    emit();
+  };
+  const permit = fresh ? null : startPermit;
+  if (continueGate) continueGate(permit, go, drop);
+  else drop();
+  if (!ran) {
+    state.playing = false;
+    state.loading = false;
+    emit();
+  }
+}
+
+// readerAction counts what the reader does to playback, and lets go of a
+// resume of the browser's own that waits on the gate (W4).
+function readerAction() {
+  actions += 1;
+  resumeWait = null;
+}
+
+// playEl is the one way the bar plays the element (round 4, T1): it marks
+// the play, and a play the browser refuses ends what this browser meant to
+// play, while the playback is the same (W8).
+function playEl() {
+  const el = state.el;
+  const at = playbackGen;
+  const mark = el.paused ? {} : null;
+  if (mark) marks.push(mark);
+  let p;
+  try { p = el.play(); } catch (e) { p = Promise.reject(e); }
+  Promise.resolve(p).then(() => unmark(mark), (e) => {
+    unmark(mark);
+    playRefused(e, at);
+  });
+}
+
+function unmark(mark) {
+  const i = mark ? marks.indexOf(mark) : -1;
+  if (i >= 0) marks.splice(i, 1);
+}
+
+// loadEl runs the element's load algorithm, which removes the `play` events
+// the marks wait for and the `pause` events of the protective pauses.
+function loadEl(el) {
+  if (el === state.el) {
+    marks.length = 0;
+    ownPauses = 0;
+  }
+  el.load();
+}
+
+// playRefused: a refusal that leaves the element paused (NotAllowedError, a
+// source the browser cannot use) ends the intent; an AbortError (a pause, the
+// bar's protective one included, or a load) changes nothing more (W8).
+function playRefused(e, at) {
+  if (at !== playbackGen || e?.name === "AbortError") return;
+  intent = false;
+  state.playing = false;
+  state.loading = false;
+  if (e?.name === "NotAllowedError" && !currentOutput()?.refusalShown?.()) state.error = "Press play to start.";
+  emit();
+}
+
+// ownPlay is the browser's own play of the element (round 4, T1): a call
+// ending, another app giving the audio focus back. The bar did not start it,
+// so the element is paused at once, before anything sounds, and the gate is
+// asked as a fresh start with a continuation's priority (W5): admitted, it
+// resumes through playEl where the playback is the same and the reader has
+// done nothing since; refused, it stays paused, the intent gone, the bar
+// saying why. Meanwhile the bar shows it starting.
+function ownPlay() {
+  if (!state.el.paused) {
+    ownPauses += 1;
+    state.el.pause();
+  }
+  const gen = playbackGen;
+  const acts = actions;
+  const wait = {};
+  resumeWait = wait;
+  state.playing = false;
+  state.loading = true;
+  emit();
+  const go = (permit) => {
+    if (resumeWait !== wait || gen !== playbackGen || acts !== actions) return;
+    resumeWait = null;
+    if (permit !== undefined) startPermit = permit;
+    intent = true;
+    playEl();
+  };
+  const drop = () => {
+    if (resumeWait !== wait) return;
+    resumeWait = null;
+    intent = false;
+    state.loading = false;
+    emit();
+  };
+  if (continueGate) continueGate(null, go, drop);
+  else drop();
+}
+
+// Whether the browser's MediaSession handlers are set: cleared while the
+// bridge's player is the bar's output (§7.5).
+let sessionActive = true;
 
 export function subscribe(fn) {
   listeners.add(fn);
@@ -146,6 +340,13 @@ export function init() {
   }
 
   state.el.addEventListener("play", () => {
+    // A play the bar did not mark is the browser's own, and asks the gate,
+    // refused where none is wired.
+    if (!marks.length) {
+      ownPlay();
+      return;
+    }
+    marks.shift();
     state.playing = true;
     // `play` fires the instant `paused` flips, which is BEFORE the
     // element knows whether it has anything to play — so resuming into
@@ -156,13 +357,26 @@ export function init() {
     emit();
   });
   state.el.addEventListener("pause", () => {
+    // A pause, the reader's or the browser's own, ends what this browser
+    // means to play; the one a track's end makes before its `ended` does not,
+    // nor the bar's protective pause of the browser's own play (W3).
+    const own = ownPauses > 0;
+    if (own) ownPauses -= 1;
+    else if (!state.el.ended) {
+      intent = false;
+      readerAction();
+    }
     state.playing = false;
-    state.loading = false;
+    state.loading = own && resumeWait !== null;
     setSessionState("paused");
     persist();
     emit();
   });
-  state.el.addEventListener("ended", () => { advance(1, { auto: true }); });
+  // A track's end: the next track goes on its start's permit, asked again;
+  // a repeat-one replay starts the element its end paused, as a start does.
+  state.el.addEventListener("ended", () => {
+    continueStart((permit) => advanceNow(1, { auto: true, permit }), { fresh: state.repeat === "one" });
+  });
   state.el.addEventListener("timeupdate", throttle(() => {
     persist(); emit(); updatePositionState(); maybePrime();
   }, 900));
@@ -221,10 +435,24 @@ function onError() {
     default: { // 2 network / 3 decode — retry once, then surface.
       if (!track._retried) {
         track._retried = true;
+        // The reload pauses the element, so whether the retry plays is what
+        // this browser meant before it (S2, Q8): a take made stopped, or a
+        // queue restored at load, plays nothing; playback goes on as a
+        // continuation, its start's permit asked again (V4, Q1).
+        const wanted = intent;
         const busted = state.el.src + (state.el.src.includes("?") ? "&" : "?") + "_r=" + Date.now();
         state.el.src = busted;
-        state.el.load();
-        void state.el.play().catch(() => {});
+        loadEl(state.el);
+        if (!wanted) {
+          state.playing = false;
+          state.loading = false;
+          emit();
+          return;
+        }
+        continueStart((permit) => {
+          startPermit = permit;
+          playEl();
+        });
         return;
       }
       state.error = `Playback failed for "${track.title || track.path}".`;
@@ -291,10 +519,13 @@ async function handleSourceError(track, src) {
   // different object at the same position.
   setTimeout(() => {
     // Both conditions: the generation catches a different track, a
-    // replaced queue and a re-load of this same one, while `playing`
-    // catches a plain pause, which changes no track at all.
-    if (state.playing && at === playbackGen) {
-      advance(1, { auto: true });
+    // replaced queue and a re-load of this same one, while `playing` and the
+    // intent catch a plain pause, which changes no track at all (the intent
+    // the reader's before its pause event lands). The skip starts the
+    // element anew, so it asks the gate as a start does, and the generation
+    // and the intent are asked again once the gate lets it go on (S1, Q3).
+    if (state.playing && intent && at === playbackGen) {
+      continueStart((permit) => advanceNow(1, { auto: true, permit }), { fresh: true });
     }
   }, 1200);
 }
@@ -336,11 +567,20 @@ function markUnplayable(track) {
   if (track.play) track.play.kind = "none";
 }
 
-/** Replace the queue and start at `start`. */
-export function playQueue(tracks, start = 0, { albumArt = null } = {}) {
+/**
+ * Replace the queue and start at `start`, shuffled where shuffle says, once
+ * the start gate lets it (R1): refused, nothing changes.
+ */
+export function playQueue(tracks, start = 0, { albumArt = null, shuffle } = {}) {
+  readerAction();
+  requestStart((permit) => playQueueNow(tracks, start, { albumArt, shuffle, permit }));
+}
+
+function playQueueNow(tracks, start, { albumArt, shuffle, permit }) {
   init();
   state.queue = tracks.filter(Boolean).map((t) => ({ ...t }));
   state.albumArt = albumArt;
+  if (shuffle !== undefined) state.shuffle = !!shuffle;
   state.skipped = 0;
   state.error = "";
   reshuffle();
@@ -354,7 +594,7 @@ export function playQueue(tracks, start = 0, { albumArt = null } = {}) {
     emit();
     return;
   }
-  load(idx, { autoplay: true });
+  load(idx, { autoplay: true, permit });
 }
 
 /** Append without disturbing what's playing. */
@@ -370,9 +610,20 @@ export function enqueue(tracks) {
 
 export function removeAt(i) {
   if (i < 0 || i >= state.queue.length) return;
+  readerAction();
   state.queue.splice(i, 1);
   if (i < state.index) state.index -= 1;
-  else if (i === state.index) load(clampIndex(state.index), { autoplay: state.playing });
+  else if (i === state.index) {
+    // The row that plays is gone: its successor is loaded stopped, and plays
+    // only as a start does, through the gate (S1).
+    const play = intent;
+    const next = clampIndex(state.index);
+    load(next, { autoplay: false });
+    if (play && next >= 0) {
+      intent = true;
+      continueStart((permit) => playNow(permit), { fresh: true });
+    }
+  }
   reshuffle();
   maybePrime();
   persist();
@@ -381,6 +632,8 @@ export function removeAt(i) {
 
 export function clearQueue() {
   playbackGen += 1;
+  intent = false;
+  readerAction();
   state.el?.pause();
   state.queue = [];
   state.index = -1;
@@ -407,12 +660,18 @@ function playableAt(i) {
   return t && resolvePlayable(t, audioURL) !== null;
 }
 
-function load(index, { autoplay }) {
+function load(index, { autoplay, permit }) {
   const track = state.queue[index];
   if (!track) return;
   const target = resolvePlayable(track, audioURL);
   if (!target) return;
   playbackGen += 1;
+  heldAt = null;
+  // A start's permit stays the playback's, through the tracks it advances
+  // to, until another start replaces it.
+  if (permit !== undefined) startPermit = permit;
+  // A load says whether this browser means to play what it loads (S2).
+  intent = !!autoplay;
   state.index = index;
   state.degraded = target.degraded;
   state.seekable = true;
@@ -423,7 +682,7 @@ function load(index, { autoplay }) {
   // playing something silently, which is the whole complaint.
   state.loading = !!autoplay;
   state.el.src = target.url;
-  state.el.load();
+  loadEl(state.el);
   updateMetadata(track);
   if (autoplay) {
     // A rejected play() outside a user gesture is NotAllowedError.
@@ -448,14 +707,7 @@ function load(index, { autoplay }) {
     // is guarded because the ordering is the only thing making it small,
     // and because a stale NotAllowedError would otherwise write "Press
     // play to start." about a track nobody is waiting on.
-    const at = playbackGen;
-    state.el.play().catch((e) => {
-      if (at !== playbackGen) return;
-      state.playing = false;
-      state.loading = false;
-      if (e?.name === "NotAllowedError") state.error = "Press play to start.";
-      emit();
-    });
+    playEl();
   }
   // Whatever the preloader was warming is for a track that is no longer
   // next — and if it IS this one, its bytes are in the HTTP cache, not
@@ -550,7 +802,7 @@ function cancelPrime() {
 function abandon(el) {
   if (!el?.getAttribute("src")) return;
   el.removeAttribute("src");
-  el.load();
+  loadEl(el);
 }
 
 function peek(delta) {
@@ -570,13 +822,27 @@ function peek(delta) {
   return state.queue[i];
 }
 
-export function advance(delta, { auto = false } = {}) {
+/**
+ * Move delta tracks and play there: a reader's advance (Next, Previous, a
+ * lock-screen control), which starts the element and asks the start gate
+ * (R1). The element's own end of a track and a skip past one that cannot
+ * play go on by themselves, through continueStart (S1).
+ */
+export function advance(delta) {
+  if (state.index < 0) return;
+  readerAction();
+  requestStart((permit) => advanceNow(delta, { permit }));
+}
+
+function advanceNow(delta, { auto = false, permit } = {}) {
   if (state.index < 0) return;
   if (auto && state.repeat === "one") {
     // Re-seek rather than reassigning src: no round-trip, no decode
     // restart.
+    if (permit !== undefined) startPermit = permit;
+    intent = true;
     state.el.currentTime = 0;
-    void state.el.play().catch(() => {});
+    playEl();
     return;
   }
   const order = state.shuffleOrder;
@@ -599,7 +865,7 @@ export function advance(delta, { auto = false } = {}) {
   const playable = nextPlayableFrom(nextIndex, delta);
   if (playable < 0) { stopAtEnd(); return; }
   if (!auto) state.skipped = 0;
-  load(playable, { autoplay: true });
+  load(playable, { autoplay: true, permit });
 }
 
 // nextPlayableFrom walks the queue from `start` in the direction of
@@ -646,17 +912,32 @@ function nextPlayableFrom(start, delta) {
 }
 
 function stopAtEnd() {
+  intent = false;
   state.playing = false;
   state.loading = false;
   state.el.pause();
   emit();
 }
 
+/** Pause at once, or play through the start gate (R1, V7). */
 export function toggle() {
   init();
   if (state.index < 0) return;
-  if (state.el.paused) void state.el.play().catch(() => {});
-  else state.el.pause();
+  if (resumeWait) {
+    // The browser's own resume waits on the gate: Play/Pause cancels it (W4).
+    readerAction();
+    state.loading = false;
+    emit();
+    return;
+  }
+  readerAction();
+  if (!state.el.paused) {
+    // Before the element's pause event, which a browser fires a task later.
+    intent = false;
+    state.el.pause();
+    return;
+  }
+  requestStart((permit) => playNow(permit));
 }
 
 export function seek(seconds) {
@@ -748,11 +1029,203 @@ function reshuffle() {
   state.shuffleOrder = order;
 }
 
+// ---- The bar's output (B634) ----
+//
+// The switch to the bridge's player and back (§7.3, §7.4). output.js
+// decides; these are the browser's halves of it.
+
+/**
+ * The browser's handover: its queue as listed (never a shuffle order), its
+ * current track, whether it plays and its position in whole seconds, read
+ * from the player's own state BEFORE the source is let go (G11), since
+ * letting go resets the element's position. A browser already suspended for
+ * the bridge (a pick of the bridge made again while the first is
+ * unconfirmed, R3) hands over what it held when it stopped.
+ */
+export function handover() {
+  const track = state.index >= 0 ? state.queue[state.index] : null;
+  const held = heldAt !== null;
+  return {
+    queue: state.queue.map((t) => ({ ...t })),
+    index: state.index,
+    playing: held ? heldPlaying : state.playing,
+    position: held ? heldAt : (state.el ? Math.floor(state.el.currentTime || 0) : 0),
+    pcm: !!track && !track.isDsd,
+  };
+}
+
+/** Whether the browser holds a queue to hand over. */
+export function hasQueue() {
+  return state.queue.length > 0;
+}
+
+/**
+ * Stop the browser for the bridge: everything that was pending against the
+ * track it played is now stale (a failure probe, a play rejection, the
+ * restored position's seek: M3, P6), its source is let go, and the saved
+ * queue keeps the position the handover read, not the element's reset one.
+ */
+export function suspend(h) {
+  playbackGen += 1;
+  intent = false;
+  readerAction();
+  heldAt = h && h.position > 0 ? h.position : 0;
+  heldPlaying = !!h?.playing;
+  state.el?.pause();
+  state.playing = false;
+  state.loading = false;
+  abandon(state.el);
+  cancelPrime();
+  persist();
+  emit();
+}
+
+/**
+ * Load the track at index and, for a position, seek the element there
+ * before it plays, so nothing of the track's start is heard (§7.4). A play
+ * the metadata defers asks the start's permit again just before it (V4):
+ * a newer pick, or a state showing the bridge playing since, plays nothing.
+ */
+function loadAt(index, { autoplay, at, permit }) {
+  if (!(at > 0)) {
+    load(index, { autoplay, permit });
+    return;
+  }
+  load(index, { autoplay: false, permit });
+  intent = !!autoplay;
+  const mine = playbackGen;
+  state.loading = !!autoplay;
+  state.el.addEventListener("loadedmetadata", function once() {
+    state.el.removeEventListener("loadedmetadata", once);
+    if (mine !== playbackGen) return;
+    if (Number.isFinite(state.el.duration)) state.el.currentTime = Math.min(at, state.el.duration);
+    if (!autoplay) return;
+    if (permit && !permit()) {
+      // Refused, it ends what this browser meant to play (round 4, T2).
+      intent = false;
+      state.playing = false;
+      state.loading = false;
+      emit();
+      return;
+    }
+    // A start let go on where no player was offered holds no permit: its
+    // deferred play asks the gate as it is now, so a player offered since
+    // that plays refuses it (round 4, W9).
+    if (permit === null) {
+      continueStart((p) => {
+        startPermit = p;
+        playEl();
+      }, { fresh: true });
+      return;
+    }
+    playEl();
+  });
+  emit();
+}
+
+/**
+ * The browser's resume of its own queue at the position it read before it
+ * stopped: called only on a barrier's done answered now (§3.2, G1), with
+ * its permit.
+ */
+export function resume(h, permit) {
+  init();
+  if (!h || h.index < 0 || !state.queue[h.index]) return;
+  loadAt(h.index, { autoplay: !!h.playing, at: h.pcm ? h.position : 0, permit });
+}
+
+/**
+ * The browser takes the bridge's queue (a switch-out's handover): its
+ * tracks, the selected one current and, for PCM, its position; it plays
+ * only where play says, which output.js decides on a barrier's done, with
+ * its permit. A selected track this browser cannot play stays shown,
+ * paused, with its reason, and Next moves to one it plays (§7.4).
+ */
+export function take(h, play, permit) {
+  init();
+  playbackGen += 1;
+  intent = false;
+  readerAction();
+  heldAt = null;
+  state.queue = (h?.queue || []).filter(Boolean).map((t) => ({ ...t }));
+  state.skipped = 0;
+  state.error = "";
+  reshuffle();
+  const idx = h && h.index >= 0 && h.index < state.queue.length ? h.index : clampIndex(0);
+  const track = state.queue[idx];
+  if (!track) {
+    state.index = -1;
+    persist();
+    emit();
+    return;
+  }
+  if (!resolvePlayable(track, audioURL)) {
+    state.index = idx;
+    state.playing = false;
+    state.loading = false;
+    abandon(state.el);
+    state.error = `"${track.title || track.path}" is not playable in this browser.`;
+    updateMetadata(track);
+    persist();
+    emit();
+    return;
+  }
+  // The position where the handover has one: PCM's, which the element seeks
+  // to before it plays; a DSD track's FLAC sidecar is seekable here too.
+  loadAt(idx, { autoplay: !!play, at: h.position > 0 ? h.position : 0, permit });
+}
+
+/**
+ * Start what the browser holds: on a barrier's done (G8), with its permit,
+ * or for a toggle's play the start gate let through (R1).
+ */
+export function start(permit) {
+  init();
+  playNow(permit);
+}
+
+function playNow(permit) {
+  if (state.index < 0 || !state.queue[state.index]) return;
+  intent = true;
+  if (!state.el.getAttribute("src")) {
+    loadAt(state.index, { autoplay: true, at: heldAt || 0, permit });
+    return;
+  }
+  if (permit !== undefined) startPermit = permit;
+  playEl();
+}
+
+/**
+ * The MediaSession while an output is chosen: the browser's handlers,
+ * metadata and playback state with this browser, and none of them with the
+ * bridge's player, whose sound is not this page's (§7.5).
+ */
+export function setMediaSession(active) {
+  sessionActive = !!active;
+  const ms = navigator.mediaSession;
+  if (!ms) return;
+  if (!sessionActive) {
+    for (const action of SESSION_ACTIONS) {
+      try { ms.setActionHandler(action, null); } catch { /* unsupported action */ }
+    }
+    ms.metadata = null;
+    ms.playbackState = "none";
+    return;
+  }
+  wireMediaSession();
+  const track = state.index >= 0 ? state.queue[state.index] : null;
+  if (track) updateMetadata(track);
+  ms.playbackState = state.playing ? "playing" : "paused";
+}
+
 // ---- MediaSession ----
+
+/** Every action the browser sets a handler for. */
+const SESSION_ACTIONS = ["play", "pause", "previoustrack", "nexttrack", "stop", "seekto", "seekbackward", "seekforward"];
 
 function wireMediaSession() {
   const ms = navigator.mediaSession;
-  if (!ms) return;
+  if (!ms || !sessionActive) return;
   const set = (action, fn) => {
     try { ms.setActionHandler(action, fn); } catch { /* unsupported action */ }
   };
@@ -768,7 +1241,7 @@ function wireMediaSession() {
 
 function updateMetadata(track) {
   const ms = navigator.mediaSession;
-  if (!ms || !window.MediaMetadata) return;
+  if (!ms || !window.MediaMetadata || !sessionActive) return;
   const artwork = state.albumArt ? [{ src: state.albumArt, sizes: "500x500", type: "image/jpeg" }] : [];
   ms.metadata = new MediaMetadata({
     title: track.title || track.path,
@@ -779,7 +1252,7 @@ function updateMetadata(track) {
 }
 
 function setSessionState(s) {
-  if (navigator.mediaSession) navigator.mediaSession.playbackState = s;
+  if (navigator.mediaSession && sessionActive) navigator.mediaSession.playbackState = s;
 }
 
 // Throttled to ~1 Hz: spamming setPositionState makes some OS widgets
@@ -805,9 +1278,12 @@ function updatePositionState() {
 
 function persist() {
   try {
+    // A suspended browser keeps the position its handover read: its
+    // element's was reset when the source was let go (§7.3, step 1).
+    const at = heldAt !== null ? heldAt : (state.el ? state.el.currentTime : 0);
     sessionStorage.setItem(STORE_KEY, JSON.stringify({
       queue: state.queue, index: state.index, shuffle: state.shuffle,
-      repeat: state.repeat, at: state.el ? state.el.currentTime : 0,
+      repeat: state.repeat, at,
       albumArt: state.albumArt,
     }));
   } catch { /* private mode / quota — playback still works */ }
@@ -819,6 +1295,8 @@ function restore() {
     saved = JSON.parse(sessionStorage.getItem(STORE_KEY) || "null");
   } catch { return; }
   if (!saved || !Array.isArray(saved.queue) || saved.queue.length === 0) return;
+  // Restored paused: nothing here means to play until the reader's Play.
+  intent = false;
   state.queue = saved.queue;
   state.shuffle = !!saved.shuffle;
   state.repeat = saved.repeat || "off";
@@ -830,8 +1308,13 @@ function restore() {
   if (!target) return;
   state.index = idx;
   state.el.src = target.url;
+  // Generation-guarded, as every continuation of playback is: a switch of
+  // the bar's output, or any later load, makes this seek stale, and it must
+  // not seek another track to this one's position (P6).
+  const mine = playbackGen;
   state.el.addEventListener("loadedmetadata", function once() {
     state.el.removeEventListener("loadedmetadata", once);
+    if (mine !== playbackGen) return;
     if (saved.at > 0 && Number.isFinite(state.el.duration)) state.el.currentTime = saved.at;
   });
   updateMetadata(track);

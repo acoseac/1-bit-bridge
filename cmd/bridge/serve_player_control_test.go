@@ -74,6 +74,8 @@ type ctlOptions struct {
 	// store, when set, is the library index the control reads, over the
 	// rig's.
 	store func(controlStore) controlStore
+	// now, when set, is the control's clock (consoleControlWiring.Now).
+	now func() time.Time
 }
 
 // ctlBackend is the stand-in with the player's facts and a test tone's
@@ -235,7 +237,7 @@ func newCtlRig(t *testing.T, o ctlOptions) *ctlRig {
 		cs = o.store(store)
 	}
 	r.c = newConsoleControl(consoleControlWiring{Plan: plan, Player: r.p, View: r.view, Boot: o.boot, Live: o.live, Store: cs, Hosts: inv,
-		GOOS: "linux", Seams: seams})
+		GOOS: "linux", Seams: seams, Now: o.now})
 	if o.dlna != nil {
 		r.c.setDLNA(o.dlna)
 	}
@@ -935,16 +937,12 @@ func TestACancelledPreparationLooksUpNothingMoreAndSendsNothing(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			returned := make(chan struct{})
-			var once sync.Once
-			hook := func() {
-				once.Do(func() {
-					cancel()
-					select {
-					case <-returned:
-					case <-time.After(10 * time.Second):
-					}
-				})
-			}
+			// The hook's wait for the request's return is the case's premise
+			// (its operation's unsent steps ended before the lookup answers):
+			// a request that never returns fails the case, never lets it go
+			// on without it (L4).
+			premise := make(chan string, 1)
+			hook := cancelHook(t, cancel, returned, premise)
 			r := newCtlRig(t, ctlOptions{store: func(cs controlStore) controlStore { return lookupStore{cs, &n, &armed, hook} }})
 			wantRecord(t, "the first replace", r.replace(paths[:1], 0, 0, false), admin.PlayerOpDone, "", "")
 			before := r.refs()
@@ -958,19 +956,7 @@ func TestACancelledPreparationLooksUpNothingMoreAndSendsNothing(t *testing.T) {
 				}
 				close(returned)
 			}()
-			var rec *admin.PlayerRecord
-			for rec == nil {
-				wake := r.c.Wake()
-				if rb := r.c.Operation(r.c.epoch, r.tab, op.Seq); rb.Record != nil && rb.Record.Status != admin.PlayerOpRunning {
-					rec = rb.Record
-					break
-				}
-				select {
-				case <-wake:
-				case <-serveGiveUp(t):
-					t.Fatal("the cancelled operation never ended")
-				}
-			}
+			rec := readBackEnded(t, r, op.Seq, premise)
 			if rec.Status != admin.PlayerOpCancelled || rec.Sent != 0 || len(rec.LeftOut) != 0 || n.Load() != 1 {
 				t.Fatalf("the operation: %s, sent %d, left out %v, %d lookups; want cancelled, nothing sent or left out, the one lookup before its end",
 					rec.Status, rec.Sent, rec.LeftOut, n.Load())
@@ -1623,6 +1609,7 @@ func TestANewerOperationEndsTheOldersUnsentSteps(t *testing.T) {
 			once.Do(func() { close(at); <-release })
 		}
 	}
+	behind := waitsBehind(r.c, opKindTransport)
 	replaced := make(chan admin.PlayerAnswer, 1)
 	go func() { replaced <- r.replace(r.paths(), 0, 0, true) }()
 	<-at
@@ -1630,7 +1617,7 @@ func TestANewerOperationEndsTheOldersUnsentSteps(t *testing.T) {
 	go func() {
 		newer <- r.command(admin.PlayerCmdRepeat, func(c *admin.PlayerCommand) { c.On = true; c.At = "" })
 	}()
-	waitEnded(t, r.c, opKindTransport)
+	reached(t, behind, "the newer operation's wait for the older replace")
 	close(release)
 	a := <-replaced
 	if a.Record == nil || a.Record.Status != admin.PlayerOpCancelled || a.Record.Sent != 2 {
@@ -1643,27 +1630,6 @@ func TestANewerOperationEndsTheOldersUnsentSteps(t *testing.T) {
 	if r.eng.Snapshot().Len() != 1 {
 		t.Fatalf("the queue holds %d, want the older one's one insert", r.eng.Snapshot().Len())
 	}
-}
-
-// waitEnded waits until the operation the control admitted last is the newer
-// one, of kind: the older ones' unsent steps are ended by then, in the same
-// admission.
-func waitEnded(t *testing.T, c *consoleControl, kind string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		c.mu.Lock()
-		var last string
-		if n := len(c.recent); n > 0 {
-			last = c.recent[n-1].rec.Kind
-		}
-		c.mu.Unlock()
-		if last == kind {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("the newer operation (%s) was never admitted", kind)
 }
 
 // TestALostReplaceHeldBetweenStepsThenAnotherPickNeverPlaysBoth pins C1's
@@ -1696,9 +1662,10 @@ func TestALostReplaceHeldBetweenStepsThenAnotherPickNeverPlaysBoth(t *testing.T)
 	if held.Record == nil || held.Record.Status != admin.PlayerOpRunning {
 		t.Fatalf("the replace held past the handler's wait answered %+v, want running", held.Record)
 	}
+	behind := waitsBehind(r.c, opKindSwitchOut)
 	switched := make(chan admin.PlayerAnswer, 1)
 	go func() { switched <- r.switchOut(true) }()
-	waitEnded(t, r.c, opKindSwitchOut)
+	reached(t, behind, "the switch-out's wait for the lost replace")
 	free()
 	a := <-switched
 	wantRecord(t, "the switch-out", a, admin.PlayerOpDone, "", "")
@@ -1765,6 +1732,7 @@ func TestAStepAStopOvertookInFlightReachesTheEngineBeforeTheSwitchOutsPause(t *t
 					waitsOnce.Do(func() { close(waits) })
 				}
 			}
+			behind := waitsBehind(r.c, opKindSwitchOut)
 			r.c.seams.afterFinal = func(kind string) {
 				if kind == opKindSwitchOut {
 					waitsOnce.Do(func() { close(waits) })
@@ -1806,7 +1774,7 @@ func TestAStepAStopOvertookInFlightReachesTheEngineBeforeTheSwitchOutsPause(t *t
 			switched := make(chan admin.PlayerAnswer, 1)
 			if tc.switchWhileHeld {
 				go func() { switched <- r.switchOut(false) }()
-				waitEnded(t, r.c, opKindSwitchOut)
+				reached(t, behind, "the switch-out's wait for the older operations")
 			}
 			if first != nil {
 				freeStop()
@@ -2142,9 +2110,10 @@ func TestASwitchOutWaitingForAClosedEnginesFactsHearsItsEnd(t *testing.T) {
 		wantRecord(t, "a replace", r.replace(r.paths(), 0, 0, true), admin.PlayerOpDone, "", "")
 		r.stopEngine()
 		t.Cleanup(func() { r.p.noteClosed(playerClosedFacts{Ended: true}) })
+		waiting := waitsForClosedFacts(r.c)
 		first := make(chan admin.PlayerAnswer, 1)
 		go func() { first <- r.switchOut(true) }()
-		waitEnded(t, r.c, opKindSwitchOut)
+		reached(t, waiting, "the switch-out's wait for the closed engine's facts")
 		return r, first
 	}
 	t.Run("a newer operation", func(t *testing.T) {

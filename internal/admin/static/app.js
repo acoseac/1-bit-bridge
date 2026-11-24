@@ -6097,7 +6097,38 @@ let activeEventSource = null;
 let lastEventSourceSeenAt = 0;
 const SSE_RECONNECT_IDLE_THRESHOLD_MS = 60 * 1000;
 
+// The serial of the stream's connections, for the player bar (B634). Every
+// open is a connection of its own, a native reconnection of one EventSource
+// included, and a connection's first player frame is the only one the bar
+// takes a new epoch from; a frame of a connection it has left is dropped.
+// handlePlayerStream hands the bar each open and each error with its serial,
+// and each player frame with the serial it arrived on, and drops whatever a
+// retired EventSource still dispatches (recycleEventStream replaces it).
+let playerStreamSerial = 0;
+
+function playerStreamEvent(es, kind) {
+  if (es !== activeEventSource) return;
+  if (kind === "open") {
+    playerStreamSerial += 1;
+    es.bridgeSerial = playerStreamSerial;
+  }
+  window.dispatchEvent(new CustomEvent("bridge:player-stream", {
+    detail: { kind, serial: es.bridgeSerial || 0 },
+  }));
+}
+
+function playerFrame(es, data) {
+  if (es !== activeEventSource) return;
+  window.dispatchEvent(new CustomEvent("bridge:player", {
+    detail: { data, serial: es.bridgeSerial || 0 },
+  }));
+}
+
 function startEventStream() {
+  // A source replaced (recycleEventStream, a long sleep's restore) ends its
+  // connection: the bar hears it as an error of that connection, so it
+  // holds what another epoch says until the new connection's first frame.
+  if (activeEventSource) playerStreamEvent(activeEventSource, "error");
   // EventSource is a built-in browser API; no polyfill needed for
   // any iOS / desktop browser the admin console targets.
   const es = new EventSource("/api/events");
@@ -6121,10 +6152,14 @@ function startEventStream() {
   es.addEventListener("tailscale",   seen((e) => safeApply("tailscale",   e.data, renderTailscaleTile)));
   es.addEventListener("upscale",     seen((e) => safeApply("upscale",     e.data, applyUpscale)));
   es.addEventListener("analysis",    seen((e) => safeApply("analysis",    e.data, applyAnalysisStats)));
+  // The bridge's own player's state (B634): handed to the bar, which orders
+  // it by its epoch and revision, as a bridge:player window event.
+  es.addEventListener("player",      seen((e) => playerFrame(es, e.data)));
 
   es.onopen = () => {
     lastEventSourceSeenAt = Date.now();
     applyConnState("connected");
+    playerStreamEvent(es, "open");
   };
   // EventSource fires onerror on every transport hiccup AND between
   // reconnect attempts. Transient network blips → readyState === 0
@@ -6133,6 +6168,7 @@ function startEventStream() {
   // we surface "disconnected" instead of "reconnecting".
   es.onerror = () => {
     applyConnState(es.readyState === EventSource.CLOSED ? "disconnected" : "reconnecting");
+    playerStreamEvent(es, "error");
   };
 }
 

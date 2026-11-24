@@ -149,6 +149,13 @@ type controlSeams struct {
 	// admitted runs on a request's goroutine once its operation is admitted,
 	// before the operation's goroutine starts, with its kind.
 	admitted func(kind string)
+	// afterMember runs in a replace's or an append's checks once the
+	// library's membership of a track has answered, before the track's entry
+	// is built, with its path.
+	afterMember func(path string)
+	// awaitClosed runs on a switch-out's goroutine just before it waits for
+	// a closed engine's facts.
+	awaitClosed func()
 	// Bounds in place of production's, where set.
 	handlerWait, barrier, releaseGap, publishWait time.Duration
 }
@@ -283,6 +290,10 @@ func (c *consoleControl) Platform() string { return c.goos }
 func (c *consoleControl) Lists() bool { return c.plan.lists }
 
 func (c *consoleControl) now() time.Time { return c.clock() }
+
+// Clock is the control's clock now, the one that stamps a capture's at: what
+// GET now's X-Bridge-Clock says as its answer is sent (M1).
+func (c *consoleControl) Clock() time.Time { return c.now() }
 
 // handlerWait, publishWait, barrierBound and releaseGap are the control's
 // bounds.
@@ -924,7 +935,8 @@ func (o *operation) finishErr(err error) {
 // ended (a Stop has none to wait for: the engine takes it in its order of
 // arrival), and waits for o's end, or for the request's end or the handler's
 // wait, answering the record as it stands then. The request's end ends o's
-// steps not yet sent; neither ends its step in flight.
+// steps not yet sent; neither ends its step in flight. The control's stop
+// before o's body begins ends o unknown, its body never run.
 func (c *consoleControl) run(ctx context.Context, o *operation, prevs []*operation, body func(o *operation)) admin.PlayerAnswer {
 	if s := c.seams; s != nil && s.admitted != nil {
 		s.admitted(o.r.rec.Kind)
@@ -949,6 +961,17 @@ func (c *consoleControl) run(ctx context.Context, o *operation, prevs []*operati
 			case <-p.done:
 			case <-c.quit:
 			}
+		}
+		// The control's stop, asked once more whatever ended the wait (a
+		// predecessor's end can win a select its quit is ready in): an
+		// operation the stop ends before its first step sends nothing, its
+		// body never run, its record final as unknown, as every other end the
+		// stop makes is (M7).
+		select {
+		case <-c.quit:
+			o.finishAs(admin.PlayerOpUnknown, "")
+			return
+		default:
 		}
 		body(o)
 	}()
@@ -1212,8 +1235,10 @@ type prepared struct {
 // function), its reference (canonical, on the first host an Insert would
 // take, within the engine's 128 bytes) and its metadata (the ContentDirectory's
 // item, XML 1.0 text within the engine's 64 KiB). A track that fails is left
-// out with its word. o's unsent steps ended before a track is checked stop
-// the checks there: the preparation is cancelled, and holds nothing else.
+// out with its word. o's unsent steps ended before a track is checked, after
+// its membership has answered, or by the time the last track's checks are
+// through, stop the checks there: the preparation is cancelled, and holds
+// nothing else, no lookup an end cut short read as a track left out.
 func (c *consoleControl) prepare(ctx context.Context, o *operation, tracks []string) prepared {
 	var out prepared
 	if o.endedNow() {
@@ -1263,6 +1288,9 @@ func (c *consoleControl) prepare(ctx context.Context, o *operation, tracks []str
 			mctx, cancel := context.WithTimeout(ctx, controlLookupBound)
 			err := res.Member(mctx, id)
 			cancel()
+			if s := c.seams; s != nil && s.afterMember != nil {
+				s.afterMember(path)
+			}
 			if err != nil {
 				w := string(engine.ReasonOf(err))
 				if w == "" {
@@ -1271,9 +1299,21 @@ func (c *consoleControl) prepare(ctx context.Context, o *operation, tracks []str
 				checked[path] = verdict{word: w}
 				continue
 			}
+			// Member runs on a context the request's end does not end, so it
+			// answers as if nothing happened: an end that came meanwhile
+			// looks nothing more up (P5).
+			if o.endedNow() {
+				return prepared{cancelled: true}
+			}
 		}
 		e, word := c.entryFor(ctx, path, id, row, host)
 		checked[path] = verdict{e: e, word: word}
+	}
+	// An end that came inside the last lookup (its row's read, its
+	// membership) is seen before any result is read: a lookup it cut short
+	// answers an error or no row, which would read as a track left out (L1).
+	if o.endedNow() {
+		return prepared{cancelled: true}
 	}
 	for i, t := range tracks {
 		v := checked[t]
@@ -1979,6 +2019,9 @@ func (c *consoleControl) silenceWithoutEngine(o *operation, why string, take boo
 			return
 		}
 		t := time.NewTimer(wait)
+		if s := c.seams; s != nil && s.awaitClosed != nil {
+			s.awaitClosed()
+		}
 		select {
 		case <-c.p.closedKnown:
 		case <-t.C:

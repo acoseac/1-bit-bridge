@@ -1043,8 +1043,90 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
    * page, and the notice is neither. */
   .np-meta:has(.np-notice:not(:empty)) .np-sub { display: none; }
   .track { grid-template-columns: 2rem 1fr auto; }
-  .track-meta, .track-dl { display: none; }
+  .track-meta, .track-dl, .track-dl-cell { display: none; }
+  /* The bridge's mode (B634): at 375px its transport (Previous, Play, Next,
+   * Stop: 182px) and its Queue, Output and Mute (112px) left the words'
+   * track 23px, and the 40px cover took all of it, so the title, the
+   * sub-line and every line the bridge says rendered 0px wide. The bridge
+   * paints no cover, and its Mute is disabled (its level is fixed), so both
+   * go: the cover's 40px and its 10px gap, and the Mute's 32px and its 8px
+   * gap, leave the words about 63px. */
+  .npbar[data-output="bridge"] .np-art,
+  .npbar[data-output="bridge"] .np-mute { display: none; }
 }
+
+/* ---- The bar's output (B634) ----------------------------------------
+ *
+ * The output button picks this browser or the bridge's own player. Its
+ * menu and the bridge's queue panel float above the bar as siblings of it,
+ * never inside it: the bar clips its children (overflow: hidden, for the
+ * rail's rounded edge), and a menu inside it would be cut off. */
+.np-btn-active { color: var(--accent); }
+.np-btn:disabled { opacity: .35; cursor: default; }
+.np-btn:disabled:hover { background: transparent; }
+/* The empty strip a box that offers its player shows with nothing chosen
+ * in the browser: the title says so, the output button is there, and the
+ * browser's transport, which has nothing to act on, is not. */
+.npbar-empty[data-output="browser"] .np-center { display: none; }
+.npbar-empty[data-output="browser"] .np-rail { display: none; }
+
+.np-menu, .np-queue {
+  position: fixed; right: 18px; z-index: 41;
+  bottom: calc(var(--bar-h) + 26px + env(safe-area-inset-bottom, 0px));
+  width: min(360px, calc(100vw - 36px));
+  padding: var(--space-3); border-radius: var(--radius);
+  background: var(--np-bg); color: var(--np-fg);
+  border: 1px solid var(--np-border); box-shadow: var(--elev-2), var(--elev-3);
+}
+.np-menu { display: flex; flex-direction: column; gap: var(--space-2); }
+.np-menu[hidden], .np-queue[hidden] { display: none; }
+.np-pick {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  min-width: 0; text-align: left; padding: 8px 10px; border-radius: 12px;
+  border: 1px solid transparent; background: transparent; color: inherit;
+  font: inherit; cursor: pointer;
+}
+.np-pick:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+.np-pick[aria-pressed="true"] { border-color: var(--accent); }
+.np-pick:disabled { opacity: .5; cursor: default; }
+.np-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.np-pick-name { font-weight: 600; font-size: 0.9rem; max-width: 100%; overflow-wrap: anywhere; }
+.np-pick-line { font-size: var(--text-xs); color: var(--np-muted); max-width: 100%; overflow-wrap: anywhere; }
+.np-pick-line:empty { display: none; }
+.np-menu-help { margin: 0; font-size: var(--text-xs); color: var(--np-muted); }
+
+.np-queue { width: min(440px, calc(100vw - 36px)); max-height: 50vh; overflow: auto; }
+.np-queue-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.np-queue-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--space-2); align-items: center; min-width: 0;
+}
+.np-queue-title {
+  min-width: 0; text-align: left; padding: 6px 8px; border: 0; border-radius: 8px;
+  background: transparent; color: inherit; font: inherit; font-size: 0.85rem; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.np-queue-title:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+.np-queue-title:disabled { cursor: default; }
+.np-queue-current .np-queue-title { color: var(--accent); font-weight: 600; }
+.np-queue-remove {
+  padding: 4px 6px; border: 0; background: transparent; color: var(--np-muted);
+  font: inherit; font-size: var(--text-xs); cursor: pointer;
+}
+.np-queue-remove:hover { color: var(--danger); }
+.np-queue-remove:disabled { opacity: .4; cursor: default; }
+.np-queue-empty { margin: 0; font-size: var(--text-xs); color: var(--np-muted); }
+
+/* A row's own Add, with the bridge's player chosen, beside its Download in
+ * that one cell, so the row keeps the columns TestTrackSubgridColumnsMatchTheRow
+ * counts. */
+.track-dl-cell { display: inline-flex; gap: var(--space-2); align-items: baseline; }
+.track-add {
+  padding: 0; border: 0; background: transparent; font: inherit; font-size: 0.78rem;
+  color: var(--fg-muted); cursor: pointer;
+}
+.track-add:hover { color: var(--accent); text-decoration: underline; }
+.track-add:disabled { opacity: .4; cursor: default; text-decoration: none; }
 
 /* Search field. Sits above the toolbar so it is present in every
  * section, not only on the search view — the whole point of a library
