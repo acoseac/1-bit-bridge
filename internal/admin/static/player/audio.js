@@ -969,7 +969,10 @@ export function toggle() {
     return;
   }
   readerAction();
-  if (!state.el.paused && !state.el.error) {
+  // A fetch the user aborted (code 1) fires no pause and is no failure: the
+  // bar's Pause still shown pauses, and Play over it once stopped is Play.
+  const failed = state.el.error && state.el.error.code !== 1;
+  if (!state.el.paused && !failed) {
     // Before the element's pause event, which a browser fires a task later;
     // the explicit Pause lets go of a start the gate holds, that event never.
     intent = false;

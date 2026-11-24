@@ -3287,6 +3287,33 @@ S.TestAFailureAfterARepeatOneReplayStartsANewStreak = async () => {
     [t.count(1200), s.error]);
 };
 
+S.TestAfterAnAbortTheButtonDoesWhatItShows = async () => {
+  // A fetch the user aborted after playback began (code 1) fires abort and
+  // no pause, so the bar still shows Pause: pressed, it pauses and asks the
+  // gate nothing; stopped, it shows Play, which starts through the gate.
+  const r = await gatedPlaying({ bar: true });
+  let asks = 0;
+  r.audio.setStartGate((run, o) => { asks += 1; r.out.gateStart(run, o); }, r.out.cancelStarts);
+  r.el.error = { code: 1 };
+  r.el.fire("abort");
+  await settle();
+  const pause = r.find("Pause");
+  check("after the abort the bar still shows Pause over a playing element", !!pause && !r.el.paused, [!!pause, r.el.paused]);
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  const plays = r.el.plays.length;
+  pause?.click();
+  await settle();
+  check("pressed, it pauses and asks the gate nothing", r.el.paused && asks === 0 && r.s.posts(ROUTES.switchOut).length === posts && r.el.plays.length === plays,
+    [r.el.paused, asks, r.s.posts(ROUTES.switchOut).length - posts, r.el.plays.slice(plays)]);
+  const play = r.find("Play");
+  check("stopped, it shows Play", !!play && !r.audio.snapshot().playing, [!!play, r.audio.snapshot().playing]);
+  const [asked, sent, played] = [asks, r.s.posts(ROUTES.switchOut).length, r.el.plays.length];
+  play?.click();
+  await settle();
+  check("and Play starts through the gate, a barrier of its own", asks === asked + 1 && r.s.posts(ROUTES.switchOut).length === sent + 1 && !r.el.paused && r.el.plays.length === played + 1,
+    [asks - asked, r.s.posts(ROUTES.switchOut).length - sent, r.el.paused, r.el.plays.slice(played)]);
+};
+
 S.TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo = async () => {
   // A row's start behind a held barrier, let go by the lock screen's Pause:
   // the browser's own play then takes that barrier, as it would take no

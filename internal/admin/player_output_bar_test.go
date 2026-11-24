@@ -793,6 +793,12 @@ func TestThreeFailuresInARowStopOnTheThirdThoughEachHadItsPlayEvent(t *testing.T
 // replay's failure schedules a skip as the first of a new streak.
 func TestAFailureAfterARepeatOneReplayStartsANewStreak(t *testing.T) { barScenario(t, 3) }
 
+// TestAfterAnAbortTheButtonDoesWhatItShows pins that after a fetch the user
+// aborted (code 1), which fires no pause, the bar's Pause, still shown,
+// pauses and asks the gate nothing, and its Play, shown once stopped,
+// starts through the gate.
+func TestAfterAnAbortTheButtonDoesWhatItShows(t *testing.T) { barScenario(t, 4) }
+
 // TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo pins that a start the lock
 // screen's Pause let go of holds no place behind its barrier: the browser's
 // own play then takes it and resumes what the browser held on its answer.
