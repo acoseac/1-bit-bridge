@@ -71,13 +71,53 @@ assertions before any control ran. Four controls, each red exactly where predict
   step comes before that check, so a request ended there is answered by the early check, with or
   without the fix.
 
-### Residual for PR 4b
+### Residuals for PR 4b
 
 - `StopCheck` with no check in the slot, on a backend with no DSD policy, answers `Policy()` read
   after the step that found the slot empty, not in it. It stays as it is: `Policy()` takes
   `policyMu`, and reading it under `b.mu` is not shown to keep the lock order. Such a backend admits
   no check, so nothing a check publishes can come between the two; PR 4b's route decides whether it
   needs that answer from the step.
+- A test that can fail by timing: `slotAsIs` (`internal/player/playback/dsd_check_gate_test.go`)
+  reads the backend's goroutine count as soon as a check is refused, while the admission's reading,
+  which runs on a goroutine the backend counts, gives that count back only once it has sent its
+  answer. Under `-race`, `TestTheSlotsBoundKeepsTheRefusalsOrder`'s "the bound and the probe's end
+  ready together" failed once in 100 runs of the test (32 repetitions each), "1 goroutines and 0
+  writes counted", and passed the other 99; a 50 ms sleep after that send, given by `-overlay`
+  with nothing tracked edited, makes it fail every time. The count is right (`Backend.Wait` waits
+  for that goroutine): the helper should join the backend's goroutines, bounded, before it reads
+  the count, wherever a refusal comes after a reading. The path is not this change's: a reading
+  that succeeded returns before the lines it adds.
+
+### Runs
+
+On the build host, `go1.27.3` with the release tags, `TMPDIR` under the worktree's `.tmp`:
+
+- The gate, in one build slot session at `79af2ff5`: `make fmt` (nothing rewritten), `make vet`,
+  `make test` (`-race -p 4 -count=1 ./...`: 2,127 s, 93 packages ok, none failed; cmd/bridge
+  1,955 s, internal/manifest 1,617 s, internal/admin 1,409 s), `make build-all` (25 s), `make
+  docs-check`, and `go vet ./...` for GOOS linux, darwin and windows: each exit 0, the tree clean
+  after.
+- Before it, alone: the playback and alsapcm packages whole, without the race detector (the gate
+  ran them with it), the changed tests by name, and cmd/bridge's source guards
+  (`TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`, `TestNoBlankKeepers`,
+  `TestEveryBackgroundGoroutineDrainsOnCleanup`) with `make docs-check` over the records.
+- `-race -count=50` at `79af2ff5`, pinned to half the host's cores, each lane alone: five alsapcm
+  tests (250 passes: the new test, `TestTheAdmissionsReadingKeepsTheRefusalsOrder`,
+  `TestAStopBeforeTheSlotEndsTheAdmission`, `TestAStoppedAdmissionsQueuedReadingReadsNothing` and
+  `TestTheCheckAdmitsOnlyWhatTheSetPlays`) and three playback tests
+  (`TestAStopBeforeTheSlotIsTakenEndsTheAdmission`, `TestTheSlotsBoundKeepsTheRefusalsOrder` and
+  `TestAnEndedRequestAdmitsNothing`): 149 passes of 150, the one failure the residual above, then
+  150 of 150 in a second lane of 50.
+- Both native-integration overlays as CI runs them, at `79af2ff5`: 16 `TestNativeIntegration` tests
+  in cmd/bridge and 33 in playback passed, every one CI requires among them.
+- `scripts/qualification-version -base da3c1098 -head HEAD`, the candidate committed: OK, at
+  version 59.
+- The iOS fixture exporters (manifest, API, cmd/bridge, `-p=1`) at `79af2ff5` and at the base: the
+  same six files, three byte-identical (`dsd_outputs.json`, `dsd_dac_outputs.json`,
+  `dsd_choice_answers.json`) and the other three identical once their clock times are masked;
+  against the export before this change, the same but for the provenance's commit.
+  `dsd_check_answers.json` is PR 4b's. No golden was written.
 
 ### What is owed
 
