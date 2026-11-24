@@ -3547,6 +3547,74 @@ S.TestAfterAnAbortThePausePressedShowsPlayAtOnce = async () => {
     [r.el.paused, r.audio.snapshot().index, r.el.plays.slice(plays)]);
 };
 
+S.TestAStopLetsGoOfAStartWaitingForTheEpoch = async () => {
+  // No frame yet: a row's start waits for the epoch. The lock screen's Stop
+  // clears the queue and lets the start go: the first frame sends no barrier
+  // and plays nothing, and the queue stays empty. Play on it does nothing, and
+  // a row played after it plays.
+  const r = await pageRig({ gate: true, noFrame: true, saved: { queue: [flac(1), flac(2)], index: 0, at: 0, shuffle: false, repeat: "off" }, latest: pub({ revision: 2, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 3 }), pub({ revision: 3, silent: true })));
+  r.audio.playQueue([flac(7), flac(8)], 0);
+  await settle();
+  check("the row's start waits for the epoch, said, nothing sent", r.out.view().line === WORDS.startWaits && r.s.posts().length === 0, [r.out.view().line, r.s.posts()]);
+  check("the lock screen's Stop is set", typeof session.handlers.stop === "function", typeof session.handlers.stop);
+  session.handlers.stop();
+  await settle();
+  r.out.streamOpen(1);
+  r.frame(pub({ revision: 2, silent: true }));
+  await settle();
+  let s = r.audio.snapshot();
+  check("the first frame then sends no barrier and nothing plays, the queue empty",
+    r.s.posts(ROUTES.switchOut).length === 0 && r.el.plays.length === 0 && r.el.paused && s.queue.length === 0 && s.index === -1 && !s.track,
+    [r.s.posts(ROUTES.switchOut).length, r.el.plays, r.el.paused, s.queue.length, s.index]);
+  r.c.advance(START_WAIT_MS);
+  r.out.tick();
+  await settle();
+  check("no wait is left to time out", r.out.view().line !== WORDS.startWaits && r.out.view().line !== WORDS.startUnanswered, r.out.view().line);
+  session.handlers.play();
+  await settle();
+  check("Play on the cleared queue does nothing", r.s.posts(ROUTES.switchOut).length === 0 && r.el.plays.length === 0 && r.audio.snapshot().index === -1,
+    [r.s.posts(ROUTES.switchOut).length, r.el.plays, r.audio.snapshot().index]);
+  r.audio.playQueue([flac(9)], 0);
+  await settle();
+  s = r.audio.snapshot();
+  check("a row played after the Stop plays, through a barrier of its own",
+    r.s.posts(ROUTES.switchOut).length === 1 && !r.el.paused && r.el.plays.length === 1 && /09\.flac/.test(r.el.plays[0] || "") && s.track?.path === "Album/09.flac",
+    [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.el.plays, s.track?.path]);
+};
+
+S.TestAStopLetsGoOfAStartWaitingOnItsBarrier = async () => {
+  // A row clicked beside a silent bridge waits on its barrier, held; the lock
+  // screen's Stop clears the queue and lets the start go: the barrier's answer
+  // plays nothing and the queue stays empty. Play on it does nothing, and a
+  // row played after it plays.
+  const r = await gatedPlaying();
+  const held = gate();
+  r.hold = held;
+  r.audio.playQueue([flac(7), flac(8)], 0);
+  await settle();
+  check("the row waits on its barrier", r.s.posts(ROUTES.switchOut).length === 2, r.s.posts(ROUTES.switchOut).length);
+  const plays = r.el.plays.length;
+  session.handlers.stop();
+  await settle();
+  held.open();
+  await settle();
+  let s = r.audio.snapshot();
+  check("the barrier's answer plays nothing, the queue empty",
+    r.el.plays.length === plays && r.el.paused && !s.playing && s.queue.length === 0 && s.index === -1 && !s.track,
+    [r.el.plays.slice(plays), r.el.paused, s.playing, s.queue.length, s.index]);
+  session.handlers.play();
+  await settle();
+  check("Play on the cleared queue does nothing", r.s.posts(ROUTES.switchOut).length === 2 && r.el.plays.length === plays && r.audio.snapshot().index === -1,
+    [r.s.posts(ROUTES.switchOut).length, r.el.plays.slice(plays), r.audio.snapshot().index]);
+  r.audio.playQueue([flac(9)], 0);
+  await settle();
+  s = r.audio.snapshot();
+  check("a row played after the Stop plays, through a barrier of its own",
+    r.s.posts(ROUTES.switchOut).length === 3 && !r.el.paused && r.el.plays.length === plays + 1 && /09\.flac/.test(r.el.plays.at(-1) || "") && s.track?.path === "Album/09.flac",
+    [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.el.plays.slice(plays), s.track?.path]);
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });

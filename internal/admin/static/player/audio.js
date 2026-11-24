@@ -73,8 +73,9 @@ let heldPlaying = false;
 // toggle's play, an advance a reader asks for, the MediaSession's handlers,
 // which call those), and runs only as it says, handed a permit that a later
 // play of that start asks again (V4). A pause never asks it; the reader's
-// explicit Pause (the bar's, the lock screen's) lets go of the starts it
-// holds, through startCancel, set beside it (output.js's cancelStarts).
+// explicit Pause (the bar's, the lock screen's) and the lock screen's Stop
+// let go of the starts it holds, through startCancel, set beside it
+// (output.js's cancelStarts).
 let startGate = null;
 let startCancel = null;
 // The continuation gate (round 3, S1, Q7): output.js's gateContinue, set by
@@ -678,6 +679,9 @@ export function clearQueue() {
   intent = false;
   readerAction();
   state.el?.pause();
+  // A Stop lets go of the starts the gate holds, as the explicit Pause does:
+  // a row waiting for the epoch or behind its barrier plays nothing.
+  startCancel?.();
   state.queue = [];
   state.index = -1;
   state.playing = false;

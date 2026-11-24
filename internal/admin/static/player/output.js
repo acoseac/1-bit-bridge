@@ -961,7 +961,7 @@ export function createOutput(env) {
   // a start the reader asked for, which supersedes it. Whatever asks may hand
   // a drop, which every way that never runs it calls, once: a refusal, a
   // start that replaced it, a pick, the wait's end (round 4, W6), an explicit
-  // Pause (cancelStarts).
+  // Pause or a Stop (cancelStarts).
   function gateStart(run, { continuation = false, drop } = {}) {
     if (offered === false) {
       run(null);
@@ -1032,7 +1032,7 @@ export function createOutput(env) {
     }
     // One barrier at a time: a start asked while one is out replaces the
     // start it runs; a continuation replaces only another continuation, or
-    // a start an explicit Pause let go of (cancelStarts).
+    // a start an explicit Pause or a Stop let go of (cancelStarts).
     if (startPending) {
       if (!continuation || startPending.continuation || !startPending.run) {
         const replaced = { drop: startPending.drop };
@@ -1057,10 +1057,11 @@ export function createOutput(env) {
     void barrier((permit) => pending.run(permit), release, () => dropOf(pending), () => !pending.run);
   }
 
-  // cancelStarts is the reader's explicit Pause (audio.js's pauseNow and the
-  // bar's Pause; never the element's pause event): a start waiting for the
-  // epoch is let go, sending nothing, and one behind the barrier in flight
-  // runs nothing when it answers, unless a start asked since takes its place.
+  // cancelStarts is the reader's explicit Pause and Stop (audio.js's pauseNow,
+  // the bar's Pause and the lock screen's, and clearQueue, the lock screen's
+  // Stop; never the element's pause event): a start waiting for the epoch is
+  // let go, sending nothing, and one behind the barrier in flight runs nothing
+  // when it answers, unless a start asked since takes its place.
   function cancelStarts() {
     const w = waiting;
     waiting = null;
@@ -1093,8 +1094,9 @@ export function createOutput(env) {
   // state newer than its silence that shows the bridge playing, starts
   // nothing (R3, R4). Every end calls release first (S3, Q9), and every end
   // that starts nothing calls drop (round 4, W6); one whose start an
-  // explicit Pause let go of (idle) ends quietly: this browser's phase, its
-  // unconfirmed line gone, nothing started and nothing said of the start.
+  // explicit Pause or a Stop let go of (idle) ends quietly: this browser's
+  // phase, its unconfirmed line gone, nothing started and nothing said of the
+  // start.
   function barrier(start, release, drop, idle) {
     const quiet = () => {
       phase = PHASE.browser;

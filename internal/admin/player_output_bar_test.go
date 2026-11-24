@@ -856,3 +856,16 @@ func TestTheBrowsersOwnResumeAPauseOvertookAsksNothingWhereNoPlayerIsOffered(t *
 // gate once, plays the track the bar showed, and its intent outlives that
 // event: the track's end plays the next track.
 func TestAfterAnAbortThePausePressedShowsPlayAtOnce(t *testing.T) { barScenario(t, 4) }
+
+// TestAStopLetsGoOfAStartWaitingForTheEpoch pins that the lock screen's Stop
+// lets go of a row's start waiting for the epoch: the first frame sends no
+// barrier and plays nothing, the queue stays empty, no wait is left to time
+// out, Play on the cleared queue does nothing, and a row played after it
+// plays.
+func TestAStopLetsGoOfAStartWaitingForTheEpoch(t *testing.T) { barScenario(t, 6) }
+
+// TestAStopLetsGoOfAStartWaitingOnItsBarrier pins that the lock screen's Stop
+// lets go of a row's start waiting on its barrier: the barrier's answer plays
+// nothing, the queue stays empty, Play on it does nothing, and a row played
+// after it plays.
+func TestAStopLetsGoOfAStartWaitingOnItsBarrier(t *testing.T) { barScenario(t, 4) }
