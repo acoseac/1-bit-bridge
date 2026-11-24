@@ -508,6 +508,8 @@ func (b *Backend) decideChoice(ctx context.Context, p *DSDPolicy, w stateWrite, 
 			return d
 		}
 		d.outcome = ChoiceBadRequest
+	case errors.Is(err, errCheckNotAnswerable):
+		d.outcome = ChoiceCheckNotAnswerable
 	case errors.Is(err, dsdstate.ErrNotWritable):
 		j.why = "the player's DSD state file is refused in memory"
 		d.outcome, d.err = ChoiceStateUnreadable, err

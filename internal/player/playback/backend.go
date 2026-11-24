@@ -245,6 +245,11 @@ type Seams struct {
 	// CheckPreparing runs on the DSD check's goroutine before the chime's
 	// build, given the check's context (Check, B728 B12). It may block.
 	CheckPreparing func(ctx context.Context)
+	// CheckEnded runs on the DSD check's goroutine once its end is published
+	// and its slot given back (endCheck), before its cause and its line;
+	// CheckStopAnswering on StopCheck's caller once its wait is over, before
+	// it reads its answer. Each may block, and neither may call the backend.
+	CheckEnded, CheckStopAnswering func()
 }
 
 // reconcilingPermission is the ReconcilingPermission seam.

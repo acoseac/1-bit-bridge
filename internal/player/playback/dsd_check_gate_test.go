@@ -3,12 +3,14 @@ package playback
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -594,11 +596,13 @@ func reached(t *testing.T, ch <-chan struct{}, what string) {
 // record as they were, wherever its request ends: before Check, the slot
 // free (where the read side names no DAC it was refused dac_unavailable) or the
 // console's tone in it, which it leaves playing, never preempted; during its
-// reading of the policy, the tone in the slot, asked under the backend's lock
-// before the slot is looked at; and as its wait for the slot ends, the probe
-// it waited for ended or its bound passed with the request's end ready beside
-// it: the wait's arming is held until both are ready, and each such case runs
-// in rounds, its select picking at random among the cases ready.
+// reading of the policy, the tone in the slot, answered while that reading is
+// still held, which goes on counted and, let go, takes no slot (B728 B12 PR 4a
+// round 2: it answered only once the reading ended); and as its wait for the
+// slot ends, the probe it waited for ended or its bound passed with the
+// request's end ready beside it: the wait's arming is held until both are
+// ready, and each such case runs in rounds, its select picking at random among
+// the cases ready.
 func TestAnEndedRequestAdmitsNothing(t *testing.T) {
 	ended := func() context.Context {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -662,8 +666,12 @@ func TestAnEndedRequestAdmitsNothing(t *testing.T) {
 		ch := askCheck(b, ctx, req)
 		reached(t, in, "the check's reading of the policy held in the box")
 		cancel()
-		letGo()
 		refusedEnded(t, answered(t, ch), "a request ended during its reading")
+		if n, _ := b.Running(); n != 1 {
+			t.Errorf("a request answered during its reading left %d goroutines counted; want the reading's own", n)
+		}
+		letGo()
+		joinedWithin(t, b, "the reading let go")
 		toneKept(t, b, tn, "a request ended during its reading")
 	})
 	for _, c := range []struct {
@@ -816,6 +824,161 @@ func TestTheChecksCountIsGivenBackOnEveryWayOut(t *testing.T) {
 		}
 		if n, w := b.Running(); n != 0 || w != 0 {
 			t.Errorf("an admitted check's run ended left %d goroutines and %d writes counted", n, w)
+		}
+	})
+}
+
+// joinedWithin waits for every goroutine b started, under the watchdog.
+func joinedWithin(t *testing.T, b *Backend, what string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := b.Wait(ctx); err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
+// firmwareBox is fixtureBox whose unit reports the firmware bcd holds once it
+// is set: a firmware change, which makes the read side's token another.
+type firmwareBox struct {
+	fixtureBox
+	bcd atomic.Pointer[string]
+}
+
+func (f *firmwareBox) UnitModel(card int) (alsa.UnitModel, error) {
+	m, err := f.fixtureBox.UnitModel(card)
+	if v := f.bcd.Load(); v != nil {
+		m.BCDDevice = *v
+	}
+	return m, err
+}
+
+// probingIn puts a probe that has not ended in b's slot.
+func probingIn(b *Backend) *probeHold {
+	p := &probeHold{done: make(chan struct{})}
+	b.mu.Lock()
+	b.probing = p
+	b.mu.Unlock()
+	return p
+}
+
+// TestAStopBeforeTheSlotIsTakenEndsTheAdmission (B728 B12 PR 4a round 2): a
+// check whose hold's stop signal comes before it takes the device slot is
+// refused with the stop's word, the record (the last check's), the waiters and
+// the count as they were: while it waits for the probe in the slot, at once;
+// and where the probe's end is ready beside the stop as its wait resumes, in
+// rounds, its select picking at random, by the step that would take the slot.
+func TestAStopBeforeTheSlotIsTakenEndsTheAdmission(t *testing.T) {
+	asked := func(t *testing.T, hold bool) (*Backend, *probeHold, chan struct{}, *checkTimers, <-chan checkAnswer, *checkHold) {
+		t.Helper()
+		timers := newCheckTimers()
+		if hold {
+			timers.hold = make(chan struct{})
+		}
+		b := publishedBackend(t, timers.afterFunc, fixtureBox{})
+		req, stop := publishedRequest(t, b)
+		rec := &checkHold{id: "the last check's"}
+		b.mu.Lock()
+		b.checkRec = rec
+		b.mu.Unlock()
+		p := probingIn(b)
+		ch := askCheck(b, context.Background(), req)
+		timers.next(t, "the check's wait for the probe")
+		return b, p, stop, timers, ch, rec
+	}
+	stopped := func(t *testing.T, b *Backend, a checkAnswer, rec *checkHold, what string) {
+		t.Helper()
+		if refusedWith(a.err) != string(CheckStop) || a.st != (CheckStatus{}) {
+			t.Fatalf("%s: the check answered %+v, %v; want refused %s", what, a.st, a.err, CheckStop)
+		}
+		b.mu.Lock()
+		b.probing = nil
+		b.mu.Unlock()
+		slotAsIs(t, b, rec, what)
+	}
+	t.Run("while it waits for the probe", func(t *testing.T) {
+		b, p, stop, _, ch, rec := asked(t, false)
+		close(stop)
+		a := answered(t, ch)
+		b.endProbe(p)
+		stopped(t, b, a, rec, "a stop while it waits for the probe")
+	})
+	t.Run("as the probe it waits for ends", func(t *testing.T) {
+		for round := range 32 {
+			b, p, stop, timers, ch, rec := asked(t, true)
+			b.endProbe(p)
+			close(stop)
+			close(timers.hold)
+			stopped(t, b, answered(t, ch), rec, fmt.Sprintf("round %d: a stop ready beside the probe's end", round))
+		}
+	})
+}
+
+// TestTheSlotsBoundKeepsTheRefusalsOrder (B728 B12 PR 4a round 2): a check
+// whose wait for the device slot passes its bound is refused in the step and
+// the order of every other refusal, by the pair published then, which its
+// refusal carries: dac_changed where a reading made another token while it
+// waited, device_busy where the token is the one it asked with; and nothing is
+// granted past the bound, where the probe's end is ready beside it as the wait
+// resumes, in rounds, its select picking at random.
+func TestTheSlotsBoundKeepsTheRefusalsOrder(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		firmware string
+		want     string
+	}{
+		{"a token another reading made while it waits", "0200", CheckDACChanged},
+		{"the token it asked with", "", string(CheckDeviceBusy)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			timers := newCheckTimers()
+			box := &firmwareBox{}
+			b := publishedBackend(t, timers.afterFunc, box)
+			req, _ := publishedRequest(t, b)
+			probingIn(b)
+			ch := askCheck(b, context.Background(), req)
+			tm := timers.next(t, "the check's wait for the probe")
+			if c.firmware != "" {
+				box.bcd.Store(&c.firmware)
+				b.RefreshDSD(true)
+			}
+			now := b.Policy()
+			if now.DSD == nil || now.DSD.DAC == nil || (now.DSD.DAC.Token != req.DACToken) != (c.firmware != "") {
+				t.Fatalf("the read side as the bound passes: %+v; want the token %v", now.DSD, c.firmware == "")
+			}
+			tm.f()
+			a := answered(t, ch)
+			var r *CheckRefused
+			if refusedWith(a.err) != c.want || !errors.As(a.err, &r) || !r.Epoch || r.Policy.Publication != now.Publication ||
+				r.Policy.DSD == nil || r.Policy.DSD.DAC == nil || r.Policy.DSD.DAC.Token != now.DSD.DAC.Token {
+				t.Errorf("the check past its bound answered %+v, %v; want refused %s with the pair published as the bound passed", a.st, a.err, c.want)
+			}
+			b.mu.Lock()
+			b.probing = nil
+			b.mu.Unlock()
+			slotAsIs(t, b, nil, c.name)
+		})
+	}
+	t.Run("the bound and the probe's end ready together", func(t *testing.T) {
+		for round := range 32 {
+			timers := newCheckTimers()
+			timers.hold = make(chan struct{})
+			b := publishedBackend(t, timers.afterFunc, fixtureBox{})
+			req, stop := publishedRequest(t, b)
+			p := probingIn(b)
+			ch := askCheck(b, context.Background(), req)
+			tm := timers.next(t, "the check's wait for the probe")
+			b.endProbe(p)
+			tm.f()
+			close(timers.hold)
+			if a := answered(t, ch); refusedWith(a.err) != string(CheckDeviceBusy) || a.st != (CheckStatus{}) {
+				if a.err == nil {
+					close(stop)
+					joinedWithin(t, b, "a check admitted past its bound")
+				}
+				t.Fatalf("round %d: a check whose bound passed as the slot was freed answered %+v, %v; want refused device_busy", round, a.st, a.err)
+			}
+			slotAsIs(t, b, nil, "the bound and the probe's end ready together")
 		}
 	})
 }

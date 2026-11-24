@@ -529,8 +529,11 @@ func TestAStopsAnswerSaysHowItsCleanupEnded(t *testing.T) {
 
 // TestEachCheckHasItsOwnHandle: Check's handle is its own check's: the
 // record and the pair its admission made (preparing), its Done and its
-// Cleanup, pending until that check's cleanup has answered and confirmed
-// after, whatever a later check does.
+// Cleanup: while a check's close is held in the kernel, its own Done open and
+// its Cleanup pending, an earlier check's Done closed and its Cleanup
+// confirmed; once that close answers, the same Done closed and its Cleanup
+// confirmed (B728 B12 PR 4a round 2: a Done closed from the start passed this
+// test before).
 func TestEachCheckHasItsOwnHandle(t *testing.T) {
 	r := newCheckRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), nil)
 	ctx, cancel := within()
@@ -552,17 +555,35 @@ func TestEachCheckHasItsOwnHandle(t *testing.T) {
 		t.Error("the first check's Done is open once it ended")
 	}
 	r.k.Hold()
-	p := r.holdPreparation()
-	second := r.admitted(dsdstate.TransportNative, playbacktest.DSD64)
-	awaitOrdered(t, p.in, "the second check's preparation held")
+	req, stop = r.request(dsdstate.TransportNative, playbacktest.DSD64)
+	second, err := r.be.Check(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.k.Await(t, "the second check's writer to fill the hardware buffer and wait on the DAC", runningAndWaiting)
+	parked, letClose := r.k.ParkNextClose()
+	t.Cleanup(letClose)
+	close(stop)
+	awaitOrdered(t, parked, "the second check's close held in the kernel")
+	select {
+	case <-second.Done():
+		t.Error("the second check's Done is closed while its close is held")
+	default:
+	}
+	if got := second.Cleanup(); got != playback.CheckCleanupPending {
+		t.Errorf("the second check's cleanup reads %s while its close is held; want pending", got)
+	}
 	if got := first.Cleanup(); got != playback.CheckCleanupConfirmed {
-		t.Errorf("the first check's cleanup reads %s while the second runs; want confirmed", got)
+		t.Errorf("the first check's cleanup reads %s while the second's close is held; want confirmed", got)
 	}
-	if second.st.ID == first.Status.ID {
-		t.Errorf("two checks share the ID %s", second.st.ID)
+	if second.Status.ID == first.Status.ID {
+		t.Errorf("two checks share the ID %s", second.Status.ID)
 	}
-	p.letGo()
-	close(second.stop)
+	letClose()
+	receiveIn(t, second.Done(), "the second check's Done once its close answered")
+	if got := second.Cleanup(); got != playback.CheckCleanupConfirmed {
+		t.Errorf("the second check's cleanup reads %s once its close answered; want confirmed", got)
+	}
 	r.endedAs(playback.CheckStopped, playback.CheckStop, "the second check")
 }
 

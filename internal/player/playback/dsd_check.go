@@ -281,27 +281,25 @@ func (b *Backend) checkEnter() bool {
 	return !b.cclosed
 }
 
-// reserveCheck reads the policy afresh within ctx (dac_unavailable where the
-// reading failed), then takes the device slot for req as a Start's hold takes
-// it, in one step under b.mu, in the route's order: refused once CloseChecks
-// has run; then as the pair published now admits req (checkAdmits: the DAC,
-// its key and token, the tuple); then while the supervisor's gate is shut
-// (its word), a release was never confirmed, or a choice's lease, a session's
-// record or hold, or another check stands (device_busy); the probe or the
-// tone (ended preempted) waited for, the check among the waiters meanwhile,
-// device_busy past its bound, each step asked again once it has; then
-// admitted (admitCheckLocked), its record built and published in that step.
-// The take moves starts, which voids an ending probe's answers as a Start's
-// take does (takeProbe). A request that has ended is refused with its error
-// first, before the slot is looked at, so no tone is preempted for it, and
-// where its wait ends at its bound. A refusal carries the pair it was decided
+// reserveCheck reads the policy afresh (readForCheck), then takes the device
+// slot for req as a Start's hold takes it, in one step under b.mu, in the
+// route's order: a request that has ended answered with its error, before
+// the slot is looked at, so no tone is preempted for it; refused once
+// CloseChecks has run; then once its hold's stop signal has come (the stop's
+// word); then as the pair published now admits req (checkAdmits: the DAC, its
+// key and token, the tuple); then while the supervisor's gate is shut (its
+// word), a release was never confirmed, or a choice's lease, a session's
+// record or hold, or another check stands, or once its wait's bound has passed
+// (device_busy: nothing is granted after it); the probe or the tone (ended
+// preempted) waited for, the check among the waiters meanwhile, every wake
+// (the slot, the bound, the request's end, the stop) deciding again in that
+// step; then admitted (admitCheckLocked), its record built and published in
+// that step. The take moves starts, which voids an ending probe's answers as a
+// Start's take does (takeProbe). A refusal carries the pair it was decided
 // on.
 func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*CheckHandle, error) {
-	if _, err := b.refreshDSDWithin(ctx, "a DSD check's admission"); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, &CheckRefused{Word: CheckDACUnavailable, Policy: b.Policy(), Epoch: true}
+	if err := b.readForCheck(ctx, req); err != nil {
+		return nil, err
 	}
 	var expired chan struct{}
 	stop := func() bool { return false }
@@ -327,12 +325,14 @@ func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*CheckHan
 		switch {
 		case b.checksClosed:
 			word = string(CheckServeStopping)
+		case signalled(req.Stop):
+			word = string(CheckStop)
 		case word != "":
 		case !b.toneOpen:
 			word = string(b.toneShut)
 		case b.terminalUnconfirmed:
 			word = string(CheckReleaseUnconfirmed)
-		case b.lease != nil || len(b.sessions) > 0 || b.holder != nil || b.checking != nil:
+		case b.lease != nil || len(b.sessions) > 0 || b.holder != nil || b.checking != nil, signalled(expired):
 			word = string(CheckDeviceBusy)
 		default:
 			if held, bound, _ = b.slotHeldLocked(); held == nil {
@@ -363,13 +363,49 @@ func (b *Backend) reserveCheck(ctx context.Context, req CheckRequest) (*CheckHan
 		select {
 		case <-held:
 		case <-expired:
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			return nil, &CheckRefused{Word: string(CheckDeviceBusy), Policy: b.Policy(), Epoch: true}
 		case <-ctx.Done():
-			return nil, ctx.Err()
+		case <-req.Stop:
 		}
+	}
+}
+
+// readForCheck reads the policy afresh for a check's admission on a goroutine
+// of the backend's, counted until that reading returns, and waits for it, its
+// request's end or its hold's stop signal, whichever comes first: an end
+// answers at once (the request's error, or the stop's word), the reading,
+// which no request can stop once it has begun, left to finish and publish as
+// a refresh does, taking no slot; a request that has ended starts none; a
+// reading that failed answers dac_unavailable.
+func (b *Backend) readForCheck(ctx context.Context, req CheckRequest) error {
+	read := make(chan error, 1)
+	if ctx.Err() == nil && !signalled(req.Stop) {
+		b.spawn(func() {
+			_, err := b.refreshDSDWithin(ctx, "a DSD check's admission")
+			read <- err
+		})
+	}
+	select {
+	case err := <-read:
+		if err == nil {
+			return nil
+		}
+	case <-ctx.Done():
+	case <-req.Stop:
+		return &CheckRefused{Word: string(CheckStop), Policy: b.Policy(), Epoch: true}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return &CheckRefused{Word: CheckDACUnavailable, Policy: b.Policy(), Epoch: true}
+}
+
+// signalled reports whether ch, nil for none, is closed.
+func signalled(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -696,11 +732,12 @@ func (b *Backend) cleanCheck(c *checkHold) (confirmed bool, err error) {
 }
 
 // endCheck gives the slot back once the check's cleanup has answered, in one
-// step under b.mu that publishes it: the check's end recorded, its cause's
-// (a complete one's completion dated, by the policy's clock), or failed
+// step under b.mu that publishes it and closes done, so no reader under b.mu
+// sees the one without the other: the check's end recorded, its cause's (a
+// complete one's completion dated, by the policy's clock), or failed
 // release_unconfirmed for a cleanup not confirmed, which fences the device as
-// a release never confirmed does, until serve restarts; then done closed and
-// the end said, a fence at Warn with what its cleanup answered.
+// a release never confirmed does, until serve restarts; then the end said, a
+// fence at Warn with what its cleanup answered.
 func (b *Backend) endCheck(c *checkHold, confirmed bool, err error) {
 	phase, reason := CheckFailed, CheckBackendFailed
 	var cause *checkCause
@@ -720,9 +757,10 @@ func (b *Backend) endCheck(c *checkHold, confirmed bool, err error) {
 		b.checking = nil
 	}
 	b.publishCheckLocked()
-	b.mu.Unlock()
-	c.end(phase, reason)
 	close(c.done)
+	b.mu.Unlock()
+	b.checkEnded()
+	c.end(phase, reason)
 	if !confirmed {
 		b.log.Warn("player: the DSD check's cleanup did not answer cleanly: nothing opens the DAC until bridge serve restarts", "err", errorText(err))
 		return
@@ -749,7 +787,8 @@ func checkFault(err error) CheckReason {
 // step that publishes it stopping, and waits for its cleanup at most
 // CheckStopWait or until ctx ends: how that check's cleanup ended (none with
 // no check in the slot; pending while it has not answered, the slot still
-// the check's), with the pair published as it answers.
+// the check's), with the pair published as it answers, the two read in one
+// step under b.mu, where endCheck publishes the end and closes done together.
 func (b *Backend) StopCheck(ctx context.Context) (CheckCleanup, PlayerPolicy) {
 	b.mu.Lock()
 	c := b.checking
@@ -767,8 +806,12 @@ func (b *Backend) StopCheck(ctx context.Context) (CheckCleanup, PlayerPolicy) {
 	case <-expired:
 	case <-ctx.Done():
 	}
+	b.checkStopAnswering()
+	b.mu.Lock()
 	h := CheckHandle{c: c}
-	return h.Cleanup(), b.Policy()
+	cleanup, pub := h.Cleanup(), b.dsdPub.Load()
+	b.mu.Unlock()
+	return cleanup, b.policyOf(pub)
 }
 
 // CloseChecks closes the checks for good, as CloseTones closes the tones: none
@@ -869,6 +912,11 @@ type AnswerRequest struct {
 	Heard    string
 }
 
+// errCheckNotAnswerable is an answer's write refused inside the store's one
+// write, its check completed more than CheckAnswerable before
+// (check_not_answerable).
+var errCheckNotAnswerable = errors.New("player backend: the DSD check completed too long ago to be answered")
+
 // Check refuses a request that is no answer at all: a token not of a token's
 // form, no check's ID, or a word heard that is none of the three.
 func (r AnswerRequest) Check() error {
@@ -884,19 +932,22 @@ func (r AnswerRequest) Check() error {
 // the DAC read, dac_unavailable; its key and token, dac_changed; the state
 // opened; the fence, persist_uncertain), with a second decision past the
 // fence, under b.mu: the check answerable (check_not_answerable for an ID of
-// no check of this boot, one that did not complete or completed more than
-// CheckAnswerable ago, one answered, one whose token is not this reading's or
-// whose firmware did not read). The answer replaces the transport's at the
-// rate under that check's firmware, in the entry of the identity it was
-// admitted for, dated, and noise or nothing takes the transport's first use
-// away, in the store's one write; a write that reached the file, durable or
-// not, makes the check answered, published by the write's publication, whose
-// pair the answer carries as ChooseDSD's does.
+// no check of this boot, one that did not complete, one answered, one whose
+// token is not this reading's or whose firmware did not read), its completion
+// time taken there; and inside the store's one write, by the policy's clock
+// read there, check_not_answerable for one completed more than
+// CheckAnswerable before (errCheckNotAnswerable), nothing written. The answer
+// replaces the transport's at the rate under that check's firmware, in the
+// entry of the identity it was admitted for, dated, and noise or nothing
+// takes the transport's first use away, in that write; a write that reached
+// the file, durable or not, makes the check answered, published by the
+// write's publication, whose pair the answer carries as ChooseDSD's does.
 func (b *Backend) AnswerCheck(ctx context.Context, req AnswerRequest) ChoiceResult {
 	if req.Check() != nil {
 		return ChoiceResult{Outcome: ChoiceBadRequest}
 	}
 	var c *checkHold
+	var completed time.Time
 	j := choiceJournal{to: req.Heard}
 	res := b.writeState(ctx, stateWrite{what: "a DSD check's answer", key: req.DACKey, token: req.DACToken,
 		admit: func(r *dsdReading) ChoiceOutcome {
@@ -904,12 +955,17 @@ func (b *Backend) AnswerCheck(ctx context.Context, req AnswerRequest) ChoiceResu
 			defer b.mu.Unlock()
 			c = b.checkRec
 			if c == nil || c.id != req.CheckID || b.checking == c || c.phase != CheckComplete || c.token != r.token ||
-				canonicalBCD(c.identity.BCDDevice) == "" || b.dsdNow().Sub(c.completed) > CheckAnswerable {
+				canonicalBCD(c.identity.BCDDevice) == "" {
 				return ChoiceCheckNotAnswerable
 			}
+			completed = c.completed
 			return ""
 		},
-		apply: func(s dsdstate.State, _ *dsdReading, now time.Time) (dsdstate.State, error) {
+		apply: func(s dsdstate.State, _ *dsdReading, _ time.Time) (dsdstate.State, error) {
+			now := b.dsdNow()
+			if now.Sub(completed) > CheckAnswerable {
+				return s, errCheckNotAnswerable
+			}
 			n := s.Clone()
 			d, bcd := n.Entry(c.identity.Key, c.identity.Stamp), canonicalBCD(c.identity.BCDDevice)
 			d.Listener = append(slices.DeleteFunc(d.Listener, func(a dsdstate.Answer) bool {
@@ -938,5 +994,19 @@ func (b *Backend) AnswerCheck(ctx context.Context, req AnswerRequest) ChoiceResu
 func (b *Backend) checkPreparing(ctx context.Context) {
 	if sm := b.cfg.Seams; sm != nil && sm.CheckPreparing != nil {
 		sm.CheckPreparing(ctx)
+	}
+}
+
+// checkEnded is the CheckEnded seam.
+func (b *Backend) checkEnded() {
+	if sm := b.cfg.Seams; sm != nil && sm.CheckEnded != nil {
+		sm.CheckEnded()
+	}
+}
+
+// checkStopAnswering is the CheckStopAnswering seam.
+func (b *Backend) checkStopAnswering() {
+	if sm := b.cfg.Seams; sm != nil && sm.CheckStopAnswering != nil {
+		sm.CheckStopAnswering()
 	}
 }
