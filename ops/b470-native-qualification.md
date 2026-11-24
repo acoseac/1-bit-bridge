@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **58**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **59**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **58**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **59**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=58; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=59; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 58 invalidates older evidence.
+An admitted command alone is insufficient. Version 59 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 58. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 59. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -1100,3 +1100,18 @@ every bump. The harness admits version 58 records alone; legacy migration
 accepts versions 35 through 58 (`LegacyVersion` remains 35). No hardware check
 was run. Main's B990 took version 57, as B12 PR 0 did on its branch; both B12
 PRs are renumbered above main's at their merges, after the 0.2.4 tag.
+
+Version 59 covers B728 B12 PR 4a (2026-11-24): the backend half of the DSD check's
+routes (`internal/player/playback`: the check judged by the path that admitted
+it, its handle, a stop's answer of how its cleanup ended, the refusals in the
+design's order, the precheck the routes take, the check's member of the read
+side, published at each transition, and the listener's answer), which no
+production path calls yet, and its tests through the real native and DoP sinks
+over the fake kernel in the guarded `internal/alsapcm`
+(`playback_dsd_check_answer_test.go`, and `playback_dsd_check_test.go`, which
+gains a generic board's native check while no list reads and moves to the new
+API). No guarded production file changes, and no byte a DAC is given changes.
+Older harness evidence is invalid all the same, as at every bump. The harness
+admits version 59 records alone; legacy migration accepts versions 35 through 59
+(`LegacyVersion` remains 35). No hardware check was run. B12 PR 3's version 58
+and this one are renumbered above main's at their merges.
