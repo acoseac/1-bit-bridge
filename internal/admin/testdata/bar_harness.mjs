@@ -3154,6 +3154,28 @@ S.TestAnExplicitPauseCancelsAPlayThatTookASkipsPlace = async () => {
     [r.audio.snapshot().index, r.el.plays.slice(plays), r.el.paused]);
 };
 
+S.TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo = async () => {
+  // A row's start behind a held barrier, let go by the lock screen's Pause:
+  // the browser's own play then takes that barrier, as it would take no
+  // barrier at all, and resumes on its answer what the browser held.
+  const r = await gatedPlaying();
+  const held = gate();
+  r.hold = held;
+  r.audio.playQueue([flac(7), flac(8)], 0);
+  await settle();
+  session.handlers.pause();
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.browserPlay();
+  await settle();
+  check("the browser's own play waits on the barrier in flight, shown starting, nothing more sent",
+    r.el.paused && r.audio.snapshot().loading && r.s.posts(ROUTES.switchOut).length === 2, [r.el.paused, r.audio.snapshot().loading, r.s.posts(ROUTES.switchOut).length]);
+  held.open();
+  await settle();
+  check("and resumes on its answer what the browser held", !r.el.paused && r.audio.snapshot().track?.path === "Album/01.flac" && r.el.plays.length === plays + 2,
+    [r.el.paused, r.audio.snapshot().track?.path, r.el.plays.slice(plays)]);
+};
+
 S.TestABarrierWhoseStartAPauseLetGoEndsQuietly = async () => {
   // A row's barrier never answers; the lock screen's Pause lets its start go,
   // and at 30 s the barrier is lost and read back done: the bar comes back to

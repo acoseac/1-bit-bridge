@@ -759,6 +759,11 @@ func TestAnExplicitPauseCancelsAStartWaitingOnItsBarrier(t *testing.T) { barScen
 // place behind the barrier, and a fresh Play then moves on.
 func TestAnExplicitPauseCancelsAPlayThatTookASkipsPlace(t *testing.T) { barScenario(t, 3) }
 
+// TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo pins that a start the lock
+// screen's Pause let go of holds no place behind its barrier: the browser's
+// own play then takes it and resumes what the browser held on its answer.
+func TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo(t *testing.T) { barScenario(t, 2) }
+
 // TestABarrierWhoseStartAPauseLetGoEndsQuietly pins that a barrier whose
 // start the lock screen's Pause let go of, lost at 30 s and read back done,
 // brings the bar back to this browser's phase with no line of a start, plays
