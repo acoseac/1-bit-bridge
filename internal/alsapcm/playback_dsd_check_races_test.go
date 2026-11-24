@@ -425,7 +425,7 @@ func TestAStoppedAdmissionsQueuedReadingReadsNothing(t *testing.T) {
 // is refused in the order the slot refuses in: its request's error, serve's
 // stop (serve_stopping, no epoch), the stop's word, then dac_unavailable for a
 // reading that failed, with no handle and nothing opened: its request ended
-// and its stop signal come, both before Check (in rounds, its select picking
+// and its stop signal come, both before Check (32 times, its select picking
 // at random); serve's stop after Check's entry, before its stop signal or
 // before its reading fails; its stop signal once a failed reading's answer
 // has reached the admission and before its refusal is decided; and a reading
@@ -452,14 +452,14 @@ func TestTheAdmissionsReadingKeepsTheRefusalsOrder(t *testing.T) {
 	}
 	t.Run("its request ended and its stop signal come before Check", func(t *testing.T) {
 		r := newCheckRig(t, native, nil)
-		for round := range 32 {
+		for n := range 32 {
 			req, stop := r.request(dsdstate.TransportNative, playbacktest.DSD64)
 			close(stop)
 			ctx, cancel := context.WithCancel(bg)
 			cancel()
 			h, err := r.be.Check(ctx, req)
 			if !errors.Is(err, context.Canceled) || h != nil {
-				t.Fatalf("round %d: the check answered %+v, %v; want its request's error", round, statusOf(h), err)
+				t.Fatalf("repetition %d: the check answered %+v, %v; want its request's error", n, statusOf(h), err)
 			}
 		}
 		nothingOpened(t, r, "checks whose request ended and whose stop signal came")
