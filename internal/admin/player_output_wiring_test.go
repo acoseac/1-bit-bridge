@@ -537,7 +537,7 @@ func checkTheContinuationsAndTheGatesWiring(t *testing.T, src string, fns map[st
 		}
 	}
 	cont := fns["continueStart"].body
-	for _, want := range []string{"const permit = fresh ? null : startPermit;", "continueGate(permit, go, drop)", "if (gen !== playbackGen || !intent) return;"} {
+	for _, want := range []string{"const permit = fresh ? null : startPermit;", "continueGate(permit, go, drop)", "if (gen !== playbackGen || !intent || asked !== readerGen()) return;"} {
 		if !strings.Contains(cont, want) {
 			t.Errorf("continueStart lacks %s", want)
 		}
@@ -574,7 +574,7 @@ func checkTheContinuationsAndTheGatesWiring(t *testing.T, src string, fns map[st
 		}
 	}
 	ms := fns["wireMediaSession"].body
-	for _, want := range []string{`set("play", () => toggle())`, `set("pause", () => pauseNow())`, `set("previoustrack", () => advance(-1))`, `set("nexttrack", () => advance(1))`} {
+	for _, want := range []string{`set("play", () => toggle({ play: true }))`, `set("pause", () => pauseNow())`, `set("previoustrack", () => advance(-1))`, `set("nexttrack", () => advance(1))`} {
 		if !strings.Contains(ms, want) {
 			t.Errorf("the MediaSession's handlers lack %s", want)
 		}
@@ -655,7 +655,7 @@ var consoleSoundSites = map[string]map[string]soundSite{
 // Pause pauses and never starts (pauseNow, never toggle, which is a start over
 // a failed track), and nothing else it does plays.
 var sessionHandlers = []string{
-	`set("play", () => toggle());`,
+	`set("play", () => toggle({ play: true }));`,
 	`set("pause", () => pauseNow());`,
 	`set("previoustrack", () => advance(-1));`,
 	`set("nexttrack", () => advance(1));`,

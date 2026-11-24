@@ -407,6 +407,11 @@ export function createOutput(env) {
   let line = "";
   let lastPoll = -Infinity;
   let pickGen = 0;
+  // The reader's generation (B1015), apart from the picks': everything the
+  // reader does to playback moves it (a pick here, audio.js's transport calls
+  // through readerActed), every start of this browser takes it as it is
+  // asked, and every admission of one asks it again.
+  let readerGen = 0;
   // A start of this browser waiting to know whether a player is offered, and
   // the newest start the barrier in flight runs (R1, V7).
   let waiting = null;
@@ -446,14 +451,16 @@ export function createOutput(env) {
 
   // storeIdentity keeps this document's identity and every operation not yet
   // resolved, its own and the ones it inherited, each by its key, so a
-  // reload, or a second one, still reads each back (R7); and whether a newer
-  // pick has superseded it (stale), so no reload lets it move the output
-  // (S4).
+  // reload, or a second one, still reads each back; whether a newer pick has
+  // superseded it (stale), so no reload lets it move the output; and whether
+  // the reader has acted since it was sent (acted), so no reload takes or
+  // starts what the reader moved on from (B1015).
   function storeIdentity() {
     const pending = {};
     for (const m of [inherited, ops]) {
       for (const [k, e] of m) {
-        pending[k] = { epoch: e.epoch, tab: e.tab, seq: e.seq, role: e.role, kind: e.kind || "", handover: e.handover || null, stale: !ours(e) };
+        pending[k] = { epoch: e.epoch, tab: e.tab, seq: e.seq, role: e.role, kind: e.kind || "", handover: e.handover || null, stale: !ours(e),
+          acted: e.reader !== readerGen };
       }
     }
     try {
@@ -470,9 +477,11 @@ export function createOutput(env) {
     for (const p of Object.values(pending)) {
       if (!p || typeof p.tab !== "string" || !/^[0-9a-f]{32}$/.test(p.tab) || !(p.seq > 0) || typeof p.epoch !== "string") continue;
       // One a newer pick had superseded keeps a pick no pick here takes:
-      // read back, it moves nothing (S4).
+      // read back, it moves nothing. Its reader's generation is this
+      // document's at its boot, 0, or, where the reader acted after it was
+      // sent, one no generation here takes (B1015).
       const e = { key: opKey(p.epoch, p.tab, p.seq), epoch: p.epoch, tab: p.tab, seq: p.seq, role: p.role, kind: p.kind || "",
-        handover: p.handover || null, inherited: true, pick: p.stale === true ? -1 : 0 };
+        handover: p.handover || null, inherited: true, pick: p.stale === true ? -1 : 0, reader: p.acted === true ? -1 : 0 };
       inherited.set(e.key, e);
     }
     // A document's own commands go under an identity of its own: two tabs
@@ -731,6 +740,14 @@ export function createOutput(env) {
     return entry.pick === pickGen;
   }
 
+  // readerActed is a reader's action on playback (B1015): the reader's
+  // generation moves, and the operations not yet resolved are stored again,
+  // each saying the reader acted after it was sent.
+  function readerActed() {
+    readerGen += 1;
+    storeIdentity();
+  }
+
   // drop removes entry, resolved, from what is kept and stored (R7).
   function drop(entry) {
     (entry.inherited ? inherited : ops).delete(entry.key);
@@ -748,7 +765,7 @@ export function createOutput(env) {
       return { refused: "no_epoch" };
     }
     seq += 1;
-    const entry = { ...op, key: opKey(epoch, tab, seq), seq, epoch, tab, pick: pickGen, inFlight: true, sentAt: env.perf(), records: [] };
+    const entry = { ...op, key: opKey(epoch, tab, seq), seq, epoch, tab, pick: pickGen, reader: readerGen, inFlight: true, sentAt: env.perf(), records: [] };
     ops.set(entry.key, entry);
     storeIdentity();
     let ans = null;
@@ -927,7 +944,9 @@ export function createOutput(env) {
     }
     if (e.role === "switch-out") {
       if (rec.status === "done") {
-        const h = handoverOf(rec);
+        // Taken stopped, but for a reader who acted after it was sent, here or
+        // before the reload: then nothing is taken (B1015).
+        const h = e.reader === readerGen ? handoverOf(rec) : null;
         setOutput("browser");
         phase = PHASE.browser;
         if (h) env.browser?.take?.(h, false);
@@ -961,19 +980,22 @@ export function createOutput(env) {
   // a start the reader asked for, which supersedes it. Whatever asks may hand
   // a drop, which every way that never runs it calls, once: a refusal, a
   // start that replaced it, a pick, the wait's end (round 4, W6), an explicit
-  // Pause or a Stop (cancelStarts).
+  // Pause or a Stop (cancelStarts). A request takes the reader's generation
+  // as it is asked; once the reader has acted since, it is let go as an
+  // explicit Pause lets go of it, its drop called, and a continuation may
+  // take its place (B1015).
   function gateStart(run, { continuation = false, drop } = {}) {
     if (offered === false) {
       run(null);
       return;
     }
     if (offered !== true || !epoch || !state) {
-      if (continuation && waiting && !waiting.continuation) {
+      if (continuation && waiting && !waiting.continuation && waiting.reader === readerGen) {
         drop?.();
         return;
       }
       const replaced = waiting;
-      waiting = { run, at: env.perf(), continuation, drop };
+      waiting = { run, at: env.perf(), continuation, drop, reader: readerGen };
       line = WORDS.startWaits;
       dropOf(replaced);
       emit();
@@ -1015,7 +1037,8 @@ export function createOutput(env) {
     const w = waiting;
     waiting = null;
     if (line === WORDS.startWaits) line = "";
-    if (offered === false) w.run(null);
+    if (w.reader !== readerGen) dropOf(w);
+    else if (offered === false) w.run(null);
     else decideStart(w.run, w.continuation, w.drop);
   }
 
@@ -1032,20 +1055,22 @@ export function createOutput(env) {
     }
     // One barrier at a time: a start asked while one is out replaces the
     // start it runs; a continuation replaces only another continuation, or
-    // a start an explicit Pause or a Stop let go of (cancelStarts).
+    // a start let go of (letGo). The slot keeps the reader's generation of
+    // the start it runs now, which its barrier's answer asks again.
     if (startPending) {
-      if (!continuation || startPending.continuation || !startPending.run) {
+      if (!continuation || startPending.continuation || letGo(startPending)) {
         const replaced = { drop: startPending.drop };
         startPending.run = run;
         startPending.continuation = continuation;
         startPending.drop = drop;
+        startPending.reader = readerGen;
         dropOf(replaced);
       } else {
         drop?.();
       }
       return;
     }
-    const pending = { run, continuation, drop };
+    const pending = { run, continuation, drop, reader: readerGen };
     startPending = pending;
     // The latch lives as long as its barrier's operation: whatever resolves
     // it lets go of the latch first, and nothing else does, the request's
@@ -1054,7 +1079,14 @@ export function createOutput(env) {
     const release = () => {
       if (startPending === pending) startPending = null;
     };
-    void barrier((permit) => pending.run(permit), release, () => dropOf(pending), () => !pending.run);
+    void barrier((permit) => pending.run(permit), release, () => dropOf(pending), () => letGo(pending));
+  }
+
+  // letGo says whether the start a slot holds runs nothing: one an explicit
+  // Pause or a Stop let go of (cancelStarts), or one asked before the reader's
+  // last action (B1015).
+  function letGo(p) {
+    return !p.run || p.reader !== readerGen;
   }
 
   // cancelStarts is the reader's explicit Pause and Stop (audio.js's pauseNow,
@@ -1077,6 +1109,8 @@ export function createOutput(env) {
   // permitFor is a start's permit: true while no newer pick came, this
   // browser is the output, and no state newer than the barrier's silence,
   // or of another epoch, shows the bridge sounding (R3, R4, V4).
+  // It reads no reader's generation: a start's later plays keep it, a take's
+  // own included, each admission asking that generation itself (B1015).
   function permitFor(silence, gen) {
     const ep = epoch;
     return () => {
@@ -1094,9 +1128,9 @@ export function createOutput(env) {
   // state newer than its silence that shows the bridge playing, starts
   // nothing (R3, R4). Every end calls release first (S3, Q9), and every end
   // that starts nothing calls drop (round 4, W6); one whose start an
-  // explicit Pause or a Stop let go of (idle) ends quietly: this browser's
-  // phase, its unconfirmed line gone, nothing started and nothing said of the
-  // start.
+  // explicit Pause or a Stop let go of, or the reader acted after (idle),
+  // ends quietly: this browser's phase, its unconfirmed line gone, nothing
+  // started and nothing said of the start.
   function barrier(start, release, drop, idle) {
     const quiet = () => {
       phase = PHASE.browser;
@@ -1187,6 +1221,9 @@ export function createOutput(env) {
     // (G11); then the browser stops, and only then the request goes.
     const h = b.handover();
     b.suspend(h);
+    // The reader's generation once the browser has stopped: back here, the
+    // browser resumes only where the reader has done nothing since (B1015).
+    const asked = readerGen;
     phase = PHASE.toBridge;
     line = WORDS.toBridge;
     setOutput("bridge");
@@ -1198,7 +1235,7 @@ export function createOutput(env) {
       role: "switch-in",
       kind: "replace",
       handover: h,
-      done(rec, how, mine) { if (mine) resolveSwitchIn(rec, h); },
+      done(rec, how, mine) { if (mine) resolveSwitchIn(rec, h, { asked }); },
       unknown(words, mine) { if (mine) { phase = PHASE.bridge; line = words || WORDS.pickAgain; } },
       // Refused before it ran: back to this browser, its line said, which
       // resumes only through the gate, and only if it was playing (R2).
@@ -1207,12 +1244,12 @@ export function createOutput(env) {
         setOutput("browser");
         phase = PHASE.browser;
         line = words;
-        if (h.playing) gateStart((permit) => env.browser?.resume?.(h, permit));
+        if (h.playing && asked === readerGen) gateStart((permit) => env.browser?.resume?.(h, permit));
       },
     });
   }
 
-  function resolveSwitchIn(rec, h, { recovered = false } = {}) {
+  function resolveSwitchIn(rec, h, { recovered = false, asked = readerGen } = {}) {
     if (rec.status === "done") {
       setOutput("bridge");
       phase = PHASE.bridge;
@@ -1243,7 +1280,9 @@ export function createOutput(env) {
       }
       line = why;
       emit();
-      if (h?.playing) gateStart((permit) => env.browser?.resume?.(h, permit));
+      // And never once the reader has acted since the switch stopped the
+      // browser (B1015).
+      if (h?.playing && asked === readerGen) gateStart((permit) => env.browser?.resume?.(h, permit));
       return;
     }
     // Changed, a later step refused, or cancelled: the switch happened in
@@ -1268,12 +1307,16 @@ export function createOutput(env) {
     phase = PHASE.toBrowser;
     line = WORDS.toBrowser;
     emit();
+    // The reader's generation at the pick: the switch takes the bridge's
+    // queue, and starts it, only where the reader has done nothing since; it
+    // still moves the output (B1015).
+    const asked = readerGen;
     return send(ROUTES.switchOut, { take: true }, {
       role: "switch-out",
       done(rec, how, mine) {
         if (!mine) return;
         if (rec.status === "done" && how === "answer" && rec.silence > 0) {
-          const h = handoverOf(rec);
+          const h = asked === readerGen ? handoverOf(rec) : null;
           setOutput("browser");
           phase = PHASE.browser;
           const permit = permitFor(rec.silence, pickGen);
@@ -1290,7 +1333,7 @@ export function createOutput(env) {
         }
         if (rec.status === "done") {
           // Read back whole after its answer was lost: history (G8).
-          recoverSwitchOut(rec);
+          recoverSwitchOut(rec, asked);
           return;
         }
         phase = PHASE.bridge;
@@ -1320,8 +1363,10 @@ export function createOutput(env) {
   // recoverSwitchOut is this document's own switch-out, its answer lost and
   // its record read back done: what it moved is taken, and only a barrier
   // answered now, beside a bridge that does not sound, starts it (G8).
-  function recoverSwitchOut(rec) {
-    const h = handoverOf(rec);
+  // Where the reader has acted since the pick (asked), nothing is taken and
+  // nothing starts (B1015).
+  function recoverSwitchOut(rec, asked) {
+    const h = asked === readerGen ? handoverOf(rec) : null;
     setOutput("browser");
     phase = PHASE.browser;
     if (h) env.browser?.take?.(h, false);
@@ -1377,6 +1422,8 @@ export function createOutput(env) {
 
   function newPick() {
     pickGen += 1;
+    // A pick is the reader's action as well (B1015).
+    readerGen += 1;
     const dropped = [waiting, startPending];
     waiting = null;
     startPending = null;
@@ -1540,5 +1587,8 @@ export function createOutput(env) {
     refusalShown: () => [WORDS.bridgePlaying, WORDS.bridgeAgain, WORDS.bridgeToo].includes(line),
     identity: () => ({ tab, seq }),
     pending: () => [...inherited.keys(), ...ops.keys()],
+    // The reader's generation, which audio.js reads and moves (B1015).
+    readerGen: () => readerGen,
+    readerActed,
   };
 }

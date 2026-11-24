@@ -507,8 +507,10 @@ function renderBrowser(s, o) {
 
   paintTrack(s);
 
-  swapIcon(refs.play, s.playing ? "pause" : "play");
-  refs.play.setAttribute("aria-label", s.playing ? "Pause" : "Play");
+  // What it shows is what it does: audio.js's toggle reads the same
+  // predicate (B1015).
+  swapIcon(refs.play, s.pauseShown ? "pause" : "play");
+  refs.play.setAttribute("aria-label", s.pauseShown ? "Pause" : "Play");
   // The button keeps the NAME of the action it performs — it still
   // pauses, and a reader who has decided against the wait needs that to
   // be true. Only its paint says "waiting", which is what the sighted

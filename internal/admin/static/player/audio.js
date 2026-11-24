@@ -89,13 +89,13 @@ let continueGate = null;
 let startPermit = null;
 // Whether this browser means to play what it holds (round 3, S2, Q8): set by
 // a load that means to play and by a play a start or a continuation lets
-// go on; cleared by a load that does not, a pause of the element other than
-// the one its end makes or one a play has overtaken, the reader's explicit
-// Pause, a start the reader asks over a paused element (requestStart),
-// suspend(), clearQueue(), the stop at the queue's end and restore(). A
-// continuation, and the retry after an error, play only while it holds: the
-// element cannot say it, since load() pauses it and a track's end pauses it
-// before `ended`.
+// go on; cleared by a load that does not, the browser's own pause of the
+// element, other than the one its end makes or one a play has overtaken, the
+// reader's explicit Pause, a start the reader asks over a paused element
+// (requestStart), suspend(), clearQueue(), the stop at the queue's end and
+// restore(). A continuation, and the retry after an error, play only while it
+// holds: the element cannot say it, since load() pauses it and a track's end
+// pauses it before `ended`.
 let intent = false;
 // The marks of the bar's own plays whose `play` event has not come (round 4,
 // T1, W1): a play() on a paused element queues one `play` event, which takes
@@ -103,14 +103,15 @@ let intent = false;
 // mark goes with its play's promise once that settles, and every load takes
 // them all, since the load algorithm removes the events they wait for.
 const marks = [];
-// The protective pauses of the browser's own plays, whose `pause` events are
-// the bar's own (W3), and the one such play waiting on the gate (W4).
-let ownPauses = 0;
+// The pauses the bar makes, oldest first, each with why (B1015): the
+// reader's, the protective pause of the browser's own play, the stop at the
+// queue's end. Only a pause() that moves the element to paused is recorded,
+// since only it queues a `pause` event, which takes the oldest record; a load
+// discards them all, as it removes their events. A `pause` event with no
+// record is the browser's own.
+const pauses = [];
+// The browser's own play waiting on the gate, if one does.
 let resumeWait = null;
-// What the reader does to playback (a transport call, a pick's suspend or
-// take) and a pause that is not the bar's own move this count; a resume of
-// the browser's own goes on only where it has not moved (W4).
-let actions = 0;
 
 /** setStartGate makes gate the one way the element starts, and cancel what lets go of the starts it holds. */
 export function setStartGate(gate, cancel = null) {
@@ -150,15 +151,17 @@ function startDropped(gen) {
 // load since, no pause), asked again when it runs, since a barrier's round
 // trip lies between (Q3). A fresh continuation starts the element anew, so it
 // hands the gate no permit and is asked as a start is (Q1). Until it runs the
-// browser shows itself stopped; refused, it stays so, the bar saying why.
+// browser shows itself stopped; refused, it stays so, the bar saying why. It
+// runs nothing once the reader has acted since it was asked (B1015).
 function continueStart(run, { fresh = false } = {}) {
   const gen = playbackGen;
+  const asked = readerGen();
   let ran = false;
   let settled = false;
   const go = (permit) => {
     if (settled) return;
     settled = true;
-    if (gen !== playbackGen || !intent) return;
+    if (gen !== playbackGen || !intent || asked !== readerGen()) return;
     ran = true;
     run(permit);
   };
@@ -184,15 +187,21 @@ function continueStart(run, { fresh = false } = {}) {
   }
 }
 
-// readerAction counts what the reader does to playback, and lets go of a
-// resume of the browser's own that waits on the gate (W4), and of its
-// spinner; the caller's own emit says so.
+// readerAction is what the reader does to playback: it moves the reader's
+// generation, the output's (B1015), and lets go of a resume of the browser's
+// own that waits on the gate, and of its spinner; the caller's own emit says
+// so.
 function readerAction() {
-  actions += 1;
+  currentOutput()?.readerActed?.();
   if (resumeWait) {
     resumeWait = null;
     state.loading = false;
   }
+}
+
+// readerGen is the reader's generation now, 0 where no output is installed.
+function readerGen() {
+  return currentOutput()?.readerGen?.() ?? 0;
 }
 
 // playEl is the one way the bar plays the element (round 4, T1): it marks
@@ -217,13 +226,21 @@ function unmark(mark) {
 }
 
 // loadEl runs the element's load algorithm, which removes the `play` events
-// the marks wait for and the `pause` events of the protective pauses.
+// the marks wait for and the `pause` events of the pauses recorded.
 function loadEl(el) {
   if (el === state.el) {
     marks.length = 0;
-    ownPauses = 0;
+    pauses.length = 0;
   }
   el.load();
+}
+
+// pauseFor pauses the element where it plays, recording why for the `pause`
+// event that queues (B1015).
+function pauseFor(why) {
+  if (!state.el || state.el.paused) return;
+  pauses.push(why);
+  state.el.pause();
 }
 
 // playRefused: a refusal that leaves the element paused (NotAllowedError) ends
@@ -249,17 +266,17 @@ function playRefused(e, at) {
 // reader's Pause, a stop) asks nothing; that pause's own event says the rest.
 function ownPlay() {
   if (state.el.paused) return;
-  ownPauses += 1;
+  pauses.push("protective");
   state.el.pause();
   const gen = playbackGen;
-  const acts = actions;
+  const asked = readerGen();
   const wait = {};
   resumeWait = wait;
   state.playing = false;
   state.loading = true;
   emit();
   const go = (permit) => {
-    if (resumeWait !== wait || gen !== playbackGen || acts !== actions) return;
+    if (resumeWait !== wait || gen !== playbackGen || asked !== readerGen()) return;
     resumeWait = null;
     if (permit !== undefined) startPermit = permit;
     intent = true;
@@ -297,6 +314,7 @@ export function snapshot() {
     queue: state.queue,
     index: state.index,
     playing: state.playing,
+    pauseShown: pauseShown(),
     loading: state.loading,
     shuffle: state.shuffle,
     repeat: state.repeat,
@@ -384,19 +402,18 @@ export function init() {
     emit();
   });
   state.el.addEventListener("pause", () => {
-    // A pause, the reader's or the browser's own, ends what this browser
-    // means to play; the one a track's end makes before its `ended` does not,
-    // nor the bar's protective pause of the browser's own play (W3), nor one a
+    // A pause the bar made takes its record, and decides nothing: its caller
+    // has done what it means. The browser's own, an interruption, ends what
+    // this browser means to play and a resume of the browser's own that
+    // waits; not the pause a track's end makes before its `ended`, nor one a
     // play has overtaken by the time its event comes (the element playing
-    // again), which leaves that play's intent alone.
-    const own = ownPauses > 0;
-    if (own) ownPauses -= 1;
-    else if (!state.el.ended && state.el.paused) {
+    // again). No pause is the reader's action (B1015).
+    if (!pauses.shift() && !state.el.ended && state.el.paused) {
       intent = false;
-      readerAction();
+      resumeWait = null;
     }
     state.playing = false;
-    state.loading = own && resumeWait !== null;
+    state.loading = resumeWait !== null;
     setSessionState("paused");
     persist();
     emit();
@@ -514,6 +531,8 @@ function onError() {
  */
 async function handleSourceError(track, src) {
   const at = playbackGen;
+  // The reader's generation before the probe, which its skip asks (B1015).
+  const asked = readerGen();
   const reason = await classifySourceFailure(src);
   // The probe is a round trip, so the reader can have moved on. Every
   // line below writes shared playback state — the error text, the
@@ -555,6 +574,9 @@ async function handleSourceError(track, src) {
   // Identity on the track, not the index: a replaced queue can hold a
   // different object at the same position.
   setTimeout(() => {
+    // Only where the reader has done nothing since the failure: a row the
+    // gate refused meanwhile was still the reader's word (B1015).
+    if (asked !== readerGen()) return;
     // Both conditions: the generation catches a different track, a
     // replaced queue and a re-load of this same one, while the intent
     // catches a plain pause (the reader's before its pause event lands),
@@ -963,27 +985,46 @@ function stopAtEnd() {
   intent = false;
   state.playing = false;
   state.loading = false;
-  state.el.pause();
+  pauseFor("stop");
   emit();
 }
 
-/** Pause at once, or play through the start gate (R1, V7). */
-export function toggle() {
+// failedEl is whether the element failed: a fetch the user aborted (code 1)
+// fires no pause and is no failure.
+function failedEl() {
+  return !!state.el?.error && state.el.error.code !== 1;
+}
+
+// pauseShown is whether the bar shows Pause: a play event came, and the
+// element has not failed since. The bar's label and its Play/Pause read it
+// alike (B1015).
+function pauseShown() {
+  return state.playing && !failedEl();
+}
+
+/**
+ * Play/Pause, doing what the reader sees (B1015). The bar's (toggle()): over
+ * a resume of the browser's own waiting on the gate, which the bar shows
+ * starting, it lets the wait go; where the bar shows Pause it pauses; where it
+ * shows Play it plays, through the start gate. The lock screen's Play (play)
+ * never pauses and keeps a resume's wait. Neither plays over an element that
+ * plays already, its play event still to come.
+ */
+export function toggle({ play = false } = {}) {
   init();
   if (state.index < 0) return;
   if (resumeWait) {
-    // The browser's own resume waits on the gate: Play/Pause cancels it (W4).
-    readerAction();
-    emit();
+    if (!play) {
+      readerAction();
+      emit();
+    }
     return;
   }
-  // A fetch the user aborted (code 1) fires no pause and is no failure: the
-  // bar's Pause still shown pauses, and Play over it once stopped is Play.
-  const failed = state.el.error && state.el.error.code !== 1;
-  if (!state.el.paused && !failed) {
+  if (!play && pauseShown()) {
     pauseNow();
     return;
   }
+  if (!state.el.paused && !failedEl()) return;
   readerAction();
   // Over a failed element Play is a start: when it runs, a source it cannot
   // use moves on, a network or decode error reloads, its retry there again.
@@ -1001,7 +1042,7 @@ export function toggle() {
 function pauseNow() {
   readerAction();
   intent = false;
-  if (!state.el.paused) state.el.pause();
+  pauseFor("reader");
   // The explicit Pause lets go of a start the gate holds; the element's
   // pause event, which a browser fires a task later, never does.
   startCancel?.();
@@ -1167,13 +1208,16 @@ function loadAt(index, { autoplay, at, permit }) {
   load(index, { autoplay: false, permit });
   intent = !!autoplay;
   const mine = playbackGen;
+  // Taken after a take's own move of the reader's generation (B1015).
+  const asked = readerGen();
   state.loading = !!autoplay;
   state.el.addEventListener("loadedmetadata", function once() {
     state.el.removeEventListener("loadedmetadata", once);
     if (mine !== playbackGen) return;
     if (Number.isFinite(state.el.duration)) state.el.currentTime = Math.min(at, state.el.duration);
-    // One start a playback: none once the reader's Play plays it, or a pause.
-    if (!autoplay || !intent || !state.el.paused) return;
+    // One start a playback: none once the reader's Play plays it, or a pause,
+    // or anything else the reader did since.
+    if (!autoplay || !intent || !state.el.paused || asked !== readerGen()) return;
     if (permit && !permit()) {
       // Refused, it ends what this browser meant to play (round 4, T2).
       intent = false;
@@ -1303,7 +1347,7 @@ function wireMediaSession() {
   const set = (action, fn) => {
     try { ms.setActionHandler(action, fn); } catch { /* unsupported action */ }
   };
-  set("play", () => toggle());
+  set("play", () => toggle({ play: true }));
   set("pause", () => pauseNow());
   set("previoustrack", () => advance(-1));
   set("nexttrack", () => advance(1));

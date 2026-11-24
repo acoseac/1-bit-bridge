@@ -869,3 +869,110 @@ func TestAStopLetsGoOfAStartWaitingForTheEpoch(t *testing.T) { barScenario(t, 6)
 // nothing, the queue stays empty, Play on it does nothing, and a row played
 // after it plays.
 func TestAStopLetsGoOfAStartWaitingOnItsBarrier(t *testing.T) { barScenario(t, 4) }
+
+// A start the reader did not ask for never plays, and the bar's control does
+// what it shows (B1015): the reader's generation, which every reader action
+// moves and every admission of a start asks again.
+
+// TestAStopWhileASwitchToThisBrowserIsOutstandingTakesNothing pins that the
+// lock screen's Stop while a switch to this browser is outstanding (a pick
+// of this browser after a barrier went unconfirmed) is the reader's last
+// word: the switch's done, beside a silent bridge, takes no handover and
+// plays nothing, the queue staying empty at index -1, and a row played after
+// it plays.
+func TestAStopWhileASwitchToThisBrowserIsOutstandingTakesNothing(t *testing.T) { barScenario(t, 3) }
+
+// TestAPauseWhileASwitchToThisBrowserIsOutstandingTakesNothing pins the same
+// for the lock screen's Pause: the queue it paused stays, and the bar's Play
+// then plays it.
+func TestAPauseWhileASwitchToThisBrowserIsOutstandingTakesNothing(t *testing.T) { barScenario(t, 3) }
+
+// TestARowWhileASwitchToThisBrowserIsOutstandingTakesNothing pins the same
+// for a row the reader plays: it plays through a barrier of its own, and the
+// switch's done leaves its queue playing.
+func TestARowWhileASwitchToThisBrowserIsOutstandingTakesNothing(t *testing.T) { barScenario(t, 3) }
+
+// TestAStopBeforeALostSwitchIsReadBackTakesAndStartsNothing pins the same
+// where the switch's answer was lost: its record read back done after the
+// Stop takes nothing and asks no barrier.
+func TestAStopBeforeALostSwitchIsReadBackTakesAndStartsNothing(t *testing.T) { barScenario(t, 5) }
+
+// TestAStopBeforeAReloadStillTakesNothingWhenTheSwitchIsReadBack pins that a
+// Stop survives a reload: the document after it reads the switch back done
+// and takes nothing, its queue empty at index -1 and silent.
+func TestAStopBeforeAReloadStillTakesNothingWhenTheSwitchIsReadBack(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestASwitchTheReaderActedAfterEndsWithoutTakingOrResuming pins the output's
+// own admissions: a switch-out done whose permit fails takes nothing stopped
+// once the reader acted, and a switch-in refused before admission or with
+// nothing changed comes back to this browser and resumes nothing.
+func TestASwitchTheReaderActedAfterEndsWithoutTakingOrResuming(t *testing.T) { barScenario(t, 3) }
+
+// TestABrowsersOwnResumeMadeAfterAPausePlaysOnceThroughTheGate pins that a
+// resume of the browser's own made after the lock screen's Pause, with an
+// earlier one's events and the Pause's still queued, plays the paused track
+// once, through the gate, and never the row the Pause let go of: no pause
+// event, the protective pause's included, is read as the reader's.
+func TestABrowsersOwnResumeMadeAfterAPausePlaysOnceThroughTheGate(t *testing.T) { barScenario(t, 2) }
+
+// TestABrowsersOwnResumeWaitingOnItsBarrierPlaysNothingAfterAPauseOrAStop pins
+// that the lock screen's Pause, and its Stop, while a resume of the browser's
+// own waits on its barrier leave that barrier's answer playing nothing.
+func TestABrowsersOwnResumeWaitingOnItsBarrierPlaysNothingAfterAPauseOrAStop(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestABrowsersOwnResumeLetGoOnAfterTheReaderActedPlaysNothing pins ownPlay's
+// own look at the reader's generation: a resume a gate other than output.js's
+// holds, and lets go on once the generation has moved, plays nothing.
+func TestABrowsersOwnResumeLetGoOnAfterTheReaderActedPlaysNothing(t *testing.T) { barScenario(t, 2) }
+
+// TestTheBarsPauseOverAnInterruptionPausesAndAsksNothing pins that the bar's
+// button does what it shows: over an element an interruption paused, its
+// pause event still to come, the Pause shown pauses and asks the gate
+// nothing, and the Play then shown asks it once and plays, after an aborted
+// fetch too.
+func TestTheBarsPauseOverAnInterruptionPausesAndAsksNothing(t *testing.T) { barScenario(t, 8) }
+
+// TestTheLockScreensPlayAndPauseDoWhatTheySayWhileAnEventIsQueued pins the
+// lock screen's two commands in both windows between a change of the element
+// and its event: its Pause never starts and its Play plays over an
+// interruption's pause, and over a start's play its Play, and the bar's Play
+// shown, pause nothing, while its Pause pauses.
+func TestTheLockScreensPlayAndPauseDoWhatTheySayWhileAnEventIsQueued(t *testing.T) {
+	barScenario(t, 6)
+}
+
+// TestASkipAskedBeforeTheReadersRowPlaysNothingWhenItsTimerFires pins that
+// the skip past a source this browser cannot use takes the reader's
+// generation before its probe: a row the reader clicks meanwhile, refused,
+// leaves the old timer skipping nothing, no barrier asked.
+func TestASkipAskedBeforeTheReadersRowPlaysNothingWhenItsTimerFires(t *testing.T) { barScenario(t, 3) }
+
+// TestAHandoverPlaysAndGoesOnWithNoReaderActionBetween pins that a take, the
+// reader's action, voids none of its own: the handover's deferred play plays
+// from its position, and its end goes on to the next track on the switch's
+// permit.
+func TestAHandoverPlaysAndGoesOnWithNoReaderActionBetween(t *testing.T) { barScenario(t, 2) }
+
+// TestARemovedPlayingRowsSuccessorTakesTheSlotOfAStartTheRemovalOutdated pins
+// that the playing row's removal, a reader's action, makes a row's start
+// waiting behind the barrier give its place up to the successor, which the
+// barrier's answer plays.
+func TestARemovedPlayingRowsSuccessorTakesTheSlotOfAStartTheRemovalOutdated(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestARemovedPlayingRowsSuccessorTakesThePlaceOfAWaitingStartTheRemovalOutdated
+// pins the same for a row's start waiting for the epoch.
+func TestARemovedPlayingRowsSuccessorTakesThePlaceOfAWaitingStartTheRemovalOutdated(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestAStartAskedBeforeTheReadersLastActionPlaysNothing pins the gate's own
+// look at the reader's generation: a Play waiting for the epoch, and one
+// waiting on its barrier, each followed by the removal of the track it was
+// for, play nothing, and a Play after them plays.
+func TestAStartAskedBeforeTheReadersLastActionPlaysNothing(t *testing.T) { barScenario(t, 5) }
