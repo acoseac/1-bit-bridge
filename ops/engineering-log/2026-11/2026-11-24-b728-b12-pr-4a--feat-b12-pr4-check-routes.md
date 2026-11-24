@@ -14,8 +14,9 @@ their long forms in `ops/History-rules-output.md` (PR 3's section, and PR 4a's).
 
 - **The order.** `reserveCheck` asked the supervisor's gate, the fence and an occupied slot before
   the pair's identity and tuple, so a changed token beside a shut gate answered the gate's word,
-  where the route's order (which PR 4b's PROTOCOL.md states) answers the fresh reading first. It now asks `serve_stopping`, then
-  the pair published now (`checkAdmits`: `dac_unavailable`, `dac_changed`, the tuple's word),
+  where the route's order (which PR 4b's PROTOCOL.md states) answers the fresh reading first. It
+  now asks `serve_stopping`, then the pair published now (`checkAdmits`: `dac_unavailable`,
+  `dac_changed`, the tuple's word),
   then the gate, the fence and the slot; a reading that fails answers `dac_unavailable`; every
   refusal past the reading carries the pair it was decided on (`CheckRefused.Policy` and
   `Epoch`).
