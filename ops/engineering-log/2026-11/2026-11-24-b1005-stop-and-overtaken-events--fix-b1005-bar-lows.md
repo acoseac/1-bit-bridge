@@ -103,3 +103,36 @@ on their plain Play.
 
 Each commit's own harness ran green over its own modules: 133 scenarios at `8b87168a`, 134 at
 `59140826`, 136 at `80603825`.
+
+### The runs
+
+Before the gate, with the release tags and node on the path: the 179 tests of `internal/admin`'s
+player files (`player_output_*_test.go`, `player_playback_error_test.go`) with `-v`, all passing,
+none skipped (62.6 s); `make docs-check`; and `cmd/bridge`'s citation, keeper, docblock and
+goroutine-drain guards.
+
+One build-slot session at `a6ac009e`, on `GOTOOLCHAIN=go1.27.3` with `GOPROXY=off` and node on the
+path, so the node cases ran: `make fmt` (it rewrote nothing), `make vet` on the host (linux/amd64)
+and for linux/arm, linux/386, linux/arm64, windows/amd64, windows/arm64 and darwin/arm64 (exit 0,
+2 to 5 s each), `make docs-check`, `make test P=8` with `-count=1` (exit 0 in 2,014 s, 93 packages
+ok: cmd/bridge 1,987.4 s, internal/manifest 1,653.2 s, internal/admin 1,526.6 s, internal/backup
+705.3 s) and `make build-all` (25 s); then, with the release tags and `-v`, the source guards by
+name, all passing: `TestNoConsoleControlDisablesItselfOutsideSetDisabled`,
+`TestPlayerEmittedClassesAreStyled`, `TestTrackSubgridColumnsMatchTheRow`,
+`TestAppJSHasNoCallsToDeletedHelpers`, `TestByteFormattersAgree`,
+`TestEveryStartOfThisBrowserAsksTheGate`, `TestNoSoundSourceOfTheConsoleBypassesTheGate`,
+`TestTheChosenPickCarriesAMarkTheFocusRingLacks`, `TestEveryNodeLookupOfTheOutputsTestsIsBarNode`,
+`TestFailureAutoAdvanceIsGuarded`, `TestEveryPlayerControlStateFieldIsRenderedSomewhere`,
+`TestTheGateGuardReadsWhatAGateCallRunsAtOnce`, `TestTheHistoryListsTheMediaSessionsStartsAsTheyAreSet`,
+`TestTheOutputMenuTakesTheFocusOfAPressOnItsWords`, `TestStalePlaybackFailuresTouchNothing`,
+`TestEveryCitedTestNameExists`, `TestNoBlankKeepers`, `TestNoDocblockNamesAnotherDeclaration` and
+`TestEveryBackgroundGoroutineDrainsOnCleanup`; the seven cases above by name, all passing, none
+skipped; and the harness's 136 scenarios under node, every check passing. The tree was clean at
+the end. No race run beyond `make test`'s: the server did not change.
+
+### Not run
+
+- No real browser ran these sequences. The harness's element queues the media element's play and
+  pause events as tasks and a load removes them, as the specification's load algorithm does; a
+  browser session should press the bar's Pause twice quickly after an aborted fetch, and send the
+  lock screen's Pause and Stop while a row waits on its barrier.
