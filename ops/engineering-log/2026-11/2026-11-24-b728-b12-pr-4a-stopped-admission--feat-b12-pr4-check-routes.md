@@ -94,6 +94,35 @@ controls, each red exactly where predicted and nowhere else:
   check (the record it keeps) and the probe's own open are untouched, and the playback package's
   checks with no unit to locate end `output_gone` before the stall.
 
+### Runs
+
+On the build host, `go1.27.3` with the release tags, `TMPDIR` under the worktree's `.tmp`:
+
+- The gate, in one build slot session at `83a052dc`: `make fmt` (nothing rewritten), `make vet`,
+  `make test` (`-race -p 4 -count=1 ./...`: 2,128 s, 93 packages ok, none failed; cmd/bridge
+  1,960 s, internal/manifest 1,619 s, internal/admin 1,407 s), `make build-all` (25 s), `make
+  docs-check`, and `go vet ./...` for GOOS linux, darwin and windows: each exit 0, the tree clean
+  after.
+- Before it, alone: the playback, alsapcm and api packages whole, without the race detector (the
+  gate ran them with it; alsapcm's tests drive the backend, api's censuses read playback's
+  source), the changed tests by name, and cmd/bridge's source guards
+  (`TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`, `TestNoBlankKeepers`,
+  `TestEveryBackgroundGoroutineDrainsOnCleanup`) with `make docs-check` over the records.
+- `-race -count=50` at `6d3ec548`, pinned to half the host's cores, each lane alone: five playback
+  tests (250 passes: the two new ones, and `TestAnEndedRequestAdmitsNothing`,
+  `TestAStopBeforeTheSlotIsTakenEndsTheAdmission` and `TestTheSlotsBoundKeepsTheRefusalsOrder`,
+  on the paths the change reaches) and eight alsapcm tests (400: the two new ones, the three
+  strengthened, and `TestAStopBeforeTheSlotEndsTheAdmission`, `TestAnEndedRequestOpensNothing` and
+  `TestAStopsAnswerIsOneReadingOfItsCheck`); none failed.
+- Both native-integration overlays as CI runs them, at `83a052dc`: 16 `TestNativeIntegration` tests
+  in cmd/bridge and 33 in playback passed, every one CI requires among them.
+- `scripts/qualification-version -base da3c1098 -head HEAD`: OK, at version 59.
+- The iOS fixture exporters (manifest, API, cmd/bridge, `-p=1`) at `83a052dc` and at the base: the
+  same six files, three byte-identical (`dsd_outputs.json`, `dsd_dac_outputs.json`,
+  `dsd_choice_answers.json`) and the other three identical once their clock times are masked;
+  against the export before this change, the same but for the provenance's commit. No golden was
+  written.
+
 ### What is owed
 
 As the entries before it: PR 4b (with the hold's release and 204 within DELETE's deadline while a
