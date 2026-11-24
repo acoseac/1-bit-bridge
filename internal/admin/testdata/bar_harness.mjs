@@ -3874,6 +3874,53 @@ S.TestABrowsersOwnResumeLetGoOnAfterTheReaderActedPlaysNothing = async () => {
   check("let go on once the reader's generation moved: it plays nothing", r.el.paused && r.el.plays.length === plays, [r.el.paused, r.el.plays.slice(plays)]);
 };
 
+S.TestAContinuationOrADeferredPlayPlaysNothingOnceTheReaderActed = async () => {
+  // Each look of audio.js's own at the reader's generation, behind a gate
+  // that compares nothing: a repeat-one replay that gate holds and lets go on
+  // once the generation has moved, and a positioned handover's play deferred
+  // to its metadata, which comes once it has moved, play nothing.
+  const r = await pageRig({ unwired: true, noFrame: true });
+  const held = [];
+  r.audio.setStartGate((run) => run(null));
+  r.audio.setContinueGate((permit, run) => { held.push(run); });
+  r.audio.playQueue([flac(1), flac(2)], 0);
+  await settle();
+  r.el.metadata(200);
+  r.audio.cycleRepeat();
+  r.audio.cycleRepeat();
+  r.el.end();
+  await settle();
+  let plays = r.el.plays.length;
+  r.out.readerActed();
+  held.shift()?.(null);
+  await settle();
+  check("a repeat-one replay let go on once the reader's generation moved plays nothing", r.el.paused && r.el.plays.length === plays, [r.el.paused, r.el.plays.slice(plays)]);
+  r.audio.take({ queue: [flac(3), flac(4)], index: 0, position: 30, playing: true }, true, () => true);
+  await settle();
+  plays = r.el.plays.length;
+  r.out.readerActed();
+  r.el.metadata(200);
+  await settle();
+  check("a handover's deferred play, its metadata after the generation moved, seeks and plays nothing", r.el.paused && r.el.plays.length === plays && r.el.currentTime === 30,
+    [r.el.paused, r.el.plays.slice(plays), r.el.currentTime]);
+};
+
+S.TestTheLockScreensPlayKeepsAResumeWaitingOnItsBarrier = async () => {
+  // The lock screen's Play while a resume of the browser's own waits on its
+  // barrier lets the wait go on, asking nothing more, and the barrier's
+  // answer resumes the track.
+  const r = await gatedPlaying();
+  const held = await browserResumeWaits(r);
+  const [posts, plays] = [r.s.posts(ROUTES.switchOut).length, r.el.plays.length];
+  session.handlers.play();
+  await settle();
+  check("the lock screen's Play keeps the wait, shown starting, nothing more sent", r.el.paused && r.audio.snapshot().loading && r.s.posts(ROUTES.switchOut).length === posts,
+    [r.el.paused, r.audio.snapshot().loading, r.s.posts(ROUTES.switchOut).length - posts]);
+  held.open();
+  await settle();
+  check("and the barrier's answer resumes the track", !r.el.paused && r.el.plays.length === plays + 1 && /01\.flac/.test(r.el.plays.at(-1) || ""), [r.el.paused, r.el.plays.slice(plays)]);
+};
+
 S.TestTheBarsPauseOverAnInterruptionPausesAndAsksNothing = async () => {
   // The browser pauses the element for an interruption, its pause event still
   // to come, so the bar still shows Pause: pressed, it pauses, asking the gate

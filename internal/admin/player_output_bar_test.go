@@ -929,6 +929,19 @@ func TestABrowsersOwnResumeWaitingOnItsBarrierPlaysNothingAfterAPauseOrAStop(t *
 // holds, and lets go on once the generation has moved, plays nothing.
 func TestABrowsersOwnResumeLetGoOnAfterTheReaderActedPlaysNothing(t *testing.T) { barScenario(t, 2) }
 
+// TestAContinuationOrADeferredPlayPlaysNothingOnceTheReaderActed pins the
+// other looks of audio.js's own at the reader's generation: a repeat-one
+// replay a gate that compares nothing lets go on, and a positioned
+// handover's play deferred to its metadata, each after the generation
+// moved, play nothing.
+func TestAContinuationOrADeferredPlayPlaysNothingOnceTheReaderActed(t *testing.T) { barScenario(t, 2) }
+
+// TestTheLockScreensPlayKeepsAResumeWaitingOnItsBarrier pins that the lock
+// screen's Play, unlike the bar's click on the resume's spinner, lets a
+// resume of the browser's own waiting on its barrier go on, and the
+// barrier's answer resumes the track.
+func TestTheLockScreensPlayKeepsAResumeWaitingOnItsBarrier(t *testing.T) { barScenario(t, 2) }
+
 // TestTheBarsPauseOverAnInterruptionPausesAndAsksNothing pins that the bar's
 // button does what it shows: over an element an interruption paused, its
 // pause event still to come, the Pause shown pauses and asks the gate
