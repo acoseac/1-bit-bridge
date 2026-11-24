@@ -66,7 +66,7 @@ held.
 Each a mutated copy of one production file at `6d3ec548` given to `go test` by `-overlay`, no
 tracked file edited, run over every check test of both packages. A census first, an overlay that
 changes nothing and prints wherever a mutation would decide otherwise, named the tests each one
-reaches; the predictions were written from those tests' assertions before any control ran. Eleven
+reaches; the predictions were written from those tests' assertions before any control ran. Ten
 controls, each red exactly where predicted and nowhere else:
 
 | | Mutation | Red |
