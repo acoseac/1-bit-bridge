@@ -538,6 +538,17 @@ func TestADeferredStartWithNoPermitAsksTheGateThatHoldsWhenItRuns(t *testing.T) 
 // position.
 func TestADeferredStartWithNoPermitPlaysWhileNoPlayerIsOffered(t *testing.T) { barScenario(t, 2) }
 
+// TestALoadClearsTheProtectivePausesCount pins that a load landing between
+// the protective pause of the browser's own play and that pause's event
+// takes the pause's count with it, so the browser's next pause still ends
+// the intent and the next removal starts nothing.
+func TestALoadClearsTheProtectivePausesCount(t *testing.T) { barScenario(t, 2) }
+
+// TestALoadBesideASoundingBridgeLeavesTheBrowserSilent guards the same
+// sequence beside the bridge's player playing: the gate refuses the
+// browser's resume at once, so the browser stays silent, the bar saying why.
+func TestALoadBesideASoundingBridgeLeavesTheBrowserSilent(t *testing.T) { barScenario(t, 2) }
+
 // TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
 // the reader replaced while a skip waits on its barrier plays from its start
 // on the barrier's done, and the skip moves nothing of it.

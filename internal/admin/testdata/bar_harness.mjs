@@ -2530,6 +2530,60 @@ S.TestADeferredStartWithNoPermitPlaysWhileNoPlayerIsOffered = async () => {
   check("still no player offered: the deferred play plays, from its position", !r.el.paused && r.el.currentTime === 42, [r.el.paused, r.el.currentTime]);
 };
 
+// ---- Round 5: a load leaves no protective pause counted ----
+
+// oneTask lets the tasks queued so far run, and none of those they queue.
+const oneTask = () => new Promise((resolve) => realTimeout(resolve, 0));
+
+S.TestALoadClearsTheProtectivePausesCount = async () => {
+  // A load that lands between the protective pause of the browser's own play
+  // and that pause's event removes the event, and the count of protective
+  // pauses goes with it: the browser's next pause still ends the intent.
+  const r = await pageRig({ gate: true, noFrame: true });
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_offered", message: "no player" } }));
+  await r.out.sampleNow();
+  await settle();
+  r.audio.playQueue([flac(1), flac(2), flac(3)], 0);
+  await settle();
+  r.el.metadata(200);
+  r.el.pause();
+  await settle();
+  r.el.browserPlay();
+  await oneTask();
+  r.audio.removeAt(0);
+  await settle();
+  check("the playing row removed before the protective pause's event: its successor plays", !r.el.paused && r.audio.snapshot().track?.path === "Album/02.flac",
+    [r.el.paused, r.audio.snapshot().track?.path]);
+  r.el.pause();
+  await settle();
+  const plays = r.el.plays.length;
+  r.audio.removeAt(0);
+  await settle();
+  check("the browser's next pause ended the intent: the next removal starts nothing",
+    r.el.paused && r.el.plays.length === plays && r.audio.snapshot().track?.path === "Album/03.flac", [r.el.paused, r.el.plays.slice(plays), r.audio.snapshot().track?.path]);
+};
+
+S.TestALoadBesideASoundingBridgeLeavesTheBrowserSilent = async () => {
+  // The same sequence beside the bridge's player playing: its gate refuses
+  // the browser's resume at once, so the browser stays silent.
+  const r = await gatedPlaying();
+  r.frame(playing({ revision: 20 }));
+  await settle();
+  r.el.pause();
+  await settle();
+  r.el.browserPlay();
+  await oneTask();
+  r.audio.removeAt(0);
+  await settle();
+  r.el.pause();
+  await settle();
+  const plays = r.el.plays.length;
+  r.audio.removeAt(0);
+  await settle();
+  check("beside the bridge playing the browser stays silent", r.el.paused && r.el.plays.length === plays, [r.el.paused, r.el.plays.slice(plays)]);
+  check("and the bar says the bridge plays", r.out.view().line === WORDS.bridgePlaying, r.out.view().line);
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });

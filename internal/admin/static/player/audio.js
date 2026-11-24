@@ -193,9 +193,12 @@ function unmark(mark) {
 }
 
 // loadEl runs the element's load algorithm, which removes the `play` events
-// the marks wait for.
+// the marks wait for and the `pause` events of the protective pauses.
 function loadEl(el) {
-  if (el === state.el) marks.length = 0;
+  if (el === state.el) {
+    marks.length = 0;
+    ownPauses = 0;
+  }
   el.load();
 }
 
