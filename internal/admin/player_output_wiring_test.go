@@ -477,10 +477,11 @@ func audioStartViolations(src string) []string {
 
 // TestTheGateGuardReadsWhatAGateCallRunsAtOnce holds the start guard to what
 // a gate call runs as it is made: only the body of a function handed to the
-// gate is its own, a parenthesis inside a literal bounds nothing, and a gated
+// gate is its own, a bracket inside a literal bounds nothing, and a gated
 // start's own code is read beside its call of the gate. Each planting, in a
 // copy of the shipped audio.js, is a start outside the gate that the guard
-// must name; the shipped file, whose removed row's successor goes to
+// must name, or a deferred callback whose literals hold brackets, which it
+// must not; the shipped file, whose removed row's successor goes to
 // continueStart in a closure, passes it.
 func TestTheGateGuardReadsWhatAGateCallRunsAtOnce(t *testing.T) {
 	src := stripJSComments(readFile(t, "static/player/audio.js"))
@@ -488,12 +489,18 @@ func TestTheGateGuardReadsWhatAGateCallRunsAtOnce(t *testing.T) {
 		t.Fatalf("the shipped audio.js fails the guard: %v", v)
 	}
 	successor := "continueStart((permit) => playNow(permit), { fresh: true });"
+	brackets := "continueStart((permit) => { const s = `)}${\"((\"}`; playNow(permit); }, { fresh: true });"
 	next := "requestStart((permit) => advanceNow(delta, { permit }));"
-	for _, tc := range []struct{ name, in, old, planted string }{
-		{"an eager argument", "removeAt", successor, "continueStart(playNow(null), { fresh: true });"},
+	for _, tc := range []struct {
+		name, in, old, planted string
+		named                  bool
+	}{
+		{"an eager argument", "removeAt", successor, "continueStart(playNow(null), { fresh: true });", true},
 		{"a bare start after a callback holding a parenthesis", "removeAt", successor,
-			"continueStart((permit) => { const open = \"(\"; playNow(permit); }, { fresh: true });\n      start();"},
-		{"a bare start beside a gated start's call of its gate", "advance", next, next + "\n  start();"},
+			"continueStart((permit) => { const open = \"(\"; playNow(permit); }, { fresh: true });\n      start();", true},
+		{"a deferred callback whose literals hold brackets", "removeAt", successor, brackets, false},
+		{"a bare start after a callback whose literals hold brackets", "removeAt", successor, brackets + "\n      start();", true},
+		{"a bare start beside a gated start's call of its gate", "advance", next, next + "\n  start();", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if n := strings.Count(src, tc.old); n != 1 {
@@ -504,8 +511,8 @@ func TestTheGateGuardReadsWhatAGateCallRunsAtOnce(t *testing.T) {
 			for _, v := range got {
 				named = named || strings.HasPrefix(v, "audio.js's "+tc.in+" ")
 			}
-			if !named {
-				t.Errorf("%s planted in %s: the guard names %q, want %s named", tc.name, tc.in, got, tc.in)
+			if named != tc.named {
+				t.Errorf("%s planted in %s: the guard names %q, want %s named: %v", tc.name, tc.in, got, tc.in, tc.named)
 			}
 		})
 	}
