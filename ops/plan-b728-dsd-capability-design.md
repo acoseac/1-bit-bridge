@@ -1276,7 +1276,9 @@ safety half the app needs is on the bridge before the app's I4 ships.
   carrying the pair it was decided on, and `CheckAdmits` the same predicate for the route's
   precheck; round 2: its request's end and its hold's stop answered at once while its reading of
   the box or its wait for the slot is held, every wake decided again in its one locked step,
-  nothing granted past the wait's bound), then by the
+  nothing granted past the wait's bound; a reading still waiting for the refreshes' lock as the
+  stop comes reads nothing, and a wake of that reading is refused in the slot's order: the request's
+  end, serve's stop, the stop, then `dac_unavailable` for a reading that failed), then by the
   supervisor's gate's word, the fence, a lease, a session or another check, waiting for a probe or a preempted tone as a Start's hold does; then,
   in its run, a fresh reading of the policy (the DoP gain among it) before the open, the locate,
   the sink opened by the tuple's plan with the unit's check, the node's identity and the admission
@@ -1298,6 +1300,8 @@ safety half the app needs is on the bridge before the app's I4 ships.
   `failed`, and `Check` answers a handle of its own check that reads the same (amended
   2026-11-24, B12 PR 4a); that answer and the pair it carries are read in one step, where the check's
   end is published and its slot given back together (round 2).
+  With no check in the slot, the stop answers `none` with the pair published as it found the slot
+  empty (amended 2026-11-24, B12 PR 4a).
 
 **The chime** (amended 2026-11-21, B12 PR 1: `internal/player/dsdchime`, inert until the
 backend's check, B12 PR 3, calls it):
