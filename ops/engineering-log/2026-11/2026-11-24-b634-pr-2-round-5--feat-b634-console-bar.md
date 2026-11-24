@@ -75,6 +75,30 @@ Five controls, each predicted in writing first, all as predicted:
   - `continueStart` going on with no gate: the pin alone, since no case reaches it. An unwired boot
     starts nothing a continuation could follow.
 
+### The runs
+
+Each through the shared build lock, on `GOTOOLCHAIN=go1.27.3` with `GOPROXY=off` and node v24.22.3
+on the path.
+
+- `make fmt vet test build-all docs-check` and the rest in one session, at `82d8dd4b`:
+  - `make fmt` rewrote nothing.
+  - `make vet`, and the same for linux/arm, linux/386, windows/amd64, windows/arm64 and
+    darwin/arm64: exit 0, 2 to 5 s each.
+  - `make docs-check`: exit 0.
+  - `scripts/qualification-version -base a79c69b2 -head HEAD`: OK.
+  - `make test` at `P=8`: exit 0 in 2,014 s, 93 packages ok, cmd/bridge 1,982 s, internal/admin
+    1,519 s.
+  - The harness's cases by name with `-v`: 93 of 93 PASS, none skipped.
+  - `make build-all`: exit 0 in 26 s. The tree was clean after.
+- The source guards, run by name before it, all pass:
+  - `TestNoConsoleControlDisablesItselfOutsideSetDisabled`, `TestPlayerEmittedClassesAreStyled`,
+    `TestTrackSubgridColumnsMatchTheRow`, `TestAppJSHasNoCallsToDeletedHelpers`,
+    `TestByteFormattersAgree`, `TestEveryStartOfThisBrowserAsksTheGate`,
+    `TestNoSoundSourceOfTheConsoleBypassesTheGate` and `TestFailureAutoAdvanceIsGuarded`;
+  - `TestEveryCitedTestNameExists`, `TestNoBlankKeepers` and
+    `TestNoDocblockNamesAnotherDeclaration`.
+- No other race run: the server did not change.
+
 ### Residuals
 
 - A boot that throws before it wires the gates mounts no bar. Nothing on the page says why the lock
