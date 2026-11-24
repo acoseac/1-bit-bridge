@@ -100,7 +100,8 @@ The 2 green by design are `TestADeferredStartPlaysWhileItsPermitHolds` (V4's pos
 restructured G8 case.
 
 30 controls, each the fix taken out as an uncommitted edit over the whole bar family, the tree clean
-after each: all red at their named cases. Two needed their case sharpened first:
+after each, were all red at their named cases. This record names none of them, so it shows their
+count alone (corrected by B1005's entry). Two needed their case sharpened first:
 
 - V2's (every no-record answer taken for a refusal): the switch-in case passed through a barrier
   that was itself lost. It now also requires the output still the bridge and no barrier sent.
@@ -118,7 +119,7 @@ Each through the shared build lock, on `GOTOOLCHAIN=go1.27.3` with `GOPROXY=off`
   parked and enters maintenance with it, so the generation moved between the two. Round 2 changed no
   server code or test, and round 1's two gates passed the case. Its cause is not established here,
   and the round's budget takes no server change, so it is left for its own follow-up. The second
-  session: exit 0 in 1,955 s, 93 packages ok, the six cross-builds and docs-check with its
+  session, on `db0db736`'s code (its child, `f8d93093`, adds this record alone): exit 0 in 1,955 s, 93 packages ok, the six cross-builds and docs-check with its
   self-tests; `make fmt` rewrote nothing.
 - The release-tag vets, `make vet` for linux/arm, linux/386, windows/amd64, windows/arm64 and
   linux/amd64: exit 0, 4 to 6 s each.
@@ -131,6 +132,9 @@ Each through the shared build lock, on `GOTOOLCHAIN=go1.27.3` with `GOPROXY=off`
 
 ### Residuals
 
+- PR 1's `TestARefusalThroughThePlayWaiterIsAnEffectNotKnown`, its maintenance case, failed in this
+  round's first gate session ("enter maintenance: generation_conflict"), its cause not established,
+  and is left for its own follow-up (the runs above).
 - Two documents of one tab coordinate nothing beyond R8's rule; a cross-tab lock or channel is not
   this round's.
 - A reload no longer resumes by itself.
