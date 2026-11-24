@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
@@ -379,10 +378,7 @@ func TestThePageStopsItsToneByItsRequestAlone(t *testing.T) {
 	// harness and its run.
 	script, assembled := tonePageScript(t, src, tonePageRun)
 	requireCarried(t, script, assembled[len(script):], src)
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; the rest runs the shipped page script")
-	}
+	node := barNode(t)
 	raw := runScriptUnderNode(t, node, assembled, struct{}{})
 	var runs []struct {
 		Name    string   `json:"name"`
@@ -482,10 +478,7 @@ func TestANavigationEndsTheToneAsItBegins(t *testing.T) {
 	}
 	script, assembled := tonePageScript(t, src, toneRouterRun, "wireBoostRouter", "boostNavigate", "boostSwap", "boostIsPlayerPath")
 	requireCarried(t, script, assembled[len(script):], src)
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; the rest runs the shipped router and page")
-	}
+	node := barNode(t)
 	raw := runScriptUnderNode(t, node, assembled, struct{}{})
 	var runs []struct {
 		Name     string   `json:"name"`
@@ -543,10 +536,7 @@ func TestAPageTheCacheShowsAgainSaysWhatTheStatusSays(t *testing.T) {
 		"playerTone.busyShown = true;", `showPlayerToneLine("ok", "");`, "setDisabled(stop, true);", "setDisabled(play, false);", "loadPlayerOutput();")
 	script, assembled := tonePageScript(t, src, toneShownAgainRun)
 	requireCarried(t, script, assembled[len(script):], src)
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; the rest runs the shipped page")
-	}
+	node := barNode(t)
 	raw := runScriptUnderNode(t, node, assembled, struct{}{})
 	var runs []struct {
 		Name      string   `json:"name"`
@@ -613,10 +603,7 @@ func TestNoStaleStatusReadPaintsOverANewerTone(t *testing.T) {
 	requireInOrder(t, "confirmPlayerToneStop", confirm, "readPlayerOutputForTone(scope, deadline - Date.now(), current)")
 	script, assembled := tonePageScript(t, src, toneStaleRun)
 	requireCarried(t, script, assembled[len(script):], src)
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; the rest runs the shipped page")
-	}
+	node := barNode(t)
 	raw := runScriptUnderNode(t, node, assembled, struct{}{})
 	var runs []struct {
 		Name    string   `json:"name"`
@@ -676,10 +663,7 @@ func TestAStopsConfirmationKeepsTheLastToneItRead(t *testing.T) {
 	}
 	script, assembled := tonePageScript(t, src, toneLastReadRun)
 	requireCarried(t, script, assembled[len(script):], src)
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; the rest runs the shipped page")
-	}
+	node := barNode(t)
 	raw := runScriptUnderNode(t, node, assembled, struct{}{})
 	var runs []struct {
 		Name   string `json:"name"`
@@ -728,10 +712,7 @@ func TestAStopNotConfirmedGivesWayOnceTheDACCloses(t *testing.T) {
 		`playerTone.busyShown = r.outcome === "stop_unconfirmed";`)
 	script, assembled := tonePageScript(t, src, toneWarningRun)
 	requireCarried(t, script, assembled[len(script):], src)
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; the rest runs the shipped page")
-	}
+	node := barNode(t)
 	raw := runScriptUnderNode(t, node, assembled, struct{}{})
 	var runs []struct {
 		Name   string `json:"name"`
@@ -787,10 +768,7 @@ func TestTheToneBeforeARefusedPlayDoesNotPaintOverIt(t *testing.T) {
 	}
 	script, assembled := tonePageScript(t, src, toneRefusedRun)
 	requireCarried(t, script, assembled[len(script):], src)
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; the rest runs the shipped page")
-	}
+	node := barNode(t)
 	raw := runScriptUnderNode(t, node, assembled, struct{}{})
 	var runs []struct {
 		Name    string `json:"name"`

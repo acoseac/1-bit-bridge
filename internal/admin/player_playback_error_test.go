@@ -185,7 +185,10 @@ func TestStalePlaybackFailuresTouchNothing(t *testing.T) {
 //
 // 1200ms is long enough to pause, pick another track, or replace the
 // queue. Both conditions are needed: the generation catches a track
-// change, `playing` catches a plain pause, which changes no track at all.
+// change, the intent catches a plain pause, which changes no track at all,
+// and which every pause ends (the bar's, the lock screen's, the browser's
+// own). `playing` cannot: a source refused before any play event, or whose
+// pending play was refused, never played (B1005).
 func TestFailureAutoAdvanceIsGuarded(t *testing.T) {
 	fn := extractJSFunction(t,
 		readFile(t, filepath.Join("static", "player", "audio.js")), "handleSourceError")
@@ -193,9 +196,9 @@ func TestFailureAutoAdvanceIsGuarded(t *testing.T) {
 	if i < 0 {
 		t.Fatal("handleSourceError no longer schedules the post-failure advance")
 	}
-	body := fn[i:]
-	if !strings.Contains(body, "state.playing") {
-		t.Error("the auto-advance does not check that playback is still running; " +
+	body := stripJSComments(fn[i:])
+	if !strings.Contains(body, "if (intent && at === playbackGen)") {
+		t.Error("the auto-advance does not check that this browser still means to play; " +
 			"pausing after a failure would be undone 1200ms later")
 	}
 	if !strings.Contains(body, "at === playbackGen") {

@@ -48,7 +48,7 @@ function boot() {
   // (round 2, R1), and so does what playback does by itself (round 3, S1).
   const output = createOutput(browserOutputEnv());
   installOutput(output);
-  audio.setStartGate(output.gateStart);
+  audio.setStartGate(output.gateStart, output.cancelStarts);
   audio.setContinueGate(output.gateContinue);
   mountBar();
   wireGlobal();

@@ -2,6 +2,9 @@ package admin
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,19 +30,66 @@ type barResult struct {
 	} `json:"fail"`
 }
 
+// barNode is node for a test that executes the shipped player modules: a
+// host without it skips the test, and under CI the test fails, so a CI green
+// means the case ran (round 4, T5). Every node lookup of the player output's
+// tests is this one (TestEveryNodeLookupOfTheOutputsTestsIsBarNode).
+func barNode(t *testing.T) string {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("node not installed under CI: the player output's node cases run there, never skip")
+		}
+		t.Skip("node not installed; this test executes the shipped player modules")
+	}
+	return node
+}
+
+// TestEveryNodeLookupOfTheOutputsTestsIsBarNode holds every
+// player_output_*_test.go to one lookup of node, barNode's, so none of them
+// skips under CI: each call of exec.LookPath, found by the files' syntax,
+// placed in the function that holds it.
+func TestEveryNodeLookupOfTheOutputsTestsIsBarNode(t *testing.T) {
+	files, err := filepath.Glob("player_output_*_test.go")
+	if err != nil || len(files) < 5 {
+		t.Fatalf("only %d of the player output's test files found (%v): the guard has stopped reading them", len(files), err)
+	}
+	var sites []string
+	for _, f := range files {
+		file, err := parser.ParseFile(token.NewFileSet(), f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if sel, isSel := call.Fun.(*ast.SelectorExpr); isSel && sel.Sel.Name == "LookPath" {
+					if pkg, isID := sel.X.(*ast.Ident); isID && pkg.Name == "exec" {
+						sites = append(sites, f+":"+fn.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if len(sites) != 1 || sites[0] != "player_output_bar_test.go:barNode" {
+		t.Errorf("the player output's tests look node up at %v: every lookup is barNode's, which fails under CI, and it alone looks", sites)
+	}
+}
+
 // barScenario runs the harness's scenario named as the calling test is, and
 // requires checks of its checks to pass and none to fail.
 func barScenario(t *testing.T, checks int) {
 	t.Helper()
-	node, err := exec.LookPath("node")
-	if err != nil {
-		// Under CI the harness runs or the case fails, so a CI green means
-		// the cases ran (round 4, T5).
-		if os.Getenv("CI") != "" {
-			t.Fatal("node not installed under CI: the bar's cases run there, never skip")
-		}
-		t.Skip("node not installed; this test executes the shipped player modules")
-	}
+	node := barNode(t)
 	harness, err := filepath.Abs(filepath.Join("testdata", "bar_harness.mjs"))
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +240,7 @@ func TestALateAnswerFromBeforeARestartNeverReplacesTheNewEpoch(t *testing.T) { b
 // TestAnOperationIsConfirmedByItsRecordNeverByAChange pins G3: a Pause of a
 // stopped bridge, which changes nothing the engine publishes, is confirmed
 // by its answer's record under a revision of its own.
-func TestAnOperationIsConfirmedByItsRecordNeverByAChange(t *testing.T) { barScenario(t, 1) }
+func TestAnOperationIsConfirmedByItsRecordNeverByAChange(t *testing.T) { barScenario(t, 2) }
 
 // TestTheFirstStateOfAnEpochLeadsToAQueueReadWhateverTheToken pins G4: the
 // first state of an epoch reads the queue, its token 0 or not, and so does
@@ -333,7 +383,7 @@ func TestAStreamRecordWithoutItsWholeRecordIsReadBack(t *testing.T) { barScenari
 // TestARequestUnansweredPast30SecondsIsUnconfirmed pins R6 and V1: a request
 // 30 s old is lost, unconfirmed and read back, and its late answer, before
 // or after the read back resolves it, is not read.
-func TestARequestUnansweredPast30SecondsIsUnconfirmed(t *testing.T) { barScenario(t, 5) }
+func TestARequestUnansweredPast30SecondsIsUnconfirmed(t *testing.T) { barScenario(t, 7) }
 
 // TestEveryUnresolvedOperationIsKeptUntilItResolves pins R7 and V3: a
 // conflict keeps the older identity's operation, each resolved by its own
@@ -366,7 +416,7 @@ func TestAFailedQueueReadIsAskedAgain(t *testing.T) { barScenario(t, 2) }
 // it: a row's play, Play, Next and the lock screen's Play and Next start
 // nothing beside the bridge playing; beside a bridge that does not sound a
 // start plays on the barrier's done alone; Pause never waits.
-func TestEveryStartOfThisBrowserGoesThroughTheGate(t *testing.T) { barScenario(t, 7) }
+func TestEveryStartOfThisBrowserGoesThroughTheGate(t *testing.T) { barScenario(t, 8) }
 
 // TestAStartWaitsToKnowWhetherAPlayerIsOffered pins V6: on a box that sends
 // no frame a start waits for GET now, which a failed first answer asks
@@ -442,7 +492,10 @@ func TestARefusedContinuationEndsTheIntentToPlay(t *testing.T) { barScenario(t, 
 func TestPlaybackLetGoWithNoPlayerOfferedAsksTheGateToGoOn(t *testing.T) { barScenario(t, 4) }
 
 // TestAContinuationBehindABarrierStopsForAPause pins Q3: a skip waiting on
-// its barrier, the reader's Pause before the answer, neither plays nor moves.
+// its barrier, the element paused before the answer, neither plays nor
+// moves. The bar's Play/Pause over the failed track is a start
+// (TestPlayOverAFailedTrackStartsAgain), and the lock screen's Pause a pause
+// (TestTheLockScreensPauseOverAFailedTrackStaysAPause).
 func TestAContinuationBehindABarrierStopsForAPause(t *testing.T) { barScenario(t, 2) }
 
 // TestAContinuationBehindABarrierStopsForTheBrowsersOwnPause pins Q3 and Q8:
@@ -556,9 +609,263 @@ func TestAnUnwiredGateRefusesTheBrowsersOwnPlay(t *testing.T) { barScenario(t, 2
 
 // TestAnUnwiredGateRefusesEveryStart pins that with no gate wired every start
 // is refused, the lock screen's Play and Next included.
-func TestAnUnwiredGateRefusesEveryStart(t *testing.T) { barScenario(t, 3) }
+func TestAnUnwiredGateRefusesEveryStart(t *testing.T) { barScenario(t, 4) }
 
-// TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins Q3: a queue
-// the reader replaced while a skip waits on its barrier plays from its start
-// on the barrier's done, and the skip moves nothing of it.
+// TestAContinuationBehindABarrierLeavesAReplacedQueueAlone pins that a queue
+// the reader replaced while a skip waits on its barrier takes the skip's
+// place behind it and plays from its start on the barrier's done, the skip
+// moving nothing of it. The skip's own look at the generation when it runs
+// is TestAContinuationBehindABarrierLeavesATakenQueueAlone's.
 func TestAContinuationBehindABarrierLeavesAReplacedQueueAlone(t *testing.T) { barScenario(t, 3) }
+
+// The bar's follow-ups to PR 2 (B1005): a resume's wait the reader cancels,
+// a track that fails, a deferred start, a handover's gone entry and the
+// output menu's focus.
+
+// TestAResumeWaitTheReaderCancelsStopsItsSpinner pins that a row clicked or
+// Next pressed while the browser's own resume waits on its barrier, refused
+// beside the bridge playing, ends that resume and its spinner, and the bar
+// is told.
+func TestAResumeWaitTheReaderCancelsStopsItsSpinner(t *testing.T) { barScenario(t, 4) }
+
+// TestRemovingARowThatIsNotPlayingCancelsNoResume pins which calls cancel
+// the browser's own resume: removing a row that is not playing does not,
+// nor do an append, a seek, the level, shuffle or repeat.
+func TestRemovingARowThatIsNotPlayingCancelsNoResume(t *testing.T) { barScenario(t, 2) }
+
+// TestRemovingTheOnlyRowLeavesNoTrackAndNothingPlaying pins that removing
+// the row that plays, with no playable track after it, leaves the queue
+// pointing at no track and the element stopped.
+func TestRemovingTheOnlyRowLeavesNoTrackAndNothingPlaying(t *testing.T) { barScenario(t, 2) }
+
+// TestAnAlbumSkipsPastATrackTheBrowserCannotPlay pins the skip in the
+// browser's own order: a source refused before its metadata, the bar's play
+// still pending and refused with NotSupportedError, is skipped through a
+// barrier of its own, the bar showing it stopped meanwhile.
+func TestAnAlbumSkipsPastATrackTheBrowserCannotPlay(t *testing.T) { barScenario(t, 2) }
+
+// TestTheStopAfterThreeUnplayableTracksStartsNothingMore pins that the stop
+// after three unplayable tracks in a row ends what this browser meant to
+// play, so removing its row starts nothing.
+func TestTheStopAfterThreeUnplayableTracksStartsNothingMore(t *testing.T) { barScenario(t, 2) }
+
+// TestASkipUnderRepeatOneMovesPastTheFailedTrack pins that the skip past a
+// source that cannot play moves on under repeat one, where a track that
+// plays still repeats at its end.
+func TestASkipUnderRepeatOneMovesPastTheFailedTrack(t *testing.T) { barScenario(t, 3) }
+
+// TestAPlayingHandoverWhoseSourceFailsBeforeItsMetadataSkips pins that a
+// handover taken to play at a position, whose source fails before the
+// metadata its play waits for, skips to the next track.
+func TestAPlayingHandoverWhoseSourceFailsBeforeItsMetadataSkips(t *testing.T) { barScenario(t, 2) }
+
+// TestAHandoverTakenStoppedWhoseSourceFailsStartsNothing is its other side:
+// a handover taken stopped skips nothing and plays nothing.
+func TestAHandoverTakenStoppedWhoseSourceFailsStartsNothing(t *testing.T) { barScenario(t, 2) }
+
+// TestPlayOverAFailedTrackStartsAgain pins that the bar's Play over a track
+// whose source cannot play is a start: it takes the skip's place behind the
+// barrier, the skip let go of, and on its done the reader's start runs, the
+// skip never, and plays the next playable track; the gates are watched from
+// before the skip asks.
+func TestPlayOverAFailedTrackStartsAgain(t *testing.T) { barScenario(t, 4) }
+
+// TestPlayOverATrackThatFailedForGoodReloadsIt pins Play over a track whose
+// network error (code 2) came back after its retry: a start that reloads the
+// track, its automatic retry there again.
+func TestPlayOverATrackThatFailedForGoodReloadsIt(t *testing.T) { barScenario(t, 4) }
+
+// TestPlayOverATrackThatFailedToDecodeForGoodReloadsIt is the same for a
+// decode error (code 3), each code's reload pinned by a case of its own.
+func TestPlayOverATrackThatFailedToDecodeForGoodReloadsIt(t *testing.T) { barScenario(t, 4) }
+
+// TestPlayOverAFailedLastTrackStopsAtTheEnd pins Play over the last track,
+// failed, with repeat off: before its skip's timer fires, it stops at the
+// queue's end through a barrier and plays nothing, and the skip then does
+// nothing more.
+func TestPlayOverAFailedLastTrackStopsAtTheEnd(t *testing.T) { barScenario(t, 3) }
+
+// TestTheLockScreensPauseOverAFailedTrackStaysAPause pins that the
+// MediaSession's Pause is a pause, never Play/Pause: over a failed track
+// whose skip waits on its barrier, it plays nothing.
+func TestTheLockScreensPauseOverAFailedTrackStaysAPause(t *testing.T) { barScenario(t, 3) }
+
+// TestAPlayBeforeAHandoversMetadataIsItsOnlyStart pins one start per
+// playback: the reader's Play before a positioned handover's metadata plays,
+// and the metadata then seeks and starts nothing more.
+func TestAPlayBeforeAHandoversMetadataIsItsOnlyStart(t *testing.T) { barScenario(t, 2) }
+
+// TestAPauseBeforeAHandoversMetadataCancelsItsDeferredStart pins that the
+// reader's Play and then Pause before a handover's metadata leave its
+// deferred start, with its permit, playing nothing.
+func TestAPauseBeforeAHandoversMetadataCancelsItsDeferredStart(t *testing.T) { barScenario(t, 3) }
+
+// TestAHandoverWhoseSelectedEntryIsGoneStartsTheNextKeptEntry pins that a
+// handover whose selected entry has no track selects the next kept entry and
+// plays it from its start.
+func TestAHandoverWhoseSelectedEntryIsGoneStartsTheNextKeptEntry(t *testing.T) { barScenario(t, 2) }
+
+// TestAHandoverWhoseSelectedLastEntryIsGoneIsTakenStopped pins that one with
+// no kept entry after the gone one is taken stopped at its first kept entry,
+// from its start.
+func TestAHandoverWhoseSelectedLastEntryIsGoneIsTakenStopped(t *testing.T) { barScenario(t, 2) }
+
+// TestATrackThatFailsForGoodPlaysNothingWhenItsBarrierAnswers pins that a
+// failure past the retry ends what this browser meant to play, so the
+// retry's barrier, answering done later, plays nothing over it.
+func TestATrackThatFailsForGoodPlaysNothingWhenItsBarrierAnswers(t *testing.T) { barScenario(t, 3) }
+
+// TestAContinuationBehindABarrierLeavesATakenQueueAlone pins a continuation's
+// look at the generation when it runs: a queue output.js hands this browser while a skip waits on
+// its barrier, which the skip's let-go then finds is no longer its playback.
+func TestAContinuationBehindABarrierLeavesATakenQueueAlone(t *testing.T) { barScenario(t, 3) }
+
+// TestAnUnwiredGateLetsNoTrackGoOnByItself pins continueStart with no gate
+// wired: a track's end goes on to no next track.
+func TestAnUnwiredGateLetsNoTrackGoOnByItself(t *testing.T) { barScenario(t, 3) }
+
+// TestTheOldestMarkGoesToTheFirstPlayEventAndNothingUnaskedSounds pins the
+// marks' order: the browser's own play queued before the reader's Pause and
+// Play takes the reader's mark, the reader's own event is then paused and
+// asked of the gate, and nothing sounds that the gate did not let.
+func TestTheOldestMarkGoesToTheFirstPlayEventAndNothingUnaskedSounds(t *testing.T) {
+	barScenario(t, 2)
+}
+
+// TestTheHarnessElementSettlesWhatALoadDrops pins the harness's element: a
+// load settles the promises of the tasks it removes, a play's resolved and
+// those a pause took refused with AbortError, as a browser's does.
+func TestTheHarnessElementSettlesWhatALoadDrops(t *testing.T) { barScenario(t, 2) }
+
+// TestTheOutputMenuClosesAsTheFocusLeavesIt pins the output menu's focus:
+// moving between its picks leaves it open, the focus leaving it for anything
+// else (the Output button included) closes it, and a click on the Output
+// button while it is open closes it once, the press keeping the focus.
+func TestTheOutputMenuClosesAsTheFocusLeavesIt(t *testing.T) { barScenario(t, 5) }
+
+// TestTheOutputButtonClaimsNoPopup pins that the Output button carries no
+// aria-haspopup: its menu is a group of buttons, no menu role.
+func TestTheOutputButtonClaimsNoPopup(t *testing.T) { barScenario(t, 2) }
+
+// An explicit Pause, a handover's wait, the failure streak and an abort
+// (B1005's second round).
+
+// TestAnExplicitPauseCancelsAStartWaitingForTheEpoch pins that the lock
+// screen's Pause lets go of a row's start waiting for the epoch: the first
+// frame then sends no barrier and plays nothing, the selection the browser
+// held stays, no wait is left to time out, and a fresh Play still plays.
+func TestAnExplicitPauseCancelsAStartWaitingForTheEpoch(t *testing.T) { barScenario(t, 6) }
+
+// TestAnExplicitPauseCancelsAStartWaitingOnItsBarrier pins that the lock
+// screen's Pause and the bar's Pause each let go of a row's start waiting on
+// its barrier: the barrier's answer plays nothing, the selection stays, and a
+// fresh Play plays what the browser held.
+func TestAnExplicitPauseCancelsAStartWaitingOnItsBarrier(t *testing.T) { barScenario(t, 6) }
+
+// TestAnExplicitPauseCancelsAPlayThatTookASkipsPlace pins that the lock
+// screen's Pause lets go of a Play over a failed track that took its skip's
+// place behind the barrier, and a fresh Play then moves on.
+func TestAnExplicitPauseCancelsAPlayThatTookASkipsPlace(t *testing.T) { barScenario(t, 3) }
+
+// TestAPauseDuringAHandoversWaitStopsItsSpinner pins that the lock screen's
+// Pause over a positioned handover waiting for its metadata shows it stopped
+// and not starting at once, and that its metadata then plays nothing.
+func TestAPauseDuringAHandoversWaitStopsItsSpinner(t *testing.T) { barScenario(t, 3) }
+
+// TestAReaderPlaySupersedesAHandoversDeferredStart pins that the reader's
+// Play during a positioned handover's wait supersedes the play its metadata
+// defers: the metadata, first, seeks to the position and plays nothing, and
+// the Play plays once, there, when the gate lets it. The answer-first order
+// is TestAPlayBeforeAHandoversMetadataIsItsOnlyStart's.
+func TestAReaderPlaySupersedesAHandoversDeferredStart(t *testing.T) { barScenario(t, 2) }
+
+// TestARefusedReaderPlayDuringAHandoversWaitShowsItStopped pins that the same
+// Play, its barrier refused, leaves the seek, plays nothing, and shows the
+// handover stopped and not starting.
+func TestARefusedReaderPlayDuringAHandoversWaitShowsItStopped(t *testing.T) { barScenario(t, 1) }
+
+// TestATrackThatPlaysToItsEndBreaksTheFailureStreak pins that a track that
+// played to its end breaks a streak of unplayable ones: an album of bad and
+// good tracks in turn reaches its sixth track, no stop said.
+func TestATrackThatPlaysToItsEndBreaksTheFailureStreak(t *testing.T) { barScenario(t, 1) }
+
+// TestThreeFailuresInARowStopOnTheThirdThoughEachHadItsPlayEvent pins that a
+// play event breaks no streak: three unplayable tracks in a row, each with
+// its play event before its error, stop on the third.
+func TestThreeFailuresInARowStopOnTheThirdThoughEachHadItsPlayEvent(t *testing.T) {
+	barScenario(t, 2)
+}
+
+// TestAFailureAfterARepeatOneReplayStartsANewStreak pins the streak under
+// repeat one: after two failures the third track plays to its end, and its
+// replay's failure schedules a skip as the first of a new streak.
+func TestAFailureAfterARepeatOneReplayStartsANewStreak(t *testing.T) { barScenario(t, 3) }
+
+// TestAfterAnAbortTheButtonDoesWhatItShows pins that after a fetch the user
+// aborted (code 1), which fires no pause, the bar's Pause, still shown,
+// pauses and asks the gate nothing, and its Play, shown once stopped,
+// starts the track it showed through the gate.
+func TestAfterAnAbortTheButtonDoesWhatItShows(t *testing.T) { barScenario(t, 4) }
+
+// TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo pins that a start the lock
+// screen's Pause let go of holds no place behind its barrier: the browser's
+// own play then takes it and resumes what the browser held on its answer.
+func TestTheBrowsersOwnPlayTakesTheSlotAPauseLetGo(t *testing.T) { barScenario(t, 2) }
+
+// TestABarrierWhoseStartAPauseLetGoEndsQuietly pins that a barrier whose
+// start the lock screen's Pause let go of, lost at 30 s and read back done,
+// brings the bar back to this browser's phase with no line of a start, plays
+// nothing, and a Play after it still plays.
+func TestABarrierWhoseStartAPauseLetGoEndsQuietly(t *testing.T) { barScenario(t, 2) }
+
+// TestAPlayAfterAnExplicitPauseOutlivesThatPausesEvent pins that the cancel
+// is the explicit Pause's, never the element's pause event: a fresh Play made
+// before that event takes the barrier in flight and plays on its answer, its
+// intent going on at the track's end.
+func TestAPlayAfterAnExplicitPauseOutlivesThatPausesEvent(t *testing.T) { barScenario(t, 3) }
+
+// A resume a pause overtook, the bar's Pause shown at once, and a Stop.
+
+// TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnItsBarriersDone pins
+// that the browser's own resume of a paused track, its play event queued
+// before the lock screen's Pause while a row's start waits on its barrier,
+// asks nothing when that event comes: the barrier's done, beside a silent
+// bridge, plays neither that track nor the row the Pause let go of.
+func TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnItsBarriersDone(t *testing.T) {
+	barScenario(t, 4)
+}
+
+// TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnANoPlayerRefusal pins
+// the same with the barrier refused as no player offered, a refusal that
+// lets a start it holds go on in this browser.
+func TestTheBrowsersOwnResumeAPauseOvertookPlaysNothingOnANoPlayerRefusal(t *testing.T) {
+	barScenario(t, 5)
+}
+
+// TestTheBrowsersOwnResumeAPauseOvertookAsksNothingWhereNoPlayerIsOffered
+// pins it where the gate already knows no player is offered and would let it
+// go on at once, and that a resume of the browser's own made after the Pause
+// still plays.
+func TestTheBrowsersOwnResumeAPauseOvertookAsksNothingWhereNoPlayerIsOffered(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestAfterAnAbortThePausePressedShowsPlayAtOnce pins that after a fetch the
+// user aborted (code 1), the bar's Pause pressed shows Play at once, before
+// the element's pause event, and that Play pressed before that event asks the
+// gate once, plays the track the bar showed, and its intent outlives that
+// event: the track's end plays the next track.
+func TestAfterAnAbortThePausePressedShowsPlayAtOnce(t *testing.T) { barScenario(t, 4) }
+
+// TestAStopLetsGoOfAStartWaitingForTheEpoch pins that the lock screen's Stop
+// lets go of a row's start waiting for the epoch: the first frame sends no
+// barrier and plays nothing, the queue stays empty, no wait is left to time
+// out, Play on the cleared queue does nothing, and a row played after it
+// plays.
+func TestAStopLetsGoOfAStartWaitingForTheEpoch(t *testing.T) { barScenario(t, 6) }
+
+// TestAStopLetsGoOfAStartWaitingOnItsBarrier pins that the lock screen's Stop
+// lets go of a row's start waiting on its barrier: the barrier's answer plays
+// nothing, the queue stays empty, Play on it does nothing, and a row played
+// after it plays.
+func TestAStopLetsGoOfAStartWaitingOnItsBarrier(t *testing.T) { barScenario(t, 4) }

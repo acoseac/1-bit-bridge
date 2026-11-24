@@ -60,21 +60,67 @@ func reached(t *testing.T, ch <-chan struct{}, what string) {
 
 // readBackEnded reads the rig's tab's operation seq back until its record is
 // no longer running, until the test's deadline, or fails with what premise
-// carries first: a hook's failure, handed to the test's goroutine.
+// carries first: a hook's failure, handed to the test's goroutine, asked
+// before each read and again once a read finds the record ended, so a record
+// that ended beside it is never taken for the case's outcome.
 func readBackEnded(t *testing.T, r *ctlRig, seq uint64, premise <-chan string) admin.PlayerRecord {
 	t.Helper()
-	for {
+	rec, failed := readBackUntilEnded(func() (<-chan struct{}, *admin.PlayerRecord) {
 		wake := r.c.Wake()
-		if rb := r.c.Operation(r.c.epoch, r.tab, seq); rb.Record != nil && rb.Record.Status != admin.PlayerOpRunning {
-			return *rb.Record
+		return wake, r.c.Operation(r.c.epoch, r.tab, seq).Record
+	}, premise, serveGiveUp(t))
+	if failed != "" {
+		t.Fatal(failed)
+	}
+	return rec
+}
+
+// readBackUntilEnded is readBackEnded's loop over read, which answers the
+// wake of the control's next change and the record as it reads now: the
+// record once it has ended and premise has said nothing, else what premise
+// said, or that the operation never ended once giveUp fires.
+func readBackUntilEnded(read func() (<-chan struct{}, *admin.PlayerRecord), premise <-chan string, giveUp <-chan time.Time) (admin.PlayerRecord, string) {
+	for {
+		select {
+		case msg := <-premise:
+			return admin.PlayerRecord{}, msg
+		default:
+		}
+		wake, rec := read()
+		if rec != nil && rec.Status != admin.PlayerOpRunning {
+			select {
+			case msg := <-premise:
+				return admin.PlayerRecord{}, msg
+			default:
+				return *rec, ""
+			}
 		}
 		select {
 		case <-wake:
 		case msg := <-premise:
-			t.Fatal(msg)
-		case <-serveGiveUp(t):
-			t.Fatal("the operation never ended")
+			return admin.PlayerRecord{}, msg
+		case <-giveUp:
+			return admin.PlayerRecord{}, "the operation never ended"
 		}
+	}
+}
+
+// TestTheReadBackAsksItsPremiseOnceTheRecordHasEnded pins readBackEnded's
+// order: a hook's failure handed over while the read that finds the record
+// ended runs, after the loop's look at the premise before that read, fails
+// the read back, never answering the record. A failure queued before the read
+// back begins is the look before the read's, which this does not exercise.
+func TestTheReadBackAsksItsPremiseOnceTheRecordHasEnded(t *testing.T) {
+	premise := make(chan string, 1)
+	reads := 0
+	rec, failed := readBackUntilEnded(func() (<-chan struct{}, *admin.PlayerRecord) {
+		reads++
+		premise <- "the hook's premise did not hold"
+		return make(chan struct{}), &admin.PlayerRecord{Status: admin.PlayerOpDone}
+	}, premise, nil)
+	if failed != "the hook's premise did not hold" || reads != 1 || rec.Status != "" {
+		t.Fatalf("a premise failed during the read that found the record ended: answered %q after %d reads, record %q; want the premise's failure after one read, no record",
+			failed, reads, rec.Status)
 	}
 }
 

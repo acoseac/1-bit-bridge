@@ -2,7 +2,6 @@ package admin
 
 import (
 	"encoding/json"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -123,10 +122,7 @@ process.exit(0);
 // with a late clock response of the connection it left dropped, and a frame
 // a retired EventSource still dispatches dropped.
 func TestTheStreamsLifecycleReachesTheBar(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; this test executes the shipped console source")
-	}
+	node := barNode(t)
 	src := readConsoleJS(t, "static/app.js")
 	script := withReachedFunctions(t, streamLifecycleHarness, src, "startEventStream", "recycleEventStream")
 	for _, fn := range []string{"function startEventStream(", "function recycleEventStream(", "function playerStreamEvent(", "function playerFrame("} {
