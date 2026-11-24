@@ -665,6 +665,35 @@ var sessionHandlers = []string{
 	`set("seekforward", (d) => seek(state.el.currentTime + (d?.seekOffset || 10)));`,
 }
 
+// TestTheHistoryListsTheMediaSessionsStartsAsTheyAreSet holds the long form
+// of the bar's output rule to what wireMediaSession sets: the MediaSession
+// handlers it lists as starts, which audio.js routes through requestStart,
+// are exactly those whose handler calls toggle or advance, so its Pause,
+// which calls pauseNow, is never listed among them.
+func TestTheHistoryListsTheMediaSessionsStartsAsTheyAreSet(t *testing.T) {
+	history := readFile(t, filepath.Join("..", "..", "ops", "History-rules-admin-console.md"))
+	m := regexp.MustCompile(`the MediaSession's ([a-z, ]+) handlers, which call those`).FindStringSubmatch(history)
+	if m == nil {
+		t.Fatal("the History's bar output entry lists no MediaSession handlers that call the bar's starts: the test has stopped reading it")
+	}
+	listed := regexp.MustCompile(`, | and `).Split(m[1], -1)
+	sort.Strings(listed)
+	words := map[string]string{"play": "play", "previoustrack": "previous", "nexttrack": "next"}
+	var set []string
+	ms := jsTopFunctions(stripJSComments(readFile(t, "static/player/audio.js")))["wireMediaSession"].body
+	for _, h := range regexp.MustCompile(`set\("(\w+)", \(\) => (?:toggle|advance)\(`).FindAllStringSubmatch(ms, -1) {
+		word, ok := words[h[1]]
+		if !ok {
+			t.Fatalf("wireMediaSession starts through its %s handler, which the test has no word for", h[1])
+		}
+		set = append(set, word)
+	}
+	sort.Strings(set)
+	if len(set) < 3 || !reflect.DeepEqual(listed, set) {
+		t.Errorf("the History lists the MediaSession's %v handlers as starts; wireMediaSession sets %v to start: list those alone", listed, set)
+	}
+}
+
 // TestNoSoundSourceOfTheConsoleBypassesTheGate is round 4's census (T4,
 // W10), on every host: every file of the console's scripts under static/,
 // comments stripped, and the templates' markup, searched for what can make
