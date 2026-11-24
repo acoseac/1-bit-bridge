@@ -819,6 +819,23 @@ func TestTheChosenPickCarriesAMarkTheFocusRingLacks(t *testing.T) {
 	}
 }
 
+// TestTheOutputMenuTakesTheFocusOfAPressOnItsWords pins at the source that
+// the output menu is focusable (tabindex -1), so a pointer press on its
+// words, whose focus a browser gives the nearest focusable ancestor, keeps
+// the focus inside the menu, and that its focusout closes it only for a
+// focus that leaves it. TestTheOutputMenuClosesAsTheFocusLeavesIt runs the
+// focusout under node with the focus moved by hand; the browser check of a
+// real press is the record's.
+func TestTheOutputMenuTakesTheFocusOfAPressOnItsWords(t *testing.T) {
+	menu := extractJSFunction(t, stripJSComments(readFile(t, "static/player/nowplaying.js")), "buildOutputMenu")
+	if !regexp.MustCompile(`refs\.menu = el\("div", \{[^}]*attrs: \{[^}]*\btabindex: "-1"`).MatchString(menu) {
+		t.Error(`the output menu is not focusable: a press on its words moves the focus out of it, and its focusout closes it`)
+	}
+	if !strings.Contains(menu, "if (!refs.menu.hidden && !refs.menu.contains(e.relatedTarget)) closeMenu();") {
+		t.Error("the output menu's focusout does not close it for a focus that leaves it alone")
+	}
+}
+
 // cssMediaBlocks is the body of every @media block of css whose query is
 // query, found by its braces.
 func cssMediaBlocks(css, query string) []string {
