@@ -89,10 +89,11 @@ let startPermit = null;
 // Whether this browser means to play what it holds (round 3, S2, Q8): set by
 // a load that means to play and by a play a start or a continuation lets
 // go on; cleared by a load that does not, a pause of the element other than
-// the one its end makes, suspend(), clearQueue(), the stop at the queue's
-// end and restore(). A continuation, and the retry after an error, play only
-// while it holds: the element cannot say it, since load() pauses it and a
-// track's end pauses it before `ended`.
+// the one its end makes, the reader's explicit Pause, a start the reader asks
+// over a paused element (requestStart), suspend(), clearQueue(), the stop at
+// the queue's end and restore(). A continuation, and the retry after an
+// error, play only while it holds: the element cannot say it, since load()
+// pauses it and a track's end pauses it before `ended`.
 let intent = false;
 // The marks of the bar's own plays whose `play` event has not come (round 4,
 // T1, W1): a play() on a paused element queues one `play` event, which takes

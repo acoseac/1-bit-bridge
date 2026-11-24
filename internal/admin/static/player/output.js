@@ -960,7 +960,8 @@ export function createOutput(env) {
   // A continuation (round 3, S1) is asked as a start is, and never displaces
   // a start the reader asked for, which supersedes it. Whatever asks may hand
   // a drop, which every way that never runs it calls, once: a refusal, a
-  // start that replaced it, a pick, the wait's end (round 4, W6).
+  // start that replaced it, a pick, the wait's end (round 4, W6), an explicit
+  // Pause (cancelStarts).
   function gateStart(run, { continuation = false, drop } = {}) {
     if (offered === false) {
       run(null);
