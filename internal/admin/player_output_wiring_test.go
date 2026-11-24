@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"io/fs"
 	"path/filepath"
 	"reflect"
@@ -144,36 +145,192 @@ var audioStarts = map[string]string{
 
 // audioGateCallRe starts a call that hands what it runs to a gate, a start
 // (requestStart) or what playback does by itself (continueStart), and
-// audioStoppedLoadRe a load that plays nothing: the calls inside either are
-// the gate's, or no play, and reach does not follow them.
+// audioStoppedLoadRe a load that plays nothing: what a gate call defers is
+// the gate's, a stopped load no play, and reach follows neither.
 var (
 	audioGateCallRe    = regexp.MustCompile(`(?:^|[^\w$.])(?:requestStart|continueStart)\(`)
 	audioStoppedLoadRe = regexp.MustCompile(`(?:^|[^\w$.])load\([^()]*\{\s*autoplay:\s*false\s*\}\)`)
+	// jsFuncHeadRe starts a function literal: an arrow's parameters, in
+	// parentheses or one name, or a function expression's keyword.
+	jsFuncHeadRe = regexp.MustCompile(`^\s*(?:async\s+)?(?:(\()|[A-Za-z_$][\w$]*\s*=>|(function)\b[^(]*\()`)
 )
 
-// withoutGatedCalls is body with the arguments of every gate call blanked,
-// to their closing parenthesis, and every stopped load taken out.
+// withoutGatedCalls is body as reach reads it: every stopped load taken
+// out, every string, template and regular-expression literal's text blanked
+// (jsMaskLiterals), so a parenthesis or a call inside one is none, and the
+// body of every function literal handed to a gate call as an argument
+// blanked, since the gate runs it when it lets it. Everything else a gate
+// call's arguments hold runs as the call is made, and stays.
 func withoutGatedCalls(body string) string {
-	body = audioStoppedLoadRe.ReplaceAllString(body, " ")
-	var b strings.Builder
-	for {
-		loc := audioGateCallRe.FindStringIndex(body)
+	code := []byte(jsMaskLiterals(audioStoppedLoadRe.ReplaceAllString(body, " ")))
+	for at := 0; ; {
+		loc := audioGateCallRe.FindIndex(code[at:])
 		if loc == nil {
-			b.WriteString(body)
-			return b.String()
+			return string(code)
 		}
-		b.WriteString(body[:loc[1]])
-		depth, i := 1, loc[1]
-		for ; i < len(body) && depth > 0; i++ {
-			switch body[i] {
-			case '(':
-				depth++
-			case ')':
-				depth--
+		open := at + loc[1] - 1
+		end := jsMatch(code, open)
+		for s := open + 1; s < end; {
+			e := jsArgEnd(code, s, end)
+			jsBlankFuncBody(code, s, e)
+			s = e + 1
+		}
+		at = open + 1
+	}
+}
+
+// jsMaskLiterals is src with the text of every string, template and
+// regular-expression literal blanked to spaces, newlines kept, and a
+// template's substitutions kept as the code they are. A slash starts a
+// regular expression after a byte that cannot end an operand (an operator,
+// an opening bracket, a comma or the start), and divides otherwise; a slash
+// after a keyword (return /x/) reads as a division.
+func jsMaskLiterals(src string) string {
+	b := []byte(src)
+	blank := func(from, to int) {
+		for k := from; k < to && k < len(b); k++ {
+			if b[k] != '\n' {
+				b[k] = ' '
 			}
 		}
-		b.WriteString(")")
-		body = body[i:]
+	}
+	var subst []int
+	depth, inTemplate := 0, false
+	prev := byte(0)
+	for i := 0; i < len(b); {
+		c := b[i]
+		if inTemplate {
+			switch {
+			case c == '\\':
+				blank(i, i+2)
+				i += 2
+			case c == '`':
+				inTemplate, prev = false, '`'
+				i++
+			case c == '$' && i+1 < len(b) && b[i+1] == '{':
+				subst = append(subst, depth)
+				depth++
+				inTemplate, prev = false, '{'
+				i += 2
+			default:
+				blank(i, i+1)
+				i++
+			}
+			continue
+		}
+		switch {
+		case c == '"' || c == '\'':
+			j := i + 1
+			for j < len(b) && b[j] != c && b[j] != '\n' {
+				if b[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			blank(i+1, j)
+			i, prev = j+1, c
+		case c == '`':
+			inTemplate = true
+			i++
+		case c == '/' && (prev == 0 || strings.IndexByte("(,=:[!&|?{};+-*%<>~^", prev) >= 0):
+			j, class := i+1, false
+			for j < len(b) && b[j] != '\n' && (class || b[j] != '/') {
+				switch b[j] {
+				case '\\':
+					j++
+				case '[':
+					class = true
+				case ']':
+					class = false
+				}
+				j++
+			}
+			blank(i+1, j)
+			i, prev = j+1, '/'
+		case c == '{':
+			depth++
+			i, prev = i+1, c
+		case c == '}':
+			depth--
+			if n := len(subst); n > 0 && subst[n-1] == depth {
+				subst, inTemplate = subst[:n-1], true
+			}
+			i, prev = i+1, c
+		default:
+			if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+				prev = c
+			}
+			i++
+		}
+	}
+	return string(b)
+}
+
+// jsMatch is the index of the bracket that closes the one at code[open],
+// counting every kind of bracket, in code whose literals are masked; the
+// end of code where none does.
+func jsMatch(code []byte, open int) int {
+	depth := 0
+	for i := open; i < len(code); i++ {
+		switch code[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return len(code)
+}
+
+// jsArgEnd is the end of the argument that starts at s: the next comma
+// outside brackets before end, or end.
+func jsArgEnd(code []byte, s, end int) int {
+	for i := s; i < end; i++ {
+		switch code[i] {
+		case '(', '[', '{':
+			i = jsMatch(code, i)
+		case ',':
+			return i
+		}
+	}
+	return end
+}
+
+// jsBlankFuncBody blanks the body of the function literal that code[s:e]
+// is, a block's inside or an arrow's expression; an argument that is no
+// function literal is left as it is.
+func jsBlankFuncBody(code []byte, s, e int) {
+	m := jsFuncHeadRe.FindSubmatchIndex(code[s:e])
+	if m == nil {
+		return
+	}
+	body := s + m[1]
+	if m[2] >= 0 || m[4] >= 0 {
+		// The parameters' parentheses, then an arrow (or a function's block).
+		close := jsMatch(code, body-1)
+		body = close + 1
+		if m[2] >= 0 {
+			arrow := regexp.MustCompile(`^\s*=>`).FindIndex(code[body:e])
+			if arrow == nil {
+				return
+			}
+			body += arrow[1]
+		}
+	}
+	for body < e && (code[body] == ' ' || code[body] == '\t' || code[body] == '\n' || code[body] == '\r') {
+		body++
+	}
+	to := e
+	if body < e && code[body] == '{' {
+		body, to = body+1, jsMatch(code, body)
+	}
+	for k := body; k < to; k++ {
+		if code[k] != '\n' {
+			code[k] = ' '
+		}
 	}
 }
 
@@ -227,27 +384,41 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 	if len(fns) < 30 {
 		t.Fatalf("only %d functions found in audio.js: the reader has stopped finding them", len(fns))
 	}
+	for _, v := range audioStartViolations(src) {
+		t.Error(v)
+	}
+	checkTheContinuationsAndTheGatesWiring(t, src, fns)
+}
+
+// audioStartViolations is what the start guard finds wrong in src, audio.js
+// with its comments stripped: a play outside the sites audioPlaySites names,
+// an exported function that reaches a play and is no start audioStarts
+// names, and a start audioStarts names that does not do as it says, a gated
+// one's own code included, read beside what it hands the gate.
+func audioStartViolations(src string) []string {
+	var out []string
+	fns := jsTopFunctions(src)
 	plays := map[string]bool{}
 	for name, f := range fns {
 		if strings.Contains(f.body, ".play(") {
 			plays[name] = true
 			if _, ok := audioPlaySites[name]; !ok {
-				t.Errorf("audio.js's %s plays the element and is no play site this test names: route it through the gate, or name it with its reason", name)
+				out = append(out, fmt.Sprintf("audio.js's %s plays the element and is no play site this test names: route it through the gate, or name it with its reason", name))
 			}
 		}
 	}
 	for name := range audioPlaySites {
 		if !plays[name] {
-			t.Errorf("audioPlaySites names %s, which plays nothing now: take it off the list", name)
+			out = append(out, fmt.Sprintf("audioPlaySites names %s, which plays nothing now: take it off the list", name))
 		}
 	}
 	// reach is whether a function reaches a play through the module's calls,
 	// outside what it hands a gate. A call of a gated start is accounted for
-	// where that start is checked (it asks the gate), and init's listeners are
-	// the element's own continuations, so reach does not go through either;
-	// it does go through a start output.js alone calls after its barrier, so
-	// a function that calls one without a permit (start(), take(h, true))
-	// reaches a play.
+	// where that start is checked (it asks the gate, and its own code reaches
+	// no play), and init's listeners are the element's own continuations, so
+	// reach does not go through either; it does go through a start output.js
+	// alone calls after its barrier, so a function that calls one without a
+	// permit (start(), take(h, true)) reaches a play.
 	memo := map[string]int{}
 	var reach func(string) bool
 	reach = func(name string) bool {
@@ -278,25 +449,76 @@ func TestEveryStartOfThisBrowserAsksTheGate(t *testing.T) {
 		how, named := audioStarts[name]
 		if !named {
 			if f.exported && reach(name) {
-				t.Errorf("audio.js's %s reaches a play and is no start this test names: ask the start gate in it", name)
+				out = append(out, fmt.Sprintf("audio.js's %s reaches a play and is no start this test names: ask the start gate in it", name))
 			}
 			continue
 		}
 		if !f.exported {
-			t.Errorf("audioStarts names %s, which audio.js does not export", name)
+			out = append(out, fmt.Sprintf("audioStarts names %s, which audio.js does not export", name))
 			continue
 		}
 		switch how {
 		case "gated":
 			if !strings.Contains(f.body, "requestStart(") {
-				t.Errorf("audio.js's %s starts the element without asking the start gate", name)
+				out = append(out, fmt.Sprintf("audio.js's %s starts the element without asking the start gate", name))
+			}
+			if reach(name) {
+				out = append(out, fmt.Sprintf("audio.js's %s reaches a play outside what it hands the start gate", name))
 			}
 		case "afterBarrier":
 			if !regexp.MustCompile(`function\s+` + name + `\([^)]*\bpermit\b`).MatchString(f.body) {
-				t.Errorf("audio.js's %s takes no permit for the plays it defers", name)
+				out = append(out, fmt.Sprintf("audio.js's %s takes no permit for the plays it defers", name))
 			}
 		}
 	}
+	sort.Strings(out)
+	return out
+}
+
+// TestTheGateGuardReadsWhatAGateCallRunsAtOnce holds the start guard to what
+// a gate call runs as it is made: only the body of a function handed to the
+// gate is its own, a parenthesis inside a literal bounds nothing, and a gated
+// start's own code is read beside its call of the gate. Each planting, in a
+// copy of the shipped audio.js, is a start outside the gate that the guard
+// must name; the shipped file, whose removed row's successor goes to
+// continueStart in a closure, passes it.
+func TestTheGateGuardReadsWhatAGateCallRunsAtOnce(t *testing.T) {
+	src := stripJSComments(readFile(t, "static/player/audio.js"))
+	if v := audioStartViolations(src); len(v) != 0 {
+		t.Fatalf("the shipped audio.js fails the guard: %v", v)
+	}
+	successor := "continueStart((permit) => playNow(permit), { fresh: true });"
+	next := "requestStart((permit) => advanceNow(delta, { permit }));"
+	for _, tc := range []struct{ name, in, old, planted string }{
+		{"an eager argument", "removeAt", successor, "continueStart(playNow(null), { fresh: true });"},
+		{"a bare start after a callback holding a parenthesis", "removeAt", successor,
+			"continueStart((permit) => { const open = \"(\"; playNow(permit); }, { fresh: true });\n      start();"},
+		{"a bare start beside a gated start's call of its gate", "advance", next, next + "\n  start();"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if n := strings.Count(src, tc.old); n != 1 {
+				t.Fatalf("audio.js holds %d of %q: the planting has stopped finding its place", n, tc.old)
+			}
+			got := audioStartViolations(strings.Replace(src, tc.old, tc.planted, 1))
+			named := false
+			for _, v := range got {
+				named = named || strings.HasPrefix(v, "audio.js's "+tc.in+" ")
+			}
+			if !named {
+				t.Errorf("%s planted in %s: the guard names %q, want %s named", tc.name, tc.in, got, tc.in)
+			}
+		})
+	}
+}
+
+// checkTheContinuationsAndTheGatesWiring is the rest of
+// TestEveryStartOfThisBrowserAsksTheGate, over the shipped audio.js (src,
+// its comments stripped, and its functions) and the modules beside it.
+func checkTheContinuationsAndTheGatesWiring(t *testing.T, src string, fns map[string]struct {
+	body     string
+	exported bool
+}) {
+	t.Helper()
 	// Round 3 (S1, Q1, Q3): every continuation goes on through continueStart,
 	// which asks the continuation gate with its start's permit (none for a
 	// fresh one) and asks again, when the gate lets it go on, whether the
