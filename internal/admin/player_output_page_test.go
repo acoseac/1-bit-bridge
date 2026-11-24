@@ -230,10 +230,7 @@ func TestThePlayerPageAsksOnlyInTheServersWords(t *testing.T) {
 // without it, is not, and saves nothing; any other refusal is the caller's,
 // asking nothing.
 func TestThePlayerPageAsksBeforeAWriteThatStopsPlayback(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; this test executes the shipped console source")
-	}
+	node := barNode(t)
 	fn := extractJSFunction(t, readConsoleJS(t, "static/app.js"), "playerOutputPost")
 	const stops = "The player is playing, or holds a pause, now. Turning it off stops it at once."
 	driver := `const calls = [];
@@ -536,10 +533,7 @@ console.log(JSON.stringify(out));
 // state; and a Source the bridge started with that is not on the LAN, whose
 // reason is the status line's and no note offers a restart for it.
 func TestThePlayerPageDrawsTheOpenHomeSwitchStateByState(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; this test executes the shipped console source")
-	}
+	node := barNode(t)
 	const (
 		starts      = "The player starts when the bridge restarts."
 		stops       = "The player is turned off: it plays nothing now, and it stops when the bridge restarts."

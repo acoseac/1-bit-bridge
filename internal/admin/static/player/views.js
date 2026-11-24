@@ -4,12 +4,73 @@
 
 import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, downloadURL,
          playlistExportURL, isAborted } from "./api.js";
-import { duration, totalDuration, qualityLabel, formatChip, plural, unplayableReason,
+import { duration, totalDuration, qualityLabel, formatChip, plural, playFor,
          bytes, variantKindLabel, variantSkipLabel, timeAgo } from "./format.js";
 import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs, crumbs, announce, setDisabled } from "./ui.js";
 import * as audio from "./audio.js";
 import { variantPanel, onVariantChange } from "./variants.js";
 import { bindTrackMarks } from "./trackmarks.js";
+import { chosenOutput, currentOutput, WORDS } from "./output.js";
+
+// ---- Rows by output (B634, §7.6) ----
+//
+// One decision, playFor, gives a row its playability, its chip and its
+// handler from the row and the chosen output: the browser's as it always
+// was, or the bridge's player's (the row's bridge field). Playing,
+// shuffling and adding go to the output chosen: the browser's queue, or the
+// bridge's engine through the console's control, an album and a playlist by
+// their ids, which the server expands.
+
+/** Play scope from start on the output chosen; tracks is what the browser plays. */
+function playOn(scope, tracks, start, albumArt) {
+  if (chosenOutput() === "bridge") {
+    currentOutput()?.replace(scope.album || scope.playlist ? scope : { tracks: tracks.map((t) => t.path) },
+      { start, play: true });
+    return;
+  }
+  audio.playQueue(tracks, start, { albumArt });
+}
+
+/** Add scope at the end of the output chosen's queue. */
+function addOn(scope, tracks) {
+  if (chosenOutput() === "bridge") {
+    currentOutput()?.append(scope.album || scope.playlist ? scope : { tracks: tracks.map((t) => t.path) });
+    return;
+  }
+  audio.enqueue(tracks);
+}
+
+/** The Shuffle button: the browser's, disabled with its words for the bridge (§7.5). */
+function shuffleButton(tracks, albumArt) {
+  const b = el("button", {
+    class: "btn", text: "Shuffle",
+    on: {
+      click: () => {
+        if (chosenOutput() === "bridge") return;
+        // Shuffle on and play, as one start the gate lets through or
+        // refuses whole (R1).
+        audio.playQueue(tracks, 0, { albumArt, shuffle: true });
+      },
+    },
+  });
+  if (chosenOutput() === "bridge") {
+    b.title = WORDS.noShuffle;
+    setDisabled(b, true);
+  }
+  return b;
+}
+
+/** "3 of 12 can't play in a browser", or on the bridge's player, for the output chosen. */
+function unplayableNote(tracks) {
+  const output = chosenOutput();
+  const n = tracks.filter((t) => !playFor(t, output).playable).length;
+  if (!n) return null;
+  return el("p", {
+    class: "muted small", text: output === "bridge"
+      ? `${n} of ${tracks.length} can't play on the bridge's player.`
+      : `${n} of ${tracks.length} can't play in a browser — download those instead.`,
+  });
+}
 
 const PAGE = 60;
 
@@ -435,20 +496,12 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   const actions = el("div", { class: "detail-actions" },
     el("button", {
       class: "btn btn-primary", text: "Play",
-      on: { click: () => audio.playQueue(d.tracks, 0, { albumArt: art }) },
+      on: { click: () => playOn({ album: id }, d.tracks, 0, art) },
     }),
-    el("button", {
-      class: "btn", text: "Shuffle",
-      on: {
-        click: () => {
-          audio.setShuffle(true);
-          audio.playQueue(d.tracks, 0, { albumArt: art });
-        },
-      },
-    }),
+    shuffleButton(d.tracks, art),
     el("button", {
       class: "btn", text: "Add to queue",
-      on: { click: () => audio.enqueue(d.tracks) },
+      on: { click: () => addOn({ album: id }, d.tracks) },
     }));
 
   // Delete is appended ASYNCHRONOUSLY and only when the operator has turned
@@ -458,8 +511,6 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // the Library page is where the space is actually reclaimed.
   appendDeleteAction(actions, d.tracks, a.title);
 
-  const unplayable = d.tracks.filter((t) => t.play?.kind === "none").length;
-
   view.appendChild(el("div", { class: "detail" },
     el("div", { class: "detail-art" }, cover(art, a.title)),
     el("div", { class: "detail-head" },
@@ -468,10 +519,7 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
       // twice — the same reason renderCollectionDetail dropped its own.
       link(`/artist/${a.artistId}`, { class: "detail-artist", text: a.albumArtist || "" }),
       albumStatLine(a),
-      unplayable > 0
-        ? el("p", { class: "muted small", text:
-            `${unplayable} of ${d.tracks.length} can't play in a browser — download those instead.` })
-        : null,
+      unplayableNote(d.tracks),
       actions,
       d.booklet ? bookletLink(d.booklet) : null)));
 
@@ -743,7 +791,9 @@ function trackList(tracks, albumArt, opts = {}) {
 }
 
 function trackRow(t, i, all, albumArt, opts = {}) {
-  const playable = !t.play || t.play.kind !== "none";
+  const output = chosenOutput();
+  const pf = playFor(t, output);
+  const playable = pf.playable;
   const row = el("li", { class: `track${playable ? "" : " track-unplayable"}` });
   const num = opts.collection ? i + 1 : (t.track || i + 1);
   // The digit is wrapped so the now-playing mark can cover it without
@@ -766,7 +816,7 @@ function trackRow(t, i, all, albumArt, opts = {}) {
     attrs: playable ? {} : { "aria-disabled": "true", "aria-describedby": "why-" + i },
   });
   if (playable) {
-    title.addEventListener("click", () => audio.playQueue(all, i, { albumArt }));
+    title.addEventListener("click", () => playOn({}, all, i, albumArt));
   }
   row.appendChild(title);
   // The reason cell is ALWAYS appended, empty for a playable track, so
@@ -783,9 +833,11 @@ function trackRow(t, i, all, albumArt, opts = {}) {
   // Where the columns are not shared (the no-subgrid fallback, and
   // mobile) the stylesheet hides it, because there it would only add a
   // gap.
+  // With the bridge's player chosen a DSD row it plays reads its way here
+  // ("DSD128, DoP"), a plain chip, and one it does not play reads why.
   row.appendChild(el("span", { class: "track-why" },
-    playable ? null : el("span", {
-      class: "chip chip-warn", text: unplayableReason(t), attrs: { id: "why-" + i },
+    !pf.chip ? null : el("span", {
+      class: pf.why ? "chip chip-warn" : "chip", text: pf.chip, attrs: { id: "why-" + i },
     })));
   // Always appended, empty unless this album spans sources — the same
   // constant-cell rule .track-why documents above. A conditional cell
@@ -797,11 +849,27 @@ function trackRow(t, i, all, albumArt, opts = {}) {
   row.appendChild(variantMarks(t));
   row.appendChild(el("span", { class: "track-size", text: bytes(t.sizeBytes) }));
   row.appendChild(el("span", { class: "track-dur", text: duration(t.duration) }));
-  row.appendChild(el("a", {
+  row.appendChild(downloadCell(t, output, playable));
+  return row;
+}
+
+/**
+ * A row's Download cell, and with the bridge's player chosen its own Add to
+ * queue beside it in that cell, so the row keeps its columns (§7.5).
+ */
+function downloadCell(t, output, playable) {
+  const dl = el("a", {
     class: "track-dl", text: "Download",
     attrs: { href: downloadURL(t.path), download: "" },
-  }));
-  return row;
+  });
+  if (output !== "bridge") return dl;
+  const add = el("button", {
+    class: "track-add", text: "Add",
+    attrs: { type: "button", "aria-label": `Add ${t.title || t.path} to the bridge's queue` },
+    on: { click: () => currentOutput()?.append({ tracks: [t.path] }) },
+  });
+  setDisabled(add, !playable);
+  return el("span", { class: "track-dl-cell" }, dl, add);
 }
 
 /**
@@ -1878,7 +1946,9 @@ async function renderCollectionDetail(view, ctx, opts) {
     seasonNote(c),
     collectionProvenance(c),
     unresolvedBlock(d),
-    collectionActions(tracks, art));
+    // A playlist travels to the bridge's player by its id, which the server
+    // expands, however long it is (K5); a smart mix by its tracks.
+    collectionActions(tracks, art, opts.scope === "playlist" ? { playlist: c.id } : {}));
 
   if (opts.actions) head.appendChild(opts.actions(c, view, ctx));
 
@@ -1897,21 +1967,21 @@ async function renderCollectionDetail(view, ctx, opts) {
   }
 }
 
-function collectionActions(tracks, art) {
-  const playable = tracks.filter((t) => !t.play || t.play.kind !== "none");
+function collectionActions(tracks, art, scope = {}) {
+  // Playable for the output chosen: a DSD-only playlist has its Play with
+  // the bridge's player chosen (§7.6).
+  const output = chosenOutput();
+  const playable = tracks.filter((t) => playFor(t, output).playable);
   const row = el("div", { class: "detail-actions" });
   if (!playable.length) return row;
   row.appendChild(el("button", {
     class: "btn btn-primary", text: "Play",
-    on: { click: () => audio.playQueue(tracks, 0, { albumArt: art }) },
+    on: { click: () => playOn(scope, tracks, 0, art) },
   }));
-  row.appendChild(el("button", {
-    class: "btn", text: "Shuffle",
-    on: { click: () => { audio.setShuffle(true); audio.playQueue(tracks, 0, { albumArt: art }); } },
-  }));
+  row.appendChild(shuffleButton(tracks, art));
   row.appendChild(el("button", {
     class: "btn", text: "Add to queue",
-    on: { click: () => audio.enqueue(tracks) },
+    on: { click: () => addOn(scope, tracks) },
   }));
   return row;
 }
