@@ -1,18 +1,20 @@
 # B1004: direct media delivery, the bridge's half: the contracts and the bridge PR's plan
 
-Plan, 2026-11-24, round 1. **Docs only**: this round writes no code, serves no route and leaves
+Plan, 2026-11-24, round 2. **Docs only**: this round writes no code, serves no route and leaves
 `PROTOCOL.md` as it is; the section the bridge PR adds to it is drafted in §3.1, marked "Draft, not
 served". Every current behaviour cited is `path:line` at bridge main `726221d2`; a rules file of the
 repository is cited by its name alone (`wire.md`), as "Where things live" lists them.
 
-**Status.** For review, round 1. Binding: the B1004 design, round 3, with its amendments A1 to A7,
+**Status.** For review, round 2. Binding: the B1004 design, round 3, with its amendments A1 to A7,
 which win where its text differs ("the design", cited by section, §1 to §11); round 0's brief, D1 to
 D5, with its review items Y1 to Y9; and round 1's brief, F1 to F4, with its review items G1 to G5,
 which win where F1 to F4 differ. Round 1 folds every P1 and P2 of round 0's reviews (§11 says where
-each went) and refutes what it does not fold, with the evidence (§12, "Refuted in round 1"). Where
-the design is silent the text says **proposal**, and §9 lists each one with who decides it. No
-contract here needed a decision of the design changed; where the design's words allow two readings,
-§9.4 names the one taken.
+each went) and refutes what it does not fold, with the evidence (§12, "Refuted in round 1"). Round 2
+folds the rulings on round 1's reviews, each named by what it changes (§13 says where each went),
+and gives the claims the rulings refuted one line each (§14, "Refuted in round 2"). Where the design
+is silent the text says **proposal**, and §9 lists each one with who decides it. No contract here
+needed a decision of the design changed; where the design's words allow two readings, §9.4 names
+the one taken.
 
 No host, address or key path appears here. `media.example` stands for the media host the owner has
 not chosen yet (the design's §11), `<tenant>` for a tenant's identifier, and every path the control
@@ -49,7 +51,7 @@ settings (§7).
 | No error carries `X-Onebit-Error-Code` | `internal/api/api.go:3082-3084` | Every application error of `/v1/media-url` carries it in every setting, and those of the byte routes while direct media is on (§3.3) |
 | File validation answers `bad_request` and `not_found`, a rendition `variant_*` | `files.go:302-319`, `:405-482`, `:736-755` | Unchanged there; `/v1/media-url` makes the same checks and maps them to `invalid_path` and the design's codes (§3.2) |
 | Each call of the resolver takes the roots afresh, and the console changes them live | `internal/fs/fs.go:258-262`, `:362-368`; `internal/admin/handlers_api.go:2124-2125` | One resolution a request: the open, the class and the signer's path all take its absolute path (§5.8) |
-| A `BRIDGE_*` boolean or whole number that does not parse is logged and ignored | `internal/config/env.go:392-397`, `:429-434` | A direct-media variable that does not parse makes the configuration invalid, which fails closed (§7.1) |
+| A `BRIDGE_*` boolean or whole number that does not parse is logged and ignored | `internal/config/env.go:392-397`, `:429-434` | A direct-media variable that does not parse, or is white space alone, makes the configuration invalid and fails to its leaf's restrictive side (§4.9, §7.1) |
 | The console's byte routes validate and serve on their own, and refuse the DSD compact tier's id | `player_audio.go:75`, `:305-440`, `:517-537` | The same classifier and counters at the same points, and the id taken (§5.7) |
 | The bridge listens on no Unix socket; the console's `/metrics` serves the whole registry on the admin listener | `internal/admin/admin.go:2199` | A metrics socket, JSON, for root (§6) |
 | No setting | `internal/config/config.go:49-110` | A `directMedia` block, off by default, set through `BRIDGE_DIRECT_MEDIA_*` (§7.1) |
@@ -190,12 +192,19 @@ encoding" refused by construction: one decoding, one encoding.
 {"delivery":"bridge","reason":"publication_pending"}
 ```
 
+```json
+{"delivery":"bridge","reason":"operator_rollback","policyVersion":43}
+```
+
 `reason` is one of the design's five, a closed set: `not_migrated`, `publication_pending`,
 `local_variant`, `non_r2_source`, `operator_rollback` (the member's name is a **proposal**: the
 design names the values only). A missing or stale R2 object is `bridge` with `publication_pending`,
-or a 503 (§2.7), never a capability for other bytes (the design's §2). Unknown members of an answer
-are ignored (§2.9). A `bridge` answer is never relayed as it stands: it is a fact the bridge records
-and gives to the classifier, whose answer the client gets (§2.7, §5.4).
+or a 503 (§2.7), never a capability for other bytes (the design's §2). An `operator_rollback` answer
+carries `policyVersion` (**proposal**: an integer, 1 to 2^53 − 1), the `version` the control plane
+gave the policy that installs the rollback, its first with `deliveryMode` `bridge`, named whether or
+not that policy is written yet; only a policy at or above it supersedes the answer (§4.8, §5.4).
+Unknown members of an answer are ignored (§2.9). A `bridge` answer is never relayed as it stands: it
+is a fact the bridge records and gives to the classifier, whose answer the client gets (§2.7, §5.4).
 
 ### 2.6 What the bridge checks in a direct answer
 
@@ -214,8 +223,8 @@ Before it relays a capability the bridge requires each of these, and otherwise a
 Then **the stat again** (**proposal**, the bridge's half of the design's "recheck stat around
 HEAD"): the bridge stats the file once more after any answer. A size or mtime that moved discards the
 answer, and the bridge records that the file at its new stat is not published (a publication fact,
-§5.4), then answers what the classifier says of it: `bridge` with `publication_pending`, or a hold's
-refusal. The bytes on the bridge are no longer the ones the signer judged, and a byte request for
+§5.4), then answers what the classifier says of it, as for the signer's own `publication_pending`
+(§2.7). The bytes on the bridge are no longer the ones the signer judged, and a byte request for
 them is counted as the answer said (F2).
 
 ### 2.7 Errors, and what the bridge answers for each
@@ -229,7 +238,7 @@ signer's status and code alone.
 |---|---|
 | 200 `direct`, every check of §2.6 passed and the stat unchanged | the capability; a publication fact of that stat is cleared (§5.4) |
 | 200 `bridge` `publication_pending` | the classifier's answer once the fact is recorded (§5.4): `bridge` `publication_pending`; a hold's 403, or 503 `policy_unavailable` where no policy was taken (§5.3) |
-| 200 `bridge` `operator_rollback` | the classifier's answer once the rollback fact is recorded (§5.4): `bridge` `operator_rollback`; a hold's 403, or 503 `policy_unavailable` where no policy was taken (§5.3) |
+| 200 `bridge` `operator_rollback` with its `policyVersion` | the classifier's answer once the rollback fact is recorded (§5.4): `bridge` `operator_rollback`; a hold's 403, or 503 `policy_unavailable` where no policy was taken (§5.3); where the policy taken is already at or above that version and ends the rollback, 503 `media_unavailable`, logged, the client asking again |
 | 200 `bridge` with any other reason, which contradicts the marker or the request (the bridge asks only of a migrated original) | 503 `media_unavailable`, logged: the bridge sends a client to its byte routes only with a class they give (F2) |
 | 400 `invalid_path`: its own refusal (§2.4's rule) | 400 `invalid_path` |
 | 400 `invalid_variant` | 400 `invalid_variant` |
@@ -238,7 +247,7 @@ signer's status and code alone.
 | 429 `rate_limited` with `Retry-After`: the mint limit (the design's §6) | 429 `rate_limited`, its `Retry-After` held to 1 to 3600 s |
 | 503 `media_unavailable`, an optional `Retry-After`: R2, or the signer's state, cannot decide | 503 `media_unavailable`, the same `Retry-After` |
 | 503 `policy_unavailable`: the signer has no current policy for the tenant | 503 `policy_unavailable` |
-| anything else: another status or code, a body that does not decode, a direct answer §2.6 refuses, a `reason` outside the five | 503 `media_unavailable` |
+| anything else: another status or code, a body that does not decode, a direct answer §2.6 refuses, a `reason` outside the five, an `operator_rollback` without a `policyVersion` | 503 `media_unavailable` |
 | no answer: the socket missing or refused, a connection closed unread (§2.2's refusal looks so), §2.3's refusal, §2.8's deadline, a resolver configuration that cannot run (§4.9) | 503 `media_unavailable` |
 | the client went away first | 499 at Info (`internal/api/api.go:3115-3121`, B364) |
 
@@ -280,7 +289,8 @@ answering each row of §2.7 in turn; the request's JSON byte for byte, for a fil
 `%2e` and a backslash among others; a fake signer that closes each connection unread (§2.2's refusal),
 and one whose UID is not `signerUID` (the expected UID set to another number), each answered 503; each
 check of §2.6 broken alone; a stat moved by a seam between the two stats, answered `bridge` with
-`publication_pending` and its fetch counted so (§5.4).
+`publication_pending` and its fetch counted so (§5.4); an `operator_rollback` answer without its
+`policyVersion` answered 503, and one with it recorded at that version.
 
 ### 2.11 The capability key stays on the signer (F3)
 
@@ -400,9 +410,9 @@ below); a client that is refused asks this route again.
 
 | Status | `error` | When |
 |---|---|---|
-| 400 | `bad_request` | The body is not one JSON object of at most 4 KiB with `path` and an optional `variant` and nothing else |
+| 400 | `bad_request` | The body is not one JSON object of at most 4 KiB holding a string `path`, an optional `variant` and nothing else |
 | 400 | `invalid_path` | `path` is malformed, names no library root, or names a directory or something that is not a file, or the media signer does not take it as this library's music |
-| 400 | `invalid_variant` | `variant` is neither null nor a rendition id (1 to 128 bytes of `[a-z0-9-]`) |
+| 400 | `invalid_variant` | `variant` is neither null nor a rendition id (1 to 128 bytes of `[a-z0-9-]`), a value of another type included |
 | 401 | `unauthorized` | Missing or invalid bearer token |
 | 403 | `fair_use_refused` | Delivery of this library's music is paused for fair use; the operator has been told |
 | 404 | `not_found` | Nothing at `path`, an SACD image's virtual track path included |
@@ -538,8 +548,9 @@ today and add only §3.1's three refusals.
 
 **Every application error of the media routes** (F4). "Yes": sent with the header; "no": sent
 without it; "never": not sent in that setting. Off: `directMedia.enabled` off. On, not advertised:
-on, `resolverEnabled` off. Advertised: on, the resolver on, whether or not its signer settings can
-run (§4.9).
+on (a value that does not parse included), `resolverEnabled` off or not parsing, the resolver
+`invalid` (§4.9). Advertised: on, the resolver on, whether or not its signer settings or
+`libraryRoot` can run (§4.9).
 
 | Route | Status and `error` | Off | On, not advertised | Advertised |
 |---|---|---|---|---|
@@ -616,8 +627,9 @@ the filesystem's: the control plane's to write, the bridge's to read (§4.4).
 
 - **The migration marker**, `migration.json` (G1): the tenant's migration state, durable, written at
   each change of it and at no other time. It is the classification the bridge holds itself, so a
-  policy lost or gone stale is told apart from a tenant never migrated: no marker is `local`, and a
-  migrated marker with no policy the bridge took refuses (§4.6).
+  policy lost or gone stale is told apart from a tenant never migrated: no marker in a present,
+  trusted directory (§4.4) is `local`, and a migrated marker with no policy the bridge took refuses
+  (§4.6).
 - **The policy**, `policy.json`: what changes while the tenant is migrated (holds, the delivery mode,
   the cutoff, what is pending), rewritten on every change and as a heartbeat (§4.7).
 
@@ -656,43 +668,85 @@ tell which tenant it is, and takes the reading that refuses.
 }
 ```
 
-How a handler learns each fact Y2 names, and what it does with it (the migration state is the
-marker's, §4.2):
+How a handler learns each fact Y2 names, what it does with it (the migration state is the
+marker's, §4.2), and each member's bound. A time is RFC 3339 in UTC, written with `Z` and at most
+nine fractional digits, so 20 to 30 bytes; an integer is at most 2^53 − 1, which every JSON reader
+holds exactly.
 
-| Member | Type | The bridge's use |
+| Member | Type and bound | The bridge's use |
 |---|---|---|
 | `schema` | `1` | any other: the file is not taken |
-| `version` | integer, 1 or more | moved by every change (§4.5); echoed in the metrics (§6.2) |
-| `issuedAt`, `validUntil` | RFC 3339 | freshness (§4.6); `issuedAt` also orders it against the signer's word (§5.4) |
-| `inventoryGeneration` | integer, 0 or more | echoed in the metrics; no decision reads it (the signer holds the inventory) |
+| `version` | integer, 1 to 2^53 − 1 | moved by every change (§4.5); orders the policy against the signer's rollback answer (§5.4); echoed in the metrics (§6.2) |
+| `issuedAt`, `validUntil` | a time each | freshness (§4.6) |
+| `inventoryGeneration` | integer, 0 to 2^53 − 1 | echoed in the metrics; no decision reads it (the signer holds the inventory) |
 | `deliveryMode` | `direct`, or `bridge` while an operator rollback is in force | `bridge` makes a migrated original `operator_rollback` (§5); it is the bridge's form of the media host's `direct_disabled` |
-| `holds` | array, empty for none | any hold refuses the migrated originals (§5.5); `id` and `since` are the control plane's, counted in the metrics |
-| `legacyCutoff` | null, or `since` and `minClientVersion` | the cutoff in force from `since`; the first app version with `directMediaV1` (§5.6) |
-| `publicationPending` | array of representations: `path` in §2.4's form, byte for byte, and `variant`, null for the original | a migrated original listed here is `publication_pending`; each recorded before its publication (the design's §2) and removed once its object is verified. The bridge PR reads the entries whose `variant` is null; an entry for a rendition is defined now, so published renditions need no new schema |
+| `holds` | array of at most 64, empty for none: `id`, 1 to 64 bytes of `[A-Za-z0-9_-]`, and `since`, a time | any hold refuses the migrated originals (§5.5); `id` and `since` are the control plane's, counted in the metrics |
+| `legacyCutoff` | null, or `since`, a time, and `minClientVersion`, 1 to 32 bytes of `[0-9A-Za-z.+-]` | the cutoff in force from `since`; the first app version with `directMediaV1` (§5.6) |
+| `publicationPending` | array of at most 7,000 representations: `path` in §2.4's form, byte for byte, its JSON string at most 1,024 bytes as written between its quotes, escapes included; and `variant`, null for the original or a rendition's id (1 to 128 bytes of `[a-z0-9-]`, §3.2) | a migrated original listed here is `publication_pending`; each recorded before its publication (the design's §2) and removed once its object is verified. The bridge PR reads the entries whose `variant` is null; an entry for a rendition is defined now, so published renditions need no new schema |
 
-Unknown members are ignored (additive). A member of the wrong type, a value outside its set, a
-`validUntil` not after `issuedAt` or more than an hour after it, an `issuedAt` more than 30 s ahead of
-the bridge's clock, more than 100,000 pending entries, or a path past 4096 bytes: the file is not taken.
-The control plane and the bridge run on one host and read one clock, so a step of that clock moves
-the writer's times with the reader's; a forward step makes the last file stale until the next write
-(60 s at most, §4.7). **Proposal**: every member and bound; the design names the facts (Y2), not
-their encoding.
+**The size is part of the contract.** The control plane writes the policy compact, with no white
+space between tokens (the example above is spaced for reading), so that at every bound it fits the
+bridge's read of 8 MiB (§4.4). Counted as written:
+
+| At its bound | Bytes |
+|---|---|
+| one hold, `{"id":"<64 bytes>","since":"<30 bytes>"}` | 114 |
+| 64 holds and the 63 commas between them | 7,359 |
+| one pending entry, `{"path":"<1,024 bytes>","variant":"<128 bytes>"}` | 1,176 |
+| 7,000 entries and the 6,999 commas between them | 8,238,999 |
+| everything else: the braces, the other members' names and values at their bounds, the cutoff's object | 339 |
+| the whole file | 8,246,697, 141,911 bytes under 8,388,608 |
+
+7,120 entries is the most that fits; the bound is the round number below it, and a member added
+later takes its bytes from the margin. The control plane never writes past a bound: past 7,000
+pending representations the rest of a backlog, and a representation whose path's string runs past
+1,024 bytes, are left out of the list (which ones stay is the control plane's choice), and what is
+left out falls to publication facts (§5.4) or to `eligible`, never to a hold, the delivery mode or
+the cutoff, which are always written whole. **Proposal**: every member and bound (§9.1); the design
+names the facts (Y2), not their encoding.
+
+Unknown members are ignored (additive). A member of the wrong type, a value outside its set or past
+its bound, a `validUntil` not after `issuedAt` or more than an hour after it, or an `issuedAt` more
+than 30 s ahead of the bridge's clock: the file is not taken (`field_invalid`), and a file past 8 MiB
+is not read (`too_large`). The control plane and the bridge run on one host and read one clock, so a
+step of that clock moves the writer's times with the reader's; a forward step makes the last file
+stale until the next write (60 s at most, §4.7).
+
+Tests (the bridge PR): the policy at every member bound, compact, as the table counts it, is taken;
+one entry more, a path's string a byte longer, a hold more, and each other member a step past its
+bound are each `field_invalid`; a file of 8 MiB and one byte is `too_large`.
 
 ### 4.4 Trust: what the bridge could have written itself
 
 The bridge trusts what it reads in the state directory, and what it does not find there, only where
-it could not have changed either: the directory and each file in it refuse the bridge's own writes,
-asked of the kernel as an open would ask (`faccessat2` with `W_OK` and `AT_EACCESS`), and where the
-directory is missing, its parent refuses them. The files are opened as regular files
-(`fsutil.OpenAsFile`, which never waits on a named pipe) and read up to 8 MiB.
+it could not have changed either, judged on the descriptors it reads through, never on a path asked
+again. Each refusal has its reason in the metrics (§6.2):
+
+- **The way there.** The directory is opened an element at a time from `/`, each element as a
+  directory without following a link (`O_DIRECTORY`, `O_NOFOLLOW`): a link on the way, the
+  directory's own name included, is untrusted (`link`), and so is an element the bridge's UID owns
+  (`owner`) or can write (`writable`), since what is below it is then its to replace.
+- **The directory and its two files.** Each is owned by root or `signerUID` (§7.1), the control
+  plane's one identity, never the bridge's UID, read from its own descriptor (`fstat`): any other
+  owner is untrusted (`owner`). Each refuses the bridge's writes, asked of the kernel as an open would
+  ask (`faccessat2` with `W_OK` and `AT_EACCESS`, relative to the descriptor the entry was reached
+  through): one it could write is untrusted (`writable`). The files are opened through the
+  directory's descriptor without following a link, as regular files (`fsutil.OpenAsFile`'s rule,
+  which never waits on a named pipe), and read up to 8 MiB.
+- **A missing directory is untrusted** (`state_dir`) while direct media is enabled: only a marker
+  missing inside a present, trusted directory means `local` (§4.6). The control plane makes the
+  directory when it provisions the tenant (§4.7), so a missing one is a fault or a mistyped path,
+  never a word; what that costs a local tenant is §9.1's item 7.
 
 Otherwise the state is **untrusted**: the bridge takes the marker as `direct_enabled` and takes no
 policy (§4.6), so no process of the bridge's UID can lift a hold or a migration by editing,
-replacing or removing a file. A policy file that is not taken because the bridge could write it
-still adds its holds, since a forger gains nothing by them; nothing else of it is taken. A bridge
-that runs as root can prove nothing out of its own reach, so its state is untrusted (the doctor says
-so, §7.2). **Proposal**: the rule and its checks; the design names the directory's purpose, not its
-proof.
+replacing or removing a file. A policy file that is not taken because the bridge could write it, or
+owns it, still adds its holds, since a forger gains nothing by them; nothing else of it is taken. A
+bridge that runs as root can prove nothing out of its own reach, every write asked of the kernel being
+its own, so its state is untrusted (`writable`; the doctor says so, §7.2). Its tests run as the
+bridge's own UID, so the allowed owners and the bridge's UID are a seam of the check, as the metrics
+socket's allowed UID is (§7.3). **Proposal**: the rule and its checks; the design names the
+directory's purpose, not its proof.
 
 ### 4.5 Versions
 
@@ -709,9 +763,9 @@ can run and a metrics socket that serves, §4.9, §6.1):
 
 | The marker | The policy | What the bridge decides |
 |---|---|---|
-| missing (its directory trusted), `local` or `copying` | not read | every original is `not_migrated`; no policy is consulted, nothing is refused (F1) |
+| missing inside a present, trusted directory (§4.4), `local` or `copying` | not read | every original is `not_migrated`; no policy is consulted, nothing is refused (F1) |
 | `verified` | not read | every original is `verified`; no policy is consulted, nothing is refused |
-| `direct_enabled`, or untrusted, or not taken (§4.2, §4.4) | current | §5.3's table in full |
+| `direct_enabled`, or untrusted, its directory missing included, or not taken (§4.2, §4.4) | current | §5.3's table in full |
 | the same | stale, or current beside a configuration that cannot run or a metrics socket that does not serve | §5.3's table on the last policy's values, the `eligible` class refused 503 `policy_unavailable` |
 | the same | none taken since the process started: missing, unreadable, not taken (§4.3, §4.5), or untrusted (§4.4) | every migrated original refused 503 `policy_unavailable`, its holds and cutoff unknown and every exemption unproven; renditions, routed tracks and files outside the R2 mount served |
 
@@ -726,10 +780,12 @@ value.
 
 ### 4.7 What the control plane promises (its PR)
 
-- The state directory, and each directory above it, are the control plane's and not the bridge's
-  UID's to write (§4.4), from the tenant's provisioning on.
+- The state directory exists from the tenant's provisioning on, it and its two files owned by root
+  or `signerUID`, and neither it nor any directory above it is a link or the bridge's UID's to own or
+  write (§4.4).
 - The marker is written before a tenant leaves `local`, at every change of its migration, and is
-  never removed while the tenant is past `local`: a missing marker is the word "local". At a move to
+  never removed while the tenant is past `local`: a marker missing from the directory is the word
+  "local", and a missing directory is no word at all (§4.4). At a move to
   `direct_enabled` the policy is written first, so the bridge never holds a migrated marker beside no
   policy but by a fault.
 - Every write is atomic: a temporary in the same directory, synced, renamed over the file, the
@@ -756,6 +812,17 @@ counted `operator_rollback` from its first byte. **Proposal**: the control plane
 `direct_disabled` once each affected bridge's metrics report the rollback's `version` (§6.2), or
 after a bound. A rollback's file leaves `holds` as they were (§5.5).
 
+**The order the bridge relies on** (**proposal**): the signer's answer names the version of the
+policy that installs the rollback (`policyVersion`, §2.5), and the bridge's rollback fact stands until
+it takes a policy at or above that version, which carries the rollback or, written after it, ends it.
+A heartbeat of an earlier policy is below that version whatever its `issuedAt`, so it never clears
+the fact. Chosen over the other order, the rollback's policy written before the signer stops minting
+and every later policy carrying it, because this one asks nothing of the order of the rollback's three
+steps, which the design's §9 lists without fixing one, nor of the bridge's poll against the signer's
+answer, and compares no time another process wrote: an `issuedAt` may run 30 s ahead of the bridge's
+clock (§4.3), and round 1's rule, any policy issued after the fact, let a heartbeat of the policy
+before the rollback clear it.
+
 ### 4.9 A configuration that cannot run (F1, G2)
 
 Off is a value: `directMedia.enabled` unset, empty or `false`, which leaves the bridge as it is today.
@@ -764,21 +831,39 @@ fails closed. It never makes a policy current, since it cannot vouch that the br
 control plane set it: the `eligible` class is refused, and every migrated original where no policy
 was taken (§4.6). The classifier, the counters and the watcher run all the same, the metrics socket
 serves where its own setting can, and the start and the metrics say which setting cannot run, by its
-path and never its value. Each kind adds an effect of its own:
+path and never its value. Each kind adds an effect of its own, and a variable that does not parse,
+white space alone included (§7.1), fails to its leaf's restrictive side:
 
 | What cannot run | Its own effect, beside the above |
 |---|---|
-| a direct-media variable that does not parse (a boolean or a whole number: §7.1), the switch's own included | it counts as set: a switch is on |
+| `enabled` that does not parse | it reads as on: the classifier, the guard, the error header (§3.3) and the counters run |
+| `resolverEnabled` that does not parse | the resolver reads as `invalid` (§6.2): `directMediaV1` is not advertised, `POST /v1/media-url` answers as with the resolver off (404 `direct_media_not_supported`), and the signer is never asked |
+| `signerUID` that does not parse, or a string leaf of white space alone | its leaf cannot run: its row below |
 | `stateDir` empty, too long, or not a directory | the state is untrusted (§4.4): the marker `direct_enabled`, no policy |
-| `libraryRoot` empty, or equal to no configured root as written after the config's own path resolution | every library root counts as the R2 mount (§5.8) |
+| `libraryRoot` empty, or equal to no configured root as written after the config's own path resolution | every library root counts as the R2 mount (§5.8), and the last row's signer gate |
 | `metricsSocket` empty or past `sun_path`'s 107 bytes | the metrics socket is not served (§6.1) |
 | a host other than Linux, where neither the peer's credentials nor the state's trust can be read | the state is untrusted, and neither socket is served |
-| `signerSocket`, `signerUID` or `capabilityHost` empty or invalid while the resolver is on | the resolver's signer calls answer 503 `media_unavailable` (§2.7); its answers from the classifier stand, and `directMediaV1` is advertised as `resolverEnabled` says |
+| `signerSocket`, `signerUID` or `capabilityHost` empty or invalid while the resolver is on, and `libraryRoot` as above | the signer gate: every resolve that would ask the signer (§5.2's steps 6, 9 and 10, with a policy taken or without) answers 503 `media_unavailable`, asks nothing and records no fact; the classifier's other answers stand (a `bridge` answer with its class, a hold's 403), and `directMediaV1` is advertised as `resolverEnabled` says |
 
 A resolver that cannot run never turns into bridge delivery: a client whose resolve answers 503 does
 not fetch from the bridge (§3.1), so a typo costs direct delivery, never the ceilings, and leaves the
-byte routes' guard and counts running. Rejected: round 0's rule, which turned direct media off with
-a reason, so a typo removed every hold and every count (§11).
+byte routes' guard and counts running. An invalid `libraryRoot` stops every signer call because the
+signer's path is made relative to it (§2.4): a root that cannot run would name the wrong object, or
+none. Rejected: round 0's rule, which turned direct media off with a reason, so a typo removed every
+hold and every count (§11); and round 1's, which read a `resolverEnabled` that does not parse as on.
+
+Tests (the bridge PR, each a real start with the variables set in the process's environment): one
+configured root, a migrated marker and a current policy file, with `libraryRoot` empty, a
+subdirectory of the root, and its parent: per case, a resolve of an original under the root answers
+503 `media_unavailable` with nothing at the fake signer, and the byte routes answer as §4.6 gives a
+configuration that cannot run (an `eligible` original 503 `policy_unavailable`, a `pre_cutoff` one
+served). `resolverEnabled` misspelled beside `enabled` on and a signer configuration that can run: no
+`directMediaV1`, the route's 404 with its header, nothing at the fake signer, the start and the
+metrics naming `directMedia.resolverEnabled` (the resolver `invalid`), and an `eligible` fetch
+refused 503 `policy_unavailable`. `enabled` misspelled: the byte routes' guard, their error header
+and the counters all run, and the metrics name `directMedia.enabled`. Each switch set to white space
+alone, as each misspelling. And the control: both switches valid on the same setup, and the resolve
+reaches the fake signer.
 
 ## 5. Fallback eligibility: one classifier for every byte route and the resolver (Y2, Y3, Y4, F2)
 
@@ -792,7 +877,7 @@ Every body byte a byte route serves is in exactly one class, a closed set, the m
 | `pre_cutoff` | A migrated original, published, no rollback, before the legacy cutoff (A3: visibility only) | no |
 | `publication_pending` | A migrated original whose publication is pending (A2) | no |
 | `operator_rollback` | A migrated original during an operator rollback (A2) | no |
-| `not_migrated` | An original of a tenant `local` or `copying`, or with no marker (§4.6) | no |
+| `not_migrated` | An original of a tenant `local` or `copying`, or with no marker in its present, trusted directory (§4.6) | no |
 | `verified` | An original of a tenant `verified`, not yet `direct_enabled` | no |
 | `local_variant` | A rendition: every rendition is a file of the bridge's own (the design's §5) | no |
 | `non_r2_source` | A track proxied from an upstream UPnP server, or a file outside the R2 mount | no |
@@ -811,10 +896,12 @@ One function, `classify(request, state)`, in `internal/directmedia`, decides eve
 the four byte routes and every resolve, per request, from the state the bridge holds when the
 request comes; nothing carries a class from one request to another. Its inputs: the request (its
 surface: a `/v1` byte route, a console byte route or the resolver; its `X-Client-Version`; a routed
-track or not; a rendition or not; the absolute path of its one resolution and that file's stat), and
-the state (the configuration's validity, the marker, the last policy taken and whether it is current,
-the facts learned from the signer, §5.4, and whether the metrics socket serves). It decides in this
-order, each step from what it has:
+track or not; a rendition or not; the absolute path of its one resolution; and a stat: on a byte
+route the stat of the file it opened, taken from the open before the first byte, never the
+resolution's, on both surfaces, `files.go:342` and `player_audio.go:422`; on the resolver the stat
+it sends the signer, §2.4), and the state (the configuration's validity, the marker, the last policy
+taken and whether it is current, the facts learned from the signer, §5.4, and whether the metrics
+socket serves). It decides in this order, each step from what it has:
 
 1. **Routing**, for a request without a variant: a routed track is `non_r2_source` before any stat,
    signer call or policy read (Y4; `files.go:281-300`; `player_audio.go:329-340`).
@@ -823,26 +910,35 @@ order, each step from what it has:
    is later work: the resolver would ask the signer with `variant` (§2.4), and the policy's pending
    entries already name renditions (§4.3).
 3. **The R2 mount**: a file outside it is `non_r2_source` (§5.8).
-4. **The migration**, the marker's (§4.6): `local`, `copying` or none, `not_migrated`; `verified`,
-   `verified`. Nothing after this step is asked of them.
+4. **The migration**, the marker's (§4.6): `local`, `copying` or none in a trusted directory,
+   `not_migrated`; `verified`, `verified`. Nothing after this step is asked of them.
 5. **A hold** (the last policy's, and those of a file not taken for `writable`, §4.4): refused 403
    `fair_use_refused`, whatever follows.
 6. **No policy taken**: refused 503 `policy_unavailable`.
-7. **A rollback**: the policy's `deliveryMode` `bridge`, or the signer's word later than the policy's
-   `issuedAt` (§5.4): `operator_rollback`.
-8. **Pending**: the representation in `publicationPending`, or a publication fact matching its path
-   and its stat (§5.4): `publication_pending`.
+7. **A rollback**: the policy's `deliveryMode` `bridge`, or a rollback fact whose version the policy
+   taken has not reached (§5.4): `operator_rollback`.
+8. **Pending**: the representation in `publicationPending`, or, on a byte route and on the
+   resolver's second pass alone, a publication fact matching its path and its stat (§5.4):
+   `publication_pending`.
 9. **The cutoff**: not in force, `pre_cutoff`; in force, on a `/v1` byte route, an app below the
    cutoff's version or sending none: refused 403 `direct_media_required` (§5.6).
 10. **Eligible**: served while the policy is current (§4.6); otherwise refused 503
     `policy_unavailable`.
 
-The resolver calls it first. A class of steps 1 to 4, 7 or 8 is answered `bridge` with that class as
-its reason, the signer not asked; a hold's refusal is answered as it is. Steps 6, 9 and 10 are what
-direct delivery is for: the resolver asks the signer (§2), relays a capability, and gives a `bridge`
-answer to the classifier as a fact (§5.4), answering what it then says. So a client the resolver
-sends to the bridge, and fetches at once, is served and counted as the class it was answered with
-(F2); where the state moves between the two, the fetch is judged as the state then stands (§5.4).
+**The resolver classifies twice.** Its first pass comes before the signer, and reads the policy
+alone at step 8: a publication fact never keeps it from asking, so once an object is published the
+signer's `direct` reaches the client and clears the fact (§5.4). A class of steps 1 to 4, 7 or 8 is
+answered `bridge` with that class as its reason, the signer not asked; a hold's refusal is answered
+as it is. Steps 6, 9 and 10 are what direct delivery is for: the resolver asks the signer (§2) and
+relays a capability, or records a `bridge` answer as a fact (§5.4) and classifies again. The second
+pass reads the fresh fact, so a `publication_pending` or `operator_rollback` from the signer is
+answered `bridge` with that reason, or with a hold's 403 or the no-policy 503 (§2.7); a second pass
+that comes to step 9 or 10 again is the signer and the policy disagreeing, answered 503
+`media_unavailable` and logged. Where the signer settings or `libraryRoot` cannot run (§4.9), every
+resolve that would ask the signer, at steps 6, 9 and 10, answers 503 `media_unavailable`, asks
+nothing and records nothing; the first pass's other answers stand. So a client the resolver sends
+to the bridge, and fetches at once, is served and counted as the class it was answered with (F2);
+where the state moves between the two, the fetch is judged as the state then stands (§5.4).
 
 ### 5.3 The table
 
@@ -850,8 +946,8 @@ An original under the R2 mount of a migrated tenant (step 4 passed), as the poli
 
 | Row | The policy says | Class | Policy current, no hold | Policy stale (§4.6) | Under a hold | No policy taken (§4.6) | `/v1/media-url` |
 |---|---|---|---|---|---|---|---|
-| 3 | `deliveryMode` `bridge`, or the signer's word later than the policy (§5.4) | `operator_rollback` | served | served | 403 `fair_use_refused` | 503 `policy_unavailable` | `bridge` `operator_rollback`, no signer |
-| 4 | the representation pending, listed or by a fact of its stat (§5.4) | `publication_pending` | served | served | 403 | 503 | `bridge` `publication_pending`, no signer |
+| 3 | `deliveryMode` `bridge`, or a rollback fact above the policy's version (§5.4) | `operator_rollback` | served | served | 403 `fair_use_refused` | 503 `policy_unavailable` | `bridge` `operator_rollback`, no signer |
+| 4 | the representation pending, listed or by a fact of its stat (§5.4) | `publication_pending` | served | served | 403 | 503 | listed: `bridge` `publication_pending`, no signer; by a fact alone: the signer (§5.2) |
 | 5 | before the cutoff, or none set | `pre_cutoff` | served | served | 403 | 503 | the signer |
 | 6 | the cutoff in force; an app at or above its version, or the console | `eligible` | served | 503 `policy_unavailable` | 403 | 503 | the signer |
 | 7 | the cutoff in force; on `/v1`, an app below its version or sending none (§5.6) | none: refused | 403 `direct_media_required` | 403 `direct_media_required` | 403 `fair_use_refused` | 503 | (the resolver applies no cutoff) |
@@ -864,11 +960,13 @@ reads the policy or calls the signer.
 
 **The resolver in each column.** With a stale policy, rows 3 and 4 are answered from its values and
 rows 5 and 6 asked of the signer, which may still mint: direct delivery does not wait for the
-bridge's policy. With no policy taken, the resolver asks the signer too and relays a capability; a
+bridge's policy. Row 4 by a fact alone is row 5 or 6 to the resolver's first pass, so it asks the
+signer too (§5.2). With no policy taken, the resolver asks the signer and relays a capability; a
 `bridge` answer it records as a fact, and the classifier still answers 503 `policy_unavailable`, the
 answer the byte route would give (F2). Under a hold it answers 403 and asks nothing. With the signer
-unavailable, rows 3 and 4 and the marker's rows stand, and rows 5 and 6 answer 503
-`media_unavailable` (§2.7).
+unavailable, or its settings or `libraryRoot` unable to run (§4.9), row 3, a listed row 4 and the
+marker's rows stand, and every resolve that would ask the signer answers 503 `media_unavailable`
+(§2.7), no fact recorded.
 
 **Refusals' order.** A hold first (row 7 under a hold is `fair_use_refused`: the tenant is paused
 whatever the app), then no policy, then the cutoff, then freshness.
@@ -878,19 +976,21 @@ whatever the app), then no policy, then the cutoff, then freshness.
 routes, the class read back from the metrics socket. By the briefs' names: pre-cutoff visibility-only
 traffic (row 5: served and counted `pre_cutoff`, never `eligible`, a stale policy still serving it);
 `verified` (row 2); publication pending (row 4, listed and by a fact); a rollback (row 3, by the
-policy and by the signer's word, with a hold and without, its bytes `operator_rollback`); existing
-holds (rows 3 to 7 refused `fair_use_refused` on every route, rows 1 and 2 and the rows before the
-policy served); the cutoff (row 7 against row 6, by `X-Client-Version`); staleness (row 6 alone
-refused, the moment an injected clock passes `validUntil`); and Y4's routed track with no local file,
-the signer's socket absent and no policy (200 `bridge` `non_r2_source`, the bytes proxied and counted
-`non_r2_source`, a resolver seam recording no stat). The restart tests (F1, G1), each a real serve
-started over the state directory and the variables as production sets them: a held, migrated tenant
-whose policy is then removed, emptied, made invalid or made writable by the bridge's UID, and a
-marker made writable, each restarted: every migrated original refused 503 on all four byte routes
-and the resolver, renditions and routed tracks served, the counters running and the reason logged;
-a `local` and a `copying` marker, and no marker, each with no policy at all: every original served,
-`not_migrated`; and a negative control that reads "no policy taken" as `not_migrated` turns the first
-set red.
+policy and by the signer's answer at its version, with a hold and without, its bytes
+`operator_rollback`); existing holds (rows 3 to 7 refused `fair_use_refused` on every route, rows 1
+and 2 and the rows before the policy served); the cutoff (row 7 against row 6, by
+`X-Client-Version`); staleness (row 6 alone refused, the moment an injected clock passes
+`validUntil`); and Y4's routed track with no local file, the signer's socket absent and no policy
+(200 `bridge` `non_r2_source`, the bytes proxied and counted `non_r2_source`, a resolver seam
+recording no stat). The restart tests (F1, G1), each a real serve started over the state directory
+and the variables as production sets them: a held, migrated tenant whose policy is then removed,
+emptied, made invalid or made writable by the bridge's UID, a marker made writable, and the state
+directory itself removed, each restarted: every migrated original refused 503 on all four byte
+routes, the resolver's `bridge` answers from the fake signer answered 503 `policy_unavailable`,
+renditions and routed tracks served, the counters running and the reason logged; a `local` and a
+`copying` marker, and no marker in a present, trusted directory, each with no policy at all: every
+original served, `not_migrated`; and a negative control that reads "no policy taken" as
+`not_migrated` turns the first set red.
 
 ### 5.4 What the bridge learns from the signer, and what a later byte request does (F2, G4)
 
@@ -902,17 +1002,22 @@ beside the policy, per request:
 | Fact | Identity | Recorded on | Lifetime | Cleared by |
 |---|---|---|---|---|
 | a publication fact: this representation, at this stat, is not published | the path below the R2 mount (§2.4), `size`, `mtimeNs` | the signer's `bridge` `publication_pending` for that stat; the bridge's own second stat that moved (§2.6), for the new stat | 600 s (**proposal**: a capability's lifetime) | the signer's `direct` for that identity; a replacement, which changes the identity; a restart |
-| the rollback fact: the signer reports a rollback | the tenant | the signer's `bridge` `operator_rollback` | 600 s | a policy taken whose `issuedAt` is later than the fact; a restart |
+| the rollback fact: the signer reports a rollback | the tenant, and the `policyVersion` its answer names (§2.5), the highest where several came | the signer's `bridge` `operator_rollback` | 600 s | a policy taken at or above that version, which carries the rollback or ends it (§4.8); a restart. Never a policy below it, a heartbeat of an earlier policy included |
 
-Facts are bounded at 10,000 (**proposal**), the oldest dropped first, which the mint limit keeps far
-off: at 120 answers a minute a tenant and 600 s each, no more than 1,200 are ever alive. A fact never
-decides anything a hold decides: a hold refuses first (step 5).
+On a byte route a fact's stat is the opened file's (§5.2), so a file replaced between the resolution
+and the open is judged as the file the route serves. A publication fact shapes the byte routes' class
+and the resolver's second pass, never its first: it never keeps the resolver from asking the signer
+(§5.2). Facts are bounded at 10,000 (**proposal**), the oldest dropped first, which the mint limit
+keeps far off: at 120 answers a minute a tenant and 600 s each, no more than 1,200 are ever alive. A
+fact never decides anything a hold decides: a hold refuses first (step 5).
 
 **A byte request after its resolver answer**, judged as the state stands when it comes (G4):
 
-- **Publication completed since**: the fact still matches, so the fetch is `publication_pending`
-  (exempt) until the fact's lifetime ends or a `direct` answer for that identity clears it; after that
-  it is judged by the policy (row 5 or 6). The client's next resolve gets `direct`.
+- **Publication completed since**: the fact still matches, so a fetch on the old answer is
+  `publication_pending` (exempt) until the fact's lifetime ends or a `direct` answer for that
+  identity clears it. The client's next resolve asks the signer whatever the fact (§5.2), gets
+  `direct` and clears it, so a fetch after it is judged by the policy (row 5 or 6), never
+  `publication_pending`.
 - **A hold arrived since**: refused 403 `fair_use_refused` (step 5).
 - **The file was replaced since**: its stat no longer matches the fact, so the fetch is judged as the
   file it is now, by the policy (row 5 or 6, or refused while the policy is not current); a client
@@ -921,15 +1026,23 @@ decides anything a hold decides: a hold refuses first (step 5).
   4 are served when stale); an `eligible` fetch is refused 503.
 - **The policy caught up since** (the path listed, or the rollback written): the same class, now by
   the policy.
-- **A rollback ended since**: a policy issued after the rollback fact supersedes it, and the fetch is
-  judged by that policy.
+- **A rollback ended since**: the policy that ends it is at or above the fact's version, so it
+  supersedes the fact, and the fetch is judged by it.
+- **A heartbeat of an earlier policy since**: below the fact's version, so the fact stands and the
+  fetch stays `operator_rollback` (§4.8).
 - **A restart, or a fact dropped at the bound**: the policy alone decides, as above; a refused client
   resolves again.
 
 Tests (G4): a fetch at once and one delayed past the fact's lifetime; a replacement between the
 resolve and the fetch; the bound filled and the oldest fact dropped; a restart between them; and, for
 each, a policy change between the two (a hold, the path listed, staleness, a rollback written and
-then ended), each fetch's answer and its class asserted.
+then ended), each fetch's answer and its class asserted. Beside them: an older policy's heartbeat
+taken after the rollback fact leaves the class `operator_rollback`, and a policy at the fact's
+version clears it; a fresh `publication_pending` answer is answered `bridge`, and its fetch served
+from the bridge and counted `publication_pending`; once publication completes, the next resolve
+reaches the signer, gets `direct`, and the next fetch is not `publication_pending`; and a seam that
+replaces the file between the resolution and the open, on each surface, has the fetch classified and
+counted by the opened file's stat.
 
 ### 5.5 Exempt from the count is not clearing a hold (Y2)
 
@@ -954,7 +1067,7 @@ design's §10 answers unsupported original-media requests `403 direct_media_requ
 says how the bridge tells such an app. **Proposal**: by the request's `X-Client-Version` (`PROTOCOL.md`,
 "Client version reporting"; read today at `api.go:2973-2975`) against `legacyCutoff.minClientVersion`,
 compared as the updater compares versions (`internal/updater/updater.go:1148-1189`: `normalizeForSemver`,
-then `golang.org/x/mod/semver`). Below it, with no header, or with one that does not parse, a `/v1`
+then `x/mod`'s `semver`). Below it, with no header, or with one that does not parse, a `/v1`
 request for a migrated original after the cutoff is row 7. The console's two routes are the bridge's
 own page and never row 7 (§5.7). Before the cutoff nothing is told apart: the guard is off until it
 (A3), so rows 5 and 6 differ by the cutoff alone. Rejected: a header the app would send for bridge
@@ -965,10 +1078,11 @@ delivery alone, which needs an app change for a fact its version gives already.
 `servePlayerBytes` (`player_audio.go:305-440`) is `serveFile`'s twin with codes of its own and the same
 steps: routing at `:329-340`, skipped for a rendition as `serveFile` skips it (`serveRoutedAudio`,
 `:517-537`), the source at `:342-356`, resolved once, the rendition at `:359-420`, then the open and
-`http.ServeContent` at `:422-439`. The bridge PR calls the same `classify` (console surface) after
-`:356` for an original, and puts the same counting writer around the body of all three kinds. A
-refusal answers in the console's envelope with §3.1's codes and the header (§3.3); an `<audio>` element
-sees only the status, which the console reads as the design's §5 says.
+`http.ServeContent` at `:422-439`. The bridge PR calls the same `classify` (console surface) for an
+original after the open at `:422`, on the opened file's stat (`serveInfo`) and before the first byte,
+and puts the same counting writer around the body of all three kinds. A refusal answers in the
+console's envelope with §3.1's codes and the header (§3.3); an `<audio>` element sees only the
+status, which the console reads as the design's §5 says.
 
 The same PR moves the console's `variantIDPattern` (`player_audio.go:75`) to the alphabet
 `/v1/media-url` takes (§3.2): today it does not match `optimized-dsd-v2-44100-16`, the DSD compact
@@ -999,14 +1113,24 @@ The file is under the R2 mount where that absolute path is `directMedia.libraryR
 compared lexically, both as the config's own path resolution writes them; the signer's path is the
 absolute path made relative to it (§2.4). A nested root inside the mount is therefore the mount's,
 whose files reach the same keys under either root's spelling. A `libraryRoot` that equals no
-configured root counts every root as the R2 mount (§4.9), so an alias of the mount's path (a link on
-its way, which the config does not resolve) fails closed. What stays open: a link inside another root
-that leads into the mount is judged by where it lies, not where it leads; a cloud tenant's roots and
-uploads make no such link.
+configured root counts every root as the R2 mount and shuts the signer gate (§4.9), so an alias of
+the mount's own spelling fails closed.
 
-Test: a seam between the resolution and the classification adds a root named like the path's first
+**Lexical containment rests on a promise, and the control plane makes it** (its PR, §7.4): on every
+tenant with direct media enabled, `roots` is a managed control (`deployment.managedControls`,
+`config.ManagedControlRoots`, `internal/config/config.go:1380`, whose routes the console refuses,
+`internal/admin/admin.go:2026-2027`), no root holds a link, and no root, nor any directory above one,
+is reached through a link. The resolver's path is lexical (`fs.go:321-333`) and the open follows
+links, so without the promise a link in another root that leads into the mount would serve the
+mount's bytes as `non_r2_source`, and a check of the opened file's device would not mend it: the
+right device beside a lexical path still names `../<the other root>/...` to the signer. The bridge
+walks no tree for links; the promise is the control plane's to keep.
+
+Tests: a seam between the resolution and the classification adds a root named like the path's first
 element (`Resolver.SetRoots`); the request is opened, classified and counted as the R2 file it
-resolved to, and a negative control that resolves the path a second time turns it red.
+resolved to, and a negative control that resolves the path a second time turns it red. And the path
+the signer receives: a file in the mount, resolved through the mount's root and through a root
+nested inside it, reaches the fake signer as one path below the mount, byte for byte.
 
 ### 5.9 Outside the guard
 
@@ -1060,7 +1184,7 @@ and its keys are a **proposal**.
     "validUntil": "2026-11-24T07:09:00Z",
     "holds": 0
   },
-  "facts": { "publication": 0, "rollback": false },
+  "facts": { "publication": 0, "rollback": null },
   "bytes": {
     "eligible": 0,
     "pre_cutoff": 0,
@@ -1082,15 +1206,22 @@ and its keys are a **proposal**.
 - `bootId`: 128 random bits drawn as the process starts (`crypto/rand`), in hex. `startedAt`: the
   process's start. `sampledAt`: the bridge's clock at the answer.
 - `config`: `valid` or `invalid`, and the yaml path of each setting that cannot run (§4.9), never a
-  value. `resolver`: `on`, `off` or `invalid`.
-- `marker`: its migration state, or `untrusted`, with a `reason` (`missing`, `unreadable`, `not_json`,
-  `schema_unknown`, `field_invalid`, `writable`, `state_dir`), null where it was taken.
+  value. `resolver`: `on` (served and advertised, whether or not its signer gate is shut, §4.9),
+  `off`, or `invalid` (its switch does not parse: neither served nor advertised, the signer never
+  asked).
+- `marker`: its migration state, or `untrusted`, with a `reason`, null where the marker was taken:
+  `missing` (inside a trusted directory, so `local`), `unreadable`, `not_json`, `schema_unknown` or
+  `field_invalid` (each read as `direct_enabled`, §4.2), or a refusal of trust, which makes it
+  `untrusted` (§4.4): `writable`, `owner` (an owner other than root and `signerUID`, the bridge's UID
+  among them), `link` (a link at or on the way to the state directory or a file) or `state_dir` (the
+  directory missing, not a directory, or its setting unable to run).
 - `policy`: §4.6's state (`current`, `stale`, `none`, or `invalid` where the newest file was not
   taken); `reason`, where it was not taken, one of `missing`, `unreadable`, `too_large`, `not_json`,
-  `schema_unknown`, `field_invalid`, `version_regressed`, `version_reused`, `writable`, `state_dir`,
-  else null; and the taken file's `version`, `inventoryGeneration`, `validUntil` and count of `holds`,
-  null where none was taken.
-- `facts`: the publication facts alive, and whether a rollback fact stands (§5.4).
+  `schema_unknown`, `field_invalid`, `version_regressed`, `version_reused`, or a refusal of trust as
+  the marker's (`writable`, `owner`, `link`, `state_dir`), else null; and the taken file's
+  `version`, `inventoryGeneration`, `validUntil` and count of `holds`, null where none was taken.
+- `facts`: the publication facts alive, and the version of a rollback fact that stands, null for
+  none (§5.4).
 - `bytes`: every class of §5.1, each a JSON integer (an unsigned 64-bit count, exact), cumulative since
   `startedAt`. The collector reads them as integers of 64 bits (§9.2): a count past 2^53 would lose
   its last digits in a float, which a tenant's process never reaches, at 9 PB.
@@ -1151,10 +1282,12 @@ never a negative delta.
 - **A direct-media variable that does not parse fails closed** (G2). Today a boolean or a whole
   number that does not parse is logged and ignored, the default kept (`env.go:392-397`, `:429-434`).
   For a `directMedia` leaf the overrides also record its yaml path, never its value, in the loaded
-  config (which `Clone` keeps), and the start treats the leaf as set and the configuration as invalid
-  (§4.9): a switch that does not parse is on. A value that is empty or white space alone says nothing,
-  as for every variable, and leaves the default. In `bridge.yaml` a value that does not decode refuses
-  the whole file, as every setting's does.
+  config (which `Clone` keeps), and the start treats the configuration as invalid and the leaf as its
+  restrictive side (§4.9): `enabled` on, `resolverEnabled` invalid, any other leaf unable to run.
+  Only an unset or empty variable leaves the default (`env.go:252`); white space alone is a value
+  that does not parse, where today a string leaf takes it as written and a boolean ignores it
+  (`env.go:390-398`). In `bridge.yaml` a value that does not decode refuses the whole file, as every
+  setting's does.
 - **The control plane sets them through the environment** (**proposal**): a bridge refuses a
   `bridge.yaml` that holds a key it does not know (`internal/config/wholenumbers.go:46`,
   `KnownFields`), so a `directMedia` key in the file would stop a binary rolled back below PR 3 from
@@ -1192,8 +1325,9 @@ Changed:
 
 - `internal/api/media_url.go` (new): the handler and its twin; the body's decode (`http.MaxBytesReader`
   at 4 KiB, its members strict); every refusal a constant pair, for the error-table guard.
-- `internal/api/files.go`: `classify` and the counter in `serveFile` after `:319` for an original, in
-  `serveVariant` around `:603`, and around the proxy at `:296`, from the one resolution at `:302`;
+- `internal/api/files.go`: `classify` and the counter in `serveFile` for an original after the open
+  at `:342`, on its stat (`opened`) and before `:364`, in `serveVariant` around `:603`, and around the
+  proxy at `:296`, from the one resolution at `:302`;
   `serveVariant`'s lookup and freshness (`:406-467`) one function the route and the download share.
 - `internal/api/upnp_proxy.go`: the counter around the proxied body (`:95-113`).
 - `internal/api/api.go`: `WithDirectMedia`; `directMediaV1` (the capacity's count and list,
@@ -1227,9 +1361,11 @@ Changed:
   request's bytes recorded.
 - **The error vocabulary**: §3.3's table in its three settings; `bad_request` for each body refused
   (not JSON, past 4 KiB, a second value after the object, an unknown member, each of `tenant`,
-  `bucket`, `key` and `lifetime`, a `variant` of another type); `invalid_path` for each of §3.2's
-  steps 2 to 4; the `enabled`-on, `resolverEnabled`-off state, in which the byte routes refuse and
-  carry the header and the route answers 404 with it.
+  `bucket`, `key` and `lifetime`, a `path` missing or not a string); `invalid_variant` for each
+  `variant` §3.2 refuses (a number, `true`, an object, an array, the empty string, 129 bytes, a byte
+  outside `[a-z0-9-]`), each with its header; `invalid_path` for each of §3.2's steps 2 to 4; the
+  `enabled`-on, `resolverEnabled`-off state, in which the byte routes refuse and carry the header and
+  the route answers 404 with it.
 - **Variant routing**: a rendition answered `bridge` `local_variant` with no signer and no policy;
   `/v1/read?variant=` and `/v1/download?variant=` with a `Range` serve the same bytes and count
   `local_variant`; a request with a variant never asks the routing table; the console plays the DSD
@@ -1237,13 +1373,18 @@ Changed:
 - **The classifier**: §5.3's rows in each column, §5.4's later byte requests, and §5.8's root change.
 - **Fail closed** (F1, G1, G2): §5.3's restart tests; each row of §4.9's table at a real start, the
   variables set in the process's environment as production sets them, never a config struct built by
-  hand, a switch that does not parse among them: the eligible class refused, the counters running, the
-  reason in the log and the metrics, a local tenant still served.
+  hand: the eligible class refused, the counters running, the reason in the log and the metrics, a
+  local tenant still served where its state is trusted; and §4.9's own tests, the two switches
+  apart, white space alone among the values that do not parse, and the control that reaches the
+  fake signer.
 - **The counters' exactness**: §6.3's list.
 - **The state**: each refusal of §4.2, §4.3 and §4.5 by its `reason`; a heartbeat taken; staleness by
   an injected clock; a replaced file taken at the next poll, the poll injected, never a sleep; each
-  untrusted case of §4.4 (a file, the directory and a missing directory's parent the bridge's UID can
-  write; a root run), with a writable policy's holds still applied.
+  untrusted case of §4.4 by its reason, the allowed owners and the bridge's UID set through the
+  check's seam (a file and the directory the bridge's UID can write; a directory the bridge's UID
+  owns at mode 0555; a file of another owner; a state directory that is a link, and one below a link;
+  a directory above it the bridge's UID can write; the directory missing; a root run), with a writable
+  or bridge-owned policy's holds still applied and nothing else of it taken.
 - **The metrics socket**: the golden document; every key present at zero; served to the allowed UID
   and a peer of any other closed unread (the allowed UID a seam on the server: the test's own UID, then
   another number); a stale socket replaced; a regular file at the path left as it is, the endpoint
@@ -1267,13 +1408,14 @@ Changed:
   (§2.2); §2.4's path rule; the capability key and the R2 credential, their custody and rotation
   (§2.11); every decision behind an answer: R2, publication tracking, the inventory generation, the
   migration states and their order, the mint limit and its caches; the state directory, its
-  ownership, the marker and the policy, their writes, the heartbeat and versions, holds and their
-  release, rollbacks and their order (§4.7, §4.8); sampling the metrics as integers of 64 bits, the
-  restart gaps, every threshold and the daily job (A1, A2, A4); the cutoff's date and
-  `minClientVersion`, from the app's release and its adoption; the `bridge@` unit: §7.1's variables, a
-  runtime directory of the bridge's own for the metrics socket, and the design's `InaccessiblePaths=`
-  for the R2 credential and the signer's files, none of which the bridge reads; the front proxy's
-  caps.
+  ownership, the marker and the policy, their writes, bounds, heartbeat and versions, holds and their
+  release, rollbacks and the version the signer names for one (§4.3, §4.7, §4.8); the managed
+  roots, `roots` among the managed controls and no link in or above a root (§5.8); sampling the
+  metrics as integers of 64 bits, the restart gaps, every threshold and the daily job (A1, A2, A4);
+  the cutoff's date and `minClientVersion`, from the app's release and its adoption; the `bridge@`
+  unit: §7.1's variables, a runtime directory of the bridge's own for the metrics socket, and the
+  design's `InaccessiblePaths=` for the R2 credential and the signer's files, none of which the
+  bridge reads; the front proxy's caps.
 - **The Worker's (PR 2).** The capability URL's behaviour, CORS and codes; §3.1 restates the codes from
   the design for the app.
 - **The app's (PR 4).** The resolver's use, the separate session, resume, renewal, the one re-resolve,
@@ -1314,26 +1456,46 @@ figures can use; its byte routes then refuse what §5.3 refuses, whether or not 
 5. The demo (§3.4): off until PR 6's gates; one mint limit and one fair-use state shared by every demo
    user.
 6. The settings through the environment, for rollbacks (§7.1).
-7. Failing closed's costs (§4.6, §4.9): a migrated tenant whose policy is lost, or whose configuration
-   has a typo, has its originals refused from the bridge until the control plane mends it; a bridge
-   that runs as root never trusts its state.
+7. The risks of failing closed (§4.4, §4.6, §4.9): a migrated tenant whose policy is lost, or whose
+   configuration has a typo, has its originals refused from the bridge until the control plane mends
+   it; a bridge that runs as root never trusts its state. And a tenant still `local` whose state
+   directory is missing, or whose `stateDir` is mistyped, while direct media is enabled for it, has
+   every original under the R2 mount refused 503 `policy_unavailable`, its whole library though none
+   of it is in R2 yet, until the path is mended; its renditions and upstream tracks are served, and
+   the start, the metrics (`state_dir`) and the doctor say why.
 8. The facts' lifetime and bound (§5.4): 600 s and 10,000.
+9. The policy's bounds (§4.3): 64 holds with ids of 64 bytes at most, 7,000 pending representations
+   with paths of 1,024 bytes at most as written, times of 30 bytes, the file compact, 8,246,697
+   bytes at every bound against the 8 MiB read; a backlog past them left to facts or `eligible`.
+10. The state directory's ownership (§4.4): the directory and its two files owned by root or
+    `signerUID`, the control plane's one identity, never the bridge's UID, and the way to them free
+    of links and of directories the bridge's UID owns or can write.
+11. The rollback's order (§4.8): the signer's answer names the version of the rollback's policy, and
+    the bridge's fact clears only at or above it (taken), or the control plane's writes ordered
+    instead, the rollback's policy before the signer stops minting.
 
 ### 9.2 For the control plane's PR
 
 1. The signer's API (§2.4 to §2.9): `POST /v1/mint` and `GET /v1/health`, the members, the answers, the
-   codes, a connection a request, and §2.4's path rule.
+   codes, a connection a request, and §2.4's path rule; an `operator_rollback` answer naming the
+   version of the policy that installs the rollback (`policyVersion`, §2.5, §4.8).
 2. The signer's UID, handed to the bridge (`signerUID`, §2.3); one tenant a UID (§2.2).
 3. The capability key's custody and rotation (§2.11).
-4. The state directory (§4): its ownership, the marker written before a tenant leaves `local`, the
-   policy before a move to `direct_enabled`, a write of the policy at least every 60 s, `validUntil` at
-   most ten minutes on, the versions, a rollback's `direct_disabled` published once the bridges report
-   its `version`, and `directMedia.enabled` never unset on a migrated tenant.
+4. The state directory (§4): made at the tenant's provisioning, owned with its files by root or
+   `signerUID` and reached through no link or directory the bridge's UID owns or can write (§4.4,
+   §4.7), the marker written before a tenant leaves `local`, the policy before a move to
+   `direct_enabled`, a write of the policy at least every 60 s, `validUntil` at most ten minutes on,
+   the versions, a rollback's `direct_disabled` published once the bridges report its `version`, and
+   `directMedia.enabled` never unset on a migrated tenant.
 5. The metrics (§6): root samples the JSON each minute, reads the counts as 64-bit integers, and reads
    `bootId` for restarts.
-6. `publicationPending`'s entries in §2.4's form, recorded before publication.
+6. `publicationPending`'s entries in §2.4's form, recorded before publication; the policy written
+   compact and within every bound of §4.3, a backlog past them cut from the list alone, with a test
+   that its writer at every bound writes a file the bridge takes.
 7. The unit (§7.4).
 8. The bounds Phase 0 qualifies: §2.8's timeouts, §2.6's URL length.
+9. The managed roots (§5.8): `roots` among the managed controls on every tenant with direct media
+   enabled, no link in a root, and no root or directory above one reached through a link.
 
 ### 9.3 For the app's PR and the console's
 
@@ -1430,3 +1592,41 @@ The P3s taken: the clock (§4.3), 64-bit integers (§6.2, §9.2), a metrics sock
   Direct delivery is counted by the media host itself (the design's §6), so a closed socket hides only
   the bridge's bytes: the `eligible` class, which counts toward the ceilings, is refused instead
   (§6.1), and the resolver goes on.
+
+## 13. Round 2: where each ruling went
+
+| Ruling | Where |
+|---|---|
+| The policy's size is part of its contract: every member bounded, the worst case counted against the 8 MiB read, a backlog past the bounds cut from the list alone | §4.3 (the bounds, the count and their tests), §9.1, §9.2 |
+| A heartbeat never clears the rollback fact: the signer names the version of the rollback's policy, and the fact clears only at or above it | §2.5, §2.7, §2.10, §4.8 (the order, and why), §5.2, §5.3, §5.4 (the heartbeat's test), §6.2, §9.1, §9.2 |
+| A missing state directory is untrusted while direct media is enabled, the parent directory's clause dropped | §4.1, §4.4, §4.6, §4.7, §5.1, §5.2, §5.3 (its restart test), §6.2, §7.3, §9.1 (what it costs a local tenant) |
+| A switch that does not parse fails to its restrictive side: `enabled` on, `resolverEnabled` invalid | §0, §3.3, §4.9 (its tests, the two switches apart), §6.2, §7.1, §7.3 |
+| An invalid `libraryRoot` stops every signer call | §3.3, §4.9 (its test), §5.2, §5.3, §5.8 |
+| Trust asks the owner as well as the write, on the opened descriptors, through no link; the owners named, the tests given a seam and each refusal a reason | §4.4, §4.7, §6.2, §7.3, §9.1, §9.2 |
+| White space alone in a direct-media variable does not parse | §4.9, §7.1 |
+| A publication fact never stops the resolver asking the signer: its first pass reads the policy alone, its second the fresh fact | §5.2, §5.3, §5.4 (its tests) |
+| The class that counts and exempts is judged on the opened file's stat, on both surfaces | §5.2, §5.4 (its test), §5.7, §7.2 |
+| The no-link premise is the control plane's promise of managed roots, and the path the signer receives is tested | §5.8, §7.4, §9.2 |
+| The version comparison's module named without its host | §5.6 |
+| A `variant` of another type is `invalid_variant`, in the draft and in the tests | §3.1, §7.3 |
+
+## 14. Refuted in round 2
+
+Four claims the verification refuted; the plan needs no change for them, and these lines settle each:
+
+- **That the resolver must not ask the signer while no policy is taken**: direct delivery is the
+  signer's and the media host's, and the signer refuses where it holds no policy of its own
+  (`:249`); a `bridge` answer then goes through the classifier, which answers 503
+  `policy_unavailable` as the byte routes would (`:240-241`, `:928-941`, `:961-969`).
+- **That a stale policy with the signer down strands older clients**: no byte route asks the signer
+  (`:62-65`, `:1313`), a stale policy serves pre-cutoff fetches (`:951`), and after the cutoff an
+  app without `directMediaV1` is refused by design whatever the policy or the signer
+  (`:953`, `:1065-1074`).
+- **That the error-code middleware's matching by path is unsound**: it marks the exact paths the
+  registry registers (`:527-539`, `:586-589`), a path no route serves is net/http's own answer
+  outside the contract (`:569-572`), and the tests run through the chain production runs
+  (`:579-582`).
+- **That one tenant can mint another's files through a link**: the signer takes the tenant from
+  the listener alone (`:103-115`) and builds the key under that tenant's prefix from a path it
+  refuses to let climb (`:151`, `:164-181`), so a link on the bridge's disk changes which bytes the
+  bridge serves, never which key the signer builds (`:316-322`, `:1119-1127`).
