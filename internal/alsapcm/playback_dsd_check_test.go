@@ -139,8 +139,22 @@ func (r *checkRig) ask(req playback.CheckRequest, stop chan struct{}) checkCall 
 	r.t.Helper()
 	ctx, cancel := within()
 	defer cancel()
-	st, err := r.be.Check(ctx, req)
-	return checkCall{st: st, err: err, stop: stop}
+	h, err := r.be.Check(ctx, req)
+	return checkCall{st: statusOf(h), err: err, stop: stop}
+}
+
+// statusOf is the record Check's handle carries, none for no handle.
+func statusOf(h *playback.CheckHandle) playback.CheckStatus {
+	if h == nil {
+		return playback.CheckStatus{}
+	}
+	return h.Status
+}
+
+// slotBack is StopCheck's answer read as the slot given back or fenced:
+// every cleanup but one still pending, and no check at all.
+func slotBack(c playback.CheckCleanup, _ playback.PlayerPolicy) bool {
+	return c != playback.CheckCleanupPending
 }
 
 // admitted asks a check of transport at bitRate and fails the test unless it
@@ -435,7 +449,8 @@ func checkIdentity() policy.Identity {
 // names, behind the supervisor's gate: a tuple the set refuses is refused by
 // the set's word for the rate, DoP unconfirmed on a DAC no profile knows
 // among them (native chosen on one, whose IDs are a generic board's while no
-// list reads, B990, is its refusal's candidate's check, round 3:
+// list reads, B990, is its refusal's candidate's check, round 3: the row of
+// its own below, which plays it to complete; on a list that names the board,
 // TestAGenericBoardsNativeCheckLetsItsAnswerBeEarned); a rate the set
 // converts (an unknown DAC under auto among them) is refused converted; one
 // it plays the other way,
@@ -533,6 +548,12 @@ func TestTheCheckAdmitsOnlyWhatTheSetPlays(t *testing.T) {
 			t.Errorf("the check's evidence: %+v; want driver_accepted under the kernel, nothing streaming_observed", e)
 		}
 	})
+	t.Run("native chosen on a DAC no profile knows while no list reads is its candidate's check", func(t *testing.T) {
+		r := newCheckRig(t, native, unknown)
+		r.admitted(dsdstate.TransportNative, playbacktest.DSD64)
+		r.k.Free()
+		r.endedAs(playback.CheckComplete, "", "the candidate's check while no list reads")
+	})
 }
 
 // TestAnEndedRequestOpensNothing: through the engine's Run, the backend and
@@ -551,8 +572,8 @@ func TestAnEndedRequestOpensNothing(t *testing.T) {
 		reads := box.reads.Load()
 		ctx, cancel := context.WithCancel(bg)
 		cancel()
-		st, err := r.be.Check(ctx, req)
-		r.refusedEnded(checkCall{st: st, err: err, stop: stop}, "a request ended before Check")
+		h, err := r.be.Check(ctx, req)
+		r.refusedEnded(checkCall{st: statusOf(h), err: err, stop: stop}, "a request ended before Check")
 		if n := box.reads.Load() - reads; n != 0 {
 			t.Errorf("a request ended before Check read the box %d times; want none", n)
 		}
@@ -567,8 +588,8 @@ func TestAnEndedRequestOpensNothing(t *testing.T) {
 		defer cancel()
 		answer := make(chan checkCall, 1)
 		go func() {
-			st, err := r.be.Check(ctx, req)
-			answer <- checkCall{st: st, err: err, stop: stop}
+			h, err := r.be.Check(ctx, req)
+			answer <- checkCall{st: statusOf(h), err: err, stop: stop}
 		}()
 		awaitOrdered(t, p.in, "the check's reading of the policy held in the box")
 		cancel()
@@ -928,7 +949,7 @@ func TestEveryEndOfTheCheckEndsItWithinItsBound(t *testing.T) {
 	ends := []end{
 		{"the hold's stop signal", func(_ *checkRig, c checkCall) { close(c.stop) }, playback.CheckStopped, playback.CheckStop},
 		{"StopCheck", func(r *checkRig, _ checkCall) {
-			if !r.be.StopCheck(bg) {
+			if !slotBack(r.be.StopCheck(bg)) {
 				r.t.Error("StopCheck answered the slot not given back")
 			}
 		}, playback.CheckStopped, playback.CheckDeleted},
@@ -1260,7 +1281,7 @@ func TestAChecksCleanupThatIsNotConfirmedKeepsTheDevice(t *testing.T) {
 				t.Errorf("a check whose close is held is %s; want stopping", p)
 			}
 			stopped := make(chan bool, 1)
-			go func() { stopped <- r.be.StopCheck(bg) }()
+			go func() { stopped <- slotBack(r.be.StopCheck(bg)) }()
 			r.timers.fire(t, playback.CheckStopWait, "StopCheck's wait")
 			if receiveIn(t, stopped, "StopCheck") {
 				t.Error("StopCheck answered the slot given back while the close is held")
@@ -1290,7 +1311,7 @@ func TestAChecksCleanupThatIsNotConfirmedKeepsTheDevice(t *testing.T) {
 			release()
 			awaitOrdered(t, parked, "the sink's close held, the check ended at its activation")
 			stopped := make(chan bool, 1)
-			go func() { stopped <- r.be.StopCheck(bg) }()
+			go func() { stopped <- slotBack(r.be.StopCheck(bg)) }()
 			r.timers.fire(t, playback.CheckStopWait, "StopCheck's wait")
 			if receiveIn(t, stopped, "StopCheck") {
 				t.Error("StopCheck answered the slot given back while the sink's close is held")
@@ -1490,8 +1511,10 @@ func TestAStopDuringAParkedOpenWaitsForItsCompletion(t *testing.T) {
 // TestAParkedMonitorReadingHoldsNoEndOfTheCheck: StopCheck, while the check's
 // monitor's reading of the box is held under the refreshes' lock, ends the
 // check and gives the slot back within its own bound, the reading still held,
-// since no transition of the check waits for the refreshes' lock: a tone then
-// plays. The monitor itself is joined once its reading answers.
+// since no transition of the check waits for the refreshes' lock: its end is
+// published (stopped, deleted) at a later publication, the generation as it
+// was, and a tone then plays. The monitor itself is joined once its reading
+// answers.
 func TestAParkedMonitorReadingHoldsNoEndOfTheCheck(t *testing.T) {
 	box := &checkBox{}
 	r := newCheckRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), withCheckBox(box))
@@ -1500,8 +1523,14 @@ func TestAParkedMonitorReadingHoldsNoEndOfTheCheck(t *testing.T) {
 	t.Cleanup(p.letGo)
 	r.monitorTickThatRevokes()
 	awaitOrdered(t, p.in, "the monitor's reading held")
-	if !r.be.StopCheck(bg) {
+	before := r.be.Policy()
+	if !slotBack(r.be.StopCheck(bg)) {
 		t.Fatal("the check did not give the slot back while its monitor's reading was held")
+	}
+	if m, now := r.member(), r.be.Policy(); m == nil || m.Phase != playback.CheckStopped || m.Reason != playback.CheckDeleted ||
+		now.Publication <= before.Publication || now.Generation != before.Generation {
+		t.Errorf("with the monitor's reading held the check is published %+v at publication %d (was %d), generation %d (was %d); want stopped, deleted, later, at the same generation",
+			m, now.Publication, before.Publication, now.Generation, before.Generation)
 	}
 	if st, _ := r.be.CheckStatus(); st.Phase != playback.CheckStopped || st.Reason != playback.CheckDeleted {
 		t.Errorf("the check's record with its monitor's reading held: %+v; want stopped, deleted", st)
@@ -1570,7 +1599,7 @@ func TestServesStopWaitsForEveryCheckItCounted(t *testing.T) {
 		r.monitorTickThatRevokes()
 		awaitOrdered(t, p.in, "the monitor's reading held")
 		r.be.CloseChecks()
-		if !r.be.StopCheck(bg) {
+		if !slotBack(r.be.StopCheck(bg)) {
 			t.Fatal("the check did not give the slot back")
 		}
 		counted(r, "a monitor held in its reading")

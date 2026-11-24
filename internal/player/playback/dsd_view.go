@@ -95,6 +95,21 @@ type DSDDAC struct {
 	Choice   DSDChoice
 	Options  []DSDOption
 	FirstUse []DSDFirstUse
+	// Check is the DSD check this boot ran or runs for the DAC (B728 B12 PR
+	// 4): the running one or the last, while it was admitted for this token,
+	// nil otherwise. A transition of it is published beside the set as it is
+	// (publishCheckLocked), never by a refresh's reading alone.
+	Check *DSDCheck
+}
+
+// DSDCheck is the check's member of the read side: its opaque ID, its tuple,
+// its phase and its reason ("" for none), as its record stands
+// (checkStatusLocked).
+type DSDCheck struct {
+	ID, Transport string
+	BitRate       int
+	Phase         CheckPhase
+	Reason        CheckReason
 }
 
 // DSDProfile is the profile the DAC matched: nil for an unknown DAC.
@@ -335,6 +350,10 @@ func (v DSDView) clone() DSDView {
 	for _, f := range v.DAC.FirstUse {
 		f.BitRates = slices.Clone(f.BitRates)
 		d.FirstUse = append(d.FirstUse, f)
+	}
+	if ch := v.DAC.Check; ch != nil {
+		cp := *ch
+		d.Check = &cp
 	}
 	c.DAC = &d
 	return c

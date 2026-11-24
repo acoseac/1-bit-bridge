@@ -622,7 +622,7 @@ func (b *Backend) ToneOutput(open bool, why ToneOutcome) {
 		if why == ToneOutputChanged {
 			r = CheckOutputChanged
 		}
-		c.end(CheckFailed, r)
+		b.endCheckLocked(c, CheckFailed, r)
 	}
 }
 

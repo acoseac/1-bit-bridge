@@ -493,8 +493,11 @@ type Backend struct {
 	// choiceReading says a choice's write holds its reading (takeChoiceReading)
 	// until it has published it (publishChoice), and refreshOwed that a
 	// refresh came meanwhile, read nothing and is owed (refreshDSD): both
-	// under dsdMu (B728 B9 PR 3).
+	// under dsdMu (B728 B9 PR 3), choiceReading written under b.mu too, where
+	// a DSD check's transition reads it, which sets checkOwed, under b.mu, in
+	// place of publishing (publishCheckLocked, B728 B12 PR 4).
 	choiceReading, refreshOwed bool
+	checkOwed                  bool
 	// tokenKey is the key the DAC's token is minted under (dacToken), drawn by
 	// New, never sent or logged: a token holds for one boot of the backend.
 	tokenKey [32]byte
