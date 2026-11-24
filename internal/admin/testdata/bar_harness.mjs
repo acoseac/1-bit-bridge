@@ -1756,6 +1756,14 @@ S.TestADeferredStartAsksItsPermitAgain = async () => {
   r.el.metadata(200);
   await settle();
   check("the bridge playing since: the deferred play plays nothing", r.el.paused, r.el.paused);
+  // Round 4 (T2's class): that refusal ends the intent too, so a retry after
+  // an error, the bridge silent since, plays nothing.
+  r.frame(pub({ revision: 7, silent: true }));
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  check("the bridge silent since, a retry after an error plays nothing", r.el.paused && r.el.plays.length === plays, [r.el.paused, r.el.plays.slice(plays)]);
 };
 
 S.TestADeferredStartPlaysWhileItsPermitHolds = async () => {

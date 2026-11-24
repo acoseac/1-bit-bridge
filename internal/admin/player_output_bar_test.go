@@ -380,8 +380,9 @@ func TestAStartBeforeTheFirstFrameWaitsForTheEpoch(t *testing.T) { barScenario(t
 
 // TestADeferredStartAsksItsPermitAgain pins V4: a start's play deferred to
 // the track's metadata plays nothing once a newer state shows the bridge
-// playing.
-func TestADeferredStartAsksItsPermitAgain(t *testing.T) { barScenario(t, 2) }
+// playing; and round 4's T2 class: that refusal ends the intent, so a retry
+// after an error, the bridge silent since, plays nothing.
+func TestADeferredStartAsksItsPermitAgain(t *testing.T) { barScenario(t, 3) }
 
 // TestADeferredStartPlaysWhileItsPermitHolds is V4's other side: with nothing
 // newer the deferred play plays, from its position.

@@ -1098,6 +1098,8 @@ function loadAt(index, { autoplay, at, permit }) {
     if (Number.isFinite(state.el.duration)) state.el.currentTime = Math.min(at, state.el.duration);
     if (!autoplay) return;
     if (permit && !permit()) {
+      // Refused, it ends what this browser meant to play (round 4, T2).
+      intent = false;
       state.playing = false;
       state.loading = false;
       emit();
