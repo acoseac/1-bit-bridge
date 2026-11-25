@@ -163,3 +163,27 @@ The controls, each a mutation of a copy of the committed modules run through eve
 
 What the bar does around the browser's own resumes is otherwise as on main: the pause count,
 `ownPlay`'s comparison, `toggle`'s dispatch and the button's label are unchanged.
+
+### Runs
+
+At `6d972d88`, on Go 1.27.3 with `GOPROXY=off` and the release tags, node first on `PATH`:
+
+- `make fmt vet test build-all docs-check` in one session holding the build slot: exit 0 in
+  2,161 s. `go fmt` rewrote nothing; in the race-enabled suite `cmd/bridge` took 1,970 s and
+  `internal/admin` 1,488 s; the six release binaries built; the doc checks passed. In the same
+  session `make vet` for linux/arm64, darwin/arm64, darwin/amd64, windows/amd64, windows/arm64,
+  linux/arm and linux/386: each exit 0.
+- The source guards by name, each passed: `TestEveryStartOfThisBrowserAsksTheGate`,
+  `TestTheGateGuardReadsWhatAGateCallRunsAtOnce`, `TestNoSoundSourceOfTheConsoleBypassesTheGate`,
+  `TestTheHistoryListsTheMediaSessionsStartsAsTheyAreSet`,
+  `TestEveryNodeLookupOfTheOutputsTestsIsBarNode`, `TestFailureAutoAdvanceIsGuarded`,
+  `TestThePlayerFrameIsWiredFromTheStreamToTheBar`, `TestEveryRowDecidesByTheOutputChosen`,
+  `TestEveryPlayerControlStateFieldIsRenderedSomewhere`,
+  `TestNoConsoleControlDisablesItselfOutsideSetDisabled`, `TestTheBarsPromiseIsSaidWordForWord`
+  and `cmd/bridge`'s `TestEveryCitedTestNameExists`.
+- The harness: all 151 scenarios run under node, none failing. Against main's modules the 136
+  older ones pass and 11 of the 15 new ones fail, as listed above.
+- The bar's Go tests (`player_output_bar_test.go`, 152 tests) under `-race -count=10`: 1,520
+  passed, none failed or skipped, on an idle machine (207 s); and 1,520 passed, none failed,
+  beside four CPU-bound processes started for the run and stopped by their process IDs after it
+  (170 s, a load average of about 4.4 on 16 cores).
