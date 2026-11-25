@@ -78,14 +78,15 @@ console.log(JSON.stringify(out));
 // TestOnlyADecodeFailureMarksATrackUnplayable is the half that matters
 // beyond the wording.
 //
-// markUnplayable is permanent for the session. Applying it to a fetch
-// failure keeps a track dead over a condition that may already have
-// cleared — an upstream that came back up, a file restored by the next
-// scan — and no reload short of a new tab would recover it.
+// markUnplayable records the source the play chose (its path and variant)
+// as undecodable for the page's life (B1021). Applying it to a fetch failure
+// keeps a track dead over a condition that may already have cleared — an
+// upstream that came back up, a file restored by the next scan — and only a
+// reload would recover it.
 func TestOnlyADecodeFailureMarksATrackUnplayable(t *testing.T) {
 	fn := extractJSFunction(t,
 		readFile(t, filepath.Join("static", "player", "audio.js")), "handleSourceError")
-	if !strings.Contains(fn, `if (reason === "decode") markUnplayable(track)`) {
+	if !strings.Contains(fn, `if (reason === "decode") markUnplayable(source)`) {
 		t.Error("handleSourceError no longer gates markUnplayable on a genuine " +
 			"decode failure; a missing file or an offline upstream would mark the " +
 			"track dead for the rest of the session")

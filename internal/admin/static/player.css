@@ -38,8 +38,10 @@
    * this one starts, and 200px of second rail left the album grid cramped. */
   --nav-w: 172px;
   --bar-h: 68px;
-  /* bar height + the dock's 14px bottom float + breathing room above it */
-  --player-bottom-inset: calc(var(--bar-h) + 40px + env(safe-area-inset-bottom, 0px));
+  /* bar height + the dock's 14px bottom float + breathing room above it. The
+   * height is the bar's as it renders (--np-bar-h, which nowplaying.js sets),
+   * --bar-h until it has: a phone's bar wraps to three rows (B1021). */
+  --player-bottom-inset: calc(var(--np-bar-h, var(--bar-h)) + 40px + env(safe-area-inset-bottom, 0px));
 
   /* The now-playing material FOLLOWS THE THEME.
    *
@@ -354,7 +356,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 /* ---- A–Z jump rail ---- */
 
 .az-rail {
-  position: sticky; top: var(--space-2); float: right; z-index: 5;
+  position: sticky; top: var(--az-top); float: right; z-index: 5;
   display: flex; flex-direction: column; align-items: center;
   gap: 1px; margin-left: var(--space-3); padding: var(--space-2) 2px;
   border-radius: 999px; background: var(--bg-panel);
@@ -371,11 +373,33 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 /* Empty letters stay in place rather than being dropped: a rail that
  * changes length as you filter is harder to hit than one that doesn't. */
 .az-letter:disabled { color: var(--fg-muted); opacity: .35; cursor: default; }
+/* The rail fits between where it sticks and the bar as the bar renders (or
+ * the window's foot), its letters shrinking to fit rather than scrolling, so
+ * every one stays there to tap (B1021): on a 568px phone it ran 554px tall,
+ * W to Z under the bar. Each letter is clipped to its own box, so a tap at
+ * a shrunken letter lands on it and not on a neighbour's glyph. Below 1024px
+ * it sticks below the shell's top bar (app.css: a 44px menu button, 10px of
+ * padding each side and a border, 65px), which covered its first letters. */
+:root { --az-top: var(--space-2); --az-foot: var(--space-2); }
+body.has-player-bar { --az-foot: var(--player-bottom-inset); }
+@media (max-width: 1023px) { :root { --az-top: calc(65px + var(--space-2)); } }
+.az-rail {
+  max-height: calc(100vh - var(--az-top) - var(--az-foot));
+  max-height: calc(100dvh - var(--az-top) - var(--az-foot));
+}
+.az-letter { min-height: 0; overflow: hidden; }
 
 /* Touch wants a bigger target than a dense desktop rail. This is also
  * where the rail earns the most, so it is NOT hidden on small screens. */
 @media (max-width: 640px) {
   .az-letter { padding: 4px 8px; font-size: 0.72rem; }
+}
+/* Where the window is short, a phone held sideways, one column of 27 letters
+ * cannot stand between the top bar and the bar (B1021: 49px of it at 568x320
+ * reached 7): they take seven columns of four rows. */
+@media (max-height: 500px) {
+  .az-rail { display: grid; grid-template-columns: repeat(7, auto); border-radius: 12px; }
+  .az-letter { padding: 2px 6px; }
 }
 
 /* ---- Rows (artists, genres, composers, folders, search) ---- */
@@ -432,6 +456,8 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .detail-artist-head { grid-template-columns: 168px 1fr; align-items: center; }
 .detail-artist { color: var(--accent); text-decoration: none; font-size: 0.95rem; }
 .detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); flex-wrap: wrap; }
+/* A finger's 44px for an album's Play, Shuffle and Add to queue (B1021). */
+@media (pointer: coarse) { .detail-actions .btn { min-width: 44px; min-height: 44px; } }
 
 .tracks { list-style: none; margin: 0; padding: 0; }
 /* Inside .detail-tabs the CARD is the wrapper; the panels block and the
@@ -668,15 +694,15 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 }
 .npbar[hidden] { display: none; }
 
-/* Position line on the bar's top edge. Below the phone breakpoint the
- * numeric scrubber row is hidden, and before this there was then NO
- * position feedback at all on a phone. Hard stops rather than a
- * gradient ramp: this is a measurement, not a fade.
+/* Position line on the bar's top edge, up to 768px, where the seek is
+ * hidden and the elapsed and total times stand beside it (B1021: the times
+ * were hidden there too, and this line was a phone's only position, with no
+ * numbers). It is where the track is, never a seek's preview. Hard stops
+ * rather than a gradient ramp: this is a measurement, not a fade.
  *
  * Three bands, not two: played, fetched, and not yet fetched. The middle
  * one is the download, and on a phone this rail is the only surface it
- * has — the scrubber that carries it on desktop is display:none down
- * there. */
+ * has: the seek that carries it in a wider window is hidden there. */
 .np-rail {
   position: absolute; inset: 0 0 auto; height: 2px;
   background: linear-gradient(to right,
@@ -878,6 +904,11 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   background: var(--bg-elev); color: var(--fg-muted);
   white-space: nowrap; vertical-align: middle;
 }
+/* A row's reason wraps within a bound (B1021): this browser's words for a
+ * DSD row the bridge's player plays are long, and nowrap they sized the
+ * shared column to them, squeezing every title and running a narrow page
+ * sideways. */
+.track-why .chip { white-space: normal; max-width: 12rem; }
 /* The reference's yellow price pill: solid fill, ink label (11.94:1).
  * On a yellow TILE this inverts to the black pill — see the tile scope. */
 .chip-quality { background: var(--accent-fill); color: var(--accent-fill-on); }
@@ -1006,11 +1037,22 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   }
   .player-nav nav::-webkit-scrollbar { display: none; }
   .player-section { white-space: nowrap; }
-  /* The controls stay; the numeric scrubber and the extras go. Position
-   * feedback survives as .np-rail on the bar's top edge — the previous
-   * rule hid .np-scrub with nothing in its place, so a phone got none. */
-  .npbar { grid-template-columns: minmax(0, 1fr) auto auto; }
-  .np-scrub, .np-chip, .np-vol { display: none; }
+  /* The controls and both times stay; the seek, the chip and the volume go.
+   * The times are a row of the bar's own under the controls, at its two
+   * ends, read-only beside the 2px rail (B1021: this rule hid them with the
+   * seek, which left a phone the rail alone, with no numbers). The seek
+   * lands only at its change, which WebKit fires after no touch, so a seek
+   * shown here would preview under a finger and never land. */
+  .npbar {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: "now ctl extra" "scrub scrub scrub"; row-gap: 2px;
+  }
+  .np-center { display: contents; }
+  .np-now { grid-area: now; }
+  .np-transport { grid-area: ctl; }
+  .np-scrub { grid-area: scrub; justify-content: space-between; }
+  .np-extra { grid-area: extra; }
+  .np-seek, .np-chip, .np-vol { display: none; }
 }
 
 @media (min-width: 769px) { .np-rail { display: none; } }
@@ -1021,20 +1063,20 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
    * modes you set once, not controls you reach for mid-track. */
   .np-btn-toggle { display: none; }
   /* The metadata column measured 41px at 375px: the title truncated to
-   * three characters, which is not a name — "Cold Six" rendered "Col…".
-   *
-   * Every pixel back comes from CHROME, not from a control. The dock's
-   * side insets, its horizontal padding, the column gap and the cover all
-   * give some up; all four transport targets keep their full size,
-   * because a 375px screen is exactly where a shrunken tap target is
-   * worst, and the mute button stays for the reason nowplaying.js records
-   * (the volume slider is hidden on touch, so it is the only way to
-   * silence the bar at all). Measured after: 95px. */
+   * three characters, which is not a name: an eight-letter title rendered
+   * as its first three and an ellipsis.
+   * The dock's side insets, its horizontal padding and the column gap give
+   * some back; and up to 480px the words take a row of their own (below).
+   * Every button the bar holds is 44px square for a finger, and the mute
+   * button stays for the reason nowplaying.js records (the volume slider is
+   * hidden on touch, so it is the only way to silence the bar at all). */
   .npbar {
     left: calc(var(--npbar-left, 0px) + 10px); right: 10px;
-    padding: 8px 10px; gap: var(--space-2);
+    padding: 8px 10px; gap: var(--space-1) var(--space-2);
   }
-  .np-art { width: 40px; height: 40px; flex-basis: 40px; }
+  .np-transport { justify-content: center; gap: var(--space-2); }
+  .np-btn, .np-btn-sm { min-width: 44px; min-height: 44px; }
+  .np-art { width: 44px; height: 44px; flex-basis: 44px; }
   .np-now { gap: 10px; }
   /* Two lines is all the height the bar has down here. So when the notice
    * has something transient to say (loading, a converted copy, a playback
@@ -1043,16 +1085,26 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
    * page, and the notice is neither. */
   .np-meta:has(.np-notice:not(:empty)) .np-sub { display: none; }
   .track { grid-template-columns: 2rem 1fr auto; }
-  .track-meta, .track-dl, .track-dl-cell { display: none; }
+  /* The count line's Download words go where the link does (B1021). */
+  .track-meta, .track-dl, .track-dl-cell, .track-dl-note { display: none; }
   /* The bridge's mode (B634): at 375px its transport (Previous, Play, Next,
    * Stop: 182px) and its Queue, Output and Mute (112px) left the words'
    * track 23px, and the 40px cover took all of it, so the title, the
    * sub-line and every line the bridge says rendered 0px wide. The bridge
    * paints no cover, and its Mute is disabled (its level is fixed), so both
-   * go: the cover's 40px and its 10px gap, and the Mute's 32px and its 8px
-   * gap, leave the words about 63px. */
+   * go, and their widths are the words' (their row is their own since
+   * B1021). */
   .npbar[data-output="bridge"] .np-art,
   .npbar[data-output="bridge"] .np-mute { display: none; }
+}
+
+/* Up to 480px the words take a row of their own beside the output and the
+ * queue, the transport a row under them and the times the last, as from
+ * 481px to 768px (B1021): at 320px the words shared one row with the
+ * transport and rendered 8px wide. Wider, a phone held sideways, the bar
+ * keeps two rows, which leaves the window room. */
+@media (max-width: 480px) {
+  .npbar { grid-template-areas: "now now extra" "ctl ctl ctl" "scrub scrub scrub"; }
 }
 
 /* ---- The bar's output (B634) ----------------------------------------
@@ -1072,7 +1124,14 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 
 .np-menu, .np-queue {
   position: fixed; right: 18px; z-index: 41;
-  bottom: calc(var(--bar-h) + 26px + env(safe-area-inset-bottom, 0px));
+  /* Above the bar as it renders (--player-bottom-inset's note), and within
+   * the window above it, scrolling inside (B1021): a phone held sideways left
+   * 136px there, and a queue of half the window began above its top. */
+  --np-panel-bottom: calc(var(--np-bar-h, var(--bar-h)) + 26px + env(safe-area-inset-bottom, 0px));
+  bottom: var(--np-panel-bottom);
+  max-height: calc(100vh - var(--np-panel-bottom) - var(--space-2));
+  max-height: calc(100dvh - var(--np-panel-bottom) - var(--space-2));
+  overflow-y: auto;
   width: min(360px, calc(100vw - 36px));
   padding: var(--space-3); border-radius: var(--radius);
   background: var(--np-bg); color: var(--np-fg);
@@ -1098,7 +1157,11 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .np-pick-line:empty { display: none; }
 .np-menu-help { margin: 0; font-size: var(--text-xs); color: var(--np-muted); }
 
-.np-queue { width: min(440px, calc(100vw - 36px)); max-height: 50vh; overflow: auto; }
+.np-queue {
+  width: min(440px, calc(100vw - 36px)); overflow: auto;
+  max-height: min(50vh, calc(100vh - var(--np-panel-bottom) - var(--space-2)));
+  max-height: min(50vh, calc(100dvh - var(--np-panel-bottom) - var(--space-2)));
+}
 .np-queue-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
 .np-queue-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
@@ -1153,6 +1216,16 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
    rail's width are this file's default and app.css's --sidebar-w. */
 @media (min-width: 1024px) {
   :root { --npbar-left: var(--sidebar-w); }
+}
+
+/* Below 1024px the shell's drawer opens under its 65px top bar and, with the
+ * bar shown, ends above it as it renders, scrolling inside as app.css lets it
+ * (B1021): on a 568px phone the bar's three rows sat over its foot. */
+@media (max-width: 1023px) {
+  body.has-player-bar header[data-nav-open="true"] .sidebar-drawer {
+    max-height: min(70vh, 520px, calc(100vh - 65px - var(--player-bottom-inset)));
+    max-height: min(70vh, 520px, calc(100dvh - 65px - var(--player-bottom-inset)));
+  }
 }
 
 /* .small has been on ~25 nodes across the player — every stat line,
@@ -1306,6 +1379,10 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
     grid-column: 2 / -1;
   }
   .track-meta, .track-size { display: inline; }
+  /* A row's reason takes a line of its own under the title, its chip
+   * wrapping (B1021): nowrap beside the title, a DSD row's chip squeezed the
+   * title to a word and ran the page sideways at 360px. */
+  .track-why { grid-column: 2 / -1; }
 }
 
 .variant-kind-stale { color: var(--accent-warm); margin: 4px 0 0; }

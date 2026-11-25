@@ -55,10 +55,11 @@ export function mount() {
   bar = el("div", { class: "npbar", attrs: { id: "nowplaying", role: "region", "aria-label": "Now playing" } });
   bar.hidden = true;
 
-  // A non-interactive progress line pinned to the bar's top edge. It is
-  // the ONLY progress indication left below the phone breakpoint, where
-  // the numeric scrubber row is hidden — before this, a phone got no
-  // position feedback at all.
+  // A non-interactive progress line pinned to the bar's top edge, up to
+  // 768px, where the seek is hidden and the elapsed and total times stand
+  // beside it, read-only (B1021): the seek lands only at its change, which
+  // WebKit fires after no touch. It shows where the track is, never a seek's
+  // preview (setRail).
   refs.rail = el("div", { class: "np-rail", attrs: { "aria-hidden": "true" } });
 
   refs.art = el("div", { class: "np-art" });
@@ -178,6 +179,12 @@ export function mount() {
   document.body.appendChild(refs.menu);
   document.body.appendChild(refs.panel);
   document.body.classList.add("has-player-bar");
+  // The height the bar renders at, for what sits above it (B1021): main's
+  // bottom padding, the output menu, the queue panel and the A–Z rail. A
+  // phone's bar wraps to rows that --bar-h alone does not know of.
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => document.documentElement.style.setProperty("--np-bar-h", `${bar.offsetHeight}px`)).observe(bar);
+  }
 
   // A click outside the open menu or the open queue closes it, as Escape
   // does; a click on its own button is that button's toggle (C8).
@@ -400,20 +407,29 @@ function queueWord(word) {
 
 // ---- Painting ----
 
-/** Drive both the scrubber fill and the mobile rail from one value. */
+/** The scrubber's played fill: where the track is, or a seek's preview while scrubbing. */
 function setProgress(frac) {
-  const pct = `${Math.max(0, Math.min(1, frac || 0)) * 100}%`;
-  refs.seek.style.setProperty("--np-progress", pct);
-  refs.rail.style.setProperty("--np-progress", pct);
+  refs.seek.style.setProperty("--np-progress", `${Math.max(0, Math.min(1, frac || 0)) * 100}%`);
+}
+
+/**
+ * The rail's played fill: where the track is, at every tick, never a seek's
+ * preview (B1021). The rail shows only up to 768px, where the seek is
+ * hidden, and a preview the seek began in a wider window (an input with no
+ * change after it, which a resize to a phone's width can leave) holds the
+ * scrubber until a change: a rail painted with the scrubber stood still
+ * with it while the track played.
+ */
+function setRail(frac) {
+  refs.rail.style.setProperty("--np-progress", `${Math.max(0, Math.min(1, frac || 0)) * 100}%`);
 }
 
 /**
  * How much of the track the browser has actually fetched, painted behind
  * the played fill on the same two surfaces.
  *
- * The rail half is not decoration: below the phone breakpoint the whole
- * numeric scrubber row is hidden, so the rail is the only place a phone
- * can see the download at all.
+ * The rail half is not decoration: up to 768px the seek is hidden, so the
+ * rail is the only place a phone can see the download at all.
  *
  * The property is --np-loaded and not --np-buffered on purpose: the
  * COLOUR of this band is --np-buffer, and two names one character apart
@@ -444,6 +460,7 @@ function tick() {
   if (s.seekable && s.duration > 0) {
     refs.total.textContent = duration(s.duration);
     setBuffered(s.buffered / s.duration);
+    setRail(s.currentTime / s.duration);
     if (!refs.isScrubbing()) {
       refs.seek.value = String(Math.round((s.currentTime / s.duration) * 1000));
       setProgress(s.currentTime / s.duration);
@@ -455,6 +472,7 @@ function tick() {
     // thumb was still parked wherever that track had got to.
     refs.total.textContent = "0:00";
     setBuffered(0);
+    setRail(0);
     if (!refs.isScrubbing()) {
       refs.seek.value = "0";
       setProgress(0);
@@ -469,8 +487,9 @@ function tickBridge(o) {
   refs.elapsed.textContent = duration(p ?? 0) || "0:00";
   refs.total.textContent = d > 0 ? duration(d) : "—";
   setBuffered(0);
+  const frac = d > 0 && p !== null ? p / d : 0;
+  setRail(frac);
   if (!refs.isScrubbing()) {
-    const frac = d > 0 && p !== null ? p / d : 0;
     refs.seek.value = String(Math.round(frac * 1000));
     setProgress(frac);
   }
@@ -540,6 +559,7 @@ function renderBrowser(s, o) {
   if (!s.seekable) {
     refs.total.textContent = "—";
     setProgress(0);
+    setRail(0);
   }
 
   paintNotice(s, o?.line || "");
