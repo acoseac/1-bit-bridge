@@ -81,6 +81,15 @@ func TestEveryLineIsGreenOrSaysItsFixInOneSentence(t *testing.T) {
 		},
 		"no phone":            func(in *Input) { in.Phones, in.Tokens = 0, 0 },
 		"tokens, none in use": func(in *Input) { in.Phones, in.Tokens = 0, 2 },
+		"the bridge's own player's dac": func(in *Input) {
+			in.DACs[0].IsMPDsOutput = false
+			in.Bridge = &BridgePlayer{DAC: &in.DACs[0]}
+		},
+		"mpd's output is the bridge's own player's dac": func(in *Input) { in.Bridge = &BridgePlayer{DAC: &in.DACs[0]} },
+		"the bridge's own player, its card not known": func(in *Input) {
+			in.DACs[0].IsMPDsOutput = false
+			in.Bridge = &BridgePlayer{}
+		},
 		"unread": func(in *Input) {
 			*in = Input{Unread: "context canceled", Roots: []RootRule{{Root: "INTERNAL", State: "unchecked"}}, Phones: 1}
 		},
@@ -322,5 +331,104 @@ func TestTheDACLineReadsTheCardsCapabilities(t *testing.T) {
 		if !strings.Contains(d.Summary, want) {
 			t.Errorf("summary %q lacks %q", d.Summary, want)
 		}
+	}
+}
+
+// The cards of the DAC line's table, as GET /v1/outputs reports them: bar
+// and desk are USB DACs on cards 2 and 3, and zero is card 0, a card like
+// any other.
+var (
+	bar  = DAC{Card: 2, ID: "Bar", Name: "Bar DAC", USBID: "20b1:3009", MaxPCMRate: 384000, NativeDSDRates: []int{2822400, 5644800, 11289600}}
+	desk = DAC{Card: 3, ID: "Desk", Name: "Desk DAC", USBID: "262a:9302", MaxPCMRate: 768000, NativeDSDRates: []int{22579200}}
+	zero = DAC{Card: 0, ID: "Zero", Name: "Zero DAC", USBID: "0d8c:0014", MaxPCMRate: 96000}
+)
+
+// asMPDsOutput is d as the card MPD's output names.
+func asMPDsOutput(d DAC) DAC {
+	d.IsMPDsOutput = true
+	return d
+}
+
+// asCandidate is d as a card MPD's element lists without naming it.
+func asCandidate(d DAC) DAC {
+	d.IsMPDsOutput = false
+	return d
+}
+
+// bridgeOn is the bridge's own player playing through d.
+func bridgeOn(d DAC) *BridgePlayer {
+	return &BridgePlayer{DAC: &d}
+}
+
+// dacLineOf is the DAC line of a healthy box whose cards are dacs and whose
+// own player is b.
+func dacLineOf(dacs []DAC, b *BridgePlayer) Line {
+	in := healthy()
+	in.DACs, in.Bridge = dacs, b
+	return Lines(in)[1]
+}
+
+// TestTheDACLineNeverPointsMPDAtTheBridgesOwnPlayersDAC: ALSA gives a card
+// to one player at a time, so MPD and the bridge's own player set to one
+// DAC play by turns, whichever opens it second failing. The line tells the
+// player's DAC from MPD's by the ALSA card both elements report, card 0 a
+// card like any other, and never sends the reader to point MPD at the
+// player's: the player's DAC that MPD's output does not name is the
+// player's, green; one MPD's output names too is a warning whose fix keeps
+// the player; beside several cards the player's is no candidate; and with
+// the player on and its card not known (bridge doctor, or an element whose
+// dac is null) the line sends the reader to the console's Player page in
+// place of a card. Every other line is as it was, word for word.
+func TestTheDACLineNeverPointsMPDAtTheBridgesOwnPlayersDAC(t *testing.T) {
+	const (
+		ownSummary     = " is the bridge's own player's DAC; MPD's output only matters when 1-bit casts over MPD"
+		bothSummary    = " is both the bridge's own player's DAC and MPD's output"
+		bothFix        = "It plays for one of them at a time: point MPD at another DAC, or cast over MPD only while the bridge's own player is off."
+		unknownSummary = "The bridge's own player is on; its DAC is shown on the console's Player page"
+		unknownFix     = "Check the bridge's own player's DAC on the console's Player page before pointing MPD at a DAC."
+		noDACFix       = "Plug the DAC in by USB and switch it on, or point MPD's audio_output at its card; `bridge output dac` lists the cards."
+		deskIsMPDs     = "Desk DAC (USB 262a:9302) is MPD's output · PCM up to 768 kHz · native DSD up to DSD512"
+	)
+	dac := func(status Status, summary, fix string) Line {
+		return Line{Key: "dac", Title: "DAC", Status: status, Summary: summary, Fix: fix}
+	}
+	pointAt := func(id string) string {
+		return `Point MPD's audio_output at the DAC (device "hw:CARD=` + id + `"), or choose it in the player's output settings.`
+	}
+	for _, tc := range []struct {
+		name   string
+		dacs   []DAC
+		bridge *BridgePlayer
+		want   Line
+	}{
+		{"the player's DAC, which MPD lists and does not name", []DAC{asCandidate(bar)}, bridgeOn(bar), dac(OK, "Bar DAC (USB 20b1:3009)"+ownSummary, "")},
+		{"the player's DAC, MPD's element listing none", nil, bridgeOn(bar), dac(OK, "Bar DAC (USB 20b1:3009)"+ownSummary, "")},
+		{"MPD's output is the player's DAC", []DAC{asMPDsOutput(bar)}, bridgeOn(bar), dac(Warn, "Bar DAC (USB 20b1:3009)"+bothSummary, bothFix)},
+		{"MPD's output is the player's DAC, card 0", []DAC{asMPDsOutput(zero)}, bridgeOn(zero), dac(Warn, "Zero DAC (USB 0d8c:0014)"+bothSummary, bothFix)},
+		{"a free DAC beside the player's", []DAC{asCandidate(bar), asCandidate(desk)}, bridgeOn(bar),
+			dac(Warn, "Desk DAC (USB 262a:9302) found, but MPD's output does not name it", pointAt("Desk"))},
+		{"a free card 0 beside the player's", []DAC{asCandidate(bar), asCandidate(zero)}, bridgeOn(bar),
+			dac(Warn, "Zero DAC (USB 0d8c:0014) found, but MPD's output does not name it", pointAt("Zero"))},
+		{"MPD's output is another card than the player's", []DAC{asMPDsOutput(desk)}, bridgeOn(bar), dac(OK, deskIsMPDs, "")},
+		{"MPD's output is another card than the player's card 0", []DAC{asMPDsOutput(desk)}, bridgeOn(zero), dac(OK, deskIsMPDs, "")},
+		{"MPD's output is card 0, the player's another card", []DAC{asMPDsOutput(zero)}, bridgeOn(bar),
+			dac(OK, "Zero DAC (USB 0d8c:0014) is MPD's output · PCM up to 96 kHz · no native DSD", "")},
+		{"the player on, its card not known", []DAC{asCandidate(bar)}, &BridgePlayer{}, dac(Warn, unknownSummary, unknownFix)},
+		{"the player on, its card not known, beside several", []DAC{asCandidate(bar), asCandidate(desk)}, &BridgePlayer{}, dac(Warn, unknownSummary, unknownFix)},
+		{"the player on, its card not known, MPD's output named", []DAC{asMPDsOutput(desk)}, &BridgePlayer{}, dac(OK, deskIsMPDs, "")},
+		{"the player on, its card not known, no DAC", nil, &BridgePlayer{}, dac(Fail, "No DAC found on this box", noDACFix)},
+		{"no DAC", nil, nil, dac(Fail, "No DAC found on this box", noDACFix)},
+		{"MPD's own DAC", []DAC{asMPDsOutput(desk)}, nil, dac(OK, deskIsMPDs, "")},
+		{"a DAC neither uses", []DAC{asCandidate(desk)}, nil, dac(Warn, "Desk DAC (USB 262a:9302) found, but MPD's output does not name it", pointAt("Desk"))},
+		{"a DAC neither uses, the player's another", []DAC{asCandidate(desk)}, bridgeOn(bar),
+			dac(Warn, "Desk DAC (USB 262a:9302) found, but MPD's output does not name it", pointAt("Desk"))},
+		{"several DACs and no player", []DAC{asCandidate(bar), asCandidate(desk)}, nil,
+			dac(Warn, "Bar DAC (USB 20b1:3009), Desk DAC (USB 262a:9302) found, but MPD's output does not name it", pointAt("Bar"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dacLineOf(tc.dacs, tc.bridge); got != tc.want {
+				t.Errorf("DAC line\n%+v\nwant\n%+v", got, tc.want)
+			}
+		})
 	}
 }

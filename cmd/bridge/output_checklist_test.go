@@ -63,6 +63,94 @@ func TestChecklistInputReadsTheOutputsBody(t *testing.T) {
 	}
 }
 
+// TestChecklistInputMatchesTheBridgesOwnPlayersCard: from a GET /v1/outputs
+// body, the checklist matches the bridge's own player's element to MPD's by
+// the ALSA card both report, never by a USB id two DACs of one model share
+// (B1022): MPD's output on the player's card is a warning whose fix keeps
+// the player, MPD's output on another card of the same model is MPD's line
+// as it was, and with the player disabled, no element of its own in the
+// body, the line is MPD's as before.
+func TestChecklistInputMatchesTheBridgesOwnPlayersCard(t *testing.T) {
+	yes := true
+	mpdEl := func(card int, id string) api.OutputInfo {
+		return api.OutputInfo{ID: "a1", Kind: "mpd", Player: api.OutputPlayer{Software: "volumio", Version: "4.119"},
+			MPD: &api.OutputMPD{Port: 6600, Addresses: []string{"192.168.1.42"}, Version: "0.24.0", State: "play"},
+			DAC: &api.OutputDAC{Card: card, ID: id, Name: "iFi (by AMR) HD USB Audio", USBID: "20b1:3009", IsMPDsOutput: &yes,
+				Capabilities: api.OutputCapabilities{MaxPCMRate: 384000, NativeDSDRates: []int{11289600}}},
+			PathRules: []api.OutputPathRule{{Root: "Music", State: "proven"}}}
+	}
+	bridgeEl := api.OutputInfo{ID: "bridge:" + thePlayerUUID, Kind: "bridge", Player: api.OutputPlayer{Software: "bridge"},
+		DAC:       &api.OutputDAC{Card: 2, ID: "Audio", Name: "iFi (by AMR) HD USB Audio", USBID: "20b1:3009"},
+		PathRules: []api.OutputPathRule{}, Bridge: &api.OutputBridge{State: "playing", LibraryScope: "self", Codecs: []string{"flac"}}}
+	mpds := outputcheck.Line{Key: "dac", Title: "DAC", Status: outputcheck.OK,
+		Summary: "iFi (by AMR) HD USB Audio (USB 20b1:3009) is MPD's output · PCM up to 384 kHz · native DSD up to DSD256"}
+	for _, tc := range []struct {
+		name    string
+		outputs []api.OutputInfo
+		// card is the card the input says the player plays through, -1
+		// for no player of the bridge's own.
+		card int
+		want outputcheck.Line
+	}{
+		{"on the same card", []api.OutputInfo{mpdEl(2, "Audio"), bridgeEl}, 2, outputcheck.Line{Key: "dac", Title: "DAC", Status: outputcheck.Warn,
+			Summary: "iFi (by AMR) HD USB Audio (USB 20b1:3009) is both the bridge's own player's DAC and MPD's output",
+			Fix:     "It plays for one of them at a time: point MPD at another DAC, or cast over MPD only while the bridge's own player is off."}},
+		{"on another card of the same model", []api.OutputInfo{mpdEl(3, "Audio_1"), bridgeEl}, 2, mpds},
+		{"with the player disabled", []api.OutputInfo{mpdEl(2, "Audio")}, -1, mpds},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := checklistInput(api.OutputsResponse{Outputs: tc.outputs})
+			switch {
+			case tc.card < 0 && in.Bridge != nil:
+				t.Fatalf("a body with no element of the player's gave the checklist a player: %+v", in.Bridge)
+			case tc.card >= 0 && (in.Bridge == nil || in.Bridge.DAC == nil || in.Bridge.DAC.Card != tc.card):
+				t.Fatalf("the player in the input %+v, want it on card %d", in.Bridge, tc.card)
+			}
+			if len(in.DACs) != 1 || in.DACs[0].Card != tc.outputs[0].DAC.Card || !in.DACs[0].IsMPDsOutput {
+				t.Fatalf("MPD's cards %+v", in.DACs)
+			}
+			if got := outputcheck.Lines(in)[1]; got != tc.want {
+				t.Errorf("DAC line\n%+v\nwant\n%+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheConsoleCallsTheBridgesOwnPlayersDACItsOwn: the console's checklist
+// panel reads serve's body, the bridge's own player's element with it
+// (B1022). On a box whose player plays through a USB DAC that MPD's element
+// lists and MPD's output does not name, the DAC line is green, names that
+// DAC as the player's, says MPD's output matters only when 1-bit casts over
+// MPD, and gives no fix: never one pointing MPD at the player's DAC.
+func TestTheConsoleCallsTheBridgesOwnPlayersDACItsOwn(t *testing.T) {
+	card := api.OutputDAC{Card: 1, ID: "DAC", Name: "USB DAC", USBID: "25ce:0025", Capabilities: api.OutputCapabilities{
+		MaxPCMRate: 384000, PCMBitDepths: []int{32}, NativeDSD: true, NativeDSDRates: []int{2822400, 5644800, 11289600}, DSDFormats: []string{"DSD_U32_BE"}}}
+	mpdCard, playerCard := card, card
+	src := outputChecklistSource{
+		Active: func(context.Context) bool { return true },
+		Outputs: func(context.Context) (api.OutputsResponse, error) {
+			return api.OutputsResponse{Outputs: []api.OutputInfo{
+				{ID: "a1", Kind: "mpd", Player: api.OutputPlayer{Software: "volumio", Version: "4.119"},
+					MPD: &api.OutputMPD{Port: 6600, Addresses: []string{"192.168.1.42"}, Version: "0.24.0", State: "stop", LoopbackBaseURL: "http://127.0.0.1:7791"},
+					DAC: &mpdCard, PathRules: []api.OutputPathRule{{Root: "Music", State: "proven"}}},
+				{ID: "bridge:" + thePlayerUUID, Kind: "bridge", Player: api.OutputPlayer{Software: "bridge"}, DAC: &playerCard, PathRules: []api.OutputPathRule{},
+					Bridge: &api.OutputBridge{State: "playing", LibraryScope: "self", Codecs: []string{"flac", "wav", "aiff", "alac", "dsf", "dff"}}},
+			}}, nil
+		},
+		LoopbackErr: func() error { return nil },
+		Tokens:      func() []auth.Token { return nil },
+	}
+	lines, ok := consoleOutputChecklist(src)(context.Background())
+	if !ok || len(lines) != 4 {
+		t.Fatalf("console: ok %v, %d lines", ok, len(lines))
+	}
+	want := admin.OutputCheckLine{Key: "dac", Title: "DAC", Status: "ok",
+		Summary: "USB DAC (USB 25ce:0025) is the bridge's own player's DAC; MPD's output only matters when 1-bit casts over MPD"}
+	if lines[1] != want {
+		t.Fatalf("the console's DAC line\n%+v\nwant\n%+v", lines[1], want)
+	}
+}
+
 // TestTheConsoleAndTheDoctorShowOneChecklist: the dashboard's panel and the
 // doctor's report (the console's Diagnostics panel, and `bridge doctor`)
 // carry the same four lines, from one source: same keys, verdicts,
@@ -486,6 +574,56 @@ func TestBridgeDoctorCallsAPlayerWithNoLibraryReady(t *testing.T) {
 	music := findCheck(t, doctor.Report{Checks: checks}, "music")
 	if music.Status != doctor.OK || music.Summary != "Ready: can play music from another bridge or NAS" || music.Hint != "" {
 		t.Fatalf("music line of a player with no library: %+v", music)
+	}
+}
+
+// TestBridgeDoctorNeverPointsMPDAtADACWhileTheBridgesOwnPlayerIsOn: bridge
+// doctor has no player of its own, and its one-shot builder lists no element
+// of the bridge's own player: it reads only whether the config turns that
+// player on, and never knows its card (B1022). On a box whose MPD's output
+// names no card and whose one USB DAC MPD's element lists, with MPD's gate
+// open, its DAC line points MPD at that DAC while the player is off, and
+// while the config turns the player on sends the reader to the console's
+// Player page instead, naming no card.
+func TestBridgeDoctorNeverPointsMPDAtADACWhileTheBridgesOwnPlayerIsOn(t *testing.T) {
+	snap, err := alsa.Reader{ProcRoot: outputFixtureRoot(t, "idle")}.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, player string
+		want         doctor.Check
+	}{
+		{"the player off", "", doctor.Check{Name: "dac", Status: doctor.Warn,
+			Summary: "iFi (by AMR) HD USB Audio (USB 20b1:3009) found, but MPD's output does not name it",
+			Hint:    `Point MPD's audio_output at the DAC (device "hw:CARD=Audio"), or choose it in the player's output settings.`}},
+		{"the player on", "  player:\n" + goBarPlayer, doctor.Check{Name: "dac", Status: doctor.Warn,
+			Summary: "The bridge's own player is on; its DAC is shown on the console's Player page",
+			Hint:    "Check the bridge's own player's DAC on the console's Player page before pointing MPD at a DAC."}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			music, data := filepath.Join(dir, "Music"), filepath.Join(dir, "data")
+			for _, d := range []string{music, data} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := filepath.Join(dir, "bridge.yaml")
+			body := "libraryRoots:\n  - " + music + "\nlistenAddress: \"127.0.0.1:0\"\nadminAddress: \"127.0.0.1:0\"\ndataDir: " + data +
+				"\noutput:\n  mpd: on\n  loopbackPort: 0\n" + tc.player
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			box := func(c *api.LocalOutputsConfig) {
+				linuxBoxSeam(music)(c)
+				c.Cards = func() (alsa.Snapshot, error) { return snap, nil }
+			}
+			checks := doctorOutputChecklist(path, mustLoadConfig(t, path), box)(context.Background())
+			if got := findCheck(t, doctor.Report{Checks: checks}, "dac"); got != tc.want {
+				t.Fatalf("the doctor's DAC line\n%+v\nwant\n%+v", got, tc.want)
+			}
+		})
 	}
 }
 
