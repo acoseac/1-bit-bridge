@@ -1,12 +1,20 @@
 ## 2026-11-25 — B1021 PR 1: the console by touch on phones, and where a DSD row plays
 
+The seek's gesture handling is not in what this PR ships: it was taken out before the merge,
+the seek put back as main has it and hidden up to 768px, where the phone shows its times
+read-only beside the rail (the section "The seek taken out", near the end). The sections before
+it record what the branch did and measured at the commits they name; where they describe a seek
+that lands at a pointer's lift, a drag's owner or identity, a count of plays, a phone's 44px seek
+or the cases that tested them, they describe code that no longer ships.
+
 ### What
 
 An audit of the console as phones, a tablet and laptop windows see it in WebKit found six
-things a touch reader meets, each fixed here:
+things a touch reader meets, each fixed here (the first in part: the times, not the seek):
 
 1. Up to 768px the bar hid its scrub row (`.np-scrub`, the seek and both times): a phone had
-   the 2px rail alone, no way to seek and no numbers, in either output.
+   the 2px rail alone, no way to seek and no numbers, in either output. Its times are shown
+   now; its seek stays hidden there.
 2. At 320px the bar's words (the track or "Stopped", the queue count, a notice) shared one row
    with the transport and the extras and rendered 8px wide with the bridge's player chosen,
    40px in this browser.
@@ -22,17 +30,19 @@ things a touch reader meets, each fixed here:
    live, and its Play asked the bridge for the start's barrier before it said "Nothing in this
    selection can play in a browser".
 
-Two more found while measuring in WebKit, both fixed:
+Two more found while measuring in WebKit, the second fixed:
 
 - WebKit, driven by touch, moves a range input's value (`input`) and fires no `change` at the
   lift, so a tapped seek never landed and its thumb stayed where the finger left it (on the
   834px tablet layout too, where the seek was shown before this change: a tap at three
-  quarters of a 20 s track left it at 2.6 s). The seek now lands once: a key's at its change,
-  a drag's at the lift of the pointer that began it (below).
+  quarters of a 20 s track left it at 2.6 s). The branch landed a drag at the lift of the
+  pointer that began it (below); that was taken out, and the seek lands at its change as on
+  main, so a touch seek is an item of its own.
 - With a track playing on that 568px phone the rail's letters shrink to about 9px, and a glyph
   taller than its box took a tap meant for its neighbour; each letter is clipped to its box.
 
-Seven more, in those changes or beside them, each fixed here:
+Seven more, in those changes or beside them, each fixed here (the first three in the seek's
+gesture handling, which went with it):
 
 1. The seek landed at any lift or cancel: a cancelled drag wrote its preview and left the
    thumb where the finger had been, and a second finger's lift wrote where the first had moved
@@ -55,18 +65,20 @@ Seven more, in those changes or beside them, each fixed here:
 7. There too the A–Z rail had 49px between the top bar and the bar: 7 of its 27 letters took a
    tap (8 on main, where the rail ran 571px from the window's top).
 
-No server change and no route; `audio.js` gains a count of plays the bar reads and the key of
-the source it chose, and records a confirmed decode failure in `format.js`'s set, and
-`output.js` only `listen`'s redraw on the output in effect (all below).
+No server change and no route; `audio.js` gains the key of the source it chose, and records a
+confirmed decode failure in `format.js`'s set, and `output.js` only `listen`'s redraw on the
+output in effect (all below).
 
 ### The changes
 
 - `player.css`: up to 768px the scrub row is a row of the bar of its own (`.np-center`'s
-  contents placed by grid areas), its seek 44px tall; up to 480px three rows (the words beside
-  the output and the queue, then the seek and both times, then the transport), and from 481px
-  to 768px, a phone held sideways among them, two; every button of the bar up to 640px 44px
-  square; the bar's rendered height (`--np-bar-h`) read by `--player-bottom-inset`, the output
-  menu and the queue panel, which stay within the window above the bar (the queue within half
+  contents placed by grid areas), its seek hidden and both times at its two ends, read-only
+  beside the rail; up to 480px three rows (the words beside the output and the queue, then the
+  transport, then the times), and from 481px to 768px, a phone held sideways among them, two,
+  the times' row last at both widths; wider, the seek as on main; every button of the bar up
+  to 640px 44px square; the bar's rendered height (`--np-bar-h`) read by
+  `--player-bottom-inset`, the output menu and the queue panel, which stay within the window
+  above the bar (the queue within half
   of it where that fits), each scrolling inside; with the bar shown, the shell's drawer, open
   below 1024px, ends above it; the rail between `--az-top` (below the top bar under 1024px) and
   `--az-foot` (the bar, or the window's foot), its letters shrinking to fit, each clipped to its
@@ -74,21 +86,11 @@ the source it chose, and records a confirmed decode failure in `format.js`'s set
   chip wraps within 12rem, and up to 640px takes a line of its own under the title; the count
   line's Download words hide where the link does; on a touch screen an album's action buttons
   are 44px square.
-- `nowplaying.js`: a ResizeObserver hands the bar's rendered height to the page. The seek lands
-  once: a key's at its change; a drag's at the lift of the pointer that began it (its
-  `pointerId`), heard on the document too, never at a cancel, which puts the thumb back where
-  the track is, another pointer's lift or cancel, or a change while that pointer is down. The
-  drag is that pointer's until it lifts, a second pointer, primary or not, neither taking nor
-  ending it, and lands that pointer's own value: an input follows the pointer that went down or
-  moved last, and another's is undone. A pointer that goes down while another is down begins
-  no drag: its inputs are undone, so its lift and the change after it land nothing. Every
-  landing asks again the play its gesture began on (`seekNow`, read at the pointerdown or a
-  key's or assistive adjustment's first input): the output with the bridge's engine run (the
-  run part of the generation) and anchor occurrence and entry, or this browser's loaded track
-  and its play, read fresh, while the seek is offered. A drag whose occurrence, run or play
-  went, or whose seek permission went, lands nothing, even once seeking is offered again; a
-  queue edit on the same occurrence in one run keeps it, as does a position update on the
-  same play; and a preview no gesture holds gives way at the next tick.
+- `nowplaying.js`: a ResizeObserver hands the bar's rendered height to the page, and the rail
+  paints where the track is at every tick (`setRail`), never the seek's preview; the seek's
+  handlers are main's. (Until the seek was taken out, the seek landed a drag at the lift of the
+  pointer that began it, owned by that pointer and bound to the play it began on: the
+  sections below.)
 - `format.js`: `playFor`'s browser branch asks the queue's question and nothing else
   (`resolvePlayable`: the row's own file this browser's decoder takes, its fresh variant, or an
   engine-dependent attempt); a row it cannot play reads "Not playable in a browser" where
@@ -103,37 +105,40 @@ the source it chose, and records a confirmed decode failure in `format.js`'s set
   Download in words the page hides where it hides the link; Play, Shuffle and Add to queue are
   disabled where no row plays on the output chosen, each naming the count line; a row that
   played here at render and no longer does redraws the open album, once a failure.
-- `audio.js`: its snapshot says the play, a count every load of the audible element (the
-  automatic retry's too, never the preloader's) and each repeat-one replay moves, read by the
-  bar alone; the source a load or a restore chose is kept, and a decode failure the byte probe
-  confirms records it, the catalog's `play` left as it was sent.
+- `audio.js`: the source a load or a restore chose is kept, and a decode failure the byte probe
+  confirms records it, the catalog's `play` left as it was sent. (A count of plays the seek's
+  drag was bound to went with the seek.)
 - `output.js`: `listen` redraws the route when the output in effect changes: the pick, or this
   browser where no player is offered.
 - `ui.js`: one capture listener a document records what every pointer went down on, and a
   pointer's click on a live letter of the A–Z rail jumps only where it went down on that
   letter or outside the rail, taking the record; a key's click is the letter's own.
-- The field guard's exemption list (`barStateExempt`) loses `anchor.occurrence`, which the bar
-  now reads for the drag's occurrence: the guard fails while a field the bar reads stays on it.
+- The field guard's exemption list (`barStateExempt`) is main's: it lost `anchor.occurrence`
+  while the seek's drag read it, and has it back since the drag went.
 
-Production against `3bedfc23`: 336 lines added (207 of code, 120 of comment, 9 blank) and 80
-removed; the seven fixes, against `dfb68c7b`, added 111 (70 of code) and removed 22, and the
-five after them, against `0dedea79`, 72 (47 of code) and 22, and the four after those, against
-`06b6d41b`, 110 (71 of code) and 67. The rules
+Production against `3bedfc23`, as it ships: 257 lines added (139 of code, 110 of comment, 8
+blank) and 76 removed. At `171029c7`, before the seek was taken out, 336 added (207 of code,
+120 of comment, 9 blank) and 80 removed; the seven fixes, against `dfb68c7b`, added 111 (70 of
+code) and removed 22, and the five after them, against `0dedea79`, 72 (47 of code) and 22, and
+the four after those, against `06b6d41b`, 110 (71 of code) and 67. The rules
 file `admin-console.md` made room first: two entries' long forms moved verbatim to its History
 file, and each reference to them was checked; then three entries (the phone's bar, where a DSD
 row plays, the album's controls), each a line and its long form. The seven fixes extend the
 first two entries, lines and long forms, in the commit that makes them (`a5c8c868`), and the
 five after them the first and the third (`6ab95527`), and the four after those all three, with
-the guard that pins the decode-only mark to its new call. No rules
-line said the rail was a phone's position; the comments in `player.css` and `nowplaying.js`
-did, and say otherwise now.
+the guard that pins the decode-only mark to its new call; the seek's taking out rewrote the
+first entry's long form (`6ce45510`), its line left for a commit of its own (the last
+sections). No rules line said the rail was a phone's position; the comments in `player.css`
+and `nowplaying.js` did, and now say it is a phone's progress line beside the times.
 
 ### Choices the brief left open
 
 - The phone's bar takes three rows up to 480px: at 320px nothing less leaves the words a
-  readable width beside a 44px seek and the transport. It is 158px tall on a phone (62px
-  before) and 112px from 641px to 768px; held sideways, a phone keeps two rows, since three
-  took more than half of a 320px-tall window. What sits above the bar reads its rendered height.
+  readable width beside the transport. With the phone's seek a 44px row, it was 158px tall on
+  a phone (62px before) and 112px from 641px to 768px; the times' row that replaced it is
+  shorter, and the bar's height with it is not measured in WebKit here. Held sideways, a phone
+  keeps two rows, since three took more than half of a 320px-tall window. What sits above the
+  bar reads its rendered height.
 - The bar's buttons up to 640px, and an album's action buttons on a touch screen, are 44px
   square now: the brief holds these items' controls to 44px. Touch sizes elsewhere (the
   tablet's bar, rows, other buttons) are left to the next PR.
@@ -147,11 +152,12 @@ did, and say otherwise now.
 - The chip's wrap applies in both outputs: within 12rem the longer words of this browser leave
   a title in the shared columns wider than before (99px at 834px against 64px, 265px against
   230px at 1280px).
-- A drag is bound to the occurrence the bar renders, not to a path: the same entry heard again
-  is a new occurrence and ends the drag, and a queue edit (a new generation) keeps it. No
-  pointer capture: on a trial build a capture on the range input stopped WebKit's slider
-  following a mouse drag (a drag to half of a 300 s track landed at 68 s), so the document hears
-  a lift away from the seek instead.
+- While the seek's drag was in, it was bound to the occurrence the bar renders, not to a path:
+  the same entry heard again was a new occurrence and ended the drag, and a queue edit (a new
+  generation) kept it. No pointer capture: on a trial build a capture on the range input
+  stopped WebKit's slider following a mouse drag (a drag to half of a 300 s track landed at
+  68 s), so the document heard a lift away from the seek instead. Both went with the drag; the
+  capture's finding is the touch seek's item's to read.
 - Where the window is short the rail takes columns rather than letters too small to tap: 27
   letters in one column need 216px of padding alone, and a phone held sideways had 49px.
 
@@ -161,17 +167,16 @@ New harness cases (`internal/admin/testdata/bar_harness.mjs`): `TestADSDRowSaysW
 `TestTheAlbumsCountLineSaysHowManyPlayWhere`,
 `TestAnAlbumNoRowOfWhichPlaysHereOffersNoPlayShuffleOrAdd`,
 `TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls`,
-`TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs`, `TestASeekLandsWhereItIsLetGoOnce`,
-`TestADragLandsOnlyOnTheBridgesOccurrenceItWasMadeOn`,
-`TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn` and
-`TestAnAlbumAsksThisBrowserWhatTheQueuePlays`; and for the five fixes after them
-`TestASecondPointerNeitherTakesNorEndsTheFirstsDrag`,
-`TestADragOnTheBridgesPlayerEndsWithItsRun`, `TestADragInThisBrowserEndsWithItsPlay`,
+`TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs`, three cases of the seek's gesture
+(its landing at a lift, the bridge's occurrence, this browser's track), and
+`TestAnAlbumAsksThisBrowserWhatTheQueuePlays`; and for the five fixes after them three more of
+the seek's (the second pointer, the engine's run, this browser's play),
 `TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser`,
 `TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay` and
-`TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn`. The harness's album answers are parsed
-afresh per request, so no page's rows are the queue's objects, and a pointer's move fires
-`pointermove` before its input, as a browser's does. The seek's case makes real gestures: a finger
+`TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn`. The seek's cases were retired with its
+gesture handling (the section "The seek taken out"). The harness's album answers are parsed
+afresh per request, so no page's rows are the queue's objects, and a pointer's move fired
+`pointermove` before its input, as a browser's does. The seek's first case made real gestures: a finger
 down with its `pointerId` and moved through two values with no write before its lift, a second
 finger's lift and cancel, a change while the finger is down and then its cancel (no write, the
 thumb back), its own lift (one write at the last value, none at the change after it), and a
@@ -180,8 +185,9 @@ chip of a native-capable DSD row, keeping its check that the browser cannot play
 old words are held for a way of `none` and for a row with no bridge field in
 `TestADSDRowSaysWhereItPlays`), and its PCM row carries its type (`audio/flac`) on a page set
 up, as the queue's question needs. Source pins, on every host:
-`TestThePhoneBarShowsItsSeekItsTimesAndItsWords` (the three rows read from the 480px block,
-failing where the 640px block sets them), `TestWhatSitsAboveTheBarClearsItAsItRenders`,
+`TestThePhoneBarShowsItsTimesAndItsWordsButNoSeek` (named for the phone's 44px seek it pinned
+until the seek was taken out; the three rows read from the 480px block, failing where the
+640px block sets them), `TestWhatSitsAboveTheBarClearsItAsItRenders`,
 `TestTheDrawerAndThePanelsStayClearOfTheBarAndInTheWindow`,
 `TestTheRailTakesColumnsWhereTheWindowIsShort`, `TestTheDSDChipWrapsUnderItsTitleOnAPhone`,
 `TestAnAlbumsControlsTakeAFingerOnATouchScreen` and `TestAnOutputSwitchRedrawsTheRoute`.
@@ -205,8 +211,9 @@ checks, the restart's 2, the replay's 3, the fallback's 1, the decode failure's 
 rail's 2; `04d7e917` added a check each to the pointer's and the rail's cases that holds at
 both ends (the owner's last value after the other pointer moved; a click no touch on the rail
 began), and the decode failure's single redraw; `a064b431` made the restart's case change the
-engine's run alone, red over `0dedea79`'s modules (a 210 s seek). The harness has 182 cases,
-every one green, the 167 on main with their assertions unchanged but the one string above.
+engine's run alone, red over `0dedea79`'s modules (a 210 s seek). The harness then had 182
+cases, every one green, the 167 on main with their assertions unchanged but the one string
+above.
 
 Controls, each a mutation of a copy (the harness over a copied module directory; the pins as
 a prebuilt test binary in a copied `static` tree, since they read the files as they run), with
@@ -234,7 +241,11 @@ not path; the click not asked where its pointer went down; a touch kept past its
 click taken for a pointer's. And the
 three controls above.
 
-### WebKit, before (`3bedfc23`) and after (this branch)
+### WebKit, before (`3bedfc23`) and after the first changes, a phone's seek shown
+
+The "after" column is the branch's layout with a phone's 44px seek row: the seek's rows, the
+bar's height and main's bottom padding below are not what ships, which shows the times alone
+there and no seek (the section "The seek taken out"); the other rows are the layout's.
 
 WebKit 27.2 (build 2388, headless) on Linux, against two test bridges on
 loopback, one at each build, over a generated library of invented names: an album of two
@@ -322,6 +333,8 @@ repository.
 
 ### Five more, in those changes and beside them
 
+The first two were in the seek's gesture handling, which went with it.
+
 1. A second pointer took the drag: one the browser calls primary (a mouse beside a finger, a
    touch beside a mouse) replaced the first's drag and its lift landed the first's preview; and
    the range is one value, so another pointer's move was what the first's lift landed (on main,
@@ -374,6 +387,8 @@ the engine's under one serve. The screenshots are kept with the run, outside the
 
 ### Four more, and the last
 
+The first two were in the seek's gesture handling, which went with it.
+
 1. A pointer that began no drag could seek: one that went down during another's drag was turned
    away, and nothing remembered it, so once the owner lifted its inputs previewed and its change
    landed through a key's path, on whatever played by then. A touch owning a drag on one track,
@@ -403,12 +418,14 @@ value. So a refused pointer's trailing `change` follows inputs the bar undid, an
 adjustment's follows its own input, which previews: the bar tells them apart by that input,
 with no timer.
 
-The decisions, stated in the rules: a new play (a replay, repeat one's or repeat all's, or the
-automatic retry) ends a held drag and puts the thumb back; a source this browser confirmed it
-cannot decode, its path and its variant, stays unplayable until the page reloads, a replacement
-at the same path and variant included, and the queue stored for a reload keeps the catalog's
-`play`, so a reloaded page plays the row again; and a key's or an assistive adjustment's input
-and change, with no pointer down, still preview and land.
+The decisions then stated in the rules: a new play (a replay, repeat one's or repeat all's, or
+the automatic retry) ended a held drag and put the thumb back; a source this browser confirmed
+it cannot decode, its path and its variant, stays unplayable until the page reloads, a
+replacement at the same path and variant included, and the queue stored for a reload keeps the
+catalog's `play`, so a reloaded page plays the row again; and a key's or an assistive
+adjustment's input and change, with no pointer down, still previewed and landed. The first and
+the last went with the seek's gesture handling; the second stands, and a reload proves it
+now (the next section).
 
 At `f1020508`, in WebKit again: a touch tap on the seek lands once in every context; a touch
 tapped under a mouse's drag lands nothing and the mouse's own value lands at its release; nothing
@@ -416,11 +433,11 @@ lands on a repeat-one replay; the rail's 27 letters each ask their own offset at
 320×568, and with three live letters none of the 24 empty taps jumps.
 
 Red first: the cases were committed first (`6a55bed5`, and `76334826` for the tick's), each
-failing over the modules of `06b6d41b`: `TestAPointerThatBeganNoDragNeverSeeks` 2 checks,
-`TestADragEndsAtAReplayItsRenderHasNotSeen` 2, `TestADragEndsAtTheRetryAndOutlivesAPrimesCancel`
-1, `TestADecodeFailureClosesTheAlbumThatStartedIt` 5, `TestAFailedVariantIsThatSourceAlone` 1,
-`TestTheRailTakesEveryPointerDownForItsClick` 2 and
-`TestAPreviewNoGestureHoldsGivesWayAtTheNextTick` 1; their positive checks pass there (the
+failing over the modules of `06b6d41b`: the seek's case of a pointer that began no drag 2
+checks, of the replay 2, of the retry and the prime's cancel 1,
+`TestADecodeFailureClosesTheAlbumThatStartedIt` 5, `TestAFailedVariantIsThatSourceAlone` 1,
+`TestTheRailTakesEveryPointerDownForItsClick` 2 and the seek's case of the preview at the
+tick 1 (the seek's four retired since, with its gesture handling); their positive checks pass there (the
 owner's own lift in either order, one touch with no change after it, a key's step, an assistive
 adjustment, a primed track let go of under a drag, a fresh answer naming another variant). The
 harness's pointerdown bubbles through the element's ancestors to the document, as a browser's
@@ -435,35 +452,151 @@ left out of the key; a redraw a listener; the resolver passing a failed file, or
 variant; no redraw at a failure; the rail's record kept past a pointer's click, taken by a key's
 click, or blind to a pointerdown outside a rail).
 
+### The seek taken out
+
+Three hazards were still open in the seek's gesture handling at `171029c7`: the input and the
+change that trail a pointer the bar refused; a tick between an input with no pointer down and
+its change; and a seek permission withdrawn and given back while an adjustment was pending.
+The touch seek is an item of its own; this PR ships the rest, the seek as main has it, hidden
+up to 768px, where a phone shows its times.
+
+Taken out, by file:
+
+- `nowplaying.js`: the pointers down and the drag's owner; the drag's identity (the play it
+  began on, a drag lost, the landing's question and the key's); the landing at a pointer's lift
+  and the document's lift listeners; the settle at the tick, the follow at render and the
+  put-back with its paint. The seek's handlers are main's, byte for byte.
+- `audio.js`: the count of plays (its declaration, its moves at a load and at the repeat-one
+  replay, the snapshot's `play`), which the drag's identity alone read. The source key
+  (`state.source`, taken at a load and a restore) stays, and so does main's generation check
+  that drops a stale failure probe: the failed source's record needs both.
+- `player_output_wiring_test.go`: main's file, `anchor.occurrence` back on `barStateExempt`,
+  since the bar reads no occurrence now (the guard fails with it off the list: a control
+  below).
+- The harness: the ten cases that tested the gesture handling alone (its landing at a lift,
+  the bridge's occurrence, this browser's track, the second pointer, the engine's run, this
+  browser's play, the pointer that began no drag, the replay, the retry and the prime's
+  cancel, the preview at the tick), their Go wrappers and the helper that made their pointers'
+  events. No kept case's assertion changed.
+
+Kept as they were at `171029c7`: `format.js`, `views.js`, `output.js` and `ui.js`;
+`nowplaying.js`'s ResizeObserver; `player.css`'s rows, panels, drawer, rail, chip and album
+buttons; the History's second and third B1021 entries.
+
+Changed for the phone (`6ce45510`):
+
+- `player.css`, up to 768px: the seek hidden with the chip and the volume; the times at the
+  scrub row's two ends (`justify-content: space-between`), read-only; the rail shown, hidden
+  from 769px as on main. Up to 480px the rows are the words, the transport, then the times,
+  the order from 481px to 768px, where the times' row is the last too. Wider than 768px the
+  seek is main's.
+- `nowplaying.js`: the rail paints where the track is at every tick (`setRail`), and the
+  seek's fill alone takes a preview (`setProgress`). Main's seek keeps a preview from an input
+  until a change, and WebKit fires no change after a touch; with the rail painted from the
+  seek's fill, as on main, a preview a wider window left standing through a resize to a
+  phone's width held the rail where the preview was while the track played on (the rail's
+  case below, red over main's modules).
+
+Tests:
+
+- `TestTheSeekLandsOnlyAtItsChange` (5 checks): in this browser an input and a pointer's lift
+  write no time and the change writes one, at the value let go (100 s of 200); with the
+  bridge's player chosen an input and a lift send no seek and the change sends one (150 s of
+  300).
+- `TestTheRailFollowsTheTrackPastAPreview` (3 checks): a pointer down and an input with no
+  change after it, and at each tick the rail at the track's position, in this browser (25%,
+  then 50%) and on the bridge's player (its anchor's).
+- `TestADecodeFailureClosesTheAlbumThatStartedIt` (10 checks, 3 new): the source refused on
+  its page to the end; then a reload, a new page over the stored queue with modules of its
+  own: the row restored, paused, the same source on its element, and its Play asks the barrier
+  and plays that source again.
+- `TestThePhoneBarShowsItsTimesAndItsWordsButNoSeek`, the pin renamed: its 44px seek
+  assertion replaced by the seek hidden up to 768px, the times at the scrub row's ends, no rule
+  up to 768px hiding the rail and one hiding it from 769px, and the times' row last up to 768px
+  and up to 480px; its row and button assertions as they were.
+
+The harness has 167 cases on main, 189 at `171029c7` and 181 now (ten retired, two new); main's
+167 are all there, with their assertions as the sections above say (the one string, the album
+answers parsed afresh, the pointerdown that bubbles), and every kept case of this PR keeps its
+assertions, the decode failure's gaining three.
+
+Red first (`f760047e`, before the change): over `171029c7`'s modules the seek's case failed 2
+checks (the lift landed: a time written in this browser, `seek(150)` sent to the bridge's
+player), the rail's case 2 (this browser's: the held drag kept the rail at 90%) and the pin 3
+assertions (the seek shown, the times side by side, the times' row not last up to 480px); over
+main's modules the seek's case passed, the rail's case failed its 3 checks (the rail at 90% in
+both outputs) and the decode failure's 3 new checks failed (main's page that started the play
+draws no reason for the row, and main marks the catalog's `play`, which the stored queue kept:
+no row restored after the reload), beside its earlier checks, which main does not meet either.
+
+Controls, each a mutation of the committed tree (`6ce45510`), its red predicted in a file
+before the run and the file put back with git after it: 11 of 11 as predicted. The rail painted
+from the seek's fill again (the rail's case red on its 3 checks, the seek's green); the rail
+left out of this browser's tick (its two checks) or the bridge's (its one); the seek landed at
+its input, or at a pointer's lift (the seek's case red, in both outputs: all five checks, and
+four, more than predicted, each a consequence of the mutation); `anchor.occurrence` off the
+exemption list (the field guard red); the seek shown up to 768px; the times not at the row's
+ends; the rows up to 480px back to words, times, transport; the rail hidden up to 768px (the
+pin red, an assertion each); the catalog's `play` marked in place again beside the key (the
+decode failure's case red on the stored queue and both reload checks).
+
+WebKit was not run for this change: no WebKit engine could be driven from the session that
+made it. What the layout without the phone's seek does in one is not measured: the times shown
+and no range at 768px, the range at 769px, in both outputs with a track loaded; the rail; the
+album's controls (left open, below).
+
+The rules file's line for the bar's entry (`admin-console.md`) is not changed by these
+commits; its new words are the long form's title and bold sentence in `6ce45510`, for a commit
+of their own.
+
 ### Runs
 
-The harness's 189 cases, all green. The whole console package, once, at `a5c8c868`: ok in
-354 s. The bar's Go tests under the race detector, ten times, at `5c6a7c8f`, idle: 228 s, ok.
-The gate ran on `b882b658`, before the five fixes, on `06b6d41b`, before the four after them,
-and again on the commit that carries this sentence, each in one session of the shared build lock: formatting, vet, vet with the
-release tags for the six release targets and for linux/386 and linux/arm, the docs' budgets,
-the source guards by name, the bar's Go tests (`player_output_bar_test.go` and
-`player_touch_layout_test.go`) under the race detector ten times idle and ten times beside
-four busy processes, the whole race-enabled suite and the cross-builds. Their results are in
-the PR's description.
+Before the seek was taken out: the harness's 189 cases, all green; the whole console package,
+once, at `a5c8c868`, ok in 354 s; the bar's Go tests under the race detector, ten times, at
+`5c6a7c8f`, idle, 228 s, ok; and the gate on `b882b658`, `06b6d41b` and `171029c7`, each in one
+session of the shared build lock: formatting, vet, vet with the release tags for the six
+release targets and for linux/386 and linux/arm, the docs' budgets, the source guards by name,
+the bar's Go tests (`player_output_bar_test.go` and `player_touch_layout_test.go`) under the
+race detector ten times idle and ten times beside four busy processes, the whole race-enabled
+suite and the cross-builds. Their results are in the PR's description.
+
+After it, on `6ce45510`, each through the shared build lock: formatting (no file rewritten),
+vet, vet with the release tags for the six release targets and for linux/386 and linux/arm,
+and the docs' check, all clean; the whole race-enabled suite, ok (93 packages, `cmd/bridge` in
+1,896 s and `internal/admin` in 1,547 s); the cross-builds of the six targets; and the bar's Go
+tests (the 189 of `player_output_bar_test.go` and `player_touch_layout_test.go`) under the
+race detector ten times idle, ok in 373 s, and ten times beside four busy processes, ok in
+381 s. Outside the lock, the whole console package once without the race detector: ok in
+308 s. These ran with this entry part-written, the code as it ships; on the commit that
+carries this sentence the docs' check and the citation guard ran again.
 
 ### Left open
 
 - No real iPhone or iPad was used: WebKit emulating touch is what was measured, and how a
   real iOS range input takes a tap is not shown here.
-- No touch drag was measured in WebKit, whose touch input here takes taps alone; Chromium took
-  one given to it as touch events. Whether an ordinary horizontal scrub on
-  a phone ends in `pointercancel`, which the bar takes for a cancel and lands nothing, is
-  shown by no evidence here; an event trace of a finger's drag on a device would settle it.
-  The cancel, a second pointer and a finger held across a track change, a restart, a replay
-  or the retry are shown in the harness, and in WebKit with a mouse's drag and a touch's tap.
+- The layout without the phone's seek, in WebKit: the times shown and no range up to 768px,
+  the range from 769px, in both outputs with a track loaded, and the rail and the album's
+  controls beside them; and the bar's height with the times' row, which is shorter than the
+  44px seek row the tables above measured (on a 568px phone the rail's letters were about 9px
+  tall with that row, each taking a tap at its centre).
 - Playlists, mixes and favorites read the set of failed sources at their next render and do
   not redraw live, and `collectionActions` hides rather than disables where nothing plays:
   both for the next PR.
-- A pointer whose `pointerup` and `pointercancel` both never reached the document (no browser
-  measured does this) would keep the seek refusing input with no drag, key and assistive
-  adjustments included, until that pointer goes down and up again.
-- The 834px tablet keeps the wider layout's 16px-tall seek (it now lands on a tap) and its
-  32px and 40px bar buttons, the touch sizes the next PR takes up.
-- On a 568px phone with a track playing, the rail's letters are about 9px tall: each takes a
-  tap at its centre, and the bar's three 44px rows are what leaves them that room.
+- The 834px tablet keeps the wider layout's 16px-tall seek, which a tap does not land, as on
+  main, and its 32px and 40px bar buttons, the touch sizes the next PR takes up.
+- For the touch seek's own item:
+  - Wider than 768px a touch on the seek lands nothing in WebKit: the 834px tablet's tap at
+    three quarters of a 20 s track sent no seek on main and one at `f1020508`, and sends none
+    now, the seek's code being main's byte for byte (not measured again in WebKit).
+  - Main's seek keeps a preview's thumb after an input with no change after it (a touch in
+    WebKit) until a later change, and paints no position on the thumb meanwhile; the rail no
+    longer follows it.
+  - The three hazards above, the event order recorded in "Four more, and the last", and the
+    pointer capture's finding under "Choices the brief left open".
+  - No touch drag was measured in WebKit, whose touch input here takes taps alone; Chromium
+    took one given to it as touch events. Whether an ordinary horizontal scrub on a phone ends
+    in `pointercancel` is shown by no evidence here; an event trace of a finger's drag on a
+    device would settle it.
+  - A design that follows a pointer's lift must also meet a pointer whose `pointerup` and
+    `pointercancel` both never reach the document (no browser measured does this): the
+    retired design kept refusing input until that pointer went down and up again.
