@@ -4981,6 +4981,19 @@ S.TestASecondPointerNeitherTakesNorEndsTheFirstsDrag = async () => {
   other.up();
   check("another pointer's move under the drag: the owner's value lands or nothing does, never the other's",
     !wrote.includes(140) && (JSON.stringify(wrote) === "[100,50]" || JSON.stringify(wrote) === "[100]"), wrote);
+  // The owner moving again after the other pointer moved: an input follows
+  // the pointer that moved last.
+  const before = wrote.length;
+  one.down();
+  one.move(250);
+  other.down();
+  other.move(700);
+  one.move(300);
+  one.up();
+  seek.fire("change");
+  other.up();
+  check("the owner moving again after the other pointer: its own last value lands, once",
+    JSON.stringify(wrote.slice(before)) === "[60]", wrote.slice(before));
 };
 
 S.TestADragOnTheBridgesPlayerEndsWithItsRun = async () => {
@@ -5111,17 +5124,22 @@ S.TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay = async () => {
   globalThis.fetch = (url, init) => /^\/api\/player\/albums\//.test(String(url)) ? read(url, init) : Promise.resolve({ ok: true, status: 206, json: async () => ({}) });
   const views = await import(new URL("views.js", dirURL));
   let redrawn = null;
-  // As boot.js wires it: a view's rerender is the route's.
-  window.addEventListener("player:rerender", () => { redrawn = views.renderAlbum(view, { id: "d1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); });
+  let redraws = 0;
+  // As boot.js wires it: a view's rerender is the route's (cut at three, so a
+  // storm of them ends the case).
+  window.addEventListener("player:rerender", () => {
+    redraws += 1;
+    if (redraws <= 3) redrawn = views.renderAlbum(view, { id: "d1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
+  });
   r.el.fail(4);
   await settle();
   await redrawn;
   await settle();
   const p = albumParts(view);
   const row = findAll(view, (n) => n.classList.contains("track-title"))[0];
-  check("the decode failure confirmed: the row reads why, the album's Play, Shuffle and Add to queue disabled, the count line saying so",
-    row?.getAttribute("aria-disabled") === "true" && rowChips(view)[0] === "Not playable in a browser" && p.play?.disabled && p.shuffle?.disabled && p.add?.disabled &&
-    /^1 of 1 can't play in a browser\./.test(p.line?.textContent || ""), [row?.getAttribute("aria-disabled"), rowChips(view), p.play?.disabled, p.line?.textContent]);
+  check("the decode failure confirmed: the album redraws once, the row reads why, the album's Play, Shuffle and Add to queue disabled, the count line saying so",
+    redraws === 1 && row?.getAttribute("aria-disabled") === "true" && rowChips(view)[0] === "Not playable in a browser" && p.play?.disabled && p.shuffle?.disabled && p.add?.disabled &&
+    /^1 of 1 can't play in a browser\./.test(p.line?.textContent || ""), [redraws, row?.getAttribute("aria-disabled"), rowChips(view), p.play?.disabled, p.line?.textContent]);
   const barriers = r.s.posts(ROUTES.switchOut).length;
   const plays = r.el.plays.length;
   p.play?.click();
@@ -5164,6 +5182,11 @@ S.TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn = async () => {
   rail.fire("pointerdown", { target: letter("Z"), pointerType: "mouse", pointerId: 1, isPrimary: true });
   letter("Z").fire("click", { detail: 1 });
   check("a key's click right after an empty tap, and a mouse's, each ask once", JSON.stringify(jumps) === '["A","M","Z","A","M","Z"]', jumps);
+  // A touch that began beside the rail, its click handed to a live letter
+  // after an empty tap's was refused: the letter's, as it was.
+  tap(letter("B"), letter("A"));
+  letter("A").fire("click", { detail: 1 });
+  check("a click no touch on the rail began, after an empty tap's, asks once", JSON.stringify(jumps.slice(6)) === '["A"]', jumps.slice(6));
 };
 
 const name = scenarioName;

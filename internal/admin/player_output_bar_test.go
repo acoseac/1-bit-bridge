@@ -285,8 +285,9 @@ func TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn(t *testing.T) { barSce
 // TestASecondPointerNeitherTakesNorEndsTheFirstsDrag pins the drag's owner
 // (B1021): a second pointer, primary or not, lands nothing at its lift while
 // the first drags, and its move of the range is never what lands; the
-// first's lift lands its own value, once.
-func TestASecondPointerNeitherTakesNorEndsTheFirstsDrag(t *testing.T) { barScenario(t, 3) }
+// first's lift lands its own value, once, its last where it moved again
+// after the other.
+func TestASecondPointerNeitherTakesNorEndsTheFirstsDrag(t *testing.T) { barScenario(t, 4) }
 
 // TestADragOnTheBridgesPlayerEndsWithItsRun pins the engine's run in a
 // drag's identity: a drag made before the bridge's player restarted, its
@@ -316,8 +317,9 @@ func TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay(t *testing.T) { ba
 // TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn pins the rail by touch: a
 // tap on a live letter asks for its bucket once, one on an empty letter asks
 // for nothing whatever live letter its click is handed, and a key's or a
-// mouse's click right after still asks once.
-func TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn(t *testing.T) { barScenario(t, 3) }
+// mouse's click right after still asks once, as does a click no touch on
+// the rail began.
+func TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn(t *testing.T) { barScenario(t, 4) }
 
 // TestADSDOnlyAlbumPlaysOnTheBridgeFromAnEmptyBar pins A2 to A4: from empty
 // session storage the bridge's player is picked with nothing sent, and a
