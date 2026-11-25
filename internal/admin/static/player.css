@@ -898,7 +898,7 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
  * DSD row the bridge's player plays are long, and nowrap they sized the
  * shared column to them, squeezing every title and running a narrow page
  * sideways. */
-.track-why .chip { white-space: normal; max-width: 16rem; }
+.track-why .chip { white-space: normal; max-width: 12rem; }
 /* The reference's yellow price pill: solid fill, ink label (11.94:1).
  * On a yellow TILE this inverts to the black pill — see the tile scope. */
 .chip-quality { background: var(--accent-fill); color: var(--accent-fill-on); }
