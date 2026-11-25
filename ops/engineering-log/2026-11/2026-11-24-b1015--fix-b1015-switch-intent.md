@@ -277,3 +277,17 @@ At `6d972d88`, on the pinned toolchain, offline, with the release tags:
   passed, none failed or skipped, on an idle machine (207 s); and 1,520 passed, none failed,
   beside four CPU-bound processes started for the run and stopped by their process IDs after it
   (170 s, a load average of about 4.4 on 16 cores).
+
+At `ccbbd67b`, the same way, with what the switch's end settles and the resume's wait:
+
+- The full build-and-test target in one session holding the build slot: exit 0 in 2,122 s, the
+  formatting step rewriting nothing, `cmd/bridge` 1,980 s and `internal/admin` 1,496 s in the
+  race-checked suite, the six release builds and the doc checks passing; in the same session the
+  release-tag vets for the same seven targets, each exit 0.
+- The same twelve source guards by name, each passed.
+- The browser-module scenarios: all 160 run, none failing. Against `a353c9f8`'s modules the 151
+  before pass and 8 of the 9 new ones fail, all but the older pick's pin; against main's, 8 of
+  the 9 new ones fail, all but the start made with no permit, and the 11 listed first.
+- The race-checked bar tests (161 tests), ten times each: 1,610 passed, none failed or skipped, on
+  an idle machine (215 s); and 1,610 passed, none failed, beside four CPU-bound processes started
+  for the run and stopped by their process IDs after it (184 s, a load average of about 4.4).
