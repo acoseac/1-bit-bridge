@@ -25,11 +25,15 @@ start of this browser still asks the one gate.
 
 Production, `audio.js` and `output.js`: 73 lines added and 21 removed (37 of the added code and
 36 comment) for the reader's generation and its comparisons, then 30 added and 27 removed (16 of
-the added code and 14 comment) for what a switch's end settles and the resume's wait. The
-commits: `1ae65a01` (the cases, red at main where the change is due), `1aa02b06` (the change),
-`6d972d88` and `a353c9f8` (this entry, the rule's line and its long form, the runs);
-`03bfb173` and `f3438deb` (the cases for what a switch's end settles and the resume's wait, red
-at `a353c9f8`), `15b29b0a` (that change), and the records after them.
+the added code and 14 comment) for what a switch's end settles and the resume's wait, then, in
+`audio.js` alone, 15 added and 8 removed (6 of the added code and 9 comment) for the mark a
+source the browser cannot use leaves on a waiting resume. The commits: `1ae65a01` (the cases,
+red at main where the change is due), `1aa02b06` (the change), `6d972d88` and `a353c9f8` (this
+entry, the rule's line and its long form, the runs); `03bfb173` and `f3438deb` (the cases for
+what a switch's end settles and the resume's wait, red at `a353c9f8`), `15b29b0a` (that change),
+`ccbbd67b` and `4eb68e7f` (their records and runs); `0ca3cf71` (the cases for the mark, three of
+them red at `4eb68e7f`, and the three-document case's history), `4802c532` (the mark),
+`4a7fb4ef` (the mark's spinner and Play cases), and the records after them.
 
 - **The reader's generation** (`output.js`, `readerGen`, `readerActed()` on the output object).
   `audio.js`'s `readerAction()` calls `currentOutput()?.readerActed?.()`, so each call of the
@@ -85,10 +89,24 @@ at `a353c9f8`), `15b29b0a` (that change), and the records after them.
   reloads the source and returns while `resumeWait` stands, so the resume's admission plays the
   reloaded source once, and a cancel or a refusal plays nothing. On main it started at once, on
   the old permit, beside a bridge whose newer state had not reached the tab.
-- **A failure ends a resume's wait** (`onError`): a network or decode error past its retry sets
-  `resumeWait = null` beside `intent = false`, and so does a source the browser cannot use (code
-  4), so the wait's admission is inert by its own identity check; that source's skip goes on as
-  on main, asked of the gate when its timer fires.
+- **A failure past its retry ends a resume's wait** (`onError`): a network or decode error past
+  its retry sets `resumeWait = null` beside `intent = false`, so the wait's admission is inert by
+  its own identity check.
+- **A source the browser cannot use marks a resume's wait** (`onError`, `resumeWait.skip`), and
+  the wait's answer settles only whether that source's skip goes on, as on main: admitted, it
+  sets the intent and plays nothing (`ownPlay`'s `if (!wait.skip) playEl()`), so the skip's timer
+  asks the gate for the next track; refused, its drop ends the intent, so the timer starts
+  nothing; a timer that fires first takes the resume's place behind its barrier, and the
+  resume's drop ends the intent, so nothing plays. `15b29b0a` ended the wait there too, which this entry said until `4eb68e7f`: the
+  admission played nothing, as now, but the intent no longer followed the answer, so after a
+  refusal the timer sent a barrier of its own and played the next track, after the browser's own
+  pause the inert admission left the intent ended and the timer played nothing, and a timer that
+  fired first played the next track on the resume's barrier. The mark goes with its track:
+  `load()` ends a marked wait, so the next track's first network error retries rather than being
+  left to the old wait, and so does the stop after three unplayable tracks in a row
+  (`handleSourceError`), so an admission after it sets no intent. A marked wait is no wait the bar
+  shows: the pause listener's spinner (`state.loading`) and `toggle`'s cancel pass it over, so the
+  bar's Play over the failed track is a start through the gate.
 
 What is no action of the reader's, and advances nothing, as on main: a seek (the scrubber and
 the lock screen's), an album's **Add to queue** (`enqueue`), removing a row that is not playing,
@@ -105,9 +123,10 @@ serve's control does (`theConsole`): each tab's last operation alone
 newer operation superseded answers `operation_gone`, and the eight most recent records, which
 every publication of it carries, handovers left out (`recentRecords`). Its history is a
 possible one, asserted where it is used: the setup barrier read back running at revision 38,
-below the switch's silence, 40, below each later barrier's, 41 and up; the switch's admission
-ends the setup barrier cancelled; a row's barrier admitted after the switch finds the switch run
-to done and only its HTTP answer held. The nothing-changed refusal's terminal state, at revision
+below the switch's silence, 40, below each later barrier's, 41 and up, one still running as its
+answer is lost included; the switch's admission ends the setup barrier cancelled, and every
+publication after it holds the handover, 09.flac, as a one-track queue, paused; a row's barrier
+admitted after the switch finds the switch run to done and only its HTTP answer held. The nothing-changed refusal's terminal state, at revision
 6, above every publication before it, comes by the stream before GET now says no player is
 offered, and its HTTP answer, carrying that same state, comes last. A row is the library's own
 control: the shipped `views.js`'s album page (`renderAlbum`) rendered over the scenarios' DOM
@@ -161,9 +180,16 @@ the resume's wait:
   `WORDS.unconfirmed` stay as the switch settles, and the row's own read back then gives this
   browser's phase and the row's words (`WORDS.startAgain`).
 - `TestAnInheritedSwitchLeavesTheWarningOfAnInheritedBarrierStillUnresolved`: three documents of
-  one tab; the third inherits the first's switch and the second's barrier, still running at the
-  console, and plays a row of its own; the switch read back keeps the barrier's warning (at
-  `a353c9f8` it cleared it).
+  one tab; the second plays a row whose barrier the console still runs as its answer is lost, its
+  admission published above the switch's silence (asserted); the third inherits the first's
+  switch and that barrier, and its reader presses the lock screen's Stop, which sends nothing; the
+  switch's record read back done takes and plays nothing, the queue empty at index -1 and paused,
+  the inherited barrier's key the one operation pending and its warning kept. At `a353c9f8` the
+  read back set this browser's phase and cleared the line; at main it took the move stopped,
+  09.flac at index 0, with `WORDS.pressPlay`. Until `4eb68e7f` the third document played a row of
+  its own: its barrier, admitted at the console, would have ended the running barrier's unsent
+  steps, as the switch's admission ends the setup barrier's, and the fixture kept that barrier
+  running beside it.
 - `TestAGoneSwitchLeavesTheWarningOfARowLostSinceItWasSent`: one document, the switch's and a
   row's answers both lost, the row's read back held: the switch's `operation_gone` set the
   bridge's phase and its gone words at `a353c9f8`; now the row's warning stays until its own read
@@ -179,9 +205,42 @@ the resume's wait:
   admission, the element paused, the failure still shown. The first is red at main too (its
   first retry played at once); the second is green at main, whose first retry took the wait's
   place behind the barrier.
-- `TestASourceTheBrowserCannotUseEndsAResumeWait`: a code-4 error while the resume waits, then the
-  admission: at `a353c9f8` and at main the admission played the failed track; now nothing, and
-  the skip, when its timer fires, plays the next track through a barrier of its own.
+- `TestASourceTheBrowserCannotUsePlaysNothingOnTheResumesAdmission`: a code-4 error while the
+  resume waits, then the admission: at `a353c9f8` and at main the admission played the failed
+  track; now nothing, and the skip, when its timer fires, plays the next track through a barrier
+  of its own. Named for the wait's end until `0ca3cf71` renamed it for the mark, its assertions
+  unchanged.
+
+Red at `4eb68e7f` and green with the mark, each a code-4 error while a resume of the browser's own
+waits on its held barrier, the skip's timer held until the case fires it:
+
+- `TestAResumesRefusalAfterASourceTheBrowserCannotUseStillEndsItsSkip`: the resume's barrier
+  refused, then the timer: at `4eb68e7f` it sent a barrier of its own and played track 2; now, as
+  at main, it asks nothing and plays nothing, the queue at track 1, paused.
+- `TestAResumesAdmissionAfterASourceTheBrowserCannotUseLetsItsSkipGoOn`: the browser's own pause
+  delivered first, which ends the intent, then the error and the admission, then the timer: at
+  `4eb68e7f` the timer played nothing; at main and at `a353c9f8` the admission played the failed
+  track; now nothing of it plays and the timer plays track 2 through a barrier of its own.
+- `TestASkipTimerBeforeAResumesAnswerPlaysNothingOfTheNextTrack`: the timer before the barrier
+  answers: at `4eb68e7f` track 2 played on that barrier's answer; now, as at main, no barrier more
+  is asked and nothing plays.
+
+Green at `4eb68e7f` and with the mark, pins of where the mark ends and what it shows:
+
+- `TestTheNextTrackAfterASkipStartedWhileAResumeWaitedRetriesItsFirstError`: no player offered
+  while the barrier is held, the timer starts track 2 at once, the old barrier is admitted, then
+  track 2's first network error: it retries once. Red at `a353c9f8`, where the wait outlived the
+  load and took the retry over; green at main, whose retry played at once.
+- `TestAResumeHeldAcrossTheStopAfterThreeUnplayableTracksStartsNothingAfterIt`: the third
+  unplayable track in a row while the resume waits, then the admission, then the failed row
+  removed: no successor starts. Red at main and at `a353c9f8`, where the admission set the intent
+  again past the stop and the removal started track 4 through a barrier.
+- `TestASourceTheBrowserCannotUseShowsNoSpinnerForTheResumeItLeaves`: the resume's pause, its play
+  and the failure queued together, the protective pause's event after the failure: no spinner over
+  the failed track. Red at main and at `a353c9f8`.
+- `TestTheBarsPlayOverASourceTheBrowserCannotUseIsAStartThoughAResumeWaits`: the bar's Play over
+  the failed track while the resume waits is a start, which plays track 2 on the barrier's answer.
+  Red at main and at `a353c9f8`, where it cancelled the resume and nothing played.
 
 Green at main and with the change, kept as pins:
 `TestAPausesEventAfterThePickOfThisBrowserLetsItsHandoverPlay` (a Pause, the pick before the
@@ -225,7 +284,22 @@ The controls, each a mutation of a copy of the committed modules run through eve
 - a lost entry of any pick holding the phase: the older pick's case alone;
 - inherited operations of the pick holding nothing: the three-document case alone;
 - `resumeWait = null` removed past the retry: both failure cases; removed for a source the
-  browser cannot use: its case alone.
+  browser cannot use, at `4eb68e7f`: its case alone.
+
+The mark's controls, the same way on `4a7fb4ef`'s modules, all as predicted, and no other case
+red in any:
+
+- the mark replaced by the wait's end, as at `4eb68e7f`: the refusal, admission-after-pause and
+  timer-first cases red;
+- the mark removed, nothing done at code 4, as at main: the admission case, the
+  admission-after-pause case, the next-track retry case, the spinner case and the Play case red;
+- the stop after three unplayable tracks leaving the marked wait: the case held across it alone;
+- the load leaving the marked wait: the next-track retry case alone;
+- the admission playing the failed source: the admission and admission-after-pause cases;
+- the spinner's exclusion removed: the spinner case alone;
+- the Play's exclusion removed: the Play case alone;
+- inherited operations of the pick holding nothing, on the rewritten three-document case: it
+  alone.
 
 ### What this does not cover
 
@@ -252,7 +326,8 @@ The controls, each a mutation of a copy of the committed modules run through eve
   and its words whatever a newer operation of the pick shows; the rule above is the switch's.
 
 What the bar does around the browser's own resumes is otherwise as on main: the pause count,
-`ownPlay`'s comparison, `toggle`'s dispatch and the button's label are unchanged.
+`ownPlay`'s comparison and the button's label are unchanged, and so is `toggle`'s dispatch but
+for a marked wait, which it passes over.
 
 ### Runs
 
