@@ -244,9 +244,10 @@ func TestAnAlbumNoRowOfWhichPlaysHereOffersNoPlayShuffleOrAdd(t *testing.T) {
 func TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls(t *testing.T) { barScenario(t, 5) }
 
 // TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs pins that the bar
-// keeps the seek and both times in its scrub row, which a phone now shows
-// (B1021's item 1), and hands the height it renders at to what sits above it
-// (main's bottom padding, the output menu, the queue panel, the A–Z rail).
+// keeps the seek and both times in its scrub row, whose times a phone now
+// shows, read-only beside the rail, its seek hidden there (B1021's item 1),
+// and hands the height it renders at to what sits above it (main's bottom
+// padding, the output menu, the queue panel, the A–Z rail).
 func TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs(t *testing.T) { barScenario(t, 4) }
 
 // TestTheSeekLandsOnlyAtItsChange pins the seek where it is shown, wider than
@@ -265,25 +266,6 @@ func TestTheSeekLandsOnlyAtItsChange(t *testing.T) { barScenario(t, 5) }
 // stood still with it.
 func TestTheRailFollowsTheTrackPastAPreview(t *testing.T) { barScenario(t, 3) }
 
-// TestASeekLandsWhereItIsLetGoOnce pins that the bar's seek lands once, where
-// its value was let go: a drag under way seeks nothing, the lift of the
-// pointer that began it lands it, since WebKit fires no change after a touch
-// moves the value (B1021), and the change after it nothing more; another
-// pointer's lift or cancel lands nothing, nor does a change while the pointer
-// is down, and the pointer's cancel puts the thumb back where the track is; a
-// key's change lands its value with no pointer down.
-func TestASeekLandsWhereItIsLetGoOnce(t *testing.T) { barScenario(t, 9) }
-
-// TestADragLandsOnlyOnTheBridgesOccurrenceItWasMadeOn pins that a drag of the
-// bar's seek with the bridge's player chosen lands only on the occurrence it
-// was made on, while the player takes seeks: one whose seek the player
-// stopped taking meanwhile seeks nothing at its lift or its change, even with
-// the seek given back before the lift, and a fresh drag then lands; the same
-// entry heard again (a new occurrence) ends the drag and a queue edit on the
-// occurrence keeps it; another track, or a DSD one whose seek is off,
-// published while the finger is down, seeks nothing.
-func TestADragLandsOnlyOnTheBridgesOccurrenceItWasMadeOn(t *testing.T) { barScenario(t, 7) }
-
 // TestAnAlbumAsksThisBrowserWhatTheQueuePlays pins that a row's playability in
 // this browser is the queue's own (B1021): a universal row whose type this
 // browser's decoder does not take, with no copy it does, is unplayable, its
@@ -292,31 +274,6 @@ func TestADragLandsOnlyOnTheBridgesOccurrenceItWasMadeOn(t *testing.T) { barScen
 // them live; and a row with no play field is unplayable with its reason an
 // element the page renders where its title points.
 func TestAnAlbumAsksThisBrowserWhatTheQueuePlays(t *testing.T) { barScenario(t, 8) }
-
-// TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn pins the same in this
-// browser: another track loaded while the finger is down, or the output moved
-// to the bridge's player, seeks nothing at the lift or the change after it.
-func TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn(t *testing.T) { barScenario(t, 3) }
-
-// TestASecondPointerNeitherTakesNorEndsTheFirstsDrag pins the drag's owner
-// (B1021): a second pointer, primary or not, lands nothing at its lift while
-// the first drags, and its move of the range is never what lands; the
-// first's lift lands its own value, once, its last where it moved again
-// after the other.
-func TestASecondPointerNeitherTakesNorEndsTheFirstsDrag(t *testing.T) { barScenario(t, 4) }
-
-// TestADragOnTheBridgesPlayerEndsWithItsRun pins the engine's run in a
-// drag's identity: a drag made before the engine restarted under one serve,
-// only its generation's run changed and its entry and occurrence restored as
-// they were, seeks nothing at its lift or the change after it, while a queue
-// edit within one run keeps the drag.
-func TestADragOnTheBridgesPlayerEndsWithItsRun(t *testing.T) { barScenario(t, 3) }
-
-// TestADragInThisBrowserEndsWithItsPlay pins the play in this browser's: a
-// position update on the play keeps the drag, and the same entry played
-// again under repeat all, or replayed under repeat one with no load, seeks
-// nothing at the lift; a drag on the replay lands.
-func TestADragInThisBrowserEndsWithItsPlay(t *testing.T) { barScenario(t, 4) }
 
 // TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser pins that the route
 // redraws on the effective output: GET now answering that no player is wired,
@@ -337,26 +294,6 @@ func TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay(t *testing.T) { ba
 // mouse's click right after still asks once, as does a click no touch on
 // the rail began.
 func TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn(t *testing.T) { barScenario(t, 4) }
-
-// TestAPointerThatBeganNoDragNeverSeeks pins the seek's refusal of a pointer
-// that went down during another's drag (B1021): in either order of the two
-// pointers' moves the owner's lift lands its own last value once, and after
-// it the other pointer's moves, lift and change, across a change of track,
-// seek nothing and leave the thumb at the track's time; one touch with no
-// change after its lift, a key's step and an assistive adjustment each land
-// once.
-func TestAPointerThatBeganNoDragNeverSeeks(t *testing.T) { barScenario(t, 7) }
-
-// TestADragEndsAtAReplayItsRenderHasNotSeen pins that a repeat-one replay is
-// a new play at the lift itself: a drag held across it and let go before any
-// render of it lands nothing, the thumb put back, and one begun after it,
-// before its first render, lands once.
-func TestADragEndsAtAReplayItsRenderHasNotSeen(t *testing.T) { barScenario(t, 2) }
-
-// TestADragEndsAtTheRetryAndOutlivesAPrimesCancel pins the automatic retry as
-// a new play (a drag held across it lands nothing) and the preloader's cancel
-// as none (a drag across it lands once).
-func TestADragEndsAtTheRetryAndOutlivesAPrimesCancel(t *testing.T) { barScenario(t, 2) }
 
 // TestADecodeFailureClosesTheAlbumThatStartedIt pins a confirmed decode
 // failure, after a retry, on the album page that started the play: it
@@ -379,12 +316,6 @@ func TestAFailedVariantIsThatSourceAlone(t *testing.T) { barScenario(t, 6) }
 // click, and a key's click beside a held touch jumps while that touch's
 // handed click does not.
 func TestTheRailTakesEveryPointerDownForItsClick(t *testing.T) { barScenario(t, 2) }
-
-// TestAPreviewNoGestureHoldsGivesWayAtTheNextTick pins that no gesture leaves
-// the seek's preview standing: an input after a lift, with no pointer down
-// and no change after it, gives the thumb back to the track at the bar's next
-// tick.
-func TestAPreviewNoGestureHoldsGivesWayAtTheNextTick(t *testing.T) { barScenario(t, 1) }
 
 // TestADSDOnlyAlbumPlaysOnTheBridgeFromAnEmptyBar pins A2 to A4: from empty
 // session storage the bridge's player is picked with nothing sent, and a

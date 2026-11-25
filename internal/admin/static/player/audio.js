@@ -53,10 +53,6 @@ let primedFor = null;
 // but NOT the same track being re-loaded — a reader retrying the row that
 // just failed would have their fresh attempt clobbered by the stale one.
 let playbackGen = 0;
-// Each play of the audible element: every load of it (the retry's too, never
-// the preloader's) and each repeat-one replay, which loads nothing. The bar's
-// seek binds a drag to it (B1021); nothing else reads it.
-let plays = 0;
 
 // How long the failure probe waits for response HEADERS. Short, because
 // the source has ALREADY failed to load by the time it runs — this only
@@ -232,7 +228,6 @@ function loadEl(el) {
   if (el === state.el) {
     marks.length = 0;
     ownPauses = 0;
-    plays += 1;
   }
   el.load();
 }
@@ -305,7 +300,6 @@ function emit() {
 export function snapshot() {
   return {
     track: state.index >= 0 ? state.queue[state.index] : null,
-    play: plays,
     queue: state.queue,
     index: state.index,
     playing: state.playing,
@@ -911,7 +905,6 @@ function advanceNow(delta, { auto = false, skip = false, permit } = {}) {
     // restart.
     if (permit !== undefined) startPermit = permit;
     intent = true;
-    plays += 1;
     state.el.currentTime = 0;
     playEl();
     return;

@@ -694,13 +694,15 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 }
 .npbar[hidden] { display: none; }
 
-/* Position line on the bar's top edge, below the tablet breakpoint, beside
- * the scrub row (B1021: the scrub row was hidden there, and this line was a
- * phone's only position, with no way to seek and no numbers). Hard stops
+/* Position line on the bar's top edge, up to 768px, where the seek is
+ * hidden and the elapsed and total times stand beside it (B1021: the times
+ * were hidden there too, and this line was a phone's only position, with no
+ * numbers). It is where the track is, never a seek's preview. Hard stops
  * rather than a gradient ramp: this is a measurement, not a fade.
  *
  * Three bands, not two: played, fetched, and not yet fetched. The middle
- * one is the download, as on the scrubber. */
+ * one is the download, and on a phone this rail is the only surface it
+ * has: the seek that carries it in a wider window is hidden there. */
 .np-rail {
   position: absolute; inset: 0 0 auto; height: 2px;
   background: linear-gradient(to right,
@@ -1035,10 +1037,12 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   }
   .player-nav nav::-webkit-scrollbar { display: none; }
   .player-section { white-space: nowrap; }
-  /* The controls, the seek and both times stay; the chip and the volume go.
-   * The scrub row is a row of the bar's own under the controls, its seek
-   * 44px tall for a finger (B1021): this rule hid it, which left a phone the
-   * 2px rail alone, with no way to seek and no numbers. */
+  /* The controls and both times stay; the seek, the chip and the volume go.
+   * The times are a row of the bar's own under the controls, at its two
+   * ends, read-only beside the 2px rail (B1021: this rule hid them with the
+   * seek, which left a phone the rail alone, with no numbers). The seek
+   * lands only at its change, which WebKit fires after no touch, so a seek
+   * shown here would preview under a finger and never land. */
   .npbar {
     grid-template-columns: minmax(0, 1fr) auto auto;
     grid-template-areas: "now ctl extra" "scrub scrub scrub"; row-gap: 2px;
@@ -1046,10 +1050,9 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   .np-center { display: contents; }
   .np-now { grid-area: now; }
   .np-transport { grid-area: ctl; }
-  .np-scrub { grid-area: scrub; }
+  .np-scrub { grid-area: scrub; justify-content: space-between; }
   .np-extra { grid-area: extra; }
-  .np-seek { height: 44px; }
-  .np-chip, .np-vol { display: none; }
+  .np-seek, .np-chip, .np-vol { display: none; }
 }
 
 @media (min-width: 769px) { .np-rail { display: none; } }
@@ -1096,12 +1099,12 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 }
 
 /* Up to 480px the words take a row of their own beside the output and the
- * queue, the seek and the transport a row each under them (B1021): at 320px
- * they shared one row with the transport and rendered 8px wide. Wider, a
- * phone held sideways, the bar keeps two rows, which leaves the window
- * room: three of 44px took half of a 320px-tall one. */
+ * queue, the transport a row under them and the times the last, as from
+ * 481px to 768px (B1021): at 320px the words shared one row with the
+ * transport and rendered 8px wide. Wider, a phone held sideways, the bar
+ * keeps two rows, which leaves the window room. */
 @media (max-width: 480px) {
-  .npbar { grid-template-areas: "now now extra" "scrub scrub scrub" "ctl ctl ctl"; }
+  .npbar { grid-template-areas: "now now extra" "ctl ctl ctl" "scrub scrub scrub"; }
 }
 
 /* ---- The bar's output (B634) ----------------------------------------
