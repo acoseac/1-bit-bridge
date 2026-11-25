@@ -278,12 +278,12 @@ leaves alone. The screenshots are kept with the run, outside the repository.
 
 The harness's 176 cases, all green. The whole console package, once, at `a5c8c868`: ok in
 354 s. The bar's Go tests under the race detector, ten times, at `5c6a7c8f`, idle: 228 s, ok.
-The gate ran on this entry's commit, in one session of the shared build lock: formatting, vet,
-the vets of the eight release targets, the docs' budgets, the source guards by name, the bar's
-Go tests (184, in `player_output_bar_test.go` and `player_touch_layout_test.go`) under the race
-detector ten times idle and ten times beside four busy processes, the whole race-enabled suite
-and the cross-builds. Its results are in the PR's description, which no record of its own
-commit can hold.
+The gate ran on `b882b658`, this entry before this paragraph's wording was corrected, in one
+session of the shared build lock: formatting, vet, vet with the release tags for the six
+release targets and for linux/386 and linux/arm, the docs' budgets, the source guards by name,
+the bar's Go tests (184, in `player_output_bar_test.go` and `player_touch_layout_test.go`) under
+the race detector ten times idle and ten times beside four busy processes, the whole
+race-enabled suite and the cross-builds. Its results are in the PR's description.
 
 ### Left open
 
