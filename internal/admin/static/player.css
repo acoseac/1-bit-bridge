@@ -163,7 +163,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   text-decoration: none; font-size: var(--text-base); font-weight: 500;
   transition: color 120ms ease, background-color 120ms ease;
 }
-.player-section:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); color: var(--fg); }
+@media (hover: hover) { .player-section:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); color: var(--fg); } }
 /* Same yellow-wash pill as the sidebar's active entry — the two menu
  * levels mark "you are here" in one voice. */
 .player-section.active { color: var(--fg); font-weight: 650; background: var(--accent-soft); }
@@ -219,7 +219,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
   font-weight: 600; padding: 3px 0;
   max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.crumb-link:hover { color: var(--fg); text-decoration: underline; }
+@media (hover: hover) { .crumb-link:hover { color: var(--fg); text-decoration: underline; } }
 .crumb-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
 
 /* ---- Search results ----
@@ -717,14 +717,18 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 .np-art {
   width: 48px; height: 48px; flex: 0 0 48px; border-radius: var(--cover-radius);
   overflow: hidden; background: var(--bg-elev); box-shadow: var(--cover-ring);
+  position: relative;
 }
+/* A track whose album has no cover: the pages' mark (.cover-empty's), held
+ * inside the square by its position and sized for its box (B1021). */
+.np-art.cover-empty::after { font-size: 1.25rem; }
 .np-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .np-art-link { display: block; width: 100%; height: 100%; }
 .np-art-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .np-meta { display: flex; flex-direction: column; min-width: 0; }
 .np-title { font-size: 0.9rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .np-title a { color: inherit; text-decoration: none; }
-.np-title a:hover { text-decoration: underline; }
+@media (hover: hover) { .np-title a:hover { text-decoration: underline; } }
 .np-sub, .np-notice { font-size: var(--text-xs); color: var(--np-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .np-notice:empty { display: none; }
 .np-notice-error { color: var(--danger); }
@@ -748,7 +752,7 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   min-width: 40px; min-height: 40px; border-radius: 50%; padding: 0;
   transition: background 120ms ease, color 120ms ease;
 }
-.np-btn:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+@media (hover: hover) { .np-btn:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); } }
 .np-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .np-btn-sm { min-width: 32px; min-height: 32px; }
 .np-btn-sm .np-ico { width: 16px; height: 16px; }
@@ -764,7 +768,7 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   border: 0;
   min-width: 44px; min-height: 44px; margin: 0 6px;
 }
-.np-btn-play:hover { background: color-mix(in srgb, var(--accent) 82%, var(--np-bg)); }
+@media (hover: hover) { .np-btn-play:hover { background: color-mix(in srgb, var(--accent) 82%, var(--np-bg)); } }
 .np-btn-play .np-ico { width: 18px; height: 18px; }
 
 /* ---- Waiting for bytes -------------------------------------------------
@@ -821,10 +825,12 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 .np-btn-toggle[data-repeat="one"] {
   color: var(--accent-fill-on); background: var(--accent-fill);
 }
-.np-btn-toggle[aria-pressed="true"]:hover,
-.np-btn-toggle[data-repeat="all"]:hover,
-.np-btn-toggle[data-repeat="one"]:hover {
-  background: color-mix(in srgb, var(--accent-fill) 82%, var(--accent-fill-edge));
+@media (hover: hover) {
+  .np-btn-toggle[aria-pressed="true"]:hover,
+  .np-btn-toggle[data-repeat="all"]:hover,
+  .np-btn-toggle[data-repeat="one"]:hover {
+    background: color-mix(in srgb, var(--accent-fill) 82%, var(--accent-fill-edge));
+  }
 }
 
 /* ---- Scrubber ----------------------------------------------------------
@@ -1034,7 +1040,13 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   .player-nav nav {
     position: static; flex-direction: row; overflow-x: auto; gap: var(--space-2);
     padding-bottom: var(--space-2); scrollbar-width: none;
+    /* The strip scrolls sideways and said so nowhere: it fades at its trailing
+     * edge as .tab-nav does, over a spacer as wide as the fade, so its last
+     * link scrolls clear of it (B1021). */
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
   }
+  .player-nav nav::after { content: ""; flex-shrink: 0; width: 48px; }
   .player-nav nav::-webkit-scrollbar { display: none; }
   .player-section { white-space: nowrap; }
   /* The controls and both times stay; the seek, the chip and the volume go.
@@ -1090,12 +1102,15 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   /* The bridge's mode (B634): at 375px its transport (Previous, Play, Next,
    * Stop: 182px) and its Queue, Output and Mute (112px) left the words'
    * track 23px, and the 40px cover took all of it, so the title, the
-   * sub-line and every line the bridge says rendered 0px wide. The bridge
-   * paints no cover, and its Mute is disabled (its level is fixed), so both
-   * go, and their widths are the words' (their row is their own since
+   * sub-line and every line the bridge says rendered 0px wide. Its cover
+   * (painted since B1021's second PR) and its Mute, disabled since its
+   * level is fixed, give their widths to the words, which the bridge's
+   * lines need more than this browser's (their row is their own since
    * B1021). */
   .npbar[data-output="bridge"] .np-art,
   .npbar[data-output="bridge"] .np-mute { display: none; }
+  /* A chip's words at a phone's smallest text, 12.5px (B1021). */
+  .chip { font-size: var(--text-xs); }
 }
 
 /* Up to 480px the words take a row of their own beside the output and the
@@ -1115,11 +1130,14 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
  * rail's rounded edge), and a menu inside it would be cut off. */
 .np-btn-active { color: var(--accent); }
 .np-btn:disabled { opacity: .35; cursor: default; }
-.np-btn:disabled:hover { background: transparent; }
+@media (hover: hover) { .np-btn:disabled:hover { background: transparent; } }
 /* The empty strip a box that offers its player shows with nothing chosen
  * in the browser: the title says so, the output button is there, and the
- * browser's transport, which has nothing to act on, is not. */
-.npbar-empty[data-output="browser"] .np-center { display: none; }
+ * browser's transport, its Mute and its volume, which have nothing to act
+ * on, are not (B1021). */
+.npbar-empty[data-output="browser"] .np-center,
+.npbar-empty[data-output="browser"] .np-mute,
+.npbar-empty[data-output="browser"] .np-vol { display: none; }
 .npbar-empty[data-output="browser"] .np-rail { display: none; }
 
 .np-menu, .np-queue {
@@ -1146,7 +1164,7 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   border: 1px solid transparent; background: transparent; color: inherit;
   font: inherit; cursor: pointer;
 }
-.np-pick:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+@media (hover: hover) { .np-pick:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); } }
 .np-pick[aria-pressed="true"] { border-color: var(--accent); }
 /* The chosen pick's check, which the focus ring, alike to its border, lacks. */
 .np-pick[aria-pressed="true"]::after { content: "\2713"; position: absolute; top: 8px; right: 10px; color: var(--accent); font-weight: 600; }
@@ -1172,16 +1190,18 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   background: transparent; color: inherit; font: inherit; font-size: 0.85rem; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.np-queue-title:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+@media (hover: hover) { .np-queue-title:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); } }
 .np-queue-title:disabled { cursor: default; }
 .np-queue-current .np-queue-title { color: var(--accent); font-weight: 600; }
 .np-queue-remove {
   padding: 4px 6px; border: 0; background: transparent; color: var(--np-muted);
   font: inherit; font-size: var(--text-xs); cursor: pointer;
 }
-.np-queue-remove:hover { color: var(--danger); }
+@media (hover: hover) { .np-queue-remove:hover { color: var(--danger); } }
 .np-queue-remove:disabled { opacity: .4; cursor: default; }
-.np-queue-empty { margin: 0; font-size: var(--text-xs); color: var(--np-muted); }
+.np-queue-empty, .np-queue-behind { margin: 0; font-size: var(--text-xs); color: var(--np-muted); }
+/* Why the entries wait while the queue is read again, above them (B1021). */
+.np-queue-behind { margin-bottom: var(--space-2); }
 
 /* A row's own Add, with the bridge's player chosen, beside its Download in
  * that one cell, so the row keeps the columns TestTrackSubgridColumnsMatchTheRow
@@ -1515,4 +1535,53 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 }
 .deleted-item-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---- A finger's sizes (B1021) ------------------------------------------
+ *
+ * Wherever a coarse pointer is there at all (a touch laptop's main pointer is
+ * its touchpad, and its screen still takes a finger), the bar's buttons, the
+ * output menu's picks, the queue panel's entries and Remove, and the player's
+ * sections and crumbs take a finger's 44px, at every width: the floors up to
+ * 640px were by width, which left a tablet 32 and 40px buttons 2px apart. A
+ * fine pointer alone keeps the compact sizes (the phone's 44px bar up to
+ * 640px is any pointer's). Text a min-height leaves at its top is centred by
+ * align-content, which keeps a crumb's ellipsis, a block box's, where a flex
+ * box would lose it. */
+@media (any-pointer: coarse) {
+  .np-btn, .np-btn-sm { min-width: 44px; min-height: 44px; }
+  .np-transport { gap: var(--space-2); }
+  .np-pick { min-height: 44px; }
+  /* 8px between entries: a mis-tap jumps the bridge's queue. */
+  .np-queue-list { gap: var(--space-2); }
+  .np-queue-title { min-height: 44px; }
+  .np-queue-remove { min-width: 44px; min-height: 44px; }
+  .player-section, .crumb-link { min-height: 44px; align-content: center; }
+}
+
+/* The bar under a finger from 641px. Its 44px buttons 8px apart do not fit its
+ * one row (at 834px the bridge's transport needs 316px of the 265px its column
+ * had, and its extras ran over the transport), nor the two rows of 641-768px
+ * with room left for the words: its centre's transport and times become rows
+ * of the bar's own. From 769px the seek stays between the times and the rail
+ * stays hidden, as in one row. */
+@media (any-pointer: coarse) and (min-width: 641px) {
+  .npbar { grid-template-columns: minmax(0, 1fr) auto auto; row-gap: var(--space-2); }
+  .np-center { display: contents; }
+  .np-now { grid-area: now; }
+  .np-transport { grid-area: ctl; justify-content: center; }
+  .np-scrub { grid-area: scrub; }
+  .np-extra { grid-area: extra; }
+}
+/* A window taller than 500px: the three rows a phone's bar has up to 480px,
+ * the words beside the extras, the transport, then the times. */
+@media (any-pointer: coarse) and (min-width: 641px) and (min-height: 501px) {
+  .npbar { grid-template-areas: "now now extra" "ctl ctl ctl" "scrub scrub scrub"; }
+}
+/* A phone held sideways, 500px tall or less, where three rows would take a
+ * third of the window: the two rows of 481-768px, its toggles and its chip
+ * hidden as a phone's are. */
+@media (any-pointer: coarse) and (min-width: 641px) and (max-height: 500px) {
+  .npbar { grid-template-areas: "now ctl extra" "scrub scrub scrub"; }
+  .np-btn-toggle, .np-chip { display: none; }
 }
