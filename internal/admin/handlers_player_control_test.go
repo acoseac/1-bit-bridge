@@ -39,6 +39,8 @@ type fakeControl struct {
 	// handoverPaths are the library paths a read back names its record's
 	// handover's tracks by.
 	handoverPaths []string
+	// queue is what Queue answers the queue holds.
+	queue []PlayerQueueEntry
 	// clock is what Clock answers: the control's clock as an answer is sent.
 	clock time.Time
 }
@@ -76,7 +78,7 @@ func (f *fakeControl) Latest() (PlayerPublication, bool) { return f.pub, true }
 func (f *fakeControl) Wake() <-chan struct{}             { return f.wake }
 func (f *fakeControl) Queue(context.Context) PlayerQueue {
 	f.count("queue")
-	return PlayerQueue{Epoch: f.pub.Epoch, ReadAt: f.pub.Revision, QueueRev: f.pub.QueueRev, Entries: []PlayerQueueEntry{}}
+	return PlayerQueue{Epoch: f.pub.Epoch, ReadAt: f.pub.Revision, QueueRev: f.pub.QueueRev, Entries: append([]PlayerQueueEntry{}, f.queue...)}
 }
 func (f *fakeControl) Plays() (PlayerPlays, bool) { return f.plays, f.runs }
 func (f *fakeControl) Replace(_ context.Context, r PlayerReplace) PlayerAnswer {
@@ -563,6 +565,111 @@ func TestTheReadBackRouteHydratesItsHandoverThroughTheCatalog(t *testing.T) {
 			t.Fatalf("track %d: row %v, want the catalog's row titled %s", i, row, want.title)
 		}
 	}
+}
+
+// TestTheBridgesQueueAndItsHandoversCarryEachAlbumsCover pins B1021's bar
+// cover at the routes: the rows of GET /api/output/player/queue, of a read
+// back's handover and of a switch-out's answer carry the cover of the album
+// the catalog files each under, the one GET /api/player/albums/{id} answers,
+// and a row whose album has none says so with an empty artworkMBID, which
+// this browser's bar reads as the row's own answer rather than the queue's
+// cover; an entry the catalog holds no row for carries no row; the album
+// detail's own rows carry neither field.
+func TestTheBridgesQueueAndItsHandoversCarryEachAlbumsCover(t *testing.T) {
+	srv, fake, _ := newControlTestServer(t)
+	cover := "local-" + strings.Repeat("c0", 32)
+	for _, tr := range []*manifest.Track{
+		{Path: "Lib/Covered/01.flac", Title: "One", Album: "Covered", ArtworkMBID: cover},
+		{Path: "Lib/Covered/02.flac", Title: "Two", Album: "Covered", ArtworkMBID: cover},
+		{Path: "Lib/Bare/01.flac", Title: "Bare", Album: "Bare"},
+	} {
+		tr.AlbumArtist, tr.Artist, tr.Codec, tr.Size, tr.ModTime = "Artist", "Artist", "FLAC", 1000, time.Unix(1, 0)
+		if err := srv.deps.Manifest.UpsertTrack(t.Context(), tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each album as its own detail answers it, and its rows as that detail has them.
+	_, list := playerGet(t, srv, "/api/player/albums?sort=title")
+	albums := map[string]map[string]any{}
+	for _, a := range list["albums"].([]any) {
+		a := a.(map[string]any)
+		w, d := playerGet(t, srv, "/api/player/albums/"+a["id"].(string))
+		if w.Code != http.StatusOK {
+			t.Fatalf("detail = %d: %s", w.Code, w.Body.String())
+		}
+		albums[a["title"].(string)] = d
+		for _, tr := range d["tracks"].([]any) {
+			for _, key := range []string{"artworkMBID", "artworkVersion"} {
+				if _, ok := tr.(map[string]any)[key]; ok {
+					t.Errorf("the album detail's row %v carries %s: no answer but the bridge's queue and a handover changes", tr, key)
+				}
+			}
+		}
+	}
+	covered, _ := albums["Covered"]["album"].(map[string]any)
+	if covered == nil || covered["artworkMBID"] != cover {
+		t.Fatalf("the covered album's detail %v, want its cover %s", albums["Covered"]["album"], cover)
+	}
+	// want is each path's cover as its album's detail answers it.
+	want := map[string]string{"Lib/Covered/01.flac": cover, "Lib/Covered/02.flac": cover, "Lib/Bare/01.flac": ""}
+	checkRows := func(where string, rows []any, paths []string) {
+		t.Helper()
+		if len(rows) != len(paths) {
+			t.Fatalf("%s: %d rows, want %d", where, len(rows), len(paths))
+		}
+		for i, p := range paths {
+			e, _ := rows[i].(map[string]any)
+			row, _ := e["track"].(map[string]any)
+			if _, known := want[p]; !known {
+				if row != nil {
+					t.Errorf("%s: %s carries a row %v, the catalog holds none", where, p, row)
+				}
+				continue
+			}
+			mbid, has := row["artworkMBID"]
+			if row == nil || !has || mbid != want[p] {
+				t.Errorf("%s: %s's row %v, want artworkMBID %q present, its album's", where, p, row, want[p])
+			}
+			version, hasVersion := row["artworkVersion"]
+			album := albums["Covered"]["album"].(map[string]any)
+			if want[p] == "" {
+				album = albums["Bare"]["album"].(map[string]any)
+			}
+			if albumVersion, ok := album["artworkVersion"]; hasVersion != ok || version != albumVersion {
+				t.Errorf("%s: %s's artworkVersion %v, want its album's %v", where, p, version, albumVersion)
+			}
+		}
+	}
+	paths := []string{"Lib/Covered/01.flac", "Lib/Bare/01.flac", "Lib/Gone/01.flac", "Lib/Covered/02.flac"}
+	for i, p := range paths {
+		fake.queue = append(fake.queue, PlayerQueueEntry{ID: uint32(11 + i), Path: p})
+	}
+	w, q := playerGet(t, srv, "/api/output/player/queue")
+	if w.Code != http.StatusOK {
+		t.Fatalf("the queue = %d: %s", w.Code, w.Body.String())
+	}
+	entries, _ := q["entries"].([]any)
+	checkRows("the queue", entries, paths)
+	fake.answer = PlayerAnswer{Record: &PlayerRecord{Tab: strings.Repeat("ab", 16), Seq: 1, Kind: "switch-out", Status: PlayerOpDone, Silence: 4,
+		Handover: &PlayerHandover{Tracks: []string{"id1", "id2", "id3", "id4"}, Selected: 0}}, HandoverPaths: paths, Player: fake.pub}
+	fake.handoverPaths = paths
+	w, back := playerGet(t, srv, "/api/output/player/operation?tab="+strings.Repeat("ab", 16)+"&seq=1&epoch="+strings.Repeat("e", 32))
+	if w.Code != http.StatusOK {
+		t.Fatalf("the read back = %d: %s", w.Code, w.Body.String())
+	}
+	rec, _ := back["record"].(map[string]any)
+	h, _ := rec["handover"].(map[string]any)
+	tracks, _ := h["tracks"].([]any)
+	checkRows("a read back's handover", tracks, paths)
+	code, raw := playerRequest(t, srv.Handler(), http.MethodPost, "/api/output/player/switch-out", `{"op":`+testOp+`,"take":true}`, nil)
+	var ans map[string]any
+	if err := json.Unmarshal([]byte(raw), &ans); err != nil || code != http.StatusOK {
+		t.Fatalf("the switch-out = %d: %s (%v)", code, raw, err)
+	}
+	rec, _ = ans["record"].(map[string]any)
+	h, _ = rec["handover"].(map[string]any)
+	tracks, _ = h["tracks"].([]any)
+	checkRows("a switch-out's handover", tracks, paths)
 }
 
 // TestTheCatalogSaysWhatTheBridgesPlayerPlays pins §6.7: each catalog row

@@ -266,6 +266,66 @@ func TestTheSeekLandsOnlyAtItsChange(t *testing.T) { barScenario(t, 5) }
 // stood still with it.
 func TestTheRailFollowsTheTrackPastAPreview(t *testing.T) { barScenario(t, 3) }
 
+// TestTheBarShowsTheCoverOfTheEntryTheBridgePlays pins B1021's bar cover with
+// the bridge's player chosen: the heard entry's album cover at the album
+// page's URL, linked to its album and named for it; the image kept by a
+// render that changes nothing; the next entry's cover; for another album that
+// shares the cover, the same image with that album's link and name; the mark
+// for an album with no cover; and an empty square with no track.
+func TestTheBarShowsTheCoverOfTheEntryTheBridgePlays(t *testing.T) { barScenario(t, 7) }
+
+// TestACoverThatFailsGivesWayToTheMarkAndOneLeftBehindChangesNothing pins the
+// cover's failures: an error of an image the bar has moved past leaves the
+// current cover, the current image's error gives way to the mark, and a
+// render after it does not ask for that image again.
+func TestACoverThatFailsGivesWayToTheMarkAndOneLeftBehindChangesNothing(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestThisBrowserShowsTheCoverOfTheTrackItTookFromTheBridge pins the cover in
+// this browser: a queue it built shows the queue's cover, and a track handed
+// over from the bridge's queue its own, the mark at once for an album with no
+// cover, never the queue's cover before it.
+func TestThisBrowserShowsTheCoverOfTheTrackItTookFromTheBridge(t *testing.T) { barScenario(t, 3) }
+
+// TestAHandedOverAlbumWithNoCoverKeepsTheMarkAfterAReload pins the same after
+// a reload: the queue restored beside the cover it saved shows the mark for a
+// handed-over album with no cover.
+func TestAHandedOverAlbumWithNoCoverKeepsTheMarkAfterAReload(t *testing.T) { barScenario(t, 1) }
+
+// TestTheMenuSaysWhatTheBridgesPlayerDoesNotDoAndItsControlsNameIt pins the
+// bar's reasons in words: the output menu's line of what the bridge's player
+// does not do, which Shuffle, Repeat, Mute, the volume and the seek name while
+// it is chosen, their titles and disabled kept, and none names once this
+// browser is the output.
+func TestTheMenuSaysWhatTheBridgesPlayerDoesNotDoAndItsControlsNameIt(t *testing.T) {
+	barScenario(t, 4)
+}
+
+// TestTheQueuePanelSaysWhyItsEntriesWaitWhileItsQueueIsReadAgain pins the
+// queue panel's line: while its queue is read again a line at its top says so
+// in WORDS' words and every entry it disables names it, and once the queue is
+// read the line is gone.
+func TestTheQueuePanelSaysWhyItsEntriesWaitWhileItsQueueIsReadAgain(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestTheMenuSaysWhatTheDACIsHandedWhileTheBridgePlays pins the bridge's
+// pick's line of the DAC: while the player plays, a line of its own beside the
+// line of what plays says the format, the channels and the sink's state the
+// chip's title says, which a phone's bar hides with the chip; none while it is
+// paused.
+func TestTheMenuSaysWhatTheDACIsHandedWhileTheBridgePlays(t *testing.T) { barScenario(t, 4) }
+
+// TestARenderPaintsThisBrowsersTimesRailAndBandForTheTrackItShows pins
+// B1021's carried rail and band: in this browser a track change and a switch
+// from the bridge's player paint the new track's times, rail and fetched band
+// at their render, before any tick, and an unseekable track after a fetched
+// one shows no band on the rail or the seek.
+func TestARenderPaintsThisBrowsersTimesRailAndBandForTheTrackItShows(t *testing.T) {
+	barScenario(t, 6)
+}
+
 // TestAnAlbumAsksThisBrowserWhatTheQueuePlays pins that a row's playability in
 // this browser is the queue's own (B1021): a universal row whose type this
 // browser's decoder does not take, with no copy it does, is unplayable, its
