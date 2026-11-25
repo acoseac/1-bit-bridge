@@ -2631,8 +2631,8 @@ code.storage-path {
    *     (B1021). --- */
   .lede { margin-bottom: 14px; }
 
-  /* --- Group G: text a phone reads, whatever the pointer (B1021): the body
-   *     at 15px, dense secondary text and a hint or a button at 14px, the
+  /* --- Text a phone reads, whatever the pointer (B1021): the body at
+   *     15px, dense secondary text and a hint or a button at 14px, the
    *     smallest at 12.5px, where 13.5, 12.5, 12 and 11.5px were. --- */
   :root { --text-base: 15px; --text-sm: 14px; --text-xs: 12.5px; }
   .hint, .btn { font-size: var(--text-sm); }
