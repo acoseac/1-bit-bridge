@@ -55,8 +55,9 @@ Seven more, in those changes or beside them, each fixed here:
 7. There too the A–Z rail had 49px between the top bar and the bar: 7 of its 27 letters took a
    tap (8 on main, where the rail ran 571px from the window's top).
 
-No server change and no route; `audio.js` gains only a read-only identity of the play, and
-`output.js` only `listen`'s redraw on the output in effect (both below).
+No server change and no route; `audio.js` gains a count of plays the bar reads and the key of
+the source it chose, and records a confirmed decode failure in `format.js`'s set, and
+`output.js` only `listen`'s redraw on the output in effect (all below).
 
 ### The changes
 
@@ -79,42 +80,51 @@ No server change and no route; `audio.js` gains only a read-only identity of the
   the track is, another pointer's lift or cancel, or a change while that pointer is down. The
   drag is that pointer's until it lifts, a second pointer, primary or not, neither taking nor
   ending it, and lands that pointer's own value: an input follows the pointer that went down or
-  moved last, and another's is undone. It lands only on what it was begun on: render's
-  `seekOn`, the output with the bridge's engine run (the run part of the generation) and anchor
-  occurrence and entry, or this browser's loaded track and its play, while the seek is
-  offered. A drag whose occurrence, run or play went, or whose seek permission went, lands
-  nothing, even once seeking is offered again; a queue edit on the same occurrence in one run
-  keeps it, as does a position update on the same play.
+  moved last, and another's is undone. A pointer that goes down while another is down begins
+  no drag: its inputs are undone, so its lift and the change after it land nothing. Every
+  landing asks again the play its gesture began on (`seekNow`, read at the pointerdown or a
+  key's or assistive adjustment's first input): the output with the bridge's engine run (the
+  run part of the generation) and anchor occurrence and entry, or this browser's loaded track
+  and its play, read fresh, while the seek is offered. A drag whose occurrence, run or play
+  went, or whose seek permission went, lands nothing, even once seeking is offered again; a
+  queue edit on the same occurrence in one run keeps it, as does a position update on the
+  same play; and a preview no gesture holds gives way at the next tick.
 - `format.js`: `playFor`'s browser branch asks the queue's question and nothing else
   (`resolvePlayable`: the row's own file this browser's decoder takes, its fresh variant, or an
   engine-dependent attempt); a row it cannot play reads "Not playable in a browser" where
   `unplayableReason` has no words, and after them it composes "the bridge's player plays it"
   and the way the bridge's chip names (DSD64, native; DoP; converted to PCM, never called
-  bit-exact) for a row whose `bridge.way` is not `none`. `adoptFailures` marks a page's rows
-  unplayable by path where the queue confirmed a decode failure.
+  bit-exact) for a row whose `bridge.way` is not `none`. `resolvePlayable` passes over a source
+  in the page's set of confirmed failures, keyed by the row's path and the variant its play
+  names (`sourceKey`), and hands back the key of the source it chose; `markUnplayable`
+  records one.
 - `views.js`: the count line says how many of the rows this browser cannot play the bridge's
   player plays, "choose it under Output, which says whether it can be chosen now", and offers
   Download in words the page hides where it hides the link; Play, Shuffle and Add to queue are
-  disabled where no row plays on the output chosen, each naming the count line; the open album
-  takes the queue's confirmed decode failures at render and at each of audio.js's snapshots,
-  which redraws the route.
-- `audio.js`: its snapshot says the play, `playbackGen` and the repeat-one replays (which load
-  nothing), read by the bar alone.
+  disabled where no row plays on the output chosen, each naming the count line; a row that
+  played here at render and no longer does redraws the open album, once a failure.
+- `audio.js`: its snapshot says the play, a count every load of the audible element (the
+  automatic retry's too, never the preloader's) and each repeat-one replay moves, read by the
+  bar alone; the source a load or a restore chose is kept, and a decode failure the byte probe
+  confirms records it, the catalog's `play` left as it was sent.
 - `output.js`: `listen` redraws the route when the output in effect changes: the pick, or this
   browser where no player is offered.
-- `ui.js`: a pointer's click on a live letter of the A–Z rail jumps only where that pointer went
-  down on it; a key's click is the letter's own.
+- `ui.js`: one capture listener a document records what every pointer went down on, and a
+  pointer's click on a live letter of the A–Z rail jumps only where it went down on that
+  letter or outside the rail, taking the record; a key's click is the letter's own.
 - The field guard's exemption list (`barStateExempt`) loses `anchor.occurrence`, which the bar
   now reads for the drag's occurrence: the guard fails while a field the bar reads stays on it.
 
-Production against `3bedfc23`: 277 lines added (165 of code, 107 of comment, 5 blank) and 64
+Production against `3bedfc23`: 336 lines added (207 of code, 120 of comment, 9 blank) and 80
 removed; the seven fixes, against `dfb68c7b`, added 111 (70 of code) and removed 22, and the
-five after them, against `0dedea79`, 72 (47 of code) and 22. The rules
+five after them, against `0dedea79`, 72 (47 of code) and 22, and the four after those, against
+`06b6d41b`, 110 (71 of code) and 67. The rules
 file `admin-console.md` made room first: two entries' long forms moved verbatim to its History
 file, and each reference to them was checked; then three entries (the phone's bar, where a DSD
 row plays, the album's controls), each a line and its long form. The seven fixes extend the
 first two entries, lines and long forms, in the commit that makes them (`a5c8c868`), and the
-five after them the first and the third (`6ab95527`). No rules
+five after them the first and the third (`6ab95527`), and the four after those all three, with
+the guard that pins the decode-only mark to its new call. No rules
 line said the rail was a phone's position; the comments in `player.css` and `nowplaying.js`
 did, and say otherwise now.
 
@@ -226,7 +236,7 @@ three controls above.
 
 ### WebKit, before (`3bedfc23`) and after (this branch)
 
-WebKit 27.2 (build 2388, the WPE port, headless) on Linux, against two test bridges on
+WebKit 27.2 (build 2388, headless) on Linux, against two test bridges on
 loopback, one at each build, over a generated library of invented names: an album of two
 20-second FLAC tracks under each letter, a DSD128 album of three DSF tracks, and a mixed album
 (FLAC, DSD64, DSD128, DSD512). Seven contexts: the iPhone SE (320×568), a 320×640 phone, a
@@ -362,12 +372,75 @@ two pointers did share it. A stream reconnecting to a new epoch renders the reco
 before the new epoch's first frame, which ends a drag on every build: the restart measured is
 the engine's under one serve. The screenshots are kept with the run, outside the repository.
 
+### Four more, and the last
+
+1. A pointer that began no drag could seek: one that went down during another's drag was turned
+   away, and nothing remembered it, so once the owner lifted its inputs previewed and its change
+   landed through a key's path, on whatever played by then. A touch owning a drag on one track,
+   a mouse pressed beside it, the touch lifted (its value landed once), the track changed, and
+   the mouse's move and release sought the new track.
+2. A drag outlived its play: a repeat-one replay and the automatic retry start a new play with
+   no render between, and the lift read the state the bar last rendered, so a lift before the
+   replay's render, or after the retry, which moved neither the generation nor the replays,
+   landed on the new play; and a drag begun after a replay, before its render, landed nothing.
+3. A confirmed decode failure left the album page that started the play actionable: the failure
+   marked the catalog's `play` in place, on an object that page's row shares with the queue, so
+   the page's check found the row marked already and redrew nothing, and its Play sent a barrier
+   for nothing; a DSD row whose one browser variant failed was `none` already and changed
+   nothing; and the queue stored for a reload kept the mark past it.
+4. The rail's record of where a touch began went stale: a live letter's click alone cleared it,
+   so an empty tap that made no click refused the next click handed to a live letter, and a
+   key's click cleared a held touch's record, whose handed click then jumped.
+
+The event order, recorded first in WebKit 27.2 (an iPhone SE and an iPad Pro 11, by touch and
+by mouse) and in Chromium 159, headless (a Pixel 7 and a desktop window with touch, and a touch
+drag given to it as touch events, lifted and cancelled): an `input` comes only while the
+pointer that moves the range is down, and none after its `pointerup`; Chromium fires `change`
+right after a touch's or a mouse's `pointerup`, WebKit after a mouse's alone, and neither after
+a `pointercancel`; and a touch tapped on the range under a mouse's drag moves the range (its
+`input` between its own down and up), the mouse's release then firing `change` at the touch's
+value. So a refused pointer's trailing `change` follows inputs the bar undid, and an assistive
+adjustment's follows its own input, which previews: the bar tells them apart by that input,
+with no timer.
+
+The decisions, stated in the rules: a new play (a replay, repeat one's or repeat all's, or the
+automatic retry) ends a held drag and puts the thumb back; a source this browser confirmed it
+cannot decode, its path and its variant, stays unplayable until the page reloads, a replacement
+at the same path and variant included, and the queue stored for a reload keeps the catalog's
+`play`, so a reloaded page plays the row again; and a key's or an assistive adjustment's input
+and change, with no pointer down, still preview and land.
+
+At `f1020508`, in WebKit again: a touch tap on the seek lands once in every context; a touch
+tapped under a mouse's drag lands nothing and the mouse's own value lands at its release; nothing
+lands on a repeat-one replay; the rail's 27 letters each ask their own offset at 568×320 and
+320×568, and with three live letters none of the 24 empty taps jumps.
+
+Red first: the cases were committed first (`6a55bed5`, and `76334826` for the tick's), each
+failing over the modules of `06b6d41b`: `TestAPointerThatBeganNoDragNeverSeeks` 2 checks,
+`TestADragEndsAtAReplayItsRenderHasNotSeen` 2, `TestADragEndsAtTheRetryAndOutlivesAPrimesCancel`
+1, `TestADecodeFailureClosesTheAlbumThatStartedIt` 5, `TestAFailedVariantIsThatSourceAlone` 1,
+`TestTheRailTakesEveryPointerDownForItsClick` 2 and
+`TestAPreviewNoGestureHoldsGivesWayAtTheNextTick` 1; their positive checks pass there (the
+owner's own lift in either order, one touch with no change after it, a key's step, an assistive
+adjustment, a primed track let go of under a drag, a fresh answer naming another variant). The
+harness's pointerdown bubbles through the element's ancestors to the document, as a browser's
+does, and the fallback case's enabled controls are asserted to exist and be enabled, the one
+assertion of an earlier case changed. One earlier case renders its album twice under one route
+generation, so both renders heard the failure: the page asks one redraw a failure. Controls,
+each a mutation of a copy of the committed modules: 17 of 17 as predicted (a later
+input taken after the owner's lift; the pointerdown's play from the render; the landing's from
+the render; a load, or the replay, not counted as a play; the preloader counted; no settling at
+the tick; the element's URL as the failure's key; the catalog's `play` marked again; the variant
+left out of the key; a redraw a listener; the resolver passing a failed file, or a failed
+variant; no redraw at a failure; the rail's record kept past a pointer's click, taken by a key's
+click, or blind to a pointerdown outside a rail).
+
 ### Runs
 
-The harness's 182 cases, all green. The whole console package, once, at `a5c8c868`: ok in
+The harness's 189 cases, all green. The whole console package, once, at `a5c8c868`: ok in
 354 s. The bar's Go tests under the race detector, ten times, at `5c6a7c8f`, idle: 228 s, ok.
-The gate ran on `b882b658`, before the five fixes, and again on the commit that carries this
-sentence, each in one session of the shared build lock: formatting, vet, vet with the
+The gate ran on `b882b658`, before the five fixes, on `06b6d41b`, before the four after them,
+and again on the commit that carries this sentence, each in one session of the shared build lock: formatting, vet, vet with the
 release tags for the six release targets and for linux/386 and linux/arm, the docs' budgets,
 the source guards by name, the bar's Go tests (`player_output_bar_test.go` and
 `player_touch_layout_test.go`) under the race detector ten times idle and ten times beside
@@ -376,14 +449,20 @@ the PR's description.
 
 ### Left open
 
-- No real iPhone or iPad was used: WebKit's WPE port emulating touch is what was measured, and
-  how a real iOS range input takes a tap is not shown here.
-- No touch drag was measured: WebKit's touch input here takes taps alone. Whether an ordinary
-  horizontal scrub on a phone ends in `pointercancel`, which the bar takes for a cancel and
-  lands nothing, is shown by no evidence here; an event trace of a finger's drag on a device
-  would settle it. The cancel, a second finger and a finger held across a track change, a
-  restart or a replay are shown in the harness alone, and in WebKit with a mouse's drag and a
-  touch's tap.
+- No real iPhone or iPad was used: WebKit emulating touch is what was measured, and how a
+  real iOS range input takes a tap is not shown here.
+- No touch drag was measured in WebKit, whose touch input here takes taps alone; Chromium took
+  one given to it as touch events. Whether an ordinary horizontal scrub on
+  a phone ends in `pointercancel`, which the bar takes for a cancel and lands nothing, is
+  shown by no evidence here; an event trace of a finger's drag on a device would settle it.
+  The cancel, a second pointer and a finger held across a track change, a restart, a replay
+  or the retry are shown in the harness, and in WebKit with a mouse's drag and a touch's tap.
+- Playlists, mixes and favorites read the set of failed sources at their next render and do
+  not redraw live, and `collectionActions` hides rather than disables where nothing plays:
+  both for the next PR.
+- A pointer whose `pointerup` and `pointercancel` both never reached the document (no browser
+  measured does this) would keep the seek refusing input with no drag, key and assistive
+  adjustments included, until that pointer goes down and up again.
 - The 834px tablet keeps the wider layout's 16px-tall seek (it now lands on a tap) and its
   32px and 40px bar buttons, the touch sizes the next PR takes up.
 - On a 568px phone with a track playing, the rail's letters are about 9px tall: each takes a
