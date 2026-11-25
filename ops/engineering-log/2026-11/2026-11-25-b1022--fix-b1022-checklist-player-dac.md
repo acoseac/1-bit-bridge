@@ -127,3 +127,15 @@ its Don't sentence; `scripts/doc-split/verify_moves.py --base 3bedfc23` passed o
 the move alone, with the composer line's and the "What stays MPD's" paragraph's edits declared, and
 the moved entry is the base's line with that one sentence replaced. A new line for the DAC line's
 rule points at its long form, a new section of that History file. `output.md` is 96,910 bytes.
+
+### Runs
+
+One build-slot session at `afca0a54`, on Go 1.27.3 with the release tags: `make fmt`, which
+rewrote nothing; `make vet` on linux/amd64 and for darwin/amd64, darwin/arm64, linux/arm64,
+windows/amd64, windows/arm64, linux/386 and linux/arm; `cmd/bridge`'s source guards by name
+(`TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`, `TestNoBlankKeepers`,
+`TestEveryBackgroundGoroutineDrainsOnCleanup`); `make test P=8 TEST_PKGS='-count=1 ./...'`, 93
+packages ok in 2,030 s (`cmd/bridge` 1,992 s, `internal/manifest` 1,656 s, `internal/admin`
+1,466 s); `make build-all`, six binaries; `make docs-check`. Each passed, and `git status` was
+clean after. The citation guard read this entry: a test name planted in it failed the guard,
+naming the entry, and passed once the bytes were put back.
