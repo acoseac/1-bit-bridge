@@ -1485,8 +1485,9 @@ var errNoLocalOutputs = errors.New("api: local outputs are not wired")
 // elements from the route's own builder, with its caches and its lazy
 // session, then the bridge's own player's, B470 PR 5b): the console's
 // checklist reads the box from here, the way the app does, and reads its
-// kind mpd elements alone (cmd/bridge's checklistInput), so the checklist
-// stays MPD's.
+// kind mpd elements, and of the player's element only the card it plays
+// through, which its DAC line never points MPD at (cmd/bridge's
+// checklistInput, B1022), so the checklist stays MPD's.
 func (s *Server) LocalOutputsResponse(ctx context.Context) (OutputsResponse, error) {
 	if s.localOutputs == nil {
 		return OutputsResponse{}, errNoLocalOutputs
