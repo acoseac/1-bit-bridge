@@ -164,3 +164,43 @@
 - **In this browser a DSD row says that the bridge's player plays it, by its catalog way, and the album's count line says how many and points to Output** (2026-11-25, backlog B1021). `playFor`'s browser branch adds to `unplayableReason`'s words "the bridge's player plays it" and the way the bridge's player's chip names ("DSD128, native", DoP, "converted to PCM", never bit-exact) for a row whose `bridge.way` is not `none`; a way of none, or no bridge field, keeps the browser's words alone, and with the bridge's player chosen the chips are as they were. A row is playable here exactly where the queue plays it (`resolvePlayable`: its own file this browser's decoder takes, its fresh variant, or an engine-dependent attempt), so the row, the count line and the album's controls agree with what Play does: a universal row whose type the decoder does not take, with no variant, disabled nothing and its Play asked the barrier and played nothing, and a row with no play field read as playable; such a row reads "Not playable in a browser" where `unplayableReason` has no words, so the reason its title names is there. A source this browser confirmed it cannot decode (a decode failure the byte probe confirms) is recorded by its key, the row's path and the variant its play names (format.js's `sourceKey`, captured where `resolvePlayable` chooses the source, never the element's URL, which a retry stamps), in a set the page keeps until it reloads, which `resolvePlayable`, and so the queue's skip, `playFor`, the count line and the album's controls, read; the catalog's `play` stays as it was sent, where `markUnplayable` marked it in place and the queue stored for a reload kept the mark past it, and a DSD row whose one browser variant failed kept its Play; a replacement at the same path and variant stays refused until a reload, and another variant the server offers is a source of its own. The count line (`unplayableNote`) says how many of the rows this browser cannot play the bridge's player plays, "choose it under Output, which says whether it can be chosen now" (the pick can be held while the catalog still describes the row), and offers Download in words (`.track-dl-note`) the page hides where it hides the link (up to 640px). A row's reason chip wraps within 12rem, and up to 640px takes a line of its own under the title, so no page runs sideways and no title is squeezed past what the chip was before. **Don't call a converted row bit-exact, say from the catalog that the bridge's player can be chosen now, offer Download where its link is hidden, decide a row's playability in this browser but by the queue's own question (`resolvePlayable`), let a source this browser confirmed it cannot decode play again before the page reloads (its row's path and the variant its play names, a replacement at the same path and variant included), key one by anything but those, or leave a row it cannot play without a reason the page renders.** `TestADSDRowSaysWhereItPlays`, `TestTheAlbumsCountLineSaysHowManyPlayWhere`, `TestAnAlbumAsksThisBrowserWhatTheQueuePlays`, `TestAFailedVariantIsThatSourceAlone` and `TestRowsFollowTheChosenOutput` (in the bar's harness) and `TestTheDSDChipWrapsUnderItsTitleOnAPhone` pin it.
 
 - **Where no row of an album plays on the output chosen, its Play, Shuffle and Add to queue are disabled, each naming the count line that says why** (2026-11-25, backlog B1021). A Play that could start nothing still asked the bridge for the start's barrier (`gateStart`'s switch-out) before it said "Nothing in this selection can play in a browser"; disabled, it is inert, and one row the queue plays makes the three live again, Play then asking the barrier as every start does. With the bridge's player chosen Shuffle stays off, since it plays its queue in order; the page follows the output in effect, which boot.js redraws the route for (`listen` compares the pick with the player offered, so GET now saying no player is wired redraws the album for this browser, where it stayed drawn for the bridge's player); a row that played here at render and no longer does, its source confirmed undecodable, redraws the open album once (a listener on audio.js's snapshots comparing the rows `playFor` found playable at render, removed before the redraw, and one redraw a failure for the page, `failures`), the page that started the play included, where the album had kept a live Play that asked the barrier again for nothing; playlists, mixes and favorites read the set at their next render and do not redraw live, and `collectionActions` hides rather than disables where nothing plays, both left for the next PR; and on a touch screen the three are 44px square. **Don't leave an album's Play live where no row plays on the output in effect, or once this browser has confirmed its rows' sources undecodable (the page that started the play included), redraw the album on the pick alone or more than once a failure, give a control this disables its reason in a title alone, or admit an album's start but through the gate.** `TestAnAlbumNoRowOfWhichPlaysHereOffersNoPlayShuffleOrAdd`, `TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls`, `TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser`, `TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay` and `TestADecodeFailureClosesTheAlbumThatStartedIt` (in the bar's harness), `TestAnOutputSwitchRedrawsTheRoute` and `TestAnAlbumsControlsTakeAFingerOnATouchScreen` pin it.
+
+- **A control the server will refuse must not look live, and the panel
+  reads the refusal's own predicate** (2026-09-28). With upscaling on and
+  `upscale.optimizeEnabled` off, "Generate CarPlay" stayed enabled on the
+  album and artist Variants panels and a click answered 503
+  `optimize-disabled`: #1060 made the console's submit refuse the kind, and
+  the summary the panel reads carried no switch. The summary now carries
+  `optimizeActive`, which is `Server.optimizeActive`, the ONE predicate the
+  batch submit, the projection endpoint and the summary read (nil reads as
+  on, as `Deps.OptimizeActive` always has), so the button is disabled
+  exactly where the submit refuses.
+  `TestTheVariantSummaryCarriesTheSwitchTheSubmitReads` compares the served
+  value with a real submit for every state of the switch, and pins that
+  submit BOTH ways (a 202 that reached the coordinator once, or the
+  switch's own 503 that reached it never): read as merely "not
+  `optimize-disabled`", a submit failing some other way passed as an
+  accepted one (CodeRabbit on #1068). And
+  `TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt` runs
+  the SHIPPED panel under node on the summary the album detail serves,
+  kind by kind against the submit, with the switches moved through the
+  settings PATCH. **Don't serve the configured `optimizeEnabled` instead**:
+  it agrees with the submit only while the gate is wired from the same
+  config, and a control that served it went red on the summary test alone.
+  The reason sits in the kind's own row with a gear for that one switch (a
+  block that stops both kinds stays one note above them), and the panel
+  tests `=== false`: an unknown leaves the button live and lets the
+  endpoint answer, the folder view's rule, since `/api/library/browse`
+  carries no feature state. The #1060 AST sweep counts a call of
+  `optimizeActive` as reading the CarPlay switch. A save from either tray
+  redraws the panel: the next bullet. **The panel-wide note must close
+  wherever the upscale gate does**, because `Deps.OptimizeActive` includes
+  that gate (the flag and a usable sox: `carPlayOptimizeActiveFn`, under The
+  CLI and the serve wiring), and a block the panel-wide note does not
+  show falls through to the CarPlay row's "switched off". The summary's
+  `soxAvailable` is therefore `Server.soxUsable`, the gate's sox half
+  (found, and FLAC when the build's formats are known): with the precheck
+  alone a sox without FLAC read as available, and the panel named a switch
+  that was on while the hi-res Generate stayed live over a refusal
+  (`TestTheVariantSummaryReadsSoxAsTheGateDoes`, and the panel test's
+  fourth state).

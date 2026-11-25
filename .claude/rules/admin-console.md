@@ -485,45 +485,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   at 375 px with a deliberately long fixture string**, and check
   `scrollWidth == clientWidth` rather than eyeballing it. (2026-09-20)
 
-- **A control the server will refuse must not look live, and the panel
-  reads the refusal's own predicate** (2026-09-28). With upscaling on and
-  `upscale.optimizeEnabled` off, "Generate CarPlay" stayed enabled on the
-  album and artist Variants panels and a click answered 503
-  `optimize-disabled`: #1060 made the console's submit refuse the kind, and
-  the summary the panel reads carried no switch. The summary now carries
-  `optimizeActive`, which is `Server.optimizeActive`, the ONE predicate the
-  batch submit, the projection endpoint and the summary read (nil reads as
-  on, as `Deps.OptimizeActive` always has), so the button is disabled
-  exactly where the submit refuses.
-  `TestTheVariantSummaryCarriesTheSwitchTheSubmitReads` compares the served
-  value with a real submit for every state of the switch, and pins that
-  submit BOTH ways (a 202 that reached the coordinator once, or the
-  switch's own 503 that reached it never): read as merely "not
-  `optimize-disabled`", a submit failing some other way passed as an
-  accepted one (CodeRabbit on #1068). And
-  `TestTheVariantPanelDisablesGenerateCarPlayWhereTheSubmitRefusesIt` runs
-  the SHIPPED panel under node on the summary the album detail serves,
-  kind by kind against the submit, with the switches moved through the
-  settings PATCH. **Don't serve the configured `optimizeEnabled` instead**:
-  it agrees with the submit only while the gate is wired from the same
-  config, and a control that served it went red on the summary test alone.
-  The reason sits in the kind's own row with a gear for that one switch (a
-  block that stops both kinds stays one note above them), and the panel
-  tests `=== false`: an unknown leaves the button live and lets the
-  endpoint answer, the folder view's rule, since `/api/library/browse`
-  carries no feature state. The #1060 AST sweep counts a call of
-  `optimizeActive` as reading the CarPlay switch. A save from either tray
-  redraws the panel: the next bullet. **The panel-wide note must close
-  wherever the upscale gate does**, because `Deps.OptimizeActive` includes
-  that gate (the flag and a usable sox: `carPlayOptimizeActiveFn`, under The
-  CLI and the serve wiring), and a block the panel-wide note does not
-  show falls through to the CarPlay row's "switched off". The summary's
-  `soxAvailable` is therefore `Server.soxUsable`, the gate's sox half
-  (found, and FLAC when the build's formats are known): with the precheck
-  alone a sox without FLAC read as available, and the panel named a switch
-  that was on while the hi-res Generate stayed live over a refusal
-  (`TestTheVariantSummaryReadsSoxAsTheGateDoes`, and the panel test's
-  fourth state).
+- **A control the server will refuse must not look live, and the panel reads the refusal's own predicate** (2026-09-28) **Don't serve the configured `optimizeEnabled` instead** **The panel-wide note must close wherever the upscale gate does** → History-rules-admin-console.md
 - **A tray redraws the page only through its spec's `onSaved`, and a page
   redraws only for a switch it draws from** (2026-09-28, CodeRabbit on
   #1068). A feature tray saves one switch and repaints nothing else, so
