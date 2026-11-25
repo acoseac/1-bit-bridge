@@ -4421,12 +4421,39 @@ S.TestASourceTheBrowserCannotUsePlaysNothingOnTheResumesAdmission = async () => 
 
 // sourceFails is gatedPlaying whose source error probe answers that the
 // bridge served the track, the skip past it held until the case fires it.
-async function sourceFails() {
+async function sourceFails(o = {}) {
   const t = longTimers();
   globalThis.fetch = async () => ({ ok: true, status: 200 });
-  const r = await gatedPlaying();
+  const r = await gatedPlaying(o);
   return { r, t };
 }
+
+S.TestASourceTheBrowserCannotUseShowsNoSpinnerForTheResumeItLeaves = async () => {
+  // The browser's resume and the source's failure both queued while the
+  // element played: the resume's protective pause comes after the failure.
+  const { r } = await sourceFails();
+  r.hold = gate();
+  r.el.pause();
+  r.el.browserPlay();
+  r.el.fail(4);
+  await settle();
+  check("the resume waits on its barrier, and no spinner shows over the track that failed",
+    r.s.posts(ROUTES.switchOut).length === 2 && r.el.paused && !r.audio.snapshot().loading && !r.audio.snapshot().playing,
+    [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.audio.snapshot().loading, r.audio.snapshot().playing]);
+};
+
+S.TestTheBarsPlayOverASourceTheBrowserCannotUseIsAStartThoughAResumeWaits = async () => {
+  const { r } = await sourceFails({ bar: true });
+  const held = await resumeQueued(r);
+  r.el.fail(4);
+  await settle();
+  r.find("Play")?.click();
+  await settle();
+  held.open();
+  await settle();
+  check("the bar's Play over the failed track while the resume waits: a start, which plays track 2 on the barrier's answer",
+    r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused, [r.audio.snapshot().index, r.el.plays, r.el.paused]);
+};
 
 S.TestAResumesRefusalAfterASourceTheBrowserCannotUseStillEndsItsSkip = async () => {
   // As before this change: the resume's refusal ends what this browser meant

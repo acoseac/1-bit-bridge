@@ -1038,6 +1038,21 @@ func TestASourceTheBrowserCannotUsePlaysNothingOnTheResumesAdmission(t *testing.
 	barScenario(t, 5)
 }
 
+// TestASourceTheBrowserCannotUseShowsNoSpinnerForTheResumeItLeaves pins that
+// a resume whose source failed before its protective pause's event shows no
+// spinner over the failed track.
+func TestASourceTheBrowserCannotUseShowsNoSpinnerForTheResumeItLeaves(t *testing.T) {
+	barScenario(t, 1)
+}
+
+// TestTheBarsPlayOverASourceTheBrowserCannotUseIsAStartThoughAResumeWaits pins
+// that the bar's Play over the failed track while such a resume waits is a
+// start, never that resume's cancel: it plays the next track on the
+// barrier's answer.
+func TestTheBarsPlayOverASourceTheBrowserCannotUseIsAStartThoughAResumeWaits(t *testing.T) {
+	barScenario(t, 2)
+}
+
 // TestAResumesRefusalAfterASourceTheBrowserCannotUseStillEndsItsSkip pins
 // what the queue does next, as before: the resume's barrier refused after its
 // source failed ends what this browser meant to play, so the skip's timer
