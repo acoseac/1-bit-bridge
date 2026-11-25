@@ -322,6 +322,46 @@ func TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay(t *testing.T) { ba
 // the rail began.
 func TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn(t *testing.T) { barScenario(t, 4) }
 
+// TestAPointerThatBeganNoDragNeverSeeks pins the seek's refusal of a pointer
+// that went down during another's drag (B1021): in either order of the two
+// pointers' moves the owner's lift lands its own last value once, and after
+// it the other pointer's moves, lift and change, across a change of track,
+// seek nothing and leave the thumb at the track's time; one touch with no
+// change after its lift, a key's step and an assistive adjustment each land
+// once.
+func TestAPointerThatBeganNoDragNeverSeeks(t *testing.T) { barScenario(t, 7) }
+
+// TestADragEndsAtAReplayItsRenderHasNotSeen pins that a repeat-one replay is
+// a new play at the lift itself: a drag held across it and let go before any
+// render of it lands nothing, the thumb put back, and one begun after it,
+// before its first render, lands once.
+func TestADragEndsAtAReplayItsRenderHasNotSeen(t *testing.T) { barScenario(t, 2) }
+
+// TestADragEndsAtTheRetryAndOutlivesAPrimesCancel pins the automatic retry as
+// a new play (a drag held across it lands nothing) and the preloader's cancel
+// as none (a drag across it lands once).
+func TestADragEndsAtTheRetryAndOutlivesAPrimesCancel(t *testing.T) { barScenario(t, 2) }
+
+// TestADecodeFailureClosesTheAlbumThatStartedIt pins a confirmed decode
+// failure, after a retry, on the album page that started the play: it
+// redraws once, its row and count line say why and its controls are
+// disabled, its Play sends no barrier while the skip is held, no snapshot
+// after redraws it again, the stored queue keeps the catalog's play, and the
+// skip goes on as it did.
+func TestADecodeFailureClosesTheAlbumThatStartedIt(t *testing.T) { barScenario(t, 7) }
+
+// TestAFailedVariantIsThatSourceAlone pins the failure's key, a row's path and
+// its variant: a DSD row whose browser variant A failed has its album's Play
+// disabled, and a fresh answer naming variant B enables it and plays B.
+func TestAFailedVariantIsThatSourceAlone(t *testing.T) { barScenario(t, 6) }
+
+// TestTheRailTakesEveryPointerDownForItsClick pins the rail's record of where
+// a pointer went down, made at every pointerdown in the document: a click a
+// touch outside the rail is handed jumps after an empty tap that made no
+// click, and a key's click beside a held touch jumps while that touch's
+// handed click does not.
+func TestTheRailTakesEveryPointerDownForItsClick(t *testing.T) { barScenario(t, 2) }
+
 // TestADSDOnlyAlbumPlaysOnTheBridgeFromAnEmptyBar pins A2 to A4: from empty
 // session storage the bridge's player is picked with nothing sent, and a
 // DSD-only album is played on it by its id.

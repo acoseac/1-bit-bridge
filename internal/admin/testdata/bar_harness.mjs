@@ -905,11 +905,13 @@ class El {
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   removeEventListener(t, fn) { this.listeners[t] = (this.listeners[t] || []).filter((x) => x !== fn); }
   // fire runs the element's listeners, and a click and a keydown bubble to
-  // the document's, as a browser's do.
+  // the document's, as a browser's do; a pointerdown bubbles through the
+  // element's ancestors to the document.
   fire(t, e = {}) {
     const ev = { type: t, target: this, ...e };
     for (const fn of [...(this.listeners[t] || [])]) fn(ev);
-    if (t === "click" || t === "keydown") for (const fn of [...(globalThis.document?.listeners?.[t] || [])]) fn(ev);
+    if (t === "pointerdown") for (let n = this.parentNode; n; n = n.parentNode) for (const fn of [...(n.listeners?.[t] || [])]) fn(ev);
+    if (t === "click" || t === "keydown" || t === "pointerdown") for (const fn of [...(globalThis.document?.listeners?.[t] || [])]) fn(ev);
   }
   click() { if (!this.disabled) this.fire("click"); }
   // The focus as a browser keeps it: on one element, and moved to the body
@@ -5100,7 +5102,7 @@ S.TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser = async () => {
   const row = findAll(view, (n) => n.classList.contains("track-title"))[0];
   check("no player offered: the pick kept, this browser the output", r.out.view().notOffered && r.out.view().output === "bridge", r.out.view());
   check("the album redraws once for this browser: its FLAC row live, Play, Shuffle and Add to queue enabled",
-    redraws === 1 && row?.getAttribute("aria-disabled") === null && !p.play?.disabled && !p.shuffle?.disabled && !p.add?.disabled,
+    redraws === 1 && row?.getAttribute("aria-disabled") === null && p.play?.disabled === false && p.shuffle?.disabled === false && p.add?.disabled === false,
     [redraws, row?.getAttribute("aria-disabled"), p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
 };
 
@@ -5184,6 +5186,266 @@ S.TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn = async () => {
   tap(letter("B"), letter("A"));
   letter("A").fire("click", { detail: 1 });
   check("a click no touch on the rail began, after an empty tap's, asks once", JSON.stringify(jumps.slice(6)) === '["A"]', jumps.slice(6));
+};
+
+S.TestAPointerThatBeganNoDragNeverSeeks = async () => {
+  const r = await barPage();
+  const seek = r.byClass("np-seek");
+  r.audio.playQueue([flac(1), flac(2)], 0);
+  r.el.metadata(200);
+  await settle();
+  // A seek lands inside a track: a load puts the time at 0.
+  const wrote = [];
+  let at = r.el.currentTime;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { if (v > 0) wrote.push(v); at = v; }, configurable: true });
+  const touch = pointer(seek, 1);
+  const mouse = pointer(seek, 2);
+  const otherGesture = async (delta) => {
+    r.audio.advance(delta);
+    r.el.metadata(200);
+    await settle();
+    mouse.move(800);
+    mouse.up();
+    seek.fire("change");
+    await settle();
+  };
+  // The other pointer moves before the owner's last move.
+  touch.down();
+  touch.move(250);
+  mouse.down();
+  mouse.move(700);
+  touch.move(300);
+  touch.up();
+  check("the owner's lift lands its own last value once, the other pointer still down", JSON.stringify(wrote) === "[60]", wrote);
+  await otherGesture(1);
+  check("the track changed, the other pointer's moves, lift and change seek nothing, the thumb at the track's time",
+    JSON.stringify(wrote) === "[60]" && r.audio.snapshot().index === 1 && seek.value === "0", [wrote, r.audio.snapshot().index, seek.value]);
+  // The other pointer moves after the owner's last move.
+  let n = wrote.length;
+  touch.down();
+  touch.move(250);
+  mouse.down();
+  touch.move(300);
+  mouse.move(700);
+  touch.up();
+  check("the other order: the owner's lift lands its own last value once", JSON.stringify(wrote.slice(n)) === "[60]", wrote.slice(n));
+  n = wrote.length;
+  await otherGesture(-1);
+  check("the track changed again, the other pointer's gesture seeks nothing, the thumb at the track's time",
+    wrote.length === n && r.audio.snapshot().index === 0 && seek.value === "0", [wrote.slice(n), r.audio.snapshot().index, seek.value]);
+  n = wrote.length;
+  touch.down();
+  touch.move(500);
+  touch.up();
+  check("one touch down, moved and lifted with no change after it lands once", JSON.stringify(wrote.slice(n)) === "[100]", wrote.slice(n));
+  n = wrote.length;
+  seek.fire("keydown", { key: "ArrowRight" });
+  seek.value = "600";
+  seek.fire("input");
+  seek.fire("change");
+  check("a key's step lands once", JSON.stringify(wrote.slice(n)) === "[120]", wrote.slice(n));
+  // An assistive adjustment: an input and a change, no key, no pointer.
+  n = wrote.length;
+  seek.value = "250";
+  seek.fire("input");
+  seek.fire("change");
+  check("an assistive adjustment lands once", JSON.stringify(wrote.slice(n)) === "[50]", wrote.slice(n));
+};
+
+S.TestADragEndsAtAReplayItsRenderHasNotSeen = async () => {
+  const r = await barPage();
+  const seek = r.byClass("np-seek");
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  await settle();
+  let writes = 0;
+  let at = r.el.currentTime;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { if (v > 0 && v < 200) writes += 1; at = v; }, configurable: true });
+  const finger = pointer(seek, 1);
+  r.audio.cycleRepeat();
+  r.audio.cycleRepeat();
+  // Repeat one replays in the ended event's own task; the bar renders the
+  // replay only at its play event, a task later. A listener after audio.js's
+  // runs between the two.
+  finger.down();
+  finger.move(500);
+  let atLift = null;
+  const liftThere = () => { finger.up(); seek.fire("change"); atLift = at; };
+  r.el.addEventListener("ended", liftThere);
+  r.el.end();
+  await settle();
+  r.el.removeEventListener("ended", liftThere);
+  check("a drag held across a repeat-one replay, let go before any render of it: nothing lands, the thumb put back",
+    r.audio.snapshot().repeat === "one" && r.el.plays.length === 2 && atLift === 0 && writes === 0 && seek.value === "0",
+    [r.audio.snapshot().repeat, r.el.plays.length, atLift, writes, seek.value]);
+  const before = writes;
+  const downThere = () => { finger.down(); finger.move(400); };
+  r.el.addEventListener("ended", downThere);
+  r.el.end();
+  await settle();
+  r.el.removeEventListener("ended", downThere);
+  finger.up();
+  seek.fire("change");
+  await settle();
+  check("a drag begun after a replay, before its first render, lands once", r.el.plays.length === 3 && writes === before + 1 && at === 80, [r.el.plays.length, writes - before, at]);
+};
+
+S.TestADragEndsAtTheRetryAndOutlivesAPrimesCancel = async () => {
+  const r = await barPage();
+  const seek = r.byClass("np-seek");
+  r.audio.playQueue([flac(1), flac(2)], 0);
+  r.el.metadata(200);
+  await settle();
+  let writes = 0;
+  let at = r.el.currentTime;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { if (v > 0 && v < 200) writes += 1; at = v; }, configurable: true });
+  const finger = pointer(seek, 1);
+  // The automatic retry: a network error reloads the same source.
+  finger.down();
+  finger.move(500);
+  r.el.fail(2);
+  await settle();
+  r.el.metadata(200);
+  await settle();
+  finger.move(600);
+  finger.up();
+  seek.fire("change");
+  await settle();
+  check("a drag held across the automatic retry, let go after its fresh metadata: nothing lands, the thumb put back",
+    r.el.plays.length === 2 && writes === 0 && seek.value === "0", [r.el.plays.length, writes, seek.value]);
+  // The next track primed near the end, then the prime let go of while a
+  // finger drags: the play is the same.
+  at = 185;
+  r.el.fire("timeupdate");
+  await settle();
+  const pre = r.audios[1];
+  const primed = !!pre?.getAttribute("src");
+  const before = writes;
+  finger.down();
+  finger.move(500);
+  r.audio.cycleRepeat();
+  r.audio.cycleRepeat();
+  finger.up();
+  seek.fire("change");
+  await settle();
+  check("a primed next track let go of while the finger drags an uninterrupted play: the drag lands once",
+    primed && !pre.getAttribute("src") && writes === before + 1 && at === 100, [primed, pre?.getAttribute("src"), writes - before, at]);
+};
+
+S.TestADecodeFailureClosesTheAlbumThatStartedIt = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const t = longTimers();
+  const rows = await libraryRows([flac(1)], { id: "s1" });
+  const view = rows.view;
+  const views = await import(new URL("views.js", dirURL));
+  let redraws = 0;
+  let redrawn = null;
+  // As boot.js wires it (cut at three, so a storm of them ends the case).
+  window.addEventListener("player:rerender", () => {
+    redraws += 1;
+    if (redraws <= 3) redrawn = views.renderAlbum(view, { id: "s1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
+  });
+  // The byte probe of the source that fails: the bridge served it.
+  const read = globalThis.fetch;
+  globalThis.fetch = (url, init) => /^\/api\/player\/albums\//.test(String(url)) ? read(url, init) : Promise.resolve({ ok: true, status: 206, json: async () => ({}) });
+  albumParts(view).play?.click();
+  await settle();
+  check("the album's Play: one barrier, one play", r.s.posts(ROUTES.switchOut).length === 1 && r.el.plays.length === 1, [r.s.posts(ROUTES.switchOut).length, r.el.plays]);
+  // A network error's retry first, then the decode failure the probe confirms.
+  r.el.fail(2);
+  await settle();
+  r.el.metadata(200);
+  await settle();
+  r.el.fail(4);
+  await settle();
+  await redrawn;
+  await settle();
+  let p = albumParts(view);
+  const row = findAll(view, (n) => n.classList.contains("track-title"))[0];
+  check("the failure confirmed after a retry: the page that started it redraws once, the row reads why, the count line says so, Play, Shuffle and Add to queue disabled",
+    redraws === 1 && row?.getAttribute("aria-disabled") === "true" && rowChips(view)[0] === "Not playable in a browser" &&
+    /^1 of 1 can't play in a browser\./.test(p.line?.textContent || "") && p.play?.disabled === true && p.shuffle?.disabled === true && p.add?.disabled === true,
+    [redraws, row?.getAttribute("aria-disabled"), rowChips(view), p.line?.textContent, p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+  const barriers = r.s.posts(ROUTES.switchOut).length;
+  const plays = r.el.plays.length;
+  p.play?.click();
+  await settle();
+  check("its Play, with the skip held, sends no barrier and plays nothing", t.count(1200) === 1 && r.s.posts(ROUTES.switchOut).length === barriers && r.el.plays.length === plays,
+    [t.count(1200), r.s.posts(ROUTES.switchOut).length - barriers, r.el.plays.length - plays]);
+  r.el.fire("timeupdate");
+  r.audio.setShuffle(false);
+  await settle();
+  check("no redraw for the snapshots after it", redraws === 1, redraws);
+  window.dispatchEvent(new Event("pagehide"));
+  const stored = JSON.parse(store.get("bridge-player-queue") || "null");
+  check("the stored queue keeps the row's play as the catalog sent it, so a reload plays it again",
+    stored?.queue?.[0]?.play?.kind === "universal", stored?.queue?.[0]?.play);
+  t.fire(1200);
+  await settle();
+  p = albumParts(view);
+  check("the skip, let go, goes on as it did: through the gate, to the queue's end, nothing played",
+    r.s.posts(ROUTES.switchOut).length === barriers + 1 && r.el.plays.length === plays && !r.audio.snapshot().playing && redraws === 1,
+    [r.s.posts(ROUTES.switchOut).length - barriers, r.el.plays.length - plays, r.audio.snapshot().playing, redraws]);
+};
+
+S.TestAFailedVariantIsThatSourceAlone = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  longTimers();
+  const viaVariant = (v) => dsd(1, { play: { kind: "none", contentType: "audio/x-dsf", variantId: v, variantContentType: "audio/flac" } });
+  let rows = await libraryRows([viaVariant("A")], { id: "v1" });
+  const view = rows.view;
+  const views = await import(new URL("views.js", dirURL));
+  let redraws = 0;
+  let redrawn = null;
+  window.addEventListener("player:rerender", () => {
+    redraws += 1;
+    if (redraws <= 3) redrawn = views.renderAlbum(view, { id: "v1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
+  });
+  const read = globalThis.fetch;
+  globalThis.fetch = (url, init) => /^\/api\/player\/albums\//.test(String(url)) ? read(url, init) : Promise.resolve({ ok: true, status: 206, json: async () => ({}) });
+  albumParts(view).play?.click();
+  await settle();
+  check("the DSD row plays its browser variant A", r.el.plays.length === 1 && /variant=A$/.test(r.el.src), [r.el.plays.length, r.el.src]);
+  r.el.fail(4);
+  await settle();
+  await redrawn;
+  await settle();
+  let p = albumParts(view);
+  check("variant A confirmed undecodable: the album's Play disabled", redraws === 1 && p.play?.disabled === true, [redraws, p.play?.disabled]);
+  // A fresh answer for the same path whose variant is now B, a source of its
+  // own; the queue still holds the row whose A failed.
+  rows = await libraryRows([viaVariant("B")], { id: "v1" });
+  p = albumParts(rows.view);
+  check("a fresh answer naming variant B: the album's Play enabled", p.play?.disabled === false && rows[0].getAttribute("aria-disabled") === null,
+    [p.play?.disabled, rows[0].getAttribute("aria-disabled")]);
+  p.play?.click();
+  await settle();
+  check("pressing it loads B", r.el.plays.length === 2 && /variant=B$/.test(r.el.src), [r.el.plays.length, r.el.src]);
+};
+
+S.TestTheRailTakesEveryPointerDownForItsClick = async () => {
+  const pg = page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const rail = ui.alphabetRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
+  pg.body.appendChild(rail);
+  const letter = (k) => rail.children.find((n) => n.textContent === k);
+  const outside = document.createElement("div");
+  pg.body.appendChild(outside);
+  // An empty tap that makes no click; a touch that goes down outside the
+  // rail; the click WebKit hands that touch's tap, on a live letter.
+  letter("B").fire("pointerdown", { pointerType: "touch", pointerId: 7, isPrimary: true });
+  outside.fire("pointerdown", { pointerType: "touch", pointerId: 8, isPrimary: true });
+  letter("A").fire("click", { detail: 1 });
+  check("an empty tap that made no click, then a click a touch outside the rail is handed: one jump", JSON.stringify(jumps) === '["A"]', jumps);
+  // A touch held on an empty letter, a key's click on a live one, then the
+  // touch's click handed to another live letter.
+  letter("N").fire("pointerdown", { pointerType: "touch", pointerId: 9, isPrimary: true });
+  letter("A").fire("click", { detail: 0 });
+  letter("M").fire("click", { detail: 1 });
+  check("a key's click beside a held touch jumps, and that touch's handed click does not", JSON.stringify(jumps) === '["A","A"]', jumps);
 };
 
 const name = scenarioName;
