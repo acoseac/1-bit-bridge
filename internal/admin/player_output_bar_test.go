@@ -249,6 +249,22 @@ func TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls(t *testing.T) { barSce
 // (main's bottom padding, the output menu, the queue panel, the A–Z rail).
 func TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs(t *testing.T) { barScenario(t, 4) }
 
+// TestTheSeekLandsOnlyAtItsChange pins the seek where it is shown, wider than
+// 768px, as it always was: in this browser an input and the pointer's lift
+// seek nothing and the change lands one seek where the value was let go, and
+// with the bridge's player chosen the same, its seek a command (B1021 keeps
+// that seek as it was and hides it on a phone, since WebKit fires no change
+// after a touch).
+func TestTheSeekLandsOnlyAtItsChange(t *testing.T) { barScenario(t, 5) }
+
+// TestTheRailFollowsTheTrackPastAPreview pins the 2px rail, a phone's
+// progress where the seek is hidden, to the track's position at every tick
+// in either output, whatever preview the seek still holds: an input with no
+// change after it (a drag in a wider window that a resize to a phone's width
+// cut short) keeps the seek's thumb, and the rail painted with the thumb
+// stood still with it.
+func TestTheRailFollowsTheTrackPastAPreview(t *testing.T) { barScenario(t, 3) }
+
 // TestASeekLandsWhereItIsLetGoOnce pins that the bar's seek lands once, where
 // its value was let go: a drag under way seeks nothing, the lift of the
 // pointer that began it lands it, since WebKit fires no change after a touch
@@ -347,8 +363,10 @@ func TestADragEndsAtTheRetryAndOutlivesAPrimesCancel(t *testing.T) { barScenario
 // redraws once, its row and count line say why and its controls are
 // disabled, its Play sends no barrier while the skip is held, no snapshot
 // after redraws it again, the stored queue keeps the catalog's play, and the
-// skip goes on as it did.
-func TestADecodeFailureClosesTheAlbumThatStartedIt(t *testing.T) { barScenario(t, 7) }
+// skip goes on as it did, the source refused on that page to the end; and a
+// reload over the stored queue, a new page, restores the row with the same
+// source, which its Play asks the barrier for and plays again.
+func TestADecodeFailureClosesTheAlbumThatStartedIt(t *testing.T) { barScenario(t, 10) }
 
 // TestAFailedVariantIsThatSourceAlone pins the failure's key, a row's path and
 // its variant: a DSD row whose browser variant A failed has its album's Play

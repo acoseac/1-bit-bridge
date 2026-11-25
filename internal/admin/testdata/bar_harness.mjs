@@ -4765,6 +4765,81 @@ S.TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs = async () => {
   check("the bar's height as it renders is handed to what sits above it", !!watch && props["--np-bar-h"] === "152px", [!!watch, props]);
 };
 
+// The seek where it is shown, wider than 768px, lands as it always has: at
+// its change alone, never at an input or a pointer's lift, in either output.
+S.TestTheSeekLandsOnlyAtItsChange = async () => {
+  const r = await barPage();
+  r.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 1, of: 1 }), playing({ revision: 4 })));
+  r.s.on("POST", ROUTES.transport, async (e) => answer(recOf(e), playing({ revision: 4 })));
+  const seek = r.byClass("np-seek");
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  await settle();
+  let writes = 0;
+  let at = r.el.currentTime;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { writes += 1; at = v; }, configurable: true });
+  const down = () => seek.fire("pointerdown", { pointerId: 1, isPrimary: true, pointerType: "mouse" });
+  const up = () => seek.fire("pointerup", { pointerId: 1, isPrimary: true, pointerType: "mouse" });
+  down();
+  seek.value = "500";
+  seek.fire("input");
+  check("this browser: an input previews and seeks nothing", writes === 0, writes);
+  up();
+  check("this browser: the pointer's lift seeks nothing", writes === 0, writes);
+  seek.fire("change");
+  check("this browser: the change lands one seek, where the value was let go", writes === 1 && at === 100, [writes, at]);
+  await r.out.pick("bridge");
+  await settle();
+  const seeks = () => r.s.posts(ROUTES.transport).filter((e) => e.body?.command === "seek").map((e) => e.body.seconds);
+  down();
+  seek.value = "500";
+  seek.fire("input");
+  up();
+  await settle();
+  check("the bridge's player: an input and the pointer's lift send no seek", r.out.view().output === "bridge" && seeks().length === 0, [r.out.view().output, seeks()]);
+  seek.fire("change");
+  await settle();
+  check("the bridge's player: the change sends one seek, where the value was let go", JSON.stringify(seeks()) === "[150]", seeks());
+};
+
+// A preview no change has ended (a drag in a window wider than 768px that a
+// resize to a phone's width cut short, the seek hidden from under it) holds
+// nothing of the 2px rail, a phone's progress there: at each tick the rail
+// is where the track is, in either output.
+S.TestTheRailFollowsTheTrackPastAPreview = async () => {
+  const r = await pageRig();
+  r.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 1, of: 1 }), playing({ revision: 4 })));
+  const ticks = [];
+  globalThis.setInterval = (fn) => { ticks.push(fn); return 0; };
+  const np = await import(new URL("nowplaying.js", dirURL));
+  np.mount();
+  const bar = r.body.children.find((c) => c.attrs.id === "nowplaying");
+  const seek = findAll(bar, (n) => n.classList.contains("np-seek"))[0];
+  const rail = findAll(bar, (n) => n.classList.contains("np-rail"))[0];
+  const props = {};
+  rail.style = { setProperty: (k, v) => { props[k] = v; }, removeProperty: (k) => { delete props[k]; } };
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  await settle();
+  seek.fire("pointerdown", { pointerId: 1, isPrimary: true, pointerType: "mouse" });
+  seek.value = "900";
+  seek.fire("input");
+  r.el.currentTime = 50;
+  ticks[0]?.();
+  check("this browser: at the next tick the rail is where the track is", ticks.length === 1 && props["--np-progress"] === "25%", [ticks.length, props["--np-progress"]]);
+  r.el.currentTime = 100;
+  ticks[0]?.();
+  check("this browser: and it follows the track as it plays", props["--np-progress"] === "50%", props["--np-progress"]);
+  await r.out.pick("bridge");
+  await settle();
+  r.c.advance(20000);
+  ticks[0]?.();
+  const p = r.out.position();
+  check("the bridge's player: at the next tick the rail is where its track is",
+    r.out.view().output === "bridge" && p > 0 && props["--np-progress"] === `${(p / 300) * 100}%`,
+    [r.out.view().output, p, props["--np-progress"]]);
+};
+
 // pointer is a finger or a button on the seek: its pointer events, with the
 // value it moves the seek to between them, as a browser delivers them (a
 // pointer's move, then the input it makes).
@@ -5387,6 +5462,22 @@ S.TestADecodeFailureClosesTheAlbumThatStartedIt = async () => {
   check("the skip, let go, goes on as it did: through the gate, to the queue's end, nothing played",
     r.s.posts(ROUTES.switchOut).length === barriers + 1 && r.el.plays.length === plays && !r.audio.snapshot().playing && redraws === 1,
     [r.s.posts(ROUTES.switchOut).length - barriers, r.el.plays.length - plays, r.audio.snapshot().playing, redraws]);
+  check("on this page the source stays refused: the row reads why and the album's Play is disabled",
+    rowChips(view)[0] === "Not playable in a browser" && p.play?.disabled === true, [rowChips(view), p.play?.disabled]);
+  // A reload over the queue the page stored: the failures are the page's
+  // own, so the new page asks for the same source again.
+  const failedSrc = r.el.plays[0];
+  const st = pub({ revision: 5, silent: true });
+  const d = await reloaded((s) => s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), st)), st);
+  const restored = d.audio.snapshot();
+  check("the reload restores the row, paused, the same source on its element",
+    restored.track?.path === "Album/01.flac" && !restored.playing && d.el.src === failedSrc && d.el.plays.length === 0,
+    [restored.track?.path, restored.playing, d.el.src, failedSrc, d.el.plays]);
+  d.audio.toggle();
+  await settle();
+  check("its Play asks the barrier and plays that source again",
+    d.s.posts(ROUTES.switchOut).length === 1 && d.el.plays.length === 1 && d.el.plays[0] === failedSrc,
+    [d.s.posts(ROUTES.switchOut).length, d.el.plays, failedSrc]);
 };
 
 S.TestAFailedVariantIsThatSourceAlone = async () => {

@@ -74,53 +74,84 @@ func anyRule(rules []touchRule, sel, prop, value string) bool {
 	return false
 }
 
-// TestThePhoneBarShowsItsSeekItsTimesAndItsWords pins B1021's items 1 and 2
-// at the source: up to 768px the scrub row (the seek and both times) is a
-// row of the bar of its own, hidden by no rule there, its seek 44px tall;
-// up to 480px the words take a row the transport does not share, which no
-// rule up to 640px makes a third row there (a phone held sideways keeps two,
-// so the bar leaves the window room), and the bar's buttons up to 640px are
-// at least 44px square.
-func TestThePhoneBarShowsItsSeekItsTimesAndItsWords(t *testing.T) {
+// barAreas is the bar's grid-template-areas in rules, one string of cells a
+// row, the last rule that sets them winning.
+func barAreas(rules []touchRule) (areas string, rows []string) {
+	for _, r := range rules {
+		if r.selects(".npbar") {
+			for _, d := range strings.Split(r.decl, ";") {
+				if k, v, ok := strings.Cut(d, ":"); ok && strings.TrimSpace(k) == "grid-template-areas" {
+					areas = strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+	for _, m := range regexp.MustCompile(`"([^"]*)"`).FindAllStringSubmatch(areas, -1) {
+		rows = append(rows, m[1])
+	}
+	return areas, rows
+}
+
+// TestThePhoneBarShowsItsTimesAndItsWordsButNoSeek pins B1021's items 1 and
+// 2 at the source: up to 768px the scrub row is a row of the bar of its own,
+// the last, hidden by no rule there, its seek hidden (it lands only at its
+// change, which WebKit fires after no touch) and the elapsed and total times
+// at its two ends, read-only beside the 2px rail, which no rule hides up to
+// 768px and one hides from 769px, where the seek shows; up to 480px the words
+// take a row the transport does not share, the times' row last as from 481px
+// to 768px, which no rule up to 640px makes a third row there (a phone held
+// sideways keeps two, so the bar leaves the window room), and the bar's
+// buttons up to 640px are at least 44px square.
+func TestThePhoneBarShowsItsTimesAndItsWordsButNoSeek(t *testing.T) {
 	tablet := playerCSSBlocks(t, "(max-width: 768px)")
 	for _, r := range tablet {
 		if r.selects(".np-scrub") && r.declares("display", "none") {
-			t.Errorf("up to 768px a rule hides the scrub row (%s): a phone has no seek and no times", r.sel)
+			t.Errorf("up to 768px a rule hides the scrub row (%s): a phone has no times", r.sel)
 		}
 	}
 	if !anyRule(tablet, ".np-scrub", "grid-area", "scrub") || !anyRule(tablet, ".np-center", "display", "contents") {
 		t.Error("up to 768px the scrub row is not a row of the bar of its own (.np-center's contents, .np-scrub's grid area)")
 	}
-	if !anyRule(tablet, ".np-seek", "height", "44px") {
-		t.Error("up to 768px the seek is not 44px tall: a finger has nothing to land on")
+	if !anyRule(tablet, ".np-seek", "display", "none") {
+		t.Error("up to 768px the seek is shown: it lands only at its change, which WebKit fires after no touch, so a finger's seek would preview and never land")
+	}
+	if !anyRule(tablet, ".np-scrub", "justify-content", "space-between") {
+		t.Error("up to 768px the times are not at the scrub row's two ends, where the hidden seek leaves them side by side")
 	}
 	phone := playerCSSBlocks(t, "(max-width: 640px)")
+	narrow := playerCSSBlocks(t, "(max-width: 480px)")
+	for _, block := range [][]touchRule{tablet, phone, narrow} {
+		for _, r := range block {
+			if r.selects(".np-rail") && r.declares("display", "none") {
+				t.Errorf("a rule up to 768px hides the rail (%s): where the seek is hidden it is the bar's progress", r.sel)
+			}
+		}
+	}
+	if !anyRule(playerCSSBlocks(t, "(min-width: 769px)"), ".np-rail", "display", "none") {
+		t.Error("from 769px, where the seek shows, the rail is not hidden")
+	}
+	tabletAreas, tabletRows := barAreas(tablet)
+	if len(tabletRows) != 2 || tabletRows[len(tabletRows)-1] != "scrub scrub scrub" {
+		t.Errorf("up to 768px the times' row is not the bar's last (grid-template-areas %q)", tabletAreas)
+	}
 	for _, r := range phone {
 		if r.selects(".npbar") && strings.Contains(r.decl, "grid-template-areas") {
 			t.Errorf("up to 640px a rule gives the bar its rows (%s): a phone held sideways takes the three rows a narrow one needs", strings.TrimSpace(r.decl))
 		}
 	}
-	narrow := playerCSSBlocks(t, "(max-width: 480px)")
-	areas := ""
-	for _, r := range narrow {
-		if r.selects(".npbar") {
-			for _, d := range strings.Split(r.decl, ";") {
-				if k, v, ok := strings.Cut(d, ":"); ok && strings.TrimSpace(k) == "grid-template-areas" {
-					areas = v
-				}
-			}
-		}
-	}
-	rows := regexp.MustCompile(`"([^"]*)"`).FindAllStringSubmatch(areas, -1)
+	areas, rows := barAreas(narrow)
 	words := false
 	for _, row := range rows {
-		cells := strings.Fields(row[1])
-		if strings.Contains(row[1], "now") {
-			words = !strings.Contains(row[1], "ctl") && cells[0] == "now"
+		cells := strings.Fields(row)
+		if strings.Contains(row, "now") {
+			words = !strings.Contains(row, "ctl") && cells[0] == "now"
 		}
 	}
 	if len(rows) < 3 || !words {
-		t.Errorf("up to 480px the words do not take a row the transport leaves them (grid-template-areas %q)", strings.TrimSpace(areas))
+		t.Errorf("up to 480px the words do not take a row the transport leaves them (grid-template-areas %q)", areas)
+	}
+	if len(rows) == 0 || rows[len(rows)-1] != "scrub scrub scrub" {
+		t.Errorf("up to 480px the times' row is not the bar's last, as it is from 481px to 768px (grid-template-areas %q)", areas)
 	}
 	if !anyRule(phone, ".np-btn", "min-width", "44px") || !anyRule(phone, ".np-btn", "min-height", "44px") ||
 		!anyRule(phone, ".np-btn-sm", "min-width", "44px") || !anyRule(phone, ".np-btn-sm", "min-height", "44px") {
