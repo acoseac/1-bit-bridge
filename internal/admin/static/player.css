@@ -1060,7 +1060,8 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
    * modes you set once, not controls you reach for mid-track. */
   .np-btn-toggle { display: none; }
   /* The metadata column measured 41px at 375px: the title truncated to
-   * three characters, which is not a name — "Cold Six" rendered "Col…".
+   * three characters, which is not a name: an eight-letter title rendered
+   * as its first three and an ellipsis.
    * The dock's side insets, its horizontal padding and the column gap give
    * some back; and up to 480px the words take a row of their own (below).
    * Every button the bar holds is 44px square for a finger, and the mute
