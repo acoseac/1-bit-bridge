@@ -995,7 +995,8 @@ func TestAnInheritedSwitchLeavesTheWarningOfARowLostSinceTheReload(t *testing.T)
 // TestAnInheritedSwitchLeavesTheWarningOfAnInheritedBarrierStillUnresolved
 // pins that an operation another earlier document left, of the switch's pick
 // and unresolved, holds the warning too: the switch read back in a third
-// document, after a row of its own, leaves that barrier's unconfirmed.
+// document, after that document's lock-screen Stop, which sends nothing,
+// leaves that barrier's unconfirmed, it alone pending.
 func TestAnInheritedSwitchLeavesTheWarningOfAnInheritedBarrierStillUnresolved(t *testing.T) {
 	barScenario(t, 10)
 }
@@ -1029,7 +1030,48 @@ func TestAFailurePastItsRetryEndsAResumeWaitAfterAStartWithNoPermit(t *testing.T
 	barScenario(t, 6)
 }
 
-// TestASourceTheBrowserCannotUseEndsAResumeWait pins that a source the browser
-// cannot use ends a resume's wait too: its admission plays nothing of the
-// failed track, and the skip goes on through a barrier of its own.
-func TestASourceTheBrowserCannotUseEndsAResumeWait(t *testing.T) { barScenario(t, 5) }
+// TestASourceTheBrowserCannotUsePlaysNothingOnTheResumesAdmission pins that a
+// resume waiting as a source the browser cannot use fails is admitted only
+// to whether its skip goes on: its admission plays nothing of the failed
+// track, and the skip goes on through a barrier of its own.
+func TestASourceTheBrowserCannotUsePlaysNothingOnTheResumesAdmission(t *testing.T) {
+	barScenario(t, 5)
+}
+
+// TestAResumesRefusalAfterASourceTheBrowserCannotUseStillEndsItsSkip pins
+// what the queue does next, as before: the resume's barrier refused after its
+// source failed ends what this browser meant to play, so the skip's timer
+// asks no barrier and plays nothing of the next track.
+func TestAResumesRefusalAfterASourceTheBrowserCannotUseStillEndsItsSkip(t *testing.T) {
+	barScenario(t, 4)
+}
+
+// TestAResumesAdmissionAfterASourceTheBrowserCannotUseLetsItsSkipGoOn pins the
+// other order: the browser's own pause delivered, then its resume admitted
+// after its source failed, means to play again, so the skip's timer plays the
+// next track through a barrier of its own, the failed source never played.
+func TestAResumesAdmissionAfterASourceTheBrowserCannotUseLetsItsSkipGoOn(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestTheNextTrackAfterASkipStartedWhileAResumeWaitedRetriesItsFirstError pins
+// that the resume's wait goes with the track it was for: the skip starts the
+// next track while the resume's barrier is held, and that track's first
+// network error, after the old barrier's admission, retries once.
+func TestTheNextTrackAfterASkipStartedWhileAResumeWaitedRetriesItsFirstError(t *testing.T) {
+	barScenario(t, 4)
+}
+
+// TestASkipTimerBeforeAResumesAnswerPlaysNothingOfTheNextTrack pins the order
+// with the timer first: the skip takes the resume's place behind its barrier,
+// which ends what this browser meant to play, so nothing more is asked and
+// nothing of the next track plays.
+func TestASkipTimerBeforeAResumesAnswerPlaysNothingOfTheNextTrack(t *testing.T) { barScenario(t, 3) }
+
+// TestAResumeHeldAcrossTheStopAfterThreeUnplayableTracksStartsNothingAfterIt
+// pins that the stop after three unplayable tracks in a row ends a resume
+// waiting across it: its admission, then the failed row's removal, start no
+// successor and play nothing more.
+func TestAResumeHeldAcrossTheStopAfterThreeUnplayableTracksStartsNothingAfterIt(t *testing.T) {
+	barScenario(t, 4)
+}
