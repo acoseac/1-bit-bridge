@@ -541,13 +541,14 @@ pin red, an assertion each); the catalog's `play` marked in place again beside t
 decode failure's case red on the stored queue and both reload checks).
 
 In WebKit 27.2 at `a9ced775` (its code is `6ce45510`'s), headless, emulating an iPhone SE and
-an iPad Pro 11 by touch, at 320, 768, 769 and 834px: a track playing in this browser, and the
+an iPad Pro 11 by touch, at 320, 768, 769 and 834px (and 1024px for the preview case alone):
+a track playing in this browser, and the
 bridge's player's state, queue and frames from fixtures, every other route served by the bridge
 measured, which has no DAC. Up to 768px the range is not displayed and both times are, at the
 two ends of their row (its `justify-content` is `space-between`), in both outputs; at 769px the
-range shows, 134 by 16px, between the times. The 2px rail shows up to 768px and not at 769px,
-and follows playback: in this browser from 4.2% to 11.7% of 20 s while the audio's time read
-1.0 s, then 2.5 s; on the bridge's player from 3.72% to 4.22% of 300 s (11.2 s to 12.7 s)
+range shows, 134 by 16px, between the times, in both outputs. The 2px rail shows up to 768px and
+not at 769px, in both outputs, and follows playback: in this browser from 4.2% to 11.7% of 20 s
+(0.8 s to 2.3 s, painted at the last tick) while the audio's time read 1.0 s, then 2.5 s; on the bridge's player from 3.72% to 4.22% of 300 s (11.2 s to 12.7 s)
 while the elapsed time read 0:11, then 0:13, a label rounded to the second. At 834px, in both
 outputs, an input and then a `pointerup` wrote no seek and the change after them wrote one; a
 mouse drag wrote none during the drag and one at the change after its lift; a touch tap on the
@@ -595,9 +596,9 @@ carries this sentence the docs' check and the citation guard ran again.
 - The 834px tablet keeps the wider layout's 16px-tall seek, which a tap does not land, as on
   main, and its 32px and 40px bar buttons, the touch sizes the next PR takes up.
 - For the touch seek's own item:
-  - Wider than 768px a touch on the seek lands nothing in WebKit, as on main, the seek's code
-    being main's byte for byte (the 834px tablet's tap at three quarters of a 20 s track sent no
-    seek on main and one at `f1020508`).
+  - At 834px a touch tap on the seek lands nothing in WebKit, as on main, the seek's code being
+    main's byte for byte (the tap at three quarters of a 20 s track sent no seek on main and one
+    at `f1020508`); no other width above 768px and no touch drag was measured.
   - Main's seek keeps a preview's thumb after an input with no change after it (a touch in
     WebKit) until a later change, and paints no position on the thumb meanwhile; the rail no
     longer follows it.
