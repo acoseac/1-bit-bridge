@@ -192,13 +192,27 @@ func TestTheTabletBandEndsWhereTheContentBegins(t *testing.T) {
 	}
 }
 
-// TestNoNarrowGridKeepsAMinContentTrack pins B1021's narrow grids at the
+// TestNoNarrowGridKeepsAMinContentTrack pins B1021's narrow pages at the
 // source: Settings' one column up to 768px and Jobs' cards take minmax(0,
 // 1fr), where a 1fr track kept its widest item's minimum and ran the page
-// sideways, and up to 640px the stat cards take one full-width column.
+// sideways, and Settings' selects no wider than that column; up to 640px the
+// stat cards take one full-width column, a switch's badges lines of their own
+// under its words, and the duplicates' tier table scrolls inside its panel.
 func TestNoNarrowGridKeepsAMinContentTrack(t *testing.T) {
-	if !anyRule(mediaRulesOf(t, "static/app.css", "(max-width: 768px)"), ".settings .settings-layout", "grid-template-columns", "minmax(0, 1fr)") {
+	tablet := mediaRulesOf(t, "static/app.css", "(max-width: 768px)")
+	if !anyRule(tablet, ".settings .settings-layout", "grid-template-columns", "minmax(0, 1fr)") {
 		t.Error("up to 768px Settings' one column keeps a 1fr track's minimum")
+	}
+	if !anyRule(tablet, ".settings select", "max-width", "100%") {
+		t.Error("up to 768px a Settings select is as wide as its longest option")
+	}
+	phone := mediaRulesOf(t, "static/app.css", "(max-width: 640px)")
+	if !anyRule(phone, ".settings label.checkbox:has(> .prereq)", "grid-template-columns", "auto minmax(0, 1fr)") ||
+		!anyRule(phone, ".settings label.checkbox > .prereq", "grid-column", "2") || !anyRule(phone, ".settings label.checkbox > .recommended", "grid-column", "2") {
+		t.Error("up to 640px a switch's badges share its words' row and run the page sideways")
+	}
+	if !anyRule(phone, ".dupes-tier-table", "overflow-x", "auto") || !anyRule(phone, ".dupes-tier-table", "display", "block") {
+		t.Error("up to 640px the duplicates' tier table runs the page sideways")
 	}
 	if !anyRule(touchRulesOf(cssCommentRe.ReplaceAllString(readFile(t, "static/app.css"), "")), ".jobs-cards", "grid-template-columns", "minmax(0, 1fr)") {
 		t.Error("Jobs' cards keep a 1fr track's minimum")
