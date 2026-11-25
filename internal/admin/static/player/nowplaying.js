@@ -35,6 +35,12 @@ import { currentOutput, PHASE, WORDS, PROMISE, ROUTES, whyWord, holdWord } from 
 let bar = null;
 let refs = {};
 
+// What a seek lands on now, which render sets: the output and the occurrence
+// heard ("bridge", its anchor's occurrence and entry; "browser", the loaded
+// track), or null where no seek is offered.
+let seekOn = null;
+const sameSeek = (a, b) => !!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]);
+
 /** Human name for each repeat mode, used as the button's accessible name. */
 const REPEAT_LABEL = { off: "Repeat off", all: "Repeat all", one: "Repeat this track" };
 
@@ -80,15 +86,28 @@ export function mount() {
     class: "np-seek",
     attrs: { type: "range", min: "0", max: "1000", value: "0", "aria-label": "Seek" },
   });
+  // The seek lands once, where its value was let go (B1021): a key's at its
+  // change; a drag's at the lift of the pointer that began it, since WebKit
+  // fires no change after a touch, and never at a change while that pointer
+  // is down, another pointer's lift, or a cancel, which puts the thumb back.
+  // A drag lands only on what it was begun on (render's seekOn): the output
+  // and the occurrence heard, while seeking is offered.
   let scrubbing = false;
-  refs.seek.addEventListener("input", () => { scrubbing = true; setProgress(refs.seek.value / 1000); });
-  // The seek lands once, where the value was let go: at its change, or at the
-  // lift of the pointer that moved it (B1021): WebKit fires no change after a
-  // touch moves the value, which left the seek unsent and the thumb held.
-  const commit = () => {
+  let drag = null;
+  refs.seek.addEventListener("pointerdown", (e) => {
+    if (drag && e.isPrimary !== true) return;
+    drag = { pointer: e.pointerId, on: seekOn, lost: !seekOn };
+  });
+  refs.seek.addEventListener("input", () => {
+    if (drag?.lost) return;
+    scrubbing = true;
+    setProgress(refs.seek.value / 1000);
+  });
+  const land = () => {
     if (!scrubbing) return;
     scrubbing = false;
     const o = out()?.view();
+    if (!seekOn) return;
     if (bridgeChosen(o)) {
       const d = o.state?.track?.duration || 0;
       if (d > 0) out().command("seek", { seconds: (refs.seek.value / 1000) * d });
@@ -97,8 +116,34 @@ export function mount() {
       if (s.duration > 0) audio.seek((refs.seek.value / 1000) * s.duration);
     }
   };
-  for (const ev of ["change", "pointerup", "pointercancel"]) refs.seek.addEventListener(ev, commit);
+  refs.seek.addEventListener("change", () => { if (!drag) land(); });
+  const lift = (e, lands) => {
+    if (drag?.pointer !== e.pointerId) return;
+    const lost = drag.lost;
+    drag = null;
+    if (lands && !lost) land();
+    else putBack();
+  };
+  // The document hears a lift away from the seek too (a mouse let go beside
+  // it); a capture of the pointer stopped WebKit's slider following a drag.
+  for (const target of [refs.seek, document]) {
+    target.addEventListener("pointerup", (e) => lift(e, true));
+    target.addEventListener("pointercancel", (e) => lift(e, false));
+  }
   refs.isScrubbing = () => scrubbing;
+  // A drag whose occurrence went, or whose seek is no longer offered, ends
+  // there: nothing it lets go of lands, even once seeking is offered again.
+  refs.followSeek = () => {
+    if (drag && !drag.lost && !sameSeek(drag.on, seekOn)) {
+      drag.lost = true;
+      putBack();
+    }
+  };
+  /** The preview dropped, the thumb back where the track is. */
+  function putBack() {
+    scrubbing = false;
+    paintPosition(out()?.view() || null);
+  }
 
   refs.shuffle = iconButton("Shuffle", "shuffle", () => {
     if (!bridgeChosen(out()?.view())) audio.setShuffle(!audio.snapshot().shuffle);
@@ -440,6 +485,11 @@ function setVolumeFill(frac) {
 function tick() {
   const o = out()?.view();
   out()?.tick();
+  paintPosition(o);
+}
+
+/** The times, the seek and the rail from where the track is now. */
+function paintPosition(o) {
   if (bridgeChosen(o)) {
     tickBridge(o);
     return;
@@ -485,9 +535,11 @@ function tickBridge(o) {
 function render() {
   if (!bar) return;
   const o = out()?.view() || null;
+  seekOn = null;
   if (bridgeChosen(o)) renderBridge(o);
   else renderBrowser(audio.snapshot(), o);
   if (!refs.menu.hidden) paintOutputButton(o);
+  refs.followSeek();
 }
 
 function renderBrowser(s, o) {
@@ -542,6 +594,7 @@ function renderBrowser(s, o) {
   // Disabling the control is the honest move: a scrubber bound to an
   // unknown duration is a control that lies.
   setDisabled(refs.seek, !s.seekable);
+  if (s.seekable) seekOn = ["browser", s.track];
   refs.seek.title = "";
   if (!s.seekable) {
     refs.total.textContent = "—";
@@ -585,7 +638,9 @@ function renderBridge(o) {
   setDisabled(refs.shuffle, true);
 
   const dsd = t ? (t.codec === "DSD" || t.bits === 1) : false;
-  setDisabled(refs.seek, !(st?.seek && can("seek")));
+  const seekable = !!(st?.seek && can("seek"));
+  setDisabled(refs.seek, !seekable);
+  if (seekable) seekOn = ["bridge", st.anchor?.occurrence, t?.entry];
   refs.seek.title = dsd ? WORDS.noSeekDSD : "";
 
   paintPanel(o);

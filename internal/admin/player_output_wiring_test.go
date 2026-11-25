@@ -871,16 +871,17 @@ func cssMediaBlocks(css, query string) []string {
 // forbidden as an input by the design: at, a capture's time, never the
 // clock's offset (M1: the offset is GET now's X-Bridge-Clock samples
 // alone); token, the queue's token, never what the queue is read by (G4:
-// queueRev is); anchor.id and anchor.occurrence, the publisher's identity
-// of an anchor, which moves only where its position does: the bar
-// extrapolates from the anchor's seconds, time and advance, for the entry
-// it names. The list is exact: a field added to it without a reason, or
-// left on it once the bar reads it, fails the guard.
+// queueRev is); anchor.id, the publisher's identity of an anchor, which
+// moves only where its position does: the bar extrapolates from the
+// anchor's seconds, time and advance, for the entry it names. The bar reads
+// anchor.occurrence for one thing, whether a drag of its seek is still on
+// the occurrence it was made on (B1021). The list is exact: a field added
+// to it without a reason, or left on it once the bar reads it, fails the
+// guard.
 var barStateExempt = map[string]string{
-	"at":                "M1: a capture's time is never the clock's offset",
-	"token":             "G4: the queue is read against queueRev, never its token",
-	"anchor.id":         "the publisher's identity of an anchor, which moves only with its position",
-	"anchor.occurrence": "the publisher's identity of an anchor's occurrence, which its entry names to the bar",
+	"at":        "M1: a capture's time is never the clock's offset",
+	"token":     "G4: the queue is read against queueRev, never its token",
+	"anchor.id": "the publisher's identity of an anchor, which moves only with its position",
 }
 
 // barSources are the bar's modules whose reads the guard resolves.

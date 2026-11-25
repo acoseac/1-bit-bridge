@@ -4844,6 +4844,7 @@ S.TestADragLandsOnlyOnTheBridgesOccurrenceItWasMadeOn = async () => {
   const all = latest.commands;
   publish({ revision: 4, commands: all.filter((c) => c !== "seek") });
   await settle();
+  finger.move(700);
   publish({ revision: 5, commands: all });
   await settle();
   await lift();
@@ -4856,6 +4857,7 @@ S.TestADragLandsOnlyOnTheBridgesOccurrenceItWasMadeOn = async () => {
   drag(500);
   publish({ revision: 6, anchor: { id: 5, occurrence: 2, entry: 11, seconds: 0, at: new Date(T0).toISOString(), advancing: true } });
   await settle();
+  finger.move(700);
   await lift();
   check("the same entry heard again while the finger was down: its lift seeks nothing", JSON.stringify(seeks()) === "[150,75]", seeks());
   drag(400);
@@ -4900,11 +4902,13 @@ S.TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn = async () => {
   r.audio.playQueue([flac(3)], 0);
   r.el.metadata(200);
   await settle();
+  finger.move(700);
   await lift();
   check("another track loaded while the finger was down: its lift and change seek nothing", writes === 1, [writes, at]);
   drag(500);
   await r.out.pick("bridge");
   await settle();
+  finger.move(700);
   await lift();
   const bridgeSeeks = r.s.posts(ROUTES.transport).filter((e) => e.body?.command === "seek").length;
   check("the output moved to the bridge's player while the finger was down: nothing seeks", writes === 1 && bridgeSeeks === 0 && r.out.view().output === "bridge",

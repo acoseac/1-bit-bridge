@@ -231,11 +231,12 @@ export function bridgeWayChip(track) {
  * answers whether the row plays, and the chip it carries when it does not,
  * or the way it plays on the bridge.
  *
- * A row no browser decodes plays here where the queue plays it, by its fresh
- * variant (resolvePlayable), so the row, the album's count line and its
- * controls agree with what Play does. One that does not says, beside the
- * browser's words, what the bridge's player does with it, by its catalog way
- * (B1021): converted is said so, never bit-exact.
+ * A row plays here where the queue plays it (resolvePlayable: its own file
+ * this browser's decoder takes, its fresh variant, or an engine-dependent
+ * attempt), so the row, the album's count line and its controls agree with
+ * what Play does. One that does not says why, and beside it what the
+ * bridge's player does with it, by its catalog way (B1021): converted is said
+ * so, never bit-exact.
  */
 export function playFor(track, output) {
   const b = track?.bridge;
@@ -244,11 +245,11 @@ export function playFor(track, output) {
     if (b.way === "none") return { playable: false, chip: bridgeWhy(b.reason), why: true };
     return { playable: true, chip: bridgeWayChip(track), why: false };
   }
-  const playable = !track?.play || track.play.kind !== "none" || resolvePlayable(track, () => "") !== null;
+  const playable = resolvePlayable(track, () => "") !== null;
   if (playable) return { playable, chip: "", why: false };
   const way = b && b.way !== "none" ? bridgeWayChip(track) : null;
   const there = way === null ? "" : ` · the bridge's player plays it${way ? ` (${way})` : ""}`;
-  return { playable, chip: unplayableReason(track) + there, why: true };
+  return { playable, chip: (unplayableReason(track) || "Not playable in a browser") + there, why: true };
 }
 
 /**
