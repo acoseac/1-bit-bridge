@@ -920,7 +920,16 @@ class El {
   }
   contains(n) { for (let x = n; x; x = x.parentNode) if (x === this) return true; return false; }
   get isConnected() { let x = this; while (x.parentNode) x = x.parentNode; return x === globalThis.document?.body; }
-  querySelector(sel) { const tag = sel.toUpperCase(); const walk = (n) => { for (const c of n.children) { if (c.tagName === tag) return c; const f = walk(c); if (f) return f; } return null; }; return walk(this); }
+  // A tag or a class (".track"), in document order, as far as the modules the
+  // cases load ask.
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  querySelectorAll(sel) {
+    const want = sel.startsWith(".") ? (c) => c.classList.contains(sel.slice(1)) : (c) => c.tagName === sel.toUpperCase();
+    const out = [];
+    const walk = (n) => { for (const c of n.children) { if (want(c)) out.push(c); walk(c); } };
+    walk(this);
+    return out;
+  }
   closest() { return null; }
 }
 function textNode(s) { const t = new El("#text"); t.own = String(s); return t; }
@@ -3613,6 +3622,959 @@ S.TestAStopLetsGoOfAStartWaitingOnItsBarrier = async () => {
   check("a row played after the Stop plays, through a barrier of its own",
     r.s.posts(ROUTES.switchOut).length === 3 && !r.el.paused && r.el.plays.length === plays + 1 && /09\.flac/.test(r.el.plays.at(-1) || "") && s.track?.path === "Album/09.flac",
     [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.el.plays.slice(plays), s.track?.path]);
+};
+
+// ---- A reader's action while a switch to this browser is outstanding ----
+//
+// The switch to this browser takes the bridge's queue and plays it only where
+// the reader has done nothing to playback in this browser since it was sent:
+// a Stop, a Pause or a row played meanwhile is what the browser keeps, and a
+// row played in a document that reads an earlier one's switch back is too. A
+// switch to the bridge refused, or refused with nothing changed, resumes
+// nothing past the reader's Next. And a resume of the browser's own waiting on
+// its barrier plays nothing a cancel or an error's retry would start.
+
+// albums is the library the cases' album pages show, by id.
+const albums = new Map();
+
+// libraryRows renders the shipped views.js's album page over tracks, from the
+// modules at base, and returns its rows' title buttons (the view on .view):
+// the browser's row, which plays its track on the output chosen (playOn),
+// where the bar's queue panel, hidden while this browser is chosen, drives the
+// bridge. Its fetch answers the albums' details and nothing else.
+async function libraryRows(tracks, { id = "a1", base = dirURL } = {}) {
+  albums.set(id, tracks);
+  globalThis.fetch = async (url) => {
+    const m = /^\/api\/player\/albums\/([^?]+)/.exec(String(url));
+    const t = m ? albums.get(decodeURIComponent(m[1])) : null;
+    const body = t ? { album: { id: m[1], title: "Album", albumArtist: "Artist", artistId: "" }, tracks: t, variants: null, release: null } : {};
+    return { ok: true, status: 200, json: async () => body };
+  };
+  document.title = "Player";
+  const views = await import(new URL("views.js", base));
+  const view = document.createElement("main");
+  await views.renderAlbum(view, { id, gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
+  const rows = findAll(view, (n) => n.classList.contains("track-title"));
+  check(`the album page lists its ${tracks.length} rows`, rows.length === tracks.length, rows.length);
+  rows.view = view;
+  return rows;
+}
+
+// theConsole is the console a switch to this browser meets, keeping its
+// records as serve's control does: each tab's last operation alone, so that a
+// read back of an older one answers operation_gone, and the eight most recent,
+// which every publication it makes carries, their handovers left out (k.pub(o)
+// is its latest publication, k.publish(st) a new one). routes(s) puts its
+// routes on a connection, a reload's too. Its first barrier (k.setup) is lost
+// while it runs, read back running at revision 38; the switch that takes the
+// bridge's queue, admitted next, ends that barrier's unsent steps (cancelled)
+// and runs to done, its silence 40, handing over 09.flac playing, which every
+// publication from then on holds as a one-track queue, paused: its answer
+// waits for k.held, or, with `lost`, is lost, and a read back of it waits for
+// k.readBack. Each later barrier runs to done at a revision above the
+// switch's: its answer waits for k.hold where set (once) and, with
+// `lostAfter`, is lost, and a read back of it waits for k.backHold; with
+// k.stuck (once) it is still running as its answer is lost, its admission
+// published above the switch's silence too. A read back of a sequence in
+// k.unreachable fails once, as a dropped connection does. k.revs records the
+// revisions that history ran at.
+function theConsole({ lost = false, lostAfter = false } = {}) {
+  const k = { held: gate(), readBack: { p: Promise.resolve() }, backHold: { p: Promise.resolve() }, hold: null,
+    unreachable: new Set(), setup: null, switched: null, revs: { running: 0, switched: 0, after: [], stuck: 0 } };
+  const last = new Map();
+  const recent = [];
+  const keep = (e, rec) => {
+    last.set(e.body.op.tab, rec);
+    recent.push(rec);
+    if (recent.length > 8) recent.shift();
+    return rec;
+  };
+  const summaries = () => recent.map((r) => ({ ...r, handover: null }));
+  const handover = { tracks: [{ id: "x9", path: "Album/09.flac", track: flac(9) }], selected: 0, position: 0, playing: true };
+  let rev = 38;
+  let queue = {};
+  k.pub = (o = {}) => pub({ revision: rev, silent: true, ...queue, ...o, operations: summaries() });
+  k.publish = (st) => { rev += 1; return { ...st, revision: rev, operations: summaries() }; };
+  k.routes = (s) => {
+    s.on("POST", ROUTES.switchOut, async (e) => {
+      if (!k.setup) {
+        k.setup = keep(e, recOf(e, { kind: "switch-out", status: "running", effect: "none", sent: 0, last: "" }));
+        return "lost";
+      }
+      if (e.body.take) {
+        Object.assign(k.setup, { status: "cancelled", sent: 0, of: 1, last: "" });
+        rev = 40;
+        k.revs.switched = rev;
+        queue = { transport: "paused", length: 1, selected: 9, track: { entry: 9, path: "Album/09.flac", named: true, title: "T9", artist: "", album: "",
+          codec: "FLAC", bits: 16, rateHz: 44100, channels: 2, duration: 200 } };
+        k.switched = keep(e, recOf(e, { kind: "switch-out", silence: rev, handover }));
+        const st = k.pub();
+        if (lost) return "lost";
+        await k.held.p;
+        return answer(k.switched, st);
+      }
+      if (k.stuck) {
+        // Still running as its answer is lost: its Pause not answered yet.
+        k.stuck = false;
+        rev += 1;
+        k.revs.stuck = rev;
+        keep(e, recOf(e, { kind: "switch-out", status: "running", effect: "none", sent: 0, last: "" }));
+        return "lost";
+      }
+      rev += 1;
+      k.revs.after.push(rev);
+      const rec = keep(e, recOf(e, { kind: "switch-out", silence: rev }));
+      const st = k.pub();
+      const h = k.hold;
+      k.hold = null;
+      if (h) await h.p;
+      return lostAfter ? "lost" : answer(rec, st);
+    });
+    s.on("GET", ROUTES.operation, async (e) => {
+      const seq = Number(e.query.get("seq"));
+      if (k.unreachable.delete(seq)) return "lost";
+      const rec = last.get(e.query.get("tab"));
+      if (!rec || rec.seq !== seq) return { status: 404, body: { error: "operation_gone", epoch: E1, revision: rev } };
+      if (rec === k.setup) k.revs.running = rev;
+      else await (rec === k.switched ? k.readBack : k.backHold).p;
+      return { body: { epoch: E1, revision: rev, record: rec } };
+    });
+  };
+  return k;
+}
+
+// afterTheSwitch checks the console's history past the switch: every barrier
+// it admitted since ran at a revision above the switch's silence.
+function afterTheSwitch(k) {
+  check("the console's history: each later barrier's silence above the switch's",
+    k.revs.after.length > 0 && k.revs.after.every((x) => x > k.revs.switched), k.revs);
+}
+
+// switchOutstanding is gatedPlaying beside theConsole, o the options of both:
+// a row of the library played, its barrier lost while the console runs it, so
+// the bar is unconfirmed with this browser chosen and track 1 playing on;
+// then, unless o.pick is false, this browser picked again, which sends the
+// switch that takes the bridge's queue (r.switchSeq; its promise k.p).
+async function switchOutstanding(o = {}) {
+  const r = await gatedPlaying(o);
+  const k = theConsole(o);
+  k.routes(r.s);
+  (await libraryRows([flac(5), flac(6)], { id: "a5" }))[0].click();
+  await settle();
+  const v = r.out.view();
+  check("a row's barrier lost: unconfirmed, this browser chosen, track 1 playing on",
+    v.phase === PHASE.unconfirmed && v.output === "browser" && !r.el.paused && r.audio.snapshot().track?.path === "Album/01.flac",
+    [v.phase, v.output, r.el.paused, r.audio.snapshot().track?.path]);
+  if (o.pick === false) return { r, k };
+  k.p = r.out.pick("browser");
+  r.switchSeq = r.out.identity().seq;
+  await settle();
+  check("the switch to this browser sent to take the bridge's queue, unanswered",
+    r.s.posts(ROUTES.switchOut).some((e) => e.body.take === true && e.body.op.seq === r.switchSeq) && r.out.view().phase === (o.lost ? PHASE.unconfirmed : PHASE.toBrowser),
+    [r.s.posts(ROUTES.switchOut).map((e) => [e.body.take, e.body.op.seq]), r.out.view().phase]);
+  check("the console's history: the setup barrier's running read back at a revision below the switch's silence",
+    k.revs.running > 0 && k.revs.running < k.revs.switched, k.revs);
+  return { r, k };
+}
+
+// answered lets the switch's answer go and waits for it.
+async function answered(k) {
+  k.held.open();
+  await k.p;
+  await settle();
+}
+
+// stopLeftAlone checks what the Stop left once the switch has ended: nothing
+// of the handover taken or played, the queue empty at no track, the element
+// paused, and this browser the output, in its own phase, nothing said.
+function stopLeftAlone(r, how) {
+  const s = r.audio.snapshot();
+  const v = r.out.view();
+  check(`${how}: nothing taken or played, the queue empty as the Stop left it, silent`,
+    !r.el.plays.some((src) => /09\.flac/.test(src)) && s.queue.length === 0 && s.index === -1 && r.el.paused && !s.playing,
+    [r.el.plays, s.queue.length, s.index, r.el.paused, s.playing]);
+  check(`${how}: this browser the output, in its own phase, nothing said`,
+    v.output === "browser" && v.phase === PHASE.browser && v.line === "", [v.output, v.phase, v.line]);
+}
+
+// pausedOnTrack1 checks that nothing of the handover was taken or played and
+// that this browser's own queue is paused on track 1.
+function pausedOnTrack1(r, how) {
+  const s = r.audio.snapshot();
+  check(`${how}: nothing taken or played, this browser's queue paused on track 1`,
+    !r.el.plays.some((src) => /09\.flac/.test(src)) && s.queue.length === 3 && s.index === 0 && s.track?.path === "Album/01.flac" && r.el.paused && !s.playing,
+    [r.el.plays, s.queue.length, s.index, s.track?.path, r.el.paused, s.playing]);
+}
+
+S.TestAStopWhileASwitchToThisBrowserIsOutstandingTakesNothing = async () => {
+  const { r, k } = await switchOutstanding();
+  session.handlers.stop();
+  await settle();
+  await answered(k);
+  stopLeftAlone(r, "the switch answered done beside a silent bridge after the lock screen's Stop");
+};
+
+S.TestAPauseWhileASwitchToThisBrowserIsOutstandingTakesNothing = async () => {
+  const { r, k } = await switchOutstanding({ bar: true });
+  session.handlers.pause();
+  await settle();
+  await answered(k);
+  pausedOnTrack1(r, "the switch answered done beside a silent bridge after the lock screen's Pause");
+  const v = r.out.view();
+  check("this browser the output, in its own phase, nothing said", v.output === "browser" && v.phase === PHASE.browser && v.line === "", [v.output, v.phase, v.line]);
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  r.find("Play")?.click();
+  await settle();
+  check("the bar's Play then plays track 1, through a barrier of its own",
+    r.s.posts(ROUTES.switchOut).length === posts + 1 && !r.el.paused && /01\.flac/.test(r.el.plays.at(-1) || "") && r.audio.snapshot().track?.path === "Album/01.flac",
+    [r.s.posts(ROUTES.switchOut).length - posts, r.el.paused, r.el.plays]);
+};
+
+S.TestARowWhileASwitchToThisBrowserIsOutstandingPlaysAndTakesNothing = async () => {
+  const { r, k } = await switchOutstanding();
+  const rows = await libraryRows([flac(7), flac(8)], { id: "a7" });
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  rows[1].click();
+  await settle();
+  const sent = r.s.posts(ROUTES.switchOut);
+  check("the library's row plays through a barrier of its own, 08.flac selected and playing",
+    sent.length === posts + 1 && sent.at(-1).body.take === false && !r.el.paused && r.audio.snapshot().track?.path === "Album/08.flac" && /08\.flac/.test(r.el.plays.at(-1) || ""),
+    [sent.length - posts, sent.at(-1)?.body.take, r.el.paused, r.audio.snapshot().track?.path, r.el.plays]);
+  await answered(k);
+  const s = r.audio.snapshot();
+  const v = r.out.view();
+  check("the switch answered done beside a silent bridge after the row: nothing taken or played, the row's album playing on",
+    !r.el.plays.some((src) => /09\.flac/.test(src)) && s.queue.length === 2 && s.index === 1 && s.track?.path === "Album/08.flac" && !r.el.paused && s.playing,
+    [r.el.plays, s.queue.length, s.index, s.track?.path, r.el.paused, s.playing]);
+  check("this browser the output, in its own phase, nothing said", v.output === "browser" && v.phase === PHASE.browser && v.line === "", [v.output, v.phase, v.line]);
+};
+
+S.TestTheSwitchsLateAnswerLeavesThePhaseARowsLostBarrierSet = async () => {
+  // The console runs the switch to done and holds its answer, then admits the
+  // row's barrier at a higher revision and runs it, its answer lost.
+  const { r, k } = await switchOutstanding({ lostAfter: true });
+  const rows = await libraryRows([flac(7), flac(8)], { id: "a7" });
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  rows[0].click();
+  await settle();
+  check("the row's barrier lost once the console ran it: unconfirmed again, track 1 playing on",
+    r.s.posts(ROUTES.switchOut).length === posts + 1 && r.out.view().phase === PHASE.unconfirmed && r.out.view().line === WORDS.unconfirmed &&
+      !r.el.paused && r.audio.snapshot().track?.path === "Album/01.flac",
+    [r.s.posts(ROUTES.switchOut).length - posts, r.out.view().phase, r.out.view().line, r.el.paused, r.audio.snapshot().track?.path]);
+  await answered(k);
+  const s = r.audio.snapshot();
+  const v = r.out.view();
+  check("the switch's late answer: nothing taken or played, track 1 playing on",
+    !r.el.plays.some((src) => /09\.flac/.test(src)) && s.queue.length === 3 && s.track?.path === "Album/01.flac" && !r.el.paused,
+    [r.el.plays, s.queue.length, s.track?.path, r.el.paused]);
+  check("this browser the output, the phase and the line as the row's lost barrier left them",
+    v.output === "browser" && v.phase === PHASE.unconfirmed && v.line === WORDS.unconfirmed, [v.output, v.phase, v.line]);
+};
+
+S.TestTheSwitchsAnswerAfterTheBridgePlaysAgainSaysSoAndTakesNothing = async () => {
+  const { r, k } = await switchOutstanding();
+  session.handlers.pause();
+  await settle();
+  r.frame(k.publish(playing()));
+  await settle();
+  await answered(k);
+  pausedOnTrack1(r, "the bridge playing again before the switch's answer, after the lock screen's Pause");
+  const v = r.out.view();
+  check("this browser the output, in its own phase, saying the bridge plays again",
+    v.output === "browser" && v.phase === PHASE.browser && v.line === WORDS.bridgeAgain, [v.output, v.phase, v.line]);
+};
+
+S.TestAPausesEventAfterThePickOfThisBrowserLetsItsHandoverPlay = async () => {
+  // The Pause is the reader's action before the switch was sent, and its
+  // pause event, which comes after, is no action of the reader's.
+  const { r, k } = await switchOutstanding({ pick: false });
+  let events = 0;
+  r.el.addEventListener("pause", () => { events += 1; });
+  session.handlers.pause();
+  k.p = r.out.pick("browser");
+  check("the lock screen's Pause, then the pick of this browser before the Pause's event: the switch sent",
+    events === 0 && r.el.paused && r.s.posts(ROUTES.switchOut).some((e) => e.body.take === true), [events, r.el.paused, r.s.posts(ROUTES.switchOut).map((e) => e.body.take)]);
+  await settle();
+  check("the Pause's event came after the switch was sent", events === 1, events);
+  await answered(k);
+  const s = r.audio.snapshot();
+  check("the switch answered done beside a silent bridge: the handover taken, its 09.flac playing, once",
+    r.el.plays.filter((src) => /09\.flac/.test(src)).length === 1 && s.queue.length === 1 && s.track?.path === "Album/09.flac" && !r.el.paused,
+    [r.el.plays, s.queue.length, s.track?.path, r.el.paused]);
+};
+
+S.TestASeekOrAnAddWhileASwitchToThisBrowserIsOutstandingLeavesItsHandoverToPlay = async () => {
+  // None of these changes what plays, so the switch's answer still takes the
+  // bridge's queue in place of what they left, as it did before.
+  const { r, k } = await switchOutstanding({ bar: true });
+  const rows = await libraryRows([flac(7)], { id: "a7" });
+  findAll(rows.view, (n) => n.tagName === "BUTTON" && n.textContent === "Add to queue")[0]?.click();
+  session.handlers.seekto({ seekTime: 10 });
+  const vol = r.byClass("np-vol");
+  vol.value = "50";
+  vol.fire("input");
+  r.find("Shuffle")?.click();
+  r.find("Repeat off")?.click();
+  const s0 = r.audio.snapshot();
+  check("an album added, a seek, the level, shuffle and repeat while the switch is outstanding",
+    s0.queue.length === 4 && r.el.currentTime === 10 && r.el.volume === 0.5 && s0.shuffle && s0.repeat === "all" && !r.el.paused,
+    [s0.queue.length, r.el.currentTime, r.el.volume, s0.shuffle, s0.repeat, r.el.paused]);
+  await answered(k);
+  const s = r.audio.snapshot();
+  check("the switch answered done beside a silent bridge: the handover taken, its 09.flac playing, once",
+    r.el.plays.filter((src) => /09\.flac/.test(src)).length === 1 && s.queue.length === 1 && s.track?.path === "Album/09.flac" && !r.el.paused,
+    [r.el.plays, s.queue.length, s.track?.path, r.el.paused]);
+};
+
+S.TestAStopBeforeTheSwitchsLostAnswerIsReadBackTakesAndStartsNothing = async () => {
+  const { r } = await switchOutstanding({ lost: true });
+  session.handlers.stop();
+  await settle();
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  r.c.advance(READ_BACK_MS);
+  r.out.tick();
+  await settle();
+  const backs = r.s.gets(ROUTES.operation).map((e) => Number(e.query.get("seq")));
+  check("the switch's record read back done after the Stop", backs.includes(r.switchSeq), backs);
+  check("no barrier asked for its handover", r.s.posts(ROUTES.switchOut).length === posts, r.s.posts(ROUTES.switchOut).length - posts);
+  stopLeftAlone(r, "read back done after the lock screen's Stop");
+};
+
+// reloaded is this tab loaded again over the same session storage: every
+// shipped module a fresh instance, from a copy of their directory, as a new
+// document has them; a console connection of its own, over the console the
+// case's routes keep, its GET now answering st; the gate wired as boot.js
+// wires it; and the stream's first frame st.
+async function reloaded(routes, st) {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const os = await import("node:os");
+  const { fileURLToPath, pathToFileURL } = await import("node:url");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bar-reload-"));
+  process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.cpSync(fileURLToPath(dirURL), dir, { recursive: true });
+  const base = pathToFileURL(dir + path.sep).href;
+  const p = page();
+  const o = await import(new URL("output.js", base));
+  const audio = await import(new URL("audio.js", base));
+  audio.init();
+  const c = clock();
+  const s = server(c);
+  s.on("GET", ROUTES.now, async () => ({ body: st, headers: { [CLOCK_HEADER]: new Date(c.now()).toISOString() } }));
+  s.on("GET", ROUTES.queue, async () => ({ body: { epoch: st.epoch, readAt: st.revision, queueRev: st.queueRev, token: 1, selected: 0, entries: [] } }));
+  routes(s);
+  const b = { handover: audio.handover, hasQueue: audio.hasQueue, suspend: audio.suspend, resume: audio.resume, take: audio.take, start: audio.start, mediaSession: audio.setMediaSession };
+  const out = o.createOutput(env(s, c, b));
+  o.installOutput(out);
+  audio.setStartGate(out.gateStart, out.cancelStarts);
+  audio.setContinueGate(out.gateContinue);
+  out.streamOpen(1);
+  out.frame(JSON.stringify(st), 1);
+  await settle();
+  return { ...p, audio, el: p.audios[0], s, c, out, base };
+}
+
+S.TestAStopBeforeAReloadIsNotSeenAndTheMoveComesBackPaused = async () => {
+  // What this change leaves as it was: the reader's generation is the
+  // document's own, so the reload's read back of the switch knows nothing of
+  // the Stop made before it.
+  const { r, k } = await switchOutstanding();
+  session.handlers.stop();
+  await settle();
+  const tab = r.out.identity().tab;
+  const d = await reloaded(k.routes, k.pub());
+  const backs = d.s.gets(ROUTES.operation).filter((e) => e.query.get("tab") === tab).map((e) => Number(e.query.get("seq")));
+  check("the reload reads the switch back by its tab's identity", backs.includes(r.switchSeq), backs);
+  const s = d.audio.snapshot();
+  check("and takes the bridge's queue back paused: 09.flac alone at index 0, nothing played",
+    s.queue.length === 1 && s.index === 0 && s.track?.path === "Album/09.flac" && d.el.plays.length === 0 && d.el.paused && !s.playing,
+    [s.queue.length, s.index, s.track?.path, d.el.plays, d.el.paused, s.playing]);
+  check("nothing asked of the gate, the bar saying to press Play",
+    d.s.posts(ROUTES.switchOut).length === 0 && d.out.view().phase === PHASE.browser && d.out.view().line === WORDS.pressPlay,
+    [d.s.posts(ROUTES.switchOut).length, d.out.view().phase, d.out.view().line]);
+};
+
+S.TestARowPlayedAfterAReloadStaysWhenTheMoveIsReadBack = async () => {
+  const { r, k } = await switchOutstanding();
+  k.readBack = gate();
+  const d = await reloaded(k.routes, k.pub());
+  const backs = d.s.gets(ROUTES.operation).map((e) => Number(e.query.get("seq")));
+  check("the reload asks for the switch's record, its answer held, unconfirmed meanwhile",
+    backs.includes(r.switchSeq) && d.out.view().phase === PHASE.unconfirmed, [backs, d.out.view().phase]);
+  const rows = await libraryRows([flac(7), flac(8)], { id: "a7", base: d.base });
+  rows[0].click();
+  await settle();
+  const sent = d.s.posts(ROUTES.switchOut);
+  check("the library's row plays in the new document, through a barrier of its own",
+    sent.length === 1 && sent[0].body.take === false && !d.el.paused && d.audio.snapshot().track?.path === "Album/07.flac" && /07\.flac/.test(d.el.plays.at(-1) || ""),
+    [sent.map((e) => e.body.take), d.el.paused, d.audio.snapshot().track?.path, d.el.plays]);
+  k.readBack.open();
+  await settle();
+  const s = d.audio.snapshot();
+  const v = d.out.view();
+  check("the switch's record read back done: the row stays, playing, nothing taken",
+    !d.el.plays.some((src) => /09\.flac/.test(src)) && s.queue.length === 2 && s.track?.path === "Album/07.flac" && !d.el.paused && s.playing,
+    [d.el.plays, s.queue.length, s.track?.path, d.el.paused, s.playing]);
+  check("this browser the output, in its own phase, nothing said", v.output === "browser" && v.phase === PHASE.browser && v.line === "", [v.output, v.phase, v.line]);
+};
+
+S.TestAHandoverPlaysAndGoesOnWithNoReaderActionBetween = async () => {
+  // The switch's own take moves what plays and voids nothing of its permit:
+  // the play its metadata defers, and the next track at its end.
+  const r = await handedOver(handoverAt30);
+  check("the handover taken to play at 30 s, waiting for its metadata",
+    r.el.paused && r.audio.snapshot().index === 0 && r.audio.snapshot().queue.length === 2 && r.el.plays.length === 0, [r.el.paused, r.audio.snapshot().index, r.el.plays]);
+  r.el.metadata(200);
+  await settle();
+  check("its metadata in, it plays once, from its position", !r.el.paused && r.el.currentTime === 30 && r.el.plays.length === 1 && /01\.flac/.test(r.el.plays[0] || ""),
+    [r.el.paused, r.el.currentTime, r.el.plays]);
+  const n = r.n;
+  r.el.end();
+  await settle();
+  check("its end plays the next track on the switch's permit, no barrier",
+    !r.el.paused && r.audio.snapshot().index === 1 && r.el.plays.length === 2 && /02\.flac/.test(r.el.plays.at(-1) || "") && r.n === n,
+    [r.el.paused, r.audio.snapshot().index, r.el.plays, r.n - n]);
+};
+
+// nextDuringASwitchIn is track 1 playing under the bar, the bridge picked:
+// this browser stopped for it and the replace sent, its answer reply(e) when
+// the case lets it go; before(r, e), where given, runs next, then GET now says
+// no player is offered, so the bar drives this browser again, and its Next
+// plays track 2 at once. plays counts the plays up to that one.
+async function nextDuringASwitchIn(reply, before) {
+  const r = await gatedPlaying({ bar: true });
+  const held = gate();
+  r.s.on("POST", ROUTES.replace, async (e) => { await held.p; return reply(e); });
+  const p = r.out.pick("bridge");
+  await settle();
+  check("the switch to the bridge sent, this browser stopped for it",
+    r.s.posts(ROUTES.replace).length === 1 && r.el.paused && r.out.view().phase === PHASE.toBridge, [r.s.posts(ROUTES.replace).length, r.el.paused, r.out.view().phase]);
+  if (before) {
+    before(r, r.s.posts(ROUTES.replace)[0]);
+    await settle();
+  }
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_offered", message: "this bridge offers no player of its own" } }));
+  await r.out.sampleNow();
+  await settle();
+  const next = r.find("Next");
+  check("GET now says no player is offered: the bar drives this browser", r.out.view().notOffered && next && !next.disabled, [r.out.view().notOffered, next?.disabled]);
+  next?.click();
+  await settle();
+  check("the bar's Next plays track 2 at once", !r.el.paused && r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || ""), [r.el.paused, r.audio.snapshot().index, r.el.plays]);
+  const plays = r.el.plays.length;
+  held.open();
+  await p;
+  await settle();
+  return { r, plays };
+}
+
+// nextStands checks that the switch's end left the reader's Next standing:
+// track 2 playing on, nothing of track 1 played after it, this browser the
+// output in its own phase, saying the switch's words.
+function nextStands(r, plays, how, line) {
+  const after = r.el.plays.slice(plays);
+  const v = r.out.view();
+  check(`${how}: the Next stands, track 2 playing on, nothing of track 1 played again`,
+    !after.some((src) => /01\.flac/.test(src)) && !r.el.paused && r.audio.snapshot().index === 1 && r.audio.snapshot().track?.path === "Album/02.flac",
+    [after, r.el.paused, r.audio.snapshot().index]);
+  check(`${how}: this browser the output, in its own phase, its words said`,
+    v.output === "browser" && v.phase === PHASE.browser && v.line === line, [v.output, v.phase, v.line]);
+}
+
+S.TestANextWhileTheSwitchToTheBridgeIsRefusedForNoPlayerStands = async () => {
+  const { r, plays } = await nextDuringASwitchIn(() => refusal("player_not_offered", null, 409, "this bridge offers no player of its own"));
+  nextStands(r, plays, "the switch refused for no player", "this bridge offers no player of its own");
+};
+
+S.TestANextWhileTheSwitchToTheBridgeIsRefusedWithNothingChangedStands = async () => {
+  // The console publishes the refusal's terminal record at revision 6, above
+  // every publication before it, and the stream delivers that state first;
+  // then GET now says no player is offered, and the HTTP answer carrying the
+  // same state comes last, not taken again, so no player is offered still.
+  const refused = (e) => recOf(e, { kind: "replace", status: "refused", error: "stale", effect: "none", sent: 1, of: 4, last: "conflict" });
+  let st = null;
+  const { r, plays } = await nextDuringASwitchIn((e) => answer(refused(e), st), (r, e) => {
+    st = pub({ revision: 6, silent: true, operations: [refused(e)] });
+    r.frame(st);
+  });
+  check("the refusal's state taken from the stream before its answer, no barrier sent for a resume",
+    r.out.view().state?.revision === 6 && r.out.view().notOffered && r.s.posts(ROUTES.switchOut).length === 1,
+    [r.out.view().state?.revision, r.out.view().notOffered, r.s.posts(ROUTES.switchOut).length]);
+  nextStands(r, plays, "the switch refused with nothing changed", "The player changed since this page last read it: nothing was changed");
+};
+
+// resumeQueued is the browser pausing the element that plays and resuming it
+// at once, both events still to come, its next barrier held (r.hold): the
+// pause's event finds the element playing again, so what this browser meant
+// to play stands, and the play's pauses the element and waits on that
+// barrier, shown starting.
+async function resumeQueued(r, held = gate()) {
+  r.hold = held;
+  r.el.pause();
+  r.el.browserPlay();
+  await settle();
+  check("the browser's resume waits on its barrier, the element paused, shown starting",
+    r.el.paused && r.audio.snapshot().loading && !r.audio.snapshot().playing, [r.el.paused, r.audio.snapshot().loading, r.audio.snapshot().playing]);
+  return held;
+}
+
+S.TestCancellingAResumeWaitLeavesNothingForItsRetryToPlay = async () => {
+  const r = await gatedPlaying({ bar: true });
+  const held = await resumeQueued(r);
+  const plays = r.el.plays.length;
+  r.byClass("np-btn-play").click();
+  r.el.fail(2);
+  await settle();
+  check("the bar's spinner pressed, then a network error: the retry reloads the track and plays nothing",
+    r.el.plays.length === plays && r.el.paused && /01\.flac.*_r=/.test(r.el.src), [r.el.plays.slice(plays), r.el.paused, r.el.src]);
+  held.open();
+  await settle();
+  check("the barrier's answer plays nothing either, the element paused",
+    r.el.plays.length === plays && r.el.paused && !r.audio.snapshot().playing, [r.el.plays.slice(plays), r.el.paused, r.audio.snapshot().playing]);
+};
+
+S.TestAnErrorWhileAResumeWaitsPlaysOnlyOnTheResumesAdmission = async () => {
+  const r = await gatedPlaying();
+  let held = await resumeQueued(r);
+  let plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  check("a network error while the resume waits on its barrier: the retry reloads the track and plays nothing",
+    r.el.plays.length === plays && r.el.paused && /01\.flac.*_r=/.test(r.el.src), [r.el.plays.slice(plays), r.el.paused, r.el.src]);
+  held.open();
+  await settle();
+  check("the resume's admission plays the reloaded track, once",
+    r.el.plays.length === plays + 1 && !r.el.paused && /01\.flac.*_r=/.test(r.el.plays.at(-1) || ""), [r.el.plays.slice(plays), r.el.paused]);
+  // Track 2, and a resume its barrier refuses: nothing plays at all.
+  session.handlers.nexttrack();
+  await settle();
+  r.el.metadata(200);
+  held = gate();
+  heldBarrier(r, held, { refuse: true });
+  await resumeQueued(r, held);
+  plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  held.open();
+  await settle();
+  check("on track 2 a network error while its resume waits, then the barrier refused: nothing plays",
+    r.audio.snapshot().index === 1 && r.el.plays.length === plays && r.el.paused && !r.audio.snapshot().playing,
+    [r.audio.snapshot().index, r.el.plays.slice(plays), r.el.paused, r.audio.snapshot().playing]);
+};
+
+// ---- What a switch's end settles, and a failure during a resume's wait ----
+//
+// A switch to this browser settles, however it ends, only what it shows
+// itself: its moving words, which no other operation sets, and its own phase,
+// its move or the unconfirmed its own loss set while no other operation of the
+// current pick is lost here or inherited and unresolved. And a failure past
+// its retry, or a source the browser cannot use, ends a resume of the
+// browser's own that waits on its barrier.
+
+S.TestAStopAfterARowRetiresTheSwitchsMovingWordsWhenItIsAnswered = async () => {
+  // As the hazard has it: this browser the output and the bar unconfirmed
+  // before the pick, so the row's start is admitted as a barrier.
+  const { r, k } = await switchOutstanding();
+  const rows = await libraryRows([flac(7), flac(8)], { id: "a7" });
+  const latch = gate();
+  k.hold = latch;
+  rows[0].click();
+  await settle();
+  const row = opKey(E1, r.out.identity().tab, r.out.identity().seq);
+  check("the row's barrier sent, its answer held, the bar still moving to this browser",
+    r.s.posts(ROUTES.switchOut).at(-1).body.take === false && r.out.pending().includes(row) && r.out.view().phase === PHASE.toBrowser && r.out.view().line === WORDS.toBrowser,
+    [r.out.pending(), r.out.view().phase, r.out.view().line]);
+  session.handlers.stop();
+  await settle();
+  check("the lock screen's Stop while the row's answer is held: the queue empty, the row's operation still pending",
+    r.audio.snapshot().queue.length === 0 && r.out.pending().includes(row), [r.audio.snapshot().queue.length, r.out.pending()]);
+  latch.open();
+  await settle();
+  check("the row's barrier answered after the Stop: nothing plays, this browser's phase, the switch's moving words still shown",
+    r.el.paused && r.out.view().phase === PHASE.browser && r.out.view().line === WORDS.toBrowser, [r.el.paused, r.out.view().phase, r.out.view().line]);
+  await answered(k);
+  const s = r.audio.snapshot();
+  const v = r.out.view();
+  check("the switch's answer then retires its moving words: nothing said, this browser's phase",
+    v.line === "" && v.phase === PHASE.browser && v.output === "browser", [v.line, v.phase, v.output]);
+  check("the queue empty, nothing of the handover played, no operation pending",
+    s.queue.length === 0 && !r.el.plays.some((src) => /09\.flac/.test(src)) && r.out.pending().length === 0, [s.queue.length, r.el.plays, r.out.pending()]);
+  afterTheSwitch(k);
+};
+
+S.TestAnInheritedSwitchLeavesTheWarningOfARowLostSinceTheReload = async () => {
+  const { r, k } = await switchOutstanding({ lostAfter: true });
+  k.readBack = gate();
+  const d = await reloaded(k.routes, k.pub());
+  check("the reload asks for the switch's record, its answer held, unconfirmed meanwhile",
+    d.s.gets(ROUTES.operation).some((e) => Number(e.query.get("seq")) === r.switchSeq) && d.out.view().phase === PHASE.unconfirmed,
+    [d.s.gets(ROUTES.operation).map((e) => e.query.get("seq")), d.out.view().phase]);
+  (await libraryRows([flac(7), flac(8)], { id: "a7", base: d.base }))[0].click();
+  await settle();
+  check("a row in the new document, its barrier's answer lost once the console ran it: unconfirmed, its words said",
+    d.s.posts(ROUTES.switchOut).length === 1 && d.out.view().phase === PHASE.unconfirmed && d.out.view().line === WORDS.unconfirmed,
+    [d.s.posts(ROUTES.switchOut).length, d.out.view().phase, d.out.view().line]);
+  k.readBack.open();
+  await settle();
+  const s = d.audio.snapshot();
+  check("the switch's record read back done: nothing taken, the row's warning kept as the switch settles",
+    d.out.view().phase === PHASE.unconfirmed && d.out.view().line === WORDS.unconfirmed && !d.el.plays.some((src) => /09\.flac/.test(src)) &&
+      s.queue.length === 3 && s.track?.path === "Album/01.flac",
+    [d.out.view().phase, d.out.view().line, d.el.plays, s.queue.length, s.track?.path]);
+  d.c.advance(READ_BACK_MS);
+  d.out.tick();
+  await settle();
+  check("the row's own read back then: this browser's phase and the row's own words, nothing pending",
+    d.out.view().phase === PHASE.browser && d.out.view().line === WORDS.startAgain && d.out.pending().length === 0,
+    [d.out.view().phase, d.out.view().line, d.out.pending()]);
+  afterTheSwitch(k);
+};
+
+S.TestAnInheritedSwitchLeavesTheWarningOfAnInheritedBarrierStillUnresolved = async () => {
+  // Three documents of one tab: the first sends the switch; the second,
+  // loaded again over it, plays a row whose barrier the console still runs as
+  // its answer is lost; the third, loaded again over the second, inherits the
+  // switch and that barrier, both of its pick, and its reader presses the lock
+  // screen's Stop, which sends nothing, so no newer barrier runs at the
+  // console beside the one still running.
+  const { r, k } = await switchOutstanding();
+  k.readBack = gate();
+  const d1 = await reloaded(k.routes, k.pub());
+  k.stuck = true;
+  (await libraryRows([flac(5), flac(6)], { id: "a5", base: d1.base }))[0].click();
+  await settle();
+  const barrier = opKey(E1, d1.out.identity().tab, d1.out.identity().seq);
+  check("the second document's row: its barrier lost while the console runs it, published above the switch's silence",
+    d1.s.posts(ROUTES.switchOut).length === 1 && d1.out.view().phase === PHASE.unconfirmed && k.revs.stuck > k.revs.switched,
+    [d1.s.posts(ROUTES.switchOut).length, d1.out.view().phase, k.revs]);
+  const d2 = await reloaded(k.routes, k.pub());
+  check("the third document inherits the switch and that barrier, unconfirmed, the switch's record asked for and held",
+    d2.out.pending().length === 2 && d2.out.view().phase === PHASE.unconfirmed &&
+      d2.s.gets(ROUTES.operation).some((e) => Number(e.query.get("seq")) === r.switchSeq),
+    [d2.out.pending(), d2.out.view().phase]);
+  session.handlers.stop();
+  await settle();
+  const s0 = d2.audio.snapshot();
+  check("the third document's lock-screen Stop: no barrier asked, its queue empty and paused",
+    d2.s.posts(ROUTES.switchOut).length === 0 && s0.queue.length === 0 && s0.index === -1 && d2.el.paused,
+    [d2.s.posts(ROUTES.switchOut).length, s0.queue.length, s0.index, d2.el.paused]);
+  check("the Stop leaves the bar unconfirmed, both inherited operations pending",
+    d2.out.view().phase === PHASE.unconfirmed && d2.out.pending().length === 2, [d2.out.view().phase, d2.out.pending()]);
+  k.readBack.open();
+  await settle();
+  const s = d2.audio.snapshot();
+  const v = d2.out.view();
+  check("the switch's record read back done: nothing taken or played, the inherited barrier alone pending, its warning kept",
+    s.queue.length === 0 && s.index === -1 && d2.el.paused && d2.el.plays.length === 0 && JSON.stringify(d2.out.pending()) === JSON.stringify([barrier]) &&
+      v.phase === PHASE.unconfirmed && v.line === WORDS.unconfirmed,
+    [s.queue.length, s.index, d2.el.paused, d2.el.plays, d2.out.pending(), v.phase, v.line]);
+};
+
+S.TestAGoneSwitchLeavesTheWarningOfARowLostSinceItWasSent = async () => {
+  // The console runs the switch, then the row's barrier, both answers lost:
+  // once it keeps the row's record it no longer keeps the switch's.
+  const { r, k } = await switchOutstanding({ lost: true, lostAfter: true });
+  (await libraryRows([flac(7), flac(8)], { id: "a7" }))[0].click();
+  await settle();
+  const rowSeq = r.out.identity().seq;
+  check("the row's barrier lost too once the console ran it: unconfirmed, its words said",
+    r.s.posts(ROUTES.switchOut).at(-1).body.op.seq === rowSeq && r.out.view().phase === PHASE.unconfirmed && r.out.view().line === WORDS.unconfirmed,
+    [r.out.view().phase, r.out.view().line]);
+  k.backHold = gate();
+  r.c.advance(READ_BACK_MS);
+  r.out.tick();
+  await settle();
+  const backs = r.s.gets(ROUTES.operation).map((e) => Number(e.query.get("seq")));
+  check("read back: the switch's record gone, the row's read back held, the row's warning kept",
+    backs.includes(r.switchSeq) && backs.includes(rowSeq) && !r.out.pending().includes(opKey(E1, r.out.identity().tab, r.switchSeq)) &&
+      r.out.view().phase === PHASE.unconfirmed && r.out.view().line === WORDS.unconfirmed,
+    [backs, r.out.pending(), r.out.view().phase, r.out.view().line]);
+  k.backHold.open();
+  await settle();
+  check("the row's own read back then: this browser's phase and the row's own words, nothing pending",
+    r.out.view().phase === PHASE.browser && r.out.view().line === WORDS.startAgain && r.out.pending().length === 0,
+    [r.out.view().phase, r.out.view().line, r.out.pending()]);
+  afterTheSwitch(k);
+};
+
+S.TestASwitchsReadBackClearsItsOwnWarningBesideAnOlderPicksLostBarrier = async () => {
+  // The barrier sent under the older pick is still lost here as the switch's
+  // record is read back: its own read back failed, and its operation_gone
+  // comes later.
+  const { r, k } = await switchOutstanding({ lost: true });
+  session.handlers.stop();
+  await settle();
+  k.unreachable.add(k.setup.seq);
+  r.c.advance(READ_BACK_MS);
+  r.out.tick();
+  await settle();
+  const setup = opKey(E1, r.out.identity().tab, k.setup.seq);
+  check("the switch read back done after the Stop, the older pick's barrier still lost: the switch's own warning cleared at once",
+    r.out.pending().includes(setup) && r.out.view().phase === PHASE.browser && r.out.view().line === "", [r.out.pending(), r.out.view().phase, r.out.view().line]);
+  r.c.advance(READ_BACK_MS);
+  r.out.tick();
+  await settle();
+  check("that barrier's operation_gone next: nothing pending, the bar as it was",
+    r.out.pending().length === 0 && r.out.view().phase === PHASE.browser && r.out.view().line === "", [r.out.pending(), r.out.view().phase, r.out.view().line]);
+};
+
+S.TestTheSwitchsAnswerKeepsTheGatesWordsAsItSettlesThePhase = async () => {
+  const { r, k } = await switchOutstanding();
+  r.frame(k.publish(playing()));
+  await settle();
+  const rows = await libraryRows([flac(7), flac(8)], { id: "a7" });
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  rows[0].click();
+  await settle();
+  check("a row clicked beside the bridge playing: refused, the gate's words said, the phase still the switch's move",
+    r.s.posts(ROUTES.switchOut).length === posts && r.out.view().line === WORDS.bridgePlaying && r.out.view().phase === PHASE.toBrowser,
+    [r.s.posts(ROUTES.switchOut).length - posts, r.out.view().line, r.out.view().phase]);
+  await answered(k);
+  const s = r.audio.snapshot();
+  const v = r.out.view();
+  check("the switch's answer: this browser's phase, the gate's words kept, never the switch's own",
+    v.phase === PHASE.browser && v.line === WORDS.bridgePlaying && v.output === "browser", [v.phase, v.line, v.output]);
+  check("nothing taken: this browser's queue on track 1",
+    !r.el.plays.some((src) => /09\.flac/.test(src)) && s.queue.length === 3 && s.track?.path === "Album/01.flac", [r.el.plays, s.queue.length, s.track?.path]);
+};
+
+// failedAndPaused checks that a track that failed past its retry was played
+// no more: no play attempt since plays, the element paused, the failure said.
+function failedAndPaused(r, plays, how) {
+  const s = r.audio.snapshot();
+  check(`${how}: no play attempt, the element paused, the failure shown`,
+    r.el.plays.length === plays && r.el.paused && !s.playing && s.error === 'Playback failed for "T1".', [r.el.plays.slice(plays), r.el.paused, s.playing, s.error]);
+}
+
+S.TestAFailurePastItsRetryEndsAResumeWait = async () => {
+  const r = await gatedPlaying();
+  const held = await resumeQueued(r);
+  check("the resume's barrier pending", r.s.posts(ROUTES.switchOut).length === 2, r.s.posts(ROUTES.switchOut).length);
+  const plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  r.el.fail(2);
+  await settle();
+  failedAndPaused(r, plays, "a network error while the resume waits, then another past its retry");
+  held.open();
+  await settle();
+  failedAndPaused(r, plays, "the resume's admission then");
+};
+
+S.TestAFailurePastItsRetryEndsAResumeWaitAfterAStartWithNoPermit = async () => {
+  const r = await pageRig({ gate: true, noFrame: true });
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_offered", message: "no player" } }));
+  await r.out.sampleNow();
+  await settle();
+  (await libraryRows([flac(1), flac(2), flac(3)], { id: "a1" }))[0].click();
+  await settle();
+  r.el.metadata(200);
+  check("no player offered: the library's row plays at once, with no permit, nothing sent",
+    !r.el.paused && r.s.posts().length === 0 && /01\.flac/.test(r.el.plays.at(-1) || ""), [r.el.paused, r.s.posts().length, r.el.plays]);
+  // The bridge's player comes up, silent: the stream opens, then its frame.
+  const latest = pub({ revision: 3, silent: true });
+  r.s.on("GET", ROUTES.now, async () => ({ body: latest, headers: { [CLOCK_HEADER]: new Date(r.c.now()).toISOString() } }));
+  const held = gate();
+  r.s.on("POST", ROUTES.switchOut, async (e) => { await held.p; return answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })); });
+  r.out.streamOpen(1);
+  r.frame(latest);
+  await settle();
+  check("the bridge's player offered since, silent, its state taken", r.out.view().offered && r.out.view().state?.revision === 3,
+    [r.out.view().offered, r.out.view().state?.revision]);
+  r.el.pause();
+  r.el.browserPlay();
+  await settle();
+  check("the browser's resume waits on its barrier, held", r.s.posts(ROUTES.switchOut).length === 1 && r.el.paused && r.audio.snapshot().loading,
+    [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.audio.snapshot().loading]);
+  const plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  r.el.fail(2);
+  await settle();
+  failedAndPaused(r, plays, "a network error while the resume waits, then another past its retry");
+  held.open();
+  await settle();
+  failedAndPaused(r, plays, "the resume's admission then");
+};
+
+S.TestASourceTheBrowserCannotUsePlaysNothingOnTheResumesAdmission = async () => {
+  const t = longTimers();
+  globalThis.fetch = async () => ({ ok: true, status: 200 });
+  const r = await gatedPlaying();
+  const held = await resumeQueued(r);
+  check("the resume's barrier pending", r.s.posts(ROUTES.switchOut).length === 2, r.s.posts(ROUTES.switchOut).length);
+  const plays = r.el.plays.length;
+  r.el.fail(4);
+  await settle();
+  check("a source the browser cannot use while the resume waits: its skip scheduled, nothing played",
+    t.count(1200) === 1 && r.el.plays.length === plays, [t.count(1200), r.el.plays.slice(plays)]);
+  held.open();
+  await settle();
+  check("the resume's admission then plays nothing of the failed track",
+    r.el.plays.length === plays && r.el.paused && r.audio.snapshot().index === 0, [r.el.plays.slice(plays), r.el.paused, r.audio.snapshot().index]);
+  t.fire(1200);
+  await settle();
+  check("the skip then plays the next track through a barrier of its own, as before",
+    r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused && r.s.posts(ROUTES.switchOut).length === 3,
+    [r.audio.snapshot().index, r.el.plays.slice(plays), r.el.paused, r.s.posts(ROUTES.switchOut).length]);
+};
+
+// sourceFails is gatedPlaying whose source error probe answers that the
+// bridge served the track, the skip past it held until the case fires it.
+async function sourceFails(o = {}) {
+  const t = longTimers();
+  globalThis.fetch = async () => ({ ok: true, status: 200 });
+  const r = await gatedPlaying(o);
+  return { r, t };
+}
+
+S.TestASourceTheBrowserCannotUseShowsNoSpinnerForTheResumeItLeaves = async () => {
+  // The browser's resume and the source's failure both queued while the
+  // element played: the resume's protective pause comes after the failure.
+  const { r } = await sourceFails();
+  r.hold = gate();
+  r.el.pause();
+  r.el.browserPlay();
+  r.el.fail(4);
+  await settle();
+  check("the resume waits on its barrier, and no spinner shows over the track that failed",
+    r.s.posts(ROUTES.switchOut).length === 2 && r.el.paused && !r.audio.snapshot().loading && !r.audio.snapshot().playing,
+    [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.audio.snapshot().loading, r.audio.snapshot().playing]);
+};
+
+S.TestTheBarsPlayOverASourceTheBrowserCannotUseIsAStartThoughAResumeWaits = async () => {
+  const { r } = await sourceFails({ bar: true });
+  const held = await resumeQueued(r);
+  r.el.fail(4);
+  await settle();
+  r.find("Play")?.click();
+  await settle();
+  held.open();
+  await settle();
+  check("the bar's Play over the failed track while the resume waits: a start, which plays track 2 on the barrier's answer",
+    r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused, [r.audio.snapshot().index, r.el.plays, r.el.paused]);
+};
+
+S.TestAResumesRefusalAfterASourceTheBrowserCannotUseStillEndsItsSkip = async () => {
+  // As before this change: the resume's refusal ends what this browser meant
+  // to play, so the skip's timer starts nothing.
+  const { r, t } = await sourceFails();
+  const held = gate();
+  let n = 0;
+  r.s.on("POST", ROUTES.switchOut, async (e) => {
+    n += 1;
+    if (n > 1) return answer(recOf(e, { kind: "switch-out", silence: 20 + n }), pub({ revision: 20 + n, silent: true }));
+    await held.p;
+    return answer(recOf(e, { kind: "switch-out", status: "refused", error: "check", effect: "none", last: "maintenance" }), pub({ revision: 20, silent: true, hold: "check" }));
+  });
+  await resumeQueued(r, held);
+  check("the resume's barrier pending", r.s.posts(ROUTES.switchOut).length === 2, r.s.posts(ROUTES.switchOut).length);
+  const plays = r.el.plays.length;
+  r.el.fail(4);
+  await settle();
+  held.open();
+  await settle();
+  check("a source the browser cannot use, then the resume's barrier refused: nothing played, paused",
+    r.el.plays.length === plays && r.el.paused, [r.el.plays.slice(plays), r.el.paused]);
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  t.fire(1200);
+  await settle();
+  check("the skip's timer then asks no barrier and plays nothing of track 2, as before",
+    r.s.posts(ROUTES.switchOut).length === posts && r.el.plays.length === plays && r.audio.snapshot().index === 0 && r.el.paused,
+    [r.s.posts(ROUTES.switchOut).length - posts, r.el.plays.slice(plays), r.audio.snapshot().index, r.el.paused]);
+};
+
+S.TestAResumesAdmissionAfterASourceTheBrowserCannotUseLetsItsSkipGoOn = async () => {
+  // The browser's own pause ended what this browser meant to play; its own
+  // resume, admitted, means to play again, as before this change, so the
+  // skip's timer goes on to track 2 through the gate, the failed source never
+  // played.
+  const { r, t } = await sourceFails();
+  const held = await browserResumeWaits(r);
+  check("the browser's own pause delivered, then its resume waiting on its barrier",
+    r.s.posts(ROUTES.switchOut).length === 2 && r.el.paused && r.audio.snapshot().loading, [r.s.posts(ROUTES.switchOut).length, r.el.paused, r.audio.snapshot().loading]);
+  const plays = r.el.plays.length;
+  r.el.fail(4);
+  await settle();
+  held.open();
+  await settle();
+  check("a source the browser cannot use, then the resume admitted: nothing of the failed track played",
+    r.el.plays.length === plays && r.el.paused, [r.el.plays.slice(plays), r.el.paused]);
+  const posts = r.s.posts(ROUTES.switchOut).length;
+  t.fire(1200);
+  await settle();
+  check("the skip's timer then plays track 2 through a barrier of its own, as before",
+    r.s.posts(ROUTES.switchOut).length === posts + 1 && r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused,
+    [r.s.posts(ROUTES.switchOut).length - posts, r.audio.snapshot().index, r.el.plays.slice(plays), r.el.paused]);
+};
+
+S.TestTheNextTrackAfterASkipStartedWhileAResumeWaitedRetriesItsFirstError = async () => {
+  // No player offered as the resume's barrier is held: the skip starts track 2
+  // at once, and the resume's late admission leaves track 2's playback alone.
+  const { r, t } = await sourceFails();
+  const held = await resumeQueued(r);
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_offered", message: "no player" } }));
+  await r.out.sampleNow();
+  await settle();
+  check("no player offered now, the resume's barrier held", r.out.view().notOffered && r.s.posts(ROUTES.switchOut).length === 2,
+    [r.out.view().notOffered, r.s.posts(ROUTES.switchOut).length]);
+  r.el.fail(4);
+  await settle();
+  t.fire(1200);
+  await settle();
+  check("the skip plays track 2 at once", r.audio.snapshot().index === 1 && /02\.flac/.test(r.el.plays.at(-1) || "") && !r.el.paused,
+    [r.audio.snapshot().index, r.el.plays, r.el.paused]);
+  r.el.metadata(200);
+  held.open();
+  await settle();
+  const plays = r.el.plays.length;
+  r.el.fail(2);
+  await settle();
+  check("the old barrier admitted after track 2 started: track 2's first network error retries once",
+    r.el.plays.length === plays + 1 && /02\.flac.*_r=/.test(r.el.plays.at(-1) || "") && !r.el.paused, [r.el.plays.slice(plays), r.el.paused]);
+};
+
+S.TestASkipTimerBeforeAResumesAnswerPlaysNothingOfTheNextTrack = async () => {
+  // The skip, asked behind the resume's barrier, takes the resume's place
+  // there, which ends what this browser meant to play, as before this change.
+  const { r, t } = await sourceFails();
+  const held = await resumeQueued(r);
+  check("the resume's barrier pending", r.s.posts(ROUTES.switchOut).length === 2, r.s.posts(ROUTES.switchOut).length);
+  const plays = r.el.plays.length;
+  r.el.fail(4);
+  await settle();
+  t.fire(1200);
+  await settle();
+  held.open();
+  await settle();
+  check("the skip's timer before the resume's barrier answers: no barrier more asked and nothing of track 2 played",
+    r.s.posts(ROUTES.switchOut).length === 2 && r.el.plays.length === plays && r.audio.snapshot().index === 0 && r.el.paused,
+    [r.s.posts(ROUTES.switchOut).length, r.el.plays.slice(plays), r.audio.snapshot().index, r.el.paused]);
+};
+
+S.TestAResumeHeldAcrossTheStopAfterThreeUnplayableTracksStartsNothingAfterIt = async () => {
+  const { r, t } = await failing({ pend: true, tracks: [flac(1), flac(2), flac(3), flac(4), flac(5)] });
+  for (let i = 0; i < 2; i++) {
+    r.el.fail(4);
+    await settle();
+    t.fire(1200);
+    await settle();
+  }
+  check("two tracks that cannot play skipped: track 3 playing", r.audio.snapshot().index === 2 && !r.el.paused, [r.audio.snapshot().index, r.el.paused]);
+  const held = await resumeQueued(r);
+  r.el.fail(4);
+  await settle();
+  check("the third in a row while the browser's resume waits on its barrier: stopped, said",
+    t.count(1200) === 0 && /can't play in this browser/.test(r.audio.snapshot().error) && r.s.posts(ROUTES.switchOut).length === 4,
+    [t.count(1200), r.audio.snapshot().error, r.s.posts(ROUTES.switchOut).length]);
+  held.open();
+  await settle();
+  const [posts, plays] = [r.s.posts(ROUTES.switchOut).length, r.el.plays.length];
+  r.audio.removeAt(2);
+  await settle();
+  check("the resume admitted after the stop, then the failed row removed: no successor started, nothing more played",
+    r.s.posts(ROUTES.switchOut).length === posts && r.el.plays.length === plays && r.el.paused,
+    [r.s.posts(ROUTES.switchOut).length - posts, r.el.plays.slice(plays), r.el.paused]);
 };
 
 const name = scenarioName;

@@ -869,3 +869,224 @@ func TestAStopLetsGoOfAStartWaitingForTheEpoch(t *testing.T) { barScenario(t, 6)
 // nothing, the queue stays empty, Play on it does nothing, and a row played
 // after it plays.
 func TestAStopLetsGoOfAStartWaitingOnItsBarrier(t *testing.T) { barScenario(t, 4) }
+
+// A reader's action while a switch to this browser is outstanding, the
+// switch to the bridge refused, and a resume's wait (B1015). Each switch is
+// sent from an unconfirmed bar with this browser chosen, the console keeping
+// each tab's last record alone, as serve's control does; a row is the
+// library album page's own (views.js's renderAlbum and its rows' buttons).
+
+// TestAStopWhileASwitchToThisBrowserIsOutstandingTakesNothing pins that the
+// lock screen's Stop while the switch is outstanding stands: its answer, done
+// beside a silent bridge, takes nothing and plays nothing, the queue empty at
+// no track and this browser the output in its own phase.
+func TestAStopWhileASwitchToThisBrowserIsOutstandingTakesNothing(t *testing.T) { barScenario(t, 6) }
+
+// TestAPauseWhileASwitchToThisBrowserIsOutstandingTakesNothing pins the same
+// for the lock screen's Pause: this browser's own queue stays paused on its
+// track, and the bar's Play then plays it through a barrier of its own.
+func TestAPauseWhileASwitchToThisBrowserIsOutstandingTakesNothing(t *testing.T) { barScenario(t, 7) }
+
+// TestARowWhileASwitchToThisBrowserIsOutstandingPlaysAndTakesNothing pins
+// that a row of the library played while the switch is outstanding plays
+// through a barrier of its own and stays: the switch's answer, the console
+// having run it first, takes nothing and plays nothing.
+func TestARowWhileASwitchToThisBrowserIsOutstandingPlaysAndTakesNothing(t *testing.T) {
+	barScenario(t, 8)
+}
+
+// TestTheSwitchsLateAnswerLeavesThePhaseARowsLostBarrierSet pins that the
+// switch's answer after a row whose barrier was lost takes nothing and leaves
+// the bar unconfirmed with its line, as that loss left it.
+func TestTheSwitchsLateAnswerLeavesThePhaseARowsLostBarrierSet(t *testing.T) { barScenario(t, 8) }
+
+// TestTheSwitchsAnswerAfterTheBridgePlaysAgainSaysSoAndTakesNothing pins that
+// with a state showing the bridge playing before the answer, after the
+// reader's Pause, the answer takes nothing and the bar says the bridge plays
+// again, where it said so before this change.
+func TestTheSwitchsAnswerAfterTheBridgePlaysAgainSaysSoAndTakesNothing(t *testing.T) {
+	barScenario(t, 6)
+}
+
+// TestAPausesEventAfterThePickOfThisBrowserLetsItsHandoverPlay pins that a
+// pause event is no action of the reader's: the lock screen's Pause, then the
+// pick of this browser before the Pause's own event, then that event and the
+// answer with silence, and the handover is taken and plays once.
+func TestAPausesEventAfterThePickOfThisBrowserLetsItsHandoverPlay(t *testing.T) { barScenario(t, 5) }
+
+// TestASeekOrAnAddWhileASwitchToThisBrowserIsOutstandingLeavesItsHandoverToPlay
+// pins what is no action of the reader's for the switch: an album's Add to
+// queue, a seek, the level, shuffle and repeat, after which the answer takes
+// the bridge's queue and plays it, as before this change.
+func TestASeekOrAnAddWhileASwitchToThisBrowserIsOutstandingLeavesItsHandoverToPlay(t *testing.T) {
+	barScenario(t, 7)
+}
+
+// TestAStopBeforeTheSwitchsLostAnswerIsReadBackTakesAndStartsNothing pins the
+// switch whose answer was lost: its record read back done after the lock
+// screen's Stop takes nothing and asks no barrier for its handover.
+func TestAStopBeforeTheSwitchsLostAnswerIsReadBackTakesAndStartsNothing(t *testing.T) {
+	barScenario(t, 8)
+}
+
+// TestAStopBeforeAReloadIsNotSeenAndTheMoveComesBackPaused pins what this
+// change leaves as it was: the reader's generation is the document's own, so
+// a reload whose document reads the switch back takes the bridge's queue back
+// paused over the Stop made before it, playing nothing and saying to press
+// Play.
+func TestAStopBeforeAReloadIsNotSeenAndTheMoveComesBackPaused(t *testing.T) { barScenario(t, 7) }
+
+// TestARowPlayedAfterAReloadStaysWhenTheMoveIsReadBack pins that a row the
+// reader plays in the reloaded document, while its read back of the earlier
+// document's switch is held, stays when that record comes: nothing taken.
+func TestARowPlayedAfterAReloadStaysWhenTheMoveIsReadBack(t *testing.T) { barScenario(t, 9) }
+
+// TestAHandoverPlaysAndGoesOnWithNoReaderActionBetween pins the switch with
+// no action of the reader's between its sending and its answer: the handover
+// plays once, from its position, and goes on to its next track on the
+// switch's permit, the take's own count of an action voiding none of it.
+func TestAHandoverPlaysAndGoesOnWithNoReaderActionBetween(t *testing.T) { barScenario(t, 3) }
+
+// TestANextWhileTheSwitchToTheBridgeIsRefusedForNoPlayerStands pins that the
+// bar's Next, which drives this browser once GET now says no player is
+// offered, stands when the switch to the bridge is then refused for no
+// player: the browser's old track is not resumed over it.
+func TestANextWhileTheSwitchToTheBridgeIsRefusedForNoPlayerStands(t *testing.T) { barScenario(t, 5) }
+
+// TestANextWhileTheSwitchToTheBridgeIsRefusedWithNothingChangedStands pins
+// the same for the switch refused with nothing changed.
+func TestANextWhileTheSwitchToTheBridgeIsRefusedWithNothingChangedStands(t *testing.T) {
+	barScenario(t, 6)
+}
+
+// TestCancellingAResumeWaitLeavesNothingForItsRetryToPlay pins that the bar's
+// press over a resume of the browser's own waiting on its barrier ends what
+// this browser meant to play: a network error after it reloads the track and
+// plays nothing, and the barrier's answer plays nothing either.
+func TestCancellingAResumeWaitLeavesNothingForItsRetryToPlay(t *testing.T) { barScenario(t, 3) }
+
+// TestAnErrorWhileAResumeWaitsPlaysOnlyOnTheResumesAdmission pins that a
+// network error while a resume of the browser's own waits on its barrier
+// reloads the track and plays it only on the resume's admission, once, and
+// nothing where the barrier refuses it.
+func TestAnErrorWhileAResumeWaitsPlaysOnlyOnTheResumesAdmission(t *testing.T) { barScenario(t, 5) }
+
+// What a switch's end settles, and a failure during a resume's wait
+// (B1015): a switch to this browser settles only its own moving words and
+// its own phase, and a failure past its retry, or a source the browser
+// cannot use, ends a resume of the browser's own waiting on its barrier.
+
+// TestAStopAfterARowRetiresTheSwitchsMovingWordsWhenItIsAnswered pins that a
+// switch answered after a row's barrier the lock screen's Stop let go of,
+// which left this browser's phase, still retires its own moving words: an
+// empty line, an empty queue, nothing played, nothing pending.
+func TestAStopAfterARowRetiresTheSwitchsMovingWordsWhenItIsAnswered(t *testing.T) {
+	barScenario(t, 11)
+}
+
+// TestAnInheritedSwitchLeavesTheWarningOfARowLostSinceTheReload pins that a
+// switch an earlier document left, read back after a row of the new document
+// lost its barrier's answer, leaves that row's unconfirmed and its words, which
+// the row's own read back then settles.
+func TestAnInheritedSwitchLeavesTheWarningOfARowLostSinceTheReload(t *testing.T) {
+	barScenario(t, 10)
+}
+
+// TestAnInheritedSwitchLeavesTheWarningOfAnInheritedBarrierStillUnresolved
+// pins that an operation another earlier document left, of the switch's pick
+// and unresolved, holds the warning too: the switch read back in a third
+// document, after that document's lock-screen Stop, which sends nothing,
+// leaves that barrier's unconfirmed, it alone pending.
+func TestAnInheritedSwitchLeavesTheWarningOfAnInheritedBarrierStillUnresolved(t *testing.T) {
+	barScenario(t, 10)
+}
+
+// TestAGoneSwitchLeavesTheWarningOfARowLostSinceItWasSent pins the same in one
+// document for a switch whose record the console no longer keeps: its
+// operation_gone leaves the row's unconfirmed and its words.
+func TestAGoneSwitchLeavesTheWarningOfARowLostSinceItWasSent(t *testing.T) { barScenario(t, 9) }
+
+// TestASwitchsReadBackClearsItsOwnWarningBesideAnOlderPicksLostBarrier pins
+// that a barrier lost under an older pick holds no warning for the switch: the
+// switch's record read back clears its own unconfirmed at once.
+func TestASwitchsReadBackClearsItsOwnWarningBesideAnOlderPicksLostBarrier(t *testing.T) {
+	barScenario(t, 6)
+}
+
+// TestTheSwitchsAnswerKeepsTheGatesWordsAsItSettlesThePhase pins that the
+// phase and the line settle apart: a row refused beside the bridge playing
+// leaves the gate's words, which the switch's answer keeps as it moves the
+// phase to this browser's.
+func TestTheSwitchsAnswerKeepsTheGatesWordsAsItSettlesThePhase(t *testing.T) { barScenario(t, 8) }
+
+// TestAFailurePastItsRetryEndsAResumeWait pins that a network error past its
+// retry while a resume of the browser's own waits on its barrier ends that
+// wait: its admission plays nothing, the failure still shown.
+func TestAFailurePastItsRetryEndsAResumeWait(t *testing.T) { barScenario(t, 4) }
+
+// TestAFailurePastItsRetryEndsAResumeWaitAfterAStartWithNoPermit pins the
+// same where playback began with no player offered, so with no permit.
+func TestAFailurePastItsRetryEndsAResumeWaitAfterAStartWithNoPermit(t *testing.T) {
+	barScenario(t, 6)
+}
+
+// TestASourceTheBrowserCannotUsePlaysNothingOnTheResumesAdmission pins that a
+// resume waiting as a source the browser cannot use fails is admitted only
+// to whether its skip goes on: its admission plays nothing of the failed
+// track, and the skip goes on through a barrier of its own.
+func TestASourceTheBrowserCannotUsePlaysNothingOnTheResumesAdmission(t *testing.T) {
+	barScenario(t, 5)
+}
+
+// TestASourceTheBrowserCannotUseShowsNoSpinnerForTheResumeItLeaves pins that
+// a resume whose source failed before its protective pause's event shows no
+// spinner over the failed track.
+func TestASourceTheBrowserCannotUseShowsNoSpinnerForTheResumeItLeaves(t *testing.T) {
+	barScenario(t, 1)
+}
+
+// TestTheBarsPlayOverASourceTheBrowserCannotUseIsAStartThoughAResumeWaits pins
+// that the bar's Play over the failed track while such a resume waits is a
+// start, never that resume's cancel: it plays the next track on the
+// barrier's answer.
+func TestTheBarsPlayOverASourceTheBrowserCannotUseIsAStartThoughAResumeWaits(t *testing.T) {
+	barScenario(t, 2)
+}
+
+// TestAResumesRefusalAfterASourceTheBrowserCannotUseStillEndsItsSkip pins
+// what the queue does next, as before: the resume's barrier refused after its
+// source failed ends what this browser meant to play, so the skip's timer
+// asks no barrier and plays nothing of the next track.
+func TestAResumesRefusalAfterASourceTheBrowserCannotUseStillEndsItsSkip(t *testing.T) {
+	barScenario(t, 4)
+}
+
+// TestAResumesAdmissionAfterASourceTheBrowserCannotUseLetsItsSkipGoOn pins the
+// other order: the browser's own pause delivered, then its resume admitted
+// after its source failed, means to play again, so the skip's timer plays the
+// next track through a barrier of its own, the failed source never played.
+func TestAResumesAdmissionAfterASourceTheBrowserCannotUseLetsItsSkipGoOn(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestTheNextTrackAfterASkipStartedWhileAResumeWaitedRetriesItsFirstError pins
+// that the resume's wait goes with the track it was for: the skip starts the
+// next track while the resume's barrier is held, and that track's first
+// network error, after the old barrier's admission, retries once.
+func TestTheNextTrackAfterASkipStartedWhileAResumeWaitedRetriesItsFirstError(t *testing.T) {
+	barScenario(t, 4)
+}
+
+// TestASkipTimerBeforeAResumesAnswerPlaysNothingOfTheNextTrack pins the order
+// with the timer first: the skip takes the resume's place behind its barrier,
+// which ends what this browser meant to play, so nothing more is asked and
+// nothing of the next track plays.
+func TestASkipTimerBeforeAResumesAnswerPlaysNothingOfTheNextTrack(t *testing.T) { barScenario(t, 3) }
+
+// TestAResumeHeldAcrossTheStopAfterThreeUnplayableTracksStartsNothingAfterIt
+// pins that the stop after three unplayable tracks in a row ends a resume
+// waiting across it: its admission, then the failed row's removal, start no
+// successor and play nothing more.
+func TestAResumeHeldAcrossTheStopAfterThreeUnplayableTracksStartsNothingAfterIt(t *testing.T) {
+	barScenario(t, 4)
+}

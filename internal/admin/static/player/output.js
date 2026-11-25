@@ -407,6 +407,11 @@ export function createOutput(env) {
   let line = "";
   let lastPoll = -Infinity;
   let pickGen = 0;
+  // The reader's generation (B1015): what the reader does to playback in this
+  // browser moves it (audio.js's readerAction, through readerActed), and a
+  // switch whose end finds it moved since the switch was sent takes nothing
+  // and starts nothing, leaving what the reader did.
+  let readerGen = 0;
   // A start of this browser waiting to know whether a player is offered, and
   // the newest start the barrier in flight runs (R1, V7).
   let waiting = null;
@@ -470,9 +475,11 @@ export function createOutput(env) {
     for (const p of Object.values(pending)) {
       if (!p || typeof p.tab !== "string" || !/^[0-9a-f]{32}$/.test(p.tab) || !(p.seq > 0) || typeof p.epoch !== "string") continue;
       // One a newer pick had superseded keeps a pick no pick here takes:
-      // read back, it moves nothing (S4).
+      // read back, it moves nothing (S4). Each carries the reader's
+      // generation as this document boots, which nothing stored carries over
+      // from the document before (B1015).
       const e = { key: opKey(p.epoch, p.tab, p.seq), epoch: p.epoch, tab: p.tab, seq: p.seq, role: p.role, kind: p.kind || "",
-        handover: p.handover || null, inherited: true, pick: p.stale === true ? -1 : 0 };
+        handover: p.handover || null, inherited: true, pick: p.stale === true ? -1 : 0, gen: readerGen };
       inherited.set(e.key, e);
     }
     // A document's own commands go under an identity of its own: two tabs
@@ -798,7 +805,8 @@ export function createOutput(env) {
       }
       storeIdentity();
       const mine = ours(entry);
-      if (mine) line = words;
+      // A switch to this browser says its own where the line is its own (ended).
+      if (mine && entry.role !== "switch-out") line = words;
       entry.refused?.(ans, words, mine);
       emit();
       return { refused: ans.error };
@@ -917,7 +925,8 @@ export function createOutput(env) {
   // read back here (a reload, or a copy of this tab, whose session storage
   // carried it in): what it moved is taken, stopped, and nothing starts, the
   // reader's Play going through the gate; its record's words say how it
-  // ended (R8, V5, V9, C1).
+  // ended (R8, V5, V9, C1). Nothing is taken where the reader has acted in
+  // this document since it booted (B1015).
   function finishInherited(e, rec) {
     if (inherited.get(e.key) !== e) return;
     drop(e);
@@ -926,15 +935,17 @@ export function createOutput(env) {
       return;
     }
     if (e.role === "switch-out") {
-      if (rec.status === "done") {
+      if (rec.status === "done" && readerGen !== e.gen) {
+        setOutput("browser");
+        ended(PHASE.browser, state && bridgeSounds(state) ? WORDS.bridgeAgain : "");
+      } else if (rec.status === "done") {
         const h = handoverOf(rec);
         setOutput("browser");
         phase = PHASE.browser;
         if (h) env.browser?.take?.(h, false);
         line = state && bridgeSounds(state) ? WORDS.bridgeAgain : (h?.playing ? WORDS.pressPlay : "");
       } else {
-        phase = PHASE.bridge;
-        line = switchOutWord(rec);
+        ended(PHASE.bridge, switchOutWord(rec));
       }
       emit();
       return;
@@ -1187,6 +1198,9 @@ export function createOutput(env) {
     // (G11); then the browser stops, and only then the request goes.
     const h = b.handover();
     b.suspend(h);
+    // Taken after the suspend's own count of an action: one of the reader's
+    // since keeps the browser's resume from starting what they left (B1015).
+    const gen = readerGen;
     phase = PHASE.toBridge;
     line = WORDS.toBridge;
     setOutput("bridge");
@@ -1198,21 +1212,22 @@ export function createOutput(env) {
       role: "switch-in",
       kind: "replace",
       handover: h,
-      done(rec, how, mine) { if (mine) resolveSwitchIn(rec, h); },
+      done(rec, how, mine) { if (mine) resolveSwitchIn(rec, h, { gen }); },
       unknown(words, mine) { if (mine) { phase = PHASE.bridge; line = words || WORDS.pickAgain; } },
       // Refused before it ran: back to this browser, its line said, which
-      // resumes only through the gate, and only if it was playing (R2).
+      // resumes only through the gate, only if it was playing (R2), and only
+      // where the reader has done nothing to it since.
       refused(ans, words, mine) {
         if (!mine) return;
         setOutput("browser");
         phase = PHASE.browser;
         line = words;
-        if (h.playing) gateStart((permit) => env.browser?.resume?.(h, permit));
+        if (h.playing && readerGen === gen) gateStart((permit) => env.browser?.resume?.(h, permit));
       },
     });
   }
 
-  function resolveSwitchIn(rec, h, { recovered = false } = {}) {
+  function resolveSwitchIn(rec, h, { recovered = false, gen = readerGen } = {}) {
     if (rec.status === "done") {
       setOutput("bridge");
       phase = PHASE.bridge;
@@ -1225,8 +1240,9 @@ export function createOutput(env) {
       // Refused with nothing changed (G9: the engine's answer decides, never
       // the count sent): back to the browser, which resumes only through
       // the gate, only beside a bridge that reads silent in the latest state
-      // accepted (G1, R4), and never for a document that only read the
-      // record back (R8, V5).
+      // accepted (G1, R4), never for a document that only read the record
+      // back (R8, V5), and never past an action of the reader's since the
+      // switch was sent (gen, B1015).
       setOutput("browser");
       phase = PHASE.browser;
       const why = rec.status === "refused" ? refusedWord(rec.error) : "";
@@ -1243,7 +1259,7 @@ export function createOutput(env) {
       }
       line = why;
       emit();
-      if (h?.playing) gateStart((permit) => env.browser?.resume?.(h, permit));
+      if (h?.playing && readerGen === gen) gateStart((permit) => env.browser?.resume?.(h, permit));
       return;
     }
     // Changed, a later step refused, or cancelled: the switch happened in
@@ -1268,15 +1284,20 @@ export function createOutput(env) {
     phase = PHASE.toBrowser;
     line = WORDS.toBrowser;
     emit();
+    const gen = readerGen;
     return send(ROUTES.switchOut, { take: true }, {
       role: "switch-out",
       done(rec, how, mine) {
         if (!mine) return;
         if (rec.status === "done" && how === "answer" && rec.silence > 0) {
-          const h = handoverOf(rec);
           setOutput("browser");
-          phase = PHASE.browser;
           const permit = permitFor(rec.silence, pickGen);
+          if (readerGen !== gen) {
+            ended(PHASE.browser, permit() ? "" : WORDS.bridgeAgain);
+            return;
+          }
+          const h = handoverOf(rec);
+          phase = PHASE.browser;
           // A state accepted since the silence that shows the bridge playing
           // again: the queue taken stopped, and said (R4).
           if (!permit()) {
@@ -1290,23 +1311,18 @@ export function createOutput(env) {
         }
         if (rec.status === "done") {
           // Read back whole after its answer was lost: history (G8).
-          recoverSwitchOut(rec);
+          recoverSwitchOut(rec, gen);
           return;
         }
-        phase = PHASE.bridge;
-        line = switchOutWord(rec);
+        ended(PHASE.bridge, switchOutWord(rec));
       },
-      unknown(words, mine) { if (mine) { phase = PHASE.bridge; line = words || WORDS.pickAgain; } },
+      unknown(words, mine) { if (mine) ended(PHASE.bridge, words || WORDS.pickAgain); },
       // Refused before it ran: back on the bridge, its line said; where no
       // player is offered, this browser is the output, nothing started (R2).
       refused(ans, words, mine) {
         if (!mine) return;
-        if (NOT_OFFERED.has(ans.error)) {
-          setOutput("browser");
-          phase = PHASE.browser;
-          return;
-        }
-        phase = PHASE.bridge;
+        if (NOT_OFFERED.has(ans.error)) setOutput("browser");
+        ended(NOT_OFFERED.has(ans.error) ? PHASE.browser : PHASE.bridge, words);
       },
     });
   }
@@ -1319,10 +1335,15 @@ export function createOutput(env) {
 
   // recoverSwitchOut is this document's own switch-out, its answer lost and
   // its record read back done: what it moved is taken, and only a barrier
-  // answered now, beside a bridge that does not sound, starts it (G8).
-  function recoverSwitchOut(rec) {
-    const h = handoverOf(rec);
+  // answered now, beside a bridge that does not sound, starts it (G8); where
+  // the reader has acted since gen, nothing is (B1015).
+  function recoverSwitchOut(rec, gen) {
     setOutput("browser");
+    if (readerGen !== gen) {
+      ended(PHASE.browser, state && bridgeSounds(state) ? WORDS.bridgeAgain : "");
+      return;
+    }
+    const h = handoverOf(rec);
     phase = PHASE.browser;
     if (h) env.browser?.take?.(h, false);
     if (state && bridgeSounds(state)) {
@@ -1331,6 +1352,21 @@ export function createOutput(env) {
     }
     line = "";
     if (h?.playing) gateStart((permit) => env.browser?.start?.(permit));
+  }
+
+  // ended settles what a switch to this browser shows as it ends, however it
+  // ends (B1015), and nothing a newer operation shows. The phase becomes `to`
+  // where the switch still holds it: its move, or an unconfirmed no other
+  // operation of the current pick holds, lost here or inherited and not yet
+  // resolved (the switch's own entry is resolved by then). The line becomes
+  // `words` where it is the switch's: its moving words, which no other
+  // operation sets, or, with the phase held, its unconfirmed line, the
+  // connection's words over it or none; a newer start's or operation's stay.
+  function ended(to, words) {
+    const held = phase === PHASE.toBrowser || (phase === PHASE.unconfirmed &&
+      ![...ops.values()].some((o) => o.lost && ours(o)) && ![...inherited.values()].some(ours));
+    if (line === WORDS.toBrowser || (held && [WORDS.unconfirmed, WORDS.reconnecting, ""].includes(line))) line = words;
+    if (held) phase = to;
   }
 
   // handoverOf keeps the entries with a track: a selected one with none gives
@@ -1535,6 +1571,9 @@ export function createOutput(env) {
     gateStart,
     gateContinue,
     cancelStarts,
+    // What the reader does to playback in this browser (audio.js's
+    // readerAction): a switch sent before it takes and starts nothing.
+    readerActed() { readerGen += 1; },
     // Whether the bar's line says the bridge's player plays, which a play
     // the browser refuses then says nothing beside (round 4, W8).
     refusalShown: () => [WORDS.bridgePlaying, WORDS.bridgeAgain, WORDS.bridgeToo].includes(line),
