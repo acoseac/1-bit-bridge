@@ -64,8 +64,9 @@ and three lines of comment in `internal/api/outputs.go`.
   an MPD device that does not resolve and those of several devices that resolve alike,
   `isMPDsOutput` null on each (PROTOCOL.md), so the checklist cannot tell that case from the
   candidates above, and telling the two apart is a change to GET /v1/outputs. The line judges both
-  as candidates, the player's card left out; which line the several-outputs case should get is
-  left to the owner.
+  as candidates, the player's card left out; the line that case gets, with GET /v1/outputs
+  unchanged, is this PR's next entry's
+  (`2026-11-25-b1022-player-on--fix-b1022-checklist-player-dac.md`).
 
 ### Tests
 

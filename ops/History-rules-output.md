@@ -947,7 +947,7 @@ The long form of `output.md`'s bullet under "The player's DSD check (B728 B12)";
 
 ## B1022 — the checklist's DAC line and the bridge's own player's DAC (2026-11-25)
 
-The long form of `output.md`'s bullet on the checklist's DAC line, under "The ALSA reader, the MPD client and `bridge output`"; the record is `ops/engineering-log/2026-11/2026-11-25-b1022--fix-b1022-checklist-player-dac.md`.
+The long form of `output.md`'s bullet on the checklist's DAC line, under "The ALSA reader, the MPD client and `bridge output`"; the records are `ops/engineering-log/2026-11/2026-11-25-b1022--fix-b1022-checklist-player-dac.md` and `ops/engineering-log/2026-11/2026-11-25-b1022-player-on--fix-b1022-checklist-player-dac.md`.
 
 ### The ALSA reader, the MPD client and `bridge output`
 
