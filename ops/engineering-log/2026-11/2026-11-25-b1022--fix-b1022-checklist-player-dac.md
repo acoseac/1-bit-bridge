@@ -139,3 +139,8 @@ packages ok in 2,030 s (`cmd/bridge` 1,992 s, `internal/manifest` 1,656 s, `inte
 1,466 s); `make build-all`, six binaries; `make docs-check`. Each passed, and `git status` was
 clean after. The citation guard read this entry: a test name planted in it failed the guard,
 naming the entry, and passed once the bytes were put back.
+
+`7e6df818` then took the fixture addresses out of the new tests (the DAC line reads none, and the
+doctor's case takes the config `writePlayerConfig` writes). At it the red at main and the twelve
+controls ran again with the same results, and the same session ran again: each step passed,
+`make test` 93 packages ok in 2,012 s (`cmd/bridge` 1,989 s), and `git status` was clean after.
