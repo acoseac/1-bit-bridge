@@ -290,9 +290,10 @@ func TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn(t *testing.T) { barSce
 func TestASecondPointerNeitherTakesNorEndsTheFirstsDrag(t *testing.T) { barScenario(t, 4) }
 
 // TestADragOnTheBridgesPlayerEndsWithItsRun pins the engine's run in a
-// drag's identity: a drag made before the bridge's player restarted, its
-// entry and occurrence restored as they were, seeks nothing at its lift or
-// the change after it, while a queue edit within one run keeps the drag.
+// drag's identity: a drag made before the engine restarted under one serve,
+// only its generation's run changed and its entry and occurrence restored as
+// they were, seeks nothing at its lift or the change after it, while a queue
+// edit within one run keeps the drag.
 func TestADragOnTheBridgesPlayerEndsWithItsRun(t *testing.T) { barScenario(t, 3) }
 
 // TestADragInThisBrowserEndsWithItsPlay pins the play in this browser's: a

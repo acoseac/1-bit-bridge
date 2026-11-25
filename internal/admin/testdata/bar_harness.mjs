@@ -5003,10 +5003,9 @@ S.TestADragOnTheBridgesPlayerEndsWithItsRun = async () => {
   r.s.on("POST", ROUTES.transport, async (e) => answer(recOf(e), latest));
   r.s.on("GET", ROUTES.now, async () => ({ body: latest, headers: { [CLOCK_HEADER]: new Date(r.c.now()).toISOString() } }));
   r.s.on("GET", ROUTES.queue, async () => ({ body: { epoch: latest.epoch, readAt: latest.revision, queueRev: latest.queueRev, token: 1, selected: 0, entries: [] } }));
-  let serial = 1;
   const publish = (o) => {
     latest = playing({ ...o });
-    r.out.frame(JSON.stringify(latest), serial);
+    r.frame(latest);
   };
   await settle();
   const seek = r.byClass("np-seek");
@@ -5014,22 +5013,20 @@ S.TestADragOnTheBridgesPlayerEndsWithItsRun = async () => {
   const finger = pointer(seek, 1);
   const drag = (v) => { finger.down(); finger.move(v); };
   const lift = async () => { finger.up(); seek.fire("change"); await settle(); };
-  // The bridge's player restarted while the finger is down, the stream
-  // reconnected to it: its queue restored, the same entry heard as
-  // occurrence 1 again, in a run of its own.
+  // The engine restarted under one serve while the finger is down: only the
+  // run of its generation changes, its queue restored, the same entry heard
+  // as occurrence 1 again.
   drag(500);
-  serial = 2;
-  r.out.streamOpen(serial);
-  publish({ epoch: E2, revision: 1, generation: "fedcba9876543210.1" });
+  publish({ revision: 4, generation: "fedcba9876543210.1" });
   await settle();
-  check("the restarted player's state is the bar's, its entry and occurrence as before",
-    r.out.view().state?.epoch === E2 && r.out.view().state?.anchor?.occurrence === 1 && r.out.view().state?.anchor?.entry === 11, r.out.view().state);
+  check("the restarted run's state is the bar's, its entry and occurrence as before",
+    r.out.view().state?.generation === "fedcba9876543210.1" && r.out.view().state?.anchor?.occurrence === 1 && r.out.view().state?.anchor?.entry === 11, r.out.view().state);
   finger.move(700);
   await lift();
-  check("a drag made before the player restarted: its lift and change seek nothing", seeks().length === 0, seeks());
+  check("a drag made before the engine restarted: its lift and change seek nothing", seeks().length === 0, seeks());
   // A queue edit within one run keeps the drag.
   drag(400);
-  publish({ epoch: E2, revision: 2, generation: "fedcba9876543210.2", queueRev: 2 });
+  publish({ revision: 5, generation: "fedcba9876543210.2", queueRev: 2 });
   await settle();
   await lift();
   check("a queue edit within the run the drag was made in keeps it: it lands once", JSON.stringify(seeks()) === "[120]", seeks());
