@@ -339,11 +339,12 @@ func TestADiscFolderBelongsToItsEdition(t *testing.T) { barScenario(t, 17) }
 func TestAnEditionHeadsAnUntaggedRowByItsDisc(t *testing.T) { barScenario(t, 2) }
 
 // TestTheDefaultEditionIsTheBestTheOutputPlays pins the order an album opens
-// on its best edition by, a check a term: this browser's own file before a copy, then depth before rate (a
-// routed edition no lower for being routed); the bridge's player's ways,
-// PCM above converted; the format order where nothing plays; then more rows
-// playing, more rows, and the folder.
-func TestTheDefaultEditionIsTheBestTheOutputPlays(t *testing.T) { barScenario(t, 16) }
+// on its best edition by, a check a term: this browser's own file before a
+// copy, then depth before rate (a routed edition no lower for being routed);
+// the bridge's player's ways, PCM above converted; the format order where
+// nothing plays; quality before completeness; then more rows playing, more
+// rows, and the folder.
+func TestTheDefaultEditionIsTheBestTheOutputPlays(t *testing.T) { barScenario(t, 17) }
 
 // TestAnOutputChangeChoosesTheEditionAgain pins the edition's slot: a change
 // of the output, which redraws the route as boot.js wires it, opens the best the new

@@ -5341,6 +5341,9 @@ S.TestTheDefaultEditionIsTheBestTheOutputPlays = async () => {
   check("this browser: FLAC 192/24 over a DSD edition with fresh copies", got === "FLAC 192/24 · 3", got);
   got = await shown([1, 2, 3].flatMap((k) => [edCd(k), edDsd(k, copy(24, 176400))]));
   check("this browser: its own file before a copy, a CD rip over DSD's 176.4/24 copies", got === "FLAC 44.1/16 · 3", got);
+  const part = [1, 2, 3, 4].map((k) => edHi(k, { path: `Lib/Part/Album/${nn(k)}.flac`, rateHz: 96000 }));
+  got = await shown([...part, ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((k) => edCd(k, { path: `Lib/Full/Album/${nn(k)}.flac` }))]);
+  check("this browser: quality before completeness, a 4-track 96/24 edition over a 9-track CD rip", got === "FLAC 96/24 · 4", got);
   got = await shown([1, 2].flatMap((k) => [edDsd(k), edDsd(k, { path: `Lib/DSD128/Album/${nn(k)}.dsf`, rateHz: 5644800 })]));
   check("this browser: DSD editions it plays none of, by the format order", got === "DSD128 · 2", got);
   store.set(OUTPUT_KEY, "bridge");
