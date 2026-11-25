@@ -138,3 +138,13 @@ with it, and its long form in `ops/History-rules-output.md` rewritten; the "What
 paragraph there says the source reads the player's boot gate; the checklist entry's pointer gains
 the period it lacked. `scripts/doc-split/verify_moves.py --base a5d6a4e9` lists the retitled line
 and its long form as missing beside their successors, and pairs every other edit.
+
+### Runs
+
+One build-slot session at `d010858c`, on Go 1.27.3 with the release tags: `make fmt`, which
+rewrote nothing; `make vet` on linux/amd64 and for darwin/amd64, darwin/arm64, linux/arm64,
+windows/amd64, windows/arm64, linux/386 and linux/arm; `cmd/bridge`'s source guards by name;
+`make test P=8 TEST_PKGS='-count=1 ./...'`, 93 packages ok in 2,013 s (`cmd/bridge` 1,991 s);
+`make build-all`, six binaries; `make docs-check`. Each passed, and `git status` was clean after.
+The citation guard read this entry: a test name planted in it failed the guard, naming the entry,
+and passed once the bytes were put back.
