@@ -124,7 +124,8 @@ func TestThePhoneBarShowsItsSeekItsTimesAndItsWords(t *testing.T) {
 // bottom padding, the output menu and the queue panel clear the bar by the
 // height it renders at (--np-bar-h, which nowplaying.js sets from the bar's
 // own box as it changes) where --bar-h alone stayed 60px under a bar of three
-// rows, and that the A–Z rail fits between its sticky top and that bar, its
+// rows, and that the A–Z rail fits between where it sticks, below the
+// shell's top bar where that bar is, and that bar (or the window's foot), its
 // letters shrinking to fit (B1021's item 3).
 func TestWhatSitsAboveTheBarClearsItAsItRenders(t *testing.T) {
 	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
@@ -144,12 +145,16 @@ func TestWhatSitsAboveTheBarClearsItAsItRenders(t *testing.T) {
 	}
 	rail := false
 	for _, r := range all {
-		if r.selects("body.has-player-bar .az-rail") && strings.Contains(r.decl, "max-height") && strings.Contains(r.decl, "var(--player-bottom-inset)") {
+		if r.selects(".az-rail") && strings.Contains(r.decl, "max-height: calc(100dvh - var(--az-top) - var(--az-foot))") {
 			rail = true
 		}
 	}
-	if !rail || !anyRule(all, ".az-letter", "min-height", "0") {
+	if !rail || !anyRule(all, ".az-rail", "top", "var(--az-top)") || !anyRule(all, "body.has-player-bar", "--az-foot", "var(--player-bottom-inset)") ||
+		!anyRule(all, ".az-letter", "min-height", "0") {
 		t.Error("the A–Z rail has no height that stops above the bar, or its letters cannot shrink to fit it")
+	}
+	if !anyRule(playerCSSBlocks(t, "(max-width: 1023px)"), ":root", "--az-top", "calc(65px + var(--space-2))") {
+		t.Error("below 1024px the A–Z rail sticks under the shell's top bar, which covers its first letters")
 	}
 	np := stripJSComments(readFile(t, "static/player/nowplaying.js"))
 	mount := extractJSFunction(t, np, "mount")

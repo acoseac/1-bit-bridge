@@ -4760,6 +4760,34 @@ S.TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs = async () => {
   check("the bar's height as it renders is handed to what sits above it", !!watch && props["--np-bar-h"] === "152px", [!!watch, props]);
 };
 
+S.TestASeekLandsWhereItIsLetGoOnce = async () => {
+  const r = await barPage();
+  const seek = r.byClass("np-seek");
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  await settle();
+  let writes = 0;
+  let at = r.el.currentTime;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { writes += 1; at = v; }, configurable: true });
+  // A touch as WebKit delivers it: the value moved, then the finger lifted, and no change.
+  seek.value = "500";
+  seek.fire("input");
+  seek.fire("pointerup");
+  check("a touch's lift lands the seek where the value was let go", writes === 1 && at === 100, [writes, at]);
+  seek.value = "250";
+  seek.fire("input");
+  seek.fire("pointerup");
+  seek.fire("change");
+  check("a mouse's release and the change after it land one seek", writes === 2 && at === 50, [writes, at]);
+  seek.value = "750";
+  seek.fire("input");
+  seek.fire("change");
+  check("a key's change lands one seek", writes === 3 && at === 150, [writes, at]);
+  seek.fire("pointerup");
+  seek.fire("pointercancel");
+  check("a lift or a cancel that moved nothing seeks nothing", writes === 3, writes);
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });

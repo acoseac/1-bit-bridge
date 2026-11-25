@@ -249,6 +249,13 @@ func TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls(t *testing.T) { barSce
 // (main's bottom padding, the output menu, the queue panel, the A–Z rail).
 func TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs(t *testing.T) { barScenario(t, 4) }
 
+// TestASeekLandsWhereItIsLetGoOnce pins that the bar's seek lands once, where
+// its value was let go: at the lift of the pointer that moved it, since
+// WebKit fires no change after a touch moves the value (B1021), or at its
+// change, the two never landing it twice, and a lift that moved nothing
+// seeking nothing.
+func TestASeekLandsWhereItIsLetGoOnce(t *testing.T) { barScenario(t, 4) }
+
 // TestADSDOnlyAlbumPlaysOnTheBridgeFromAnEmptyBar pins A2 to A4: from empty
 // session storage the bridge's player is picked with nothing sent, and a
 // DSD-only album is played on it by its id.
