@@ -208,8 +208,46 @@ func TestTheBridgesReturnPlaysNothing(t *testing.T) { barScenario(t, 2) }
 
 // TestRowsFollowTheChosenOutput pins §7.6: one decision gives a row its
 // playability and its chip for the output chosen, a DSD row playing on the
-// bridge's player and reading its way, a routed one reading why.
+// bridge's player and reading its way, a routed one reading why, and in this
+// browser a DSD row the bridge's player plays saying so (B1021).
 func TestRowsFollowTheChosenOutput(t *testing.T) { barScenario(t, 4) }
+
+// TestADSDRowSaysWhereItPlays pins B1021's item 4: in this browser a DSD row
+// says it cannot play here and, by its catalog way, that the bridge's player
+// plays it (its rate natively, as DoP, or converted to PCM, never called
+// bit-exact); a row the bridge's player refuses, or one with no bridge field,
+// keeps the browser's words alone; the bridge's player's chips are as they
+// were; and the album page draws each, in either output.
+func TestADSDRowSaysWhereItPlays(t *testing.T) { barScenario(t, 10) }
+
+// TestTheAlbumsCountLineSaysHowManyPlayWhere pins the album's count line
+// (B1021): in this browser it says how many rows cannot play here and how
+// many of those the bridge's player plays, pointing to Output, whose pick
+// says whether it can be chosen now (free and held alike), and offers
+// Download in words the page shows only where it shows the link; with the
+// bridge's player chosen it is as it was.
+func TestTheAlbumsCountLineSaysHowManyPlayWhere(t *testing.T) { barScenario(t, 12) }
+
+// TestAnAlbumNoRowOfWhichPlaysHereOffersNoPlayShuffleOrAdd pins B1021's item
+// 6: where no row of an album plays on the output chosen, its Play, Shuffle
+// and Add to queue are disabled, each naming the count line that says why,
+// and a disabled Play sends no barrier; a row the queue plays (a fresh FLAC
+// copy of a DSD row included) makes them live, Play then asking the barrier
+// as every start does; and with the bridge's player chosen Shuffle stays off.
+func TestAnAlbumNoRowOfWhichPlaysHereOffersNoPlayShuffleOrAdd(t *testing.T) {
+	barScenario(t, 14)
+}
+
+// TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls pins that a switch of
+// the output, which redraws the route as boot.js wires it, gives an open
+// album the rows, the count line and the controls of the output picked.
+func TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls(t *testing.T) { barScenario(t, 5) }
+
+// TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs pins that the bar
+// keeps the seek and both times in its scrub row, which a phone now shows
+// (B1021's item 1), and hands the height it renders at to what sits above it
+// (main's bottom padding, the output menu, the queue panel, the A–Z rail).
+func TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs(t *testing.T) { barScenario(t, 4) }
 
 // TestADSDOnlyAlbumPlaysOnTheBridgeFromAnEmptyBar pins A2 to A4: from empty
 // session storage the bridge's player is picked with nothing sent, and a
