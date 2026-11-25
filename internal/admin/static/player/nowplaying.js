@@ -86,39 +86,53 @@ export function mount() {
     class: "np-seek",
     attrs: { type: "range", min: "0", max: "1000", value: "0", "aria-label": "Seek" },
   });
-  // The seek lands once, where its value was let go (B1021): a key's at its
-  // change; a drag's at the lift of the pointer that began it, since WebKit
-  // fires no change after a touch, and never at a change while that pointer
-  // is down, another pointer's lift, or a cancel, which puts the thumb back.
-  // The drag is that pointer's until it lifts, and lands its own value: an
-  // input follows the pointer that went down or moved last, and another's is
-  // undone. A drag lands only on what it was begun on (render's seekOn): the
-  // output and the occurrence heard, in its run or its play, while seeking is
-  // offered.
+  // The seek lands once, where its value was let go (B1021): a key's or an
+  // assistive adjustment's at its change; a drag's at the lift of the pointer
+  // that began it, since WebKit fires no change after a touch, and never at a
+  // change while that pointer is down, another pointer's lift, or a cancel,
+  // which puts the thumb back. The drag is that pointer's until it lifts, and
+  // lands its own value: an input follows the pointer that went down or moved
+  // last, and another's is undone. A pointer that goes down while another is
+  // down begins no drag: its inputs are undone, so neither its lift nor the
+  // change after it has a preview to land. Every landing asks again the play
+  // its gesture began on (seekNow): the output and the occurrence heard, in
+  // its run or its play, while seeking is offered; a replay or a retry is a
+  // new play.
   let scrubbing = false;
   let drag = null;
   let mover = null;
+  let keyOn = null;
+  const down = new Set();
+  const seekNow = () => {
+    if (bridgeChosen(out()?.view())) return seekOn;
+    const s = audio.snapshot();
+    return s.seekable ? ["browser", s.track, s.play] : null;
+  };
   refs.seek.addEventListener("pointerdown", (e) => {
     mover = e.pointerId;
-    if (drag && drag.pointer !== e.pointerId) return;
-    drag = { pointer: e.pointerId, on: seekOn, lost: !seekOn, value: null };
+    const free = down.size === 0 || drag?.pointer === e.pointerId;
+    down.add(e.pointerId);
+    if (!free) return;
+    const on = seekNow();
+    drag = { pointer: e.pointerId, on, lost: !on, value: null };
   });
   refs.seek.addEventListener("input", () => {
-    if (drag && mover !== drag.pointer) {
-      if (drag.value !== null && !drag.lost) refs.seek.value = drag.value;
+    if (drag ? mover !== drag.pointer : down.size > 0) {
+      if (drag?.value != null && !drag.lost) refs.seek.value = drag.value;
       else putBack();
       return;
     }
     if (drag?.lost) return;
+    if (!drag && !scrubbing) keyOn = seekNow();
     scrubbing = true;
     if (drag) drag.value = refs.seek.value;
     setProgress(refs.seek.value / 1000);
   });
-  const land = (v) => {
+  const land = (v, on) => {
     if (!scrubbing) return;
     scrubbing = false;
+    if (!on || !sameSeek(on, seekNow())) return putBack();
     const o = out()?.view();
-    if (!seekOn) return;
     if (bridgeChosen(o)) {
       const d = o.state?.track?.duration || 0;
       if (d > 0) out().command("seek", { seconds: (v / 1000) * d });
@@ -127,12 +141,12 @@ export function mount() {
       if (s.duration > 0) audio.seek((v / 1000) * s.duration);
     }
   };
-  refs.seek.addEventListener("change", () => { if (!drag) land(refs.seek.value); });
+  refs.seek.addEventListener("change", () => { if (!drag) land(refs.seek.value, keyOn); });
   const lift = (e, lands) => {
-    if (drag?.pointer !== e.pointerId) return;
-    const { lost, value } = drag;
+    if (!down.delete(e.pointerId) || drag?.pointer !== e.pointerId) return;
+    const { lost, value, on } = drag;
     drag = null;
-    if (lands && !lost && value !== null) land(value);
+    if (lands && !lost && value !== null) land(value, on);
     else putBack();
   };
   // The document hears a lift away from the seek too (a mouse let go beside
@@ -143,6 +157,9 @@ export function mount() {
     target.addEventListener("pointercancel", (e) => lift(e, false));
   }
   refs.isScrubbing = () => scrubbing;
+  // A preview no gesture holds any more (an input with no change after it)
+  // gives the thumb back to the track at the next tick.
+  refs.settle = () => { if (scrubbing && !drag) putBack(); };
   // A drag whose occurrence went, or whose seek is no longer offered, ends
   // there: nothing it lets go of lands, even once seeking is offered again.
   refs.followSeek = () => {
@@ -497,6 +514,7 @@ function setVolumeFill(frac) {
 function tick() {
   const o = out()?.view();
   out()?.tick();
+  refs.settle();
   paintPosition(o);
 }
 

@@ -146,8 +146,9 @@ export function engineCanPlay(contentType) {
 /**
  * Resolve what to actually request for a track, if anything.
  *
- * Returns { url, contentType, degraded } or null when nothing here can
- * play it. `degraded` marks a variant substitution so the UI can say
+ * Returns { url, contentType, degraded, key } or null when nothing here can
+ * play it; `key` is the source chosen, which a confirmed decode failure is
+ * recorded by. `degraded` marks a variant substitution so the UI can say
  * so — the web player is explicitly not a bit-exact path, and quietly
  * serving a different file than the one named would undercut that
  * honesty.
@@ -155,30 +156,47 @@ export function engineCanPlay(contentType) {
 export function resolvePlayable(track, audioURLFor) {
   const play = track?.play;
   if (!play) return null;
-  if (play.kind !== "none" && engineCanPlay(play.contentType)) {
-    return { url: audioURLFor(track.path, null), contentType: play.contentType, degraded: false };
+  const own = sourceKey(track, null);
+  if (play.kind !== "none" && engineCanPlay(play.contentType) && !failed.has(own)) {
+    return { url: audioURLFor(track.path, null), contentType: play.contentType, degraded: false, key: own };
   }
-  if (play.variantId && engineCanPlay(play.variantContentType)) {
+  const variant = sourceKey(track, play.variantId);
+  if (play.variantId && engineCanPlay(play.variantContentType) && !failed.has(variant)) {
     return {
       url: audioURLFor(track.path, play.variantId),
       contentType: play.variantContentType,
       degraded: true,
+      key: variant,
     };
   }
   // Engine-dependent with no variant: attempt it anyway. canPlayType
   // under-reports (notably ALAC), and a failed attempt costs one
   // request and surfaces a precise error, where refusing up front
   // would hide a track the browser could actually have played.
-  if (play.kind === "engine-dependent") {
-    return { url: audioURLFor(track.path, null), contentType: play.contentType, degraded: false };
+  if (play.kind === "engine-dependent" && !failed.has(own)) {
+    return { url: audioURLFor(track.path, null), contentType: play.contentType, degraded: false, key: own };
   }
   return null;
 }
 
+// The sources this page's browser confirmed it cannot decode (B1021), each a
+// row's path and the variant its play names (sourceKey, never a URL), until
+// the page reloads: a source replaced at the same path and variant too.
+const failed = new Set();
+const sourceKey = (track, variantId) => `${track.path}\n${variantId || ""}`;
+
+/** markUnplayable records the source resolvePlayable chose, confirmed undecodable here. */
+export function markUnplayable(source) {
+  if (source) failed.add(source);
+}
+
+/** How many sources this page has recorded as undecodable. */
+export const failures = () => failed.size;
+
 /** Short reason for the "can't play here" chip. */
 export function unplayableReason(track) {
   if (!track || !track.play) return "";
-  if (track.play.kind === "none") {
+  if (track.play.kind === "none" || failed.has(sourceKey(track, null))) {
     return track.isDsd ? "DSD — not playable in a browser" : "Not playable in a browser";
   }
   return "May not play in this browser";
@@ -250,19 +268,6 @@ export function playFor(track, output) {
   const way = b && b.way !== "none" ? bridgeWayChip(track) : null;
   const there = way === null ? "" : ` · the bridge's player plays it${way ? ` (${way})` : ""}`;
   return { playable, chip: (unplayableReason(track) || "Not playable in a browser") + there, why: true };
-}
-
-/**
- * A row the queue found this browser cannot decode (its play marked none
- * after a confirmed decode failure) reads so among tracks too, by its path,
- * since a page's rows are not the queue's objects (B1021). It answers how
- * many it marked.
- */
-export function adoptFailures(tracks, queue) {
-  const failed = new Set(queue.filter((q) => q.play?.kind === "none").map((q) => q.path));
-  const hit = tracks.filter((t) => t.play && t.play.kind !== "none" && failed.has(t.path));
-  for (const t of hit) t.play = { ...t.play, kind: "none" };
-  return hit.length;
 }
 
 /**

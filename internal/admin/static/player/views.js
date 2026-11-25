@@ -4,7 +4,7 @@
 
 import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, downloadURL,
          playlistExportURL, isAborted } from "./api.js";
-import { duration, totalDuration, qualityLabel, formatChip, plural, playFor, adoptFailures,
+import { duration, totalDuration, qualityLabel, formatChip, plural, playFor, failures,
          bytes, variantKindLabel, variantSkipLabel, timeAgo } from "./format.js";
 import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs, crumbs, announce, setDisabled } from "./ui.js";
 import * as audio from "./audio.js";
@@ -82,6 +82,9 @@ function unplayableNote(tracks) {
 }
 
 const PAGE = 60;
+
+// The count of undecodable sources an album's redraw was last asked for.
+let redrawnFor = 0;
 
 // The album-grid filters filterAlbums accepts. Kept as one list so a new
 // axis is forwarded and preserved by every helper below at once.
@@ -502,12 +505,18 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // trail and the title beside the cover.
   setAxisTitle(albumName);
 
-  // A decode failure the queue confirms while the album is shown redraws it.
-  adoptFailures(d.tracks, audio.snapshot().queue);
+  // A row that played here at render and no longer does (a source the
+  // browser confirmed it cannot decode) redraws the album, once a failure.
+  const live = d.tracks.filter((t) => playFor(t, "browser").playable);
   let off = null;
-  off = audio.subscribe((s) => {
-    if (gen() !== at) off?.();
-    else if (adoptFailures(d.tracks, s.queue)) rerenderView();
+  off = audio.subscribe(() => {
+    const lost = gen() === at && live.some((t) => !playFor(t, "browser").playable);
+    if (gen() === at && !lost) return;
+    off?.();
+    if (lost && failures() > redrawnFor) {
+      redrawnFor = failures();
+      rerenderView();
+    }
   });
   const note = unplayableNote(d.tracks);
   const actions = el("div", { class: "detail-actions" },

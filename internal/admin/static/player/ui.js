@@ -249,15 +249,23 @@ export function onVisible(sentinel, onHit) {
  */
 const RAIL_LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 
+// What the last pointer went down on, anywhere in the document, which one
+// capture listener a document records for every rail (B1021): a pointer's
+// click on a live letter jumps only where it went down on that letter or
+// outside the rail, since WebKit hands a tap on an empty letter's click to
+// the nearest live one, and takes the record; a key's click (detail 0) is its
+// letter's own and leaves it.
+let pointerDown = null;
+let listening = null;
+
 export function alphabetRail(buckets, onJump) {
   if (!Array.isArray(buckets) || buckets.length === 0) return null;
+  if (listening !== document) {
+    listening = document;
+    document.addEventListener("pointerdown", (e) => { pointerDown = e.target; }, true);
+  }
   const byKey = new Map(buckets.map((b) => [b.key, b]));
   const rail = el("nav", { class: "az-rail", attrs: { "aria-label": "Jump to letter" } });
-  // A pointer's click jumps only from the letter its pointer went down on
-  // (B1021): WebKit hands a tap on an empty letter's click to the nearest live
-  // one. A key's click (detail 0) is its letter's own.
-  let began = null;
-  rail.addEventListener("pointerdown", (e) => { began = e.target.parentNode === rail ? e.target : null; });
   for (const letter of RAIL_LETTERS) {
     const b = byKey.get(letter);
     const btn = el("button", {
@@ -267,9 +275,12 @@ export function alphabetRail(buckets, onJump) {
         : { type: "button", disabled: "", "aria-disabled": "true" },
     });
     if (b) btn.addEventListener("click", (e) => {
-      const elsewhere = e.detail > 0 && began && began !== btn;
-      began = null;
-      if (!elsewhere) onJump(b);
+      if (e.detail > 0) {
+        const from = pointerDown;
+        pointerDown = null;
+        if (from !== btn && from?.parentNode === rail) return;
+      }
+      onJump(b);
     });
     rail.appendChild(btn);
   }

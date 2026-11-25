@@ -5,7 +5,7 @@
 // acts as a preloader.
 
 import { audioURL } from "./api.js";
-import { resolvePlayable, formatChip } from "./format.js";
+import { resolvePlayable, formatChip, markUnplayable } from "./format.js";
 import { currentOutput } from "./output.js";
 
 const STORE_KEY = "bridge-player-queue";
@@ -53,9 +53,10 @@ let primedFor = null;
 // but NOT the same track being re-loaded — a reader retrying the row that
 // just failed would have their fresh attempt clobbered by the stale one.
 let playbackGen = 0;
-// The repeat-one replays, which load nothing: with playbackGen, the play the
-// bar's seek binds a drag to (B1021). Nothing else reads it.
-let replays = 0;
+// Each play of the audible element: every load of it (the retry's too, never
+// the preloader's) and each repeat-one replay, which loads nothing. The bar's
+// seek binds a drag to it (B1021); nothing else reads it.
+let plays = 0;
 
 // How long the failure probe waits for response HEADERS. Short, because
 // the source has ALREADY failed to load by the time it runs — this only
@@ -231,6 +232,7 @@ function loadEl(el) {
   if (el === state.el) {
     marks.length = 0;
     ownPauses = 0;
+    plays += 1;
   }
   el.load();
 }
@@ -303,7 +305,7 @@ function emit() {
 export function snapshot() {
   return {
     track: state.index >= 0 ? state.queue[state.index] : null,
-    play: `${playbackGen}.${replays}`,
+    play: plays,
     queue: state.queue,
     index: state.index,
     playing: state.playing,
@@ -478,7 +480,7 @@ function onError() {
       if (resumeWait) resumeWait.skip = true;
       state.playing = state.loading = false;
       emit();
-      void handleSourceError(track, state.el.src);
+      void handleSourceError(track, state.el.src, state.source);
       return;
     default: { // 2 network / 3 decode — retry once, then surface.
       if (!track._retried) {
@@ -532,7 +534,7 @@ function onError() {
  * down, and a 2xx for anything it served — which leaves decoding as the
  * only remaining explanation.
  */
-async function handleSourceError(track, src) {
+async function handleSourceError(track, src, source) {
   const at = playbackGen;
   const reason = await classifySourceFailure(src);
   // The probe is a round trip, so the reader can have moved on. Every
@@ -543,7 +545,7 @@ async function handleSourceError(track, src) {
   // Only a genuine decode failure is permanent. Marking the others would
   // keep a track dead for the rest of the session over a condition that
   // may have already cleared.
-  if (reason === "decode") markUnplayable(track);
+  if (reason === "decode") markUnplayable(source);
 
   const name = track.title || track.path;
   state.skipped += 1;
@@ -620,10 +622,6 @@ async function classifySourceFailure(url) {
     ctrl.abort();
     return "error";
   }
-}
-
-function markUnplayable(track) {
-  if (track.play) track.play.kind = "none";
 }
 
 /**
@@ -752,6 +750,7 @@ function load(index, { autoplay, permit }) {
   // playing something silently, which is the whole complaint.
   state.loading = !!autoplay;
   state.el.src = target.url;
+  state.source = target.key;
   loadEl(state.el);
   updateMetadata(track);
   if (autoplay) {
@@ -912,7 +911,7 @@ function advanceNow(delta, { auto = false, skip = false, permit } = {}) {
     // restart.
     if (permit !== undefined) startPermit = permit;
     intent = true;
-    replays += 1;
+    plays += 1;
     state.el.currentTime = 0;
     playEl();
     return;
@@ -1410,6 +1409,7 @@ function restore() {
   if (!target) return;
   state.index = idx;
   state.el.src = target.url;
+  state.source = target.key;
   // Generation-guarded, as every continuation of playback is: a switch of
   // the bar's output, or any later load, makes this seek stale, and it must
   // not seek another track to this one's position (P6).
