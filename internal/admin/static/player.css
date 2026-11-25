@@ -1156,6 +1156,10 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   border: 1px solid var(--np-border); box-shadow: var(--elev-2), var(--elev-3);
 }
 .np-menu { display: flex; flex-direction: column; gap: var(--space-2); }
+/* Each child keeps its words' height and the menu scrolls inside: a coarse
+ * pointer's floor on a pick stands in for a flex item's own minimum, and a
+ * short window squeezed the bridge's pick below its words (B1021). */
+.np-menu > * { flex-shrink: 0; }
 .np-menu[hidden], .np-queue[hidden] { display: none; }
 .np-pick {
   position: relative;
