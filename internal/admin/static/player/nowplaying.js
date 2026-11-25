@@ -55,10 +55,9 @@ export function mount() {
   bar = el("div", { class: "npbar", attrs: { id: "nowplaying", role: "region", "aria-label": "Now playing" } });
   bar.hidden = true;
 
-  // A non-interactive progress line pinned to the bar's top edge. It is
-  // the ONLY progress indication left below the phone breakpoint, where
-  // the numeric scrubber row is hidden — before this, a phone got no
-  // position feedback at all.
+  // A non-interactive progress line pinned to the bar's top edge, below the
+  // tablet breakpoint, beside the scrub row a phone now shows too (B1021):
+  // the rail alone left a phone no way to seek and no numbers.
   refs.rail = el("div", { class: "np-rail", attrs: { "aria-hidden": "true" } });
 
   refs.art = el("div", { class: "np-art" });
@@ -178,6 +177,12 @@ export function mount() {
   document.body.appendChild(refs.menu);
   document.body.appendChild(refs.panel);
   document.body.classList.add("has-player-bar");
+  // The height the bar renders at, for what sits above it (B1021): main's
+  // bottom padding, the output menu, the queue panel and the A–Z rail. A
+  // phone's bar wraps to rows that --bar-h alone does not know of.
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => document.documentElement.style.setProperty("--np-bar-h", `${bar.offsetHeight}px`)).observe(bar);
+  }
 
   // A click outside the open menu or the open queue closes it, as Escape
   // does; a click on its own button is that button's toggle (C8).
@@ -410,10 +415,6 @@ function setProgress(frac) {
 /**
  * How much of the track the browser has actually fetched, painted behind
  * the played fill on the same two surfaces.
- *
- * The rail half is not decoration: below the phone breakpoint the whole
- * numeric scrubber row is hidden, so the rail is the only place a phone
- * can see the download at all.
  *
  * The property is --np-loaded and not --np-buffered on purpose: the
  * COLOUR of this band is --np-buffer, and two names one character apart

@@ -60,16 +60,25 @@ function shuffleButton(tracks, albumArt) {
   return b;
 }
 
-/** "3 of 12 can't play in a browser", or on the bridge's player, for the output chosen. */
+/**
+ * "3 of 12 can't play in a browser", or on the bridge's player, for the
+ * output chosen. In this browser it says how many of those the bridge's
+ * player plays, pointing to Output, whose pick says whether it can be chosen
+ * now, and offers Download in words the page hides where it hides the link
+ * (B1021). Its id names it as the reason of the controls an album disables.
+ */
 function unplayableNote(tracks) {
   const output = chosenOutput();
-  const n = tracks.filter((t) => !playFor(t, output).playable).length;
+  const left = tracks.filter((t) => !playFor(t, output).playable);
+  const n = left.length;
   if (!n) return null;
-  return el("p", {
-    class: "muted small", text: output === "bridge"
-      ? `${n} of ${tracks.length} can't play on the bridge's player.`
-      : `${n} of ${tracks.length} can't play in a browser — download those instead.`,
-  });
+  const attrs = { id: "album-why" };
+  if (output === "bridge") return el("p", { class: "muted small", attrs, text: `${n} of ${tracks.length} can't play on the bridge's player.` });
+  const k = left.filter((t) => playFor(t, "bridge").playable).length;
+  const them = k < n ? `${k} of them` : (n === 1 ? "it" : "them");
+  return el("p", { class: "muted small", attrs }, `${n} of ${tracks.length} can't play in a browser.`,
+    k ? ` The bridge's player plays ${them}: choose it under Output, which says whether it can be chosen now.` : null,
+    el("span", { class: "track-dl-note", text: ` Download ${n === 1 ? "it" : "those"} instead.` }));
 }
 
 const PAGE = 60;
@@ -493,6 +502,7 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // trail and the title beside the cover.
   setAxisTitle(albumName);
 
+  const note = unplayableNote(d.tracks);
   const actions = el("div", { class: "detail-actions" },
     el("button", {
       class: "btn btn-primary", text: "Play",
@@ -503,6 +513,15 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
       class: "btn", text: "Add to queue",
       on: { click: () => addOn({ album: id }, d.tracks) },
     }));
+  // Where no row plays on the output chosen, the three are disabled, the
+  // count line saying why (B1021): a Play that can start nothing still asked
+  // the start's barrier of the bridge.
+  if (!d.tracks.some((t) => playFor(t, chosenOutput()).playable)) {
+    for (const b of [...actions.children]) {
+      setDisabled(b, true);
+      if (note) b.setAttribute("aria-describedby", note.getAttribute("id"));
+    }
+  }
 
   // Delete is appended ASYNCHRONOUSLY and only when the operator has turned
   // it on, so a bridge without it renders exactly the toolbar it did before.
@@ -519,7 +538,7 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
       // twice — the same reason renderCollectionDetail dropped its own.
       link(`/artist/${a.artistId}`, { class: "detail-artist", text: a.albumArtist || "" }),
       albumStatLine(a),
-      unplayableNote(d.tracks),
+      note,
       actions,
       d.booklet ? bookletLink(d.booklet) : null)));
 

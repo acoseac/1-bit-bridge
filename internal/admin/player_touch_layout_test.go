@@ -167,8 +167,8 @@ func TestWhatSitsAboveTheBarClearsItAsItRenders(t *testing.T) {
 // Download words hide where the Download link does.
 func TestTheDSDChipWrapsUnderItsTitleOnAPhone(t *testing.T) {
 	phone := playerCSSBlocks(t, "(max-width: 640px)")
-	if !anyRule(phone, ".track-why", "grid-column", "2 / -1") || !anyRule(phone, ".track-why .chip", "white-space", "normal") {
-		t.Error("up to 640px a row's reason is not on a line of its own under the title, or its chip does not wrap")
+	if !anyRule(phone, ".track-why", "grid-column", "2 / -1") {
+		t.Error("up to 640px a row's reason is not on a line of its own under the title")
 	}
 	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
 	wraps := false
@@ -188,6 +188,16 @@ func TestTheDSDChipWrapsUnderItsTitleOnAPhone(t *testing.T) {
 	}
 	if !hidden {
 		t.Error("up to 640px the count line offers Download where the Download link is hidden")
+	}
+}
+
+// TestAnAlbumsControlsTakeAFingerOnATouchScreen pins at the source that an
+// album's Play, Shuffle and Add to queue are at least 44px square where the
+// pointer is a finger (B1021's item 6).
+func TestAnAlbumsControlsTakeAFingerOnATouchScreen(t *testing.T) {
+	touch := playerCSSBlocks(t, "(pointer: coarse)")
+	if !anyRule(touch, ".detail-actions .btn", "min-width", "44px") || !anyRule(touch, ".detail-actions .btn", "min-height", "44px") {
+		t.Error("on a touch screen an album's action buttons are not at least 44px square")
 	}
 }
 
