@@ -84,6 +84,24 @@ func TestEveryControlTakesAFingerWhereACoarsePointerIs(t *testing.T) {
 	}
 }
 
+// TestTheOutputMenuScrollsRatherThanSqueezeAPick pins at the source that no
+// child of the output menu shrinks, whatever the pointer: the menu is a column
+// the room above the bar caps, and a coarse pointer's 44px floor stands in for
+// a flex item's own minimum, its words' height, so a short window squeezed the
+// bridge's pick to 44px and ran its words over the line below it (WebKit at
+// 568 by 320 and 844 by 390, and at 320 by 568 while a long title played).
+// Each child keeps its height, outside every @media block, and the menu
+// scrolls inside.
+func TestTheOutputMenuScrollsRatherThanSqueezeAPick(t *testing.T) {
+	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
+	for _, b := range cssMediaBlocks(css, "") {
+		css = strings.Replace(css, b, "", 1)
+	}
+	if !anyRule(touchRulesOf(css), ".np-menu > *", "flex-shrink", "0") {
+		t.Error("a child of the output menu shrinks below its words where they outgrow the room above the bar")
+	}
+}
+
 // TestTheBarTakesRowsForAFingerFrom641px pins B1021's bar under a coarse
 // pointer from 641px (D5) at the source: its centre's transport and times are
 // rows of the bar's own, three where the window is taller than 500px (the
