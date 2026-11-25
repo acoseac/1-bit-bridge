@@ -992,6 +992,14 @@ func TestAnInheritedSwitchLeavesTheWarningOfARowLostSinceTheReload(t *testing.T)
 	barScenario(t, 10)
 }
 
+// TestAnInheritedSwitchLeavesTheWarningOfAnInheritedBarrierStillUnresolved
+// pins that an operation another earlier document left, of the switch's pick
+// and unresolved, holds the warning too: the switch read back in a third
+// document, after a row of its own, leaves that barrier's unconfirmed.
+func TestAnInheritedSwitchLeavesTheWarningOfAnInheritedBarrierStillUnresolved(t *testing.T) {
+	barScenario(t, 10)
+}
+
 // TestAGoneSwitchLeavesTheWarningOfARowLostSinceItWasSent pins the same in one
 // document for a switch whose record the console no longer keeps: its
 // operation_gone leaves the row's unconfirmed and its words.

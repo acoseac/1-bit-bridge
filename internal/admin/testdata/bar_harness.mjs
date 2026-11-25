@@ -3672,9 +3672,10 @@ async function libraryRows(tracks, { id = "a1", base = dirURL } = {}) {
 // waits for k.held, or, with `lost`, is lost, and a read back of it waits for
 // k.readBack. Each later barrier runs to done at a revision above the
 // switch's: its answer waits for k.hold where set (once) and, with
-// `lostAfter`, is lost, and a read back of it waits for k.backHold. A read
-// back of a sequence in k.unreachable fails once, as a dropped connection
-// does. k.revs records the revisions that history ran at.
+// `lostAfter`, is lost, and a read back of it waits for k.backHold; with
+// k.stuck (once) it is still running as its answer is lost. A read back of a
+// sequence in k.unreachable fails once, as a dropped connection does. k.revs
+// records the revisions that history ran at.
 function theConsole({ lost = false, lostAfter = false } = {}) {
   const k = { held: gate(), readBack: { p: Promise.resolve() }, backHold: { p: Promise.resolve() }, hold: null,
     unreachable: new Set(), setup: null, switched: null, revs: { running: 0, switched: 0, after: [] } };
@@ -3706,6 +3707,12 @@ function theConsole({ lost = false, lostAfter = false } = {}) {
         if (lost) return "lost";
         await k.held.p;
         return answer(k.switched, st);
+      }
+      if (k.stuck) {
+        // Still running as its answer is lost: its Pause not answered yet.
+        k.stuck = false;
+        keep(e, recOf(e, { kind: "switch-out", status: "running", effect: "none", sent: 0, last: "" }));
+        return "lost";
       }
       rev += 1;
       k.revs.after.push(rev);
@@ -4214,6 +4221,36 @@ S.TestAnInheritedSwitchLeavesTheWarningOfARowLostSinceTheReload = async () => {
     d.out.view().phase === PHASE.browser && d.out.view().line === WORDS.startAgain && d.out.pending().length === 0,
     [d.out.view().phase, d.out.view().line, d.out.pending()]);
   afterTheSwitch(k);
+};
+
+S.TestAnInheritedSwitchLeavesTheWarningOfAnInheritedBarrierStillUnresolved = async () => {
+  // Three documents of one tab: the first sends the switch; the second,
+  // loaded again over it, plays a row whose barrier the console still runs as
+  // its answer is lost; the third, loaded again over the second, inherits the
+  // switch and that barrier, both of its pick, and plays a row of its own.
+  const { r, k } = await switchOutstanding();
+  k.readBack = gate();
+  const d1 = await reloaded(k.routes, k.pub());
+  k.stuck = true;
+  (await libraryRows([flac(5), flac(6)], { id: "a5", base: d1.base }))[0].click();
+  await settle();
+  check("the second document's row: its barrier lost while the console runs it",
+    d1.s.posts(ROUTES.switchOut).length === 1 && d1.out.view().phase === PHASE.unconfirmed, [d1.s.posts(ROUTES.switchOut).length, d1.out.view().phase]);
+  const d2 = await reloaded(k.routes, k.pub());
+  check("the third document inherits the switch and that barrier, unconfirmed, the switch's record asked for and held",
+    d2.out.pending().length === 2 && d2.out.view().phase === PHASE.unconfirmed &&
+      d2.s.gets(ROUTES.operation).some((e) => Number(e.query.get("seq")) === r.switchSeq),
+    [d2.out.pending(), d2.out.view().phase]);
+  (await libraryRows([flac(7), flac(8)], { id: "a7", base: d2.base }))[0].click();
+  await settle();
+  check("its own row plays, through a barrier of its own",
+    d2.s.posts(ROUTES.switchOut).length === 1 && !d2.el.paused && /07\.flac/.test(d2.el.plays.at(-1) || ""), [d2.s.posts(ROUTES.switchOut).length, d2.el.paused, d2.el.plays]);
+  k.readBack.open();
+  await settle();
+  const v = d2.out.view();
+  check("the switch's record read back done: nothing taken, the inherited barrier's warning kept",
+    v.phase === PHASE.unconfirmed && v.line === WORDS.unconfirmed && !d2.el.plays.some((src) => /09\.flac/.test(src)) && d2.audio.snapshot().track?.path === "Album/07.flac" && !d2.el.paused,
+    [v.phase, v.line, d2.el.plays, d2.audio.snapshot().track?.path, d2.el.paused]);
 };
 
 S.TestAGoneSwitchLeavesTheWarningOfARowLostSinceItWasSent = async () => {
