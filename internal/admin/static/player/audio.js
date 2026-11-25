@@ -104,7 +104,9 @@ let intent = false;
 // them all, since the load algorithm removes the events they wait for.
 const marks = [];
 // The protective pauses of the browser's own plays, whose `pause` events are
-// the bar's own (W3), and the one such play waiting on the gate (W4).
+// the bar's own (W3), and the one such play waiting on the gate (W4); one
+// whose source the browser cannot use is marked (skip), its answer settling
+// only whether that source's skip goes on, until a load or the skips' stop.
 let ownPauses = 0;
 let resumeWait = null;
 // What the reader does to playback (a transport call, a pick's suspend or
@@ -267,7 +269,7 @@ function ownPlay() {
     resumeWait = null;
     if (permit !== undefined) startPermit = permit;
     intent = true;
-    playEl();
+    if (!wait.skip) playEl();
   };
   const drop = () => {
     if (resumeWait !== wait) return;
@@ -400,7 +402,7 @@ export function init() {
       readerAction(false);
     }
     state.playing = false;
-    state.loading = own && resumeWait !== null;
+    state.loading = own && resumeWait !== null && !resumeWait.skip;
     setSessionState("paused");
     persist();
     emit();
@@ -466,9 +468,10 @@ function onError() {
       // The probe below is a round trip, and a spinner left up across it
       // says "still coming" about a source we already know did not load;
       // nothing plays, and the bar's Play over it starts again (toggle). A
-      // resume of the browser's own waiting on the gate ends with it: its
-      // admission would play the source that failed; the skip goes on (B1015).
-      resumeWait = null;
+      // resume of the browser's own waiting on the gate settles only whether
+      // the skip goes on, as it did: admitted, it plays nothing of the source
+      // that failed; refused, it ends the intent (B1015).
+      if (resumeWait) resumeWait.skip = true;
       state.playing = state.loading = false;
       emit();
       void handleSourceError(track, state.el.src);
@@ -548,6 +551,7 @@ async function handleSourceError(track, src) {
       ? `The next tracks can't play in this browser. Use Download on the ones you want.`
       : `The next tracks could not be loaded. Check the source is reachable.`;
     intent = false;
+    resumeWait = null;
     state.playing = false;
     state.loading = false;
     emit();
@@ -727,6 +731,8 @@ function load(index, { autoplay, permit }) {
   if (!target) return;
   playbackGen += 1;
   heldAt = null;
+  // A resume marked for the skip past the track that failed goes with it.
+  if (resumeWait?.skip) resumeWait = null;
   // A start's permit stays the playback's, through the tracks it advances
   // to, until another start replaces it.
   if (permit !== undefined) startPermit = permit;
@@ -984,10 +990,11 @@ function stopAtEnd() {
 export function toggle() {
   init();
   if (state.index < 0) return;
-  if (resumeWait) {
+  if (resumeWait && !resumeWait.skip) {
     // The browser's own resume waits on the gate: Play/Pause cancels it (W4),
     // and with it what this browser meant to play, which an error's retry
-    // reads (B1015).
+    // reads (B1015). One marked for a skip is no wait the bar shows: Play is
+    // over the failed track, a start.
     intent = false;
     readerAction();
     emit();
