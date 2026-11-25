@@ -103,7 +103,7 @@ func TestTheOutputMenuScrollsRatherThanSqueezeAPick(t *testing.T) {
 }
 
 // TestTheBarTakesRowsForAFingerFrom641px pins B1021's bar under a coarse
-// pointer from 641px (D5) at the source: its centre's transport and times are
+// pointer from 641px at the source: its centre's transport and times are
 // rows of the bar's own, three where the window is taller than 500px (the
 // words beside the extras, the transport, the times) and two where it is
 // 500px tall or less, a phone held sideways, its toggles and its chip hidden
@@ -137,10 +137,11 @@ func TestTheBarTakesRowsForAFingerFrom641px(t *testing.T) {
 	}
 }
 
-// TestTheBarAndTheSectionsHoverOnlyForAPointerThatHovers pins D12 at the
-// source: every :hover paint of the bar, its menu and its queue panel, of the
-// player's sections and of the crumbs sits in a (hover: hover) block, so a
-// tap's paint does not stick on a touch screen, and none stands outside one.
+// TestTheBarAndTheSectionsHoverOnlyForAPointerThatHovers pins B1021's hover
+// paints at the source: every :hover paint of the bar, its menu and its queue
+// panel, of the player's sections and of the crumbs sits in a (hover: hover)
+// block, so a tap's paint does not stick on a touch screen, and none stands
+// outside one.
 func TestTheBarAndTheSectionsHoverOnlyForAPointerThatHovers(t *testing.T) {
 	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
 	all := touchRulesOf(css)
