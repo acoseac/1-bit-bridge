@@ -362,6 +362,12 @@ func TestAFailedVariantIsThatSourceAlone(t *testing.T) { barScenario(t, 6) }
 // handed click does not.
 func TestTheRailTakesEveryPointerDownForItsClick(t *testing.T) { barScenario(t, 2) }
 
+// TestAPreviewNoGestureHoldsGivesWayAtTheNextTick pins that no gesture leaves
+// the seek's preview standing: an input after a lift, with no pointer down
+// and no change after it, gives the thumb back to the track at the bar's next
+// tick.
+func TestAPreviewNoGestureHoldsGivesWayAtTheNextTick(t *testing.T) { barScenario(t, 1) }
+
 // TestADSDOnlyAlbumPlaysOnTheBridgeFromAnEmptyBar pins A2 to A4: from empty
 // session storage the bridge's player is picked with nothing sent, and a
 // DSD-only album is played on it by its id.

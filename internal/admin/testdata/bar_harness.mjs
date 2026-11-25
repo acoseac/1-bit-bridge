@@ -5448,6 +5448,31 @@ S.TestTheRailTakesEveryPointerDownForItsClick = async () => {
   check("a key's click beside a held touch jumps, and that touch's handed click does not", JSON.stringify(jumps) === '["A","A"]', jumps);
 };
 
+S.TestAPreviewNoGestureHoldsGivesWayAtTheNextTick = async () => {
+  const r = await pageRig();
+  const ticks = [];
+  globalThis.setInterval = (fn) => { ticks.push(fn); return 0; };
+  const np = await import(new URL("nowplaying.js", dirURL));
+  np.mount();
+  const bar = r.body.children.find((c) => c.attrs.id === "nowplaying");
+  const seek = findAll(bar, (n) => n.classList.contains("np-seek"))[0];
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  await settle();
+  let at = 0;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { at = v; }, configurable: true });
+  const finger = pointer(seek, 1);
+  finger.down();
+  finger.move(400);
+  finger.up();
+  // An input after the lift, no pointer down, and no change after it.
+  seek.value = "900";
+  seek.fire("input");
+  at = 50;
+  ticks[0]?.();
+  check("an input no change followed: at the next tick the thumb follows the track again", ticks.length === 1 && seek.value === "250", [ticks.length, seek.value]);
+};
+
 const name = scenarioName;
 if (!S[name]) {
   R.fail.push({ name: "scenario", detail: `no scenario ${name}` });
