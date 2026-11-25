@@ -366,3 +366,21 @@ At `ccbbd67b`, the same way, with what the switch's end settles and the resume's
 - The race-checked bar tests (161 tests), ten times each: 1,610 passed, none failed or skipped, on
   an idle machine (215 s); and 1,610 passed, none failed, beside four CPU-bound processes started
   for the run and stopped by their process IDs after it (184 s, a load average of about 4.4).
+
+At `4e3832c1`, the same way, with the mark (its modules those of `4a7fb4ef`):
+
+- The full build-and-test target in one session holding the build slot: exit 0 in 2,123 s, the
+  formatting step rewriting nothing, `cmd/bridge` 1,970 s and `internal/admin` 1,494 s in the
+  race-checked suite, the six release builds and the doc checks passing; in the same session the
+  release-tag vets for the same seven targets, each exit 0.
+- The same twelve source guards by name, each passed.
+- The browser-module scenarios: all 167 run, none failing. Against `4eb68e7f`'s modules the 164
+  others pass and 3 of the 7 new fail: the refusal, the admission after the browser's own pause
+  and the timer first. Against `a353c9f8`'s, 13 fail: 5 of the 7 new, all but the refusal and the
+  timer first, and the eight listed as red at `a353c9f8`, the three-document case among them.
+  Against main's, 23 fail: 4 of the 7 new, all but those two and the next-track retry, the 11
+  listed first, and 8 of the 9 for what a switch's end settles and the resume's wait, all but the
+  start made with no permit.
+- The race-checked bar tests (168 tests), ten times each: 1,680 passed, none failed or skipped, on
+  an idle machine (223 s); and 1,680 passed, none failed, beside four CPU-bound processes started
+  for the run and stopped by their process IDs after it (194 s, a load average of about 4.3).
