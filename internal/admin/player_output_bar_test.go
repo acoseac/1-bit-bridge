@@ -282,6 +282,43 @@ func TestAnAlbumAsksThisBrowserWhatTheQueuePlays(t *testing.T) { barScenario(t, 
 // to the bridge's player, seeks nothing at the lift or the change after it.
 func TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn(t *testing.T) { barScenario(t, 3) }
 
+// TestASecondPointerNeitherTakesNorEndsTheFirstsDrag pins the drag's owner
+// (B1021): a second pointer, primary or not, lands nothing at its lift while
+// the first drags, and its move of the range is never what lands; the
+// first's lift lands its own value, once.
+func TestASecondPointerNeitherTakesNorEndsTheFirstsDrag(t *testing.T) { barScenario(t, 3) }
+
+// TestADragOnTheBridgesPlayerEndsWithItsRun pins the engine's run in a
+// drag's identity: a drag made before the bridge's player restarted, its
+// entry and occurrence restored as they were, seeks nothing at its lift or
+// the change after it, while a queue edit within one run keeps the drag.
+func TestADragOnTheBridgesPlayerEndsWithItsRun(t *testing.T) { barScenario(t, 3) }
+
+// TestADragInThisBrowserEndsWithItsPlay pins the play in this browser's: a
+// position update on the play keeps the drag, and the same entry played
+// again under repeat all, or replayed under repeat one with no load, seeks
+// nothing at the lift; a drag on the replay lands.
+func TestADragInThisBrowserEndsWithItsPlay(t *testing.T) { barScenario(t, 4) }
+
+// TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser pins that the route
+// redraws on the effective output: GET now answering that no player is wired,
+// with the bridge picked, makes this browser the output, and the album
+// redraws once, its FLAC row and its Play, Shuffle and Add to queue live.
+func TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser(t *testing.T) { barScenario(t, 4) }
+
+// TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay pins that the
+// open album follows a confirmed decode failure, by the row's path, with
+// rows parsed afresh per request: the row reads why, its album's controls are
+// disabled and their Play sends no barrier while the skip is held; the skip,
+// let go, goes on as it did.
+func TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay(t *testing.T) { barScenario(t, 6) }
+
+// TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn pins the rail by touch: a
+// tap on a live letter asks for its bucket once, one on an empty letter asks
+// for nothing whatever live letter its click is handed, and a key's or a
+// mouse's click right after still asks once.
+func TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn(t *testing.T) { barScenario(t, 3) }
+
 // TestADSDOnlyAlbumPlaysOnTheBridgeFromAnEmptyBar pins A2 to A4: from empty
 // session storage the bridge's player is picked with nothing sent, and a
 // DSD-only album is played on it by its id.

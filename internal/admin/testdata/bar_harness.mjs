@@ -3643,14 +3643,15 @@ const albums = new Map();
 // modules at base, and returns its rows' title buttons (the view on .view):
 // the browser's row, which plays its track on the output chosen (playOn),
 // where the bar's queue panel, hidden while this browser is chosen, drives the
-// bridge. Its fetch answers the albums' details and nothing else.
+// bridge. Its fetch answers the albums' details and nothing else, each answer
+// parsed afresh, as the server's is: no two requests share a row.
 async function libraryRows(tracks, { id = "a1", base = dirURL } = {}) {
   albums.set(id, tracks);
   globalThis.fetch = async (url) => {
     const m = /^\/api\/player\/albums\/([^?]+)/.exec(String(url));
     const t = m ? albums.get(decodeURIComponent(m[1])) : null;
     const body = t ? { album: { id: m[1], title: "Album", albumArtist: "Artist", artistId: "" }, tracks: t, variants: null, release: null } : {};
-    return { ok: true, status: 200, json: async () => body };
+    return { ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(body)) };
   };
   document.title = "Player";
   const views = await import(new URL("views.js", base));
@@ -4763,10 +4764,11 @@ S.TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs = async () => {
 };
 
 // pointer is a finger or a button on the seek: its pointer events, with the
-// value it moves the seek to between them, as a browser delivers them.
+// value it moves the seek to between them, as a browser delivers them (a
+// pointer's move, then the input it makes).
 const pointer = (seek, id, primary = true) => ({
   down() { seek.fire("pointerdown", { pointerId: id, isPrimary: primary }); },
-  move(v) { seek.value = String(v); seek.fire("input"); },
+  move(v) { seek.fire("pointermove", { pointerId: id, isPrimary: primary }); seek.value = String(v); seek.fire("input"); },
   up() { seek.fire("pointerup", { pointerId: id, isPrimary: primary }); },
   cancel() { seek.fire("pointercancel", { pointerId: id, isPrimary: primary }); },
 });
@@ -4946,6 +4948,222 @@ S.TestAnAlbumAsksThisBrowserWhatTheQueuePlays = async () => {
   check("a row with no play field: unplayable, its reason rendered where it points",
     rows[0].getAttribute("aria-disabled") === "true" && !!named && reason?.textContent === "Not playable in a browser",
     [rows[0].getAttribute("aria-disabled"), named, reason?.textContent]);
+};
+
+S.TestASecondPointerNeitherTakesNorEndsTheFirstsDrag = async () => {
+  const r = await barPage();
+  const seek = r.byClass("np-seek");
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  await settle();
+  const wrote = [];
+  let at = r.el.currentTime;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { wrote.push(v); at = v; }, configurable: true });
+  const one = pointer(seek, 1);
+  // A second pointer the browser calls primary too (a mouse beside a finger).
+  const two = pointer(seek, 2);
+  one.down();
+  one.move(500);
+  two.down();
+  two.up();
+  check("a second primary pointer's lift while the first drags lands nothing", wrote.length === 0, wrote);
+  one.up();
+  seek.fire("change");
+  check("the first pointer's lift lands its own drag, once", JSON.stringify(wrote) === "[100]", wrote);
+  // The range is one value: another pointer moves it under the first's drag.
+  one.down();
+  one.move(250);
+  const other = pointer(seek, 3, false);
+  other.down();
+  other.move(700);
+  one.up();
+  seek.fire("change");
+  other.up();
+  check("another pointer's move under the drag: the owner's value lands or nothing does, never the other's",
+    !wrote.includes(140) && (JSON.stringify(wrote) === "[100,50]" || JSON.stringify(wrote) === "[100]"), wrote);
+};
+
+S.TestADragOnTheBridgesPlayerEndsWithItsRun = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  let latest = playing({ revision: 3 });
+  const r = await barPage({ latest });
+  r.s.on("POST", ROUTES.transport, async (e) => answer(recOf(e), latest));
+  r.s.on("GET", ROUTES.now, async () => ({ body: latest, headers: { [CLOCK_HEADER]: new Date(r.c.now()).toISOString() } }));
+  r.s.on("GET", ROUTES.queue, async () => ({ body: { epoch: latest.epoch, readAt: latest.revision, queueRev: latest.queueRev, token: 1, selected: 0, entries: [] } }));
+  let serial = 1;
+  const publish = (o) => {
+    latest = playing({ ...o });
+    r.out.frame(JSON.stringify(latest), serial);
+  };
+  await settle();
+  const seek = r.byClass("np-seek");
+  const seeks = () => r.s.posts(ROUTES.transport).filter((e) => e.body?.command === "seek").map((e) => e.body.seconds);
+  const finger = pointer(seek, 1);
+  const drag = (v) => { finger.down(); finger.move(v); };
+  const lift = async () => { finger.up(); seek.fire("change"); await settle(); };
+  // The bridge's player restarted while the finger is down, the stream
+  // reconnected to it: its queue restored, the same entry heard as
+  // occurrence 1 again, in a run of its own.
+  drag(500);
+  serial = 2;
+  r.out.streamOpen(serial);
+  publish({ epoch: E2, revision: 1, generation: "fedcba9876543210.1" });
+  await settle();
+  check("the restarted player's state is the bar's, its entry and occurrence as before",
+    r.out.view().state?.epoch === E2 && r.out.view().state?.anchor?.occurrence === 1 && r.out.view().state?.anchor?.entry === 11, r.out.view().state);
+  finger.move(700);
+  await lift();
+  check("a drag made before the player restarted: its lift and change seek nothing", seeks().length === 0, seeks());
+  // A queue edit within one run keeps the drag.
+  drag(400);
+  publish({ epoch: E2, revision: 2, generation: "fedcba9876543210.2", queueRev: 2 });
+  await settle();
+  await lift();
+  check("a queue edit within the run the drag was made in keeps it: it lands once", JSON.stringify(seeks()) === "[120]", seeks());
+};
+
+S.TestADragInThisBrowserEndsWithItsPlay = async () => {
+  const r = await barPage();
+  const seek = r.byClass("np-seek");
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  await settle();
+  // A seek lands strictly inside the track: the element's own end sets its
+  // time to the duration, and a load or a replay to 0.
+  let writes = 0;
+  let at = r.el.currentTime;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { if (v > 0 && v < 200) writes += 1; at = v; }, configurable: true });
+  const finger = pointer(seek, 1);
+  const drag = (v) => { finger.down(); finger.move(v); };
+  const lift = async () => { finger.up(); seek.fire("change"); await settle(); };
+  drag(500);
+  at = 37;
+  r.el.fire("timeupdate");
+  await settle();
+  await lift();
+  check("a position update on the play the drag was made on keeps it: it lands once", writes === 1 && at === 100, [writes, at]);
+  // Repeat all over one entry: its end loads the same entry again.
+  r.audio.cycleRepeat();
+  drag(500);
+  r.el.end();
+  await settle();
+  r.el.metadata(200);
+  await settle();
+  finger.move(700);
+  await lift();
+  check("the entry played again under repeat all while the finger was down: its lift and change seek nothing",
+    r.audio.snapshot().repeat === "all" && r.el.plays.length === 2 && writes === 1 && at === 0, [r.audio.snapshot().repeat, r.el.plays.length, writes, at]);
+  // Repeat one: its replay starts the same element and track from 0, no load.
+  r.audio.cycleRepeat();
+  drag(500);
+  r.el.end();
+  await settle();
+  finger.move(700);
+  await lift();
+  check("a repeat-one replay while the finger was down: its lift and change seek nothing",
+    r.audio.snapshot().repeat === "one" && r.el.plays.length === 3 && writes === 1 && at === 0, [r.audio.snapshot().repeat, r.el.plays.length, writes, at]);
+  drag(250);
+  await lift();
+  check("a drag on the replay, uninterrupted, lands once", writes === 2 && at === 50, [writes, at]);
+};
+
+S.TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const r = await pageRig({ latest: playing({ revision: 3 }) });
+  const rows = await libraryRows([flac(1)], { id: "f1" });
+  const view = rows.view;
+  const views = await import(new URL("views.js", dirURL));
+  // As boot.js wires it (wireOutput): the output's change redraws the route.
+  let redraws = 0;
+  let redrawn = null;
+  listen(r.out, { win: window, doc: document, onOutput: () => { redraws += 1; redrawn = views.renderAlbum(view, { id: "f1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); } });
+  let p = albumParts(view);
+  check("the bridge's player chosen: a row it says nothing of plays nowhere, the album's Play off",
+    r.out.view().output === "bridge" && !r.out.view().notOffered && p.play?.disabled === true, [r.out.view().output, p.play?.disabled]);
+  // GET now answers that no player is wired: this browser is the output now,
+  // the pick of the bridge kept.
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_wired", message: "no player" } }));
+  await r.out.sampleNow();
+  await settle();
+  await redrawn;
+  p = albumParts(view);
+  const row = findAll(view, (n) => n.classList.contains("track-title"))[0];
+  check("no player offered: the pick kept, this browser the output", r.out.view().notOffered && r.out.view().output === "bridge", r.out.view());
+  check("the album redraws once for this browser: its FLAC row live, Play, Shuffle and Add to queue enabled",
+    redraws === 1 && row?.getAttribute("aria-disabled") === null && !p.play?.disabled && !p.shuffle?.disabled && !p.add?.disabled,
+    [redraws, row?.getAttribute("aria-disabled"), p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+};
+
+S.TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const t = longTimers();
+  let rows = await libraryRows([flac(1)], { id: "d1" });
+  rows[0].click();
+  await settle();
+  check("a start from the album: one barrier, one play", r.s.posts(ROUTES.switchOut).length === 1 && r.el.plays.length === 1, [r.s.posts(ROUTES.switchOut).length, r.el.plays]);
+  // The album shown again after the queue started: its rows parsed afresh,
+  // none of them an object the queue holds.
+  rows = await libraryRows([flac(1)], { id: "d1" });
+  const view = rows.view;
+  // The byte probe of the source that fails: the bridge served it.
+  const read = globalThis.fetch;
+  globalThis.fetch = (url, init) => /^\/api\/player\/albums\//.test(String(url)) ? read(url, init) : Promise.resolve({ ok: true, status: 206, json: async () => ({}) });
+  const views = await import(new URL("views.js", dirURL));
+  let redrawn = null;
+  // As boot.js wires it: a view's rerender is the route's.
+  window.addEventListener("player:rerender", () => { redrawn = views.renderAlbum(view, { id: "d1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); });
+  r.el.fail(4);
+  await settle();
+  await redrawn;
+  await settle();
+  const p = albumParts(view);
+  const row = findAll(view, (n) => n.classList.contains("track-title"))[0];
+  check("the decode failure confirmed: the row reads why, the album's Play, Shuffle and Add to queue disabled, the count line saying so",
+    row?.getAttribute("aria-disabled") === "true" && rowChips(view)[0] === "Not playable in a browser" && p.play?.disabled && p.shuffle?.disabled && p.add?.disabled &&
+    /^1 of 1 can't play in a browser\./.test(p.line?.textContent || ""), [row?.getAttribute("aria-disabled"), rowChips(view), p.play?.disabled, p.line?.textContent]);
+  const barriers = r.s.posts(ROUTES.switchOut).length;
+  const plays = r.el.plays.length;
+  p.play?.click();
+  await settle();
+  check("its Play, with the skip held, sends no barrier and plays nothing", t.count(1200) === 1 && r.s.posts(ROUTES.switchOut).length === barriers && r.el.plays.length === plays,
+    [t.count(1200), r.s.posts(ROUTES.switchOut).length - barriers, r.el.plays.length - plays]);
+  t.fire(1200);
+  await settle();
+  check("the skip, let go, goes on as it did: through the gate, to the queue's end, nothing played",
+    r.s.posts(ROUTES.switchOut).length === barriers + 1 && r.el.plays.length === plays && !r.audio.snapshot().playing,
+    [r.s.posts(ROUTES.switchOut).length - barriers, r.el.plays.length - plays, r.audio.snapshot().playing]);
+};
+
+S.TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn = async () => {
+  page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const rail = ui.alphabetRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
+  const letter = (k) => rail.children.find((n) => n.textContent === k);
+  const empty = rail.children.filter((n) => n.hasAttribute("disabled"));
+  // A touch as WebKit delivers it: its pointerdown on the letter under the
+  // finger, which the rail hears, then the click: a live letter's own, and an
+  // empty letter's handed by touch adjustment to the nearest live one.
+  const tap = (under, clicked) => {
+    rail.fire("pointerdown", { target: under, pointerType: "touch", pointerId: 7, isPrimary: true });
+    clicked?.fire("click", { detail: 1 });
+  };
+  for (const k of ["A", "M", "Z"]) tap(letter(k), letter(k));
+  check("a tap on each live letter asks for its bucket once", JSON.stringify(jumps) === '["A","M","Z"]', jumps);
+  const near = (n) => { const i = rail.children.indexOf(n); return letter(i < 7 ? "A" : (i < 21 ? "M" : "Z")); };
+  for (const n of empty) tap(n, near(n));
+  check("a tap on each of the 24 empty letters asks for nothing, whatever live letter its click is handed",
+    empty.length === 24 && jumps.length === 3, [empty.length, jumps]);
+  // No suppression left over: a key on a focused live letter, right after an
+  // empty tap whose click went elsewhere and after one that made no click.
+  tap(letter("B"), letter("A"));
+  letter("A").fire("click", { detail: 0 });
+  tap(letter("N"), null);
+  letter("M").fire("click", { detail: 0 });
+  rail.fire("pointerdown", { target: letter("Z"), pointerType: "mouse", pointerId: 1, isPrimary: true });
+  letter("Z").fire("click", { detail: 1 });
+  check("a key's click right after an empty tap, and a mouse's, each ask once", JSON.stringify(jumps) === '["A","M","Z","A","M","Z"]', jumps);
 };
 
 const name = scenarioName;
