@@ -74,7 +74,7 @@ func TestChecklistInputMatchesTheBridgesOwnPlayersCard(t *testing.T) {
 	yes := true
 	mpdEl := func(card int, id string) api.OutputInfo {
 		return api.OutputInfo{ID: "a1", Kind: "mpd", Player: api.OutputPlayer{Software: "volumio", Version: "4.119"},
-			MPD: &api.OutputMPD{Port: 6600, Addresses: []string{"192.168.1.42"}, Version: "0.24.0", State: "play"},
+			MPD: &api.OutputMPD{Port: 6600, Addresses: []string{}, Version: "0.24.0", State: "play"},
 			DAC: &api.OutputDAC{Card: card, ID: id, Name: "iFi (by AMR) HD USB Audio", USBID: "20b1:3009", IsMPDsOutput: &yes,
 				Capabilities: api.OutputCapabilities{MaxPCMRate: 384000, NativeDSDRates: []int{11289600}}},
 			PathRules: []api.OutputPathRule{{Root: "Music", State: "proven"}}}
@@ -131,7 +131,7 @@ func TestTheConsoleCallsTheBridgesOwnPlayersDACItsOwn(t *testing.T) {
 		Outputs: func(context.Context) (api.OutputsResponse, error) {
 			return api.OutputsResponse{Outputs: []api.OutputInfo{
 				{ID: "a1", Kind: "mpd", Player: api.OutputPlayer{Software: "volumio", Version: "4.119"},
-					MPD: &api.OutputMPD{Port: 6600, Addresses: []string{"192.168.1.42"}, Version: "0.24.0", State: "stop", LoopbackBaseURL: "http://127.0.0.1:7791"},
+					MPD: &api.OutputMPD{Port: 6600, Addresses: []string{}, Version: "0.24.0", State: "stop"},
 					DAC: &mpdCard, PathRules: []api.OutputPathRule{{Root: "Music", State: "proven"}}},
 				{ID: "bridge:" + thePlayerUUID, Kind: "bridge", Player: api.OutputPlayer{Software: "bridge"}, DAC: &playerCard, PathRules: []api.OutputPathRule{},
 					Bridge: &api.OutputBridge{State: "playing", LibraryScope: "self", Codecs: []string{"flac", "wav", "aiff", "alac", "dsf", "dff"}}},
@@ -602,17 +602,14 @@ func TestBridgeDoctorNeverPointsMPDAtADACWhileTheBridgesOwnPlayerIsOn(t *testing
 			Hint:    "Check the bridge's own player's DAC on the console's Player page before pointing MPD at a DAC."}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			music, data := filepath.Join(dir, "Music"), filepath.Join(dir, "data")
-			for _, d := range []string{music, data} {
-				if err := os.MkdirAll(d, 0o755); err != nil {
-					t.Fatal(err)
-				}
+			path, music := writePlayerConfig(t)
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
 			}
-			path := filepath.Join(dir, "bridge.yaml")
-			body := "libraryRoots:\n  - " + music + "\nlistenAddress: \"127.0.0.1:0\"\nadminAddress: \"127.0.0.1:0\"\ndataDir: " + data +
-				"\noutput:\n  mpd: on\n  loopbackPort: 0\n" + tc.player
-			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			// The config ends in its output block, which the player's block
+			// joins.
+			if err := os.WriteFile(path, append(body, tc.player...), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			box := func(c *api.LocalOutputsConfig) {
