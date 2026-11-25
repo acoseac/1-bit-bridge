@@ -376,9 +376,10 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 /* The rail fits between where it sticks and the bar as the bar renders (or
  * the window's foot), its letters shrinking to fit rather than scrolling, so
  * every one stays there to tap (B1021): on a 568px phone it ran 554px tall,
- * W to Z under the bar. Below 1024px it sticks below the shell's top bar
- * (app.css: a 44px menu button, 10px of padding each side and a border,
- * 65px), which covered its first letters. */
+ * W to Z under the bar. Each letter is clipped to its own box, so a tap at
+ * a shrunken letter lands on it and not on a neighbour's glyph. Below 1024px
+ * it sticks below the shell's top bar (app.css: a 44px menu button, 10px of
+ * padding each side and a border, 65px), which covered its first letters. */
 :root { --az-top: var(--space-2); --az-foot: var(--space-2); }
 body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 @media (max-width: 1023px) { :root { --az-top: calc(65px + var(--space-2)); } }
@@ -386,7 +387,7 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   max-height: calc(100vh - var(--az-top) - var(--az-foot));
   max-height: calc(100dvh - var(--az-top) - var(--az-foot));
 }
-.az-letter { min-height: 0; }
+.az-letter { min-height: 0; overflow: hidden; }
 
 /* Touch wants a bigger target than a dense desktop rail. This is also
  * where the rail earns the most, so it is NOT hidden on small screens. */

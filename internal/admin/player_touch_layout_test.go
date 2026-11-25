@@ -150,8 +150,8 @@ func TestWhatSitsAboveTheBarClearsItAsItRenders(t *testing.T) {
 		}
 	}
 	if !rail || !anyRule(all, ".az-rail", "top", "var(--az-top)") || !anyRule(all, "body.has-player-bar", "--az-foot", "var(--player-bottom-inset)") ||
-		!anyRule(all, ".az-letter", "min-height", "0") {
-		t.Error("the A–Z rail has no height that stops above the bar, or its letters cannot shrink to fit it")
+		!anyRule(all, ".az-letter", "min-height", "0") || !anyRule(all, ".az-letter", "overflow", "hidden") {
+		t.Error("the A–Z rail has no height that stops above the bar, or its letters cannot shrink to fit it each in its own box")
 	}
 	if !anyRule(playerCSSBlocks(t, "(max-width: 1023px)"), ":root", "--az-top", "calc(65px + var(--space-2))") {
 		t.Error("below 1024px the A–Z rail sticks under the shell's top bar, which covers its first letters")
