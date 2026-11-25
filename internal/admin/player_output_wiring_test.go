@@ -777,10 +777,12 @@ func TestNoSoundSourceOfTheConsoleBypassesTheGate(t *testing.T) {
 
 // TestThePhoneBarKeepsItsWordsWithTheBridgeChosen pins R10 at the source: in
 // a max-width 640px block, with the bridge chosen, the bar draws neither the
-// cover, which the bridge never paints, nor the Mute, which it disables
-// (the level is fixed), so the words keep about 63px at 375px; the bar says
-// which output it shows (data-output) and the Mute carries np-mute. The
-// browser session measures .np-meta's width.
+// cover nor the Mute, which it disables (the level is fixed), so their widths
+// are the words', which the bridge's lines need (about 63px at 375px before
+// the words took a row of their own; the cover is painted since B1021's
+// second PR, and hidden there for the words alone); the bar says which output
+// it shows (data-output) and the Mute carries np-mute. The browser session
+// measures .np-meta's width.
 func TestThePhoneBarKeepsItsWordsWithTheBridgeChosen(t *testing.T) {
 	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
 	found := false
