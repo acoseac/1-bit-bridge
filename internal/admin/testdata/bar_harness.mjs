@@ -5495,7 +5495,8 @@ S.TestAnEditionKeepsThePagesFailedSources = async () => {
   r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
   const t = longTimers();
   const F = await import(new URL("format.js", dirURL));
-  const tracks = [flac(1, { path: "Keep/Rip/01.flac", title: "Song" }), dsd(1, { path: "Keep/DSD/01.dsf", title: "Song" })];
+  const copy = { kind: "none", contentType: "audio/x-dsf", variantId: "pcm-1", variantContentType: "audio/flac" };
+  const tracks = [flac(1, { path: "Keep/Rip/01.flac", title: "Song" }), dsd(1, { path: "Keep/DSD/01.dsf", title: "Song", play: copy })];
   const page = await editionPage(tracks, { id: "keep" });
   const view = page.view;
   // The byte probe of the source that fails: the bridge served it.
@@ -5532,6 +5533,20 @@ S.TestAnEditionKeepsThePagesFailedSources = async () => {
   check("the stored queue keeps each row's play as the catalog sent it", stored?.queue?.[0]?.play?.kind === "universal", stored?.queue?.[0]?.play);
   t.fire(1200);
   await settle();
+  // The edition picked since: its copy played, then confirmed undecodable,
+  // redraws the page once more, that edition still shown.
+  editions(view).options.find((b) => b.textContent.startsWith("DSD64"))?.click();
+  albumParts(view).play?.click();
+  await settle();
+  check("an edition picked since: its copy plays", pressed() === "DSD64 · 1" && /variant=pcm-1/.test(r.el.src), [pressed(), r.el.src]);
+  r.el.fail(4);
+  await settle();
+  await redrawn;
+  await settle();
+  check("its copy confirmed undecodable: one redraw more, that edition shown, its row unplayable",
+    redraws === 2 && pressed() === "DSD64 · 1" && albumParts(view).play?.disabled === true, [redraws, pressed(), albumParts(view).play?.disabled]);
+  t.fire(1200);
+  await settle();
 };
 
 S.TestAPickRepaintsThePageInPlace = async () => {
@@ -5565,6 +5580,17 @@ S.TestAPickRepaintsThePageInPlace = async () => {
   e.options[1]?.click();
   check("a pick the route has gone past paints nothing", editions(view).pressed === e.options[0] && JSON.stringify(listing(view)) === JSON.stringify(SONGS) && page.log.length === asked,
     [editions(view).pressed?.textContent, listing(view).length]);
+  // An edition spanning two sources repaints at once too, its source filter
+  // and all: the names are read once a render, so a pick waits for nothing.
+  const mixed = await editionPage([flac(1, { path: "Lib/Mix/01.flac", title: "M1" }), flac(1, { path: "Lib/Solo/01.flac", title: "M1" }),
+    flac(2, { path: "Lib/Mix/02.flac", title: "M2", routed: true, sourceId: "uuid:up" }), flac(2, { path: "Lib/Solo/02.flac", title: "M2" })], { id: "in-place-mixed" });
+  const m = editions(mixed.view);
+  m.options[1]?.click();
+  m.options[0]?.click();
+  check("an edition spanning two sources repaints at once, its source filter included, the names read once",
+    m.options[0]?.textContent === "FLAC 44.1/16 · 2 · Mix" && !!findAll(mixed.view, (x) => x.classList.contains("source-filter"))[0] &&
+    JSON.stringify(listing(mixed.view)) === JSON.stringify(["M1", "M2"]) && mixed.log.filter((x) => x.path === "/api/player/sources").length === 1,
+    [m.words, listing(mixed.view), mixed.log.map((x) => x.path)]);
 };
 
 S.TestAReloadShowsTheDefaultEdition = async () => {

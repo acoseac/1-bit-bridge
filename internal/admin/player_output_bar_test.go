@@ -366,14 +366,16 @@ func TestAnEditionThatPlaysNothingHereSaysWhy(t *testing.T) { barScenario(t, 5) 
 // TestAnEditionKeepsThePagesFailedSources pins that B1021's failed sources
 // and their one redraw stand: a confirmed decode failure in the edition shown
 // redraws it once, the same edition, and picks change neither the failures
-// nor what reads as failed, nor the stored queue's play.
-func TestAnEditionKeepsThePagesFailedSources(t *testing.T) { barScenario(t, 4) }
+// nor what reads as failed, nor the stored queue's play; and an edition
+// picked since, its copy then confirmed undecodable, redraws once more.
+func TestAnEditionKeepsThePagesFailedSources(t *testing.T) { barScenario(t, 6) }
 
 // TestAPickRepaintsThePageInPlace pins a pick's repaint: it asks nothing and
 // redraws no route, moves aria-pressed with the options in place and the
-// focus kept, repaints the list, stat line, count line and controls, and a
-// pick on a page the route has left paints nothing.
-func TestAPickRepaintsThePageInPlace(t *testing.T) { barScenario(t, 5) }
+// focus kept, repaints the list, stat line, count line and controls, an
+// edition spanning two sources at once, source filter and all, and a pick on
+// a page the route has left paints nothing.
+func TestAPickRepaintsThePageInPlace(t *testing.T) { barScenario(t, 6) }
 
 // TestAReloadShowsTheDefaultEdition pins the slot's page life: a pick stands
 // through a redraw, and a reload or a link opened afresh opens the default.
