@@ -52,6 +52,9 @@ type dsdRig struct {
 	// fails its teardown (FakeKernel.OpenNativeSinkWithCleanupError): "close"
 	// leaves its release unconfirmed.
 	cleanup string
+	// openNative, when set, answers each native or DoP open in place of the
+	// fake kernel (a stand-in's answer: B728 B12 PR 3's cleanup that panics).
+	openNative func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
 }
 
 // card is the fake node's card, where the box has the test DAC.
@@ -80,8 +83,11 @@ func newDSDRigWith(t *testing.T, st dsdstate.State, edit func(*playback.DSDPolic
 			cfg.OpenNative = func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
 				d.mu.Lock()
 				d.opens = append(d.opens, c)
-				cleanup := d.cleanup
+				cleanup, stand := d.cleanup, d.openNative
 				d.mu.Unlock()
+				if stand != nil {
+					return stand(ctx, c)
+				}
 				if cleanup != "" {
 					return r.k.OpenNativeSinkWithCleanupError(ctx, c, cleanup)
 				}

@@ -79,6 +79,8 @@ const (
 	ToneStartWaiting ToneOutcome = "start_waiting"
 	ToneSessionHolds ToneOutcome = "session_holds"
 	TonePlaying      ToneOutcome = "tone_playing"
+	// ToneCheckRunning is the DSD check holding the slot (Check, B728 B12).
+	ToneCheckRunning ToneOutcome = "check_running"
 	// ToneRequestEnded is the request's own end: before the slot, a refusal;
 	// after it, the tone's end.
 	ToneRequestEnded ToneOutcome = "request_ended"
@@ -119,7 +121,7 @@ func ToneWords() []ToneOutcome {
 	return []ToneOutcome{
 		ToneLevelRefused, ToneLengthRefused, ToneServeStopping,
 		ToneOutputUnknown, ToneWithheld, ToneOutputUnavailable, ToneOutputChanged, ToneSnapshotStale,
-		ToneReleaseUnconfirmed, ToneProbeRunning, ToneChoiceWrite, ToneStartWaiting, ToneSessionHolds, TonePlaying, ToneRequestEnded,
+		ToneReleaseUnconfirmed, ToneProbeRunning, ToneChoiceWrite, ToneStartWaiting, ToneSessionHolds, TonePlaying, ToneCheckRunning, ToneRequestEnded,
 		TonePlayed, TonePreempted, ToneOutputGone, ToneDeviceError, ToneWrongDevice, ToneNotLocated, ToneOpenRefused, ToneNoFormat, ToneFailed, ToneStopUnconfirmed,
 	}
 }
@@ -253,7 +255,7 @@ func (b *Backend) Tone(ctx context.Context, req ToneRequest) ToneResult {
 	b.toneCounted()
 	t, why := b.reserveTone(ctx, req)
 	if t == nil {
-		b.toneLeave()
+		b.leave()
 		return ToneResult{Outcome: why}
 	}
 	b.toneAdmitted()
@@ -297,8 +299,8 @@ func (b *Backend) toneEnter() bool {
 	return true
 }
 
-// toneLeave gives back the count of a tone refused at the slot.
-func (b *Backend) toneLeave() {
+// leave gives back the count of a tone, or a DSD check, refused at the slot.
+func (b *Backend) leave() {
 	b.gmu.Lock()
 	defer b.gmu.Unlock()
 	if b.live--; b.live == 0 {
@@ -311,9 +313,9 @@ func (b *Backend) toneLeave() {
 // slot under, refusing by word and never waiting, in this order: the gate
 // shut (its word); a release never confirmed; a probe; a choice's write's
 // configuration lease; a Start waiting for the slot; a session's record or
-// the device's holder; another tone; and the request ended already. The
-// tone's context is the caller's, cancelled by whatever ends it. The last
-// tone's result is cleared as this one is admitted.
+// the device's holder; another tone; the DSD check (B728 B12); and the request
+// ended already. The tone's context is the caller's, cancelled by whatever
+// ends it. The last tone's result is cleared as this one is admitted.
 func (b *Backend) reserveTone(ctx context.Context, req ToneRequest) (*toneHold, ToneOutcome) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -332,6 +334,8 @@ func (b *Backend) reserveTone(ctx context.Context, req ToneRequest) (*toneHold, 
 		return nil, ToneSessionHolds
 	case b.toning != nil:
 		return nil, TonePlaying
+	case b.checking != nil:
+		return nil, ToneCheckRunning
 	case ctx.Err() != nil:
 		return nil, ToneRequestEnded
 	}
@@ -593,8 +597,9 @@ func (b *Backend) endTone(t *toneHold, run *toneRun, confirmed bool) {
 // ToneOutput opens or shuts the tone's gate, the supervisor's alone (serve's
 // player, from the output reports and the watcher's snapshots): open admits
 // tones again, unless serve's stop has closed them (CloseTones); shut refuses
-// them with why and ends the tone that plays with it. The gate starts shut,
-// output_unknown.
+// them with why and ends the tone that plays with it, and the DSD check (Check,
+// B728 B12) failed, output_changed for a unit change and output_unavailable for
+// any other shut. The gate starts shut, output_unknown.
 func (b *Backend) ToneOutput(open bool, why ToneOutcome) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -611,6 +616,13 @@ func (b *Backend) ToneOutput(open bool, why ToneOutcome) {
 	b.toneOpen, b.toneShut = false, why
 	if t := b.toning; t != nil {
 		t.end(why)
+	}
+	if c := b.checking; c != nil {
+		r := CheckOutputUnavailable
+		if why == ToneOutputChanged {
+			r = CheckOutputChanged
+		}
+		c.end(CheckFailed, r)
 	}
 }
 

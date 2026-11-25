@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **57**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **58**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Since B728 no production path reads an approval record or a candidate:
 the player plays DSD by its effective policy (`ops/plan-b728-dsd-capability-design.md`). This runbook
 is the engineering harness's. Its evidence binds `qualificationVersion`, whose guard covers the DSD byte
@@ -249,7 +249,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **57**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **58**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -338,7 +338,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=57; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=58; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -386,7 +386,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 57 invalidates older evidence.
+An admitted command alone is insufficient. Version 58 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -425,7 +425,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 57. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 58. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -1070,3 +1070,33 @@ code changes, and the DSD byte path is as it was. Older harness evidence is
 invalid all the same, as at every bump. The harness admits version 57 records
 alone; legacy migration accepts versions 35 through 57 (`LegacyVersion` remains
 35). No hardware check was run.
+
+Version 57 covers B728 B12 PR 0 (2026-11-22). A panic on the native sink's writer, on
+its opening worker or in a close of its node is recovered on the goroutine it came on,
+typed `ReasonPanicked` and logged once (`DSDConfig.Log`). Before it the writer's own
+panic was already recovered, untyped and unlogged (`native writer panic: %T`), and a
+panic in a close of the node or on the opening worker ended the process: every close of
+the node has a recover of its own (`releaseRecovered`: `closeNative`'s, the close of a
+node the open did not hand over, `openNative`'s, which keeps a setup's panic with its
+close's failure), DROP and HW_FREE included, the node closed once whatever they do; a
+reopen whose refused node's close failed answers it in `CleanupResult`; the writer's own
+panic is typed, and the opening worker answers its caller or `CompletionResult`
+(`sink_dsd_open.go`, `sink_dsd.go`, `sink_dsd_writer.go`, `device_native.go`,
+`device.go`, `doc.go`, and `internal/alsapcm`'s tests); the backend's `native.go` passes
+its logger and fences the device after an open that panicked with its node's close
+unconfirmed. No byte a DAC is given changes: what does not panic plays as before. Older harness evidence is invalid all the same, as at every bump. The harness
+admits version 57 records alone; legacy migration accepts versions 35 through 57
+(`LegacyVersion` remains 35). No hardware check was run.
+
+Version 58 covers B728 B12 PR 3 (2026-11-22): the player's backend gains the DSD
+check (`internal/player/playback/dsd_check.go`), which no production path calls
+yet, and its tests through the real native and DoP sinks over the fake kernel,
+which live in the guarded `internal/alsapcm` (`playback_dsd_check_test.go`,
+`playback_dsd_check_candidate_test.go` since round 3, and an opener stand-in in
+`playback_dsd_policy_test.go`'s rig) because the fake kernel is reachable only
+there. No guarded production file changes, and no byte
+a DAC is given changes. Older harness evidence is invalid all the same, as at
+every bump. The harness admits version 58 records alone; legacy migration
+accepts versions 35 through 58 (`LegacyVersion` remains 35). No hardware check
+was run. Main's B990 took version 57, as B12 PR 0 did on its branch; both B12
+PRs are renumbered above main's at their merges, after the 0.2.4 tag.

@@ -507,6 +507,14 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
   `dsd_rate_above_choice`. For DoP: `dop_not_offered` (a profile's refused rate included),
   `listener_rejected`, `dop_gain_unverifiable`, `dop_gain_not_unity`, `dop_confirmation_required`,
   `dsd_rate_above_choice`.
+- **`native_check_required` carries a candidate** (B12 PR 3, round 3): the plan the row's
+  explicit `native` gives at r once the DAC is vouched for (`decide` asked again with vouched
+  true), where that is native: native offered, no rejection, r ≤ `maxBitRate`. The bridge's blind
+  spot is asked before the cap, so a rate above it is refused with the same word and carries
+  none. No session plays a candidate, which is no row's plan; the DSD check of native at r plays it
+  alone (§6.2), so the listener's clean answer at r that makes it the row's plan can be earned on
+  a generic board's IDs. A set held to what two states play alike (B9's `Intersect`) keeps a
+  candidate only where both states carry it, the same plan.
 - **`auto` on a DAC that takes no conversion target** refuses a rate neither transport plays as
   `conversion_not_offered`, as `convert` does.
 - **`auto` means no explicit choice.** It is the preselection the decision asks for. The app shows
@@ -1235,11 +1243,20 @@ safety half the app needs is on the bridge before the app's I4 ships.
 
 - **Admission is the effective policy's.** The tuple asked for, transport and rate, must be one the
   effective set plays now for this DAC (§3.2): offered, gain at unity, DoP confirmed where the DAC
-  has no DoP claim, and no rejection (B990: first use is no condition). Being merely offered is not enough. A
-  tuple outside the set is refused, `check_unavailable` with the set's reason. So the check cannot
-  play anything an ordinary track could not. To check native on an unknown DAC, the user first
-  chooses native, which makes native the set's for this DAC wherever nothing else refuses it there
-  (§3.2; B990: no acknowledgement).
+  has no DoP claim, and no rejection (B990: first use is no condition); or, for native alone, the
+  candidate a `native_check_required` refusal carries at the rate (§3.2; B12 PR 3, round 3).
+  Being merely offered is not enough. Any other tuple is refused, `check_unavailable` with the
+  set's reason, DoP at a rate where native waits for a listener's answer among them
+  (`native_check_required`, the rate's own word). So the check plays nothing an ordinary track
+  could not, but the one plan a clean answer at the rate lets an ordinary track play. To check
+  native on an unknown DAC, the user first chooses native. On IDs that are no generic board's that
+  makes native the set's for this DAC wherever nothing else refuses it there (§3.2; B990: no
+  acknowledgement); on a generic board's it is refused `native_check_required` at each rate no
+  listener's answer holds clean, and the check plays that refusal's candidate, so the answer can
+  be earned. A check so admitted is judged by the candidate as one the set's plan admitted is by
+  that plan (§3.5): kept while the candidate published at its rate is its plan, on the identity it
+  was admitted under, and ended `policy_changed` once it is gone or changed; no session's
+  reconciliation reads a candidate.
 - **The hold comes first** (amended 2026-11-20, B12 PR 2). The engine's owner decides the check in
   the one step that grants its hold (`EnterCheck`): a choice's write in flight (its configuration
   reservation), another hold, an unconfirmed release and a DAC that is not there refuse it; and if
@@ -1253,14 +1270,26 @@ safety half the app needs is on the bridge before the app's I4 ships.
   leaves the transport stopped and never autoplays (the maintenance bullet in
   `.claude/rules/player.md`; the check's hold in `.claude/rules/output.md`).
 - The backend then reads the DAC afresh, admits the tuple against that reading and takes the device
-  slot (B12 PR 3); the route answers 202 only after all of that (B12 PR 4).
+  slot (B12 PR 3); the route answers 202 only after all of that (B12 PR 4). Built in B12 PR 3
+  (amended 2026-11-22), inert until PR 4: `playback.Backend.Check`, counted among the backend's
+  goroutines before it waits, refused by the supervisor's gate's word, the fence, a lease, a
+  session or another check, waiting for a probe or a preempted tone as a Start's hold does; then,
+  in its run, a fresh reading of the policy (the DoP gain among it) before the open, the locate,
+  the sink opened by the tuple's plan with the unit's check, the node's identity and the admission
+  identity's compare, the activation judged as a session's, the prefill, the chime, the plan's
+  tail and the drain. The policy reconciles it after the sessions, comparing every new set with
+  the admission identity first; containment and its own 100 ms monitor end it too
+  (`.claude/rules/output.md`, the check's bullet).
 - The bridge prepares the chime (below) after that, under the hold (`preparing`), so the preparation
   competes with no playback for the CPU; a play it interrupted is silent for at most the
   preparation's bound, and not at all for a chime made already.
 - It plays the chime through the transport and rate under test, with that tuple's plan.
 - It drains, releases and exits the hold.
-- The whole check is bounded at 10 s of wall clock, the harness's own bound for a contact
-  (`ops/b470-native-qualification.md:33`).
+- The whole check is bounded by its two phases (amended 2026-11-22, B12 PR 3): `preparing` at 2 s,
+  and `playing` at 10 s, the harness's own bound for a contact
+  (`ops/b470-native-qualification.md:33`), from the preparation's end to the drain's end, the fresh
+  reading, the locate and the open included: 12 s in all. A stop's answer is bounded on its own
+  (`StopCheck`, 2 s); the cleanup it waits for can come later, the slot kept until it does.
 
 **The chime** (amended 2026-11-21, B12 PR 1: `internal/player/dsdchime`, inert until the
 backend's check, B12 PR 3, calls it):
@@ -1301,7 +1330,10 @@ Modulating 0.7 s of one channel at DSD256 is about 7.9 M modulator steps. Measur
 host (amd64, an AMD Ryzen 9 6900HX, 2026-11-21, B12 PR 1): 7.8 ns a step, a whole chime built in 31,
 62 and 123 ms at DSD64, DSD128 and DSD256, cold or warm. The Pi 4 is not measured: its 20–50 ns a
 step, 0.3–0.8 s for DSD256's two tones, is an estimate still, and so is the `preparing` bound of 2 s
-that rests on it, until B12 measures the time on a Pi 4. Each rate's chime is made once per process
+that rests on it, until B12 measures the time on a Pi 4. B12 PR 3 measured the cold build again on
+its own amd64 build host (2026-11-22): 33, 65 and 128 ms, and 1.6 s at DSD256 under the race
+detector; three times the largest is under 2 s, so the bound stays 2 s, still unmeasured on a Pi 4,
+where it holds while a build is less than about five times slower. Each rate's chime is made once per process
 and kept in memory: 1,693,440, 3,386,880 and 6,773,760 bytes of stereo. Nothing is embedded in the
 binary. The check reports `preparing` until the chime is ready.
 
@@ -1334,8 +1366,16 @@ release.
 | The chime completes and the answer is clean | `listener: {answer: clean, on}` for the transport, rate and bcdDevice, replacing any earlier answer |
 | The chime completes and the answer is noise or nothing | `listener: {answer: noise or nothing, on}`, replacing an earlier `clean`. That transport is refused at that rate in every mode, and its first use re-arms (§3.2), until a write chooses that mode again. The re-arm is this write's: it takes the transport's `firstUse` entry away in the same `Store.Update`, which the policy reads as it stands (B5). B990: the re-arm is reported and gates nothing, and the rejection goes with the transport's retry alone, a write that makes it the DAC's mode again (§7.2) |
 | The chime is stopped or fails | nothing but the check's own state; an answer to it is refused (`check_not_answerable`) |
+| The check's sink opens (amended 2026-11-22, B12 PR 3) | `evidence.driverAcceptedAt` for its tuple, under the kernel, as a session's open records it; never `streamingObservedAt`, which the 2.4 s chime cannot earn |
 
 Never recorded: who answered, beyond `app` or `console`; a device token; a serial; a port.
+
+The check's own state (amended 2026-11-22, B12 PR 3) is a record in memory, one boot's, one check at
+a time, the last kept: its opaque id, its tuple, its phase (`preparing`, `playing`, `complete`,
+`stopping`, `stopped`, `failed`; `answered` is PR 4's) and its reason, the token and the identity it
+was admitted under, and the identity its sink opened. PR 3 reads it through `Backend.CheckStatus`
+alone; PR 4 publishes it and writes the answer, which PR 3 does not: no member of the read side and
+no write of the listener's answer is PR 3's.
 
 ## 7. The protocol
 
@@ -1527,9 +1567,10 @@ after the sync, the new choice, which the next start reads and publishes, answer
 
 Admission is the effective policy's (§6.2). The tuple must be one the effective set plays now, so
 first use acknowledged, DoP confirmed where the DAC has no DoP claim, gain at unity and no rejection
-all hold. Being merely offered is not enough. (B990: first use is no condition, and a refused
-tuple's reason is the set's, `native_check_required` among them; `first_use_pending` is given no
-more.)
+all hold, or, for native alone, the candidate a `native_check_required` refusal carries at the rate
+(§3.2; B12 PR 3, round 3). Being merely offered is not enough. (B990: first use is no condition,
+and a refused tuple's reason is the set's, `native_check_required` among them; `first_use_pending`
+is given no more.)
 
 Refusals:
 - 409 `dac_changed`, `would_interrupt` or `check_running`;
@@ -1712,7 +1753,7 @@ B1 narrows the guard to the code that changes DSD bytes or the harness's evidenc
 | B4, the probe | `internal/alsapcm/` | 39 |
 | B7, the cutover | `internal/player/playback/native.go` and `edges.go` (plan construction) | the next free at its merge |
 | B11, conversion wired | `native.go`, whose DSD open (`internal/player/playback/native.go:23-74`) is where a convert plan branches off | the next free at its merge |
-| B12, the check | `native.go`, and `internal/alsapcm/` if the check needs a sink seam | the next free at its merge |
+| B12, the check | PR 0 (amended 2026-11-22, the native sink's panic containment): `internal/alsapcm/` (`sink_dsd.go`, `sink_dsd_open.go`, `sink_dsd_writer.go`, `device_native.go`, `device.go`, `doc.go` and the package's tests) and `native.go` (`DSDConfig.Log`, and the fence after an open that panicked with its node's close unconfirmed); then `native.go`, and `internal/alsapcm/` if the check needs a sink seam. PR 3 (amended 2026-11-22, the backend's check, inert): no guarded production file (no sink seam, `native.go` unchanged); its tests through the real sinks are under `internal/alsapcm/` (`playback_dsd_check_test.go`, and an opener stand-in in `playback_dsd_policy_test.go`'s rig), where the fake kernel is, so it owes a bump. The cut to PR 4: the routes, serve's adapter and its calls of `CloseChecks`, the answer's write, the read side's member, `PROTOCOL.md` and the iOS mirror. PR 4 wires the check only on PR 3's complete admission, identity, containment and cleanup guarantees | PR 0: 57 (main's 56, B972's, and one); PR 3: 58; the rest: the next free at its merge |
 | every other PR (B2, B5, B6, B8, B9, B10, B13) | none. Their code is in new packages or paths B1 unguards | unchanged |
 
 The rows after B3 plan no number: B735 took 37 on main and B3 takes 38, the numbers this table

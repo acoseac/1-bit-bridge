@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"time"
@@ -26,9 +27,30 @@ const (
 // supervisor's and the probe's refreshes meet one: admission, a monitor and
 // an activation are a session's, and while the write holds the configuration
 // lease no Start registers, so none is admitted or acquires the device.
-func (b *Backend) refreshDSD(where string) (d *dsdSet, err error) {
+func (b *Backend) refreshDSD(where string) (*dsdSet, error) {
 	b.dsdMu.Lock()
 	defer b.dsdMu.Unlock()
+	return b.refreshHeld(where)
+}
+
+// refreshDSDWithin is refreshDSD for a caller whose wait for the refreshes'
+// lock ends with ctx (lockReading), the DSD check's: ctx's error, nothing
+// read, once it has, asked again once the lock is held, as a choice's write
+// asks it (takeChoiceReading), since lockReading takes a free lock without
+// looking at ctx.
+func (b *Backend) refreshDSDWithin(ctx context.Context, where string) (*dsdSet, error) {
+	if !b.lockReading(ctx) {
+		return nil, ctx.Err()
+	}
+	defer b.dsdMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return b.refreshHeld(where)
+}
+
+// refreshHeld is refreshDSD's reading, its lock held.
+func (b *Backend) refreshHeld(where string) (d *dsdSet, err error) {
 	if b.choiceReading {
 		b.refreshOwed = true
 		return b.dsd.Load(), nil
@@ -44,8 +66,8 @@ func (b *Backend) refreshDSD(where string) (d *dsdSet, err error) {
 
 // containDSD contains a panic in a reading of the policy or a publication of
 // it, under the refreshes' lock: logged without its value (logPanic), the next
-// reading made fresh (dsdRead), every session holding DSD stopped, and the set
-// published judged as it stands.
+// reading made fresh (dsdRead), every session holding DSD stopped, the DSD
+// check ended (backend_failed), and the set published judged as it stands.
 func (b *Backend) containDSD(where string, r any) {
 	b.dsdRead = time.Time{}
 	b.logPanic(where, r)
@@ -53,6 +75,9 @@ func (b *Backend) containDSD(where string, r any) {
 	ss := make([]*session, 0, len(b.sessions))
 	for _, s := range b.sessions {
 		ss = append(ss, s)
+	}
+	if c := b.checking; c != nil {
+		c.end(CheckFailed, CheckBackendFailed)
 	}
 	b.mu.Unlock()
 	for _, s := range ss {

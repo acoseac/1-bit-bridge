@@ -271,15 +271,21 @@ func autoTransports(in Inputs, st dsdstate.State, key dacprofile.Key, stamp dsds
 // computed from one reading of the unit: each rate cur plays plays only where
 // landed plays it the same way (Plan.Same), and is refused as
 // dsd_choice_uncertain otherwise, so what plays now plays under either state
-// the next start may read; a rate cur refuses keeps its own word. The
-// identity, the choice and each rate's facts are cur's.
+// the next start may read; a rate cur refuses keeps its own word, and its
+// Candidate only where landed's is the same plan, so the DSD check plays
+// nothing either state would not let it. The identity, the choice and each
+// rate's facts are cur's.
 func Intersect(cur, landed Set) Set {
 	out := cur
 	out.rates = nil
 	for _, r := range cur.rates {
-		if r.Plan.Outcome != OutcomeRefused && !landed.At(r.Plan.BitRate).Plan.Same(r.Plan) {
+		l := landed.At(r.Plan.BitRate).Plan
+		if r.Plan.Outcome != OutcomeRefused && !l.Same(r.Plan) {
 			r.Plan = refused(r.Plan.BitRate, ReasonChoiceUncertain,
 				"a choice write reached the state's file and is not known to be durable, and the state it left plays this rate another way: the next start reads the file")
+		}
+		if c := r.Plan.Candidate; c != nil && (l.Candidate == nil || !l.Candidate.Same(*c)) {
+			r.Plan.Candidate = nil
 		}
 		out.rates = append(out.rates, r)
 	}

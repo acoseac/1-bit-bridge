@@ -270,10 +270,12 @@ func (d *dsdSet) bcd() string {
 
 // same reports whether e publishes and admits what d does: both computed or
 // neither, with the same reason; the same unit, endpoint and identity; and at
-// every rate the same plan (policy.Plan.Same) or the same refusal. The read
-// side is no part of it: a change of evidence, first use, the choice's
-// revision or a warning alone moves neither the set nor its generation, and
-// refreshDSD publishes it beside the set as it was (B728 B8).
+// every rate the same plan (policy.Plan.Same) or the same refusal, and the
+// same candidate or none (policy.Plan.Candidate, what the DSD check may play
+// there, B728 B12 PR 3 round 3). The read side is no part of it: a change of
+// evidence, first use, the choice's revision or a warning alone moves neither
+// the set nor its generation, and refreshDSD publishes it beside the set as it
+// was (B728 B8).
 func (d *dsdSet) same(e *dsdSet) bool {
 	if d.computed != e.computed {
 		return false
@@ -294,6 +296,9 @@ func (d *dsdSet) same(e *dsdSet) bool {
 			return false
 		}
 		if (p.Outcome == policy.OutcomeNative || p.Outcome == policy.OutcomeDoP || p.Outcome == policy.OutcomeConverted) && !p.Same(q) {
+			return false
+		}
+		if (p.Candidate == nil) != (q.Candidate == nil) || p.Candidate != nil && !p.Candidate.Same(*q.Candidate) {
 			return false
 		}
 	}
@@ -746,14 +751,7 @@ func (s *session) startDSDMonitor() {
 	}
 	s.dsdMonitor = true
 	s.mu.Unlock()
-	tick := s.b.cfg.DSD.Tick
-	if tick == nil {
-		tick = func() (<-chan time.Time, func()) {
-			t := time.NewTicker(dsdTick)
-			return t.C, t.Stop
-		}
-	}
-	ticks, stop := tick()
+	ticks, stop := s.b.dsdTicks()
 	s.b.spawn(func() {
 		defer s.b.monitorEnded(s.id)
 		defer stop()
@@ -774,19 +772,34 @@ func (s *session) startDSDMonitor() {
 	})
 }
 
+// dsdTicks is a monitor's tick of the policy: DSDPolicy.Tick's, or every
+// dsdTick.
+func (b *Backend) dsdTicks() (<-chan time.Time, func()) {
+	if tick := b.cfg.DSD.Tick; tick != nil {
+		return tick()
+	}
+	t := time.NewTicker(dsdTick)
+	return t.C, t.Stop
+}
+
 // reconcileDSD contains each session independently, so one failure cannot
-// prevent the remaining sessions from receiving the published verdict.
+// prevent the remaining sessions from receiving the published verdict. The
+// DSD check is judged after them (reconcileCheck, B728 B12).
 func (b *Backend) reconcileDSD(next *dsdSet) {
 	b.mu.Lock()
 	ss := make([]*session, 0, len(b.sessions))
 	for _, s := range b.sessions {
 		ss = append(ss, s)
 	}
+	check := b.checking
 	b.mu.Unlock()
 	for _, s := range ss {
 		if step := s.reconcileDSD(next); step != "" {
 			s.stopDSD("the effective DSD set's reconciliation ("+step+")", false)
 		}
+	}
+	if check != nil {
+		b.reconcileCheck(check, next)
 	}
 	b.dsdJudged = next
 }
@@ -977,35 +990,46 @@ func (s *session) checkDSDActivation(o *occ) error {
 // no gain check: its PCM changes no DoP word. It records the identity the
 // sink opened.
 func (out *output) checkDSDNode(n alsapcm.NodeInfo, admitted *dsdSet) error {
-	p := out.s.b.cfg.DSD
-	if p == nil || p.Box == nil {
-		return errors.New("player backend: the effective DSD policy has no reading of the box")
-	}
-	m, err := p.Box.UnitModel(n.Card)
+	id, _, err := nodeIdentity(out.s.b.cfg.DSD, n, admitted, out.plan)
 	if err != nil {
-		return fmt.Errorf("player backend: the opened node's unit did not read: %w", err)
-	}
-	key, err := dsdstate.KeyOf(m.USB, m.Product)
-	if err != nil {
-		return fmt.Errorf("player backend: the opened node's unit does not key: %w", err)
-	}
-	id := policy.Identity{Key: key, Stamp: dsdstate.StampOf(m.Manufacturer), BCDDevice: m.BCDDevice}
-	if !id.Same(admitted.set.Identity()) {
-		return &alsapcm.Error{Reason: alsapcm.ReasonWrongDevice, Op: "open", Endpoint: alsapcm.Endpoint{Card: n.Card, Device: n.Device},
-			Detail: "the node opened is not the DAC the effective DSD set was computed for (its model, its maker or its firmware differs)"}
-	}
-	if out.plan != nil && out.plan.Tuple.Transport == TransportDoP {
-		alts, err := p.Box.PlaybackAltsets(n.Card, n.Device)
-		if err != nil {
-			return fmt.Errorf("player backend: the opened node's stream did not read for the DoP gain check: %w", err)
-		}
-		g := policy.CheckGain(readMixer(p.Box, n.Card, m), policy.DoPAltsets(alts, out.plan.Tuple.BitRate), admitted.profile, m.BCDDevice)
-		if !g.Unity {
-			return fmt.Errorf("player backend: DoP refused at the open, %s: %s", g.Reason, g.Detail)
-		}
+		return err
 	}
 	out.setOpenedIdentity(id)
 	return nil
+}
+
+// nodeIdentity is the check after open of a DSD node under plan (checkDSDNode's
+// and the DSD check's, checkNode): the identity its unit reads as, refused
+// unless it is admitted's, and for DoP the gain check read afresh, whose
+// refusal is the policy's (gain).
+func nodeIdentity(p *DSDPolicy, n alsapcm.NodeInfo, admitted *dsdSet, plan *engine.NativePlan) (id policy.Identity, gain bool, err error) {
+	if p == nil || p.Box == nil {
+		return id, false, errors.New("player backend: the effective DSD policy has no reading of the box")
+	}
+	m, err := p.Box.UnitModel(n.Card)
+	if err != nil {
+		return id, false, fmt.Errorf("player backend: the opened node's unit did not read: %w", err)
+	}
+	key, err := dsdstate.KeyOf(m.USB, m.Product)
+	if err != nil {
+		return id, false, fmt.Errorf("player backend: the opened node's unit does not key: %w", err)
+	}
+	id = policy.Identity{Key: key, Stamp: dsdstate.StampOf(m.Manufacturer), BCDDevice: m.BCDDevice}
+	if !id.Same(admitted.set.Identity()) {
+		return id, false, &alsapcm.Error{Reason: alsapcm.ReasonWrongDevice, Op: "open", Endpoint: alsapcm.Endpoint{Card: n.Card, Device: n.Device},
+			Detail: "the node opened is not the DAC the effective DSD set was computed for (its model, its maker or its firmware differs)"}
+	}
+	if plan != nil && plan.Tuple.Transport == TransportDoP {
+		alts, err := p.Box.PlaybackAltsets(n.Card, n.Device)
+		if err != nil {
+			return id, true, fmt.Errorf("player backend: the opened node's stream did not read for the DoP gain check: %w", err)
+		}
+		g := policy.CheckGain(readMixer(p.Box, n.Card, m), policy.DoPAltsets(alts, plan.Tuple.BitRate), admitted.profile, m.BCDDevice)
+		if !g.Unity {
+			return id, true, fmt.Errorf("player backend: DoP refused at the open, %s: %s", g.Reason, g.Detail)
+		}
+	}
+	return id, false, nil
 }
 
 // evidenceOf is the state's entry of d for what was observed of transport in
@@ -1130,12 +1154,13 @@ func observedFrames(p *engine.NativePlan) int64 {
 }
 
 // probeSlotSkips are the probe's refusals by the device slot (Probe's
-// reserveProbe), a choice's write's configuration lease (B728 B9 PR 2) and
-// the console's test tone (B601) among them: a probe due then stays due, and
+// reserveProbe), a choice's write's configuration lease (B728 B9 PR 2), the
+// console's test tone (B601) and the DSD check (B728 B12) among them: a probe
+// due then stays due, and
 // the supervisor asks it again once the slot is free (ProbeDSD). A refusal
 // left out of it is published as a probe made (publishProbe), and the unit
 // is never probed again until a replug, a migration's part or a choice.
-var probeSlotSkips = []ProbeSkip{ProbeSessionHolds, ProbeSessionPaused, ProbeReleasePending, ProbeReleaseUnconfirmed, ProbeRunning, ProbeChoiceWrite, ProbeToneHolds}
+var probeSlotSkips = []ProbeSkip{ProbeSessionHolds, ProbeSessionPaused, ProbeReleasePending, ProbeReleaseUnconfirmed, ProbeRunning, ProbeChoiceWrite, ProbeToneHolds, ProbeCheckHolds}
 
 // dsdProbe is the probe's bookkeeping: the unit last probed; a probe asked
 // for anew (forced: a migration's part, ForgetDSDProbe, or a choice written,
