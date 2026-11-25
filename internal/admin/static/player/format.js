@@ -270,6 +270,28 @@ export function playFor(track, output) {
   return { playable, chip: (unplayableReason(track) || "Not playable in a browser") + there, why: true };
 }
 
+// The bridge's player's ways, the better first (B1023): DSD as itself, PCM as
+// itself, then DSD converted to PCM, which is never bit-exact.
+const WAY_RANK = { native: 4, dop: 3, pcm: 2, converted: 1 };
+
+/**
+ * rankFor is what an album's edition order asks of a row on the output chosen
+ * (B1023), by the decisions it plays by: null where it does not play there
+ * (playFor), else its terms, the greater first. On the bridge's player its
+ * way, then a DSD way's 1-bit rate or PCM's depth and rate; in this browser
+ * its own file before a variant (resolvePlayable's degraded: an own lossy file
+ * before a lossless copy), then the depth and the rate of what plays.
+ */
+export function rankFor(track, output) {
+  if (!playFor(track, output).playable) return null;
+  if (output === "bridge") {
+    const way = track.bridge.way;
+    return way === "pcm" ? [WAY_RANK.pcm, track.bits || 0, track.rateHz || 0] : [WAY_RANK[way] || 0, track.rateHz || 0, 0];
+  }
+  const v = resolvePlayable(track, () => "").degraded ? track.play : null;
+  return [v ? 0 : 1, (v ? v.variantBits : track.bits) || 0, (v ? v.variantRateHz : track.rateHz) || 0];
+}
+
 /**
  * The bar's chip for what the bridge's DAC receives (§4.3): the codec and
  * the PCM it is, or the DSD rate and its way. Converted DSD says so, and is

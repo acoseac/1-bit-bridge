@@ -4,7 +4,7 @@
 
 import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, downloadURL,
          playlistExportURL, isAborted } from "./api.js";
-import { duration, totalDuration, qualityLabel, formatChip, plural, playFor, failures,
+import { duration, totalDuration, qualityLabel, formatChip, plural, playFor, failures, rankFor, dsdName,
          bytes, variantKindLabel, variantSkipLabel, timeAgo } from "./format.js";
 import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs, crumbs, announce, setDisabled } from "./ui.js";
 import * as audio from "./audio.js";
@@ -395,8 +395,8 @@ function select(name, value, options) {
 
 // ---- Album detail ----
 
-// appendDeleteAction adds a Delete button to a detail toolbar when the console
-// allows deleting. It is fire-and-forget: a failure to learn the setting leaves
+// appendDeleteAction adds a Delete button to a detail toolbar once its caller has
+// read that the console allows deleting: a failure to learn the setting leaves
 // the toolbar as it was, which is the safe direction for a destructive control.
 //
 // ROUTED tracks are excluded here, not just refused server-side. Their bytes
@@ -405,21 +405,17 @@ function select(name, value, options) {
 // button that renders, is pressed, and then reports a failure reads as a broken
 // console rather than as somebody else’s library. An album spanning both
 // keeps its button for the local half and says what it is leaving alone.
-async function appendDeleteAction(actions, tracks, label) {
+// An edition's Delete (B1023) moves the edition shown, which it names, and no
+// SACD image's track, which is no file; its words are the page's (state), so a
+// pick away and back shows it running, and settled hands the trash's answer on.
+function appendDeleteAction(actions, tracks, label, edition = null, state = null, settled = null) {
   const all = (tracks || []).filter((t) => t?.path);
   const routed = all.filter((t) => t.routed).length;
-  const paths = all.filter((t) => !t.routed).map((t) => t.path);
+  const paths = all.filter((t) => !t.routed && !(edition && imageOf(t.path))).map((t) => t.path);
   if (!paths.length) return;
-  let cfg;
-  try {
-    cfg = await api.settings();
-  } catch {
-    return;
-  }
-  if (!cfg || !cfg.allowDelete) return;
 
   const btn = el("button", {
-    class: "btn danger", text: "Delete…",
+    class: "btn danger", text: state?.text || "Delete…",
     on: {
       click: async () => {
         const n = paths.length;
@@ -428,28 +424,188 @@ async function appendDeleteAction(actions, tracks, label) {
             `${routed === 1 ? "is" : "are"} left alone.`
           : "";
         if (!confirm(
-          `Move ${n} file${n === 1 ? "" : "s"} from "${label}" to the trash?\n\n` +
+          `Move ${n} file${n === 1 ? "" : "s"} ${edition ? `of the ${edition} edition of` : "from"} "${label}" to the trash?\n\n` +
           `They stay recoverable from the Library page until the trash is emptied.` +
           upstream)) {
           return;
         }
+        const say = (text) => { btn.textContent = text; if (state) state.text = text; };
         setDisabled(btn, true);
-        btn.textContent = "Deleting…";
+        say("Deleting…");
         try {
           const res = await api.trash(paths);
           const failed = (res.outcomes || []).filter((o) => o.status === "failed");
-          btn.textContent = failed.length
+          say(failed.length
             ? `${res.ok} deleted, ${failed.length} failed`
-            : `${res.ok} moved to trash`;
+            : `${res.ok} moved to trash`);
+          settled?.(res);
         } catch (e) {
+          if (state) state.text = "";
           setDisabled(btn, false);
           btn.textContent = "Delete…";
+          settled?.(null);
           alert(e?.message ? e.message : String(e));
         }
       },
     },
   });
+  if (state?.text) setDisabled(btn, true);
   actions.appendChild(btn);
+}
+
+// ---- An album's editions (B1023) ----
+//
+// The catalog's album is its tags', as the phone's is, so a DSD rip, a hi-res
+// download and a CD rip of one release are one album. Where a song repeats
+// across its folders the page shows one folder at a time, the best the output
+// plays by default; an album no song of which repeats draws as it always did.
+
+// The catalog's disc-folder rule (dupes.discNumberForFolderName): the whole
+// name, cd, disc, disk, vol or volume in any case, then a number whose last
+// one or two digits past its zeros are the disc; a folder above it is needed.
+const DISC_FOLDER = /^\s*(?:volume|disc|disk|vol|cd)\s*0*(\d{1,2})\s*$/i;
+
+/** folderOf is the folder a row's edition is, and its disc folder's number (null for none). */
+function folderOf(t) {
+  const parts = String(t.path || "").replace(/\\/g, "/").split("/").filter(Boolean);
+  parts.pop();
+  const m = parts.length > 1 ? DISC_FOLDER.exec(parts[parts.length - 1]) : null;
+  if (m) parts.pop();
+  return { folder: parts.join("/"), disc: m ? Number(m[1]) : null };
+}
+
+/** songOf is the name a row's song goes by (its title, else its file's name past a track number), "" for none. */
+function songOf(t) {
+  const name = String(t.title || "").trim() ||
+    String(t.path || "").split("/").pop().replace(/\.[^.]*$/, "").replace(/^\s*\d{1,3}[\s._\-–—]+/, "");
+  return name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+// An SACD image's virtual track (manifest.SACDVirtualContainer's grammar):
+// each carries the whole image's size, and none is a file the trash can move.
+const SACD_TRACK = /^(.*\.[iI][sS][oO])\/(?:st|mc)\/(?:0[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-5])\.dff$/;
+const imageOf = (path) => SACD_TRACK.exec(path || "")?.[1] || "";
+
+// An edition's format and its order on every output: DSD by its 1-bit rate,
+// then PCM by its depth and rate (dupes.outranks' order), then the rest.
+const formatOf = (t) => (t.isDsd ? dsdName(t.rateHz) : formatChip(t)) || "Other";
+const formatKey = (t) => (t.isDsd ? [2, t.rateHz || 0, 0] : t.rateHz ? [1, t.bits || 0, t.rateHz] : [0, 0, 0]);
+
+/** cmpKeys orders two keys term by term, the greater first. */
+const cmpKeys = (a, b) => a.reduce((d, x, i) => d || b[i] - x, 0);
+
+/** modal is the item most of items share by name, the greater key on a tie. */
+function modal(items) {
+  const n = new Map();
+  for (const it of items) n.set(it.name, { ...it, n: (n.get(it.name)?.n || 0) + 1 });
+  let best = null;
+  for (const c of n.values()) if (!best || c.n > best.n || (c.n === best.n && cmpKeys(c.key, best.key) < 0)) best = c;
+  return best;
+}
+
+/** folderOrder is dupes.outranks' own tail: the fewer folders, then the shorter path, then the one that sorts first. */
+const folderOrder = ({ folder: a }, { folder: b }) =>
+  a.split("/").length - b.split("/").length || a.length - b.length || (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * albumEditions is an album's folders by the catalog's fold, in the picker's
+ * order (by format, then more rows, then the folder), where a song repeats
+ * across them (the same resolved disc and name, never a track number, which
+ * the scanner takes from a file's name too), else one edition of every row.
+ * Each has its format, the one most of its rows share; its words (its folder's
+ * name where another reads the same, the end of its path that tells it apart
+ * where the names match too); its stat line's numbers (an SACD image counted
+ * once); and its rows' heading discs (tag, else disc folder, else 1, where any
+ * of its rows has either).
+ */
+function albumEditions(tracks) {
+  const by = new Map();
+  const seen = new Map();
+  let repeats = false;
+  for (const t of tracks) {
+    const f = folderOf(t);
+    const ed = by.get(f.folder) || by.set(f.folder, { folder: f.folder, rows: [], at: [] }).get(f.folder);
+    ed.rows.push(t);
+    ed.at.push(f);
+    const song = songOf(t);
+    if (!song) continue;
+    const k = `${t.disc || (f.disc ?? 1)}\n${song}`;
+    if (!seen.has(k)) seen.set(k, f.folder);
+    else if (seen.get(k) !== f.folder) repeats = true;
+  }
+  const eds = repeats ? [...by.values()] : [{ folder: "", rows: tracks, at: tracks.map(folderOf) }];
+  for (const ed of eds) {
+    const f = modal(ed.rows.map((t) => ({ name: formatOf(t), key: formatKey(t) })));
+    ed.format = f?.name || "";
+    ed.key = f?.key || [0, 0, 0];
+    const disc = (t, i) => t.disc || (ed.at[i].disc ?? 1);
+    const marked = ed.rows.some((t, i) => t.disc || ed.at[i].disc !== null);
+    ed.discOf = new Map(ed.rows.map((t, i) => [t, marked ? disc(t, i) : null]));
+    const sizes = new Map(ed.rows.map((t) => [imageOf(t.path) || t.path, t.sizeBytes || 0]));
+    ed.stats = { discCount: new Set(ed.rows.map(disc)).size, trackCount: ed.rows.length,
+      duration: ed.rows.reduce((s, t) => s + (t.duration || 0), 0), sizeBytes: [...sizes.values()].reduce((s, n) => s + n, 0) };
+  }
+  eds.sort((a, b) => cmpKeys(a.key, b.key) || b.rows.length - a.rows.length || folderOrder(a, b));
+  for (const ed of eds) {
+    const twins = eds.filter((o) => o.format === ed.format && o.rows.length === ed.rows.length);
+    const segs = ed.folder.split("/");
+    let part = "";
+    for (let j = 1; twins.length > 1 && !part && j <= segs.length; j++) {
+      const tail = segs.slice(-j).join("/");
+      if (j === segs.length || twins.every((o) => o === ed || !`/${o.folder}`.endsWith(`/${tail}`))) part = tail;
+    }
+    ed.label = [ed.format, ed.rows.length, part].filter((x) => x !== "").join(" · ");
+    ed.name = [ed.format, plural(ed.rows.length, "track"), part].filter(Boolean).join(", ");
+    ed.title = part ? `${ed.format} · ${part}` : ed.format;
+  }
+  return eds;
+}
+
+/**
+ * bestFor is the edition the output chosen plays best, which an album opens
+ * on, compared term by term: whether any of its rows plays there, the
+ * key most of its playing rows share (rankFor; its format's where none plays),
+ * how many play, how many rows it has, then its folder.
+ */
+function bestFor(eds, output) {
+  const key = (ed) => {
+    const ranks = ed.rows.map((t) => rankFor(t, output)).filter(Boolean);
+    const top = ranks.length ? modal(ranks.map((k) => ({ name: k.join(), key: k }))).key : ed.key;
+    return [ranks.length ? 1 : 0, ...top, ranks.length, ed.rows.length];
+  };
+  return eds.map((ed) => ({ ed, k: key(ed) })).sort((x, y) => cmpKeys(x.k, y.k) || folderOrder(x.ed, y.ed))[0].ed;
+}
+
+// The edition an album page shows: one slot for the page's life, keyed by the
+// album and the output, as detailTabs' tab memory is, so a redraw keeps it and
+// another album, another output or a reload shows the default.
+const editionShown = { key: "", folder: "" };
+
+// What the bridge's player's control takes a request (handlers_player_control.go),
+// a KiB left to the rest of the body: an edition goes as its paths (its album's
+// id is every edition's), and one past it is refused here, in words of its own.
+const SCOPE_WORDS = "This edition is more than the bridge's player takes in one request (20,000 tracks of " +
+  "4,096 bytes a path, 8 MiB in all): choose this browser under Output to play it, or add the tracks you want from their rows.";
+function fitsTheBridge(rows) {
+  const enc = new TextEncoder();
+  const paths = rows.map((t) => t.path || "");
+  return paths.length <= 20000 && paths.every((p) => p && enc.encode(p).length <= 4096) &&
+    enc.encode(JSON.stringify(paths)).length + 1024 <= 8 << 20;
+}
+
+/**
+ * The edition picker: the word Edition and a button an edition ("DSD64 · 13",
+ * named "DSD64, 13 tracks"), built once a render, so a pick moves aria-pressed
+ * alone and the pressed option keeps the focus.
+ */
+function editionPicker(eds, onPick) {
+  const bar = el("div", { class: "edition-picker", attrs: { role: "group", "aria-labelledby": "edition-word" } },
+    el("span", { class: "edition-word", text: "Edition", attrs: { id: "edition-word" } }));
+  for (const ed of eds) {
+    ed.button = el("button", { class: "edition-btn", text: ed.label, attrs: { type: "button", "aria-label": ed.name }, on: { click: () => onPick(ed) } });
+    bar.appendChild(ed.button);
+  }
+  return bar;
 }
 
 export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }) {
@@ -505,9 +661,19 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // trail and the title beside the cover.
   setAxisTitle(albumName);
 
+  // An album in editions (B1023) shows the slot's, else the best the output
+  // plays; a mixed album's source names are read once, so a pick never waits.
+  const output = chosenOutput();
+  const slot = `${id}\n${output}`;
+  let rows = d.tracks;
+  let eds = albumEditions(rows);
+  const editioned = eds.length > 1;
+  const names = eds.some((e) => albumSourceIDs(e.rows).length > 1) ? await api.sourceNames().catch(() => null) : null;
+  if (gen() !== at) return;
+
   // A row that played here at render and no longer does (a source the
   // browser confirmed it cannot decode) redraws the album, once a failure.
-  const live = d.tracks.filter((t) => playFor(t, "browser").playable);
+  let live = [];
   let off = null;
   off = audio.subscribe(() => {
     const lost = gen() === at && live.some((t) => !playFor(t, "browser").playable);
@@ -518,33 +684,86 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
       rerenderView();
     }
   });
-  const note = unplayableNote(d.tracks);
-  const actions = el("div", { class: "detail-actions" },
-    el("button", {
-      class: "btn btn-primary", text: "Play",
-      on: { click: () => playOn({ album: id }, d.tracks, 0, art) },
-    }),
-    shuffleButton(d.tracks, art),
-    el("button", {
-      class: "btn", text: "Add to queue",
-      on: { click: () => addOn({ album: id }, d.tracks) },
-    }));
-  // Where no row plays on the output chosen, the three are disabled, the
-  // count line saying why (B1021): a Play that can start nothing still asked
-  // the start's barrier of the bridge.
-  if (!d.tracks.some((t) => playFor(t, chosenOutput()).playable)) {
-    for (const b of [...actions.children]) {
-      setDisabled(b, true);
-      if (note) b.setAttribute("aria-describedby", note.getAttribute("id"));
-    }
-  }
 
+  // A pick repaints these in place from the album fetched, the picker kept.
+  const statBox = el("div");
+  const pickerBox = el("div");
+  const partsBox = el("div");
+  const tracksBox = el("div");
+  let shown = null;
+  let actions = null;
   // Delete is appended ASYNCHRONOUSLY and only when the operator has turned
   // it on, so a bridge without it renders exactly the toolbar it did before.
   // Deleting moves the files to the library's trash rather than unlinking
   // them, which is why the confirm can be a plain one: it is recoverable, and
   // the Library page is where the space is actually reclaimed.
-  appendDeleteAction(actions, d.tracks, a.title);
+  let allowDelete = false;
+  const deleting = new Map(); // An edition's deletion, the page's while it runs.
+  const addDelete = () => appendDeleteAction(actions, shown.rows, a.title, editioned ? shown.title : null,
+    editioned ? deleting.get(shown.folder) || deleting.set(shown.folder, { text: "" }).get(shown.folder) : null,
+    editioned ? settled : null);
+  const paint = () => {
+    const ed = shown;
+    live = ed.rows.filter((t) => playFor(t, "browser").playable);
+    for (const e of eds) e.button?.setAttribute("aria-pressed", String(e === ed));
+    clear(statBox);
+    statBox.appendChild(albumStatLine(a, editioned ? ed : null));
+    const note = unplayableNote(ed.rows);
+    const scope = editioned ? {} : { album: id };
+    actions = el("div", { class: "detail-actions" },
+      el("button", { class: "btn btn-primary", text: "Play", on: { click: () => playOn(scope, ed.rows, 0, art) } }),
+      shuffleButton(ed.rows, art),
+      el("button", { class: "btn", text: "Add to queue", on: { click: () => addOn(scope, ed.rows) } }));
+    // Where no row plays on the output chosen, the three are disabled, the
+    // count line saying why (B1021): a Play that can start nothing still asked
+    // the start's barrier of the bridge.
+    if (!ed.rows.some((t) => playFor(t, chosenOutput()).playable)) {
+      for (const b of [...actions.children]) {
+        setDisabled(b, true);
+        if (note) b.setAttribute("aria-describedby", note.getAttribute("id"));
+      }
+    }
+    const over = editioned && chosenOutput() === "bridge" && !fitsTheBridge(ed.rows)
+      ? el("p", { class: "muted small", text: SCOPE_WORDS, attrs: { id: "album-scope" } }) : null;
+    if (over) for (const b of [actions.children[0], actions.children[2]]) {
+      setDisabled(b, true);
+      b.setAttribute("aria-describedby", "album-scope");
+    }
+    clear(partsBox);
+    for (const n of [note, over, actions]) if (n) partsBox.appendChild(n);
+    if (allowDelete) addDelete();
+    clear(tracksBox);
+    tracksBox.appendChild(albumTracksPanel(ed.rows, art, names, ed.discOf));
+  };
+  const setup = () => {
+    shown = (editionShown.key === slot && eds.find((e) => e.folder === editionShown.folder)) || bestFor(eds, output);
+    Object.assign(editionShown, { key: slot, folder: shown.folder });
+    clear(pickerBox);
+    if (eds.length > 1) pickerBox.appendChild(editionPicker(eds, (ed) => {
+      // A pick on a page another route or render has replaced paints nothing.
+      if (gen() !== at || ed === shown) return;
+      shown = ed;
+      editionShown.folder = ed.folder;
+      paint();
+    }));
+  };
+  const settled = (res) => {
+    if (gen() !== at) return;
+    const moved = new Set((res?.outcomes || []).filter((o) => o.status === "trashed").map((o) => o.path));
+    if (moved.size) {
+      rows = rows.filter((t) => !moved.has(t.path));
+      if (!rows.length) return rerenderView();
+      eds = albumEditions(rows);
+      setup();
+    }
+    paint();
+  };
+  setup();
+  paint();
+  if (rows.some((t) => t?.path && !t.routed)) api.settings().then((cfg) => {
+    allowDelete = !!cfg?.allowDelete;
+    if (allowDelete && gen() === at) addDelete();
+  }, () => {});
 
   view.appendChild(el("div", { class: "detail" },
     el("div", { class: "detail-art" }, cover(art, a.title)),
@@ -553,9 +772,9 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
       // and rendering it again beside the cover printed the album name
       // twice — the same reason renderCollectionDetail dropped its own.
       link(`/artist/${a.artistId}`, { class: "detail-artist", text: a.albumArtist || "" }),
-      albumStatLine(a),
-      note,
-      actions,
+      statBox,
+      pickerBox,
+      partsBox,
       d.booklet ? bookletLink(d.booklet) : null)));
 
   // Tracks, About and Variants are TABS rather than a stack. Stacked,
@@ -575,8 +794,6 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // see variants.js. A tray save redraws the panel in place instead, from
   // `refresh` (a fresh summary) while `alive` says this route is still the
   // current one.
-  const tracksPanel = d.tracks.length ? await albumTracksPanel(d.tracks, art) : null;
-  if (gen() !== at) return;
   const variants = variantPanel(d.variants, { albumIds: [id] }, rerenderView, {
     plain: true,
     // A tray save redraws the panel in place from a fresh summary, so the
@@ -592,7 +809,7 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
     {
       id: "tracks", label: "Tracks",
       panel: d.tracks.length
-        ? tracksPanel
+        ? tracksBox
         : emptyState("No tracks here",
             "This album's files are gone from the library — a rescan will remove it."),
     },
@@ -635,24 +852,27 @@ function rerenderView() {
  * out the detail nobody else shows. The DTO has carried rateHz, bits and
  * discCount all along — they were simply never rendered, so the page
  * said "Hi-Res" where it could say "FLAC 96/24".
+ *
+ * An album in editions states the edition shown (ed), with the album's year.
  */
-function albumStatLine(a) {
+function albumStatLine(a, ed = null) {
+  const s = ed ? ed.stats : a;
   const parts = [];
   if (a.year) parts.push(String(a.year));
-  if (a.discCount > 1) parts.push(plural(a.discCount, "disc"));
-  parts.push(plural(a.trackCount, "track"));
-  const dur = totalDuration(a.duration);
+  if (s.discCount > 1) parts.push(plural(s.discCount, "disc"));
+  parts.push(plural(s.trackCount, "track"));
+  const dur = totalDuration(s.duration);
   if (dur) parts.push(dur);
 
   // Size joins the line rather than the chip: it is a fact about the
   // files, like the track count, not a claim about their quality.
-  const size = bytes(a.sizeBytes);
+  const size = bytes(s.sizeBytes);
   if (size) parts.push(size);
 
   const line = el("p", { class: "detail-stats muted small", text: parts.join(" · ") });
   // Format rides as a chip rather than more grey text: it is the one
   // fact on this line a listener actually scans for.
-  const fmt = albumFormatLabel(a);
+  const fmt = ed ? ed.format : albumFormatLabel(a);
   if (fmt) line.appendChild(chip(fmt, "chip-quality"));
   return line;
 }
@@ -709,20 +929,15 @@ function bookletLink(booklet) {
  * The list is NOT filtered to the source you browsed in. An album is one
  * release, and showing two of its five tracks because of how you arrived
  * would read as tracks missing rather than as a filter.
+ *
+ * Its caller reads the names, once a render (B1023); discOf is each row's disc.
  */
-async function albumTracksPanel(tracks, art) {
+function albumTracksPanel(tracks, art, names, discOf) {
   const ids = albumSourceIDs(tracks);
-  if (ids.length < 2) return trackList(tracks, art);
-
-  let names;
-  try {
-    names = await api.sourceNames();
-  } catch {
-    // The split is real whether or not we can name the halves; without
-    // names there is nothing useful to label them with, so fall back to
-    // the plain list rather than to "Unknown source" twice.
-    return trackList(tracks, art);
-  }
+  // The split is real whether or not we can name the halves; without names
+  // there is nothing useful to label them with, so fall back to the plain list
+  // rather than to "Unknown source" twice.
+  if (ids.length < 2 || !names) return trackList(tracks, art, { discOf });
 
   const box = el("div");
   let current = "";
@@ -738,7 +953,7 @@ async function albumTracksPanel(tracks, art) {
     // The per-track chip earns its cell only in the combined view: inside
     // a filtered one every row has the same answer, which the button
     // above already gives.
-    box.appendChild(trackList(shown, art, current ? {} : { sourceNames: names }));
+    box.appendChild(trackList(shown, art, current ? { discOf } : { sourceNames: names, discOf }));
   };
   paint();
   return box;
@@ -812,8 +1027,10 @@ function trackList(tracks, albumArt, opts = {}) {
   const list = el("ol", { class: "tracks" });
   let disc = null;
   tracks.forEach((t, i) => {
-    if (!opts.collection && t.disc && t.disc !== disc) {
-      disc = t.disc;
+    // An album's page gives each row its heading disc, an untagged row's too.
+    const d = opts.discOf ? opts.discOf.get(t) ?? null : t.disc || null;
+    if (!opts.collection && d !== null && d !== disc) {
+      disc = d;
       list.appendChild(el("li", { class: "track-disc", text: `Disc ${disc}` }));
     }
     list.appendChild(trackRow(t, i, tracks, albumArt, opts));

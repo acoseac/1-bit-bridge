@@ -458,6 +458,8 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 .detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); flex-wrap: wrap; }
 /* A finger's 44px for an album's Play, Shuffle and Add to queue (B1021). */
 @media (pointer: coarse) { .detail-actions .btn { min-width: 44px; min-height: 44px; } }
+/* …and for each option of its edition picker (B1023). */
+@media (pointer: coarse) { .edition-btn { min-width: 44px; min-height: 44px; } }
 
 .tracks { list-style: none; margin: 0; padding: 0; }
 /* Inside .detail-tabs the CARD is the wrapper; the panels block and the
@@ -1451,6 +1453,17 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   background: var(--accent-soft); border-color: transparent;
   color: var(--fg); font-weight: 650;
 }
+
+/* The edition picker above an album's Play (B1023), the source filter's look:
+ * its options wrap, and so does an option's label, so no page runs sideways. */
+.edition-picker { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: var(--space-3); }
+.edition-word { color: var(--fg-muted); font-size: 0.8rem; margin-right: 4px; }
+.edition-btn {
+  padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--fg-muted);
+  cursor: pointer; font-size: 0.8rem; font-weight: 500; max-width: 100%; overflow-wrap: anywhere;
+}
+.edition-btn:hover { color: var(--fg); border-color: var(--fg-muted); }
+.edition-btn[aria-pressed="true"] { background: var(--accent-soft); border-color: transparent; color: var(--fg); font-weight: 650; }
 
 /* ---- "Recently deleted" playlists, with the undo ----------------------
  *
