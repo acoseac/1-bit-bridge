@@ -47,9 +47,10 @@ type Input struct {
 	Player Player
 	DACs   []DAC
 	// Bridge is the bridge's own player while it is on, nil while it is
-	// off: in serve its element of the body (kind bridge), listed while the
-	// player's gate holds, and in bridge doctor a config that turns the
-	// player on. The DAC line alone reads it (B1022).
+	// off: in serve its element of the body (kind bridge), listed once the
+	// player has an identity, or else the player's gate, which serve decided
+	// at boot; in bridge doctor a config that turns the player on. The DAC
+	// line alone reads it (B1022).
 	Bridge   *BridgePlayer
 	Roots    []RootRule
 	Loopback Loopback
@@ -88,8 +89,9 @@ type DAC struct {
 
 // BridgePlayer is the bridge's own player as the DAC line reads it. DAC is
 // the card it plays through, nil while that card is not known: an element
-// whose dac is null, and bridge doctor, which has no player of its own and
-// reads only whether the config turns it on.
+// whose dac is null; serve's player before it has an identity, which its
+// element waits for; and bridge doctor, which has no player of its own and
+// reads only whether the config it loaded turns it on.
 type BridgePlayer struct {
 	DAC *DAC
 }
@@ -169,50 +171,14 @@ func playerLine(p Player) Line {
 	return l
 }
 
-// dacLine judges the cards MPD's elements list beside the bridge's own
-// player (B1022). ALSA gives a card to one player at a time, whichever
-// opens it second failing, so the line never sends the reader to point MPD
-// at the card the player plays through: that card is no candidate, and
-// while the player is on with its card not known the line names none.
+// dacLine judges the cards MPD's elements list: as it always has while the
+// bridge's own player is off, and by playerDACLine while it is on (B1022).
 func dacLine(dacs []DAC, bridge *BridgePlayer) Line {
-	l := Line{Key: "dac", Title: "DAC"}
-	// own is the card the bridge's own player plays through, when it is on
-	// and that card is known.
-	var own *DAC
 	if bridge != nil {
-		own = bridge.DAC
+		return playerDACLine(dacs, bridge.DAC)
 	}
-	for _, d := range dacs {
-		if !d.IsMPDsOutput {
-			continue
-		}
-		if own != nil && d.Card == own.Card {
-			l.Status = Warn
-			l.Summary = dacName(*own) + " is both the bridge's own player's DAC and MPD's output"
-			l.Fix = "It plays for one of them at a time: point MPD at another DAC, or cast over MPD only while the bridge's own player is off."
-			return l
-		}
-		l.Status = OK
-		l.Summary = dacName(d) + " is MPD's output · " + capabilities(d)
-		return l
-	}
-	// MPD's output names no card: the cards listed are the candidates, but
-	// for the player's.
-	free := dacs
-	if own != nil {
-		free = nil
-		for _, d := range dacs {
-			if d.Card != own.Card {
-				free = append(free, d)
-			}
-		}
-	}
-	switch {
-	case own != nil && len(free) == 0:
-		l.Status = OK
-		l.Summary = dacName(*own) + " is the bridge's own player's DAC; MPD's output only matters when 1-bit casts over MPD"
-		return l
-	case len(dacs) == 0:
+	l := Line{Key: "dac", Title: "DAC"}
+	if len(dacs) == 0 {
 		// No card MPD's output resolves to, and no USB card to offer. The
 		// box may hold an I2S HAT behind a device name this reader does not
 		// resolve, so the line does not say USB alone.
@@ -220,20 +186,84 @@ func dacLine(dacs []DAC, bridge *BridgePlayer) Line {
 		l.Summary = "No DAC found on this box"
 		l.Fix = "Plug the DAC in by USB and switch it on, or point MPD's audio_output at its card; `bridge output dac` lists the cards."
 		return l
-	case bridge != nil && own == nil:
-		// Any candidate may be the player's card.
-		l.Status = Warn
-		l.Summary = "The bridge's own player is on; its DAC is shown on the console's Player page"
-		l.Fix = "Check the bridge's own player's DAC on the console's Player page before pointing MPD at a DAC."
-		return l
 	}
-	names := make([]string, 0, len(free))
-	for _, d := range free {
+	for _, d := range dacs {
+		if d.IsMPDsOutput {
+			l.Status = OK
+			l.Summary = dacName(d) + " is MPD's output · " + capabilities(d)
+			return l
+		}
+	}
+	names := make([]string, 0, len(dacs))
+	for _, d := range dacs {
 		names = append(names, dacName(d))
 	}
 	l.Status = Warn
 	l.Summary = strings.Join(names, ", ") + " found, but MPD's output does not name it"
-	l.Fix = fmt.Sprintf(`Point MPD's audio_output at the DAC (device "hw:CARD=%s"), or choose it in the player's output settings.`, free[0].ID)
+	l.Fix = fmt.Sprintf(`Point MPD's audio_output at the DAC (device "hw:CARD=%s"), or choose it in the player's output settings.`, dacs[0].ID)
+	return l
+}
+
+// playerDACLine is the DAC line while the bridge's own player is on, own the
+// card it plays through, nil while that card is not known (B1022). ALSA
+// gives a card to one player at a time, whichever opens it second failing.
+// The body cannot say which card MPD's output names when it lists
+// candidates (a device that does not resolve and several that do are alike,
+// isMPDsOutput null on each), nor that its MPD half, which the builder keeps
+// for 500 ms, was read with the player's card where it is now: so while the
+// player is on no line names a card to point MPD at. The two are matched by
+// Card alone, within one body.
+func playerDACLine(dacs []DAC, own *DAC) Line {
+	l := Line{Key: "dac", Title: "DAC", Status: Warn}
+	if own == nil {
+		for _, d := range dacs {
+			if d.IsMPDsOutput {
+				l.Summary = dacName(d) + " is MPD's output, and the checklist cannot tell whether the bridge's own player plays through it too"
+				l.Fix = "Check the player's DAC binding (`bridge output dac inspect`, or the console's Player page): if it names this DAC, point MPD at another one, or cast over MPD only while the bridge's own player is off."
+				return l
+			}
+		}
+		l.Summary = "The bridge's own player is on, and the checklist cannot tell which DAC it plays through"
+		l.Fix = "Check the player's DAC binding (`bridge output dac inspect`, or the console's Player page) before changing MPD's output."
+		return l
+	}
+	name := dacName(*own)
+	for _, d := range dacs {
+		if d.IsMPDsOutput && d.Card == own.Card {
+			l.Summary = name + " is both the bridge's own player's DAC and MPD's output"
+			l.Fix = "It plays for one of them at a time: point MPD at another DAC, or cast over MPD only while the bridge's own player is off."
+			return l
+		}
+	}
+	for _, d := range dacs {
+		if d.IsMPDsOutput {
+			l.Status = OK
+			l.Summary = dacName(d) + " is MPD's output · " + capabilities(d)
+			return l
+		}
+	}
+	// MPD's output names no card: it may name any candidate, the player's
+	// card among them or not.
+	mine, others := false, []string{}
+	for _, d := range dacs {
+		if d.Card == own.Card {
+			mine = true
+		} else {
+			others = append(others, dacName(d))
+		}
+	}
+	check := "Check MPD's audio_output before changing it: the bridge's own player plays through " + name + "."
+	switch {
+	case len(others) == 0:
+		l.Status = OK
+		l.Summary = name + " is the bridge's own player's DAC; MPD's output only matters when 1-bit casts over MPD"
+	case mine:
+		l.Summary, l.Fix = "MPD's output may include "+name+", the bridge's own player's DAC", check
+	case len(others) == 1:
+		l.Summary, l.Fix = others[0]+" found, and the checklist cannot tell whether MPD's output names it", check
+	default:
+		l.Summary, l.Fix = strings.Join(others, ", ")+" found, and the checklist cannot tell which of them, if any, MPD's output names", check
+	}
 	return l
 }
 

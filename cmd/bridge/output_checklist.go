@@ -70,11 +70,13 @@ type outputChecklistSource struct {
 	// flight with its request's context, which ends with the request.
 	Reads   *outputsReads
 	ReadKey string
-	// BridgePlayerOn, where it is not nil, says whether the config turns the
-	// bridge's own player on: bridge doctor's, whose one-shot builder lists
-	// no element of that player's, so its DAC line knows the player is on
-	// and never its card (B1022). Serve's source has none: its body carries
-	// the player's element while the player's gate holds.
+	// BridgePlayerOn, where it is not nil, says whether the bridge's own
+	// player is on, for a body that lists no element of the player's
+	// (B1022): serve's is the player's gate as serve decided it at boot
+	// (bridgeOutput.Enabled), since its body lists the player's element only
+	// once the player has an identity; bridge doctor's is whether the config
+	// it loaded turns the player on, since its one-shot builder lists none.
+	// Either way the DAC line knows the player is on and not its card.
 	BridgePlayerOn func() bool
 }
 
@@ -409,7 +411,9 @@ func doctorChecks(lines []outputcheck.Line) []doctor.Check {
 // identity (B470 PR 5b). Its DAC line reads whether the config turns that
 // player on (config.PlayerEnabled, on the host the builder stands for), and
 // never the card the player plays through, which no element of the player's
-// gives it (B1022).
+// gives it (B1022). That config is the one this run loaded, its file and its
+// own environment: a service whose environment turns the player on beside a
+// file that leaves it off is one the doctor run from a shell reads as off.
 //
 // seam, when not nil, edits the builder's config before it is built: a
 // test stands in for Linux and for the box's MPD and cards there.
