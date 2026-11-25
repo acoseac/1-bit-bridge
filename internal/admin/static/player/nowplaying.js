@@ -36,8 +36,8 @@ let bar = null;
 let refs = {};
 
 // What a seek lands on now, which render sets: the output and the occurrence
-// heard ("bridge", its anchor's occurrence and entry; "browser", the loaded
-// track), or null where no seek is offered.
+// heard ("bridge", the engine's run and its anchor's occurrence and entry;
+// "browser", the loaded track and its play), or null where no seek is offered.
 let seekOn = null;
 const sameSeek = (a, b) => !!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -90,43 +90,55 @@ export function mount() {
   // change; a drag's at the lift of the pointer that began it, since WebKit
   // fires no change after a touch, and never at a change while that pointer
   // is down, another pointer's lift, or a cancel, which puts the thumb back.
-  // A drag lands only on what it was begun on (render's seekOn): the output
-  // and the occurrence heard, while seeking is offered.
+  // The drag is that pointer's until it lifts, and lands its own value: an
+  // input follows the pointer that went down or moved last, and another's is
+  // undone. A drag lands only on what it was begun on (render's seekOn): the
+  // output and the occurrence heard, in its run or its play, while seeking is
+  // offered.
   let scrubbing = false;
   let drag = null;
+  let mover = null;
   refs.seek.addEventListener("pointerdown", (e) => {
-    if (drag && e.isPrimary !== true) return;
-    drag = { pointer: e.pointerId, on: seekOn, lost: !seekOn };
+    mover = e.pointerId;
+    if (drag && drag.pointer !== e.pointerId) return;
+    drag = { pointer: e.pointerId, on: seekOn, lost: !seekOn, value: null };
   });
   refs.seek.addEventListener("input", () => {
+    if (drag && mover !== drag.pointer) {
+      if (drag.value !== null && !drag.lost) refs.seek.value = drag.value;
+      else putBack();
+      return;
+    }
     if (drag?.lost) return;
     scrubbing = true;
+    if (drag) drag.value = refs.seek.value;
     setProgress(refs.seek.value / 1000);
   });
-  const land = () => {
+  const land = (v) => {
     if (!scrubbing) return;
     scrubbing = false;
     const o = out()?.view();
     if (!seekOn) return;
     if (bridgeChosen(o)) {
       const d = o.state?.track?.duration || 0;
-      if (d > 0) out().command("seek", { seconds: (refs.seek.value / 1000) * d });
+      if (d > 0) out().command("seek", { seconds: (v / 1000) * d });
     } else {
       const s = audio.snapshot();
-      if (s.duration > 0) audio.seek((refs.seek.value / 1000) * s.duration);
+      if (s.duration > 0) audio.seek((v / 1000) * s.duration);
     }
   };
-  refs.seek.addEventListener("change", () => { if (!drag) land(); });
+  refs.seek.addEventListener("change", () => { if (!drag) land(refs.seek.value); });
   const lift = (e, lands) => {
     if (drag?.pointer !== e.pointerId) return;
-    const lost = drag.lost;
+    const { lost, value } = drag;
     drag = null;
-    if (lands && !lost) land();
+    if (lands && !lost && value !== null) land(value);
     else putBack();
   };
   // The document hears a lift away from the seek too (a mouse let go beside
   // it); a capture of the pointer stopped WebKit's slider following a drag.
   for (const target of [refs.seek, document]) {
+    target.addEventListener("pointermove", (e) => { mover = e.pointerId; });
     target.addEventListener("pointerup", (e) => lift(e, true));
     target.addEventListener("pointercancel", (e) => lift(e, false));
   }
@@ -594,7 +606,7 @@ function renderBrowser(s, o) {
   // Disabling the control is the honest move: a scrubber bound to an
   // unknown duration is a control that lies.
   setDisabled(refs.seek, !s.seekable);
-  if (s.seekable) seekOn = ["browser", s.track];
+  if (s.seekable) seekOn = ["browser", s.track, s.play];
   refs.seek.title = "";
   if (!s.seekable) {
     refs.total.textContent = "—";
@@ -640,7 +652,7 @@ function renderBridge(o) {
   const dsd = t ? (t.codec === "DSD" || t.bits === 1) : false;
   const seekable = !!(st?.seek && can("seek"));
   setDisabled(refs.seek, !seekable);
-  if (seekable) seekOn = ["bridge", st.anchor?.occurrence, t?.entry];
+  if (seekable) seekOn = ["bridge", String(st.generation || "").split(".")[0], st.anchor?.occurrence, t?.entry];
   refs.seek.title = dsd ? WORDS.noSeekDSD : "";
 
   paintPanel(o);

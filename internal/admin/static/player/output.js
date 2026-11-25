@@ -338,7 +338,9 @@ export function chosenOutput() {
  * stream's lifecycle (bridge:player-stream: each open with its connection's
  * serial, each error), a page shown again (visibilitychange to visible,
  * pageshow from the cache), which forgets the clock's samples; and calls
- * onOutput when the output picked changes, which redraws the route in place.
+ * onOutput when the output in effect changes (the pick, or this browser where
+ * no player is offered, as chosenOutput says), which redraws the route in
+ * place (B1021).
  */
 export function listen(o, { win, doc, onOutput }) {
   win.addEventListener("bridge:player", (e) => o.frame(e.detail?.data, e.detail?.serial));
@@ -352,11 +354,12 @@ export function listen(o, { win, doc, onOutput }) {
   win.addEventListener("pageshow", (e) => {
     if (e.persisted) o.resume();
   });
-  let last = o.view().output;
+  const effect = (v) => (v.output === "bridge" && !v.notOffered ? "bridge" : "browser");
+  let last = effect(o.view());
   o.subscribe((v) => {
-    if (v.output === last) return;
-    last = v.output;
-    onOutput?.(v.output);
+    if (effect(v) === last) return;
+    last = effect(v);
+    onOutput?.(last);
   });
 }
 

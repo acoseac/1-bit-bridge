@@ -253,6 +253,19 @@ export function playFor(track, output) {
 }
 
 /**
+ * A row the queue found this browser cannot decode (its play marked none
+ * after a confirmed decode failure) reads so among tracks too, by its path,
+ * since a page's rows are not the queue's objects (B1021). It answers how
+ * many it marked.
+ */
+export function adoptFailures(tracks, queue) {
+  const failed = new Set(queue.filter((q) => q.play?.kind === "none").map((q) => q.path));
+  const hit = tracks.filter((t) => t.play && t.play.kind !== "none" && failed.has(t.path));
+  for (const t of hit) t.play = { ...t.play, kind: "none" };
+  return hit.length;
+}
+
+/**
  * The bar's chip for what the bridge's DAC receives (§4.3): the codec and
  * the PCM it is, or the DSD rate and its way. Converted DSD says so, and is
  * never called bit-exact.

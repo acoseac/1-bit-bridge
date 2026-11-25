@@ -53,6 +53,9 @@ let primedFor = null;
 // but NOT the same track being re-loaded — a reader retrying the row that
 // just failed would have their fresh attempt clobbered by the stale one.
 let playbackGen = 0;
+// The repeat-one replays, which load nothing: with playbackGen, the play the
+// bar's seek binds a drag to (B1021). Nothing else reads it.
+let replays = 0;
 
 // How long the failure probe waits for response HEADERS. Short, because
 // the source has ALREADY failed to load by the time it runs — this only
@@ -300,6 +303,7 @@ function emit() {
 export function snapshot() {
   return {
     track: state.index >= 0 ? state.queue[state.index] : null,
+    play: `${playbackGen}.${replays}`,
     queue: state.queue,
     index: state.index,
     playing: state.playing,
@@ -908,6 +912,7 @@ function advanceNow(delta, { auto = false, skip = false, permit } = {}) {
     // restart.
     if (permit !== undefined) startPermit = permit;
     intent = true;
+    replays += 1;
     state.el.currentTime = 0;
     playEl();
     return;

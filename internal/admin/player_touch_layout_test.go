@@ -7,7 +7,7 @@ import (
 )
 
 // The console by touch (B1021): what a phone's bar and pages need of
-// player.css, pinned at the source on every host. The node harness runs the
+// player.css, pinned at the source on every host. The bar's harness runs the
 // modules (TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs and the
 // album cases beside it); what the rules do in a real engine, at each width,
 // is the record's WebKit evidence, which no Go guard can see.
@@ -259,9 +259,10 @@ func TestAnAlbumsControlsTakeAFingerOnATouchScreen(t *testing.T) {
 }
 
 // TestAnOutputSwitchRedrawsTheRoute pins at the source what
-// TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls stands in for under
-// node: boot.js redraws the route whenever the output picked changes, so an
-// open album's rows, count line and controls follow the output.
+// TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls stands in for in the
+// bar's harness: boot.js redraws the route whenever the output in effect
+// changes (output.js's listen), so an open album's rows, count line and
+// controls follow the output.
 func TestAnOutputSwitchRedrawsTheRoute(t *testing.T) {
 	wire := extractJSFunction(t, stripJSComments(readFile(t, "static/player/boot.js")), "wireOutput")
 	if !strings.Contains(wire, "onOutput: () => route()") {

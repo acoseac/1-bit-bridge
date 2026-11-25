@@ -4,7 +4,7 @@
 
 import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, downloadURL,
          playlistExportURL, isAborted } from "./api.js";
-import { duration, totalDuration, qualityLabel, formatChip, plural, playFor,
+import { duration, totalDuration, qualityLabel, formatChip, plural, playFor, adoptFailures,
          bytes, variantKindLabel, variantSkipLabel, timeAgo } from "./format.js";
 import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs, crumbs, announce, setDisabled } from "./ui.js";
 import * as audio from "./audio.js";
@@ -502,6 +502,13 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // trail and the title beside the cover.
   setAxisTitle(albumName);
 
+  // A decode failure the queue confirms while the album is shown redraws it.
+  adoptFailures(d.tracks, audio.snapshot().queue);
+  let off = null;
+  off = audio.subscribe((s) => {
+    if (gen() !== at) off?.();
+    else if (adoptFailures(d.tracks, s.queue)) rerenderView();
+  });
   const note = unplayableNote(d.tracks);
   const actions = el("div", { class: "detail-actions" },
     el("button", {
