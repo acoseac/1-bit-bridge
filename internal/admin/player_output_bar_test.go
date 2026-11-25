@@ -250,11 +250,37 @@ func TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls(t *testing.T) { barSce
 func TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs(t *testing.T) { barScenario(t, 4) }
 
 // TestASeekLandsWhereItIsLetGoOnce pins that the bar's seek lands once, where
-// its value was let go: at the lift of the pointer that moved it, since
-// WebKit fires no change after a touch moves the value (B1021), or at its
-// change, the two never landing it twice, and a lift that moved nothing
-// seeking nothing.
-func TestASeekLandsWhereItIsLetGoOnce(t *testing.T) { barScenario(t, 4) }
+// its value was let go: a drag under way seeks nothing, the lift of the
+// pointer that began it lands it, since WebKit fires no change after a touch
+// moves the value (B1021), and the change after it nothing more; another
+// pointer's lift or cancel lands nothing, nor does a change while the pointer
+// is down, and the pointer's cancel puts the thumb back where the track is; a
+// key's change lands its value with no pointer down.
+func TestASeekLandsWhereItIsLetGoOnce(t *testing.T) { barScenario(t, 9) }
+
+// TestADragLandsOnlyOnTheBridgesOccurrenceItWasMadeOn pins that a drag of the
+// bar's seek with the bridge's player chosen lands only on the occurrence it
+// was made on, while the player takes seeks: one whose seek the player
+// stopped taking meanwhile seeks nothing at its lift or its change, even with
+// the seek given back before the lift, and a fresh drag then lands; the same
+// entry heard again (a new occurrence) ends the drag and a queue edit on the
+// occurrence keeps it; another track, or a DSD one whose seek is off,
+// published while the finger is down, seeks nothing.
+func TestADragLandsOnlyOnTheBridgesOccurrenceItWasMadeOn(t *testing.T) { barScenario(t, 7) }
+
+// TestAnAlbumAsksThisBrowserWhatTheQueuePlays pins that a row's playability in
+// this browser is the queue's own (B1021): a universal row whose type this
+// browser's decoder does not take, with no copy it does, is unplayable, its
+// album's Play, Shuffle and Add to queue disabled with the count line and the
+// row's chip saying why, and its Play sends no barrier; a row it decodes keeps
+// them live; and a row with no play field is unplayable with its reason an
+// element the page renders where its title points.
+func TestAnAlbumAsksThisBrowserWhatTheQueuePlays(t *testing.T) { barScenario(t, 8) }
+
+// TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn pins the same in this
+// browser: another track loaded while the finger is down, or the output moved
+// to the bridge's player, seeks nothing at the lift or the change after it.
+func TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn(t *testing.T) { barScenario(t, 3) }
 
 // TestADSDOnlyAlbumPlaysOnTheBridgeFromAnEmptyBar pins A2 to A4: from empty
 // session storage the bridge's player is picked with nothing sent, and a

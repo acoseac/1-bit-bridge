@@ -497,7 +497,9 @@ S.TestTheBridgesReturnPlaysNothing = async () => {
 };
 
 S.TestRowsFollowTheChosenOutput = async () => {
-  const pcm = { path: "A/01.flac", codec: "FLAC", rateHz: 96000, play: { kind: "universal" }, bridge: { way: "pcm" } };
+  // A page, so this browser's decoder is asked as the queue asks it.
+  page();
+  const pcm = { path: "A/01.flac", codec: "FLAC", rateHz: 96000, play: { kind: "universal", contentType: "audio/flac" }, bridge: { way: "pcm" } };
   const native = { path: "D/01.dsf", codec: "DSF", isDsd: true, rateHz: 2822400, play: { kind: "none" }, bridge: { way: "native" } };
   const dop = { path: "D/02.dsf", codec: "DSF", isDsd: true, rateHz: 5644800, play: { kind: "none" }, bridge: { way: "dop" } };
   const conv = { path: "D/03.dsf", codec: "DSF", isDsd: true, rateHz: 11289600, play: { kind: "none" }, bridge: { way: "converted" } };
@@ -4760,6 +4762,15 @@ S.TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs = async () => {
   check("the bar's height as it renders is handed to what sits above it", !!watch && props["--np-bar-h"] === "152px", [!!watch, props]);
 };
 
+// pointer is a finger or a button on the seek: its pointer events, with the
+// value it moves the seek to between them, as a browser delivers them.
+const pointer = (seek, id, primary = true) => ({
+  down() { seek.fire("pointerdown", { pointerId: id, isPrimary: primary }); },
+  move(v) { seek.value = String(v); seek.fire("input"); },
+  up() { seek.fire("pointerup", { pointerId: id, isPrimary: primary }); },
+  cancel() { seek.fire("pointercancel", { pointerId: id, isPrimary: primary }); },
+});
+
 S.TestASeekLandsWhereItIsLetGoOnce = async () => {
   const r = await barPage();
   const seek = r.byClass("np-seek");
@@ -4769,23 +4780,168 @@ S.TestASeekLandsWhereItIsLetGoOnce = async () => {
   let writes = 0;
   let at = r.el.currentTime;
   Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { writes += 1; at = v; }, configurable: true });
-  // A touch as WebKit delivers it: the value moved, then the finger lifted, and no change.
-  seek.value = "500";
-  seek.fire("input");
-  seek.fire("pointerup");
-  check("a touch's lift lands the seek where the value was let go", writes === 1 && at === 100, [writes, at]);
-  seek.value = "250";
-  seek.fire("input");
-  seek.fire("pointerup");
+  const one = pointer(seek, 1);
+  const two = pointer(seek, 2, false);
+  // A finger drags through two values: nothing lands before it lifts, then
+  // its lift lands the value it let go of (WebKit fires no change after a
+  // touch), and the change after it nothing more.
+  one.down();
+  one.move(300);
+  one.move(500);
+  check("a drag under way seeks nothing", writes === 0, writes);
+  one.up();
+  check("its lift lands it once, where it was let go", writes === 1 && at === 100, [writes, at]);
   seek.fire("change");
-  check("a mouse's release and the change after it land one seek", writes === 2 && at === 50, [writes, at]);
-  seek.value = "750";
+  check("the change after the lift lands nothing more", writes === 1, writes);
+  // A second finger lifting or cancelled while the first drags lands nothing.
+  one.down();
+  one.move(250);
+  two.down();
+  two.up();
+  two.cancel();
+  check("another finger's lift or cancel lands nothing", writes === 1, writes);
+  one.up();
+  check("the first finger's lift lands its drag", writes === 2 && at === 50, [writes, at]);
+  // A change while the finger is down, then its cancel: nothing lands, and
+  // the thumb goes back to where the track is.
+  one.down();
+  one.move(750);
+  seek.fire("change");
+  check("a change while the finger is down lands nothing", writes === 2, writes);
+  one.cancel();
+  check("its cancel lands nothing and puts the thumb back where the track is", writes === 2 && seek.value === "250", [writes, seek.value]);
+  // A key moves the value and its change lands it, no pointer down.
+  seek.value = "600";
   seek.fire("input");
   seek.fire("change");
-  check("a key's change lands one seek", writes === 3 && at === 150, [writes, at]);
-  seek.fire("pointerup");
-  seek.fire("pointercancel");
-  check("a lift or a cancel that moved nothing seeks nothing", writes === 3, writes);
+  check("a key's change lands one seek", writes === 3 && at === 120, [writes, at]);
+  one.up();
+  one.cancel();
+  check("a lift or a cancel with no drag seeks nothing", writes === 3, writes);
+};
+
+S.TestADragLandsOnlyOnTheBridgesOccurrenceItWasMadeOn = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  let latest = playing({ revision: 3 });
+  const r = await barPage({ latest });
+  r.s.on("POST", ROUTES.transport, async (e) => answer(recOf(e), latest));
+  const publish = (o) => {
+    latest = playing({ ...o });
+    r.frame(latest);
+  };
+  await settle();
+  const seek = r.byClass("np-seek");
+  const seeks = () => r.s.posts(ROUTES.transport).filter((e) => e.body?.command === "seek").map((e) => e.body.seconds);
+  const finger = pointer(seek, 1);
+  const drag = (v) => { finger.down(); finger.move(v); };
+  const lift = async () => { finger.up(); seek.fire("change"); await settle(); };
+  drag(500);
+  await lift();
+  check("a drag on the occurrence playing lands one seek", JSON.stringify(seeks()) === "[150]", seeks());
+  // The permission alone: the occurrence kept, seek taken from its commands,
+  // then given back before the lift.
+  drag(500);
+  const all = latest.commands;
+  publish({ revision: 4, commands: all.filter((c) => c !== "seek") });
+  await settle();
+  publish({ revision: 5, commands: all });
+  await settle();
+  await lift();
+  check("a seek the player stopped taking while the finger was down: its lift and change seek nothing", JSON.stringify(seeks()) === "[150]", seeks());
+  drag(250);
+  await lift();
+  check("a fresh drag once it takes seeks again lands", JSON.stringify(seeks()) === "[150,75]", seeks());
+  // The occurrence, not the path: the same entry heard again, then a queue
+  // edit on the occurrence heard.
+  drag(500);
+  publish({ revision: 6, anchor: { id: 5, occurrence: 2, entry: 11, seconds: 0, at: new Date(T0).toISOString(), advancing: true } });
+  await settle();
+  await lift();
+  check("the same entry heard again while the finger was down: its lift seeks nothing", JSON.stringify(seeks()) === "[150,75]", seeks());
+  drag(400);
+  publish({ revision: 7, generation: "0123456789abcdef.2", queueRev: 2, anchor: latest.anchor });
+  await settle();
+  await lift();
+  check("a queue edit on the occurrence the drag was made on keeps it: it lands", JSON.stringify(seeks()) === "[150,75,120]", seeks());
+  // Another track, then a DSD track whose seek is off.
+  drag(500);
+  publish({ revision: 8, generation: latest.generation, queueRev: 2, selected: 12,
+    track: { entry: 12, path: "Album/02 B.flac", named: true, title: "B", codec: "FLAC", bits: 16, rateHz: 44100, channels: 2, duration: 80 },
+    anchor: { id: 6, occurrence: 3, entry: 12, seconds: 0, at: new Date(T0).toISOString(), advancing: true } });
+  await settle();
+  await lift();
+  check("another track published while the finger was down: its lift seeks nothing", JSON.stringify(seeks()) === "[150,75,120]", seeks());
+  drag(500);
+  publish({ revision: 9, generation: latest.generation, queueRev: 2, selected: 13, seek: false,
+    track: { entry: 13, path: "DSD/03 C.dsf", named: true, title: "C", codec: "DSD", bits: 1, rateHz: 2822400, channels: 2, duration: 200 },
+    anchor: { id: 7, occurrence: 4, entry: 13, seconds: 0, at: new Date(T0).toISOString(), advancing: true } });
+  await settle();
+  await lift();
+  check("a DSD track whose seek is off: the lift that reaches it seeks nothing", JSON.stringify(seeks()) === "[150,75,120]" && seek.disabled === true, [seeks(), seek.disabled]);
+};
+
+S.TestADragInThisBrowserLandsOnlyOnTheTrackItWasMadeOn = async () => {
+  const r = await barPage();
+  r.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 2, of: 2 }), playing({ revision: 4 })));
+  const seek = r.byClass("np-seek");
+  r.audio.playQueue([flac(1), flac(2)], 0);
+  r.el.metadata(200);
+  await settle();
+  let writes = 0;
+  let at = r.el.currentTime;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { if (v > 0) writes += 1; at = v; }, configurable: true });
+  const finger = pointer(seek, 1);
+  const drag = (v) => { finger.down(); finger.move(v); };
+  const lift = async () => { finger.up(); seek.fire("change"); await settle(); };
+  drag(500);
+  await lift();
+  check("a drag on the track playing lands one seek", writes === 1 && at === 100, [writes, at]);
+  drag(500);
+  r.audio.playQueue([flac(3)], 0);
+  r.el.metadata(200);
+  await settle();
+  await lift();
+  check("another track loaded while the finger was down: its lift and change seek nothing", writes === 1, [writes, at]);
+  drag(500);
+  await r.out.pick("bridge");
+  await settle();
+  await lift();
+  const bridgeSeeks = r.s.posts(ROUTES.transport).filter((e) => e.body?.command === "seek").length;
+  check("the output moved to the bridge's player while the finger was down: nothing seeks", writes === 1 && bridgeSeeks === 0 && r.out.view().output === "bridge",
+    [writes, bridgeSeeks, r.out.view().output]);
+};
+
+S.TestAnAlbumAsksThisBrowserWhatTheQueuePlays = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  // A row the server calls universal whose type this browser's decoder does
+  // not take, and no copy it does: the queue plays nothing of it.
+  const ogg = flac(1, { path: "Album/01.ogg", codec: "Vorbis", play: { kind: "universal", contentType: "audio/ogg" } });
+  let rows = await libraryRows([ogg], { id: "q1" });
+  let p = albumParts(rows.view);
+  check("a universal row this browser cannot decode: unplayable, its album's Play, Shuffle and Add to queue disabled",
+    rows[0].getAttribute("aria-disabled") === "true" && p.play?.disabled && p.shuffle?.disabled && p.add?.disabled,
+    [rows[0].getAttribute("aria-disabled"), p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+  check("its reason said in the count line and the row's chip",
+    /^1 of 1 can't play in a browser\./.test(p.line?.textContent || "") && rowChips(rows.view)[0] === "May not play in this browser",
+    [p.line?.textContent, rowChips(rows.view)]);
+  p.play?.click();
+  await settle();
+  check("its Play sends no barrier and plays nothing", r.s.posts(ROUTES.switchOut).length === 0 && r.el.plays.length === 0,
+    [r.s.posts(ROUTES.switchOut).length, r.el.plays]);
+  rows = await libraryRows([flac(2)], { id: "q2" });
+  p = albumParts(rows.view);
+  check("a row this browser decodes: playable, the album's controls live",
+    rows[0].getAttribute("aria-disabled") === null && !p.play?.disabled && !p.shuffle?.disabled && !p.add?.disabled && !p.line,
+    [rows[0].getAttribute("aria-disabled"), p.play?.disabled, p.line?.textContent]);
+  // A row with no play field: the queue plays nothing of it, and its reason
+  // is an element the page renders.
+  rows = await libraryRows([{ path: "Album/03.flac", title: "T3", codec: "FLAC" }, flac(4)], { id: "q3" });
+  const named = rows[0].getAttribute("aria-describedby");
+  const reason = findAll(rows.view, (n) => n.getAttribute?.("id") === named)[0];
+  check("a row with no play field: unplayable, its reason rendered where it points",
+    rows[0].getAttribute("aria-disabled") === "true" && !!named && reason?.textContent === "Not playable in a browser",
+    [rows[0].getAttribute("aria-disabled"), named, reason?.textContent]);
 };
 
 const name = scenarioName;

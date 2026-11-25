@@ -77,8 +77,10 @@ func anyRule(rules []touchRule, sel, prop, value string) bool {
 // TestThePhoneBarShowsItsSeekItsTimesAndItsWords pins B1021's items 1 and 2
 // at the source: up to 768px the scrub row (the seek and both times) is a
 // row of the bar of its own, hidden by no rule there, its seek 44px tall;
-// up to 640px the words take a row the transport does not share, and the
-// bar's buttons there are at least 44px square.
+// up to 480px the words take a row the transport does not share, which no
+// rule up to 640px makes a third row there (a phone held sideways keeps two,
+// so the bar leaves the window room), and the bar's buttons up to 640px are
+// at least 44px square.
 func TestThePhoneBarShowsItsSeekItsTimesAndItsWords(t *testing.T) {
 	tablet := playerCSSBlocks(t, "(max-width: 768px)")
 	for _, r := range tablet {
@@ -93,8 +95,14 @@ func TestThePhoneBarShowsItsSeekItsTimesAndItsWords(t *testing.T) {
 		t.Error("up to 768px the seek is not 44px tall: a finger has nothing to land on")
 	}
 	phone := playerCSSBlocks(t, "(max-width: 640px)")
-	areas := ""
 	for _, r := range phone {
+		if r.selects(".npbar") && strings.Contains(r.decl, "grid-template-areas") {
+			t.Errorf("up to 640px a rule gives the bar its rows (%s): a phone held sideways takes the three rows a narrow one needs", strings.TrimSpace(r.decl))
+		}
+	}
+	narrow := playerCSSBlocks(t, "(max-width: 480px)")
+	areas := ""
+	for _, r := range narrow {
 		if r.selects(".npbar") {
 			for _, d := range strings.Split(r.decl, ";") {
 				if k, v, ok := strings.Cut(d, ":"); ok && strings.TrimSpace(k) == "grid-template-areas" {
@@ -112,7 +120,7 @@ func TestThePhoneBarShowsItsSeekItsTimesAndItsWords(t *testing.T) {
 		}
 	}
 	if len(rows) < 3 || !words {
-		t.Errorf("up to 640px the words do not take a row the transport leaves them (grid-template-areas %q)", strings.TrimSpace(areas))
+		t.Errorf("up to 480px the words do not take a row the transport leaves them (grid-template-areas %q)", strings.TrimSpace(areas))
 	}
 	if !anyRule(phone, ".np-btn", "min-width", "44px") || !anyRule(phone, ".np-btn", "min-height", "44px") ||
 		!anyRule(phone, ".np-btn-sm", "min-width", "44px") || !anyRule(phone, ".np-btn-sm", "min-height", "44px") {
@@ -160,6 +168,50 @@ func TestWhatSitsAboveTheBarClearsItAsItRenders(t *testing.T) {
 	mount := extractJSFunction(t, np, "mount")
 	if !strings.Contains(mount, "new ResizeObserver(") || !strings.Contains(mount, `setProperty("--np-bar-h", `) || !strings.Contains(mount, "bar.offsetHeight") {
 		t.Error("mount does not hand the bar's rendered height (--np-bar-h) to the page as the bar changes size")
+	}
+}
+
+// TestTheDrawerAndThePanelsStayClearOfTheBarAndInTheWindow pins at the
+// source that what the taller bar sits beside stays reachable: the shell's
+// drawer, open below 1024px with the bar shown, ends above the bar as it
+// renders, and the output menu and the queue panel stay within the window
+// above it (the queue within half of it where that fits), each scrolling
+// inside where its content is longer.
+func TestTheDrawerAndThePanelsStayClearOfTheBarAndInTheWindow(t *testing.T) {
+	drawer := false
+	for _, r := range playerCSSBlocks(t, "(max-width: 1023px)") {
+		if r.selects(`body.has-player-bar header[data-nav-open="true"] .sidebar-drawer`) && strings.Contains(r.decl, "100dvh") &&
+			strings.Contains(r.decl, "var(--player-bottom-inset)") {
+			drawer = true
+		}
+	}
+	if !drawer {
+		t.Error("below 1024px the open drawer is not held above the bar as it renders: the bar covers its foot")
+	}
+	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
+	panels, queue := false, false
+	for _, r := range touchRulesOf(css) {
+		if r.selects(".np-menu") && r.selects(".np-queue") && strings.Contains(r.decl, "max-height: calc(100dvh - var(--np-panel-bottom) - var(--space-2))") &&
+			r.declares("overflow-y", "auto") && strings.Contains(r.decl, "bottom: var(--np-panel-bottom)") {
+			panels = true
+		}
+		if r.selects(".np-queue") && strings.Contains(r.decl, "max-height: min(50vh, calc(100dvh - var(--np-panel-bottom) - var(--space-2)))") {
+			queue = true
+		}
+	}
+	if !panels || !queue {
+		t.Error("the output menu and the queue panel are not held within the window above the bar, scrolling inside")
+	}
+}
+
+// TestTheRailTakesColumnsWhereTheWindowIsShort pins at the source that where
+// the window is short (a phone held sideways) the A–Z rail's letters take
+// seven columns, since one column of 27 cannot stand between the top bar and
+// the bar there.
+func TestTheRailTakesColumnsWhereTheWindowIsShort(t *testing.T) {
+	short := playerCSSBlocks(t, "(max-height: 500px)")
+	if !anyRule(short, ".az-rail", "display", "grid") || !anyRule(short, ".az-rail", "grid-template-columns", "repeat(7, auto)") {
+		t.Error("where the window is short the A–Z rail keeps one column, whose letters run under the bar")
 	}
 }
 
