@@ -465,7 +465,10 @@ function onError() {
     case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED — see handleSourceError.
       // The probe below is a round trip, and a spinner left up across it
       // says "still coming" about a source we already know did not load;
-      // nothing plays, and the bar's Play over it starts again (toggle).
+      // nothing plays, and the bar's Play over it starts again (toggle). A
+      // resume of the browser's own waiting on the gate ends with it: its
+      // admission would play the source that failed; the skip goes on (B1015).
+      resumeWait = null;
       state.playing = state.loading = false;
       emit();
       void handleSourceError(track, state.el.src);
@@ -498,8 +501,10 @@ function onError() {
         return;
       }
       state.error = `Playback failed for "${track.title || track.path}".`;
-      // Its retry's barrier may still answer: it plays nothing over this.
+      // Its retry's barrier may still answer, and a resume of the browser's
+      // own waiting on the gate be admitted: neither plays over this (B1015).
       intent = false;
+      resumeWait = null;
       state.playing = false;
       state.loading = false;
       emit();

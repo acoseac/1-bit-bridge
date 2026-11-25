@@ -805,7 +805,8 @@ export function createOutput(env) {
       }
       storeIdentity();
       const mine = ours(entry);
-      if (mine) line = words;
+      // A switch to this browser says its own where the line is its own (ended).
+      if (mine && entry.role !== "switch-out") line = words;
       entry.refused?.(ans, words, mine);
       emit();
       return { refused: ans.error };
@@ -936,7 +937,7 @@ export function createOutput(env) {
     if (e.role === "switch-out") {
       if (rec.status === "done" && readerGen !== e.gen) {
         setOutput("browser");
-        leftAlone(PHASE.unconfirmed, state && bridgeSounds(state));
+        ended(PHASE.browser, state && bridgeSounds(state) ? WORDS.bridgeAgain : "");
       } else if (rec.status === "done") {
         const h = handoverOf(rec);
         setOutput("browser");
@@ -944,8 +945,7 @@ export function createOutput(env) {
         if (h) env.browser?.take?.(h, false);
         line = state && bridgeSounds(state) ? WORDS.bridgeAgain : (h?.playing ? WORDS.pressPlay : "");
       } else {
-        phase = PHASE.bridge;
-        line = switchOutWord(rec);
+        ended(PHASE.bridge, switchOutWord(rec));
       }
       emit();
       return;
@@ -1293,7 +1293,7 @@ export function createOutput(env) {
           setOutput("browser");
           const permit = permitFor(rec.silence, pickGen);
           if (readerGen !== gen) {
-            leftAlone(PHASE.toBrowser, !permit());
+            ended(PHASE.browser, permit() ? "" : WORDS.bridgeAgain);
             return;
           }
           const h = handoverOf(rec);
@@ -1314,20 +1314,15 @@ export function createOutput(env) {
           recoverSwitchOut(rec, gen);
           return;
         }
-        phase = PHASE.bridge;
-        line = switchOutWord(rec);
+        ended(PHASE.bridge, switchOutWord(rec));
       },
-      unknown(words, mine) { if (mine) { phase = PHASE.bridge; line = words || WORDS.pickAgain; } },
+      unknown(words, mine) { if (mine) ended(PHASE.bridge, words || WORDS.pickAgain); },
       // Refused before it ran: back on the bridge, its line said; where no
       // player is offered, this browser is the output, nothing started (R2).
       refused(ans, words, mine) {
         if (!mine) return;
-        if (NOT_OFFERED.has(ans.error)) {
-          setOutput("browser");
-          phase = PHASE.browser;
-          return;
-        }
-        phase = PHASE.bridge;
+        if (NOT_OFFERED.has(ans.error)) setOutput("browser");
+        ended(NOT_OFFERED.has(ans.error) ? PHASE.browser : PHASE.bridge, words);
       },
     });
   }
@@ -1345,7 +1340,7 @@ export function createOutput(env) {
   function recoverSwitchOut(rec, gen) {
     setOutput("browser");
     if (readerGen !== gen) {
-      leftAlone(PHASE.unconfirmed, state && bridgeSounds(state));
+      ended(PHASE.browser, state && bridgeSounds(state) ? WORDS.bridgeAgain : "");
       return;
     }
     const h = handoverOf(rec);
@@ -1359,16 +1354,19 @@ export function createOutput(env) {
     if (h?.playing) gateStart((permit) => env.browser?.start?.(permit));
   }
 
-  // leftAlone ends a switch to this browser that an action of the reader's
-  // came after (B1015), this browser already made the output: nothing is taken
-  // and nothing started, what the reader did standing. The phase becomes this
-  // browser's only where the switch's own still shows (own: its move, or the
-  // loss its read back resolves), a phase set since keeping its line, and the
-  // line then says only that the bridge sounds again (sounds).
-  function leftAlone(own, sounds) {
-    if (phase !== own) return;
-    phase = PHASE.browser;
-    line = sounds ? WORDS.bridgeAgain : "";
+  // ended settles what a switch to this browser shows as it ends, however it
+  // ends (B1015), and nothing a newer operation shows. The phase becomes `to`
+  // where the switch still holds it: its move, or an unconfirmed no other
+  // operation of the current pick holds, lost here or inherited and not yet
+  // resolved (the switch's own entry is resolved by then). The line becomes
+  // `words` where it is the switch's: its moving words, which no other
+  // operation sets, or, with the phase held, its unconfirmed line, the
+  // connection's words over it or none; a newer start's or operation's stay.
+  function ended(to, words) {
+    const held = phase === PHASE.toBrowser || (phase === PHASE.unconfirmed &&
+      ![...ops.values()].some((o) => o.lost && ours(o)) && ![...inherited.values()].some(ours));
+    if (line === WORDS.toBrowser || (held && [WORDS.unconfirmed, WORDS.reconnecting, ""].includes(line))) line = words;
+    if (held) phase = to;
   }
 
   // handoverOf keeps the entries with a track: a selected one with none gives
