@@ -82,7 +82,12 @@ export function mount() {
   });
   let scrubbing = false;
   refs.seek.addEventListener("input", () => { scrubbing = true; setProgress(refs.seek.value / 1000); });
-  refs.seek.addEventListener("change", () => {
+  // The seek lands once, where the value was let go: at its change, or at the
+  // lift of the pointer that moved it (B1021): WebKit fires no change after a
+  // touch moves the value, which left the seek unsent and the thumb held.
+  const commit = () => {
+    if (!scrubbing) return;
+    scrubbing = false;
     const o = out()?.view();
     if (bridgeChosen(o)) {
       const d = o.state?.track?.duration || 0;
@@ -91,8 +96,8 @@ export function mount() {
       const s = audio.snapshot();
       if (s.duration > 0) audio.seek((refs.seek.value / 1000) * s.duration);
     }
-    scrubbing = false;
-  });
+  };
+  for (const ev of ["change", "pointerup", "pointercancel"]) refs.seek.addEventListener(ev, commit);
   refs.isScrubbing = () => scrubbing;
 
   refs.shuffle = iconButton("Shuffle", "shuffle", () => {

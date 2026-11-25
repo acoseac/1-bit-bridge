@@ -356,7 +356,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 /* ---- A–Z jump rail ---- */
 
 .az-rail {
-  position: sticky; top: var(--space-2); float: right; z-index: 5;
+  position: sticky; top: var(--az-top); float: right; z-index: 5;
   display: flex; flex-direction: column; align-items: center;
   gap: 1px; margin-left: var(--space-3); padding: var(--space-2) 2px;
   border-radius: 999px; background: var(--bg-panel);
@@ -373,12 +373,18 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 /* Empty letters stay in place rather than being dropped: a rail that
  * changes length as you filter is harder to hit than one that doesn't. */
 .az-letter:disabled { color: var(--fg-muted); opacity: .35; cursor: default; }
-/* The rail stops above the bar as the bar renders, its letters shrinking to
- * fit rather than scrolling, so every one stays there to tap (B1021): on a
- * 568px phone it ran 554px tall and W to Z sat under the bar. */
-body.has-player-bar .az-rail {
-  max-height: calc(100vh - var(--space-2) - var(--player-bottom-inset));
-  max-height: calc(100dvh - var(--space-2) - var(--player-bottom-inset));
+/* The rail fits between where it sticks and the bar as the bar renders (or
+ * the window's foot), its letters shrinking to fit rather than scrolling, so
+ * every one stays there to tap (B1021): on a 568px phone it ran 554px tall,
+ * W to Z under the bar. Below 1024px it sticks below the shell's top bar
+ * (app.css: a 44px menu button, 10px of padding each side and a border,
+ * 65px), which covered its first letters. */
+:root { --az-top: var(--space-2); --az-foot: var(--space-2); }
+body.has-player-bar { --az-foot: var(--player-bottom-inset); }
+@media (max-width: 1023px) { :root { --az-top: calc(65px + var(--space-2)); } }
+.az-rail {
+  max-height: calc(100vh - var(--az-top) - var(--az-foot));
+  max-height: calc(100dvh - var(--az-top) - var(--az-foot));
 }
 .az-letter { min-height: 0; }
 
