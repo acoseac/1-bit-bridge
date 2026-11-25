@@ -497,14 +497,16 @@ S.TestTheBridgesReturnPlaysNothing = async () => {
 };
 
 S.TestRowsFollowTheChosenOutput = async () => {
-  const pcm = { path: "A/01.flac", codec: "FLAC", rateHz: 96000, play: { kind: "universal" }, bridge: { way: "pcm" } };
+  // A page, so this browser's decoder is asked as the queue asks it.
+  page();
+  const pcm = { path: "A/01.flac", codec: "FLAC", rateHz: 96000, play: { kind: "universal", contentType: "audio/flac" }, bridge: { way: "pcm" } };
   const native = { path: "D/01.dsf", codec: "DSF", isDsd: true, rateHz: 2822400, play: { kind: "none" }, bridge: { way: "native" } };
   const dop = { path: "D/02.dsf", codec: "DSF", isDsd: true, rateHz: 5644800, play: { kind: "none" }, bridge: { way: "dop" } };
   const conv = { path: "D/03.dsf", codec: "DSF", isDsd: true, rateHz: 11289600, play: { kind: "none" }, bridge: { way: "converted" } };
   const routed = { path: "R/01.flac", codec: "FLAC", routed: true, play: { kind: "universal" }, bridge: { way: "none", reason: "routed" } };
   const b = (t) => playFor(t, "bridge");
   const w = (t) => playFor(t, "browser");
-  check("the browser: DSD not playable, PCM plays", !w(native).playable && w(native).chip === "DSD — not playable in a browser" && w(pcm).playable, [w(native), w(pcm)]);
+  check("the browser: DSD not playable, PCM plays", !w(native).playable && w(native).chip === "DSD — not playable in a browser · the bridge's player plays it (DSD64, native)" && w(pcm).playable, [w(native), w(pcm)]);
   check("the bridge: DSD plays and reads its way", b(native).playable && b(native).chip === "DSD64, native" && b(dop).chip === "DSD128, DoP" && b(conv).chip === "DSD256, converted to PCM", [b(native), b(dop), b(conv)]);
   check("the bridge: a routed row reads why", !b(routed).playable && b(routed).chip === "On another server: the bridge's player plays this bridge's own files", b(routed));
   check("the bridge: PCM plays with no chip", b(pcm).playable && b(pcm).chip === "", b(pcm));
@@ -903,11 +905,13 @@ class El {
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   removeEventListener(t, fn) { this.listeners[t] = (this.listeners[t] || []).filter((x) => x !== fn); }
   // fire runs the element's listeners, and a click and a keydown bubble to
-  // the document's, as a browser's do.
+  // the document's, as a browser's do; a pointerdown bubbles through the
+  // element's ancestors to the document.
   fire(t, e = {}) {
     const ev = { type: t, target: this, ...e };
     for (const fn of [...(this.listeners[t] || [])]) fn(ev);
-    if (t === "click" || t === "keydown") for (const fn of [...(globalThis.document?.listeners?.[t] || [])]) fn(ev);
+    if (t === "pointerdown") for (let n = this.parentNode; n; n = n.parentNode) for (const fn of [...(n.listeners?.[t] || [])]) fn(ev);
+    if (t === "click" || t === "keydown" || t === "pointerdown") for (const fn of [...(globalThis.document?.listeners?.[t] || [])]) fn(ev);
   }
   click() { if (!this.disabled) this.fire("click"); }
   // The focus as a browser keeps it: on one element, and moved to the body
@@ -3641,14 +3645,15 @@ const albums = new Map();
 // modules at base, and returns its rows' title buttons (the view on .view):
 // the browser's row, which plays its track on the output chosen (playOn),
 // where the bar's queue panel, hidden while this browser is chosen, drives the
-// bridge. Its fetch answers the albums' details and nothing else.
+// bridge. Its fetch answers the albums' details and nothing else, each answer
+// parsed afresh, as the server's is: no two requests share a row.
 async function libraryRows(tracks, { id = "a1", base = dirURL } = {}) {
   albums.set(id, tracks);
   globalThis.fetch = async (url) => {
     const m = /^\/api\/player\/albums\/([^?]+)/.exec(String(url));
     const t = m ? albums.get(decodeURIComponent(m[1])) : null;
     const body = t ? { album: { id: m[1], title: "Album", albumArtist: "Artist", artistId: "" }, tracks: t, variants: null, release: null } : {};
-    return { ok: true, status: 200, json: async () => body };
+    return { ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(body)) };
   };
   document.title = "Player";
   const views = await import(new URL("views.js", base));
@@ -4575,6 +4580,539 @@ S.TestAResumeHeldAcrossTheStopAfterThreeUnplayableTracksStartsNothingAfterIt = a
   check("the resume admitted after the stop, then the failed row removed: no successor started, nothing more played",
     r.s.posts(ROUTES.switchOut).length === posts && r.el.plays.length === plays && r.el.paused,
     [r.s.posts(ROUTES.switchOut).length - posts, r.el.plays.slice(plays), r.el.paused]);
+};
+
+// ---- The console by touch (B1021): where a DSD row plays, the album's
+// controls, the phone's times ----
+//
+// In this browser a DSD row says it cannot play here and, by its catalog way,
+// what the bridge's player does with it; the album's count line says how many
+// rows the bridge's player plays and points to Output; Play, Shuffle and Add
+// to queue are disabled, their reason in the count line, where no row plays
+// on the output chosen, by the decision the queue plays by; and the bar keeps
+// its seek and both times (a phone shows the times, read-only beside the
+// rail, its seek hidden), and says how tall it renders.
+
+// albumParts is an album page's count line and its three action buttons.
+const albumParts = (view) => {
+  const btn = (text) => findAll(view, (n) => n.tagName === "BUTTON" && n.textContent === text)[0] || null;
+  return {
+    line: findAll(view, (n) => n.tagName === "P" && /can't play/.test(n.textContent))[0] || null,
+    play: btn("Play"), shuffle: btn("Shuffle"), add: btn("Add to queue"),
+  };
+};
+
+// rowChips is the chip of each row of an album page, "" for a row with none.
+const rowChips = (view) => findAll(view, (n) => n.classList.contains("track-why")).map((n) => n.textContent);
+
+const viaBridge = (n, way, o = {}) => dsd(n, { bridge: way === "none" ? { way, reason: "dsd_rate_not_played" } : { way }, ...o });
+const DSD_WORDS = "DSD — not playable in a browser";
+
+S.TestADSDRowSaysWhereItPlays = async () => {
+  await pageRig();
+  const native = viaBridge(1, "native");
+  const dop = viaBridge(2, "dop", { rateHz: 5644800 });
+  const conv = viaBridge(3, "converted", { rateHz: 11289600 });
+  const none = viaBridge(4, "none", { rateHz: 22579200 });
+  const bare = dsd(5);
+  const w = (t) => playFor(t, "browser");
+  const b = (t) => playFor(t, "bridge");
+  check("this browser: a native row says the bridge's player plays it, at its rate, natively",
+    !w(native).playable && w(native).why && w(native).chip === `${DSD_WORDS} · the bridge's player plays it (DSD64, native)`, w(native));
+  check("a DoP row says so as DoP", !w(dop).playable && w(dop).chip === `${DSD_WORDS} · the bridge's player plays it (DSD128, DoP)`, w(dop));
+  check("a converted row says converted to PCM, never bit-exact",
+    !w(conv).playable && w(conv).chip === `${DSD_WORDS} · the bridge's player plays it (DSD256, converted to PCM)` && !/bit-exact/i.test(w(conv).chip), w(conv));
+  check("a row the bridge's player refuses keeps the browser's words alone", !w(none).playable && w(none).chip === DSD_WORDS, w(none));
+  check("a row with no bridge field keeps them too", !w(bare).playable && w(bare).chip === DSD_WORDS, w(bare));
+  check("the bridge's player chosen: each row's chip as before",
+    b(native).playable && b(native).chip === "DSD64, native" && b(dop).chip === "DSD128, DoP" && b(conv).chip === "DSD256, converted to PCM" &&
+    !b(none).playable && b(none).chip === "A DSD rate the bridge's DAC does not take" && !b(bare).playable && b(bare).chip === "The bridge's player has not said what it plays",
+    [b(native), b(dop), b(conv), b(none), b(bare)]);
+  const all = [native, dop, conv, none, bare];
+  let rows = await libraryRows(all, { id: "w1" });
+  check("this browser's album page draws each row's words", JSON.stringify(rowChips(rows.view)) === JSON.stringify(all.map((t) => w(t).chip)), rowChips(rows.view));
+  store.set(OUTPUT_KEY, "bridge");
+  await pageRig();
+  rows = await libraryRows(all, { id: "w2" });
+  check("the bridge's player's album page draws its own", JSON.stringify(rowChips(rows.view)) === JSON.stringify(all.map((t) => b(t).chip)), rowChips(rows.view));
+};
+
+S.TestTheAlbumsCountLineSaysHowManyPlayWhere = async () => {
+  const mixed = [flac(1, { bridge: { way: "pcm" } }), viaBridge(2, "native"), viaBridge(3, "dop", { rateHz: 5644800 }), viaBridge(4, "none", { rateHz: 22579200 })];
+  const words = "3 of 4 can't play in a browser. The bridge's player plays 2 of them: choose it under Output, which says whether it can be chosen now. Download those instead.";
+  const r = await barPage({ latest: pub() });
+  r.find("Output: this browser")?.click();
+  await settle();
+  const pick = () => findAll(r.body, (n) => n.classList.contains("np-pick") && n.textContent.startsWith("The bridge's player"))[0] || null;
+  for (const [name, st] of [["the bridge's player free", null], ["held by the DSD check", pub({ revision: 2, hold: "check" })]]) {
+    if (st) {
+      r.frame(st);
+      await settle();
+    }
+    const rows = await libraryRows(mixed, { id: st ? "n-held" : "n-free" });
+    const { line } = albumParts(rows.view);
+    check(`${name}: how many, and where they play`, line?.textContent === words, line?.textContent);
+    const dl = line ? findAll(line, (n) => n.classList.contains("track-dl-note"))[0] : null;
+    check(`${name}: Download offered in the words the page shows only where it shows the link`, dl?.textContent === " Download those instead.", dl?.textContent);
+    const p = pick();
+    check(`${name}: Output says whether it can be chosen now`,
+      st ? p?.disabled === true && p.textContent.includes("The DSD check is playing on the DAC") : p?.disabled === false, [p?.disabled, p?.textContent]);
+  }
+  {
+    const rows = await libraryRows([flac(1), dsd(2), dsd(3)], { id: "n-bare" });
+    const { line } = albumParts(rows.view);
+    check("rows the bridge's player has not described: no word of it, Download where its link shows",
+      line?.textContent === "2 of 3 can't play in a browser. Download those instead.", line?.textContent);
+  }
+  store.set(OUTPUT_KEY, "bridge");
+  await pageRig();
+  const rows = await libraryRows(mixed, { id: "n-bridge" });
+  const { line } = albumParts(rows.view);
+  check("the bridge's player chosen: its count as before", line?.textContent === "1 of 4 can't play on the bridge's player.", line?.textContent);
+};
+
+S.TestAnAlbumNoRowOfWhichPlaysHereOffersNoPlayShuffleOrAdd = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const dsdOnly = [viaBridge(1, "native"), viaBridge(2, "native")];
+  let rows = await libraryRows(dsdOnly, { id: "x1" });
+  let p = albumParts(rows.view);
+  check("no row plays in this browser: Play, Shuffle and Add to queue disabled", p.play?.disabled && p.shuffle?.disabled && p.add?.disabled, [p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+  check("their reason in words the page shows, which each names", /^2 of 2 can't play in a browser\. The bridge's player plays them: choose it under Output/.test(p.line?.textContent || "") &&
+    !!p.line?.getAttribute("id") && [p.play, p.shuffle, p.add].every((x) => x?.getAttribute("aria-describedby") === p.line.getAttribute("id")),
+    [p.line?.textContent, p.line?.getAttribute("id"), p.play?.getAttribute("aria-describedby")]);
+  p.play?.click();
+  p.shuffle?.click();
+  p.add?.click();
+  await settle();
+  check("a disabled Play sends no barrier and starts nothing", r.s.posts(ROUTES.switchOut).length === 0 && r.el.plays.length === 0 && r.audio.snapshot().queue.length === 0,
+    [r.s.posts(ROUTES.switchOut).length, r.el.plays, r.audio.snapshot().queue.length]);
+  // The same album with a fresh FLAC copy of its first row, which the queue plays.
+  const copy = { kind: "none", contentType: "audio/x-dsf", variantId: "pcm-1", variantContentType: "audio/flac" };
+  rows = await libraryRows([viaBridge(1, "native", { play: copy }), viaBridge(2, "native")], { id: "x2" });
+  p = albumParts(rows.view);
+  check("a row with a copy this browser plays is playable, by the queue's own decision",
+    rows[0].getAttribute("aria-disabled") === null && rows[1].getAttribute("aria-disabled") === "true" && JSON.stringify(rowChips(rows.view)) === JSON.stringify(["", `${DSD_WORDS} · the bridge's player plays it (DSD64, native)`]),
+    [rows[0].getAttribute("aria-disabled"), rowChips(rows.view)]);
+  check("and its album's Play, Shuffle and Add to queue are live", !p.play?.disabled && !p.shuffle?.disabled && !p.add?.disabled && p.play?.getAttribute("aria-describedby") === null,
+    [p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+  p.play?.click();
+  await settle();
+  check("its Play asks the barrier and plays the copy", r.s.posts(ROUTES.switchOut).length === 1 && /variant=pcm-1/.test(r.el.plays.at(-1) || ""), [r.s.posts(ROUTES.switchOut).length, r.el.plays]);
+  rows = await libraryRows([dsd(1), flac(2)], { id: "x3" });
+  p = albumParts(rows.view);
+  check("one PCM row beside DSD: all three live in this browser", !p.play?.disabled && !p.shuffle?.disabled && !p.add?.disabled, [p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+  store.set(OUTPUT_KEY, "bridge");
+  await pageRig();
+  rows = await libraryRows(dsdOnly, { id: "x4" });
+  p = albumParts(rows.view);
+  check("the bridge's player chosen, which plays them: Play and Add to queue live, Shuffle off as before",
+    !p.play?.disabled && !p.add?.disabled && p.shuffle?.disabled && p.shuffle?.title === WORDS.noShuffle && !p.line, [p.play?.disabled, p.add?.disabled, p.shuffle?.disabled, p.shuffle?.title, p.line?.textContent]);
+  rows = await libraryRows([viaBridge(1, "none"), dsd(2)], { id: "x5" });
+  p = albumParts(rows.view);
+  check("rows the bridge's player does not play: all three disabled, the reason said",
+    p.play?.disabled && p.shuffle?.disabled && p.add?.disabled && p.line?.textContent === "2 of 2 can't play on the bridge's player." && p.add?.getAttribute("aria-describedby") === p.line.getAttribute("id"),
+    [p.play?.disabled, p.add?.disabled, p.line?.textContent]);
+};
+
+S.TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls = async () => {
+  const r = await pageRig();
+  const tracks = [viaBridge(1, "native"), viaBridge(2, "none", { rateHz: 22579200 })];
+  const rows = await libraryRows(tracks, { id: "o1" });
+  const view = rows.view;
+  const views = await import(new URL("views.js", dirURL));
+  // As boot.js wires it (wireOutput): the output picked redraws the route.
+  let redrawn = null;
+  listen(r.out, { win: window, doc: document, onOutput: () => { redrawn = views.renderAlbum(view, { id: "o1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); } });
+  let p = albumParts(view);
+  check("this browser: no row plays, the controls off, the line its words",
+    p.play?.disabled && p.add?.disabled && /^2 of 2 can't play in a browser\. The bridge's player plays 1 of them/.test(p.line?.textContent || ""), [p.play?.disabled, p.line?.textContent]);
+  await r.out.pick("bridge");
+  await settle();
+  await redrawn;
+  p = albumParts(view);
+  check("the switch to the bridge's player redraws the page", redrawn !== null && r.out.view().output === "bridge", r.out.view().output);
+  check("its rows read the bridge's player's ways", JSON.stringify(rowChips(view)) === JSON.stringify(["DSD64, native", "A DSD rate the bridge's DAC does not take"]), rowChips(view));
+  check("its line and its controls follow: Play and Add to queue live", !p.play?.disabled && !p.add?.disabled && p.shuffle?.disabled && p.line?.textContent === "1 of 2 can't play on the bridge's player.",
+    [p.play?.disabled, p.add?.disabled, p.line?.textContent]);
+};
+
+S.TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs = async () => {
+  const observed = [];
+  globalThis.ResizeObserver = class { constructor(fn) { this.fn = fn; } observe(n) { observed.push({ n, fn: this.fn }); } disconnect() {} };
+  const r = await pageRig();
+  const ticks = [];
+  globalThis.setInterval = (fn) => { ticks.push(fn); return 0; };
+  const props = {};
+  document.documentElement.style.setProperty = (k, v) => { props[k] = v; };
+  const np = await import(new URL("nowplaying.js", dirURL));
+  np.mount();
+  const bar = r.body.children.find((c) => c.attrs.id === "nowplaying");
+  const one = (cls) => findAll(bar, (n) => n.classList.contains(cls));
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  r.el.currentTime = 42;
+  await settle();
+  ticks.forEach((fn) => fn());
+  const scrub = one("np-scrub")[0];
+  const seek = one("np-seek")[0];
+  const times = one("np-time");
+  check("the bar's scrub row holds the seek and both times", !!scrub && !!seek && scrub.contains(seek) && times.length === 2 && times.every((x) => scrub.contains(x)), [!!scrub, !!seek, times.length]);
+  check("the times say where the track is and how long it is", times[0]?.textContent === "0:42" && times[1]?.textContent === "3:20", times.map((x) => x.textContent));
+  check("the seek live for a source that seeks", seek?.tagName === "INPUT" && seek.getAttribute("type") === "range" && !seek.disabled, seek?.disabled);
+  const watch = observed.find((o) => o.n === bar);
+  bar.offsetHeight = 152;
+  watch?.fn([]);
+  check("the bar's height as it renders is handed to what sits above it", !!watch && props["--np-bar-h"] === "152px", [!!watch, props]);
+};
+
+// The seek where it is shown, wider than 768px, lands as it always has: at
+// its change alone, never at an input or a pointer's lift, in either output.
+S.TestTheSeekLandsOnlyAtItsChange = async () => {
+  const r = await barPage();
+  r.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 1, of: 1 }), playing({ revision: 4 })));
+  r.s.on("POST", ROUTES.transport, async (e) => answer(recOf(e), playing({ revision: 4 })));
+  const seek = r.byClass("np-seek");
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  await settle();
+  let writes = 0;
+  let at = r.el.currentTime;
+  Object.defineProperty(r.el, "currentTime", { get: () => at, set: (v) => { writes += 1; at = v; }, configurable: true });
+  const down = () => seek.fire("pointerdown", { pointerId: 1, isPrimary: true, pointerType: "mouse" });
+  const up = () => seek.fire("pointerup", { pointerId: 1, isPrimary: true, pointerType: "mouse" });
+  down();
+  seek.value = "500";
+  seek.fire("input");
+  check("this browser: an input previews and seeks nothing", writes === 0, writes);
+  up();
+  check("this browser: the pointer's lift seeks nothing", writes === 0, writes);
+  seek.fire("change");
+  check("this browser: the change lands one seek, where the value was let go", writes === 1 && at === 100, [writes, at]);
+  await r.out.pick("bridge");
+  await settle();
+  const seeks = () => r.s.posts(ROUTES.transport).filter((e) => e.body?.command === "seek").map((e) => e.body.seconds);
+  down();
+  seek.value = "500";
+  seek.fire("input");
+  up();
+  await settle();
+  check("the bridge's player: an input and the pointer's lift send no seek", r.out.view().output === "bridge" && seeks().length === 0, [r.out.view().output, seeks()]);
+  seek.fire("change");
+  await settle();
+  check("the bridge's player: the change sends one seek, where the value was let go", JSON.stringify(seeks()) === "[150]", seeks());
+};
+
+// A preview no change has ended (a drag in a window wider than 768px that a
+// resize to a phone's width cut short, the seek hidden from under it) holds
+// nothing of the 2px rail, a phone's progress there: at each tick the rail
+// is where the track is, in either output.
+S.TestTheRailFollowsTheTrackPastAPreview = async () => {
+  const r = await pageRig();
+  r.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 1, of: 1 }), playing({ revision: 4 })));
+  const ticks = [];
+  globalThis.setInterval = (fn) => { ticks.push(fn); return 0; };
+  const np = await import(new URL("nowplaying.js", dirURL));
+  np.mount();
+  const bar = r.body.children.find((c) => c.attrs.id === "nowplaying");
+  const seek = findAll(bar, (n) => n.classList.contains("np-seek"))[0];
+  const rail = findAll(bar, (n) => n.classList.contains("np-rail"))[0];
+  const props = {};
+  rail.style = { setProperty: (k, v) => { props[k] = v; }, removeProperty: (k) => { delete props[k]; } };
+  r.audio.playQueue([flac(1)], 0);
+  r.el.metadata(200);
+  await settle();
+  seek.fire("pointerdown", { pointerId: 1, isPrimary: true, pointerType: "mouse" });
+  seek.value = "900";
+  seek.fire("input");
+  r.el.currentTime = 50;
+  ticks[0]?.();
+  check("this browser: at the next tick the rail is where the track is", ticks.length === 1 && props["--np-progress"] === "25%", [ticks.length, props["--np-progress"]]);
+  r.el.currentTime = 100;
+  ticks[0]?.();
+  check("this browser: and it follows the track as it plays", props["--np-progress"] === "50%", props["--np-progress"]);
+  await r.out.pick("bridge");
+  await settle();
+  r.c.advance(20000);
+  ticks[0]?.();
+  const p = r.out.position();
+  check("the bridge's player: at the next tick the rail is where its track is",
+    r.out.view().output === "bridge" && p > 0 && props["--np-progress"] === `${(p / 300) * 100}%`,
+    [r.out.view().output, p, props["--np-progress"]]);
+};
+
+S.TestAnAlbumAsksThisBrowserWhatTheQueuePlays = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  // A row the server calls universal whose type this browser's decoder does
+  // not take, and no copy it does: the queue plays nothing of it.
+  const ogg = flac(1, { path: "Album/01.ogg", codec: "Vorbis", play: { kind: "universal", contentType: "audio/ogg" } });
+  let rows = await libraryRows([ogg], { id: "q1" });
+  let p = albumParts(rows.view);
+  check("a universal row this browser cannot decode: unplayable, its album's Play, Shuffle and Add to queue disabled",
+    rows[0].getAttribute("aria-disabled") === "true" && p.play?.disabled && p.shuffle?.disabled && p.add?.disabled,
+    [rows[0].getAttribute("aria-disabled"), p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+  check("its reason said in the count line and the row's chip",
+    /^1 of 1 can't play in a browser\./.test(p.line?.textContent || "") && rowChips(rows.view)[0] === "May not play in this browser",
+    [p.line?.textContent, rowChips(rows.view)]);
+  p.play?.click();
+  await settle();
+  check("its Play sends no barrier and plays nothing", r.s.posts(ROUTES.switchOut).length === 0 && r.el.plays.length === 0,
+    [r.s.posts(ROUTES.switchOut).length, r.el.plays]);
+  rows = await libraryRows([flac(2)], { id: "q2" });
+  p = albumParts(rows.view);
+  check("a row this browser decodes: playable, the album's controls live",
+    rows[0].getAttribute("aria-disabled") === null && !p.play?.disabled && !p.shuffle?.disabled && !p.add?.disabled && !p.line,
+    [rows[0].getAttribute("aria-disabled"), p.play?.disabled, p.line?.textContent]);
+  // A row with no play field: the queue plays nothing of it, and its reason
+  // is an element the page renders.
+  rows = await libraryRows([{ path: "Album/03.flac", title: "T3", codec: "FLAC" }, flac(4)], { id: "q3" });
+  const named = rows[0].getAttribute("aria-describedby");
+  const reason = findAll(rows.view, (n) => n.getAttribute?.("id") === named)[0];
+  check("a row with no play field: unplayable, its reason rendered where it points",
+    rows[0].getAttribute("aria-disabled") === "true" && !!named && reason?.textContent === "Not playable in a browser",
+    [rows[0].getAttribute("aria-disabled"), named, reason?.textContent]);
+};
+
+S.TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const r = await pageRig({ latest: playing({ revision: 3 }) });
+  const rows = await libraryRows([flac(1)], { id: "f1" });
+  const view = rows.view;
+  const views = await import(new URL("views.js", dirURL));
+  // As boot.js wires it (wireOutput): the output's change redraws the route.
+  let redraws = 0;
+  let redrawn = null;
+  listen(r.out, { win: window, doc: document, onOutput: () => { redraws += 1; redrawn = views.renderAlbum(view, { id: "f1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); } });
+  let p = albumParts(view);
+  check("the bridge's player chosen: a row it says nothing of plays nowhere, the album's Play off",
+    r.out.view().output === "bridge" && !r.out.view().notOffered && p.play?.disabled === true, [r.out.view().output, p.play?.disabled]);
+  // GET now answers that no player is wired: this browser is the output now,
+  // the pick of the bridge kept.
+  r.s.on("GET", ROUTES.now, async () => ({ status: 409, body: { error: "player_not_wired", message: "no player" } }));
+  await r.out.sampleNow();
+  await settle();
+  await redrawn;
+  p = albumParts(view);
+  const row = findAll(view, (n) => n.classList.contains("track-title"))[0];
+  check("no player offered: the pick kept, this browser the output", r.out.view().notOffered && r.out.view().output === "bridge", r.out.view());
+  check("the album redraws once for this browser: its FLAC row live, Play, Shuffle and Add to queue enabled",
+    redraws === 1 && row?.getAttribute("aria-disabled") === null && p.play?.disabled === false && p.shuffle?.disabled === false && p.add?.disabled === false,
+    [redraws, row?.getAttribute("aria-disabled"), p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+};
+
+S.TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const t = longTimers();
+  let rows = await libraryRows([flac(1)], { id: "d1" });
+  rows[0].click();
+  await settle();
+  check("a start from the album: one barrier, one play", r.s.posts(ROUTES.switchOut).length === 1 && r.el.plays.length === 1, [r.s.posts(ROUTES.switchOut).length, r.el.plays]);
+  // The album shown again after the queue started: its rows parsed afresh,
+  // none of them an object the queue holds.
+  rows = await libraryRows([flac(1)], { id: "d1" });
+  const view = rows.view;
+  // The byte probe of the source that fails: the bridge served it.
+  const read = globalThis.fetch;
+  globalThis.fetch = (url, init) => /^\/api\/player\/albums\//.test(String(url)) ? read(url, init) : Promise.resolve({ ok: true, status: 206, json: async () => ({}) });
+  const views = await import(new URL("views.js", dirURL));
+  let redrawn = null;
+  let redraws = 0;
+  // As boot.js wires it: a view's rerender is the route's (cut at three, so a
+  // storm of them ends the case).
+  window.addEventListener("player:rerender", () => {
+    redraws += 1;
+    if (redraws <= 3) redrawn = views.renderAlbum(view, { id: "d1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
+  });
+  r.el.fail(4);
+  await settle();
+  await redrawn;
+  await settle();
+  const p = albumParts(view);
+  const row = findAll(view, (n) => n.classList.contains("track-title"))[0];
+  check("the decode failure confirmed: the album redraws once, the row reads why, the album's Play, Shuffle and Add to queue disabled, the count line saying so",
+    redraws === 1 && row?.getAttribute("aria-disabled") === "true" && rowChips(view)[0] === "Not playable in a browser" && p.play?.disabled && p.shuffle?.disabled && p.add?.disabled &&
+    /^1 of 1 can't play in a browser\./.test(p.line?.textContent || ""), [redraws, row?.getAttribute("aria-disabled"), rowChips(view), p.play?.disabled, p.line?.textContent]);
+  const barriers = r.s.posts(ROUTES.switchOut).length;
+  const plays = r.el.plays.length;
+  p.play?.click();
+  await settle();
+  check("its Play, with the skip held, sends no barrier and plays nothing", t.count(1200) === 1 && r.s.posts(ROUTES.switchOut).length === barriers && r.el.plays.length === plays,
+    [t.count(1200), r.s.posts(ROUTES.switchOut).length - barriers, r.el.plays.length - plays]);
+  t.fire(1200);
+  await settle();
+  check("the skip, let go, goes on as it did: through the gate, to the queue's end, nothing played",
+    r.s.posts(ROUTES.switchOut).length === barriers + 1 && r.el.plays.length === plays && !r.audio.snapshot().playing,
+    [r.s.posts(ROUTES.switchOut).length - barriers, r.el.plays.length - plays, r.audio.snapshot().playing]);
+};
+
+S.TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn = async () => {
+  page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const rail = ui.alphabetRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
+  const letter = (k) => rail.children.find((n) => n.textContent === k);
+  const empty = rail.children.filter((n) => n.hasAttribute("disabled"));
+  // A touch as WebKit delivers it: its pointerdown on the letter under the
+  // finger, which the rail hears, then the click: a live letter's own, and an
+  // empty letter's handed by touch adjustment to the nearest live one.
+  const tap = (under, clicked) => {
+    rail.fire("pointerdown", { target: under, pointerType: "touch", pointerId: 7, isPrimary: true });
+    clicked?.fire("click", { detail: 1 });
+  };
+  for (const k of ["A", "M", "Z"]) tap(letter(k), letter(k));
+  check("a tap on each live letter asks for its bucket once", JSON.stringify(jumps) === '["A","M","Z"]', jumps);
+  const near = (n) => { const i = rail.children.indexOf(n); return letter(i < 7 ? "A" : (i < 21 ? "M" : "Z")); };
+  for (const n of empty) tap(n, near(n));
+  check("a tap on each of the 24 empty letters asks for nothing, whatever live letter its click is handed",
+    empty.length === 24 && jumps.length === 3, [empty.length, jumps]);
+  // No suppression left over: a key on a focused live letter, right after an
+  // empty tap whose click went elsewhere and after one that made no click.
+  tap(letter("B"), letter("A"));
+  letter("A").fire("click", { detail: 0 });
+  tap(letter("N"), null);
+  letter("M").fire("click", { detail: 0 });
+  rail.fire("pointerdown", { target: letter("Z"), pointerType: "mouse", pointerId: 1, isPrimary: true });
+  letter("Z").fire("click", { detail: 1 });
+  check("a key's click right after an empty tap, and a mouse's, each ask once", JSON.stringify(jumps) === '["A","M","Z","A","M","Z"]', jumps);
+  // A touch that began beside the rail, its click handed to a live letter
+  // after an empty tap's was refused: the letter's, as it was.
+  tap(letter("B"), letter("A"));
+  letter("A").fire("click", { detail: 1 });
+  check("a click no touch on the rail began, after an empty tap's, asks once", JSON.stringify(jumps.slice(6)) === '["A"]', jumps.slice(6));
+};
+
+S.TestADecodeFailureClosesTheAlbumThatStartedIt = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const t = longTimers();
+  const rows = await libraryRows([flac(1)], { id: "s1" });
+  const view = rows.view;
+  const views = await import(new URL("views.js", dirURL));
+  let redraws = 0;
+  let redrawn = null;
+  // As boot.js wires it (cut at three, so a storm of them ends the case).
+  window.addEventListener("player:rerender", () => {
+    redraws += 1;
+    if (redraws <= 3) redrawn = views.renderAlbum(view, { id: "s1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
+  });
+  // The byte probe of the source that fails: the bridge served it.
+  const read = globalThis.fetch;
+  globalThis.fetch = (url, init) => /^\/api\/player\/albums\//.test(String(url)) ? read(url, init) : Promise.resolve({ ok: true, status: 206, json: async () => ({}) });
+  albumParts(view).play?.click();
+  await settle();
+  check("the album's Play: one barrier, one play", r.s.posts(ROUTES.switchOut).length === 1 && r.el.plays.length === 1, [r.s.posts(ROUTES.switchOut).length, r.el.plays]);
+  // A network error's retry first, then the decode failure the probe confirms.
+  r.el.fail(2);
+  await settle();
+  r.el.metadata(200);
+  await settle();
+  r.el.fail(4);
+  await settle();
+  await redrawn;
+  await settle();
+  let p = albumParts(view);
+  const row = findAll(view, (n) => n.classList.contains("track-title"))[0];
+  check("the failure confirmed after a retry: the page that started it redraws once, the row reads why, the count line says so, Play, Shuffle and Add to queue disabled",
+    redraws === 1 && row?.getAttribute("aria-disabled") === "true" && rowChips(view)[0] === "Not playable in a browser" &&
+    /^1 of 1 can't play in a browser\./.test(p.line?.textContent || "") && p.play?.disabled === true && p.shuffle?.disabled === true && p.add?.disabled === true,
+    [redraws, row?.getAttribute("aria-disabled"), rowChips(view), p.line?.textContent, p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+  const barriers = r.s.posts(ROUTES.switchOut).length;
+  const plays = r.el.plays.length;
+  p.play?.click();
+  await settle();
+  check("its Play, with the skip held, sends no barrier and plays nothing", t.count(1200) === 1 && r.s.posts(ROUTES.switchOut).length === barriers && r.el.plays.length === plays,
+    [t.count(1200), r.s.posts(ROUTES.switchOut).length - barriers, r.el.plays.length - plays]);
+  r.el.fire("timeupdate");
+  r.audio.setShuffle(false);
+  await settle();
+  check("no redraw for the snapshots after it", redraws === 1, redraws);
+  window.dispatchEvent(new Event("pagehide"));
+  const stored = JSON.parse(store.get("bridge-player-queue") || "null");
+  check("the stored queue keeps the row's play as the catalog sent it, so a reload plays it again",
+    stored?.queue?.[0]?.play?.kind === "universal", stored?.queue?.[0]?.play);
+  t.fire(1200);
+  await settle();
+  p = albumParts(view);
+  check("the skip, let go, goes on as it did: through the gate, to the queue's end, nothing played",
+    r.s.posts(ROUTES.switchOut).length === barriers + 1 && r.el.plays.length === plays && !r.audio.snapshot().playing && redraws === 1,
+    [r.s.posts(ROUTES.switchOut).length - barriers, r.el.plays.length - plays, r.audio.snapshot().playing, redraws]);
+  check("on this page the source stays refused: the row reads why and the album's Play is disabled",
+    rowChips(view)[0] === "Not playable in a browser" && p.play?.disabled === true, [rowChips(view), p.play?.disabled]);
+  // A reload over the queue the page stored: the failures are the page's
+  // own, so the new page asks for the same source again.
+  const failedSrc = r.el.plays[0];
+  const st = pub({ revision: 5, silent: true });
+  const d = await reloaded((s) => s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), st)), st);
+  const restored = d.audio.snapshot();
+  check("the reload restores the row, paused, the same source on its element",
+    restored.track?.path === "Album/01.flac" && !restored.playing && d.el.src === failedSrc && d.el.plays.length === 0,
+    [restored.track?.path, restored.playing, d.el.src, failedSrc, d.el.plays]);
+  d.audio.toggle();
+  await settle();
+  check("its Play asks the barrier and plays that source again",
+    d.s.posts(ROUTES.switchOut).length === 1 && d.el.plays.length === 1 && d.el.plays[0] === failedSrc,
+    [d.s.posts(ROUTES.switchOut).length, d.el.plays, failedSrc]);
+};
+
+S.TestAFailedVariantIsThatSourceAlone = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  longTimers();
+  const viaVariant = (v) => dsd(1, { play: { kind: "none", contentType: "audio/x-dsf", variantId: v, variantContentType: "audio/flac" } });
+  let rows = await libraryRows([viaVariant("A")], { id: "v1" });
+  const view = rows.view;
+  const views = await import(new URL("views.js", dirURL));
+  let redraws = 0;
+  let redrawn = null;
+  window.addEventListener("player:rerender", () => {
+    redraws += 1;
+    if (redraws <= 3) redrawn = views.renderAlbum(view, { id: "v1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
+  });
+  const read = globalThis.fetch;
+  globalThis.fetch = (url, init) => /^\/api\/player\/albums\//.test(String(url)) ? read(url, init) : Promise.resolve({ ok: true, status: 206, json: async () => ({}) });
+  albumParts(view).play?.click();
+  await settle();
+  check("the DSD row plays its browser variant A", r.el.plays.length === 1 && /variant=A$/.test(r.el.src), [r.el.plays.length, r.el.src]);
+  r.el.fail(4);
+  await settle();
+  await redrawn;
+  await settle();
+  let p = albumParts(view);
+  check("variant A confirmed undecodable: the album's Play disabled", redraws === 1 && p.play?.disabled === true, [redraws, p.play?.disabled]);
+  // A fresh answer for the same path whose variant is now B, a source of its
+  // own; the queue still holds the row whose A failed.
+  rows = await libraryRows([viaVariant("B")], { id: "v1" });
+  p = albumParts(rows.view);
+  check("a fresh answer naming variant B: the album's Play enabled", p.play?.disabled === false && rows[0].getAttribute("aria-disabled") === null,
+    [p.play?.disabled, rows[0].getAttribute("aria-disabled")]);
+  p.play?.click();
+  await settle();
+  check("pressing it loads B", r.el.plays.length === 2 && /variant=B$/.test(r.el.src), [r.el.plays.length, r.el.src]);
+};
+
+S.TestTheRailTakesEveryPointerDownForItsClick = async () => {
+  const pg = page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const rail = ui.alphabetRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
+  pg.body.appendChild(rail);
+  const letter = (k) => rail.children.find((n) => n.textContent === k);
+  const outside = document.createElement("div");
+  pg.body.appendChild(outside);
+  // An empty tap that makes no click; a touch that goes down outside the
+  // rail; the click WebKit hands that touch's tap, on a live letter.
+  letter("B").fire("pointerdown", { pointerType: "touch", pointerId: 7, isPrimary: true });
+  outside.fire("pointerdown", { pointerType: "touch", pointerId: 8, isPrimary: true });
+  letter("A").fire("click", { detail: 1 });
+  check("an empty tap that made no click, then a click a touch outside the rail is handed: one jump", JSON.stringify(jumps) === '["A"]', jumps);
+  // A touch held on an empty letter, a key's click on a live one, then the
+  // touch's click handed to another live letter.
+  letter("N").fire("pointerdown", { pointerType: "touch", pointerId: 9, isPrimary: true });
+  letter("A").fire("click", { detail: 0 });
+  letter("M").fire("click", { detail: 1 });
+  check("a key's click beside a held touch jumps, and that touch's handed click does not", JSON.stringify(jumps) === '["A","A"]', jumps);
 };
 
 const name = scenarioName;

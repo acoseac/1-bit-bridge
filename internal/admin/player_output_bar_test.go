@@ -208,8 +208,114 @@ func TestTheBridgesReturnPlaysNothing(t *testing.T) { barScenario(t, 2) }
 
 // TestRowsFollowTheChosenOutput pins §7.6: one decision gives a row its
 // playability and its chip for the output chosen, a DSD row playing on the
-// bridge's player and reading its way, a routed one reading why.
+// bridge's player and reading its way, a routed one reading why, and in this
+// browser a DSD row the bridge's player plays saying so (B1021).
 func TestRowsFollowTheChosenOutput(t *testing.T) { barScenario(t, 4) }
+
+// TestADSDRowSaysWhereItPlays pins B1021's item 4: in this browser a DSD row
+// says it cannot play here and, by its catalog way, that the bridge's player
+// plays it (its rate natively, as DoP, or converted to PCM, never called
+// bit-exact); a row the bridge's player refuses, or one with no bridge field,
+// keeps the browser's words alone; the bridge's player's chips are as they
+// were; and the album page draws each, in either output.
+func TestADSDRowSaysWhereItPlays(t *testing.T) { barScenario(t, 10) }
+
+// TestTheAlbumsCountLineSaysHowManyPlayWhere pins the album's count line
+// (B1021): in this browser it says how many rows cannot play here and how
+// many of those the bridge's player plays, pointing to Output, whose pick
+// says whether it can be chosen now (free and held alike), and offers
+// Download in words the page shows only where it shows the link; with the
+// bridge's player chosen it is as it was.
+func TestTheAlbumsCountLineSaysHowManyPlayWhere(t *testing.T) { barScenario(t, 12) }
+
+// TestAnAlbumNoRowOfWhichPlaysHereOffersNoPlayShuffleOrAdd pins B1021's item
+// 6: where no row of an album plays on the output chosen, its Play, Shuffle
+// and Add to queue are disabled, each naming the count line that says why,
+// and a disabled Play sends no barrier; a row the queue plays (a fresh FLAC
+// copy of a DSD row included) makes them live, Play then asking the barrier
+// as every start does; and with the bridge's player chosen Shuffle stays off.
+func TestAnAlbumNoRowOfWhichPlaysHereOffersNoPlayShuffleOrAdd(t *testing.T) {
+	barScenario(t, 14)
+}
+
+// TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls pins that a switch of
+// the output, which redraws the route as boot.js wires it, gives an open
+// album the rows, the count line and the controls of the output picked.
+func TestAnOutputSwitchRedrawsAnAlbumsRowsLineAndControls(t *testing.T) { barScenario(t, 5) }
+
+// TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs pins that the bar
+// keeps the seek and both times in its scrub row, whose times a phone now
+// shows, read-only beside the rail, its seek hidden there (B1021's item 1),
+// and hands the height it renders at to what sits above it (main's bottom
+// padding, the output menu, the queue panel, the A–Z rail).
+func TestTheBarCarriesItsSeekAndBothTimesAndSaysHowTallItIs(t *testing.T) { barScenario(t, 4) }
+
+// TestTheSeekLandsOnlyAtItsChange pins the seek where it is shown, wider than
+// 768px, as it always was: in this browser an input and the pointer's lift
+// seek nothing and the change lands one seek where the value was let go, and
+// with the bridge's player chosen the same, its seek a command (B1021 keeps
+// that seek as it was and hides it on a phone, since WebKit fires no change
+// after a touch).
+func TestTheSeekLandsOnlyAtItsChange(t *testing.T) { barScenario(t, 5) }
+
+// TestTheRailFollowsTheTrackPastAPreview pins the 2px rail, a phone's
+// progress where the seek is hidden, to the track's position at every tick
+// in either output, whatever preview the seek still holds: an input with no
+// change after it (a drag in a wider window that a resize to a phone's width
+// cut short) keeps the seek's thumb, and the rail painted with the thumb
+// stood still with it.
+func TestTheRailFollowsTheTrackPastAPreview(t *testing.T) { barScenario(t, 3) }
+
+// TestAnAlbumAsksThisBrowserWhatTheQueuePlays pins that a row's playability in
+// this browser is the queue's own (B1021): a universal row whose type this
+// browser's decoder does not take, with no copy it does, is unplayable, its
+// album's Play, Shuffle and Add to queue disabled with the count line and the
+// row's chip saying why, and its Play sends no barrier; a row it decodes keeps
+// them live; and a row with no play field is unplayable with its reason an
+// element the page renders where its title points.
+func TestAnAlbumAsksThisBrowserWhatTheQueuePlays(t *testing.T) { barScenario(t, 8) }
+
+// TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser pins that the route
+// redraws on the effective output: GET now answering that no player is wired,
+// with the bridge picked, makes this browser the output, and the album
+// redraws once, its FLAC row and its Play, Shuffle and Add to queue live.
+func TestAnAlbumRedrawsWhenTheOutputFallsBackToThisBrowser(t *testing.T) { barScenario(t, 4) }
+
+// TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay pins that the
+// open album follows a confirmed decode failure, by the row's path, with
+// rows parsed afresh per request: the row reads why, its album's controls are
+// disabled and their Play sends no barrier while the skip is held; the skip,
+// let go, goes on as it did.
+func TestAConfirmedDecodeFailureDisablesTheAlbumsHopelessPlay(t *testing.T) { barScenario(t, 6) }
+
+// TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn pins the rail by touch: a
+// tap on a live letter asks for its bucket once, one on an empty letter asks
+// for nothing whatever live letter its click is handed, and a key's or a
+// mouse's click right after still asks once, as does a click no touch on
+// the rail began.
+func TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn(t *testing.T) { barScenario(t, 4) }
+
+// TestADecodeFailureClosesTheAlbumThatStartedIt pins a confirmed decode
+// failure, after a retry, on the album page that started the play: it
+// redraws once, its row and count line say why and its controls are
+// disabled, its Play sends no barrier while the skip is held, no snapshot
+// after redraws it again, the stored queue keeps the catalog's play, and the
+// skip goes on as it did, the source refused on that page to the end; and a
+// reload over the stored queue, a new page, restores the row with the same
+// source, which its Play asks the barrier for and plays again.
+func TestADecodeFailureClosesTheAlbumThatStartedIt(t *testing.T) { barScenario(t, 10) }
+
+// TestAFailedVariantIsThatSourceAlone pins the failure's key, a row's path and
+// its variant: a DSD row whose browser variant A failed has its album's Play
+// disabled, and a fresh answer naming variant B enables it and plays B.
+func TestAFailedVariantIsThatSourceAlone(t *testing.T) { barScenario(t, 6) }
+
+// TestTheRailTakesEveryPointerDownForItsClick pins the rail's record of where
+// a pointer went down, made at every pointerdown in the document: a click a
+// touch outside the rail is handed jumps after an empty tap that made no
+// click, and a key's click beside a held touch jumps while that touch's
+// handed click does not.
+func TestTheRailTakesEveryPointerDownForItsClick(t *testing.T) { barScenario(t, 2) }
 
 // TestADSDOnlyAlbumPlaysOnTheBridgeFromAnEmptyBar pins A2 to A4: from empty
 // session storage the bridge's player is picked with nothing sent, and a
