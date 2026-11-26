@@ -77,6 +77,8 @@ stubs under `docs/`, `docs/release-process.md` and the installer comment in
 the five pages answer 200, `/install.sh` redirects to the latest release's
 asset, and the features page holds the `public-mode` anchor `README.md` links
 to.
+Each stub also carries a `<noscript>` meta refresh to the same page, so a
+browser without JavaScript or a crawler that runs none is still sent on.
 
 Kept as they are: the infrastructure hosts under 1-bit.app (the demo bridge,
 the cloud tenants, Atlas); dated history (the engineering log,
