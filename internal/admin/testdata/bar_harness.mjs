@@ -6648,8 +6648,9 @@ S.TestAFingerScrubsTheRail = async () => {
   page();
   const ui = await import(new URL("ui.js", dirURL));
   const jumps = [];
+  let moved = null;
   const rail = ui.indexRail([{ key: "A", offset: 0, count: 5 }, { key: "C", offset: 5, count: 2 }, { key: "D", offset: 7, count: 4 },
-    { key: "M", offset: 11, count: 3 }, { key: "Z", offset: 14, count: 1 }], (b) => jumps.push(b.key));
+    { key: "M", offset: 11, count: 3 }, { key: "Z", offset: 14, count: 1 }], (b) => { jumps.push(b.key); moved?.(); });
   const m = railModel(rail);
   const letter = (k) => m.entries.find((n) => n.textContent === k);
   const callout = rail.querySelector(".az-callout");
@@ -6695,6 +6696,15 @@ S.TestAFingerScrubsTheRail = async () => {
   check("a tall callout stays inside the rail's height at its first and last letters", atFirst === "20px" && callout.style.top === `${rail.rect.height - 20}px`,
     [atFirst, callout.style.top]);
   finger("pointerup", "Z", { pointerId: 12 });
+  // Placed before the jump, which empties the list and can move the rail (a
+  // short window's grid stood 87px lower while its list was empty): the
+  // callout's height is the finger's against the rail where it stood.
+  callout.offsetHeight = 0;
+  const before = rail.rect.top;
+  moved = () => { rail.rect = { ...rail.rect, top: rail.rect.top + 87, bottom: rail.rect.bottom + 87 }; };
+  finger("pointerdown", "M", { pointerId: 13 });
+  check("the callout is placed against the rail where it stood before the jump moved it",
+    callout.style.top === `${letter("M").rect.top + 5 - before}px`, [callout.style.top, letter("M").rect.top + 5 - before]);
 };
 
 S.TestAScrubIsItsOwnersAlone = async () => {
