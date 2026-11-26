@@ -192,8 +192,8 @@ func TestWhatSitsAboveTheBarClearsItAsItRenders(t *testing.T) {
 		!anyRule(all, ".az-letter", "min-height", "0") || !anyRule(all, ".az-letter", "overflow", "hidden") {
 		t.Error("the A–Z rail has no height that stops above the bar, or its letters cannot shrink to fit it each in its own box")
 	}
-	if !anyRule(playerCSSBlocks(t, "(max-width: 1023px)"), ":root", "--az-top", "calc(65px + var(--space-2))") {
-		t.Error("below 1024px the A–Z rail sticks under the shell's top bar, which covers its first letters")
+	if !anyRule(playerCSSBlocks(t, "(max-width: 1023px)"), ":root", "--az-top", "calc(65px + var(--list-head-pin) + var(--space-2))") {
+		t.Error("below 1024px the A–Z rail sticks under the shell's top bar or the list's head, which cover its first letters")
 	}
 	np := stripJSComments(readFile(t, "static/player/nowplaying.js"))
 	mount := extractJSFunction(t, np, "mount")
@@ -232,6 +232,48 @@ func TestTheDrawerAndThePanelsStayClearOfTheBarAndInTheWindow(t *testing.T) {
 	}
 	if !panels || !queue {
 		t.Error("the output menu and the queue panel are not held within the window above the bar, scrolling inside")
+	}
+}
+
+// TestAListsHeadPinsBelowWhatIsPinnedAboveIt pins B1021 PR 3a's head at the
+// source: where the window is taller than 500px (the default, which one
+// override for a short window leaves) the head sticks under the shell's top
+// bar (65px below 1024px, nothing from 1024px) at a fixed height token, the
+// A–Z rail's top below it at every width, the rows' scroll margin all that is
+// pinned over them, and the field a finger's 44px tall with text iOS does not
+// zoom into wherever any pointer is coarse.
+func TestAListsHeadPinsBelowWhatIsPinnedAboveIt(t *testing.T) {
+	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
+	short := playerCSSBlocks(t, "(max-height: 500px)")
+	rest := css
+	for _, b := range cssMediaBlocks(css, "") {
+		rest = strings.Replace(rest, b, "", 1)
+	}
+	all := touchRulesOf(rest)
+	if !anyRule(all, ".list-head", "position", "sticky") || !anyRule(all, ".list-head", "top", "var(--list-head-top)") ||
+		!anyRule(all, ":root", "--list-head-pin", "var(--list-head-h)") || !anyRule(all, ".list-head", "height", "var(--list-head-h)") {
+		t.Error("the list's head does not stick at its fixed height under what is pinned above it")
+	}
+	if !anyRule(short, ".list-head", "position", "static") || !anyRule(short, ":root", "--list-head-pin", "0px") {
+		t.Error("in a window 500px tall or less the head is pinned: a short window keeps its rail and pins no head")
+	}
+	if !anyRule(playerCSSBlocks(t, "(max-width: 1023px)"), ":root", "--list-head-top", "65px") {
+		t.Error("below 1024px the head does not stick under the shell's 65px top bar")
+	}
+	if !anyRule(all, ":root", "--az-top", "calc(var(--list-head-pin) + var(--space-2))") {
+		t.Error("from 1024px the A–Z rail does not stick below the list's pinned head")
+	}
+	for _, sel := range []string{".list-body > .grid", ".list-body > .rows"} {
+		if !anyRule(all, sel, "scroll-margin-top", "calc(var(--list-head-top) + var(--list-head-pin))") {
+			t.Errorf("%s carries no scroll margin of what is pinned over it: a jump lands its first row under the head", sel)
+		}
+	}
+	if !anyRule(all, ".list-body > .rows", "content-visibility", "visible") {
+		t.Error("a list's rows are content-visibility: auto, which WebKit gives no heights as they go in: a restored place clamps short")
+	}
+	coarse := playerCSSBlocks(t, "(any-pointer: coarse)")
+	if !anyRule(coarse, ".list-filter", "min-height", "44px") || !anyRule(coarse, ".list-filter", "font-size", "16px") {
+		t.Error("where any pointer is coarse the list's filter is not 44px tall with 16px text")
 	}
 }
 

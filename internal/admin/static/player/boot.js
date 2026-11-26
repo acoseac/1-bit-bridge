@@ -188,6 +188,10 @@ function renderSections() {
 function wireLinks() {
   document.addEventListener("click", (e) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    // Any link's click, a boosted operator page's included (app.js pushes
+    // its entry after a fetch, never through pushRoute): the page's place,
+    // while its DOM and its entry are still current.
+    if (e.target.closest("a[href]")) savePlace();
     const a = e.target.closest("a[data-route]");
     if (!a) return;
     // A download or an explicit target is not a navigation, so it is not
@@ -204,6 +208,14 @@ function wireLinks() {
     if (url.origin !== location.origin) return;
     e.preventDefault();
     if (url.href === location.href) return;
+    // A crumb whose page is an ancestor in this tab's history goes back to
+    // it, its place restored there (B1021); popstate routes it.
+    const back = a.closest("#player-crumb") ? crumbBack(url.pathname + url.search) : 0;
+    if (back) {
+      savePlace();
+      history.go(back);
+      return;
+    }
     pushRoute(url.pathname + url.search);
     route();
   });
@@ -351,7 +363,9 @@ const maxTrail = 4;
 function currentCrumbEntry() {
   const h = document.getElementById("player-title");
   const label = (h?.textContent || "").trim();
-  return label ? { label, href: location.pathname + location.search } : null;
+  // Its entry's depth and key, which a crumb back to it reads (B1021).
+  const s = history.state || {};
+  return label ? { label, href: location.pathname + location.search, depth: s.depth, key: s.key } : null;
 }
 
 /**
@@ -369,7 +383,10 @@ function readTrail() {
   if (!Array.isArray(raw)) return null;
   const out = raw.filter((e) =>
     e && typeof e.label === "string" && e.label !== "" &&
-    typeof e.href === "string" && e.href.startsWith("/") && !e.href.startsWith("//"));
+    typeof e.href === "string" && e.href.startsWith("/") && !e.href.startsWith("//"))
+    // An entry's depth and key are kept only as an integer and a string: one
+    // recorded before them is a crumb that pushes.
+    .map(({ label, href, depth, key }) => (Number.isInteger(depth) && typeof key === "string" ? { label, href, depth, key } : { label, href }));
   return out.length ? out : null;
 }
 
@@ -407,9 +424,66 @@ function trailFor(targetHref) {
   return next.slice(-maxTrail);
 }
 
-/** pushState with the route trail attached. Every push goes through here. */
+/**
+ * pushState with the route trail attached. Every push goes through here,
+ * after the place of the page being left is written into its own entry, and
+ * stamps the new entry one deeper than the current one, with a key of its
+ * own (B1021).
+ */
 function pushRoute(href) {
-  history.pushState({ scrollY: 0, trail: trailFor(href) }, "", href);
+  savePlace();
+  history.pushState({ scrollY: 0, trail: trailFor(href), depth: depthOf(history.state) + 1, key: newKey() }, "", href);
+}
+
+const depthOf = (s) => (Number.isInteger(s?.depth) ? s.depth : 0);
+// Unique across this tab's loads: history.state outlives a reload.
+const newKey = () => Array.from(crypto.getRandomValues(new Uint32Array(2)), (n) => n.toString(36)).join("");
+
+// The URL each entry routed in this page's life last held, by its key.
+const entryURLs = new Map();
+
+/**
+ * How far back (a negative step) the crumb's page is in this tab's history,
+ * or 0 where the crumb pushes: a trail entry of this entry's with that href,
+ * a depth below this one's, and an entry that still holds the href (a filter
+ * edited in place there since, by Back and Forward, has moved it).
+ */
+function crumbBack(href) {
+  const here = depthOf(history.state);
+  const t = readTrail()?.find((e) => e.href === href);
+  return t && t.depth < here && entryURLs.get(t.key) === href ? t.depth - here : 0;
+}
+
+// The page the place writer writes for (B1021): its entry's key, its view,
+// its list's measure, and whether it has rendered (nothing is written into
+// its entry before).
+let shown = { key: "", view: null, list: null, ready: false };
+let saveTimer = 0;
+
+/**
+ * Write the page's place into its own entry: a list's (views.js's measure)
+ * or a page's scroll offset. Only into the entry the page was routed for,
+ * while its view is in the document and once it has rendered; just before
+ * every navigation from it, at pagehide, at a list's jump, and at most once
+ * per 500 ms while it scrolls. A write WebKit refuses past its rate of
+ * history writes is dropped, never thrown at the navigation after it.
+ */
+function savePlace() {
+  clearTimeout(saveTimer);
+  saveTimer = 0;
+  const s = history.state;
+  if (!shown.ready || s?.key !== shown.key || !shown.view?.isConnected) return;
+  entryURLs.set(s.key, location.pathname + location.search);
+  try {
+    if (shown.list) {
+      const place = shown.list();
+      if (place) history.replaceState({ ...s, place }, "");
+    } else if (Math.abs((s.scrollY || 0) - window.scrollY) >= 40) {
+      history.replaceState({ ...s, scrollY: window.scrollY }, "");
+    }
+  } catch {
+    /* refused past WebKit's rate of history writes: the next one lands */
+  }
 }
 
 export function navigate(href) {
@@ -541,7 +615,19 @@ function route() {
   const titleEl = document.getElementById("player-title");
   if (!view) return;
 
+  // The page being left, while its DOM and its entry are current: an output
+  // change and a redraw route the same entry without pushRoute.
+  savePlace();
   generation += 1;
+  // An entry the router did not push (a first load, a boosted one) is
+  // stamped, keeping all it holds.
+  let s = history.state || {};
+  if (!Number.isInteger(s.depth) || typeof s.key !== "string") {
+    s = { ...s, depth: depthOf(s), key: typeof s.key === "string" ? s.key : newKey() };
+    history.replaceState(s, "");
+  }
+  entryURLs.set(s.key, location.pathname + location.search);
+  const here = shown = { key: s.key, view, list: null, ready: false };
   // Split the path with string ops rather than a regex. Both patterns
   // this replaced were flagged for super-linear backtracking, and while
   // a pathname is short enough that it never mattered, the manual form
@@ -604,7 +690,14 @@ function route() {
   // a view that reads the server fresh. One fetch per route that mounts a
   // tray. Guarded like every other reach into app.js.
   window.BridgeFeatureTray?.invalidate?.();
-  const ctx = { params, gen, setToolbar, setCrumb, id: rest, trail: readTrail() };
+  const ctx = {
+    params, gen, setToolbar, setCrumb, id: rest, trail: readTrail(),
+    // A list's place (views.js's renderPagedList): its measure as it begins,
+    // its rendering or restoring done, and a write at its jump.
+    listing: (measure) => { here.list = measure; },
+    listed: () => { here.ready = true; },
+    savePlace,
+  };
 
   const routes = {
     albums: ["Albums", () => renderAlbums(view, ctx)],
@@ -644,8 +737,10 @@ function route() {
   // where "abdullah" reached the box as "a".
   //
   // The live region still fires: announcing costs nothing and moving
-  // focus is the only part that was wrong.
-  if (document.activeElement !== document.getElementById("player-search-input")) {
+  // focus is the only part that was wrong. So for a list's name filter
+  // (B1021), whose list keeps the focus in it as it redraws.
+  const typing = document.activeElement;
+  if (typing !== document.getElementById("player-search-input") && !typing?.classList?.contains("list-filter")) {
     titleEl.focus({ preventScroll: true });
   }
   announce(title);
@@ -659,11 +754,14 @@ function route() {
   // stale offset the LAST writer rather than a flicker. Measured:
   // scrollTo saw [{top: 0}, {top: 640}] and the reader ended up 640px
   // down a page they had just opened.
+  //
+  // A list is its page's one scroll writer, to its place or its top
+  // (views.js's renderPagedList): this restore is for every other page.
   const myGen = gen();
-  const state = history.state || {};
   void Promise.resolve(render()).then(() => {
     if (myGen !== gen()) return;
-    window.scrollTo({ top: state.scrollY || 0 });
+    if (!here.list) window.scrollTo({ top: s.scrollY || 0 });
+    here.ready = true;
   });
 }
 
@@ -722,12 +820,12 @@ function updateSidebarNav(section) {
   }
 }
 
+// Coalesced (B1021): every 40px of a fling wrote history, past the rate
+// WebKit allows.
 window.addEventListener("scroll", () => {
-  if (!document.getElementById("player-root")) return;
-  const s = history.state || {};
-  if (Math.abs((s.scrollY || 0) - window.scrollY) < 40) return;
-  history.replaceState({ ...s, scrollY: window.scrollY }, "");
+  if (document.getElementById("player-root") && !saveTimer) saveTimer = setTimeout(savePlace, 500);
 }, { passive: true });
+window.addEventListener("pagehide", savePlace);
 
 // Entry point, LAST.
 //

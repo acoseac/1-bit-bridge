@@ -121,6 +121,11 @@ const maxUnresolvedListed = 200
 
 // apiPlayerPlaylists handles GET /api/player/playlists.
 func (s *Server) apiPlayerPlaylists(w http.ResponseWriter, r *http.Request) {
+	name, err := nameFilter(r.URL.Query().Get("q"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 	cat, ok := s.playerCatalog(w, r)
 	if !ok {
 		return
@@ -131,6 +136,8 @@ func (s *Server) apiPlayerPlaylists(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
 		return
 	}
+	// A playlist matches on its name, folded as the catalog's names are.
+	rows = namedOnly(rows, name, func(p manifest.AdminPlaylistSummary) string { return librarycat.SortKey(p.Name) })
 	// One query for every tile's leading paths, not one per playlist.
 	heads, err := s.deps.Manifest.PlaylistHeadPaths(r.Context(), mosaicScanDepth)
 	if err != nil {

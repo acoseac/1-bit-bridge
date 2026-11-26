@@ -128,7 +128,10 @@ export const api = {
   // The player's own collection endpoints, not the operator ones:
   // /api/playlists and /api/smart-playlists are summaries-only by
   // design, so they carry no cover refs and nothing playable.
-  playlists: () => getJSON("/api/player/playlists", { key: "playlists" }),
+  playlists: (params) => {
+    const query = qs(params);
+    return getJSON(`/api/player/playlists${query ? `?${query}` : ""}`, { key: "playlists" });
+  },
   playlist: (id) => getJSON(`/api/player/playlists/${encodeURIComponent(id)}`, { key: "detail" }),
   // Tombstones + their undo. The OPERATOR endpoints, like the export
   // below: a deleted playlist has no cover, no playable tracks and no
