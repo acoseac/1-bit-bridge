@@ -2,8 +2,8 @@
 
 ### What
 
-The owner's reports, each measured at the base in WebKit before anything changed (the numbers
-are in "WebKit, base and head" below):
+Reported defects, each measured at the base in WebKit before anything changed (the numbers are
+in "WebKit, base and head" below):
 
 - **A list started over.** Albums opens on Recently Added; past its first page (60 rows) a tile
   opens the album, and the album's "Albums" crumb pushed a new entry, `{ scrollY: 0, trail: [] }`,
@@ -147,8 +147,8 @@ Made where the brief left a choice:
   empty, "  " and "!?", filters nothing; 257 bytes is 400 and 256 is 200; the playlists answer the
   whole filtered collection; after a selective filter the unfiltered artists, genres and composers
   are row for row the lists before it) and `TestAFilteredGenreListDrawsNoRail`. Both red at the
-  base, its two handlers and `sortkey.go` overlaid (`go test -overlay`) with a names-only
-  `SortKey` shim: every list answered unfiltered.
+  base, its two handlers and `sortkey.go` overlaid at build time with a names-only `SortKey`
+  shim: every list answered unfiltered.
 - **The page model**: `testdata/list_harness.mjs`, run like the bar's harness, one scenario a Go
   test with the same JSON report and `barNode`, through `harnessScenario`, which `barScenario` now
   calls with the bar's harness's name. It models a session history (entries of a state and a URL;
@@ -182,7 +182,8 @@ Made where the brief left a choice:
   real boost router, then Back), `TestTheFilterNarrowsTheListInPlace` and
   `TestAFilterPauseWritesNothingAfterANavigation`. Over the base's player modules ten are red; the
   eleventh, `TestACrumbOutsideThisTabsHistoryPushesAsBefore`, pins the pushes that stay and is
-  green there by design.
+  green there by design (its own control, a crumb with no trail entry going back, is in the
+  round-2 entry).
 - **Source pins** (`player_touch_layout_test.go`): `TestAListsHeadPinsBelowWhatIsPinnedAboveIt`
   (the head sticky at its fixed height outside any media block, un-pinned in `(max-height:
   500px)`, `--list-head-top` 65px below 1024px, `--az-top` taking the head, the rows' scroll
@@ -207,7 +208,8 @@ Made where the brief left a choice:
   re-rendering controls were narrower at their first run and were corrected with the reason above
   before the final run. The row-199 case first read the reader's own scroll clamped at the loaded
   rows' end, so its place was not row 199: the model's reader now scrolls again once the observer
-  has paged on, and the case asserts its premise.
+  has paged on, and the case asserts its premise. Not enumerated above: the rows'
+  `content-visibility: visible` taken out, whose run the round-2 entry records.
 - **Counts**: the bar's harness, 193 scenarios before and after, all green; the list harness, none
   before, 11 after, all green.
 
