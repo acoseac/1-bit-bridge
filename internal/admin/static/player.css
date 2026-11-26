@@ -403,11 +403,12 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
  * room between where it sticks and the bar, its entries sharing that height
  * and each as wide as the column, with no gutter or gap around them, so a
  * finger anywhere on the rail is on the entry at its height; nothing selects
- * and the browser shows no callout of its own under a held finger. A short
- * window takes PR 1's grid back, in the block after this one. */
+ * and the browser shows no callout of its own under a held finger. 8px from
+ * the list, where 12px left a 390px phone's albums one column of tiles. A
+ * short window takes PR 1's grid back, in the block after this one. */
 @media (any-pointer: coarse) {
   .az-rail {
-    min-width: 44px; padding: 0; gap: 0; align-items: stretch;
+    min-width: 44px; margin-left: var(--space-2); padding: 0; gap: 0; align-items: stretch;
     height: calc(100vh - var(--az-top) - var(--az-foot));
     height: calc(100dvh - var(--az-top) - var(--az-foot));
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
@@ -424,10 +425,13 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 }
 /* The scrub's callout: where the list is, in words, large, beside the rail at
  * the finger's height and never under it; inside the rail's stacking context
- * (the popovers' range) and touched by no pointer. */
+ * (the popovers' range) and touched by no pointer. Its words wrap within the
+ * room left of the rail (100% is the rail's width), which "Earlier this year"
+ * overran by 15px beside a short window's grid at 568x320. */
 .az-callout {
   position: absolute; right: calc(100% + var(--space-3)); top: 0; transform: translateY(-50%);
-  padding: var(--space-2) var(--space-3); border-radius: 12px; white-space: nowrap;
+  width: max-content; max-width: calc(100vw - 100% - var(--shell-gutter) - var(--space-3) - var(--space-2));
+  padding: var(--space-2) var(--space-3); border-radius: 12px;
   font-size: 1.5rem; font-weight: 700; line-height: 1.2; color: var(--fg);
   background: var(--bg-panel); border: 1px solid var(--border); box-shadow: var(--elev-2);
   pointer-events: none;
