@@ -40,6 +40,10 @@ func sortKey(s string) string {
 	return b.String()
 }
 
+// SortKey is the exported form of sortKey, the fold Search matches a query
+// by, so the console's list filters fold a query and a name as Search does.
+func SortKey(s string) string { return sortKey(s) }
+
 // BucketOf is the exported form of bucket, for callers that hold a sort
 // key other than the one already stamped on a row.
 //
