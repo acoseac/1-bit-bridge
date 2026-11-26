@@ -289,7 +289,7 @@ what the take stored, where it seeded the value (2); the route's test gives one 
 the cover and the album a stored version after the upsert (`SetArtworkVersionAndBumpIndex`,
 one row), required in the detail and in every answer; `TestTheVolumeTakesAFingerAndLooksDisabledWhileItIs`,
 and `TestEveryControlTakesAFingerWhereACoarsePointerIs` and `TestTheBarTakesRowsForAFingerFrom641px`
-extended. The harness: 194 cases. Red first at `7fd5c47b`, over `9dbec301`'s production: each
+extended. The harness: 193 cases. Red first at `7fd5c47b`, over `9dbec301`'s production: each
 output's retry 1 check, the gone entry 1, the pins 7, 3 and 2 assertions; the route's test, the
 reload's case and the survivors' case green there. Controls, 15 of 15 as predicted at
 `b245aff9`, each red where predicted alone: the failure kept; the failure dropped at no cover
@@ -319,6 +319,16 @@ every one passing; and the bar's Go tests (the 190 of `player_output_bar_test.go
 detector ten times idle, ok in 267 s, and ten times beside four busy processes, ok in 234 s.
 These ran with this section not yet written, the code as it ships; on the commit that carries
 it the docs' check and the citation guard ran again.
+
+After the section on a cover that fails and comes back, on `4381a4d5`, the same, in one session
+of the shared build lock: formatting, no file rewritten; vet and the eight targets' vets, clean;
+the whole race-enabled suite, ok (93 packages, 37 of them unchanged and answered from the test
+cache, `cmd/bridge` in 1,979 s, `internal/manifest` in 1,630 s and `internal/admin` in 1,500 s,
+2,092 s in all); the cross-builds; the docs' check; the seven and the four guards by name, all
+passing; the harness's 193 scenarios, every one passing; and the bar's Go tests, now 211 (the
+194 of `player_output_bar_test.go` among them), under the race detector ten times idle, ok in
+275 s, and ten times beside four busy processes, ok in 241 s. On the commit that carries this
+paragraph the docs' check and the citation guard ran again.
 
 ### Left open
 
