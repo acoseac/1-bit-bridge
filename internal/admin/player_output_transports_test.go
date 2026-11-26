@@ -147,7 +147,7 @@ func TestTheOwnersPlayerPageShowsEachTransportRow(t *testing.T) {
 		headings = append(headings, strings.TrimSpace(htmlText(th)))
 	}
 	if strings.Join(headings, "|") != "Transport|Plays|The DAC takes it|Set to|Rates" {
-		t.Fatalf("#player-output-transports-panel's thead th cells are %q, want Transport, Plays, The DAC takes it, Set to and Rates", headings)
+		t.Errorf("#player-output-transports-panel's thead th cells are %q, want Transport, Plays, The DAC takes it, Set to and Rates", headings)
 	}
 	body := htmlByID(panel, "player-output-transports")
 	if body == nil || body.Data != "tbody" || body.FirstChild != nil {

@@ -34,8 +34,8 @@ type consoleRow struct {
 	Note    string   `json:"note"`
 }
 
-// consoleRows are rep's transport rows by kind, failing the test unless they
-// are pcm, dop, native and converted, in that order.
+// consoleRows are rep's transport rows by kind, failing the test, and going
+// on, unless they are pcm, dop, native and converted, in that order.
 func consoleRows(t *testing.T, rep admin.PlayerReport) map[string]consoleRow {
 	t.Helper()
 	raw, err := json.Marshal(rep.Transports)
@@ -53,7 +53,7 @@ func consoleRows(t *testing.T, rep admin.PlayerReport) map[string]consoleRow {
 		out[r.Kind] = r
 	}
 	if strings.Join(kinds, " ") != "pcm dop native converted" {
-		t.Fatalf("the transport rows are %v (%s), want pcm, dop, native and converted", kinds, raw)
+		t.Errorf("the transport rows are %v, want pcm, dop, native and converted", kinds)
 	}
 	return out
 }
