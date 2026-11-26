@@ -488,19 +488,29 @@ func TestLoadShippedExample(t *testing.T) {
 }
 
 // TestTheShippedExampleLeavesThePlayersDSDToItsState holds the example's DSD
-// words to the player since its DSD cutover (B728 B7): they no longer say that
-// dsdMode defaults off, and its output block, uncommented as an owner copies
-// it into bridge.yaml (its own markers, then a nested key's), assigns none of
-// the three legacy DSD keys, whose names may stay in its prose, and decodes
-// with no key unread, no problem and no legacy DSD key set.
+// words to the player since its DSD cutover (B728 B7): they say neither that
+// dsdMode defaults off nor that the legacy DSD keys are read only to migrate
+// (serve's boot snapshot reads two of them for the console), they say that the
+// console's Player page has no control for the DAC's DSD choice, which
+// TestThePlayerPageOffersNoDSDControl holds the page to, and its output block,
+// uncommented as an owner copies it into bridge.yaml (its own markers, then a
+// nested key's), assigns none of the three legacy DSD keys, whose names may
+// stay in its prose, and decodes with no key unread, no problem and no legacy
+// DSD key set.
 func TestTheShippedExampleLeavesThePlayersDSDToItsState(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "bridge.yaml.example"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	prose := strings.Join(strings.Fields(strings.ReplaceAll(string(raw), "#", " ")), " ")
-	if strings.Contains(prose, "dsdMode defaults off") {
-		t.Errorf("the example says dsdMode defaults off: the player decides DSD by its DSD state, and the key only migrates")
+	for _, gone := range []string{"dsdMode defaults off", "read only to migrate"} {
+		if strings.Contains(prose, gone) {
+			t.Errorf("the example says %q: the player decides DSD playback from its DSD state, which the legacy keys reach only through a migration", gone)
+		}
+	}
+	const page = "The console's Player page has no control for changing the DAC's DSD choice."
+	if !strings.Contains(prose, page) {
+		t.Errorf("the example does not say %q", page)
 	}
 	lines := strings.Split(string(raw), "\n")
 	start := -1

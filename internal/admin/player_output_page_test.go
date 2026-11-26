@@ -154,15 +154,29 @@ func TestThePlayerPageOffersTheRestartAsSettingsDoes(t *testing.T) {
 // TestThePlayerPageOffersNoDSDControl pins what the page says of DSD, served
 // as an owner's loopback bridge serves it (a public bridge serves none of the
 // player's panels): no hint that DSD comes later, since the player plays it by
-// its effective policy (B728), its transports panel there, no control for DSD
-// and no command to copy, and its script posts nothing but the switch, the
-// OpenHome switch (B612), the DAC and the test tone (B601), whose request
-// writes nothing and which no second route stops.
+// its effective policy (B728), and the help panel's sentence that the policy
+// can refuse it as well as play it natively, send it as DoP or convert it to
+// PCM; its transports panel there, no control for DSD and no command to copy,
+// and its script posts nothing but the switch, the OpenHome switch (B612), the
+// DAC and the test tone (B601), whose request writes nothing and which no
+// second route stops.
 func TestThePlayerPageOffersNoDSDControl(t *testing.T) {
 	srv, _, _ := newPlayerTestServer(t)
 	page := renderOutputPage(t, srv)
 	if strings.Contains(page, `id="player-output-public"`) {
 		t.Fatalf("the page is a public bridge's, which serves none of the player's panels")
+	}
+	doc, err := html.Parse(strings.NewReader(page))
+	if err != nil {
+		t.Fatal(err)
+	}
+	help := htmlByID(doc, "player-output-bar-help")
+	if help == nil {
+		t.Fatal("the page serves no help panel for playing from the console")
+	}
+	const dsd = "DSD plays on the bridge's player alone: under its effective DSD policy, the player can play the original DSD natively, send it as DoP, convert it to PCM, or refuse it."
+	if !strings.Contains(strings.Join(strings.Fields(htmlText(help)), " "), dsd) {
+		t.Errorf("the help panel does not say %q", dsd)
 	}
 	for _, gone := range []string{"comes in a later version", `id="player-output-dsd-later"`} {
 		if strings.Contains(page, gone) {
