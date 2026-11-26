@@ -405,17 +405,19 @@ function select(name, value, options) {
 // button that renders, is pressed, and then reports a failure reads as a broken
 // console rather than as somebody else’s library. An album spanning both
 // keeps its button for the local half and says what it is leaving alone.
-// An edition's Delete (B1023) moves the edition shown, which it names, and no
-// SACD image's track, which is no file; its words are the page's (state), so a
-// pick away and back shows it running, and settled hands the trash's answer on.
-function appendDeleteAction(actions, tracks, label, edition = null, state = null, settled = null) {
+// An album's Delete (B1023) moves the edition shown, which it names where the
+// album shows editions, and no SACD image's track, which is no file; a path a
+// request carries reads Deleting… until it answers, through any redraw, and
+// settleTrash takes the answer, whose words (said) the paths left keep.
+function appendDeleteAction(actions, id, tracks, label, edition, said) {
   const all = (tracks || []).filter((t) => t?.path);
   const routed = all.filter((t) => t.routed).length;
-  const paths = all.filter((t) => !t.routed && !(edition && imageOf(t.path))).map((t) => t.path);
+  const paths = all.filter((t) => !t.routed && !imageOf(t.path)).map((t) => t.path);
   if (!paths.length) return;
+  const words = paths.some((p) => trashing.has(p)) ? "Deleting…" : paths.map((p) => said.get(p)).find(Boolean);
 
   const btn = el("button", {
-    class: "btn danger", text: state?.text || "Delete…",
+    class: "btn danger", text: words || "Delete…",
     on: {
       click: async () => {
         const n = paths.length;
@@ -429,28 +431,71 @@ function appendDeleteAction(actions, tracks, label, edition = null, state = null
           upstream)) {
           return;
         }
-        const say = (text) => { btn.textContent = text; if (state) state.text = text; };
+        for (const p of paths) trashing.add(p);
         setDisabled(btn, true);
-        say("Deleting…");
+        btn.textContent = "Deleting…";
+        let res = null;
+        let err = null;
         try {
-          const res = await api.trash(paths);
-          const failed = (res.outcomes || []).filter((o) => o.status === "failed");
-          say(failed.length
-            ? `${res.ok} deleted, ${failed.length} failed`
-            : `${res.ok} moved to trash`);
-          settled?.(res);
+          res = await api.trash(paths);
         } catch (e) {
-          if (state) state.text = "";
-          setDisabled(btn, false);
-          btn.textContent = "Delete…";
-          settled?.(null);
-          alert(e?.message ? e.message : String(e));
+          err = e;
         }
+        settleTrash(id, paths, res, err);
       },
     },
   });
-  if (state?.text) setDisabled(btn, true);
+  if (words) setDisabled(btn, true);
   actions.appendChild(btn);
+}
+
+// An album's deletions (B1023), the page's, so a redraw keeps them: the paths
+// a request carries until it answers (trashing), and by album each path an
+// answer took off the page (deletions): gone where the trash moved it; held
+// where the answer was lost, as no later read can tell whether the move
+// landed after it; at the answer's count (answers) where it could not be
+// moved, until a read begun after that answer lists it or not.
+const trashing = new Set();
+const deletions = new Map();
+let answers = 0;
+// The album page shown now, which an answer for its album reconciles.
+let albumShown = null;
+
+/**
+ * settleTrash takes the trash's answer for album id's paths. postJSON's Error
+ * is the trash's refusal, which it makes before it moves anything; fetch's
+ * TypeError, or an answer that does not read, leaves each path unknown.
+ */
+function settleTrash(id, paths, res, err) {
+  answers += 1;
+  const off = deletions.get(id) || deletions.set(id, new Map()).get(id);
+  const lost = !res && (err instanceof TypeError || err instanceof SyntaxError);
+  const status = new Map((res?.outcomes || []).map((o) => [o.path, o.status]));
+  for (const p of paths) {
+    trashing.delete(p);
+    if (lost) off.set(p, { held: true });
+    else if (res) off.set(p, status.get(p) === "trashed" ? { gone: true } : { at: answers });
+  }
+  const v = albumShown;
+  if (v?.id === id && v.gen() === v.at) v.answered(paths, res);
+  if (err) alert(err?.message ? err.message : String(err));
+}
+
+/**
+ * keepOf is the rows a read of album id, begun at answers' count seen, leaves
+ * on its page, and how many of its rows the page holds off: a path an answer
+ * before the read could not move is the album's again where the read lists it.
+ */
+function keepOf(id, tracks, seen) {
+  const off = deletions.get(id);
+  if (!off) return { rows: tracks, held: 0 };
+  const listed = new Set(tracks.map((t) => t.path));
+  for (const [p, d] of off) {
+    if (d.at === undefined || d.at > seen) continue;
+    if (listed.has(p)) off.delete(p);
+    else off.set(p, { gone: true });
+  }
+  return { rows: tracks.filter((t) => !off.has(t.path)), held: tracks.filter((t) => off.has(t.path) && !off.get(t.path).gone).length };
 }
 
 // ---- An album's editions (B1023) ----
@@ -461,9 +506,14 @@ function appendDeleteAction(actions, tracks, label, edition = null, state = null
 // plays by default; an album no song of which repeats draws as it always did.
 
 // The catalog's disc-folder rule (dupes.discNumberForFolderName): the whole
-// name, cd, disc, disk, vol or volume in any case, then a number whose last
-// one or two digits past its zeros are the disc; a folder above it is needed.
-const DISC_FOLDER = /^\s*(?:volume|disc|disk|vol|cd)\s*0*(\d{1,2})\s*$/i;
+// name, cd, disc, disk, vol or volume, each letter as unicode.ToLower folds
+// it (a dotted capital I an i, the Kelvin sign a k), between Go's white
+// space (unicode.IsSpace: U+0085 is, U+FEFF is not), then a number whose
+// last one or two digits past its zeros are the disc; a folder above it is
+// needed.
+const GO_SPACE = "[\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]*";
+const DISC_FOLDER = new RegExp(`^${GO_SPACE}(?:[vV][oO][lL][uU][mM][eE]|[dD][iI\\u0130][sS][cC]|[dD][iI\\u0130][sS][kK\\u212a]|[vV][oO][lL]|[cC][dD])` +
+  `${GO_SPACE}0*(\\d{1,2})${GO_SPACE}$`);
 
 /** folderOf is the folder a row's edition is, and its disc folder's number (null for none). */
 function folderOf(t) {
@@ -503,9 +553,13 @@ function modal(items) {
   return best;
 }
 
-/** folderOrder is dupes.outranks' own tail: the fewer folders, then the shorter path, then the one that sorts first. */
-const folderOrder = ({ folder: a }, { folder: b }) =>
-  a.split("/").length - b.split("/").length || a.length - b.length || (a < b ? -1 : a > b ? 1 : 0);
+/** folderOrder is dupes.outranks' own tail: the fewer folders, then the shorter path, then the one that sorts first, in UTF-8's bytes as Go's are. */
+const utf8 = new TextEncoder();
+const folderOrder = ({ folder: a }, { folder: b }) => {
+  const [x, y] = [utf8.encode(a), utf8.encode(b)];
+  const i = x.findIndex((c, k) => c !== y[k]);
+  return a.split("/").length - b.split("/").length || x.length - y.length || (i < 0 ? 0 : x[i] - y[i]);
+};
 
 /**
  * albumEditions is an album's folders by the catalog's fold, in the picker's
@@ -581,17 +635,38 @@ function bestFor(eds, output) {
 // another album, another output or a reload shows the default.
 const editionShown = { key: "", folder: "" };
 
+// An output change shows the default wherever it is made: the output's own
+// subscription (output.js's subscribe, which listen turns into boot.js's
+// redraw) lets the slot go at each change of the output in effect.
+let watched = null;
+function watchOutput() {
+  const o = currentOutput();
+  if (!o || o === watched) return;
+  watched = o;
+  let last = chosenOutput();
+  o.subscribe(() => {
+    if (currentOutput() !== o) return;
+    if (chosenOutput() !== last) editionShown.key = "";
+    last = chosenOutput();
+  });
+}
+
 // What the bridge's player's control takes a request (handlers_player_control.go),
 // a KiB left to the rest of the body: an edition goes as its paths (its album's
-// id is every edition's), and one past it is refused here, in words of its own.
+// id is every edition's), and one past it is refused here, in words of its own,
+// on the toolbar, a title (its list) and a row's Add (its path).
 const SCOPE_WORDS = "This edition is more than the bridge's player takes in one request (20,000 tracks of " +
   "4,096 bytes a path, 8 MiB in all): choose this browser under Output to play it, or add the tracks you want from their rows.";
+const fitsAPath = (p) => !!p && utf8.encode(p).length <= 4096;
 function fitsTheBridge(rows) {
-  const enc = new TextEncoder();
   const paths = rows.map((t) => t.path || "");
-  return paths.length <= 20000 && paths.every((p) => p && enc.encode(p).length <= 4096) &&
-    enc.encode(JSON.stringify(paths)).length + 1024 <= 8 << 20;
+  return paths.length <= 20000 && paths.every(fitsAPath) && utf8.encode(JSON.stringify(paths)).length + 1024 <= 8 << 20;
 }
+
+// What an album page holds off after deletions it could not settle, and how
+// a reader finds out.
+const heldNote = (n) => (n ? el("p", { class: "muted small", text: `${plural(n, "track")} left off this page: whether the trash moved ` +
+  `${n === 1 ? "it" : "them"} is not known. Load the page again to see what the library holds.` }) : null);
 
 /**
  * The edition picker: the word Edition and a button an edition ("DSD64 · 13",
@@ -615,9 +690,23 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // reach it and a superseded render would sail past to write its crumb
   // over the page that replaced it.
   const at = gen();
+  // This render is the album page shown (B1023): a trash answer for its album
+  // reaches it, the page read again once painted; its words stay on the paths
+  // its request left (said).
+  const said = new Map();
+  let reread = null;
+  const me = { id, at, gen, answered: (paths, res) => {
+    const failed = (res?.outcomes || []).filter((o) => o.status === "failed").length;
+    if (res) for (const p of paths) said.set(p, failed ? `${res.ok} deleted, ${failed} failed` : `${res.ok} moved to trash`);
+    if (reread) reread();
+    else me.stale = true;
+  } };
+  albumShown = me;
+  watchOutput();
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
+  const seen = answers;
   let d;
   try {
     d = await api.album(id);
@@ -665,9 +754,9 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // plays; a mixed album's source names are read once, so a pick never waits.
   const output = chosenOutput();
   const slot = `${id}\n${output}`;
-  let rows = d.tracks;
+  let kept = keepOf(id, d.tracks, seen);
+  let rows = kept.rows;
   let eds = albumEditions(rows);
-  const editioned = eds.length > 1;
   const names = eds.some((e) => albumSourceIDs(e.rows).length > 1) ? await api.sourceNames().catch(() => null) : null;
   if (gen() !== at) return;
 
@@ -698,18 +787,19 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // them, which is why the confirm can be a plain one: it is recoverable, and
   // the Library page is where the space is actually reclaimed.
   let allowDelete = false;
-  const deleting = new Map(); // An edition's deletion, the page's while it runs.
-  const addDelete = () => appendDeleteAction(actions, shown.rows, a.title, editioned ? shown.title : null,
-    editioned ? deleting.get(shown.folder) || deleting.set(shown.folder, { text: "" }).get(shown.folder) : null,
-    editioned ? settled : null);
+  const addDelete = () => appendDeleteAction(actions, id, shown.rows, a.title, eds.length > 1 ? shown.title : null, said);
   const paint = () => {
     const ed = shown;
+    // An album shown whole goes to the bridge's player by its id; one in
+    // editions, or one a deletion has changed, as the paths it shows (the
+    // catalog lists a moved file until it is built again).
+    const byId = eds.length === 1 && !deletions.get(id)?.size;
     live = ed.rows.filter((t) => playFor(t, "browser").playable);
     for (const e of eds) e.button?.setAttribute("aria-pressed", String(e === ed));
     clear(statBox);
-    statBox.appendChild(albumStatLine(a, editioned ? ed : null));
+    statBox.appendChild(albumStatLine(a, byId ? null : ed));
     const note = unplayableNote(ed.rows);
-    const scope = editioned ? {} : { album: id };
+    const scope = byId ? { album: id } : {};
     actions = el("div", { class: "detail-actions" },
       el("button", { class: "btn btn-primary", text: "Play", on: { click: () => playOn(scope, ed.rows, 0, art) } }),
       shuffleButton(ed.rows, art),
@@ -723,17 +813,17 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
         if (note) b.setAttribute("aria-describedby", note.getAttribute("id"));
       }
     }
-    const over = editioned && chosenOutput() === "bridge" && !fitsTheBridge(ed.rows)
+    const over = !byId && chosenOutput() === "bridge" && !fitsTheBridge(ed.rows)
       ? el("p", { class: "muted small", text: SCOPE_WORDS, attrs: { id: "album-scope" } }) : null;
     if (over) for (const b of [actions.children[0], actions.children[2]]) {
       setDisabled(b, true);
-      b.setAttribute("aria-describedby", "album-scope");
+      b.setAttribute("aria-describedby", [b.getAttribute("aria-describedby"), "album-scope"].filter(Boolean).join(" "));
     }
     clear(partsBox);
-    for (const n of [note, over, actions]) if (n) partsBox.appendChild(n);
+    for (const n of [heldNote(kept.held), note, over, actions]) if (n) partsBox.appendChild(n);
     if (allowDelete) addDelete();
     clear(tracksBox);
-    tracksBox.appendChild(albumTracksPanel(ed.rows, art, names, ed.discOf));
+    tracksBox.appendChild(albumTracksPanel(ed.rows, art, names, ed.discOf, !byId));
   };
   const setup = () => {
     shown = (editionShown.key === slot && eds.find((e) => e.folder === editionShown.folder)) || bestFor(eds, output);
@@ -747,19 +837,26 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
       paint();
     }));
   };
-  const settled = (res) => {
-    if (gen() !== at) return;
-    const moved = new Set((res?.outcomes || []).filter((o) => o.status === "trashed").map((o) => o.path));
-    if (moved.size) {
-      rows = rows.filter((t) => !moved.has(t.path));
-      if (!rows.length) return rerenderView();
-      eds = albumEditions(rows);
-      setup();
-    }
-    paint();
-  };
   setup();
   paint();
+  // A trash answer reads the album again: the page takes what the library
+  // holds now, never a path its deletions hold off; a read that fails keeps
+  // the rows it had, less those.
+  reread = async () => {
+    const asked = answers;
+    let fresh = null;
+    try {
+      fresh = (await api.album(id)).tracks;
+    } catch { /* below */ }
+    if (gen() !== at) return;
+    kept = keepOf(id, fresh || rows, fresh ? asked : -1);
+    rows = kept.rows;
+    if (!rows.length && !kept.held) return rerenderView();
+    eds = albumEditions(rows);
+    setup();
+    paint();
+  };
+  if (me.stale) reread();
   if (rows.some((t) => t?.path && !t.routed)) api.settings().then((cfg) => {
     allowDelete = !!cfg?.allowDelete;
     if (allowDelete && gen() === at) addDelete();
@@ -930,14 +1027,15 @@ function bookletLink(booklet) {
  * release, and showing two of its five tracks because of how you arrived
  * would read as tracks missing rather than as a filter.
  *
- * Its caller reads the names, once a render (B1023); discOf is each row's disc.
+ * Its caller reads the names, once a render (B1023); discOf is each row's disc,
+ * and bound holds each list the rows send to the bridge's player's bounds.
  */
-function albumTracksPanel(tracks, art, names, discOf) {
+function albumTracksPanel(tracks, art, names, discOf, bound) {
   const ids = albumSourceIDs(tracks);
   // The split is real whether or not we can name the halves; without names
   // there is nothing useful to label them with, so fall back to the plain list
   // rather than to "Unknown source" twice.
-  if (ids.length < 2 || !names) return trackList(tracks, art, { discOf });
+  if (ids.length < 2 || !names) return trackList(tracks, art, { discOf, bound });
 
   const box = el("div");
   let current = "";
@@ -953,7 +1051,7 @@ function albumTracksPanel(tracks, art, names, discOf) {
     // The per-track chip earns its cell only in the combined view: inside
     // a filtered one every row has the same answer, which the button
     // above already gives.
-    box.appendChild(trackList(shown, art, current ? { discOf } : { sourceNames: names, discOf }));
+    box.appendChild(trackList(shown, art, current ? { discOf, bound } : { sourceNames: names, discOf, bound }));
   };
   paint();
   return box;
@@ -1025,6 +1123,9 @@ function sourceFilterBar(ids, names, current, onPick) {
 
 function trackList(tracks, albumArt, opts = {}) {
   const list = el("ol", { class: "tracks" });
+  // The list a title sends, held once a list to the bridge's player's bounds
+  // where the album page asks (B1023).
+  const rowOpts = opts.bound && chosenOutput() === "bridge" ? { ...opts, fits: fitsTheBridge(tracks) } : opts;
   let disc = null;
   tracks.forEach((t, i) => {
     // An album's page gives each row its heading disc, an untagged row's too.
@@ -1033,7 +1134,7 @@ function trackList(tracks, albumArt, opts = {}) {
       disc = d;
       list.appendChild(el("li", { class: "track-disc", text: `Disc ${disc}` }));
     }
-    list.appendChild(trackRow(t, i, tracks, albumArt, opts));
+    list.appendChild(trackRow(t, i, tracks, albumArt, rowOpts));
   });
   // Every list, not just the album page's: the row that is playing is
   // worth marking wherever a track list is rendered, and binding here is
@@ -1063,11 +1164,14 @@ function trackRow(t, i, all, albumArt, opts = {}) {
   // its Download links on lines of their own.
   row.appendChild(el("span", { class: "track-num" },
     el("span", { class: "track-n", text: String(num) })));
+  // A title whose list is past the bridge's bounds sends nothing, the album
+  // page's words saying why.
+  const sends = playable && opts.fits !== false;
   const title = el("button", {
     class: "track-title", text: t.title || t.path,
-    attrs: playable ? {} : { "aria-disabled": "true", "aria-describedby": "why-" + i },
+    attrs: sends ? {} : { "aria-disabled": "true", "aria-describedby": playable ? "album-scope" : "why-" + i },
   });
-  if (playable) {
+  if (sends) {
     title.addEventListener("click", () => playOn({}, all, i, albumArt));
   }
   row.appendChild(title);
@@ -1101,26 +1205,29 @@ function trackRow(t, i, all, albumArt, opts = {}) {
   row.appendChild(variantMarks(t));
   row.appendChild(el("span", { class: "track-size", text: bytes(t.sizeBytes) }));
   row.appendChild(el("span", { class: "track-dur", text: duration(t.duration) }));
-  row.appendChild(downloadCell(t, output, playable));
+  row.appendChild(downloadCell(t, output, playable, opts.bound));
   return row;
 }
 
 /**
  * A row's Download cell, and with the bridge's player chosen its own Add to
- * queue beside it in that cell, so the row keeps its columns (§7.5).
+ * queue beside it in that cell, so the row keeps its columns (§7.5); where
+ * the album page asks (bound), a path past the bridge's bound for one
+ * disables it, the page's words saying why (B1023).
  */
-function downloadCell(t, output, playable) {
+function downloadCell(t, output, playable, bound = false) {
   const dl = el("a", {
     class: "track-dl", text: "Download",
     attrs: { href: downloadURL(t.path), download: "" },
   });
   if (output !== "bridge") return dl;
+  const long = bound && !fitsAPath(t.path);
   const add = el("button", {
     class: "track-add", text: "Add",
-    attrs: { type: "button", "aria-label": `Add ${t.title || t.path} to the bridge's queue` },
+    attrs: { type: "button", "aria-label": `Add ${t.title || t.path} to the bridge's queue`, ...(long ? { "aria-describedby": "album-scope" } : {}) },
     on: { click: () => currentOutput()?.append({ tracks: [t.path] }) },
   });
-  setDisabled(add, !playable);
+  setDisabled(add, !playable || long);
   return el("span", { class: "track-dl-cell" }, dl, add);
 }
 

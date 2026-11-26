@@ -5774,7 +5774,8 @@ S.TestAnEditionsDeleteStaysItsOwnAcrossPicks = async () => {
 };
 
 S.TestAPendingDeleteHoldsAcrossARegroupingAndARedraw = async () => {
-  await pageRig();
+  const r = await pageRig();
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
   globalThis.confirm = () => true;
   let g = 1;
   const hi = [1, 2, 3].map((k) => edHi(k));
@@ -5800,15 +5801,19 @@ S.TestAPendingDeleteHoldsAcrossARegroupingAndARedraw = async () => {
   del()?.click();
   await settle();
   check("and a press of it sends nothing", posts().length === 2, posts().length);
-  // The album drawn again, as a change of output draws it, the second answer
-  // still held.
-  g = 2;
-  await page.render();
+  // A change of output draws the album again, as boot.js wires it, the
+  // second answer still held.
+  let redrawn = null;
+  listen(r.out, { win: window, doc: document, onOutput: () => { g += 1; redrawn = page.render(); } });
+  await r.out.pick("bridge");
+  await settle();
+  await redrawn;
   await settle();
   del()?.click();
   await settle();
-  check("a redraw keeps it Deleting…, a press sending nothing", del()?.textContent === "Deleting…" && del()?.disabled === true && posts().length === 2,
-    [del()?.textContent, posts().length]);
+  check("the redraw a change of output makes keeps it Deleting…, a press sending nothing",
+    r.out.view().output === "bridge" && g === 2 && del()?.textContent === "Deleting…" && del()?.disabled === true && posts().length === 2,
+    [r.out.view().output, g, del()?.textContent, posts().length]);
   lib.asked[1].open([cd[0].path]);
   await settle();
   check("the second answer reaches the page shown now: the row it moved gone, the two it could not move listed, its Delete saying so",
@@ -5934,13 +5939,13 @@ S.TestADeletionsAnswerIsReconciledFromWhatTheLibraryHolds = async () => {
   editions(after.view).options.find((o) => o.textContent.endsWith("Z"))?.click();
   deleteOf(after.view)?.click();
   await settle();
-  check("an answer lost after the move holds its paths off the page too",
-    !editions(after.view).group && JSON.stringify(listing(after.view)) === JSON.stringify(["S1", "S2", "S3", "S4"]) && left(after.view) === words(4),
-    [editions(after.view).words, left(after.view)]);
+  check("an answer lost after the move: its paths off the page, the read after it, which no longer lists them, saying nothing of them",
+    !editions(after.view).group && JSON.stringify(listing(after.view)) === JSON.stringify(["S1", "S2", "S3", "S4"]) && left(after.view) === "" &&
+    deleteOf(after.view)?.textContent === "Delete…", [editions(after.view).words, left(after.view), deleteOf(after.view)?.textContent]);
   g = 3;
   await after.render();
   await settle();
-  check("and a read that no longer lists them says nothing of them", JSON.stringify(listing(after.view)) === JSON.stringify(["S1", "S2", "S3", "S4"]) && left(after.view) === "",
+  check("and so does a redraw", JSON.stringify(listing(after.view)) === JSON.stringify(["S1", "S2", "S3", "S4"]) && left(after.view) === "",
     [listing(after.view), left(after.view)]);
   // An answer that moved nothing, and the read after it fails.
   const unread = await pageOf("unread", four("U"), four("V"));

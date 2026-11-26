@@ -599,8 +599,8 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   .track-waiting .track-ico { visibility: visible; }
   .track-waiting .track-mark::after { content: none; }
 }
-.track-unplayable .track-title { cursor: default; color: var(--fg-muted); }
-.track-unplayable .track-title:hover { color: var(--fg-muted); }
+.track-unplayable .track-title, .track-title[aria-disabled="true"] { cursor: default; color: var(--fg-muted); }
+.track-unplayable .track-title:hover, .track-title[aria-disabled="true"]:hover { color: var(--fg-muted); }
 .track-meta, .track-dur, .track-size { color: var(--fg-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 
 /* Per-track variant marks. Small enough to scan down a column without
