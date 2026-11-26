@@ -216,8 +216,9 @@ libraryName: "My Music Library"
 
 # tailscale: how the bridge uses Tailscale. mode: cli asks the host's
 #   tailscale for status and *.ts.net certificates, tsnet runs a tailnet
-#   node inside the bridge, and disabled uses neither. With no mode, a
-#   loopback install uses cli and a public one disabled.
+#   node inside the bridge, and disabled uses neither. With no mode set, it
+#   is disabled where this file sets deployment.mode: public, and cli
+#   otherwise (BRIDGE_DEPLOYMENT_MODE does not change it).
 #   uploadDiagnosticLogs: true lets that embedded node (tsnet mode) upload
 #   Tailscale's diagnostic logs to Tailscale. Absent or false, the default,
 #   the bridge sets TS_NO_LOGS_NO_SUPPORT=true for the node, which then
