@@ -64,20 +64,30 @@ libraryName: "My Music Library"
 #   no resampling, software volume or normalization setting, and there will
 #   not be; mixer takes {type: none} alone in this release. The player's
 #   UUID is kept in <dataDir>/player-uuid.
-#   DSD is no setting of this file: the player decides it for its DAC by
-#   its DSD state, <dataDir>/player-dsd.json, which keeps each DAC's choice
-#   as the 1-bit app writes it (PUT /v1/outputs/{id}/dsd, for the DAC the
-#   player is bound to, while the player is stopped). A fresh install's
-#   state holds the default mode auto, which a DAC with no choice of its
-#   own takes; under auto each DSD rate plays natively, as DoP or converted
-#   to PCM, or is refused, by the DAC's USB identity, the DSD formats it
-#   offers, a listener's answers, the evidence of its DoP, its gain and the
-#   PCM it takes for a conversion. dsdMode, allowDoP and dsdQualification
-#   are legacy keys, read only to migrate an older config: each start of
-#   bridge serve warns of each one set, and its player migrates them once
-#   into that state, for its playback. The exception is the owner's
-#   qualification report (bridge output play --report, see
-#   ops/b470-native-qualification.md), which still reads all three.
+#   A running bridge serve player decides DSD playback for its DAC from
+#   its DSD state, <dataDir>/player-dsd.json, by its effective DSD policy.
+#   The state keeps each DAC's choice as the 1-bit app writes it
+#   (PUT /v1/outputs/{id}/dsd, for the DAC the player is bound to, while
+#   the player is stopped). The console's Player page has no control for
+#   changing the DAC's DSD choice. A fresh install's state holds the
+#   default mode auto, which a DAC with no choice of its own takes; under
+#   auto each DSD rate plays natively, as DoP or converted to PCM, or is
+#   refused, by the DAC's USB identity, the DSD formats it offers, a
+#   listener's answers, the evidence of its DoP, its gain and the PCM it
+#   takes for a conversion. A choice the app writes may also set a maximum
+#   rate (none by default, and 0 is none): under auto a DSD64, DSD128 or
+#   DSD256 rate above it is converted to PCM, even one the DAC takes
+#   natively or as DoP, or refused where the DAC takes no conversion
+#   target; a rate at the maximum may still play natively or as DoP.
+#   dsdMode, allowDoP and dsdQualification are legacy keys, which reach
+#   that state only through a migration: each start of bridge serve warns
+#   of each one set, the player on or off, and the player's start migrates
+#   them into the state once (an explicit dsdMode: off, or dop without
+#   allowDoP: true, becomes its default mode off), the part for a DAC
+#   waiting until the binding resolves to one. A plain bridge output play
+#   migrates them into a state of its own; its qualification report
+#   (bridge output play --report, see ops/b470-native-qualification.md)
+#   reads all three as they are.
 #   openhome: true puts the player on the LAN as an OpenHome renderer that
 #   the 1-bit app lists and casts to (off by default; the console's Player
 #   page has a switch for it): a listener of its own on each LAN address on
