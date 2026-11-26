@@ -257,6 +257,8 @@ const RAIL_LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 const RAIL_NAMES = { letters: "Jump to letter", years: "Jump to year", dates: "Jump to date added" };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const SCRUBS = new Set(["touch", "pen"]);
+// A rail no list asks about stays live.
+const ALWAYS_LIVE = () => true;
 // How long a scrub's lift owes the click its tap makes to the scrub: WebKit
 // fires a tap's click within milliseconds of its pointerup, and a lift the
 // browser gives no click owes it no longer than this.
@@ -305,7 +307,7 @@ function railEntries(kind, buckets, now) {
   return RAIL_LETTERS.map((l) => ({ label: l, words: l, buckets: byKey.has(l) ? [byKey.get(l)] : [] }));
 }
 
-export function indexRail(buckets, onJump, kind = "letters", { live = () => true, lift = null } = {}) {
+export function indexRail(buckets, onJump, kind = "letters", { live = ALWAYS_LIVE, lift = null } = {}) {
   if (!Array.isArray(buckets) || buckets.length === 0) return null;
   if (listening !== document) {
     listening = document;
