@@ -4,8 +4,8 @@
 
 At the base (`8ef04ab3`, B1021 PR 1 merged), in WebKit and in its code:
 
-1. With the bridge's player chosen the bar painted no cover, the owner's report: a DSD64 track
-   playing on a laptop, the bar's square empty while the album page showed the cover. In this
+1. With the bridge's player chosen the bar painted no cover: a DSD64 track playing on a laptop,
+   the bar's square empty while the album page showed the cover. In this
    browser, once it took the bridge's queue, the bar painted the queue's one cover: handed a
    FLAC album after playing another, it showed the other album's cover, after the take and
    after a reload, and handed an album with no cover, the same.
@@ -222,6 +222,84 @@ every number of the bridge's output below is of that simulated state.
 - **The strip and the menu:** up to 768px the section strip fades at its trailing edge; the
   menu's lines read at 12.5px up to 640px.
 
+### A cover that fails and comes back, the floors on every control, and a touch laptop's short bar
+
+Read and measured again at `9dbec301`, after the commits above:
+
+1. **A cover that failed stayed refused.** The painter kept the failed URL until another
+   failed, so a cover that failed, then another album's, then the first with its answers back
+   showed the mark and asked for nothing (in WebKit, the first cover's requests failing until
+   the bar had shown the second: no request for it once back on it). The painter forgets a
+   failure once the bar has moved to another cover, an album's with none included, and asks
+   for the failed one again when it comes back to it; no cover between (no track, a row not
+   read yet) is no move, so the failure holds across it. In WebKit after: asked for again, and
+   loaded.
+2. **An entry the catalog no longer holds.** With the bridge's player chosen, a heard entry
+   whose queue row holds no track drew an empty square, as a row not read yet does; it draws
+   the mark. In this browser a handover leaves such entries out (`handoverOf`), so after a
+   switch the cover is the next survivor's own, the mark for one whose album has none, and an
+   empty strip where none survives, never the queue's: a case pins it, green before the change
+   and after.
+3. **The floors on every control a coarse floor reaches, side by side**, by touch at 390, 834
+   and 1194px and on the simulated hybrid below: a one-letter crumb was 10px wide and a
+   trail's wrapped rows 0px apart; the UPnP page's Rescan, Edit and Remove 6.4px apart; the
+   library page's row of actions a space's 4.3px apart, its buttons touching once wrapped at
+   390px. A crumb takes 44px with its words at its middle (a longer one keeps its width), the
+   wrapped rows 8px, and every `div.row-actions` (the library page's, the upload page's, two
+   dialogs') and the UPnP actions 8px. The extras' 8px, a queue entry's Remove's 8px and the
+   Player page's DAC rows (31px apart) held already.
+4. **A touch laptop's short bar.** A pointer that hovers keeps the volume from 769px, and a
+   short window under a coarse pointer put the extras beside the words: at 769×390 and
+   1024×390, with the bridge's player chosen, 240px of extras laid the cover over Previous.
+   WebKit gives no context both coarse and hovering (a touch context reads `(hover: none)`, a
+   mouse's `(any-pointer: fine)`), so the hybrid is simulated: a mouse's context served the
+   stylesheets with `(any-pointer: coarse)` read as `(any-pointer: fine)`, `(hover: hover)`
+   matching as it does, the coarse floor read back from a bar button (44px). A short window's
+   two rows take two columns, the words beside the transport and the times beside the
+   extras: nothing overlaps, and the words have 179 and 170px there (simulated), 207 and 198px
+   by touch (43 and 34px before), 282px at 844×390 by touch (118px); the bar is 118px tall in
+   a short window (92px). With the times across a third column, as first tried, the
+   transport's column took their width and the words kept 65px, so the pin changed before the
+   fix (`93b6b816`). The tall template is the common rule's and the short window's the one
+   override after it, so no window height falls between two blocks, as 500.5px did.
+5. **The volume's height.** Where it shows under a coarse pointer it was 84×16px at 834 and
+   1194px (simulated hybrid); it is 44px tall, its 4px track at its middle. Disabled with the
+   bridge's player chosen it kept a live slider's look (opacity 1, a pointer cursor) and is
+   dimmed as the seek is.
+6. **Hover.** No hover rule of app.css is this change's; its older ones (a button's, the
+   gear's, the shell's navigation, the tabs, a table's rows, a card's) stay outside
+   `(hover: hover)`, the operator pages' and the shell's, and the rules' line names the hover
+   paints it holds to it, the bar's, its panels', the sections' and the crumbs'.
+7. **The records.** The moved entry's long form names its PR alone (#1068), and the tray rule
+   by its words where "the next bullet" pointed at nothing in its new file; its line and long
+   form agree in their title and bold sentences (`verify_moves.py`, an `--edit` naming each
+   changed block). The log and the cover's long form state the defect alone, and the touch long form
+   names the tablet by its size.
+
+This browser's disabled seek (its track's length unknown, the element's duration made
+Infinity in the page, simulated), tapped at its centre at 834, 1194 and 844×390 by touch and at
+1280 by mouse, fired no click and sent nothing, before and after.
+
+Tests: `TestACoverThatFailedIsAskedForAgainOnceTheBarHasShownAnother` 3 checks,
+`TestThisBrowserAsksAgainForACoverThatFailedOnceItHasShownAnother` 3,
+`TestTheBridgesEntryTheCatalogNoLongerHoldsShowsTheMark` 1 and
+`TestASwitchToThisBrowserShowsTheCoverOfTheTrackThatSurvives` 3 (a real switch from a queue
+with its own cover); `TestAHandedOverAlbumWithNoCoverKeepsTheMarkAfterAReload` reloads over
+what the take stored, where it seeded the value (2); the route's test gives one track of two
+the cover and the album a stored version after the upsert (`SetArtworkVersionAndBumpIndex`,
+one row), required in the detail and in every answer; `TestTheVolumeTakesAFingerAndLooksDisabledWhileItIs`,
+and `TestEveryControlTakesAFingerWhereACoarsePointerIs` and `TestTheBarTakesRowsForAFingerFrom641px`
+extended. The harness: 194 cases. Red first at `7fd5c47b`, over `9dbec301`'s production: each
+output's retry 1 check, the gone entry 1, the pins 7, 3 and 2 assertions; the route's test, the
+reload's case and the survivors' case green there. Controls, 15 of 15 as predicted at
+`b245aff9`, each red where predicted alone: the failure kept; the failure dropped at no cover
+too; the gone entry an empty square; the queue's cover over the row's (the survivors', the
+take's and the reload's cases); the stored queue dropping its rows' cover (the reload's case,
+which the seeded case could not show); the version left out of the fill; the crumb's width, the
+trail's row gap, the UPnP gap, the row of actions, the volume's height and its disabled look
+each taken out; the short window's extras beside the words again, its rows across three
+columns, and the tall template in a block of its own again.
+
 ### Runs
 
 On `e6361043`, in one session of the shared build lock: formatting with go.mod's toolchain, no
@@ -244,7 +322,11 @@ it the docs' check and the citation guard ran again.
 
 ### Left open
 
-- No real iPhone, iPad or touch laptop was used: WebKit emulating touch is what was measured.
+- No real phone, tablet or touch laptop was used: WebKit emulating touch is what was measured,
+  and it gives no context both coarse and hovering, so a touch laptop's numbers are simulated
+  (the section on a cover that fails and comes back, above).
+- Rows stacked one over another keep their gaps: from 769px the player's sections stand 2px
+  apart in their column, and Settings' disclosure row sits on its first switch's row.
 - The touch seek, the tablet's 16px seek included, is an item of its own.
 - This browser keeps one cover for a queue it builds itself (an album added to the queue, a
   queue added after Stop, favorites), and the lock screen's artwork is audio.js's: both left
