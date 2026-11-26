@@ -17,6 +17,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
@@ -494,10 +495,13 @@ func (c *consolePlayer) name(ctx context.Context, t engine.Track) (consoleNamed,
 }
 
 // transports is each transport's standing on the running player's DAC: what
-// it plays now, from the three facts it rests on (the DAC's altsets, the mode
-// the player runs with, and the backend's published epoch of approved
-// tuples), never one of them alone, and only while the player's output takes
-// playback (outputOpen).
+// it plays now, from the three facts it rests on (the DAC's altsets, the DSD
+// choice GET /v1/outputs publishes for the bound DAC, and the backend's
+// published set: its native and DoP tuples, and the rates it converts to PCM,
+// which a row of their own lists with the PCM each becomes), never one of
+// them alone, and only while the player's output takes playback (outputOpen).
+// The boot snapshot's legacy DSD keys decide nothing since B728's cutover,
+// and the table reads none of them (B1029).
 func (c *consolePlayer) transports(run admin.PlayerRunning, facts api.BridgeOutputFacts, snap *engine.Snapshot) []admin.PlayerTransport {
 	running := snap != nil
 	open, closedBy := outputOpen(run, snap)
@@ -512,15 +516,30 @@ func (c *consolePlayer) transports(run admin.PlayerRunning, facts api.BridgeOutp
 		}
 		return "no"
 	}
-	// The legacy keys as the boot snapshot holds them, the page's words until
-	// B728's B13 gives it the bound DAC's choice: GET /v1/outputs' dsdMode and
-	// allowDoP describe that choice since B8, which this line does not say.
-	mode := c.bootDSDMode()
-	allowDoP := c.bootAllowDoP()
-	pcm := admin.PlayerTransport{Kind: "pcm", Plays: open, Approved: []string{}, Mode: "always on: PCM needs no approval",
+	choice := dsdChoiceText(facts)
+	dopChoice := choice
+	switch {
+	case !facts.Listed:
+	case facts.AllowDoP:
+		dopChoice += "; DoP allowed"
+	default:
+		dopChoice += "; DoP not allowed"
+	}
+	pcm := admin.PlayerTransport{Kind: "pcm", Plays: open, Rates: []string{"every rate the DAC takes"}, Mode: "always on: no DSD choice applies to it",
 		Note: "PCM plays bit-exact, as the file holds it: nothing is resampled, converted or mixed."}
-	dop := admin.PlayerTransport{Kind: "dop", Approved: []string{}, Mode: "dsdMode " + mode + ", allowDoP " + fmt.Sprint(allowDoP)}
-	native := admin.PlayerTransport{Kind: "native", Approved: []string{}, Mode: "dsdMode " + mode}
+	dop := admin.PlayerTransport{Kind: "dop", Rates: []string{}, Mode: dopChoice}
+	native := admin.PlayerTransport{Kind: "native", Rates: []string{}, Mode: choice}
+	// What the DAC takes for a conversion is the convert option the bound
+	// DAC's read side publishes: a PCM target its altsets take.
+	conv := admin.PlayerTransport{Kind: "converted", Rates: []string{}, Mode: choice, Capable: "unknown"}
+	if d := facts.DSDDAC; d != nil {
+		conv.Capable = "no"
+		for _, o := range d.Options {
+			if o.Mode == dsdstate.ModeConvert && o.Offered {
+				conv.Capable = "yes"
+			}
+		}
+	}
 	if known {
 		pcm.Capable = capable(dac.MaxPCMRate > 0)
 		deep := false
@@ -532,22 +551,28 @@ func (c *consolePlayer) transports(run admin.PlayerRunning, facts api.BridgeOutp
 	} else {
 		pcm.Capable, dop.Capable, native.Capable = "unknown", "unknown", "unknown"
 	}
-	dop.Note = "DoP travels in 24-bit PCM at 176.4 kHz or more; whether the DAC decodes it is what an owner's listening qualification establishes."
+	dop.Note = "DoP travels in 24-bit PCM at 176.4 kHz or more; the player sends it where the DAC's profile says the DAC takes it or its owner confirmed it, " +
+		"and only while no control on the DAC's playback path changes the samples."
 	native.Note = "Native DSD is the DAC's own DSD format, at the rates its altsets list."
+	conv.Note = "The player converts these DSD rates to the PCM each names: what the DAC receives is not bit-exact."
 	if p := facts.DSDPlayback; running && p != nil {
 		for _, t := range p.Tuples {
 			if t.Transport == "dop" {
-				dop.Approved = append(dop.Approved, dsdTupleText(t))
+				dop.Rates = append(dop.Rates, dsdTupleText(t))
 			} else {
-				native.Approved = append(native.Approved, dsdTupleText(t))
+				native.Rates = append(native.Rates, dsdTupleText(t))
 			}
 		}
-		if len(p.Tuples) == 0 && p.Reason != "" {
-			dop.Note += " No approval is in force (" + p.Reason + ")."
-			native.Note += " No approval is in force (" + p.Reason + ")."
+		for _, r := range p.Converted {
+			conv.Rates = append(conv.Rates, fmt.Sprintf("%s to %g kHz %d-bit PCM", dsdRateName(r.BitRate), float64(r.RateHz)/1000, r.ValidBits))
+		}
+		if len(p.Tuples)+len(p.Converted) == 0 && p.Reason != "" {
+			for _, t := range []*admin.PlayerTransport{&dop, &native, &conv} {
+				t.Note += " No DSD rate plays now (" + p.Reason + ")."
+			}
 		}
 	}
-	dop.Plays, native.Plays = open && len(dop.Approved) > 0, open && len(native.Approved) > 0
+	dop.Plays, native.Plays, conv.Plays = open && len(dop.Rates) > 0, open && len(native.Rates) > 0, open && len(conv.Rates) > 0
 	prefix := ""
 	switch {
 	case !running:
@@ -555,10 +580,31 @@ func (c *consolePlayer) transports(run admin.PlayerRunning, facts api.BridgeOutp
 	case !open:
 		prefix = "The player's output is not available now (" + closedBy + "), so nothing plays. "
 	}
-	for _, t := range []*admin.PlayerTransport{&pcm, &dop, &native} {
+	for _, t := range []*admin.PlayerTransport{&pcm, &dop, &native, &conv} {
 		t.Note = prefix + t.Note
 	}
-	return []admin.PlayerTransport{pcm, dop, native}
+	return []admin.PlayerTransport{pcm, dop, native, conv}
+}
+
+// dsdChoiceText is the DSD choice that applies to the bound DAC as GET
+// /v1/outputs publishes it: its dsdMode and, from its dsdDAC, the choice's
+// cap and whether the choice is the DAC's own or the bridge's default; none
+// published for a player it does not list.
+func dsdChoiceText(f api.BridgeOutputFacts) string {
+	if !f.Listed {
+		return "none published"
+	}
+	text := f.DSDMode
+	if d := f.DSDDAC; d != nil {
+		if d.Choice.MaxBitRate > 0 {
+			text += " up to " + dsdRateName(d.Choice.MaxBitRate)
+		}
+		if d.Choice.Revision > 0 {
+			return text + ", this DAC's own choice"
+		}
+		text += ", the bridge's default"
+	}
+	return text
 }
 
 // outputOpen reports whether the running player's output takes playback now,
@@ -585,28 +631,20 @@ func outputOpen(run admin.PlayerRunning, snap *engine.Snapshot) (bool, string) {
 	return true, ""
 }
 
-// bootDSDMode and bootAllowDoP are the boot snapshot's DSD settings, which
-// the player runs with.
-func (c *consolePlayer) bootDSDMode() string {
-	if c.view != nil {
-		return c.view.bootDSDMode
-	}
-	return "off"
-}
-
-func (c *consolePlayer) bootAllowDoP() bool { return c.view != nil && c.view.bootAllowDoP }
-
-// dsdTupleText words an approved tuple for the page: its rate by the DSD
+// dsdTupleText words a published tuple for the page: its rate by the DSD
 // family's name, and its format.
-func dsdTupleText(t api.OutputDSDTuple) string {
-	name := fmt.Sprintf("%d bit/s", t.BitRate)
+func dsdTupleText(t api.OutputDSDTuple) string { return dsdRateName(t.BitRate) + " " + t.Format }
+
+// dsdRateName names a DSD rate by its family's name, the 48 kHz family said
+// so, and any other rate in bit/s.
+func dsdRateName(bitRate int) string {
 	switch {
-	case t.BitRate > 0 && t.BitRate%44100 == 0:
-		name = fmt.Sprintf("DSD%d", t.BitRate/44100)
-	case t.BitRate > 0 && t.BitRate%48000 == 0:
-		name = fmt.Sprintf("DSD%d (48 kHz family)", t.BitRate/48000)
+	case bitRate > 0 && bitRate%44100 == 0:
+		return fmt.Sprintf("DSD%d", bitRate/44100)
+	case bitRate > 0 && bitRate%48000 == 0:
+		return fmt.Sprintf("DSD%d (48 kHz family)", bitRate/48000)
 	}
-	return name + " " + t.Format
+	return fmt.Sprintf("%d bit/s", bitRate)
 }
 
 // playerSignalView is what the DAC receives, from the backend's observation.
