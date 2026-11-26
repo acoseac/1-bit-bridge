@@ -214,9 +214,10 @@ libraryName: "My Music Library"
 # autocert:
 #   domain: bridge.example.com
 
-# tailscale: how the bridge uses Tailscale. mode: cli (the default) asks the
-#   host's tailscale for status and *.ts.net certificates, tsnet runs a
-#   tailnet node inside the bridge, and disabled uses neither.
+# tailscale: how the bridge uses Tailscale. mode: cli asks the host's
+#   tailscale for status and *.ts.net certificates, tsnet runs a tailnet
+#   node inside the bridge, and disabled uses neither. With no mode, a
+#   loopback install uses cli and a public one disabled.
 #   uploadDiagnosticLogs: true lets that embedded node (tsnet mode) upload
 #   Tailscale's diagnostic logs to Tailscale. Absent or false, the default,
 #   the bridge sets TS_NO_LOGS_NO_SUPPORT=true for the node, which then
