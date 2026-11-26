@@ -2,7 +2,7 @@
 
 ### What
 
-The owner's reports, read at the base (`c2306c2a`, PR 3a merged over main `a23aab63`):
+The reports, read at the base (`c2306c2a`, PR 3a merged over main `a23aab63`):
 
 - **The default sort had no rail.** Albums opens on Recently Added; `albumBuckets` answered no
   buckets for Recently Added or Year, and the DTO's comment called that absence the client's sign
@@ -121,7 +121,7 @@ The owner's reports, read at the base (`c2306c2a`, PR 3a merged over main `a23aa
   scrubbing, a mouse keeping PR 1's click; short windows on PR 1's grid with the scrub across it;
   years outside 1000-9999 under `?`; the callout's words alone.
 - **The iOS app's index rules** are taken from the premise check's reading of them (the app's
-  `library-lists.md` and its index views), which this host has no copy of.
+  `library-lists.md` and its index views), of which no copy was at hand.
 
 ### Tests
 
