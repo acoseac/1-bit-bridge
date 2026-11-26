@@ -3,7 +3,8 @@
 Run `bridge backup --config /path/to/bridge.yaml` to capture the library
 database, pairing tokens, TLS pair, configuration, console account, harvest
 state and player identity with its counter floor, when present. A running
-service can be backed up. Protect snapshots: they contain credentials.
+service can be backed up. Protect snapshots: they contain credentials. Each
+run then prunes older snapshots by the configuration's retention (below).
 
 ## Verified snapshots
 
@@ -201,8 +202,17 @@ must not add a snapshot at every start. A bridge that keeps
 restarting before its check ends keeps one snapshot, not
 one per start, and the first start that lasts long enough verifies it.
 
-With retention on (`backup.keep` above 0), the prune after each snapshot
-keeps the `keep` newest, and beside them, even when older: the newest
+Retention is the configuration's `backup.keep`, or `BRIDGE_BACKUP_KEEP`
+where that variable is set, which overrides the file. The scheduled
+snapshots, the console's and `bridge backup` all prune by it. A `keep` of
+`-1` (any negative value) turns retention off; `0`, or no `keep` at all, is
+the default, 7. `bridge backup --keep N` overrides both for that run, and
+there `0` or less turns retention off. Before 0.2.4, `bridge backup` without
+`--keep` kept 7 whatever the configuration said: before an upgrade, run the
+older version's `bridge backup` with `--keep 0`, which keeps every snapshot.
+
+With retention on, the prune after each snapshot keeps the `keep` newest,
+and beside them, even when older: the newest
 snapshot whose database is `VERIFIED`; while none is, the newest one taken
 by an earlier version; the newest whose database check `FAILED` or did not
 finish, as evidence, one at most; and every snapshot whose check is still to

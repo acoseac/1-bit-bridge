@@ -2775,8 +2775,11 @@ func (l LibraryWatchConfig) EffectiveDebounceSeconds() int {
 
 // BackupConfig configures the periodic state-snapshot ticker that
 // `bridge serve` runs alongside the manifest scanner. The CLI
-// `bridge backup` / `bridge restore` work regardless of this section
-// — these knobs only govern the in-process automatic schedule.
+// `bridge backup` / `bridge restore` work regardless of this section.
+// IntervalHours governs the in-process automatic schedule alone; Keep is
+// the retention every snapshot's prune applies: the ticker's, the
+// console's, and `bridge backup`'s unless its --keep is given (backlog
+// B1035).
 //
 // Default state (section absent): IntervalHours=24, Keep=7 (one
 // snapshot per day, a week retained). Setting `intervalHours: 0`
@@ -2795,10 +2798,11 @@ type BackupConfig struct {
 	IntervalHours *int `yaml:"intervalHours,omitempty"`
 
 	// Keep is the maximum number of snapshots to retain after a
-	// rotation. Older snapshots beyond this count are deleted on each
-	// periodic snapshot. A NEGATIVE value (e.g. `keep: -1`) disables
-	// pruning — the operator manages backup-disk usage by hand in that
-	// case (a negative value won't trip Validate).
+	// rotation. Older snapshots beyond this count are deleted after each
+	// snapshot (bridge backup's --keep, where given, in its place). A
+	// NEGATIVE value (e.g. `keep: -1`) disables pruning — the operator
+	// manages backup-disk usage by hand in that case (a negative value
+	// won't trip Validate).
 	//
 	// Zero or an omitted `backup` section BOTH fall back to
 	// DefaultBackupKeep: `keep,omitempty` can't distinguish "absent" from
@@ -2818,9 +2822,9 @@ func (b BackupConfig) EffectiveIntervalHours() int {
 	return *b.IntervalHours
 }
 
-// EffectiveKeep returns the rotation count to apply on each
-// periodic snapshot. Mirrors EffectiveIntervalHours so call sites
-// have one helper per field.
+// EffectiveKeep returns the rotation count to apply after each
+// snapshot, `bridge backup`'s without --keep included. Mirrors
+// EffectiveIntervalHours so call sites have one helper per field.
 func (b BackupConfig) EffectiveKeep() int {
 	if b.Keep == 0 {
 		return DefaultBackupKeep
@@ -4188,10 +4192,10 @@ func (c *Config) validate(warn bool) error {
 	if c.Integrity.VariantSweepMaxDeletePercent != nil && (*c.Integrity.VariantSweepMaxDeletePercent < 0 || *c.Integrity.VariantSweepMaxDeletePercent > 100) {
 		return fmt.Errorf("integrity.variantSweepMaxDeletePercent: must be between 0 and 100 (100 disables the guard, omit for default %d)", DefaultVariantSweepMaxDeletePercent)
 	}
-	// backup.Keep: any non-positive value disables pruning. No
-	// upper-bound check — an operator who wants 1000 retained
-	// snapshots is making a disk-space choice we don't second-
-	// guess.
+	// backup.Keep: a negative value disables pruning, and 0 is the
+	// default (EffectiveKeep). No upper-bound check — an operator who
+	// wants 1000 retained snapshots is making a disk-space choice we
+	// don't second-guess.
 
 	// CustomEndpoints is deliberately NOT checked here. It is
 	// prune-and-warn, never fatal (ValidateCustomEndpoints returns
