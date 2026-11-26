@@ -26,4 +26,4 @@ On 174caa63, in one session of the shared build lock: formatting (no file rewrit
 
 ### What stays open
 
-The bolded rule of the console view's line in `.claude/rules/cli-serve.md` names neither the boot keys nor the converted row; its long form in `ops/History-rules-cli-serve.md` says what the table reads now. `internal/config/player.go` still says, in `EffectiveDSDMode`'s doc, that it is what GET /v1/outputs publishes as the player's dsdMode (242 to 244), as B1028's entry says. And the tone case's one failure under the full suite (Runs) is a case of its own.
+The console view's line in `.claude/rules/cli-serve.md` and its long form in `ops/History-rules-cli-serve.md` now carry one bolded rule, which names the choice GET /v1/outputs publishes and the converted row's own place (the commit after this entry's). `internal/config/player.go` still says, in `EffectiveDSDMode`'s doc, that it is what GET /v1/outputs publishes as the player's dsdMode (242 to 244), as B1028's entry says. And the tone case's one failure under the full suite (Runs) is a case of its own.
