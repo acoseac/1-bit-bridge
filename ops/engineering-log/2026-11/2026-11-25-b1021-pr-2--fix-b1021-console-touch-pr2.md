@@ -272,8 +272,8 @@ Read and measured again at `9dbec301`, after the commits above:
    paints it holds to it, the bar's, its panels', the sections' and the crumbs'.
 7. **The records.** The moved entry's long form names its PR alone (#1068), and the tray rule
    by its words where "the next bullet" pointed at nothing in its new file; its line and long
-   form agree in their title and bold sentences (`verify_moves.py`, an `--edit` naming each
-   changed block). The log and the cover's long form state the defect alone, and the touch long form
+   form agree in their title and bold sentences, each changed block shown an edit of its own
+   with nothing else moved or lost. The log and the cover's long form state the defect alone, and the touch long form
    names the tablet by its size.
 
 This browser's disabled seek (its track's length unknown, the element's duration made
@@ -299,6 +299,44 @@ which the seeded case could not show); the version left out of the fill; the cru
 trail's row gap, the UPnP gap, the row of actions, the volume's height and its disabled look
 each taken out; the short window's extras beside the words again, its rows across three
 columns, and the tall template in a block of its own again.
+
+### A table cell's actions, the volume in two states, and four small fixes
+
+Read and measured again at `79e655cb`:
+
+1. **A table cell's actions.** The Paired Devices page's Rotate, Expiry and Revoke sit in a
+   table cell (`td.row-actions`), which the phone's column spaces (8px) up to 640px alone: from
+   641px under a coarse pointer their 143px column stacked them 0px apart, at 769 and 1194px by
+   touch, and a column widened to hold the three in a row put them a space's 4px apart. Margins
+   from 641px under a coarse pointer now hold them 8px apart stacked and 12px side by side; the
+   cell stays a table cell, its row's cells ending at one border beside a name on two lines, the
+   row 24px taller; at 640px the phone's column (520px buttons 8px apart) and a mouse at 1194px
+   measure as before. The other action cells hold one button or none (the library's roots, and
+   the jobs' batches, which app.js builds) and keep their geometry: the rules touch only a cell
+   of two buttons or more.
+2. **The volume in two states**, in WebKit, the hybrid simulated: with this browser playing and
+   the slider focused from the keyboard (`:focus-visible`), its ring (2px at 3px) paints whole,
+   5px inside the bar's clip at its top, and the thumb over its 4px track sits at the middle of
+   the 44px box to half a pixel, at 834 and 1194px; with the bridge's output chosen it is
+   disabled, at opacity 0.35 with the default cursor. Firefox could not run here: its build
+   needs GTK3 and X11 libraries this host lacks, which only root can install, so its range
+   styling (`::-moz-range-track`) is not measured.
+3. **Four small fixes.** The touch long form labels its hybrid numbers as simulated and gives
+   the simulated widths beside the touch ones. The rows pin reads each property's declarations
+   on `.npbar` in the two coarse blocks in source order, one in the template's block, then one
+   in the short window's, where it compared the blocks' first places alone, so a second copy of
+   the template's columns or areas after the short block, which the cascade would take, goes
+   red. The trackless entry's case paints a covered entry first, then hears the trackless one,
+   the queue's revision unchanged, and counts the square's images and links. And this record
+   states a check's result without naming its script.
+
+Tests and controls: red first at `79a7c6f7`, over `79e655cb`'s production, the table cell's
+pin (its block absent); the rows pin and the trackless case green there, pinning what holds.
+Controls, 7 of 7 as predicted at `4507d0a3`: either margin taken out, or the cell made a flex
+row (the touch pin); the template's columns, or its areas, again after the short window's
+block (the rows pin); a square that keeps what it held once its image goes (seven cover cases,
+the trackless one among them, which from an empty square could not show it); and the trackless
+entry drawn as an empty square.
 
 ### Runs
 
@@ -337,6 +375,9 @@ paragraph the docs' check and the citation guard ran again.
   (the section on a cover that fails and comes back, above).
 - Rows stacked one over another keep their gaps: from 769px the player's sections stand 2px
   apart in their column, and Settings' disclosure row sits on its first switch's row.
+- In a short window under a coarse pointer the empty strip in this browser gives Output a row of
+  its own under its words: left to a later item.
+- Firefox's range styling for the volume is not measured: its build does not run on this host.
 - The touch seek, the tablet's 16px seek included, is an item of its own.
 - This browser keeps one cover for a queue it builds itself (an album added to the queue, a
   queue added after Stop, favorites), and the lock screen's artwork is audio.js's: both left
