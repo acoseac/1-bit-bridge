@@ -222,6 +222,26 @@ every number of the bridge's output below is of that simulated state.
 - **The strip and the menu:** up to 768px the section strip fades at its trailing edge; the
   menu's lines read at 12.5px up to 640px.
 
+### Runs
+
+On `e6361043`, in one session of the shared build lock: formatting with go.mod's toolchain, no
+file rewritten; vet, and vet with the release tags for the six release targets and for
+linux/386 and linux/arm, all clean; the whole race-enabled suite, ok (93 packages, `cmd/bridge`
+in 1,977 s, `internal/manifest` in 1,625 s and `internal/admin` in 1,494 s, 2,124 s in all);
+the cross-builds of the six targets; the docs' check; the source guards by name, the console's
+seven (`TestPlayerEmittedClassesAreStyled`, `TestPlayerCSSDoesNotHijackOperatorTableClasses`,
+`TestTrackSubgridColumnsMatchTheRow`, `TestNoConsoleControlDisablesItselfOutsideSetDisabled`,
+`TestEveryPlayerControlStateFieldIsRenderedSomewhere`,
+`TestThePhoneBarKeepsItsWordsWithTheBridgeChosen` and
+`TestEveryNodeLookupOfTheOutputsTestsIsBarNode`) and cmd/bridge's four
+(`TestNoDocblockNamesAnotherDeclaration`, `TestEveryCitedTestNameExists`, `TestNoBlankKeepers`
+and `TestEveryBackgroundGoroutineDrainsOnCleanup`), all passing; the harness's 189 scenarios,
+every one passing; and the bar's Go tests (the 190 of `player_output_bar_test.go`,
+`player_touch_layout_test.go`'s, the new pins and the route's test, 206 in all) under the race
+detector ten times idle, ok in 267 s, and ten times beside four busy processes, ok in 234 s.
+These ran with this section not yet written, the code as it ships; on the commit that carries
+it the docs' check and the citation guard ran again.
+
 ### Left open
 
 - No real iPhone, iPad or touch laptop was used: WebKit emulating touch is what was measured.
