@@ -57,8 +57,8 @@ before:
     # clone without tags, contradicting the release_meta.go contract
     # that version equals the release tag sans leading `v`.
     - sh -c 'printf "{\"version\":\"{{ .Version }}\",\"minClientVersion\":\"%s\",\"protocolVersion\":1}\n" "${MIN_CLIENT_VERSION:-0.0.0}" > release-meta.json'
-    # The one-line installer (curl -fsSL https://1-bit.app/install.sh | sh,
-    # which 1-bit.app redirects to releases/latest/download/install.sh),
+    # The one-line installer (curl -fsSL https://1-bit.swiss/install.sh | sh,
+    # which 1-bit.swiss redirects to releases/latest/download/install.sh),
     # stamped with this release's version so that every download it makes
     # comes from this release's own tag, never `latest`. Written to the repo
     # root (gitignored) for the reason release-meta.json is; attached by

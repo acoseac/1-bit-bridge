@@ -1,5 +1,13 @@
 # 1-bit-bridge sample config. Copy to bridge.yaml and edit for your machine.
 #
+# Going back to 0.2.3 or earlier: five keys below are new in 0.2.4, and an
+# earlier bridge refuses a file that holds any of them, whatever its value,
+# and does not start, so an update's automatic rollback to one is not made:
+# adminLANAddress, enrich.enabled, enrich.deezerEnabled, update.checkEnabled
+# and tailscale.uploadDiagnosticLogs. Remove each one you set before you go
+# back. Their BRIDGE_ variables cost no rollback: an earlier version ignores
+# them, and what they set does not hold there.
+#
 # libraryRoots:    absolute paths the server will expose. All client paths are
 #                  resolved relative to one of these; traversal (..) is rejected.
 # listenAddress:   host:port to bind the HTTPS server on. Default :7788.
@@ -206,6 +214,28 @@ libraryName: "My Music Library"
 # autocert:
 #   domain: bridge.example.com
 
+# tailscale: how the bridge uses Tailscale. mode: cli (the default) asks the
+#   host's tailscale for status and *.ts.net certificates, tsnet runs a
+#   tailnet node inside the bridge, and disabled uses neither.
+#   uploadDiagnosticLogs: true lets that embedded node (tsnet mode) upload
+#   Tailscale's diagnostic logs to Tailscale. Absent or false, the default,
+#   the bridge sets TS_NO_LOGS_NO_SUPPORT=true for the node, which then
+#   uploads no diagnostic logs and no network flow logs; a tailnet that
+#   requires them refuses it, and the admin tile says what to change. A
+#   TS_NO_LOGS_NO_SUPPORT=true in the bridge's own environment keeps the
+#   uploads off even with the key set. A change takes a restart of the
+#   bridge's process. Also in the admin console (Settings -> Networking) and
+#   BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS.
+#   uploadDiagnosticLogs is new in 0.2.4: while it is in the file, whatever
+#   its value, bridge 0.2.3 and earlier refuse the file, so an update's
+#   automatic rollback to one of them is not made and one installed by hand
+#   will not start. Delete the line before you go back to one: an earlier
+#   version's tsnet node uploads those logs unless TS_NO_LOGS_NO_SUPPORT=true
+#   is in its environment.
+# tailscale:
+#   mode: tsnet
+#   uploadDiagnosticLogs: true
+
 # enrich: the background enricher, which fills in cover art, MusicBrainz IDs
 #   and artist photos. It sends the artist and album names your files carry
 #   to MusicBrainz, the release IDs it finds to the Cover Art Archive, and
@@ -218,6 +248,13 @@ libraryName: "My Music Library"
 #   BRIDGE_ENRICH_DEEZER_ENABLED. Covers, IDs and photos already fetched stay,
 #   and the bridge still serves them. The Atlas harvest (atlas below), the
 #   update check and certificate renewal are separate, and go on.
+#   enabled and deezerEnabled are new in 0.2.4: while either is in the file,
+#   whatever its value, bridge 0.2.3 and earlier refuse the file, so an
+#   update's automatic rollback to one of them is not made and one installed
+#   by hand will not start. Switch the lookups back on in the console, which
+#   removes the keys, or delete the lines, before you go back to one.
+#   BRIDGE_ENRICH_ENABLED and BRIDGE_ENRICH_DEEZER_ENABLED instead cost no
+#   rollback: earlier versions ignore them, and run the lookups.
 #   musicbrainzBaseURL and coverArtBaseURL say where it looks: both empty by
 #   default (public MusicBrainz + Cover Art Archive). Point them at a
 #   self-hosted Atlas mirror (github.com/acoseac/1-bit-atlas) to keep those two
