@@ -241,7 +241,7 @@ func TestTheDrawerAndThePanelsStayClearOfTheBarAndInTheWindow(t *testing.T) {
 // bar (65px below 1024px, nothing from 1024px) at a fixed height token, the
 // A–Z rail's top below it at every width, the rows' scroll margin all that is
 // pinned over them, and the field a finger's 44px tall with text iOS does not
-// zoom into wherever any pointer is coarse.
+// zoom into wherever any pointer is coarse, a floor no later rule overrides.
 func TestAListsHeadPinsBelowWhatIsPinnedAboveIt(t *testing.T) {
 	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
 	short := playerCSSBlocks(t, "(max-height: 500px)")
@@ -275,6 +275,85 @@ func TestAListsHeadPinsBelowWhatIsPinnedAboveIt(t *testing.T) {
 	if !anyRule(coarse, ".list-filter", "min-height", "44px") || !anyRule(coarse, ".list-filter", "font-size", "16px") {
 		t.Error("where any pointer is coarse the list's filter is not 44px tall with 16px text")
 	}
+	// And the floor wins the cascade there: the last rule that sets each of
+	// the field's two is the coarse one, where the field's shared style (its
+	// 0.9rem, 14.4px), later at the same specificity, overrode it.
+	ordered := cssRulesInOrder(css)
+	for _, floor := range [][2]string{{"min-height", "44px"}, {"font-size", "16px"}} {
+		var last *cssRuleAt
+		for i := range ordered {
+			if ordered[i].selects(".list-filter") && ordered[i].sets(floor[0]) {
+				last = &ordered[i]
+			}
+		}
+		if last == nil || last.media != "(any-pointer: coarse)" || !last.declares(floor[0], floor[1]) {
+			got := "none"
+			if last != nil {
+				got = last.sel + " {" + last.decl + "} in @media " + last.media
+			}
+			t.Errorf("the last rule setting the list filter's %s is not the coarse pointer's %s, which a later rule of the same specificity overrides: %s", floor[0], floor[1], got)
+		}
+	}
+}
+
+// cssRuleAt is a style rule of a stylesheet and the @media query of the
+// innermost block around it ("" outside any).
+type cssRuleAt struct {
+	touchRule
+	media string
+}
+
+// cssRulesInOrder is every style rule of css (comments stripped first), in
+// source order, each with the @media query it is in.
+func cssRulesInOrder(css string) []cssRuleAt {
+	type open struct {
+		prelude string
+		body    int
+	}
+	var (
+		out   []cssRuleAt
+		stack []open
+		from  int
+	)
+	for i := 0; i < len(css); i++ {
+		switch css[i] {
+		case '{':
+			stack = append(stack, open{strings.TrimSpace(css[from:i]), i + 1})
+			from = i + 1
+		case '}':
+			if len(stack) == 0 {
+				from = i + 1
+				continue
+			}
+			r := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if !strings.HasPrefix(r.prelude, "@") {
+				media := ""
+				for j := len(stack) - 1; j >= 0 && media == ""; j-- {
+					if q, ok := strings.CutPrefix(stack[j].prelude, "@media"); ok {
+						media = strings.TrimSpace(q)
+					}
+				}
+				out = append(out, cssRuleAt{touchRule{r.prelude, css[r.body:i]}, media})
+			}
+			from = i + 1
+		case ';':
+			if len(stack) == 0 {
+				from = i + 1
+			}
+		}
+	}
+	return out
+}
+
+// sets reports whether the rule declares prop, whatever its value.
+func (r touchRule) sets(prop string) bool {
+	for _, d := range strings.Split(r.decl, ";") {
+		if k, _, ok := strings.Cut(d, ":"); ok && strings.TrimSpace(k) == prop {
+			return true
+		}
+	}
+	return false
 }
 
 // TestTheRailTakesColumnsWhereTheWindowIsShort pins at the source that where

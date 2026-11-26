@@ -427,8 +427,6 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
  * by: under content-visibility: auto WebKit gave the genres' rows none yet,
  * and their restored place clamped to the window's height. */
 .list-body > .rows { content-visibility: visible; }
-/* A finger's field, and text iOS does not zoom into as it focuses. */
-@media (any-pointer: coarse) { .list-filter { min-height: 44px; font-size: 16px; } }
 
 /* ---- Rows (artists, genres, composers, folders, search) ---- */
 
@@ -1258,6 +1256,10 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   background: var(--bg-panel); color: var(--fg); font: inherit; font-size: 0.9rem;
 }
 .player-search input:focus-visible, .list-filter:focus-visible { outline: none; box-shadow: var(--glow); border-color: var(--accent); }
+/* A list's filter takes a finger's field, and text iOS does not zoom into as
+ * it focuses (B1021): after the rule above, whose 0.9rem (14.4px) won when
+ * this came first at the same specificity. */
+@media (any-pointer: coarse) { .list-filter { min-height: 44px; font-size: 16px; } }
 
 
 /* ---- Shell integration ------------------------------------------------
