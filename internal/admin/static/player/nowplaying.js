@@ -705,9 +705,10 @@ function paintBridgeTrack(o) {
   }
   const entry = o.queue?.entries?.find((e) => e.id === t.entry);
   const albumId = entry?.track?.albumId;
-  // The heard entry's cover, its queue row's (B1021); unknown, an empty
-  // square, until its row is read.
-  paintArt(entry?.track ? { url: coverURL(entry.track, 500), albumId, album: t.album } : null);
+  // The heard entry's cover, its queue row's (B1021): unknown, an empty
+  // square, until its row is read, and the mark where its row holds no
+  // track, the catalog no longer having it.
+  paintArt(entry?.track ? { url: coverURL(entry.track, 500), albumId, album: t.album } : entry ? { url: null } : null);
   const name = t.named ? (t.title || t.path) : (t.path || "A track this library does not name");
   refs.title.appendChild(albumId ? link(`/album/${albumId}`, { text: name }) : document.createTextNode(name));
   refs.sub.textContent = [t.artist, t.album].filter(Boolean).join(" — ");
@@ -729,10 +730,14 @@ function dacDetails(o) {
  * replaced only when its URL changes, so a render that changes nothing keeps
  * it, while the link follows the album whatever the image does: a local cover
  * is named by its bytes, so two albums can share one URL. An image that fails
- * to load gives way to the mark and is not asked for again, unless the bar has
- * moved to another cover since.
+ * to load gives way to the mark and is not asked for again while the bar shows
+ * that cover; once the bar has moved to another, an album's with none
+ * included, the failed one is asked for again when the bar comes back to it.
+ * No cover (no track, a row not read yet) is no move, so a failure holds
+ * across it.
  */
 function paintArt(cover) {
+  if (cover && cover.url !== refs.artFailed) refs.artFailed = null;
   refs.artCover = cover;
   const url = cover?.url && cover.url !== refs.artFailed ? cover.url : null;
   if ((refs.artImg?.getAttribute("src") ?? null) !== url) {

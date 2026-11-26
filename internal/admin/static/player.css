@@ -889,7 +889,9 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 .np-seek:focus-visible, .np-vol:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 3px; border-radius: var(--radius-pill);
 }
-.np-seek:disabled { opacity: .35; cursor: default; }
+/* The volume is disabled with the bridge's player chosen (its level is fixed)
+ * and looked live until B1021's second PR. */
+.np-seek:disabled, .np-vol:disabled { opacity: .35; cursor: default; }
 .np-vol { max-width: 84px; }
 /* iOS Safari ignores audio.volume outright, so a slider there is a control
  * that does nothing. The mute button beside it still works, which is why
@@ -1561,31 +1563,43 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
   .np-queue-title { min-height: 44px; }
   .np-queue-remove { min-width: 44px; min-height: 44px; }
   .player-section, .crumb-link { min-height: 44px; align-content: center; }
+  /* A one-letter crumb is a glyph wide; its words sit at its middle, where a
+   * crumb wider than 44px has no room to move them. A trail's wrapped rows
+   * are 8px apart, as its crumbs side by side are. */
+  .crumb-link { min-width: 44px; text-align: center; }
+  .crumb-list { row-gap: var(--space-2); }
+  /* The volume shows from 769px where a pointer hovers, a touch laptop's
+   * included; its 4px track stays at its middle. */
+  .np-vol { height: 44px; }
 }
 
 /* The bar under a finger from 641px. Its 44px buttons 8px apart do not fit its
  * one row (at 834px the bridge's transport needs 316px of the 265px its column
  * had, and its extras ran over the transport), nor the two rows of 641-768px
  * with room left for the words: its centre's transport and times become rows
- * of the bar's own. From 769px the seek stays between the times and the rail
- * stays hidden, as in one row. */
+ * of the bar's own, the three a phone's bar has up to 480px, the words beside
+ * the extras, the transport, then the times. From 769px the seek stays
+ * between the times and the rail stays hidden, as in one row. One template
+ * and one override after it, so no window height falls between two. */
 @media (any-pointer: coarse) and (min-width: 641px) {
-  .npbar { grid-template-columns: minmax(0, 1fr) auto auto; row-gap: var(--space-2); }
+  .npbar {
+    grid-template-columns: minmax(0, 1fr) auto auto; row-gap: var(--space-2);
+    grid-template-areas: "now now extra" "ctl ctl ctl" "scrub scrub scrub";
+  }
   .np-center { display: contents; }
   .np-now { grid-area: now; }
   .np-transport { grid-area: ctl; justify-content: center; }
   .np-scrub { grid-area: scrub; }
   .np-extra { grid-area: extra; }
 }
-/* A window taller than 500px: the three rows a phone's bar has up to 480px,
- * the words beside the extras, the transport, then the times. */
-@media (any-pointer: coarse) and (min-width: 641px) and (min-height: 501px) {
-  .npbar { grid-template-areas: "now now extra" "ctl ctl ctl" "scrub scrub scrub"; }
-}
-/* A phone held sideways, 500px tall or less, where three rows would take a
- * third of the window: the two rows of 481-768px, its toggles and its chip
- * hidden as a phone's are. */
+/* A phone held sideways, or a touch laptop's short window, 500px tall or
+ * less, where three rows would take a third of the window: two, in two
+ * columns, the words beside the transport and the times beside the extras,
+ * its toggles and its chip hidden as a phone's are. Beside the words, the
+ * extras with the volume a pointer that hovers keeps from 769px took 240px of
+ * the 495px at 769px and laid the cover over Previous; and the times, across
+ * a third column, widened the transport's by their own width. */
 @media (any-pointer: coarse) and (min-width: 641px) and (max-height: 500px) {
-  .npbar { grid-template-areas: "now ctl extra" "scrub scrub scrub"; }
+  .npbar { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "now ctl" "scrub extra"; }
   .np-btn-toggle, .np-chip { display: none; }
 }

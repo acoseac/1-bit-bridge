@@ -3460,4 +3460,9 @@ label.checkbox.tray-switch {
   /* ...but the Player page's DAC list holds its radio in no label and
    * hands its row no tap, so the radio itself is the target. */
   td > input[type="radio"] { width: 44px; height: 44px; }
+  /* A row of actions' buttons 8px apart, wrapped too: the UPnP page's stood
+   * 6.4px apart, and a page's or a dialog's row-actions a space's 4.3px, its
+   * wrapped buttons touching. */
+  .upnp-upstream-actions { gap: var(--space-2); }
+  div.row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 }
