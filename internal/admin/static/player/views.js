@@ -453,7 +453,8 @@ async function appendDeleteAction(actions, tracks, label) {
   actions.appendChild(btn);
 }
 
-export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }) {
+export async function renderAlbum(view, ctx) {
+  const { id, gen, setToolbar, setCrumb, trail } = ctx;
   // Captured BEFORE any await. The album fetch is abort-guarded, but the
   // source-name lookup behind the crumb root is MEMOISED — after its
   // first resolution it is not a request at all, so abortReads cannot
@@ -498,7 +499,9 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
        { label: a.albumArtist || "Unknown artist", href: scopedHref(`/artist/${a.artistId}`) }]
     : [scopedRoot(CRUMB_ROOTS.albums)];
   const crumbChain = await sourceRootedCrumbs(trail, structural);
-  if (gen() !== at) return;
+  // Nor once an operator page has replaced this one, which moves no
+  // generation (B1021): the page must still be this route's.
+  if (gen() !== at || !owned(ctx)) return;
   setCrumb(crumbs(crumbChain, albumName));
   // The heading names the album, the way every other detail page names
   // its subject. It used to stay the generic word "Album", which left the
@@ -1015,7 +1018,8 @@ function monogram(name) {
 }
 
 
-export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail }) {
+export async function renderArtist(view, ctx) {
+  const { id, gen, setToolbar, setCrumb, trail } = ctx;
   // See renderAlbum: captured before any await, because the memoised
   // source-name lookup is not reachable by abortReads.
   const at = gen();
@@ -1039,7 +1043,7 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail 
   // case, and it would leave the page with no heading at all.
   const artistName = d.artist.name || "Unknown artist";
   const artistCrumbs = await sourceRootedCrumbs(trail, [scopedRoot(CRUMB_ROOTS.artists)]);
-  if (gen() !== at) return;
+  if (gen() !== at || !owned(ctx)) return;
   setCrumb(crumbs(artistCrumbs, artistName));
   setAxisTitle(artistName);
   const portrait = d.hasImage
@@ -1268,9 +1272,8 @@ async function renderPagedList(view, ctx, opts) {
   let snapshotAt = "";
   const sentinel = el("div", { class: "sentinel" });
   // The way back to the first row from a window that starts past it, whose
-  // rows above come back by no scrolling.
-  const top = el("button", { class: "btn btn-quiet", text: "Back to the top",
-    attrs: { type: "button", hidden: true }, on: { click: () => void load(0, null, "jump") } });
+  // rows above come back by no scrolling: drawn with each body (paint).
+  let top = null;
 
   // renderGen invalidates a fetch that was in flight when a jump reset
   // the list.
@@ -1292,13 +1295,18 @@ async function renderPagedList(view, ctx, opts) {
   //
   // And a load answered after a boosted navigation to an operator page, which
   // replaces <main> and pushes its own entry with no route, is stale too: it
-  // must neither page on nor scroll the page that replaced the list's.
+  // must neither page on nor scroll the page that replaced the list's. Nor
+  // does a load or a page start once its route has moved on (`gone`): its
+  // request would cancel the next page's under a key they share, a genre's
+  // or a composer's name and the axis lists' pages both being "axis".
   let renderGen = 0;
-  const stale = (mine) => mine !== renderGen || gen() !== at || !owned(ctx);
+  const gone = () => gen() !== at || !owned(ctx);
+  const stale = (mine) => mine !== renderGen || gone();
   const listGen = () => `${gen()}:${renderGen}`;
   // The filter's commits so far: a body's callbacks (its rail's letters, its
-  // Try again) act only while no commit has come since it was drawn, so none
-  // drawn for the old q acts while the new q's rows are still on their way.
+  // Back to the top, its Try again, its Clear) act only while no commit has
+  // come since it was drawn, so none drawn for the old q acts while the new
+  // q's rows are still on their way.
   let commits = 0;
   const whileDrawn = (fn) => {
     const drawn = commits;
@@ -1359,6 +1367,8 @@ async function renderPagedList(view, ctx, opts) {
     if (countNoun) body.appendChild(el("p", { class: "muted small", text: countText() }));
     const rail = alphabetRail(r.buckets, whileDrawn((b) => void load(b.offset, null, "jump")));
     if (rail) body.appendChild(rail);
+    top = el("button", { class: "btn btn-quiet", text: "Back to the top",
+      attrs: { type: "button", hidden: true }, on: { click: whileDrawn(() => void load(0, null, "jump")) } });
     container = el("div", { class: containerClass });
     for (const n of [top, container, sentinel]) body.appendChild(n);
   }
@@ -1376,6 +1386,7 @@ async function renderPagedList(view, ctx, opts) {
   // The list is measurable (boot.js's ready) only once a load's rows stand:
   // never across its fetches, nor after one that failed or was superseded.
   async function load(from, place, mode) {
+    if (gone()) return;
     const mine = ++renderGen;
     stopPaging();
     ctx.listed?.(false);
@@ -1431,7 +1442,7 @@ async function renderPagedList(view, ctx, opts) {
   }
 
   async function page() {
-    if (loading) return;
+    if (loading || gone()) return;
     loading = true;
     const mine = renderGen;
     try {
@@ -1503,7 +1514,7 @@ async function renderPagedList(view, ctx, opts) {
   function noMatch() {
     const box = emptyState(`No ${countNoun}s match “${q}”`);
     box.appendChild(el("button", { class: "btn", text: "Clear", attrs: { type: "button" },
-      on: { click: () => { field.value = ""; void commit(); field.focus(); } } }));
+      on: { click: whileDrawn(() => { field.value = ""; void commit(); field.focus(); }) } }));
     return box;
   }
 
@@ -2145,6 +2156,9 @@ async function renderCollectionDetail(view, ctx, opts) {
     view.appendChild(errorState(e));
     return;
   }
+  // Every route ends this request (abortReads); a boosted navigation to an
+  // operator page ends none, so the page must still be this route's (B1021).
+  if (!owned(ctx)) return;
   clear(view);
   const c = d.collection;
   const tracks = d.tracks || [];
@@ -2662,7 +2676,8 @@ function browseTrackRow(t) {
  * `/api/library/browse?camelot=` the Inspector used, which already
  * returns exactly a filtered track list and no folders.
  */
-export async function renderTracks(view, { params, setToolbar, setCrumb, trail }) {
+export async function renderTracks(view, ctx) {
+  const { params, setToolbar, setCrumb, trail } = ctx;
   setToolbar(null);
   const camelot = (params.get("camelot") || "").toUpperCase();
   clear(view);
@@ -2681,6 +2696,8 @@ export async function renderTracks(view, { params, setToolbar, setCrumb, trail }
     view.appendChild(errorState(e));
     return;
   }
+  // As renderCollectionDetail's: every route ends the request, a boost none.
+  if (!owned(ctx)) return;
   clear(view);
   // The human pitch, not the wheel code: "A minor" names the page in the
   // same vocabulary the line below it uses.

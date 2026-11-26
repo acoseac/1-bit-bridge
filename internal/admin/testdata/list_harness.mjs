@@ -19,7 +19,8 @@
 // What boot.js needs to import and boot and is not a list's is stubbed: the
 // audio element's media methods, navigator.mediaSession, the bridge
 // player's GET now (no player offered, unless a case holds it), and the
-// album and artist pages' detail answers (no tracks). A reload keeps the
+// detail pages' answers: an album's, an artist's, a playlist's, a smart
+// mix's and a key's tracks (no tracks). A reload keeps the
 // tab's history and its session storage and makes everything else anew, the
 // modules from a copy of their directory, since node evaluates a module once
 // per URL.
@@ -423,6 +424,11 @@ function answer(e) {
   if (p === "/api/player/composers") return { body: page(named(lib.composers, q, "name"), q, (c) => initial(c.name), "entries") };
   if (p === "/api/player/playlists") return { body: { collections: named(lib.playlists, q, "name"), snapshotAt: SNAP } };
   if (p === "/api/player/mixes") return { body: { enabled: true, collections: lib.mixes, snapshotAt: SNAP } };
+  if ((m = /^\/api\/player\/(playlists|mixes)\/(\w+)$/.exec(p))) {
+    const c = lib[m[1]].find((x) => x.id === m[2]);
+    return c ? { body: { collection: c, tracks: [] } } : { status: 404, body: { error: "not_found" } };
+  }
+  if (p === "/api/library/browse" && q.get("camelot")) return { body: { keyName: "A minor", keyFilter: q.get("camelot"), tracks: [] } };
   if (p === "/api/playlists/deleted") return { body: { deleted: [] } };
   if (p === "/api/player/sources") return { body: { sources: [{ id: "nas", name: "NAS" }] } };
   if (p === "/api/settings") return { body: { allowDelete: false } };
@@ -978,6 +984,84 @@ S.TestALateAnswerTouchesNoOperatorPage = async () => {
   check("and nothing scrolls the operator page after its own scroll", codeScrolls.length === scrolls, codeScrolls.slice(scrolls));
 };
 
+S.TestAListLeftForAnAxisPageAsksNothingWhileItsNameIsHeld = async () => {
+  // The genres' rows, past their first page: a genre opened, its name held,
+  // and the genres' list, still in the page, scrolled to its end meanwhile.
+  await rig("/genres", { layout: { cols: 1, rowH: 48 } });
+  const axisGets = (path, from) => listGets(path).filter((e) => log.indexOf(e) >= from).map((e) => e.query.toString());
+  const genre = lib.genres[3];
+  let named = hold("/api/player/genres", (q) => !q.has("offset"));
+  await navigate(tile(3));
+  check("the genre's page waits for its name", location.pathname === `/genre/${genre.id}` && holds.size === 0, [location.pathname, holds.size]);
+  let asked = log.length;
+  scrollTo(docHeight());
+  await settle();
+  check("the genres' list, scrolled to its end meanwhile, asks for nothing", axisGets("/api/player/genres", asked).length === 0, axisGets("/api/player/genres", asked));
+  named();
+  await settle();
+  const want = lib.albums.filter((a) => a.genre === genre.g);
+  check("and the genre's grid opens once its name comes", title() === genre.name && titleOf(rows()[0]) === want[0].title, [title(), titleOf(rows()[0]), want[0].title]);
+
+  // The composers' rail, a jump, a composer opened, Back with the restore
+  // failing, Forward with the composer's name held, and the old Try again.
+  doc.getElementById("player-sections").querySelectorAll("a").find((a) => a.dataset.section === "composers").fire("click", { detail: 1 });
+  await settle();
+  doc.getElementById("player-view").querySelectorAll(".az-letter").find((b) => b.textContent === "M").fire("click", { detail: 0 });
+  await settle();
+  const composer = lib.composers[lib.composers.findIndex((c) => c.name.startsWith("M")) + 1];
+  await navigate(tile(1));
+  fail("/api/player/composers");
+  await back();
+  check("the composers' restore failed, offering Try again", !!button("Try again"), viewText());
+  named = hold("/api/player/composers", (q) => !q.has("offset"));
+  await forward();
+  check("the composer's page waits for its name", location.pathname === `/composer/${composer.id}` && holds.size === 0, [location.pathname, holds.size]);
+  asked = log.length;
+  await navigate(button("Try again"));
+  check("the old Try again, pressed meanwhile, asks for nothing", axisGets("/api/player/composers", asked).length === 0, axisGets("/api/player/composers", asked));
+  named();
+  await settle();
+  check("and the composer's grid opens once its name comes", title() === composer.name && rows().length > 0, [title(), rows().length]);
+};
+
+S.TestALateDetailAnswerRetitlesNoOperatorPage = async () => {
+  if (!boostScript) {
+    check("app.js's boost router is given", false, "no boost script");
+    return;
+  }
+  await rig("/albums");
+  const stats = () => doc.getElementById("primary-nav").querySelector('a[href="/stats"]');
+  const section = (s) => doc.getElementById("player-sections").querySelectorAll("a").find((a) => a.dataset.section === s);
+  // A detail page whose answer is held while an operator page replaces it,
+  // then let go, and Back.
+  const late = async (what, path, open) => {
+    const release = hold(path);
+    await open();
+    const waiting = holds.size === 0;
+    await navigate(stats());
+    const titled = doc.title;
+    const scrolls = codeScrolls.length;
+    release();
+    await settle();
+    check(`the answer for ${what}, come after an operator page replaced it, retitles and scrolls that page with nothing`,
+      waiting && location.pathname === "/stats" && titled === "Stats" && doc.title === titled && codeScrolls.length === scrolls,
+      [waiting, location.pathname, doc.title, titled, codeScrolls.slice(scrolls)]);
+    await back();
+  };
+  await late("an album", `/api/player/albums/${lib.albums[3].id}`, () => navigate(tile(3)));
+  await navigate(section("artists"));
+  await late("an artist", `/api/player/artists/${lib.artists[3].id}`, () => navigate(tile(3)));
+  await navigate(section("playlists"));
+  await late("a playlist", "/api/player/playlists/p2", () => navigate(tile(2)));
+  await navigate(section("mixes"));
+  await late("a smart mix", "/api/player/mixes/m2", () => navigate(tile(2)));
+  await late("a key's tracks", "/api/library/browse", async () => {
+    history.pushState({ scrollY: 0 }, "", "/tracks?camelot=8A");
+    win.dispatchEvent({ type: "popstate" });
+    await settle();
+  });
+};
+
 S.TestAListWritesNoPlaceUntilALoadsRowsStand = async () => {
   await rig("/albums");
   await readerAt(450, -20);
@@ -1187,6 +1271,48 @@ S.TestNoCallbackOfAListAFilterReplacedActs = async () => {
   check("the old Try again, pressed then, asks for no window of the old place", !after(asked).some((o) => Number(o) >= 1200), after(asked));
   check("and the filtered list stands from its first row again", rows().length > 0 && titleOf(rows()[0]) === want[0].title && viewText().includes(`${want.length} albums`),
     [rows().length, titleOf(rows()[0]), want[0].title]);
+
+  // A jump's window, a filter, its rows held, and the old Back to the top.
+  g.fire("keydown", { key: "Escape" });
+  await settle();
+  letter("M").fire("click", { detail: 0 });
+  await settle();
+  check("the jump's window offers Back to the top", !!button("Back to the top") && !button("Back to the top").hidden, !!button("Back to the top"));
+  release = hold("/api/player/albums");
+  await type(g, "Album 1");
+  await advance(400);
+  asked = log.length;
+  await navigate(button("Back to the top"));
+  const held = after(asked);
+  release();
+  await settle();
+  check("the old Back to the top, pressed while the filter's rows are held, asks for nothing", held.length === 0, held);
+  check("and the filtered list stands from its first row, its count announced",
+    titleOf(rows()[0]) === want[0].title && doc.getElementById("player-live").textContent === `${want.length} albums`,
+    [titleOf(rows()[0]), doc.getElementById("player-live").textContent]);
+  letter("M").fire("click", { detail: 0 });
+  await settle();
+  await navigate(button("Back to the top"));
+  check("a jump in the filtered list, then its own Back to the top, reaches its first row", titleOf(rows()[0]) === want[0].title && topRow()?.title === want[0].title,
+    [titleOf(rows()[0]), topRow()]);
+
+  // A filter matching nothing, a matching one, its rows held, and the old Clear.
+  g.value = "zzzz";
+  g.fire("keydown", { key: "Enter" });
+  await settle();
+  check("a filter matching nothing offers Clear", !!button("Clear"), viewText());
+  release = hold("/api/player/albums");
+  g.value = "";
+  await type(g, "Album 1");
+  await advance(400);
+  asked = log.length;
+  await navigate(button("Clear"));
+  const cleared = log.slice(asked).filter((e) => e.path === "/api/player/albums").length;
+  check("the old Clear, pressed while a matching filter's rows are held, empties no field and asks for nothing",
+    g.value === "Album 1" && new URLSearchParams(location.search).get("q") === "Album 1" && cleared === 0, [g.value, location.search, cleared]);
+  release();
+  await settle();
+  check("and the matching filter's rows stand", titleOf(rows()[0]) === want[0].title && viewText().includes(`${want.length} albums`), [titleOf(rows()[0]), viewText().slice(0, 200)]);
 };
 
 const name = scenarioName;

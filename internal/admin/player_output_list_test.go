@@ -161,7 +161,25 @@ func TestACrumbPushesWhereItsEntryNowHoldsAnotherURL(t *testing.T) { listScenari
 func TestACrumbReturnsToItsEntryAfterAReload(t *testing.T) { listScenario(t, 6) }
 
 // TestNoCallbackOfAListAFilterReplacedActs: while a filter's rows are held,
-// a letter of the rail drawn for the old q and the Try again of a restore
-// that failed before it ask for nothing, and the filtered list stands from
-// its first row.
-func TestNoCallbackOfAListAFilterReplacedActs(t *testing.T) { listScenario(t, 6) }
+// a letter of the rail drawn for the old q, the Try again of a restore that
+// failed before it, a jump's Back to the top and the Clear of a filter that
+// matched nothing ask for nothing (the Clear empties no field), and the
+// filtered list stands from its first row, its count announced; a jump in
+// that list, then its own Back to the top, reaches its first row.
+func TestNoCallbackOfAListAFilterReplacedActs(t *testing.T) { listScenario(t, 13) }
+
+// TestAListLeftForAnAxisPageAsksNothingWhileItsNameIsHeld: a genre opened
+// from the genres' rows, its name held, and the genres' list, still in the
+// page, scrolled to its end; and a composer reached by Forward from a
+// composers' list whose restore failed, its name held, and that list's Try
+// again: neither list asks for anything, and each grid opens once its name
+// comes.
+func TestAListLeftForAnAxisPageAsksNothingWhileItsNameIsHeld(t *testing.T) { listScenario(t, 7) }
+
+// TestALateDetailAnswerRetitlesNoOperatorPage: through app.js's own boost
+// router, an operator page replaces an album, an artist, a playlist, a smart
+// mix and a key's tracks while each one's answer is held: let go after, none
+// retitles or scrolls the operator page.
+func TestALateDetailAnswerRetitlesNoOperatorPage(t *testing.T) {
+	listScenario(t, 5, boostScriptFile(t))
+}
