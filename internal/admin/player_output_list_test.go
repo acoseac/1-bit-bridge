@@ -115,8 +115,10 @@ func boostScriptFile(t *testing.T) string {
 // announced are the filtered first page's; Escape clears; a filter matching
 // nothing says so, with Clear; a list opened on such a filter keeps its
 // field; a genre's grid writes q alone into its URL; a redraw keeps the
-// focus in the field; and the playlists show the filtered collection.
-func TestTheFilterNarrowsTheListInPlace(t *testing.T) { listScenario(t, 14) }
+// focus in the field; the playlists show the filtered collection; a source's
+// banner leads out of the source with the filter kept; and a filter past the
+// server's 256 bytes offers no Try again.
+func TestTheFilterNarrowsTheListInPlace(t *testing.T) { listScenario(t, 16) }
 
 // TestAFilterPauseWritesNothingAfterANavigation: a keystroke, then a row
 // opened inside the pause: the album's URL and entry stay as the navigation

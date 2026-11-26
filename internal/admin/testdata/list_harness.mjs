@@ -398,6 +398,10 @@ function answer(e) {
     const player = win.__player?.isPlayerPath(p);
     return { body: player ? "SHELL" : "OPERATOR", headers: { "X-Bridge-Active": player ? "player" : "stats", "X-Bridge-Section": player ? "player" : "server" } };
   }
+  // The server's bound on q: trimmed, at most 256 bytes.
+  if (p.startsWith("/api/player/") && new TextEncoder().encode((q.get("q") || "").trim()).length > 256) {
+    return { status: 400, body: { error: "bad_request", message: "q is longer than 256 bytes" } };
+  }
   if (p === "/api/player/albums") {
     let rows = named(lib.albums, q, "title", "albumArtist");
     if (q.get("genre")) rows = rows.filter((a) => lib.genres[a.genre]?.id === q.get("genre"));
@@ -904,6 +908,22 @@ S.TestTheFilterNarrowsTheListInPlace = async () => {
   await type(field(), "3");
   await advance(400);
   check("the playlists' filter shows the filtered collection and its count", rows().length === 1 && titleOf(rows()[0]) === "Playlist 3" && viewText().includes("1 playlist"), [rows().length, viewText()]);
+
+  // A source's grid: its banner's way out keeps the filter the URL now holds.
+  history.pushState({ scrollY: 0 }, "", "/albums?source=nas");
+  win.dispatchEvent({ type: "popstate" });
+  await settle();
+  field().focus();
+  await type(field(), "b");
+  await advance(400);
+  const out = doc.getElementById("player-view").querySelector(".scope-clear");
+  check("a source's banner leads out of the source with the filter kept", out?.attrs.href === "/albums?q=b" && location.search === "?source=nas&q=b", [out?.attrs.href, location.search]);
+  // A filter the server refuses, past its 256 bytes, offers no Try again that
+  // would be refused again: the field is the way on.
+  field().value = "é".repeat(130);
+  field().fire("keydown", { key: "Enter" });
+  await settle();
+  check("a filter past the server's bound offers no Try again", !button("Try again") && viewText().includes("longer than 256 bytes") && !!field(), viewText());
 };
 
 S.TestAFilterPauseWritesNothingAfterANavigation = async () => {

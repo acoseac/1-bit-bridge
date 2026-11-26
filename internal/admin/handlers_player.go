@@ -644,7 +644,8 @@ func sortAlbumIndices(cat *librarycat.Catalog, idx []int, mode string) {
 	case "", "recent":
 		// AddedAt is MIN(indexed_at) over the album's tracks — see
 		// librarycat.Album. It is "recently indexed", not a true
-		// first-seen date; the store has no such column.
+		// first-seen date: the store has one, first_indexed_at, which
+		// the catalog does not read.
 		sort.SliceStable(idx, func(i, j int) bool {
 			x, y := al[idx[i]], al[idx[j]]
 			if x.AddedAt != y.AddedAt {

@@ -1403,7 +1403,9 @@ async function renderPagedList(view, ctx, opts) {
       if (isAborted(e) || stale(mine)) return;
       clear(body);
       container = null;
-      body.appendChild(errorState(e, whileDrawn(() => void load(from, place, mode))));
+      // A refused request (the server's 400, a q past its bound) would be
+      // refused again: the field above is the way on, not Try again.
+      body.appendChild(errorState(e, e.status === 400 ? null : whileDrawn(() => void load(from, place, mode))));
       return;
     } finally {
       // Only the CURRENT generation may release the flag: a superseded
@@ -1482,9 +1484,16 @@ async function renderPagedList(view, ctx, opts) {
     const { place: _, ...s } = history.state;
     history.replaceState(s, "", u);
     // The entry's URL has moved: a crumb whose trail recorded the old one
-    // must not go back to it, whatever this load answers.
+    // must not go back to it, whatever this load answers; and the source
+    // banner's way out keeps the filter the URL now holds.
     ctx.moved?.();
     commits += 1;
+    const out = banner?.querySelector?.(".scope-clear");
+    if (out) {
+      const all = new URL(u);
+      all.searchParams.delete("source");
+      out.setAttribute("href", all.pathname + all.search);
+    }
     href = u.pathname + u.search;
     const mine = renderGen + 1;
     await load(0, null, "keep");

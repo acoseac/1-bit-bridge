@@ -243,7 +243,7 @@ body.has-player-bar main { padding-bottom: var(--player-bottom-inset); }
 .player-title:focus-visible { outline: none; }
 .player-status { padding: var(--space-5) 0; }
 .player-empty { padding: var(--space-6) 0; text-align: center; }
-.player-empty h2 { margin: 0 0 var(--space-2); font-size: 1.1rem; }
+.player-empty h2 { margin: 0 0 var(--space-2); font-size: 1.1rem; overflow-wrap: anywhere; }
 /* The action an empty library offers. Its OWN class, never `.btn` — this file
  * must not style operator classes, and app.css owns that one. `inline-flex`
  * because .btn is written for <button> and an <a> is inline by default, so it
