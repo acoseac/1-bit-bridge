@@ -647,7 +647,9 @@ func TestBridgeDoctorCallsAPlayerWithNoLibraryReady(t *testing.T) {
 // config turns the player on, bound to a DAC or not, through the file or
 // through the environment, it sends the reader to the player's binding and
 // names no card to point MPD at: beside that DAC, beside MPD's output named
-// in a warning of its own, and where no card is listed at all.
+// in a warning of its own, and where no card is listed at all. Every case but
+// the environment's is the file's, whatever the process exports
+// (writePlayerConfig).
 func TestBridgeDoctorNeverPointsMPDAtADACWhileTheBridgesOwnPlayerIsOn(t *testing.T) {
 	snap, err := alsa.Reader{ProcRoot: outputFixtureRoot(t, "idle")}.Read()
 	if err != nil {
@@ -680,9 +682,6 @@ func TestBridgeDoctorNeverPointsMPDAtADACWhileTheBridgesOwnPlayerIsOn(t *testing
 		{name: "the player on, no card", player: "  player:\n" + goBarPlayer, noCards: true, want: unknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.env {
-				t.Setenv("BRIDGE_OUTPUT_PLAYER_ENABLED", "true")
-			}
 			path, music := writePlayerConfig(t)
 			body, err := os.ReadFile(path)
 			if err != nil {
@@ -692,6 +691,11 @@ func TestBridgeDoctorNeverPointsMPDAtADACWhileTheBridgesOwnPlayerIsOn(t *testing
 			// joins.
 			if err := os.WriteFile(path, append(body, tc.player...), 0o600); err != nil {
 				t.Fatal(err)
+			}
+			// After the fixture, which leaves every other case to the file,
+			// and before the load.
+			if tc.env {
+				t.Setenv("BRIDGE_OUTPUT_PLAYER_ENABLED", "true")
 			}
 			box := func(c *api.LocalOutputsConfig) {
 				linuxBoxSeam(music)(c)
@@ -715,9 +719,14 @@ func TestBridgeDoctorNeverPointsMPDAtADACWhileTheBridgesOwnPlayerIsOn(t *testing
 
 // writePlayerConfig writes a player's config, output.mpd on with one
 // library root and no loopback probe, beside a token file whose one token
-// a phone has used, and returns the config's path and the root.
+// a phone has used, and returns the config's path and the root. The file
+// decides whether the bridge's own player is on: it sets
+// BRIDGE_OUTPUT_PLAYER_ENABLED empty for the test, a value the loader takes
+// no override from, so a shell or a CI job that exports it true does not
+// turn the player on in a case the file decides.
 func writePlayerConfig(t *testing.T) (path, music string) {
 	t.Helper()
+	t.Setenv("BRIDGE_OUTPUT_PLAYER_ENABLED", "")
 	dir := t.TempDir()
 	music = filepath.Join(dir, "Music")
 	data := filepath.Join(dir, "data")
