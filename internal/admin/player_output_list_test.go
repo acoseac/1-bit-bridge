@@ -131,11 +131,12 @@ func TestALateAnswerTouchesNoOperatorPage(t *testing.T) {
 	listScenario(t, 5, boostScriptFile(t))
 }
 
-// TestAFailedRestoreIsNoPlaceToWriteUntilARetryStands: a restore that fails
-// leaves the entry's place as it was; its Try again, held at its second
-// page, and a row of its first page opened keep that place; a retry that
-// stands restores it, and a scroll after it records a new one.
-func TestAFailedRestoreIsNoPlaceToWriteUntilARetryStands(t *testing.T) { listScenario(t, 6) }
+// TestAListWritesNoPlaceUntilALoadsRowsStand: a restore that fails leaves
+// the entry's place as it was; its Try again, held at its second page, and a
+// row of its first page opened keep that place; a retry that stands restores
+// it, and a scroll after it records a new one; and a restore a jump
+// superseded, left while the jump's rows are held, keeps its place.
+func TestAListWritesNoPlaceUntilALoadsRowsStand(t *testing.T) { listScenario(t, 7) }
 
 // TestAWholeCollectionRestoresFromItsFirstRowByItsRowsID: the playlists,
 // 1,300 of them, come back to row 1,200 from their first row, asked for once,

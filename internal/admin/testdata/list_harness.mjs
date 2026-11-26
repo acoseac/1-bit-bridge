@@ -958,7 +958,7 @@ S.TestALateAnswerTouchesNoOperatorPage = async () => {
   check("and nothing scrolls the operator page after its own scroll", codeScrolls.length === scrolls, codeScrolls.slice(scrolls));
 };
 
-S.TestAFailedRestoreIsNoPlaceToWriteUntilARetryStands = async () => {
+S.TestAListWritesNoPlaceUntilALoadsRowsStand = async () => {
   await rig("/albums");
   await readerAt(450, -20);
   const before = topRow();
@@ -987,6 +987,26 @@ S.TestAFailedRestoreIsNoPlaceToWriteUntilARetryStands = async () => {
   await settle();
   await advance(600);
   check("and a scroll after it records the new place", here().state.place?.anchor === 465, here().state.place);
+
+  // A restore superseded by a jump whose rows are held, and the list left.
+  const sort = doc.getElementById("player-toolbar").querySelectorAll("select").find((s) => s.attrs["aria-label"] === "sort");
+  sort.value = "title";
+  sort.fire("change");
+  await settle();
+  await readerAt(450, 0);
+  await navigate(tile(450));
+  const deep = structuredClone(H.entries[H.index - 1].state.place);
+  const restoring = hold("/api/player/albums", (q) => q.get("offset") === "200");
+  await back();
+  const atM = String([...lib.albums].sort((x, y) => fold(x.title).localeCompare(fold(y.title))).findIndex((a) => a.title.startsWith("M")));
+  const jumping = hold("/api/player/albums", (q) => q.get("offset") === atM);
+  doc.getElementById("player-view").querySelectorAll(".az-letter").find((b) => b.textContent === "M").fire("click", { detail: 0 });
+  await settle();
+  await navigate(doc.getElementById("player-sections").querySelectorAll("a").find((a) => a.dataset.section === "artists"));
+  restoring();
+  jumping();
+  check("a restore a jump superseded, left while the jump's rows were held, keeps its place", deep?.anchor === 450 && same(H.entries[H.index - 1].state.place, deep),
+    [H.entries[H.index - 1].state.place, deep]);
 };
 
 S.TestAWholeCollectionRestoresFromItsFirstRowByItsRowsID = async () => {
