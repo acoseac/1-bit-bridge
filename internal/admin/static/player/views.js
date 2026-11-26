@@ -407,18 +407,24 @@ function select(name, value, options) {
 // keeps its button for the local half and says what it is leaving alone.
 // An album in editions (B1023) keeps the one Delete: it moves every file of
 // every edition, never an SACD image's track, which is no file, and its
-// confirmation says how many editions those files are; made once, it keeps its
-// request and its answer through every pick, which only moves it.
-function deleteButton(tracks, label, editions) {
+// confirmation says how many editions those files are. Its request is the
+// album's (trashing), so a pick, which only moves the button, and a redraw,
+// which builds another, show it alike: Deleting… while it is out, then its
+// answer.
+function deleteButton(id, tracks, label, editions, gen) {
   const all = (tracks || []).filter((t) => t?.path);
   const routed = all.filter((t) => t.routed).length;
   const files = new Set(all.filter((t) => !t.routed && !imageOf(t.path)));
   if (!files.size) return null;
   const paths = [...files].map((t) => t.path);
   const k = editions.filter((ed) => ed.rows.some((t) => files.has(t))).length;
+  const out = trashing.get(id);
+  if (out?.said) trashing.delete(id);
+  const same = out && out.paths.length === paths.length && out.paths.every((p, i) => p === paths[i]);
+  const words = !out ? "" : !out.said ? "Deleting…" : same ? out.said : "";
 
   const btn = el("button", {
-    class: "btn danger", text: "Delete…",
+    class: "btn danger", text: words || "Delete…", attrs: { id: "album-delete", "data-album": id },
     on: {
       click: async () => {
         const n = paths.length;
@@ -427,28 +433,61 @@ function deleteButton(tracks, label, editions) {
             `${routed === 1 ? "is" : "are"} left alone.`
           : "";
         if (!confirm(
-          `Move ${n} file${n === 1 ? "" : "s"} ${k > 1 ? `of ${k} editions of` : "from"} "${label}" to the trash?\n\n` +
+          `Move ${n} file${n === 1 ? "" : "s"} ${editions.length > 1 ? `of ${k} edition${k === 1 ? "" : "s"} of` : "from"} "${label}" to the trash?\n\n` +
           `They stay recoverable from the Library page until the trash is emptied.` +
           upstream)) {
           return;
         }
         setDisabled(btn, true);
         btn.textContent = "Deleting…";
-        try {
-          const res = await api.trash(paths);
-          const failed = (res.outcomes || []).filter((o) => o.status === "failed");
-          btn.textContent = failed.length
-            ? `${res.ok} deleted, ${failed.length} failed`
-            : `${res.ok} moved to trash`;
-        } catch (e) {
-          setDisabled(btn, false);
-          btn.textContent = "Delete…";
-          alert(e?.message ? e.message : String(e));
-        }
+        trashAlbum(id, paths, gen);
       },
     },
   });
+  if (words) setDisabled(btn, true);
   return btn;
+}
+
+// An album's Delete request (B1023), by album id: the paths it asked, the
+// render of its album shown now (at, which each render of the album takes at
+// its start), and once answered with that render's Delete not built yet, what
+// the answer said (said), for that Delete; a later render lets it go.
+const trashing = new Map();
+
+/**
+ * trashAlbum sends album id's Delete and takes its answer holding no node: the
+ * answer goes on the album's Delete shown when it lands, else to the Delete
+ * the album's render shown then builds, else nowhere; a refusal gives the
+ * Delete shown back and is said wherever the reader is, as it always was.
+ */
+async function trashAlbum(id, paths, gen) {
+  const out = { paths, at: gen() };
+  trashing.set(id, out);
+  let said = "";
+  let err = null;
+  try {
+    const res = await api.trash(paths);
+    const failed = (res.outcomes || []).filter((o) => o.status === "failed");
+    said = failed.length ? `${res.ok} deleted, ${failed.length} failed` : `${res.ok} moved to trash`;
+  } catch (e) {
+    err = e;
+  }
+  const live = document.getElementById("album-delete");
+  const btn = live?.getAttribute("data-album") === id ? live : null;
+  if (!err && !btn && out.at === gen()) {
+    out.said = said;
+    return;
+  }
+  if (trashing.get(id) === out) trashing.delete(id);
+  if (err) {
+    if (btn) {
+      setDisabled(btn, false);
+      btn.textContent = "Delete…";
+    }
+    alert(err?.message ? err.message : String(err));
+  } else if (btn) {
+    btn.textContent = said;
+  }
 }
 
 // ---- An album's editions (B1023) ----
@@ -563,7 +602,6 @@ function albumEditions(tracks) {
     }
     ed.label = [ed.format, ed.rows.length, part].filter((x) => x !== "").join(" · ");
     ed.name = [ed.format, plural(ed.rows.length, "track"), part].filter(Boolean).join(", ");
-    ed.title = part ? `${ed.format} · ${part}` : ed.format;
   }
   return eds;
 }
@@ -641,6 +679,11 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // reach it and a superseded render would sail past to write its crumb
   // over the page that replaced it.
   const at = gen();
+  // The album's Delete request, if one is out, is this render's to show; an
+  // answer kept for a render before this one goes.
+  const out = trashing.get(id);
+  if (out?.said) trashing.delete(id);
+  else if (out) out.at = at;
   watchOutput();
   setToolbar(null);
   clear(view);
@@ -727,7 +770,8 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // Deleting moves the files to the library's trash rather than unlinking
   // them, which is why the confirm can be a plain one: it is recoverable, and
   // the Library page is where the space is actually reclaimed. It is the
-  // album's, made once (deleteButton), and each paint moves it into its row.
+  // album's, made once a render (deleteButton), and each paint moves it into
+  // its row.
   let del = null;
   const paint = () => {
     const ed = shown;
@@ -778,7 +822,7 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   paint();
   if (d.tracks.some((t) => t?.path && !t.routed && !imageOf(t.path))) api.settings().then((cfg) => {
     if (!cfg?.allowDelete || gen() !== at) return;
-    del = deleteButton(d.tracks, a.title, eds);
+    del = deleteButton(id, d.tracks, a.title, eds, gen);
     if (del) actions.appendChild(del);
   }, () => {});
 
