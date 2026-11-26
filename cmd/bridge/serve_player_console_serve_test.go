@@ -186,11 +186,11 @@ func transportPlays(st admin.PlayerStatus) string {
 	return strings.Join(out, " ")
 }
 
-// requireNothingPlays fails the test unless st lists the three transports
+// requireNothingPlays fails the test unless st lists the four transports
 // and none of them plays.
 func requireNothingPlays(t *testing.T, what string, st admin.PlayerStatus) {
 	t.Helper()
-	if got := transportPlays(st); got != "pcm=false dop=false native=false" {
+	if got := transportPlays(st); got != "pcm=false dop=false native=false converted=false" {
 		t.Errorf("%s: the transports say %s, want none playing", what, got)
 	}
 }
@@ -198,7 +198,7 @@ func requireNothingPlays(t *testing.T, what string, st admin.PlayerStatus) {
 // requirePCMPlays fails the test unless st lists PCM playing, and no DSD.
 func requirePCMPlays(t *testing.T, what string, st admin.PlayerStatus) {
 	t.Helper()
-	if got := transportPlays(st); got != "pcm=true dop=false native=false" {
+	if got := transportPlays(st); got != "pcm=true dop=false native=false converted=false" {
 		t.Errorf("%s: the transports say %s, want pcm playing", what, got)
 	}
 }
@@ -217,9 +217,9 @@ func pendingChanges(st admin.PlayerStatus) []string {
 // its kind and its serial's label, the DAC the watcher resolved with the
 // capabilities GET /v1/outputs' read projects, the track heard named from the
 // library's own row (its path the index stores) with the decoder's report,
-// the three transports, each by what the DAC takes, the mode the player runs
-// with and the tuples approved, apart, and nothing pending; no answer carries
-// the serial.
+// the four transports, each by what the DAC takes, the DSD choice GET
+// /v1/outputs publishes and the rates the player publishes, apart, and
+// nothing pending; no answer carries the serial.
 func TestTheConsoleShowsTheRunningPlayer(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -252,20 +252,29 @@ func TestTheConsoleShowsTheRunningPlayer(t *testing.T) {
 	if tr == nil || !tr.Named || tr.Path != rel || tr.Codec != "FLAC" || tr.RateHz != 96000 || tr.Bits != 24 || tr.Channels != 2 || tr.Duration != 200 {
 		t.Errorf("the track heard: %+v, want %s named from the library's row with the decoder's report", tr, rel)
 	}
-	if len(st.Transports) != 3 || st.Transports[0].Kind != "pcm" || !st.Transports[0].Plays || st.Transports[1].Plays || st.Transports[2].Plays {
+	rows := consoleRows(t, st.PlayerReport)
+	if !rows["pcm"].Plays || rows["dop"].Plays || rows["native"].Plays || rows["converted"].Plays {
 		t.Fatalf("the transports: %+v, want pcm playing and no DSD", st.Transports)
 	}
-	// What the DAC takes, the mode, and the approvals are three facts: the GO
-	// bar's stream takes DoP's 24 bits at 176.4 kHz and native DSD, the player
-	// runs with DSD off, and nothing is approved, so neither plays.
-	for _, tr := range st.Transports {
-		if tr.Capable != "yes" || len(tr.Approved) != 0 {
-			t.Errorf("%s: capable %q, approved %v; want yes, and nothing approved", tr.Kind, tr.Capable, tr.Approved)
+	// What the DAC takes, the choice, and the rates are three facts: the GO
+	// bar's stream takes DoP's 24 bits at 176.4 kHz and native DSD, and the
+	// stand-in backend publishes no DSD read side, so GET /v1/outputs says
+	// dsdMode off and allowDoP false, no rate plays any way, and what the DAC
+	// takes for a conversion is not known.
+	for _, kind := range []string{"pcm", "dop", "native"} {
+		if r := rows[kind]; r.Capable != "yes" {
+			t.Errorf("%s: capable %q, want yes", kind, r.Capable)
 		}
 	}
-	if dop, native := st.Transports[1], st.Transports[2]; dop.Mode != "dsdMode off, allowDoP false" || native.Mode != "dsdMode off" {
-		t.Errorf("the DSD transports' modes: %q and %q, want the boot snapshot's DSD off", dop.Mode, native.Mode)
+	for _, kind := range []string{"dop", "native", "converted"} {
+		if r := rows[kind]; len(r.Rates) != 0 {
+			t.Errorf("%s: rates %v, want none", kind, r.Rates)
+		}
 	}
+	if c := rows["converted"]; c.Capable != "unknown" {
+		t.Errorf("converted: capable %q, want unknown with no DSD read side", c.Capable)
+	}
+	requireSetTo(t, "a backend that publishes no DSD read side", rows, "off", "DoP not allowed")
 	if !st.Configured.Enabled || !st.Configured.Starts || len(st.Pending) != 0 {
 		t.Errorf("configured %+v, pending %v; want the boot state, nothing pending", st.Configured, st.Pending)
 	}
