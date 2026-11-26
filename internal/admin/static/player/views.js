@@ -694,7 +694,7 @@ export async function renderAlbum(view, ctx) {
   try {
     d = await api.album(id);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -746,7 +746,9 @@ export async function renderAlbum(view, ctx) {
   // still expand to), as the paths it shows.
   const byId = eds.length === 1 && a.trackCount === d.tracks.length;
   const names = eds.some((e) => albumSourceIDs(e.rows).length > 1) ? await api.sourceNames().catch(() => null) : null;
-  if (gen() !== at) return;
+  // Nor, past the names, a page its route no longer owns: it subscribes, keeps
+  // an edition and paints nothing there (B1021).
+  if (gen() !== at || !owned(ctx)) return;
 
   // A row that played here at render and no longer does (a source the
   // browser confirmed it cannot decode) redraws the album, once a failure.
@@ -1319,7 +1321,7 @@ export async function renderArtist(view, ctx) {
   try {
     d = await api.artist(id);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -1414,6 +1416,14 @@ async function renderAxis(view, ctx, fetcher, kind, emptyTitle, emptyDetail) {
 // hands no check is its page's.
 function owned(ctx) {
   return !ctx.owns || ctx.owns();
+}
+
+// Whether a render asked under generation at has been overtaken, by a newer
+// render of its entry or by a page its route no longer owns: its failure then
+// paints nothing (B1021). A refined search keeps the entry and the view while
+// route() moves the generation; a boost to an operator page moves none.
+function overtaken(ctx, at) {
+  return ctx.gen() !== at || !owned(ctx);
 }
 
 /**
@@ -1800,10 +1810,11 @@ async function renderPagedList(view, ctx, opts) {
     if (mine === renderGen && gen() === at) announce(total ? countText() : `No ${countNoun}s match “${q}”`);
   }
 
+  // Its Clear, once the route has moved on, empties and focuses nothing.
   function noMatch() {
     const box = emptyState(`No ${countNoun}s match “${q}”`);
     box.appendChild(el("button", { class: "btn", text: "Clear", attrs: { type: "button" },
-      on: { click: whileDrawn(() => { field.value = ""; void commit(); field.focus(); }) } }));
+      on: { click: whileDrawn(() => { if (gone()) return; field.value = ""; void commit(); field.focus(); }) } }));
     return box;
   }
 
@@ -1835,7 +1846,9 @@ async function renderPagedList(view, ctx, opts) {
  * screen, and the two are answers to different questions asked one at a
  * time.
  */
-export async function renderFavorites(view, { gen, setToolbar }) {
+export async function renderFavorites(view, ctx) {
+  const { gen, setToolbar } = ctx;
+  const at = gen();
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -1843,7 +1856,7 @@ export async function renderFavorites(view, { gen, setToolbar }) {
   try {
     r = await api.favorites();
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -2173,7 +2186,7 @@ async function drawMixes(page) {
   try {
     r = await api.mixes();
   } catch (e) {
-    if (isAborted(e) || ctx.gen() !== at) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e, () => { void drawMixes(page); }));
     return;
@@ -2434,13 +2447,14 @@ async function renderCollectionDetail(view, ctx, opts) {
   // and read as a third kind of button sandwiched between the two.
   const chain = crumbAncestors(ctx.trail, [opts.root]);
   ctx.setCrumb(crumbs(chain));
+  const at = ctx.gen();
   clear(view);
   view.appendChild(spinner());
   let d;
   try {
     d = await opts.fetch();
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -2703,7 +2717,9 @@ function readAsDataURL(file) {
   });
 }
 
-export async function renderFolders(view, { params, setToolbar, setCrumb }) {
+export async function renderFolders(view, ctx) {
+  const { params, setToolbar, setCrumb } = ctx;
+  const at = ctx.gen();
   setToolbar(null);
   const path = params.get("path") || "";
   // Both derived from the path, so both are painted BEFORE the fetch:
@@ -2728,7 +2744,7 @@ export async function renderFolders(view, { params, setToolbar, setCrumb }) {
   try {
     r = await api.browse(path);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -2975,12 +2991,13 @@ export async function renderTracks(view, ctx) {
       "Open a segment of the harmonic wheel on Smart Mixes to list the tracks in that key."));
     return;
   }
+  const at = ctx.gen();
   view.appendChild(spinner());
   let r;
   try {
     r = await api.browseByKey(camelot);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -3009,7 +3026,9 @@ export async function renderTracks(view, ctx) {
   view.appendChild(list);
 }
 
-export async function renderSearch(view, { params, setToolbar }) {
+export async function renderSearch(view, ctx) {
+  const { params, setToolbar } = ctx;
+  const at = ctx.gen();
   setToolbar(null);
   const q = (params.get("q") || "").trim();
   if (q.length < 2) {
@@ -3037,7 +3056,7 @@ export async function renderSearch(view, { params, setToolbar }) {
   try {
     r = await api.search(q);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;

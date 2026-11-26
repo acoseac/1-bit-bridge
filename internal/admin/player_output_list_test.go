@@ -165,16 +165,51 @@ func TestACrumbReturnsToItsEntryAfterAReload(t *testing.T) { listScenario(t, 6) 
 // failed before it, a jump's Back to the top and the Clear of a filter that
 // matched nothing ask for nothing (the Clear empties no field), and the
 // filtered list stands from its first row, its count announced; a jump in
-// that list, then its own Back to the top, reaches its first row.
-func TestNoCallbackOfAListAFilterReplacedActs(t *testing.T) { listScenario(t, 13) }
+// that list puts M's first row first and shows its own Back to the top,
+// which reaches the list's first row.
+func TestNoCallbackOfAListAFilterReplacedActs(t *testing.T) { listScenario(t, 15) }
 
 // TestAListLeftForAnAxisPageAsksNothingWhileItsNameIsHeld: a genre opened
 // from the genres' rows, its name held, and the genres' list, still in the
 // page, scrolled to its end; and a composer reached by Forward from a
 // composers' list whose restore failed, its name held, and that list's Try
 // again: neither list asks for anything, and each grid opens once its name
-// comes.
-func TestAListLeftForAnAxisPageAsksNothingWhileItsNameIsHeld(t *testing.T) { listScenario(t, 7) }
+// comes; and the genres filtered to nothing, a genre reached by Forward, its
+// name held, the focus on another control: the old Clear leaves the field's
+// words and the focus where they were.
+func TestAListLeftForAnAxisPageAsksNothingWhileItsNameIsHeld(t *testing.T) { listScenario(t, 11) }
+
+// TestALateFailurePaintsOnlyThePageThatAsked: through app.js's own boost
+// router, an album, an artist, a playlist, a smart mix, the smart mixes, the
+// favorites, a folder, a key's tracks and a search, each one's request held
+// and then answering 500: let go while the page is its route's, it shows the
+// error; let go once an operator page has replaced the page, the page's view
+// keeps the spinner it had and shows no error.
+func TestALateFailurePaintsOnlyThePageThatAsked(t *testing.T) {
+	listScenario(t, 18, boostScriptFile(t))
+}
+
+// TestAFailureOfASupersededRenderLeavesTheNewerResults: a search refined on
+// its own history entry, the first one's request held where its abort
+// reaches nothing and then answering 500 once the refined search's results
+// stand: they stand still.
+func TestAFailureOfASupersededRenderLeavesTheNewerResults(t *testing.T) { listScenario(t, 3) }
+
+// TestAnAbortedBodyReadStaysAnAbort: api.js's getJSON over a 404 whose body
+// is still being read when abortReads aborts its request rejects with an
+// abort, and over a 404 whose body is no JSON, with no abort, with the
+// status and the status's words.
+func TestAnAbortedBodyReadStaysAnAbort(t *testing.T) { listScenario(t, 2) }
+
+// TestAnAlbumLeftWhileItsSourceNamesAreHeldDoesNothingOnceTheyCome: through
+// app.js's own boost router, an album whose one edition holds this library's
+// rows and an upstream's, its heading drawn and its source names held while
+// an operator page replaces it: the names, let go after, draw nothing on its
+// page, subscribe nothing to the player, and leave another album's edition
+// pick as it was.
+func TestAnAlbumLeftWhileItsSourceNamesAreHeldDoesNothingOnceTheyCome(t *testing.T) {
+	listScenario(t, 5, boostScriptFile(t))
+}
 
 // TestALateDetailAnswerRetitlesNoOperatorPage: through app.js's own boost
 // router, an operator page replaces an album, an artist, a playlist, a smart

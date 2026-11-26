@@ -19,8 +19,9 @@
 // What boot.js needs to import and boot and is not a list's is stubbed: the
 // audio element's media methods, navigator.mediaSession, the bridge
 // player's GET now (no player offered, unless a case holds it), and the
-// detail pages' answers: an album's, an artist's, a playlist's, a smart
-// mix's and a key's tracks (no tracks). A reload keeps the
+// detail pages' answers: an album's (its rows where a case sets them, else
+// none), an artist's, a playlist's, a smart mix's, a key's tracks (none) and
+// a search's albums. A reload keeps the
 // tab's history and its session storage and makes everything else anew, the
 // modules from a copy of their directory, since node evaluates a module once
 // per URL.
@@ -354,9 +355,12 @@ const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const hex = (n) => n.toString(16).padStart(16, "0");
 const fold = (s) => s.replace(/^the /i, "").normalize("NFD").replace(/\p{M}/gu, "").toUpperCase().replace(/[^\p{L}\p{N}]/gu, "");
 const SNAP = "2026-11-26T08:00:00Z";
-const lib = { albums: [], artists: [], genres: [], composers: [], playlists: [], mixes: [] };
+// tracks are an album's rows by its id, which its detail answers (none unless
+// a case sets them).
+const lib = { albums: [], artists: [], genres: [], composers: [], playlists: [], mixes: [], tracks: new Map() };
 function library(o = {}) {
   const n = { albums: 1400, artists: 400, genres: 80, composers: 80, playlists: 6, mixes: 12, ...o };
+  lib.tracks = new Map();
   lib.albums = Array.from({ length: n.albums }, (_, i) => ({
     id: hex(i + 1), title: `${LETTERS[i % 26]} Album ${String(i).padStart(4, "0")}`,
     albumArtist: i % 50 === 7 ? "The Brass Lanterns" : `Artist ${String(i % n.artists).padStart(3, "0")}`,
@@ -413,7 +417,7 @@ function answer(e) {
   let m;
   if ((m = /^\/api\/player\/albums\/(\w+)$/.exec(p))) {
     const a = lib.albums.find((x) => x.id === m[1]);
-    return a ? { body: { album: a, tracks: [], variants: null } } : { status: 404, body: { error: "not_found" } };
+    return a ? { body: { album: a, tracks: structuredClone(lib.tracks.get(a.id) || []), variants: null } } : { status: 404, body: { error: "not_found" } };
   }
   if (p === "/api/player/artists") return { body: page(named(lib.artists, q, "name"), q, (a) => initial(a.name), "artists") };
   if ((m = /^\/api\/player\/artists\/(\w+)$/.exec(p))) {
@@ -429,6 +433,10 @@ function answer(e) {
     return c ? { body: { collection: c, tracks: [] } } : { status: 404, body: { error: "not_found" } };
   }
   if (p === "/api/library/browse" && q.get("camelot")) return { body: { keyName: "A minor", keyFilter: q.get("camelot"), tracks: [] } };
+  if (p === "/api/player/search") {
+    const f = fold(q.get("q") || "");
+    return { body: { albums: lib.albums.filter((a) => fold(a.title).includes(f)).slice(0, 12).map((a) => ({ id: a.id, name: a.title, detail: a.albumArtist })), artists: [], tracks: [] } };
+  }
   if (p === "/api/playlists/deleted") return { body: { deleted: [] } };
   if (p === "/api/player/sources") return { body: { sources: [{ id: "nas", name: "NAS" }] } };
   if (p === "/api/settings") return { body: { allowDelete: false } };
@@ -438,11 +446,12 @@ function answer(e) {
 const log = [];
 const holds = new Map();
 // hold makes the next request for path (whose query meets when, if given)
-// wait until the case lets it go.
-function hold(path, when = null) {
+// wait until the case lets it go; a deaf hold's request answers then whatever
+// its signal says, as a failure that is no abort would reach its render.
+function hold(path, when = null, deaf = false) {
   let open;
   const p = new Promise((r) => { open = r; });
-  holds.set(path, { p, when });
+  holds.set(path, { p, when, deaf });
   return () => open();
 }
 const fails = new Set();
@@ -453,17 +462,18 @@ globalThis.fetch = async (url, init = {}) => {
   const e = { path: u.pathname, query: u.searchParams, partial: !!init.headers?.["X-Bridge-Partial"] };
   log.push(e);
   const gate = holds.get(e.path);
+  const deaf = !!gate?.deaf && (!gate.when || gate.when(e.query));
   if (gate && (!gate.when || gate.when(e.query))) {
     holds.delete(e.path);
     await new Promise((resolve, reject) => {
       gate.p.then(resolve);
-      init.signal?.addEventListener?.("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+      if (!deaf) init.signal?.addEventListener?.("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
     });
   }
   inflight += 1;
   await turn();
   inflight -= 1;
-  if (init.signal?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+  if (init.signal?.aborted && !deaf) throw Object.assign(new Error("aborted"), { name: "AbortError" });
   const failed = fails.delete(e.path);
   const { status = 200, body = null, headers = {} } = failed ? { status: 500, body: { error: "internal", message: "The list could not be read." } } : answer(e);
   const lower = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
@@ -1022,6 +1032,32 @@ S.TestAListLeftForAnAxisPageAsksNothingWhileItsNameIsHeld = async () => {
   named();
   await settle();
   check("and the composer's grid opens once its name comes", title() === composer.name && rows().length > 0, [title(), rows().length]);
+
+  // A genre opened and Back, the genres filtered to nothing, Forward with the
+  // genre's name held, the focus on another control, and the old Clear.
+  doc.getElementById("player-sections").querySelectorAll("a").find((a) => a.dataset.section === "genres").fire("click", { detail: 1 });
+  await settle();
+  const opened = lib.genres[5];
+  await navigate(tile(5));
+  await back();
+  const f = field();
+  f.focus();
+  await type(f, "zzzz");
+  await advance(400);
+  const clear = button("Clear");
+  check("the genres filtered to nothing offer Clear", !!clear && viewText().includes("No genres match “zzzz”"), viewText());
+  named = hold("/api/player/genres", (q) => !q.has("offset"));
+  await forward();
+  const search = doc.getElementById("player-search-input");
+  search.focus();
+  check("the genre's page waits for its name, the genres' Clear still in the page", location.pathname === `/genre/${opened.id}` && holds.size === 0 && !!clear?.isConnected,
+    [location.pathname, holds.size, !!clear?.isConnected]);
+  await navigate(clear);
+  check("the old Clear, pressed meanwhile, leaves the field's words and the focus where they were", f.value === "zzzz" && doc.activeElement === search,
+    [f.value, doc.activeElement === search, doc.activeElement === f]);
+  named();
+  await settle();
+  check("and the genre's grid opens once its name comes", title() === opened.name && rows().length > 0, [title(), rows().length]);
 };
 
 S.TestALateDetailAnswerRetitlesNoOperatorPage = async () => {
@@ -1292,6 +1328,9 @@ S.TestNoCallbackOfAListAFilterReplacedActs = async () => {
     [titleOf(rows()[0]), doc.getElementById("player-live").textContent]);
   letter("M").fire("click", { detail: 0 });
   await settle();
+  const atFilteredM = want.find((a) => a.title.startsWith("M"));
+  check("a jump in the filtered list puts M's first row first", titleOf(rows()[0]) === atFilteredM.title, [titleOf(rows()[0]), atFilteredM.title]);
+  check("and shows its own Back to the top", button("Back to the top")?.hidden === false, button("Back to the top")?.hidden);
   await navigate(button("Back to the top"));
   check("a jump in the filtered list, then its own Back to the top, reaches its first row", titleOf(rows()[0]) === want[0].title && topRow()?.title === want[0].title,
     [titleOf(rows()[0]), topRow()]);
@@ -1313,6 +1352,169 @@ S.TestNoCallbackOfAListAFilterReplacedActs = async () => {
   release();
   await settle();
   check("and the matching filter's rows stand", titleOf(rows()[0]) === want[0].title && viewText().includes(`${want.length} albums`), [titleOf(rows()[0]), viewText().slice(0, 200)]);
+};
+
+S.TestALateFailurePaintsOnlyThePageThatAsked = async () => {
+  if (!boostScript) {
+    check("app.js's boost router is given", false, "no boost script");
+    return;
+  }
+  await rig("/albums");
+  const stats = () => doc.getElementById("primary-nav").querySelector('a[href="/stats"]');
+  const section = (s) => doc.getElementById("player-sections").querySelectorAll("a").find((a) => a.dataset.section === s);
+  const to = async (url) => {
+    history.pushState({ scrollY: 0 }, "", url);
+    win.dispatchEvent({ type: "popstate" });
+    await settle();
+  };
+  const away = () => navigate(section("albums"));
+  const failure = (v) => v.querySelectorAll(".player-empty").find((n) => n.textContent.includes("The list could not be read.")) || null;
+  // A page whose request is held and then answers 500: let go while the page
+  // is its route's, the page shows the error; let go once an operator page has
+  // replaced it, the page's view, out of the document, keeps the spinner it
+  // had and shows no error. Back then returns to the page.
+  const late = async (what, path, open, leave) => {
+    fail(path);
+    let release = hold(path);
+    await open();
+    release();
+    await settle();
+    check(`${what}: a failure while its page is the route's shows the error`, !!failure(doc.getElementById("player-view")), viewText());
+    await leave();
+    fail(path);
+    release = hold(path);
+    await open();
+    const view = doc.getElementById("player-view");
+    const spin = view.children[0];
+    const waiting = holds.size === 0 && view.children.length === 1 && !!spin?.classList.contains("player-status");
+    await navigate(stats());
+    const swapped = location.pathname === "/stats" && !view.isConnected;
+    release();
+    await settle();
+    check(`${what}: a failure come once an operator page replaced the page paints nothing on it`,
+      waiting && swapped && view.children.length === 1 && view.children[0] === spin && !failure(view),
+      [waiting, swapped, view.children.map((n) => n.textContent)]);
+    await back();
+  };
+  await late("an album", `/api/player/albums/${lib.albums[3].id}`, () => navigate(tile(3)), back);
+  await navigate(section("artists"));
+  await late("an artist", `/api/player/artists/${lib.artists[3].id}`, () => navigate(tile(3)), back);
+  await navigate(section("playlists"));
+  await late("a playlist", "/api/player/playlists/p2", () => navigate(tile(2)), back);
+  await navigate(section("mixes"));
+  await late("a smart mix", "/api/player/mixes/m2", () => navigate(tile(2)), back);
+  await late("the smart mixes", "/api/player/mixes", () => navigate(section("mixes")), away);
+  await late("the favorites", "/api/player/favorites", () => navigate(section("favorites")), away);
+  await late("a folder", "/api/library/browse", () => navigate(section("folders")), away);
+  await late("a key's tracks", "/api/library/browse", () => to("/tracks?camelot=8A"), away);
+  await late("a search", "/api/player/search", () => to("/search?q=Album%200"), away);
+};
+
+S.TestAFailureOfASupersededRenderLeavesTheNewerResults = async () => {
+  await rig("/albums");
+  const input = doc.getElementById("player-search-input");
+  const results = () => doc.getElementById("player-view").querySelector(".search-results");
+  const first = () => results()?.querySelector(".tile-title")?.textContent;
+  // A search whose answer is held where the abort that ends it reaches nothing.
+  const release = hold("/api/player/search", null, true);
+  input.focus();
+  input.value = "Album 0";
+  input.fire("input");
+  await advance(400);
+  const key = here().state?.key;
+  check("the search waits for its answer", location.pathname === "/search" && holds.size === 0 && !results(), [location.href, holds.size]);
+  // Refined on the same entry, its results drawn.
+  input.value = "Album 01";
+  input.fire("input");
+  await advance(400);
+  check("the refined search, on the same entry, draws its results", here().state?.key === key && location.search === "?q=Album%2001" && first() === "W Album 0100",
+    [here().state?.key === key, location.search, first()]);
+  // The first search's answer, a failure, comes after them.
+  fail("/api/player/search");
+  release();
+  await settle();
+  check("the first search's failure, come after, leaves the refined results", first() === "W Album 0100" && !doc.getElementById("player-view").querySelector(".player-empty"),
+    viewText().slice(0, 200));
+};
+
+S.TestAnAbortedBodyReadStaysAnAbort = async () => {
+  const api = await import(new URL("api.js", dirURL));
+  const reply = (json) => ({ ok: false, status: 404, statusText: "Not Found", redirected: false, headers: { get: () => null }, json });
+  // A 404 whose body is still being read when its request's signal aborts.
+  let reading;
+  const read = new Promise((r) => { reading = r; });
+  globalThis.fetch = async (_url, init = {}) => reply(() => new Promise((_, reject) => {
+    reading(init.signal);
+    init.signal.addEventListener("abort", () => reject(init.signal.reason));
+  }));
+  const p = api.getJSON("/api/player/albums/held", { key: "detail" }).catch((e) => e);
+  const signal = await read;
+  api.abortReads();
+  const e = await p;
+  check("a body read its request's abort ends is an abort", signal.aborted && api.isAborted(e), [signal.aborted, e?.name, e?.message, e?.status]);
+  // A 404 whose body is no JSON, read whole, with no abort.
+  globalThis.fetch = async () => reply(async () => { throw new SyntaxError("Unexpected token 'n', \"not json\" is not valid JSON"); });
+  const m = await api.getJSON("/api/player/albums/bad", { key: "detail" }).catch((x) => x);
+  check("a body that is no JSON, read with no abort, keeps its status and the status's words", !api.isAborted(m) && m.status === 404 && m.message === "404 Not Found",
+    [m?.name, m?.message, m?.status]);
+};
+
+S.TestAnAlbumLeftWhileItsSourceNamesAreHeldDoesNothingOnceTheyCome = async () => {
+  if (!boostScript) {
+    check("app.js's boost router is given", false, "no boost script");
+    return;
+  }
+  await rig("/albums");
+  const nav = (href) => doc.getElementById("primary-nav").querySelector(`a[href="${href}"]`);
+  const flac = { codec: "FLAC", duration: 200, play: { kind: "universal", contentType: "audio/flac" } };
+  // E holds the same three songs in two folders, two editions; M one edition
+  // of this library's rows and an upstream's, whose source names it looks up.
+  const E = lib.albums[3];
+  const M = lib.albums[4];
+  lib.tracks.set(E.id, [1, 2, 3].flatMap((n) => [
+    { ...flac, path: `Lib/E/Hi/0${n} Song ${n}.flac`, title: `Song ${n}`, track: n, disc: 1, rateHz: 96000, bits: 24 },
+    { ...flac, path: `Lib/E/CD/0${n} Song ${n}.flac`, title: `Song ${n}`, track: n, disc: 1, rateHz: 44100, bits: 16 },
+  ]));
+  lib.tracks.set(M.id, [
+    { ...flac, path: "Lib/M/01 Near.flac", title: "Near", track: 1, rateHz: 44100, bits: 16 },
+    { ...flac, path: "Lib/M/02 Nearer.flac", title: "Nearer", track: 2, rateHz: 44100, bits: 16 },
+    { ...flac, path: "Upstream/M/03 Far.flac", title: "Far", track: 3, rateHz: 44100, bits: 16, routed: true, sourceId: "uuid:upstream" },
+    { ...flac, path: "Upstream/M/04 Farther.flac", title: "Farther", track: 4, rateHz: 44100, bits: 16, routed: true, sourceId: "uuid:upstream" },
+  ]);
+  const editions = () => doc.getElementById("player-view").querySelector(".edition-picker")?.querySelectorAll("button") || [];
+  const pressed = () => editions().find((b) => b.getAttribute("aria-pressed") === "true")?.textContent || "";
+  await navigate(tile(3));
+  const shown = pressed();
+  editions().find((b) => b.getAttribute("aria-pressed") !== "true")?.click();
+  await settle();
+  const picked = pressed();
+  check("an album in two editions shows the one picked", editions().length === 2 && !!picked && picked !== shown, [shown, picked, editions().length]);
+  await back();
+  const names = hold("/api/player/sources");
+  await navigate(tile(4));
+  const view = doc.getElementById("player-view");
+  check("the mixed album draws its heading and asks for its source names", title() === M.title && holds.size === 0 && listGets("/api/player/sources").length === 1,
+    [title(), holds.size, listGets("/api/player/sources").length]);
+  const drawn = view.children.length;
+  let redraws = 0;
+  win.addEventListener("player:rerender", () => { redraws += 1; });
+  await navigate(nav("/stats"));
+  names();
+  await settle();
+  check("its names, come once an operator page replaced the album, draw nothing on it", location.pathname === "/stats" && view.children.length === drawn && !view.querySelector(".detail"),
+    [location.pathname, view.children.length, drawn]);
+  // A subscription the album took would redraw the page once a row it plays
+  // here could not be decoded.
+  const format = await import(new URL("format.js", dirURL));
+  const audio = await import(new URL("audio.js", dirURL));
+  format.markUnplayable("Lib/M/01 Near.flac\n");
+  audio.setShuffle(false);
+  await settle();
+  check("nor do they subscribe it to the player's changes", redraws === 0, redraws);
+  // Nor take the albums' edition slot: the album in two editions keeps its pick.
+  await navigate(nav("/albums"));
+  await navigate(tile(3));
+  check("the album in two editions still shows the one picked", pressed() === picked, [pressed(), picked]);
 };
 
 const name = scenarioName;

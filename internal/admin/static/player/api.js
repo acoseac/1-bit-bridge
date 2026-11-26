@@ -63,8 +63,10 @@ async function errorFrom(r) {
   try {
     const j = await r.json();
     if (j && (j.message || j.error)) msg = j.message || j.error;
-  } catch {
-    /* a non-JSON body is not worth a second failure */
+  } catch (e) {
+    // An abort that ends the body's read is the request's end, never its
+    // failure (B1021); a non-JSON body is not worth a second failure.
+    if (isAborted(e)) throw e;
   }
   const e = new Error(msg);
   e.status = r.status;
