@@ -151,16 +151,26 @@ func TestThePlayerPageOffersTheRestartAsSettingsDoes(t *testing.T) {
 	}
 }
 
-// TestThePlayerPageOffersNoDSDControl pins the owner's decision for this
-// release: the page says plainly that DSD on this player comes later, offers
-// no control for it and no command to copy, and its script posts nothing but
-// the switch, the OpenHome switch (B612), the DAC and the test tone (B601),
-// whose request writes nothing and which no second route stops.
+// TestThePlayerPageOffersNoDSDControl pins what the page says of DSD, served
+// as an owner's loopback bridge serves it (a public bridge serves none of the
+// player's panels): no hint that DSD comes later, since the player plays it by
+// its effective policy (B728), its transports panel there, no control for DSD
+// and no command to copy, and its script posts nothing but the switch, the
+// OpenHome switch (B612), the DAC and the test tone (B601), whose request
+// writes nothing and which no second route stops.
 func TestThePlayerPageOffersNoDSDControl(t *testing.T) {
 	srv, _, _ := newPlayerTestServer(t)
 	page := renderOutputPage(t, srv)
-	if !strings.Contains(page, "DSD on this player comes in a later version.") {
-		t.Errorf("the page does not say that DSD on this player comes later")
+	if strings.Contains(page, `id="player-output-public"`) {
+		t.Fatalf("the page is a public bridge's, which serves none of the player's panels")
+	}
+	for _, gone := range []string{"comes in a later version", `id="player-output-dsd-later"`} {
+		if strings.Contains(page, gone) {
+			t.Errorf("the page carries %q: the player plays DSD in this version", gone)
+		}
+	}
+	if !strings.Contains(page, `id="player-output-transports-panel"`) {
+		t.Errorf("the page serves no transports panel")
 	}
 	content := page[strings.Index(page, `<section class="page output">`):]
 	content = content[:strings.Index(content, "</section>")]

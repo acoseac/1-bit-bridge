@@ -487,6 +487,63 @@ func TestLoadShippedExample(t *testing.T) {
 	}
 }
 
+// TestTheShippedExampleLeavesThePlayersDSDToItsState holds the example's DSD
+// words to the player since its DSD cutover (B728 B7): they no longer say that
+// dsdMode defaults off, and its output block, uncommented as an owner copies
+// it into bridge.yaml (its own markers, then a nested key's), assigns none of
+// the three legacy DSD keys, whose names may stay in its prose, and decodes
+// with no key unread, no problem and no legacy DSD key set.
+func TestTheShippedExampleLeavesThePlayersDSDToItsState(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "bridge.yaml.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prose := strings.Join(strings.Fields(strings.ReplaceAll(string(raw), "#", " ")), " ")
+	if strings.Contains(prose, "dsdMode defaults off") {
+		t.Errorf("the example says dsdMode defaults off: the player decides DSD by its DSD state, and the key only migrates")
+	}
+	lines := strings.Split(string(raw), "\n")
+	start := -1
+	for i, l := range lines {
+		if l == "# output:" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatal("the example has no commented output block")
+	}
+	for i := start; i < len(lines) && strings.HasPrefix(lines[i], "#"); i++ {
+		l := strings.TrimPrefix(strings.TrimPrefix(lines[i], "#"), " ")
+		indent := len(l) - len(strings.TrimLeft(l, " "))
+		l = l[:indent] + strings.TrimPrefix(l[indent:], "# ")
+		for _, key := range []string{"dsdMode", "allowDoP", "dsdQualification"} {
+			if strings.HasPrefix(strings.TrimSpace(l), key+":") {
+				t.Errorf("the example's output block sets %s, a legacy key the player's start migrates into its DSD state: %q", key, strings.TrimSpace(l))
+			}
+		}
+		lines[i] = l
+	}
+	path, _ := writeConfig(t, strings.ReplaceAll(strings.Join(lines, "\n"), "/Users/me/Music", "{{LIBRARY_ROOT}}"))
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("the example with its output block uncommented does not load: %v", err)
+	}
+	p := cfg.Output.Player
+	if err := p.Unread(); err != nil {
+		t.Fatalf("the uncommented player block does not read: %v", err)
+	}
+	if !p.Device.Configured() || p.Room == "" {
+		t.Fatalf("the uncommented block reached no output.player: %+v", p)
+	}
+	if err := p.Problem(); err != nil {
+		t.Errorf("the uncommented player block is refused: %v", err)
+	}
+	if keys := p.LegacyDSDKeys(); len(keys) != 0 {
+		t.Errorf("the uncommented player block sets the legacy DSD keys %v", keys)
+	}
+}
+
 func TestScanIntervalConversion(t *testing.T) {
 	c := &Config{ScanIntervalSec: 45}
 	if c.ScanInterval() != 45*time.Second {
