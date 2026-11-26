@@ -208,6 +208,65 @@ func TestTheConsoleKnowsThePlayerIsOnBesideABodyWithNoElementOfIts(t *testing.T)
 	}
 }
 
+// TestThePlayersElementWinsOverTheBootGate: the player's gate as serve
+// decided it at boot (BridgePlayerOn) speaks only for a body that lists no
+// element of the player's (B1022). Where the body lists one, its card and
+// its dac null alike, the line reads the player from it whatever the gate
+// says, and the gate is never asked; where it lists none, the gate is asked
+// once and decides.
+func TestThePlayersElementWinsOverTheBootGate(t *testing.T) {
+	mpdEl := api.OutputInfo{ID: "a1", Kind: "mpd", Player: api.OutputPlayer{Software: "volumio", Version: "4.119"},
+		MPD: &api.OutputMPD{Port: 6600, Addresses: []string{}, Version: "0.24.0", State: "stop"},
+		DAC: &api.OutputDAC{Card: 1, ID: "DAC", Name: "USB DAC", USBID: "25ce:0025"}, PathRules: []api.OutputPathRule{}}
+	playerEl := func(dac *api.OutputDAC) api.OutputInfo {
+		return api.OutputInfo{ID: "bridge:" + thePlayerUUID, Kind: "bridge", Player: api.OutputPlayer{Software: "bridge"}, DAC: dac,
+			PathRules: []api.OutputPathRule{}, Bridge: &api.OutputBridge{State: "stopped", LibraryScope: "self", Codecs: []string{"flac"}}}
+	}
+	card := &api.OutputDAC{Card: 1, ID: "[redacted]", Name: "USB DAC", USBID: "25ce:0025"}
+	own := outputcheck.Line{Key: "dac", Title: "DAC", Status: outputcheck.OK,
+		Summary: "USB DAC (USB 25ce:0025) is the bridge's own player's DAC; MPD's output only matters when 1-bit casts over MPD"}
+	unknown := outputcheck.Line{Key: "dac", Title: "DAC", Status: outputcheck.Warn,
+		Summary: "The bridge's own player is on, and the checklist cannot tell which DAC it plays through",
+		Fix:     "Check the player's DAC binding (`bridge output dac inspect`, or the console's Player page) before changing MPD's output."}
+	off := outputcheck.Line{Key: "dac", Title: "DAC", Status: outputcheck.Warn,
+		Summary: "USB DAC (USB 25ce:0025) found, but MPD's output does not name it",
+		Fix:     `Point MPD's audio_output at the DAC (device "hw:CARD=DAC"), or choose it in the player's output settings.`}
+	for _, tc := range []struct {
+		name    string
+		outputs []api.OutputInfo
+		gate    bool
+		want    outputcheck.Line
+		// asked is how often the gate is asked.
+		asked int
+	}{
+		{"the player's element with its card, the gate shut", []api.OutputInfo{mpdEl, playerEl(card)}, false, own, 0},
+		{"the player's element with its card, the gate open", []api.OutputInfo{mpdEl, playerEl(card)}, true, own, 0},
+		{"the player's element with no card, the gate shut", []api.OutputInfo{mpdEl, playerEl(nil)}, false, unknown, 0},
+		{"the player's element with no card, the gate open", []api.OutputInfo{mpdEl, playerEl(nil)}, true, unknown, 0},
+		{"no element of the player's, the gate open", []api.OutputInfo{mpdEl}, true, unknown, 1},
+		{"no element of the player's, the gate shut", []api.OutputInfo{mpdEl}, false, off, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asked := 0
+			src := outputChecklistSource{
+				Active: func(context.Context) bool { return true },
+				Outputs: func(context.Context) (api.OutputsResponse, error) {
+					return api.OutputsResponse{Outputs: tc.outputs}, nil
+				},
+				LoopbackErr:    func() error { return nil },
+				Tokens:         func() []auth.Token { return nil },
+				BridgePlayerOn: func() bool { asked++; return tc.gate },
+			}
+			if got := mustChecklist(t, src)[1]; got != tc.want {
+				t.Errorf("the DAC line\n%+v\nwant\n%+v", got, tc.want)
+			}
+			if asked != tc.asked {
+				t.Errorf("the gate was asked %d times, want %d", asked, tc.asked)
+			}
+		})
+	}
+}
+
 // TestTheConsoleAndTheDoctorShowOneChecklist: the dashboard's panel and the
 // doctor's report (the console's Diagnostics panel, and `bridge doctor`)
 // carry the same four lines, from one source: same keys, verdicts,
