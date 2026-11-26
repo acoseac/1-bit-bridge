@@ -1381,7 +1381,7 @@ export async function renderArtist(view, ctx) {
   // After the grid is in the document, so the chunks land in a node the
   // reader can actually see fill. Skipped when the grid was replaced by
   // an empty state and is not in the document at all.
-  if (albums === grid) chunkAppend(grid, d.albums, albumTile, gen);
+  if (albums === grid) chunkAppend(grid, d.albums, albumTile, ownedGen(ctx, gen));
 }
 
 // ---- Genres / Composers ----
@@ -1418,6 +1418,14 @@ async function renderAxis(view, ctx, fetcher, kind, emptyTitle, emptyDetail) {
 // hands no check is its page's.
 function owned(ctx) {
   return !ctx.owns || ctx.owns();
+}
+
+// The generation a chunked append (ui.js's chunkAppend) runs under, none
+// that any matches once the page is no longer its route's: a frame queued
+// before a boost to an operator page, which moves no generation, appends
+// nothing to the page it left.
+function ownedGen(ctx, gen) {
+  return () => (owned(ctx) ? gen() : NaN);
 }
 
 // Whether a render asked under generation at has been overtaken, by a newer
@@ -1603,7 +1611,7 @@ async function renderPagedList(view, ctx, opts) {
   let renderGen = 0;
   const gone = () => gen() !== at || !owned(ctx);
   const stale = (mine) => mine !== renderGen || gone();
-  const listGen = () => `${gen()}:${renderGen}`;
+  const listGen = ownedGen(ctx, () => `${gen()}:${renderGen}`);
   // The filter's commits so far: a body's callbacks (its rail's letters, its
   // Back to the top, its Try again, its Clear) act only while no commit has
   // come since it was drawn, so none drawn for the old q acts while the new
@@ -1613,6 +1621,10 @@ async function renderPagedList(view, ctx, opts) {
     const drawn = commits;
     return (...a) => { if (drawn === commits) fn(...a); };
   };
+  // A finger holds the rail: its jumps write no place as they land, and its
+  // lift writes the last one's, once its rows stand (B1021), where a drag
+  // across the rail wrote one a letter, past WebKit's rate of history writes.
+  let held = false;
   const pinned = () => parseFloat(getComputedStyle(container).scrollMarginTop) || 0;
   const countText = () => (label ? `${plural(total, countNoun)} in ${label}` : plural(total, countNoun));
   const stopPaging = () => {
@@ -1623,6 +1635,7 @@ async function renderPagedList(view, ctx, opts) {
     ids.push(...items.map((i) => i.id));
     if (atOnce) for (const i of items) container.appendChild(make(i));
     else chunkAppend(container, items, make, listGen);
+    container.style.minHeight = "";
   };
   // A place's row: by its id where the window holds it and the catalog was
   // rebuilt since it was measured, or the list is whole (whose window an
@@ -1666,7 +1679,14 @@ async function renderPagedList(view, ctx, opts) {
       return;
     }
     if (countNoun) body.appendChild(el("p", { class: "muted small", text: countText() }));
-    const rail = indexRail(r.buckets, whileDrawn((b) => void load(b.offset, null, "jump")), r.rail);
+    // The rail takes no scrub, and ends one at its next move, once a filter
+    // has committed (its rows still to come) or the route has moved on.
+    held = false;
+    const drawn = commits;
+    const rail = indexRail(r.buckets, whileDrawn((b, scrub) => { held = !!scrub; void load(b.offset, null, "jump"); }), r.rail, {
+      live: () => drawn === commits && !gone(),
+      lift: whileDrawn(() => { held = false; if (!gone()) ctx.savePlace?.(); }),
+    });
     if (rail) body.appendChild(rail);
     top = el("button", { class: "btn btn-quiet", text: "Back to the top",
       attrs: { type: "button", hidden: true }, on: { click: whileDrawn(() => void load(0, null, "jump")) } });
@@ -1694,8 +1714,13 @@ async function renderPagedList(view, ctx, opts) {
     loading = true;
     start = offset = from;
     ids = [];
-    if (mode === "jump" && container) clear(container);
-    else container = null;
+    if (mode === "jump" && container) {
+      // Its height kept until its rows land: emptied, the list shortened the
+      // page, and a short window's sticky rail stood 87px lower under a
+      // finger held on it, which then read the letter above.
+      container.style.minHeight = `${container.getBoundingClientRect().height}px`;
+      clear(container);
+    } else container = null;
     try {
       // A window past the first row asks the first page for the rail and
       // the total the server sends there alone.
@@ -1739,7 +1764,7 @@ async function renderPagedList(view, ctx, opts) {
       disposeSentinel = onVisible(sentinel, () => { if (offset < total) void page(); });
     } else sentinel.remove();
     ctx.listed?.(true);
-    if (mode !== "top") ctx.savePlace?.();
+    if (mode !== "top" && !(mode === "jump" && held)) ctx.savePlace?.();
   }
 
   async function page() {
@@ -1912,7 +1937,7 @@ export async function renderFavorites(view, ctx) {
   // After the grid is in the document, so the reader watches it fill —
   // and only when it actually got there, since a tab whose panel was
   // replaced by the unresolved notice never holds it.
-  if (albums.length) chunkAppend(grid, albums, albumTile, gen);
+  if (albums.length) chunkAppend(grid, albums, albumTile, ownedGen(ctx, gen));
 }
 
 /**

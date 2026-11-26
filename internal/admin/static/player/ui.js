@@ -257,6 +257,10 @@ const RAIL_LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 const RAIL_NAMES = { letters: "Jump to letter", years: "Jump to year", dates: "Jump to date added" };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const SCRUBS = new Set(["touch", "pen"]);
+// How long a scrub's lift owes the click its tap makes to the scrub: WebKit
+// fires a tap's click within milliseconds of its pointerup, and a lift the
+// browser gives no click owes it no longer than this.
+const OWED_MS = 1000;
 
 // What the last pointer went down on, anywhere in the document, and its
 // type, which one capture listener a document records for every rail (B1021):
@@ -264,11 +268,12 @@ const SCRUBS = new Set(["touch", "pen"]);
 // rail, or by a mouse on that entry, since WebKit hands a tap on an empty
 // letter's click to the nearest live one and a touch's or a pen's jumped as
 // the scrub took it, and takes the record; a key's click (detail 0) is its
-// entry's own and leaves it. `owed` is a scrub's click: its owner went up on
-// the rail, and the click that tap makes, whatever pointer went down since
-// elsewhere, is the scrub's, until the next pointerdown.
+// entry's own and leaves it. `owedUntil` is a scrub's click: its owner went up
+// on the rail, and the click that tap makes, whatever pointer went down since
+// elsewhere, is the scrub's, until the next pointerdown or keydown, or
+// OWED_MS after the lift.
 let pointerDown = null;
-let owed = false;
+let owedUntil = 0;
 let listening = null;
 
 // railEntries is the rail's entries for its kind: each one's label, the words
@@ -300,11 +305,12 @@ function railEntries(kind, buckets, now) {
   return RAIL_LETTERS.map((l) => ({ label: l, words: l, buckets: byKey.has(l) ? [byKey.get(l)] : [] }));
 }
 
-export function indexRail(buckets, onJump, kind = "letters") {
+export function indexRail(buckets, onJump, kind = "letters", { live = () => true, lift = null } = {}) {
   if (!Array.isArray(buckets) || buckets.length === 0) return null;
   if (listening !== document) {
     listening = document;
-    document.addEventListener("pointerdown", (e) => { pointerDown = { target: e.target, type: e.pointerType }; owed = false; }, true);
+    document.addEventListener("pointerdown", (e) => { pointerDown = { target: e.target, type: e.pointerType }; owedUntil = 0; }, true);
+    document.addEventListener("keydown", () => { owedUntil = 0; }, true);
   }
   const rail = el("nav", { class: "az-rail", attrs: { "aria-label": RAIL_NAMES[kind] || RAIL_NAMES.letters } });
   const entries = new Map();
@@ -321,9 +327,9 @@ export function indexRail(buckets, onJump, kind = "letters") {
       btn.addEventListener("click", (e) => {
         if (e.detail > 0) {
           const from = pointerDown;
-          const scrubbed = owed;
+          const scrubbed = performance.now() < owedUntil;
           pointerDown = null;
-          owed = false;
+          owedUntil = 0;
           if (scrubbed || (from && rail.contains(from.target) && (SCRUBS.has(from.type) || !btn.contains(from.target)))) return;
         }
         onJump(entry.buckets[0]);
@@ -335,15 +341,18 @@ export function indexRail(buckets, onJump, kind = "letters") {
   callout.hidden = true;
   rail.appendChild(callout);
 
-  // The scrub: a touch's or a pen's pointer, which the rail captures as it goes
-  // down there, owns it until its lift, its cancel or the rail's lost capture
-  // (a pointer beside it moves nothing; a primary one going down takes it over,
-  // its owner's end lost). It takes the entry at the contact point (the
-  // event's target, which WebKit gives), then at each move the one under the
-  // finger, the point held inside the rail; a decade's band gives the year at
-  // the finger's height in it. The list jumps at each new live bucket, never
-  // from an empty letter, and nothing more at the scrub's end; the callout
-  // says where it is, beside the rail at the finger's height.
+  // The scrub: the first touch's or pen's pointer to go down on the rail while
+  // no scrub holds it, which the rail captures, owns it until its lift, its
+  // cancel or the rail's lost capture; no other pointer, primary or not, starts
+  // or takes over a scrub meanwhile (its own going down again, its end never
+  // delivered, starts it anew). It takes the entry at the contact point
+  // (the event's target, which WebKit gives), then at each move the one under
+  // the finger, the point held inside the rail; a decade's band gives the year
+  // at the finger's height in it. The list jumps at each new live bucket, told
+  // that a finger holds the rail, never from an empty letter, and hears `lift`
+  // at the end of a scrub that jumped; the callout says where it is, beside
+  // the rail at the finger's height. While `live` says no (a filter's answer is
+  // on its way), the rail takes no scrub, and ends one at its next move.
   let owner = null;
   const entryOf = (n) => {
     for (; n && n !== rail; n = n.parentNode) if (n.parentNode === rail) return n;
@@ -361,8 +370,10 @@ export function indexRail(buckets, onJump, kind = "letters") {
     if (entry) {
       b = entry.buckets[0];
       if (at && entry.buckets.length > 1) {
+        // Held to the band's years at both ends; a band with no height is its first year's.
         const box = btn.getBoundingClientRect();
-        b = entry.buckets[Math.min(entry.buckets.length - 1, Math.floor(((y - box.top) / box.height) * entry.buckets.length))] || b;
+        const i = Math.floor(((y - box.top) / box.height) * entry.buckets.length);
+        b = entry.buckets[Math.min(entry.buckets.length - 1, Math.max(0, i))] || b;
       }
       callout.textContent = entry.buckets.length > 1 ? b.key : entry.words;
       callout.hidden = false;
@@ -377,23 +388,30 @@ export function indexRail(buckets, onJump, kind = "letters") {
     }
     if (b && b !== owner.bucket) {
       owner.bucket = b;
-      onJump(b);
+      onJump(b, true);
     }
   };
   rail.addEventListener("pointerdown", (e) => {
-    if (!SCRUBS.has(e.pointerType) || (owner && !e.isPrimary)) return;
+    if (!SCRUBS.has(e.pointerType) || (owner && owner.id !== e.pointerId) || !live()) return;
     owner = { id: e.pointerId, bucket: null };
     rail.setPointerCapture(e.pointerId);
     take(entryOf(e.target) || under(e.clientX, e.clientY), e.clientY);
   });
   rail.addEventListener("pointermove", (e) => {
-    if (owner?.id === e.pointerId) take(under(e.clientX, e.clientY), e.clientY);
+    if (owner?.id !== e.pointerId) return;
+    if (live()) take(under(e.clientX, e.clientY), e.clientY);
+    else {
+      owner = null;
+      callout.hidden = true;
+    }
   });
   const end = (e) => {
     if (owner?.id !== e.pointerId || (e.type === "lostpointercapture" && e.target !== rail)) return;
-    if (e.type === "pointerup") owed = true;
+    if (e.type === "pointerup") owedUntil = performance.now() + OWED_MS;
+    const jumped = !!owner.bucket;
     owner = null;
     callout.hidden = true;
+    if (jumped) lift?.();
   };
   for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) rail.addEventListener(type, end);
   return rail;

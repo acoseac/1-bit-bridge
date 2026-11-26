@@ -926,9 +926,10 @@ class El {
     if (v && globalThis.document && globalThis.document.activeElement === this) globalThis.document.activeElement = globalThis.document.body;
   }
   contains(n) { for (let x = n; x; x = x.parentNode) if (x === this) return true; return false; }
-  // A pointer's capture is the browser's; the box is the one a case lays out
-  // (railModel), none by default.
-  setPointerCapture() {}
+  // A pointer's capture is the browser's, each one an element takes recorded
+  // (`captures`); the box is the one a case lays out (railModel), none by
+  // default.
+  setPointerCapture(id) { (this.captures ||= []).push(id); }
   releasePointerCapture() {}
   getBoundingClientRect() { return this.rect || { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0 }; }
   get isConnected() { let x = this; while (x.parentNode) x = x.parentNode; return x === globalThis.document?.body; }
@@ -6620,6 +6621,15 @@ S.TestTheYearRailFollowsThePhonesBands = async () => {
   const callout = r17.querySelector(".az-callout");
   r17.fire("pointerdown", { target: eighties, pointerType: "touch", pointerId: 5, isPrimary: true, ...m.at(eighties, 0.3) });
   check("the callout names the year under the finger", callout.textContent === "1985" && !callout.hidden, [callout.textContent, callout.hidden]);
+  // A finger above the rail, then below it, its point held inside the rail:
+  // the first decade's band at its first year, the last decade's at its last.
+  const ends = rail([2025, 2021, 2019, 2018, 2010, 2003, 1999, 1998, 1990, 1987, 1985, 1983, 1982, 1979, 1975, 1966, 1962]);
+  railModel(ends, { h: 40 });
+  const past = (type, dy) => ends.fire(type, { target: ends, pointerType: "touch", pointerId: 7, isPrimary: true,
+    clientX: ends.rect.left + 10, clientY: dy < 0 ? ends.rect.top + dy : ends.rect.bottom + dy });
+  past("pointerdown", -30);
+  past("pointermove", 30);
+  check("a finger above the rail takes the first decade's first year, and below it the last decade's last", sameJSON(jumps.slice(-2), ["2025", "1962"]), jumps.slice(-2));
 };
 
 S.TestTheDateRailNamesItsPeriods = async () => {
@@ -6772,6 +6782,91 @@ S.TestAScrubCrossesTheShortWindowsGrid = async () => {
   rail.fire("pointerdown", { target: rail, pointerType: "touch", pointerId: 5, isPrimary: true, clientX: rail.rect.right, clientY: letter("M").rect.top + 9 });
   rail.fire("pointerup", { target: rail, pointerType: "touch", pointerId: 5, isPrimary: true });
   check("a tap on a row's left or right edge takes the cell there (G empty, M live)", sameJSON(jumps.slice(5), ["M"]), jumps.slice(5));
+};
+
+S.TestNoPointerTakesAScrubFromItsOwner = async () => {
+  const pg = page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const rail = ui.indexRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
+  pg.body.appendChild(rail);
+  const m = railModel(rail);
+  const letter = (k) => m.entries.find((n) => n.textContent === k);
+  const callout = rail.querySelector(".az-callout");
+  const ev = (pointerType, id, isPrimary, k) => ({ target: rail, pointerType, pointerId: id, isPrimary, ...m.at(letter(k)) });
+  // A touch that is not primary (a first finger resting elsewhere on the
+  // glass), down on the rail while no scrub holds it: the first there.
+  letter("A").fire("pointerdown", { ...ev("touch", 5, false, "A"), target: letter("A") });
+  check("a touch that is not primary, down on the idle rail, owns the scrub: its jump, its callout, the capture",
+    sameJSON(jumps, ["A"]) && callout.textContent === "A" && !callout.hidden && sameJSON(rail.captures, [5]), [jumps, callout.textContent, rail.captures]);
+  // A primary pen and a primary touch down on the rail it owns, and moved.
+  letter("M").fire("pointerdown", { ...ev("pen", 9, true, "M"), target: letter("M") });
+  rail.fire("pointermove", ev("pen", 9, true, "Z"));
+  letter("Z").fire("pointerdown", { ...ev("touch", 6, true, "Z"), target: letter("Z") });
+  rail.fire("pointermove", ev("touch", 6, true, "M"));
+  check("a primary pen and a primary touch down on it take nothing: no jump, the callout and the capture the owner's",
+    sameJSON(jumps, ["A"]) && callout.textContent === "A" && !callout.hidden && sameJSON(rail.captures, [5]), [jumps, callout.textContent, rail.captures]);
+  rail.fire("pointerup", ev("pen", 9, true, "Z"));
+  rail.fire("pointercancel", ev("touch", 6, true, "M"));
+  rail.fire("lostpointercapture", ev("pen", 9, true, "Z"));
+  check("nor do their lift, cancel or lost capture end the owner's scrub", !callout.hidden && callout.textContent === "A", [callout.hidden, callout.textContent]);
+  rail.fire("pointermove", ev("touch", 5, false, "Z"));
+  rail.fire("pointerup", ev("touch", 5, false, "Z"));
+  check("the owner's move jumps, and its lift ends the scrub and hides the callout", sameJSON(jumps, ["A", "Z"]) && callout.hidden, [jumps, callout.hidden]);
+  letter("M").fire("pointerdown", { ...ev("pen", 9, true, "M"), target: letter("M") });
+  check("then the pen's next down takes the rail", sameJSON(jumps, ["A", "Z", "M"]) && callout.textContent === "M" && sameJSON(rail.captures, [5, 9]),
+    [jumps, callout.textContent, rail.captures]);
+};
+
+S.TestAScrubsLiftOwesItsClickASecondAtMost = async () => {
+  const pg = page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const rail = ui.indexRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
+  pg.body.appendChild(rail);
+  const outside = document.createElement("div");
+  pg.body.appendChild(outside);
+  // PR 1's short window: seven columns of four rows, the last cell empty.
+  const m = railModel(rail, { cols: 7, w: 20, h: 18 });
+  const letter = (k) => m.entries.find((n) => n.textContent === k);
+  const real = performance.now.bind(performance);
+  let skew = 0;
+  performance.now = () => real() + skew;
+  try {
+    // A scrub a mouse went down beside, elsewhere, so the record of where a
+    // pointer went down is the mouse's, lifted where the browser makes no click.
+    const scrub = (id) => {
+      skew = 0;
+      letter("A").fire("pointerdown", { pointerType: "touch", pointerId: id, isPrimary: true, ...m.at(letter("A")) });
+      outside.fire("pointerdown", { pointerType: "mouse", pointerId: 1, isPrimary: true });
+      rail.fire("pointerup", { target: rail, pointerType: "touch", pointerId: id, isPrimary: true, ...m.at(letter("A")) });
+    };
+    scrub(2);
+    skew = 900;
+    letter("Z").fire("click", { detail: 1 });
+    check("a click 900ms after the lift is the scrub's tap's: no jump", sameJSON(jumps, ["A"]), jumps);
+    scrub(3);
+    skew = 1001;
+    letter("Z").fire("click", { detail: 1 });
+    check("a click past the second, with no click of the tap's before it, is its own: it jumps", sameJSON(jumps, ["A", "A", "Z"]), jumps);
+    scrub(4);
+    outside.fire("keydown", { key: "Tab" });
+    letter("M").fire("click", { detail: 1 });
+    check("as is one after a keydown", sameJSON(jumps, ["A", "A", "Z", "A", "M"]), jumps);
+    // A tap on the grid's empty cell, then one on an empty letter, each click
+    // handed to a live letter.
+    rail.fire("pointerdown", { target: rail, pointerType: "touch", pointerId: 6, isPrimary: true, clientX: rail.rect.right - 2, clientY: rail.rect.bottom - 2 });
+    rail.fire("pointerup", { target: rail, pointerType: "touch", pointerId: 6, isPrimary: true });
+    letter("Z").fire("click", { detail: 1 });
+    letter("B").fire("pointerdown", { pointerType: "touch", pointerId: 7, isPrimary: true, ...m.at(letter("B")) });
+    rail.fire("pointerup", { target: rail, pointerType: "touch", pointerId: 7, isPrimary: true });
+    letter("A").fire("click", { detail: 1 });
+    check("a tap on the grid's empty cell or on an empty letter jumps nothing, nor does the click each is handed", jumps.length === 5, jumps);
+    letter("M").fire("click", { detail: 0 });
+    check("and a key's click after them jumps", sameJSON(jumps.slice(5), ["M"]), jumps.slice(5));
+  } finally {
+    delete performance.now;
+  }
 };
 
 const name = scenarioName;

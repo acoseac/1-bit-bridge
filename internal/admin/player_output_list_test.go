@@ -230,3 +230,33 @@ func TestARestoredListKeepsItsRailAndItsKind(t *testing.T) { listScenario(t, 9) 
 // rows in and a frame holding the rest of its page, then its jump to Z
 // before that frame runs: the list is Z's rows alone, in order.
 func TestARapidScrubAppendsOnlyTheLastJumpsRows(t *testing.T) { listScenario(t, 2) }
+
+// TestAHeldFingerReadsTheRailWhereItsJumpFoundIt: in a window 320px tall, its
+// rail in seven columns that stand 87px lower while the list is shorter than
+// the window, a finger down on M and, M's rows held, moved where it went
+// down: the jump kept the list's height, so the move asks for nothing (not
+// F, above M), the callout still says M, and once M's rows land the list's
+// height is its own again.
+func TestAHeldFingerReadsTheRailWhereItsJumpFoundIt(t *testing.T) { listScenario(t, 3) }
+
+// TestAScrubWritesItsPlaceOnceAtItsLift: a drag across every live letter,
+// each one's rows in before the next move, writes no place until its lift,
+// which writes Z's; a lift before Z's rows land writes nothing then and Z's
+// place once they do; a key's jump and a mouse's write theirs as their rows
+// land; and a lift once the list's route has moved on writes nothing.
+func TestAScrubWritesItsPlaceOnceAtItsLift(t *testing.T) { listScenario(t, 6) }
+
+// TestAFrameQueuedBeforeABoostAppendsNothing: through app.js's own boost
+// router, a jump's frame holding the rest of its page and an operator page
+// replacing the list before it runs: let go after, the frame appends nothing
+// to the list its page left.
+func TestAFrameQueuedBeforeABoostAppendsNothing(t *testing.T) {
+	listScenario(t, 3, boostScriptFile(t))
+}
+
+// TestTheOldRailTakesNoScrubWhileAFiltersRowsAreHeld: a finger on the rail
+// while a filter commits, its rows held: the finger's next move asks for
+// nothing and ends the callout, and a new finger on the old rail is not taken
+// (no request, no callout, no capture); the filtered list then stands under
+// a rail of its own.
+func TestTheOldRailTakesNoScrubWhileAFiltersRowsAreHeld(t *testing.T) { listScenario(t, 5) }

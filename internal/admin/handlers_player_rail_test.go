@@ -125,6 +125,16 @@ func TestTheAlbumRailFollowsEverySort(t *testing.T) {
 	if kind, got, kindSent, _ := railOf(t, srv, "/api/player/artists", "artists"); kind != "letters" || len(got) != 7 {
 		t.Errorf("artists: rail %q (sent %v), buckets %v; want letters over seven", kind, kindSent, got)
 	}
+	// The composers, alphabetical, and the genres, by their track counts
+	// (The Beatles Sound and Zydeco before Acid Jazz).
+	axes, _, _ := newTestServer(t)
+	seedNameFilterLibrary(t, axes)
+	if kind, got, kindSent, _ := railOf(t, axes, "/api/player/composers", "entries"); kind != "letters" || len(got) != 5 {
+		t.Errorf("composers: rail %q (sent %v), buckets %v; want letters over five", kind, kindSent, got)
+	}
+	if kind, got, kindSent, bucketsSent := railOf(t, axes, "/api/player/genres", "entries"); kindSent || bucketsSent {
+		t.Errorf("genres by count: rail %q (sent %v), buckets %v (sent %v); want neither", kind, kindSent, got, bucketsSent)
+	}
 }
 
 // TestTheDateRailFilesByTheReadersCalendar holds Recently Added's periods to
