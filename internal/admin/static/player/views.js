@@ -395,9 +395,9 @@ function select(name, value, options) {
 
 // ---- Album detail ----
 
-// appendDeleteAction adds a Delete button to a detail toolbar once its caller has
-// read that the console allows deleting: a failure to learn the setting leaves
-// the toolbar as it was, which is the safe direction for a destructive control.
+// deleteButton is an album's Delete, made once a render where the console
+// allows deleting: a failure to learn the setting leaves the toolbar as it was,
+// which is the safe direction for a destructive control.
 //
 // ROUTED tracks are excluded here, not just refused server-side. Their bytes
 // live on an upstream UPnP server and their "path" is a DIDL container path
@@ -405,19 +405,20 @@ function select(name, value, options) {
 // button that renders, is pressed, and then reports a failure reads as a broken
 // console rather than as somebody else’s library. An album spanning both
 // keeps its button for the local half and says what it is leaving alone.
-// An album's Delete (B1023) moves the edition shown, which it names where the
-// album shows editions, and no SACD image's track, which is no file; a path a
-// request carries reads Deleting… until it answers, through any redraw, and
-// settleTrash takes the answer, whose words (said) the paths left keep.
-function appendDeleteAction(actions, id, tracks, label, edition, said) {
+// An album in editions (B1023) keeps the one Delete: it moves every file of
+// every edition, never an SACD image's track, which is no file, and its
+// confirmation says how many editions those files are; made once, it keeps its
+// request and its answer through every pick, which only moves it.
+function deleteButton(tracks, label, editions) {
   const all = (tracks || []).filter((t) => t?.path);
   const routed = all.filter((t) => t.routed).length;
-  const paths = all.filter((t) => !t.routed && !imageOf(t.path)).map((t) => t.path);
-  if (!paths.length) return;
-  const words = paths.some((p) => trashing.has(p)) ? "Deleting…" : paths.map((p) => said.get(p)).find(Boolean);
+  const files = new Set(all.filter((t) => !t.routed && !imageOf(t.path)));
+  if (!files.size) return null;
+  const paths = [...files].map((t) => t.path);
+  const k = editions.filter((ed) => ed.rows.some((t) => files.has(t))).length;
 
   const btn = el("button", {
-    class: "btn danger", text: words || "Delete…",
+    class: "btn danger", text: "Delete…",
     on: {
       click: async () => {
         const n = paths.length;
@@ -426,76 +427,28 @@ function appendDeleteAction(actions, id, tracks, label, edition, said) {
             `${routed === 1 ? "is" : "are"} left alone.`
           : "";
         if (!confirm(
-          `Move ${n} file${n === 1 ? "" : "s"} ${edition ? `of the ${edition} edition of` : "from"} "${label}" to the trash?\n\n` +
+          `Move ${n} file${n === 1 ? "" : "s"} ${k > 1 ? `of ${k} editions of` : "from"} "${label}" to the trash?\n\n` +
           `They stay recoverable from the Library page until the trash is emptied.` +
           upstream)) {
           return;
         }
-        for (const p of paths) trashing.add(p);
         setDisabled(btn, true);
         btn.textContent = "Deleting…";
-        let res = null;
-        let err = null;
         try {
-          res = await api.trash(paths);
+          const res = await api.trash(paths);
+          const failed = (res.outcomes || []).filter((o) => o.status === "failed");
+          btn.textContent = failed.length
+            ? `${res.ok} deleted, ${failed.length} failed`
+            : `${res.ok} moved to trash`;
         } catch (e) {
-          err = e;
+          setDisabled(btn, false);
+          btn.textContent = "Delete…";
+          alert(e?.message ? e.message : String(e));
         }
-        settleTrash(id, paths, res, err);
       },
     },
   });
-  if (words) setDisabled(btn, true);
-  actions.appendChild(btn);
-}
-
-// An album's deletions (B1023), the page's, so a redraw keeps them: the paths
-// a request carries until it answers (trashing), and by album each path an
-// answer took off the page (deletions): gone where the trash moved it; held
-// where the answer was lost, as no later read can tell whether the move
-// landed after it; at the answer's count (answers) where it could not be
-// moved, until a read begun after that answer lists it or not.
-const trashing = new Set();
-const deletions = new Map();
-let answers = 0;
-// The album page shown now, which an answer for its album reconciles.
-let albumShown = null;
-
-/**
- * settleTrash takes the trash's answer for album id's paths. postJSON's Error
- * is the trash's refusal, which it makes before it moves anything; fetch's
- * TypeError, or an answer that does not read, leaves each path unknown.
- */
-function settleTrash(id, paths, res, err) {
-  answers += 1;
-  const off = deletions.get(id) || deletions.set(id, new Map()).get(id);
-  const lost = !res && (err instanceof TypeError || err instanceof SyntaxError);
-  const status = new Map((res?.outcomes || []).map((o) => [o.path, o.status]));
-  for (const p of paths) {
-    trashing.delete(p);
-    if (lost) off.set(p, { held: true });
-    else if (res) off.set(p, status.get(p) === "trashed" ? { gone: true } : { at: answers });
-  }
-  const v = albumShown;
-  if (v?.id === id && v.gen() === v.at) v.answered(paths, res);
-  if (err) alert(err?.message ? err.message : String(err));
-}
-
-/**
- * keepOf is the rows a read of album id, begun at answers' count seen, leaves
- * on its page, and how many of its rows the page holds off: a path an answer
- * before the read could not move is the album's again where the read lists it.
- */
-function keepOf(id, tracks, seen) {
-  const off = deletions.get(id);
-  if (!off) return { rows: tracks, held: 0 };
-  const listed = new Set(tracks.map((t) => t.path));
-  for (const [p, d] of off) {
-    if (d.at === undefined || d.at > seen) continue;
-    if (listed.has(p)) off.delete(p);
-    else off.set(p, { gone: true });
-  }
-  return { rows: tracks.filter((t) => !off.has(t.path)), held: tracks.filter((t) => off.has(t.path) && !off.get(t.path).gone).length };
+  return btn;
 }
 
 // ---- An album's editions (B1023) ----
@@ -654,19 +607,17 @@ function watchOutput() {
 // What the bridge's player's control takes a request (handlers_player_control.go),
 // a KiB left to the rest of the body: an edition goes as its paths (its album's
 // id is every edition's), and one past it is refused here, in words of its own,
-// on the toolbar, a title (its list) and a row's Add (its path).
+// on the toolbar, a title (its list) and a row's Add (its path); an album sent
+// by its id keeps its toolbar, its rows held to the same bounds.
 const SCOPE_WORDS = "This edition is more than the bridge's player takes in one request (20,000 tracks of " +
   "4,096 bytes a path, 8 MiB in all): choose this browser under Output to play it, or add the tracks you want from their rows.";
+const ROW_WORDS = "A row's title here sends more than the bridge's player takes in one request (20,000 tracks of " +
+  "4,096 bytes a path, 8 MiB in all): play the album with Play, or add the tracks you want from their rows.";
 const fitsAPath = (p) => !!p && utf8.encode(p).length <= 4096;
 function fitsTheBridge(rows) {
   const paths = rows.map((t) => t.path || "");
   return paths.length <= 20000 && paths.every(fitsAPath) && utf8.encode(JSON.stringify(paths)).length + 1024 <= 8 << 20;
 }
-
-// What an album page holds off after deletions it could not settle, and how
-// a reader finds out.
-const heldNote = (n) => (n ? el("p", { class: "muted small", text: `${plural(n, "track")} left off this page: whether the trash moved ` +
-  `${n === 1 ? "it" : "them"} is not known. Load the page again to see what the library holds.` }) : null);
 
 /**
  * The edition picker: the word Edition and a button an edition ("DSD64 · 13",
@@ -690,23 +641,10 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // reach it and a superseded render would sail past to write its crumb
   // over the page that replaced it.
   const at = gen();
-  // This render is the album page shown (B1023): a trash answer for its album
-  // reaches it, the page read again once painted; its words stay on the paths
-  // its request left (said).
-  const said = new Map();
-  let reread = null;
-  const me = { id, at, gen, answered: (paths, res) => {
-    const failed = (res?.outcomes || []).filter((o) => o.status === "failed").length;
-    if (res) for (const p of paths) said.set(p, failed ? `${res.ok} deleted, ${failed} failed` : `${res.ok} moved to trash`);
-    if (reread) reread();
-    else me.stale = true;
-  } };
-  albumShown = me;
   watchOutput();
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
-  const seen = answers;
   let d;
   try {
     d = await api.album(id);
@@ -754,9 +692,12 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // plays; a mixed album's source names are read once, so a pick never waits.
   const output = chosenOutput();
   const slot = `${id}\n${output}`;
-  let kept = keepOf(id, d.tracks, seen);
-  let rows = kept.rows;
-  let eds = albumEditions(rows);
+  const eds = albumEditions(d.tracks);
+  // An album shown whole goes to the bridge's player by its id; one in
+  // editions, or one whose catalog counts tracks the page does not show (a
+  // row deleted or suppressed since the catalog was built, which the id would
+  // still expand to), as the paths it shows.
+  const byId = eds.length === 1 && a.trackCount === d.tracks.length;
   const names = eds.some((e) => albumSourceIDs(e.rows).length > 1) ? await api.sourceNames().catch(() => null) : null;
   if (gen() !== at) return;
 
@@ -785,15 +726,11 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // it on, so a bridge without it renders exactly the toolbar it did before.
   // Deleting moves the files to the library's trash rather than unlinking
   // them, which is why the confirm can be a plain one: it is recoverable, and
-  // the Library page is where the space is actually reclaimed.
-  let allowDelete = false;
-  const addDelete = () => appendDeleteAction(actions, id, shown.rows, a.title, eds.length > 1 ? shown.title : null, said);
+  // the Library page is where the space is actually reclaimed. It is the
+  // album's, made once (deleteButton), and each paint moves it into its row.
+  let del = null;
   const paint = () => {
     const ed = shown;
-    // An album shown whole goes to the bridge's player by its id; one in
-    // editions, or one a deletion has changed, as the paths it shows (the
-    // catalog lists a moved file until it is built again).
-    const byId = eds.length === 1 && !deletions.get(id)?.size;
     live = ed.rows.filter((t) => playFor(t, "browser").playable);
     for (const e of eds) e.button?.setAttribute("aria-pressed", String(e === ed));
     clear(statBox);
@@ -813,17 +750,17 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
         if (note) b.setAttribute("aria-describedby", note.getAttribute("id"));
       }
     }
-    const over = !byId && chosenOutput() === "bridge" && !fitsTheBridge(ed.rows)
-      ? el("p", { class: "muted small", text: SCOPE_WORDS, attrs: { id: "album-scope" } }) : null;
-    if (over) for (const b of [actions.children[0], actions.children[2]]) {
+    const over = chosenOutput() === "bridge" && !fitsTheBridge(ed.rows)
+      ? el("p", { class: "muted small", text: byId ? ROW_WORDS : SCOPE_WORDS, attrs: { id: "album-scope" } }) : null;
+    if (over && !byId) for (const b of [actions.children[0], actions.children[2]]) {
       setDisabled(b, true);
       b.setAttribute("aria-describedby", [b.getAttribute("aria-describedby"), "album-scope"].filter(Boolean).join(" "));
     }
+    if (del) actions.appendChild(del);
     clear(partsBox);
-    for (const n of [heldNote(kept.held), note, over, actions]) if (n) partsBox.appendChild(n);
-    if (allowDelete) addDelete();
+    for (const n of [note, over, actions]) if (n) partsBox.appendChild(n);
     clear(tracksBox);
-    tracksBox.appendChild(albumTracksPanel(ed.rows, art, names, ed.discOf, !byId));
+    tracksBox.appendChild(albumTracksPanel(ed.rows, art, names, ed.discOf));
   };
   const setup = () => {
     shown = (editionShown.key === slot && eds.find((e) => e.folder === editionShown.folder)) || bestFor(eds, output);
@@ -839,27 +776,10 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   };
   setup();
   paint();
-  // A trash answer reads the album again: the page takes what the library
-  // holds now, never a path its deletions hold off; a read that fails keeps
-  // the rows it had, less those.
-  reread = async () => {
-    const asked = answers;
-    let fresh = null;
-    try {
-      fresh = (await api.album(id)).tracks;
-    } catch { /* below */ }
-    if (gen() !== at) return;
-    kept = keepOf(id, fresh || rows, fresh ? asked : -1);
-    rows = kept.rows;
-    if (!rows.length && !kept.held) return rerenderView();
-    eds = albumEditions(rows);
-    setup();
-    paint();
-  };
-  if (me.stale) reread();
-  if (rows.some((t) => t?.path && !t.routed)) api.settings().then((cfg) => {
-    allowDelete = !!cfg?.allowDelete;
-    if (allowDelete && gen() === at) addDelete();
+  if (d.tracks.some((t) => t?.path && !t.routed && !imageOf(t.path))) api.settings().then((cfg) => {
+    if (!cfg?.allowDelete || gen() !== at) return;
+    del = deleteButton(d.tracks, a.title, eds);
+    if (del) actions.appendChild(del);
   }, () => {});
 
   view.appendChild(el("div", { class: "detail" },
@@ -1028,9 +948,10 @@ function bookletLink(booklet) {
  * would read as tracks missing rather than as a filter.
  *
  * Its caller reads the names, once a render (B1023); discOf is each row's disc,
- * and bound holds each list the rows send to the bridge's player's bounds.
+ * and each list it draws holds what its rows send to the bridge's player's bounds.
  */
-function albumTracksPanel(tracks, art, names, discOf, bound) {
+function albumTracksPanel(tracks, art, names, discOf) {
+  const bound = true;
   const ids = albumSourceIDs(tracks);
   // The split is real whether or not we can name the halves; without names
   // there is nothing useful to label them with, so fall back to the plain list
