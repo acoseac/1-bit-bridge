@@ -25,8 +25,9 @@ func listScenario(t *testing.T, checks int, args ...string) {
 // are loaded in pages of 200, and row 150 is the top row again at its delta,
 // after one scroll; a place at row 199 with more rows behind it stands once
 // the observer has paged on; a place 1,200 rows in comes back with its
-// window re-based at its page, and Back to the top reaches row 0.
-func TestBackReturnsTheAlbumListToItsPlace(t *testing.T) { listScenario(t, 14) }
+// window re-based at its page, and Back to the top reaches row 0, whose list
+// pages on past its first 60 rows.
+func TestBackReturnsTheAlbumListToItsPlace(t *testing.T) { listScenario(t, 15) }
 
 // TestBackReturnsTheArtistAndAxisListsToTheirPlace: the artists' grid, the
 // genres' rows and the playlists, one page, each stand at their top row
@@ -47,8 +48,9 @@ func TestACrumbOutsideThisTabsHistoryPushesAsBefore(t *testing.T) { listScenario
 
 // TestARailJumpIsTheWindowBackRestores: a jump to M, a scroll, a row opened,
 // Back: the list's first row is M's first, the top row stands where it
-// stood, and the restored window keeps its rail, from which A is reached.
-func TestARailJumpIsTheWindowBackRestores(t *testing.T) { listScenario(t, 5) }
+// stood, and the restored window keeps its rail, from which A is reached,
+// and A's window pages on past its first 60 rows.
+func TestARailJumpIsTheWindowBackRestores(t *testing.T) { listScenario(t, 6) }
 
 // TestAPlaceIsRestoredOnlyOnTheURLItWasMeasuredOn: after Back has restored
 // the place, a sort change and then a filter change each start the list at
@@ -87,6 +89,13 @@ wireBoostRouter();
 // pagehide) and Back, which swaps the shell in again: the list stands at its
 // place.
 func TestBackFromAnOperatorPageReturnsTheListToItsPlace(t *testing.T) {
+	listScenario(t, 3, boostScriptFile(t))
+}
+
+// boostScriptFile writes app.js's boost router, assembled from the shipped
+// app.js, to a file of the test's own for the list harness to run.
+func boostScriptFile(t *testing.T) string {
+	t.Helper()
 	script := withReachedFunctions(t, boostPrefix, readConsoleJS(t, "static/app.js"), "wireBoostRouter")
 	for _, fn := range []string{"function wireBoostRouter(", "function boostNavigate(", "function boostSwap(", "function boostIsPlayerPath("} {
 		if !strings.Contains(script, fn) {
@@ -97,7 +106,7 @@ func TestBackFromAnOperatorPageReturnsTheListToItsPlace(t *testing.T) {
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	listScenario(t, 3, path)
+	return path
 }
 
 // TestTheFilterNarrowsTheListInPlace: three keystrokes make one request after
@@ -113,3 +122,42 @@ func TestTheFilterNarrowsTheListInPlace(t *testing.T) { listScenario(t, 14) }
 // opened inside the pause: the album's URL and entry stay as the navigation
 // left them, and no list is asked for.
 func TestAFilterPauseWritesNothingAfterANavigation(t *testing.T) { listScenario(t, 2) }
+
+// TestALateAnswerTouchesNoOperatorPage: through app.js's own boost router,
+// an operator page replaces a list whose restore is held, and then a genre's
+// albums whose name's lookup is held: neither answer, let go after, scrolls
+// the operator page after its own scroll, nor retitles it.
+func TestALateAnswerTouchesNoOperatorPage(t *testing.T) {
+	listScenario(t, 5, boostScriptFile(t))
+}
+
+// TestAFailedRestoreIsNoPlaceToWriteUntilARetryStands: a restore that fails
+// leaves the entry's place as it was; its Try again, held at its second
+// page, and a row of its first page opened keep that place; a retry that
+// stands restores it, and a scroll after it records a new one.
+func TestAFailedRestoreIsNoPlaceToWriteUntilARetryStands(t *testing.T) { listScenario(t, 6) }
+
+// TestAWholeCollectionRestoresFromItsFirstRowByItsRowsID: the playlists,
+// 1,300 of them, come back to row 1,200 from their first row, asked for once,
+// with no Back to the top; a place an earlier build re-based at 1,200 lands on
+// its row and the next place starts at the first row; a playlist gone above
+// the place's row is found by its id; and Smart Mixes do the same.
+func TestAWholeCollectionRestoresFromItsFirstRowByItsRowsID(t *testing.T) { listScenario(t, 7) }
+
+// TestACrumbPushesWhereItsEntryNowHoldsAnotherURL: after Back, a filter
+// that matches nothing (the list at its top, no write pending) and Forward,
+// the album's crumb pushes; and so it does after a filter whose answer is
+// still held when Forward comes the moment the URL moved.
+func TestACrumbPushesWhereItsEntryNowHoldsAnotherURL(t *testing.T) { listScenario(t, 5) }
+
+// TestACrumbReturnsToItsEntryAfterAReload: a reload on the album keeps what
+// its crumb needs: the crumb goes back one entry, the list at its place,
+// Forward reaching the album; and once the list's filter has moved its URL,
+// Forward and a reload, the crumb pushes.
+func TestACrumbReturnsToItsEntryAfterAReload(t *testing.T) { listScenario(t, 6) }
+
+// TestNoCallbackOfAListAFilterReplacedActs: while a filter's rows are held,
+// a letter of the rail drawn for the old q and the Try again of a restore
+// that failed before it ask for nothing, and the filtered list stands from
+// its first row.
+func TestNoCallbackOfAListAFilterReplacedActs(t *testing.T) { listScenario(t, 6) }

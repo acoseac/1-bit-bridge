@@ -19,9 +19,15 @@
 // What boot.js needs to import and boot and is not a list's is stubbed: the
 // audio element's media methods, navigator.mediaSession, the bridge
 // player's GET now (no player offered, unless a case holds it), and the
-// album and artist pages' detail answers (no tracks).
+// album and artist pages' detail answers (no tracks). A reload keeps the
+// tab's history and its session storage and makes everything else anew, the
+// modules from a copy of their directory, since node evaluates a module once
+// per URL.
 
-import { readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 
 const [, , dirURL, scenarioName, boostScript] = process.argv;
@@ -347,9 +353,9 @@ const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const hex = (n) => n.toString(16).padStart(16, "0");
 const fold = (s) => s.replace(/^the /i, "").normalize("NFD").replace(/\p{M}/gu, "").toUpperCase().replace(/[^\p{L}\p{N}]/gu, "");
 const SNAP = "2026-11-26T08:00:00Z";
-const lib = { albums: [], artists: [], genres: [], composers: [], playlists: [] };
+const lib = { albums: [], artists: [], genres: [], composers: [], playlists: [], mixes: [] };
 function library(o = {}) {
-  const n = { albums: 1400, artists: 400, genres: 80, composers: 80, playlists: 6, ...o };
+  const n = { albums: 1400, artists: 400, genres: 80, composers: 80, playlists: 6, mixes: 12, ...o };
   lib.albums = Array.from({ length: n.albums }, (_, i) => ({
     id: hex(i + 1), title: `${LETTERS[i % 26]} Album ${String(i).padStart(4, "0")}`,
     albumArtist: i % 50 === 7 ? "The Brass Lanterns" : `Artist ${String(i % n.artists).padStart(3, "0")}`,
@@ -362,6 +368,7 @@ function library(o = {}) {
   lib.composers = Array.from({ length: n.composers }, (_, c) => ({ id: hex(0x30000 + c), name: `${LETTERS[c % 26]} Composer ${c}`, albumCount: 2, trackCount: 2 }))
     .sort((x, y) => fold(x.name).localeCompare(fold(y.name)));
   lib.playlists = Array.from({ length: n.playlists }, (_, k) => ({ id: `p${k}`, name: `Playlist ${k}`, count: 10 }));
+  lib.mixes = Array.from({ length: n.mixes }, (_, k) => ({ id: `m${k}`, name: `Mix ${k}`, count: 10 }));
 }
 const buckets = (rows, letter) => {
   const out = [];
@@ -411,6 +418,7 @@ function answer(e) {
   if (p === "/api/player/genres") return { body: page(named(lib.genres, q, "name"), q, null, "entries") };
   if (p === "/api/player/composers") return { body: page(named(lib.composers, q, "name"), q, (c) => initial(c.name), "entries") };
   if (p === "/api/player/playlists") return { body: { collections: named(lib.playlists, q, "name"), snapshotAt: SNAP } };
+  if (p === "/api/player/mixes") return { body: { enabled: true, collections: lib.mixes, snapshotAt: SNAP } };
   if (p === "/api/playlists/deleted") return { body: { deleted: [] } };
   if (p === "/api/player/sources") return { body: { sources: [{ id: "nas", name: "NAS" }] } };
   if (p === "/api/settings") return { body: { allowDelete: false } };
@@ -419,22 +427,26 @@ function answer(e) {
 }
 const log = [];
 const holds = new Map();
-// hold makes the next request for path wait until the case lets it go.
-function hold(path) {
+// hold makes the next request for path (whose query meets when, if given)
+// wait until the case lets it go.
+function hold(path, when = null) {
   let open;
   const p = new Promise((r) => { open = r; });
-  holds.set(path, p);
+  holds.set(path, { p, when });
   return () => open();
 }
+const fails = new Set();
+// fail makes the next request for path answer 500.
+function fail(path) { fails.add(path); }
 globalThis.fetch = async (url, init = {}) => {
   const u = new URL(String(url), "http://x/");
   const e = { path: u.pathname, query: u.searchParams, partial: !!init.headers?.["X-Bridge-Partial"] };
   log.push(e);
   const gate = holds.get(e.path);
-  if (gate) {
+  if (gate && (!gate.when || gate.when(e.query))) {
     holds.delete(e.path);
     await new Promise((resolve, reject) => {
-      gate.then(resolve);
+      gate.p.then(resolve);
       init.signal?.addEventListener?.("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
     });
   }
@@ -442,7 +454,8 @@ globalThis.fetch = async (url, init = {}) => {
   await turn();
   inflight -= 1;
   if (init.signal?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
-  const { status = 200, body = null, headers = {} } = answer(e);
+  const failed = fails.delete(e.path);
+  const { status = 200, body = null, headers = {} } = failed ? { status: 500, body: { error: "internal", message: "The list could not be read." } } : answer(e);
   const lower = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
   return {
     ok: status >= 200 && status < 300, status, statusText: "", redirected: false,
@@ -479,6 +492,46 @@ async function rig(path = "/albums", o = {}) {
   H.entries = [{ state: o.state ?? null, url: path }];
   H.index = 0;
   setURL(path);
+  makePage();
+  if (o.output) store.set("bridge-player-output", o.output);
+  const nowHeld = o.holdNow ? hold("/api/output/player/now") : null;
+  const views = await import(new URL("views.js", dirURL));
+  await import(new URL("boot.js", dirURL));
+  if (boostScript) vm.runInThisContext(readFileSync(boostScript, "utf8"), { filename: "app-boost.js" });
+  await settle();
+  return { views, nowHeld };
+}
+
+// reload loads the page again where it stands, as a browser's reload does:
+// the tab's history (its entries and their states) and its session storage
+// stay; the document, the window's listeners, the timers, the frames, the
+// observers and every module are made anew, the modules from a copy of their
+// directory.
+const copies = [];
+process.on("exit", () => { for (const d of copies) rmSync(d, { recursive: true, force: true }); });
+async function reload() {
+  await settle();
+  for (const k of Object.keys(win.listeners)) delete win.listeners[k];
+  held.clear();
+  frames.length = 0;
+  observers.clear();
+  holds.clear();
+  sy = 0;
+  pendingScroll = false;
+  setURL(here().url);
+  makePage();
+  const tmp = mkdtempSync(join(tmpdir(), "list-harness-"));
+  copies.push(tmp);
+  cpSync(fileURLToPath(dirURL), join(tmp, "player"), { recursive: true });
+  const dir = pathToFileURL(join(tmp, "player") + "/");
+  await import(new URL("views.js", dir));
+  await import(new URL("boot.js", dir));
+  await settle();
+}
+
+// makePage builds the document a player page loads into: the shell's
+// header, main and the player's mount points.
+function makePage() {
   const html = new El("html");
   const body = new El("body");
   html.appendChild(body);
@@ -500,13 +553,6 @@ async function rig(path = "/albums", o = {}) {
   };
   Object.defineProperty(html, "scrollHeight", { get: docHeight });
   globalThis.document = doc;
-  if (o.output) store.set("bridge-player-output", o.output);
-  const nowHeld = o.holdNow ? hold("/api/output/player/now") : null;
-  const views = await import(new URL("views.js", dirURL));
-  await import(new URL("boot.js", dirURL));
-  if (boostScript) vm.runInThisContext(readFileSync(boostScript, "utf8"), { filename: "app-boost.js" });
-  await settle();
-  return { views, nowHeld };
 }
 
 // The rows of the list on screen, and what the reader sees of them.
@@ -604,6 +650,11 @@ S.TestBackReturnsTheAlbumListToItsPlace = async () => {
   check("a re-based window offers Back to the top", !!toTop && !toTop.hidden, !!toTop);
   await navigate(toTop);
   check("Back to the top reaches the list's first row", titleOf(rows()[0]) === "A Album 0000" && topRow()?.title === "A Album 0000", [titleOf(rows()[0]), topRow()]);
+  const pagedFrom = log.length;
+  await loadThrough(60);
+  check("and the list it draws pages on past its first 60 rows as the reader scrolls to their end",
+    rows().length > 60 && listGets("/api/player/albums").some((e) => log.indexOf(e) >= pagedFrom && e.query.get("offset") === "60"),
+    [rows().length, listGets("/api/player/albums").filter((e) => log.indexOf(e) >= pagedFrom).map((e) => e.query.toString())]);
 };
 
 S.TestBackReturnsTheArtistAndAxisListsToTheirPlace = async () => {
@@ -716,6 +767,11 @@ S.TestARailJumpIsTheWindowBackRestores = async () => {
   letter("A").fire("click", { detail: 0 });
   await settle();
   check("a jump to A from the restored window draws the list from A", titleOf(rows()[0]) === "A Album 0000", titleOf(rows()[0]));
+  const pagedFrom = log.length;
+  await loadThrough(60);
+  check("and the jump's window pages on past its first 60 rows as the reader scrolls to their end",
+    rows().length > 60 && titleOf(rows()[0]) === "A Album 0000" && listGets("/api/player/albums").some((e) => log.indexOf(e) >= pagedFrom && e.query.get("offset") === "60"),
+    [rows().length, listGets("/api/player/albums").filter((e) => log.indexOf(e) >= pagedFrom).map((e) => e.query.toString())]);
 };
 
 S.TestAPlaceIsRestoredOnlyOnTheURLItWasMeasuredOn = async () => {
@@ -864,6 +920,229 @@ S.TestAFilterPauseWritesNothingAfterANavigation = async () => {
   await advance(400);
   check("the album's URL and entry are as the tile left them", location.pathname + location.search === url && same(here().state, state), [location.href, here().state]);
   check("the pause asked for no list", listGets("/api/player/albums").filter((e) => log.indexOf(e) >= asked).length === 0, log.slice(asked).map((e) => e.path));
+};
+
+S.TestALateAnswerTouchesNoOperatorPage = async () => {
+  if (!boostScript) {
+    check("app.js's boost router is given", false, "no boost script");
+    return;
+  }
+  // A restore whose rows come once an operator page has replaced the list.
+  await rig("/albums");
+  await readerAt(150, -37);
+  await navigate(tile(150));
+  const release = hold("/api/player/albums");
+  await back();
+  const stats = () => doc.getElementById("primary-nav").querySelector('a[href="/stats"]');
+  await navigate(stats());
+  check("an operator page replaced the list while its restore waited", location.pathname === "/stats" && !doc.getElementById("player-view") && here().state?.boost === true,
+    [location.pathname, here().state]);
+  let scrolls = codeScrolls.length;
+  release();
+  await settle();
+  check("the restore's rows, come after it, scroll the operator page nowhere", codeScrolls.length === scrolls, codeScrolls.slice(scrolls));
+
+  // A genre's albums, whose name comes once an operator page has replaced them.
+  await back();
+  doc.getElementById("player-sections").querySelectorAll("a").find((a) => a.dataset.section === "genres").fire("click", { detail: 1 });
+  await settle();
+  const named = hold("/api/player/genres");
+  await navigate(tile(3));
+  check("the genre's page waits for its name", location.pathname.startsWith("/genre/") && holds.size === 0, location.pathname);
+  await navigate(stats());
+  const titled = doc.title;
+  scrolls = codeScrolls.length;
+  named();
+  await settle();
+  check("the name, come after it, retitles the operator page with nothing", titled === "Stats" && doc.title === titled, [doc.title, titled]);
+  check("and nothing scrolls the operator page after its own scroll", codeScrolls.length === scrolls, codeScrolls.slice(scrolls));
+};
+
+S.TestAFailedRestoreIsNoPlaceToWriteUntilARetryStands = async () => {
+  await rig("/albums");
+  await readerAt(450, -20);
+  const before = topRow();
+  await navigate(tile(450));
+  const saved = structuredClone(H.entries[H.index - 1].state.place);
+  check("the list's place at row 450 is recorded", saved?.anchor === 450 && before?.title === "I Album 0450", [saved, before]);
+  fail("/api/player/albums");
+  await back();
+  check("a restore that fails shows its error with Try again, the entry's place as it was",
+    !!button("Try again") && same(here().state.place, saved), [viewText(), here().state.place]);
+
+  // Try again, its second page held, and a row of its first page opened.
+  const release = hold("/api/player/albums", (q) => q.get("offset") === "200");
+  await navigate(button("Try again"));
+  check("the retry's first page stands while its second is held", rows().length === 200, rows().length);
+  await navigate(tile(10));
+  release();
+  check("leaving then keeps the place the restore was for in the list's entry", same(H.entries[H.index - 1].state.place, saved), [H.entries[H.index - 1].state.place, saved]);
+
+  // Back, the restore failing again, a retry that stands, and a scroll.
+  fail("/api/player/albums");
+  await back();
+  await navigate(button("Try again"));
+  check("a retry that stands restores the place", same(topRow(), before), [topRow(), before]);
+  scrollTo(win.scrollY + 3 * layout.rowH);
+  await settle();
+  await advance(600);
+  check("and a scroll after it records the new place", here().state.place?.anchor === 465, here().state.place);
+};
+
+S.TestAWholeCollectionRestoresFromItsFirstRowByItsRowsID = async () => {
+  await rig("/playlists", { library: { playlists: 1300 }, layout: { cols: 1, rowH: 300 } });
+  const toTop = () => button("Back to the top");
+  await readerAt(1200, 0);
+  const far = topRow();
+  check("the reader's top row is playlist 1200", far?.title === "Playlist 1200" && far.delta === 0, far);
+  await navigate(tile(1200));
+  const asked = log.length;
+  await back();
+  check("Back returns playlist 1200 to the top row, the whole collection from its first row", same(topRow(), far) && titleOf(rows()[0]) === "Playlist 0",
+    [topRow(), far, titleOf(rows()[0])]);
+  check("asked for once, with no way back to a top it never left",
+    listGets("/api/player/playlists").filter((e) => log.indexOf(e) >= asked).length === 1 && toTop()?.hidden === true,
+    [listGets("/api/player/playlists").filter((e) => log.indexOf(e) >= asked).length, toTop()?.hidden]);
+
+  // A place an earlier build wrote over a window it re-based at 1,200.
+  history.pushState({ scrollY: 0, place: { href: "/playlists", start: 1200, anchor: 1203, anchorId: "p3", delta: 0, snapshotAt: SNAP } }, "", "/playlists");
+  win.dispatchEvent({ type: "popstate" });
+  await settle();
+  check("a place an earlier build re-based lands on its row, the window from the first row", topRow()?.title === "Playlist 3" && titleOf(rows()[0]) === "Playlist 0" && toTop()?.hidden === true,
+    [topRow(), titleOf(rows()[0]), toTop()?.hidden]);
+  scrollTo(win.scrollY + layout.rowH);
+  await settle();
+  await advance(600);
+  check("and the place it records next starts its window at the first row", here().state.place?.start === 0 && here().state.place?.anchorId === "p4", here().state.place);
+
+  // A playlist gone above the place's row: the row is found by its id.
+  lib.playlists.splice(1, 1);
+  history.pushState({ scrollY: 0, place: { href: "/playlists", start: 0, anchor: 10, anchorId: "p10", delta: 0, snapshotAt: SNAP } }, "", "/playlists");
+  win.dispatchEvent({ type: "popstate" });
+  await settle();
+  check("a playlist gone above the place's row: the row is found by its id", topRow()?.title === "Playlist 10", topRow());
+
+  // Smart Mixes, which their endpoint answers whole too.
+  history.pushState({ scrollY: 0, place: { href: "/mixes", start: 1200, anchor: 1205, anchorId: "m5", delta: 0, snapshotAt: SNAP } }, "", "/mixes");
+  win.dispatchEvent({ type: "popstate" });
+  await settle();
+  check("Smart Mixes land on the recorded mix, the window from their first row", topRow()?.title === "Mix 5" && titleOf(rows()[0]) === "Mix 0" && toTop()?.hidden === true,
+    [topRow(), titleOf(rows()[0]), toTop()?.hidden]);
+};
+
+S.TestACrumbPushesWhereItsEntryNowHoldsAnotherURL = async () => {
+  // A filter that matches nothing, the list at its top with no write pending.
+  await rig("/albums");
+  await navigate(tile(3));
+  await back();
+  check("Back returns the list at its top, nothing scrolled to write", win.scrollY === 0 && topRow()?.title === titleOf(rows()[0]), [win.scrollY, topRow()]);
+  const f = field();
+  f.focus();
+  await type(f, "zzzz");
+  await advance(400);
+  check("a filter matching nothing moved the list's URL", location.search === "?q=zzzz" && viewText().includes("No albums match “zzzz”"), [location.search, viewText()]);
+  await forward();
+  let pushes = H.pushes;
+  let gos = H.gos.length;
+  await navigate(crumb("Albums"));
+  check("the album's crumb then pushes the URL it names", H.pushes === pushes + 1 && H.gos.length === gos && location.pathname === "/albums" && location.search === "",
+    [H.pushes - pushes, H.gos.slice(gos), location.href]);
+
+  // A filter that matches, its answer held, and Forward the moment the URL moved.
+  await navigate(tile(4));
+  await back();
+  const g = field();
+  g.focus();
+  const release = hold("/api/player/albums");
+  await type(g, "x");
+  await advance(400);
+  check("the URL moved, the filter's answer still held", location.search === "?q=x" && holds.size === 0, [location.search, holds.size]);
+  await forward();
+  release();
+  pushes = H.pushes;
+  gos = H.gos.length;
+  await navigate(crumb("Albums"));
+  check("the album's crumb pushes then too", H.pushes === pushes + 1 && H.gos.length === gos && location.pathname === "/albums" && location.search === "",
+    [H.pushes - pushes, H.gos.slice(gos), location.href]);
+};
+
+S.TestACrumbReturnsToItsEntryAfterAReload = async () => {
+  await rig("/albums");
+  await readerAt(150, -37);
+  const before = topRow();
+  await navigate(tile(150));
+  const length = history.length;
+  await reload();
+  check("the reload draws the album again", location.pathname.startsWith("/album/") && title() === "U Album 0150", [location.pathname, title()]);
+  let pushes = H.pushes;
+  let gos = H.gos.length;
+  await navigate(crumb("Albums"));
+  check("after it the album's Albums crumb goes back one entry", same(H.gos.slice(gos), [-1]) && H.pushes === pushes && history.length === length && location.pathname === "/albums",
+    [H.gos.slice(gos), H.pushes - pushes, history.length, length]);
+  check("and the list stands at its place", same(topRow(), before), [topRow(), before]);
+  await forward();
+  check("Forward reaches the album again", location.pathname.startsWith("/album/") && title() === "U Album 0150", [location.pathname, title()]);
+
+  // Back, the filter edited in place, Forward, a reload: the list's entry no
+  // longer holds the URL the album's trail recorded, and the crumb pushes.
+  await back();
+  const f = field();
+  f.focus();
+  await type(f, "zzzz");
+  await advance(400);
+  check("the filter edited the list's own entry", location.search === "?q=zzzz", location.search);
+  await forward();
+  await reload();
+  pushes = H.pushes;
+  gos = H.gos.length;
+  await navigate(crumb("Albums"));
+  check("after a reload the crumb of an entry edited since pushes the URL it names", H.pushes === pushes + 1 && H.gos.length === gos && location.pathname === "/albums" && location.search === "",
+    [H.pushes - pushes, H.gos.slice(gos), location.href]);
+};
+
+S.TestNoCallbackOfAListAFilterReplacedActs = async () => {
+  // The rail drawn for the old q: a letter pressed while the new q's rows are held.
+  await rig("/albums?sort=title");
+  const letter = (k) => doc.getElementById("player-view").querySelectorAll(".az-letter").find((b) => b.textContent === k);
+  const byTitle = (rs) => [...rs].sort((x, y) => fold(x.title).localeCompare(fold(y.title)));
+  const atM = byTitle(lib.albums).findIndex((a) => a.title.startsWith("M"));
+  const want = byTitle(lib.albums.filter((a) => fold(a.title).includes("ALBUM1") || fold(a.albumArtist).includes("ALBUM1")));
+  const f = field();
+  f.focus();
+  let release = hold("/api/player/albums");
+  await type(f, "Album 1");
+  await advance(400);
+  let asked = log.length;
+  check("the old rail stands while the filter's rows are held", !!letter("M") && !letter("M").disabled, !!letter("M"));
+  letter("M").fire("click", { detail: 0 });
+  await settle();
+  release();
+  await settle();
+  const after = (from) => listGets("/api/player/albums").filter((e) => log.indexOf(e) >= from).map((e) => e.query.get("offset"));
+  check("its letter, pressed then, asks for nothing", !after(asked).includes(String(atM)), after(asked));
+  check("and the filtered list stands from its first row", rows().length > 0 && titleOf(rows()[0]) === want[0].title && viewText().includes(`${want.length} albums`),
+    [rows().length, titleOf(rows()[0]), want[0].title]);
+
+  // A restore 1,200 rows in that failed; a filter, its rows held; the old Try again.
+  f.fire("keydown", { key: "Escape" });
+  await settle();
+  await readerAt(1200, 0);
+  await navigate(tile(1200));
+  fail("/api/player/albums");
+  await back();
+  check("the restore failed, offering Try again", !!button("Try again"), viewText());
+  const g = field();
+  g.focus();
+  release = hold("/api/player/albums");
+  await type(g, "Album 1");
+  await advance(400);
+  asked = log.length;
+  await navigate(button("Try again"));
+  release();
+  await settle();
+  check("the old Try again, pressed then, asks for no window of the old place", !after(asked).some((o) => Number(o) >= 1200), after(asked));
+  check("and the filtered list stands from its first row again", rows().length > 0 && titleOf(rows()[0]) === want[0].title && viewText().includes(`${want.length} albums`),
+    [rows().length, titleOf(rows()[0]), want[0].title]);
 };
 
 const name = scenarioName;

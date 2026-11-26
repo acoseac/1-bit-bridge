@@ -439,19 +439,50 @@ const depthOf = (s) => (Number.isInteger(s?.depth) ? s.depth : 0);
 // Unique across this tab's loads: history.state outlives a reload.
 const newKey = () => Array.from(crypto.getRandomValues(new Uint32Array(2)), (n) => n.toString(36)).join("");
 
-// The URL each entry routed in this page's life last held, by its key.
-const entryURLs = new Map();
+/**
+ * The URL each entry of this tab's history last held, by its key, recorded
+ * where it moves: as the router routes the entry, and as a list's filter
+ * writes its URL in place. Kept in the tab's session storage, which a reload
+ * keeps and no other tab shares, since a descendant's trail is a copy taken
+ * as it was pushed and the ancestor's own state cannot be read before going
+ * back to it; the latest ENTRY_URLS_KEPT entries. Where the record is not to
+ * be had, a crumb pushes.
+ */
+const ENTRY_URLS = "bridge-player-entries";
+const ENTRY_URLS_KEPT = 200;
+
+function recordedURLs() {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(ENTRY_URLS) || "[]");
+    return Array.isArray(v) ? v.filter((e) => Array.isArray(e) && typeof e[0] === "string" && typeof e[1] === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function recordURL(key) {
+  if (typeof key !== "string") return;
+  try {
+    const kept = recordedURLs().filter(([k]) => k !== key);
+    kept.push([key, location.pathname + location.search]);
+    sessionStorage.setItem(ENTRY_URLS, JSON.stringify(kept.slice(-ENTRY_URLS_KEPT)));
+  } catch {
+    // Not recorded: no URL an entry held before may stand for it, so every
+    // crumb pushes until the next record.
+    try { sessionStorage.removeItem(ENTRY_URLS); } catch { /* nothing to trust */ }
+  }
+}
 
 /**
  * How far back (a negative step) the crumb's page is in this tab's history,
  * or 0 where the crumb pushes: a trail entry of this entry's with that href,
- * a depth below this one's, and an entry that still holds the href (a filter
- * edited in place there since, by Back and Forward, has moved it).
+ * a depth below this one's, and an entry recorded as still holding the href
+ * (a filter edited in place there since, by Back and Forward, has moved it).
  */
 function crumbBack(href) {
   const here = depthOf(history.state);
   const t = readTrail()?.find((e) => e.href === href);
-  return t && t.depth < here && entryURLs.get(t.key) === href ? t.depth - here : 0;
+  return t && t.depth < here && recordedURLs().find(([k]) => k === t.key)?.[1] === href ? t.depth - here : 0;
 }
 
 // The page the place writer writes for (B1021): its entry's key, its view,
@@ -473,7 +504,6 @@ function savePlace() {
   saveTimer = 0;
   const s = history.state;
   if (!shown.ready || s?.key !== shown.key || !shown.view?.isConnected) return;
-  entryURLs.set(s.key, location.pathname + location.search);
   try {
     if (shown.list) {
       const place = shown.list();
@@ -626,8 +656,13 @@ function route() {
     s = { ...s, depth: depthOf(s), key: typeof s.key === "string" ? s.key : newKey() };
     history.replaceState(s, "");
   }
-  entryURLs.set(s.key, location.pathname + location.search);
+  recordURL(s.key);
   const here = shown = { key: s.key, view, list: null, ready: false };
+  // Whether the page is still this route's: its entry the one shown and its
+  // view in the document. A boosted navigation to an operator page pushes its
+  // own entry and replaces <main> with no route, so the generation alone
+  // cannot tell.
+  const owns = () => history.state?.key === s.key && view.isConnected;
   // Split the path with string ops rather than a regex. Both patterns
   // this replaced were flagged for super-linear backtracking, and while
   // a pathname is short enough that it never mattered, the manual form
@@ -693,10 +728,14 @@ function route() {
   const ctx = {
     params, gen, setToolbar, setCrumb, id: rest, trail: readTrail(),
     // A list's place (views.js's renderPagedList): its measure as it begins,
-    // its rendering or restoring done, and a write at its jump.
+    // whether its rows stand (each of its loads decides, a failed one and
+    // one under way leaving it unready), a write at its jump, and its entry's
+    // URL moved by its filter.
     listing: (measure) => { here.list = measure; },
-    listed: () => { here.ready = true; },
+    listed: (on) => { here.ready = on; },
     savePlace,
+    owns,
+    moved: () => recordURL(s.key),
   };
 
   const routes = {
@@ -756,11 +795,13 @@ function route() {
   // down a page they had just opened.
   //
   // A list is its page's one scroll writer, to its place or its top
-  // (views.js's renderPagedList): this restore is for every other page.
+  // (views.js's renderPagedList), and its loads say when it is ready: this
+  // restore is for every other page, and only while it is this route's (an
+  // operator page boosted in meanwhile moved no generation).
   const myGen = gen();
   void Promise.resolve(render()).then(() => {
-    if (myGen !== gen()) return;
-    if (!here.list) window.scrollTo({ top: s.scrollY || 0 });
+    if (myGen !== gen() || !owns() || here.list) return;
+    window.scrollTo({ top: s.scrollY || 0 });
     here.ready = true;
   });
 }

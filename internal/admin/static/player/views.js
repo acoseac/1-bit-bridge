@@ -1116,6 +1116,13 @@ async function renderAxis(view, ctx, fetcher, kind, emptyTitle, emptyDetail) {
   });
 }
 
+// Whether the page a view was routed for is still the page shown: its entry
+// current and its view in the document (boot.js's ctx.owns). A caller that
+// hands no check is its page's.
+function owned(ctx) {
+  return !ctx.owns || ctx.owns();
+}
+
 /**
  * One genre's or one composer's albums.
  *
@@ -1151,7 +1158,7 @@ export async function renderAxisAlbums(view, ctx, kind) {
   const myGen = ctx.gen();
   let chain = base;
   const rooted = await sourceRootedCrumbs(ctx.trail, [scopedRoot(root)]);
-  if (ctx.gen() !== myGen) return;
+  if (ctx.gen() !== myGen || !owned(ctx)) return;
   // Compared by LENGTH, not by reference: sourceRootedCrumbs builds its
   // own array from the same ancestors, so it is never the same object
   // even when it added nothing — and the only thing it can add is the one
@@ -1168,14 +1175,15 @@ export async function renderAxisAlbums(view, ctx, kind) {
   // whatever page the reader is now looking at. The generation counter
   // is what route() bumps on every navigation, so comparing it is the
   // reliable test rather than relying on which requests happen to share
-  // a key.
+  // a key. Nor does a boosted navigation to an operator page, which moves no
+  // generation: the page must still be this route's (B1021).
   let label = "";
   try {
     const r = await (kind === "genre" ? api.genres({ limit: 200 }) : api.composers({ limit: 200 }));
-    if (ctx.gen() !== myGen) return;
+    if (ctx.gen() !== myGen || !owned(ctx)) return;
     label = (r.entries || []).find((e) => e.id === id)?.name || "";
   } catch (e) {
-    if (isAborted(e) || ctx.gen() !== myGen) return;
+    if (isAborted(e) || ctx.gen() !== myGen || !owned(ctx)) return;
     // A missing label costs a heading, never the albums — the grid below
     // is driven by the id, not the name.
     label = "";
@@ -1228,13 +1236,15 @@ function setAxisTitle(label) {
  * either way it is its page's one scroll writer. `filter` gives it a head
  * holding its name filter (the URL's q), which a change leaves in place,
  * its focus and caret too, while the count line, the rail and the rows
- * below it are drawn again.
+ * below it are drawn again. `whole` is a list its endpoint answers at once
+ * from its first row, whatever the offset asked (Playlists, Smart Mixes):
+ * its window always starts there, and its place's row is found by its id.
  */
 async function renderPagedList(view, ctx, opts) {
   const { gen } = ctx;
   const { fetchPage, pick, make, containerClass = "rows",
     emptyTitle, emptyDetail, emptyAction = null,
-    countNoun = "", label = "", banner = null, filter = false } = opts;
+    countNoun = "", label = "", banner = null, filter = false, whole = false } = opts;
   const at = gen();
   const key = history.state?.key;
   let href = location.pathname + location.search;
@@ -1279,9 +1289,21 @@ async function renderPagedList(view, ctx, opts) {
   // `loading` at all: the superseded call's `finally` clears it while
   // the jump's own fetch is still running, which lets the sentinel start
   // a third page. That part is a real ordering defect today.
+  //
+  // And a load answered after a boosted navigation to an operator page, which
+  // replaces <main> and pushes its own entry with no route, is stale too: it
+  // must neither page on nor scroll the page that replaced the list's.
   let renderGen = 0;
-  const stale = (mine) => mine !== renderGen || gen() !== at;
+  const stale = (mine) => mine !== renderGen || gen() !== at || !owned(ctx);
   const listGen = () => `${gen()}:${renderGen}`;
+  // The filter's commits so far: a body's callbacks (its rail's letters, its
+  // Try again) act only while no commit has come since it was drawn, so none
+  // drawn for the old q acts while the new q's rows are still on their way.
+  let commits = 0;
+  const whileDrawn = (fn) => {
+    const drawn = commits;
+    return (...a) => { if (drawn === commits) fn(...a); };
+  };
   const pinned = () => parseFloat(getComputedStyle(container).scrollMarginTop) || 0;
   const countText = () => (label ? `${plural(total, countNoun)} in ${label}` : plural(total, countNoun));
   const stopPaging = () => {
@@ -1293,11 +1315,14 @@ async function renderPagedList(view, ctx, opts) {
     if (atOnce) for (const i of items) container.appendChild(make(i));
     else chunkAppend(container, items, make, listGen);
   };
-  // A place's row: by its offset, or by its id where the catalog was rebuilt
-  // since it was measured and the window holds it; and where the window's
-  // scroll puts it, its delta below the pinned edge.
+  // A place's row: by its id where the window holds it and the catalog was
+  // rebuilt since it was measured, or the list is whole (whose window an
+  // earlier build re-based past its first row); else by its offset in the
+  // window it was measured in. And where the window's scroll puts it, its
+  // delta below the pinned edge.
   const rowOf = (place) => {
-    const i = place.snapshotAt !== snapshotAt && ids.includes(place.anchorId) ? ids.indexOf(place.anchorId) : place.anchor - start;
+    const i = (whole || place.snapshotAt !== snapshotAt) && ids.includes(place.anchorId)
+      ? ids.indexOf(place.anchorId) : place.anchor - (whole ? place.start : start);
     return container.children[Math.min(i, container.children.length - 1)];
   };
   const placeTop = (place, row) => window.scrollY + row.getBoundingClientRect().top - pinned() - place.delta;
@@ -1332,7 +1357,7 @@ async function renderPagedList(view, ctx, opts) {
       return;
     }
     if (countNoun) body.appendChild(el("p", { class: "muted small", text: countText() }));
-    const rail = alphabetRail(r.buckets, (b) => void load(b.offset, null, "jump"));
+    const rail = alphabetRail(r.buckets, whileDrawn((b) => void load(b.offset, null, "jump")));
     if (rail) body.appendChild(rail);
     container = el("div", { class: containerClass });
     for (const n of [top, container, sentinel]) body.appendChild(n);
@@ -1348,9 +1373,12 @@ async function renderPagedList(view, ctx, opts) {
   // load draws the window from `from`: a jump's rows, or a fresh window
   // through a place's row, scrolled to it, else to the page's top ("top")
   // or, where the reader is past the list's top, to the list's ("keep").
+  // The list is measurable (boot.js's ready) only once a load's rows stand:
+  // never across its fetches, nor after one that failed or was superseded.
   async function load(from, place, mode) {
     const mine = ++renderGen;
     stopPaging();
+    ctx.listed?.(false);
     loading = true;
     start = offset = from;
     ids = [];
@@ -1375,7 +1403,7 @@ async function renderPagedList(view, ctx, opts) {
       if (isAborted(e) || stale(mine)) return;
       clear(body);
       container = null;
-      body.appendChild(errorState(e, () => void load(from, place, mode)));
+      body.appendChild(errorState(e, whileDrawn(() => void load(from, place, mode))));
       return;
     } finally {
       // Only the CURRENT generation may release the flag: a superseded
@@ -1389,9 +1417,14 @@ async function renderPagedList(view, ctx, opts) {
     else if (mode === "jump" || (mode === "keep" && container.getBoundingClientRect().top < pinned())) {
       container.scrollIntoView({ block: "start", behavior: "auto" });
     } else if (mode === "top") window.scrollTo({ top: 0 });
-    // Armed once the rows stand, so its first answer pages on from them.
-    if (offset < total) disposeSentinel = onVisible(sentinel, () => { if (offset < total) void page(); });
-    else sentinel.remove();
+    // Armed once the rows stand, so its first answer pages on from them; put
+    // back below them first, since a jump keeps its container and paints
+    // nothing, and stopPaging took the sentinel out.
+    if (offset < total) {
+      body.appendChild(sentinel);
+      disposeSentinel = onVisible(sentinel, () => { if (offset < total) void page(); });
+    } else sentinel.remove();
+    ctx.listed?.(true);
     if (mode !== "top") ctx.savePlace?.();
   }
 
@@ -1412,7 +1445,7 @@ async function renderPagedList(view, ctx, opts) {
       if (isAborted(e) || stale(mine)) return;
       clear(body);
       container = null;
-      body.appendChild(errorState(e, () => void load(start, null, "keep")));
+      body.appendChild(errorState(e, whileDrawn(() => void load(start, null, "keep"))));
     } finally {
       if (mine === renderGen) loading = false;
     }
@@ -1448,6 +1481,10 @@ async function renderPagedList(view, ctx, opts) {
     else u.searchParams.delete("q");
     const { place: _, ...s } = history.state;
     history.replaceState(s, "", u);
+    // The entry's URL has moved: a crumb whose trail recorded the old one
+    // must not go back to it, whatever this load answers.
+    ctx.moved?.();
+    commits += 1;
     href = u.pathname + u.search;
     const mine = renderGen + 1;
     await load(0, null, "keep");
@@ -1465,11 +1502,11 @@ async function renderPagedList(view, ctx, opts) {
   const saved = history.state?.place;
   const place = saved?.href === href && [saved.start, saved.anchor, saved.delta].every(Number.isFinite) ? saved : null;
   // Up to 1,000 rows of a window are restored; past them it starts again at
-  // the page that holds the place's row.
-  let from = place ? place.start : 0;
-  if (place && place.anchor - from > 1000) from = place.anchor - ((place.anchor - from) % PAGE);
+  // the page that holds the place's row. A whole list starts at its first
+  // row, whatever start its place names.
+  let from = place && !whole ? place.start : 0;
+  if (place && !whole && place.anchor - from > 1000) from = place.anchor - ((place.anchor - from) % PAGE);
   await load(from, place, "top");
-  ctx.listed?.();
 }
 
 // ---- Favorites / Playlists / Mixes / Folders / Search ----
@@ -1615,6 +1652,7 @@ export async function renderPlaylists(view, ctx) {
     containerClass: "grid",
     countNoun: "playlist",
     filter: true,
+    whole: true,
     emptyTitle: "No playlists backed up",
     emptyDetail: "Playlists appear here when a paired device has playlist backup switched on.",
     // The banner slot, not a section appended after the grid — and that
@@ -1864,6 +1902,7 @@ async function drawMixes(page) {
     make: (c) => collectionTile(c, `/mix/${c.id}`, "smartmix"),
     containerClass: "grid",
     countNoun: "mix",
+    whole: true,
     emptyTitle: "No mixes generated yet",
     emptyDetail: "Mixes are rebuilt periodically once there is listening history to work from.",
   });
