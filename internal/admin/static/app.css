@@ -3466,3 +3466,12 @@ label.checkbox.tray-switch {
   .upnp-upstream-actions { gap: var(--space-2); }
   div.row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 }
+/* ...and a table cell's adjacent actions from 641px, where the phone's column
+ * of them (8px apart) ends: by margins, 8px side by side and once their
+ * column wraps them (the Paired Devices page's Rotate, Expiry and Revoke
+ * stacked 0px apart), the cell still a table cell, whose borders are the
+ * table's, and a cell of one button or none left as it was. */
+@media (any-pointer: coarse) and (min-width: 641px) {
+  table.rows td.row-actions > .btn:not(:last-child) { margin-inline-end: 8px; }
+  table.rows td.row-actions:has(> .btn + .btn) > .btn { margin-block: 4px; }
+}
