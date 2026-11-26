@@ -38,9 +38,10 @@ const (
 
 	// playerTimeLayout is the snapshot timestamp format every player
 	// response echoes. A named layout rather than five copies of the
-	// same magic string: the client compares snapshotAt across
-	// responses to notice a rebuild mid-scroll, so the format is a
-	// contract between the two, not incidental formatting.
+	// same magic string: a list's restored place compares the
+	// snapshotAt it was measured on with its answer's to notice a
+	// rebuild (views.js), so the format is a contract between the two,
+	// not incidental formatting.
 	playerTimeLayout = "2006-01-02T15:04:05Z"
 )
 

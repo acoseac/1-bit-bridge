@@ -89,8 +89,16 @@ func TestEveryNodeLookupOfTheOutputsTestsIsBarNode(t *testing.T) {
 // requires checks of its checks to pass and none to fail.
 func barScenario(t *testing.T, checks int) {
 	t.Helper()
+	harnessScenario(t, "bar_harness.mjs", checks)
+}
+
+// harnessScenario runs the scenario named as the calling test is of the
+// testdata harness named, with args after it, as barScenario runs the
+// bar's.
+func harnessScenario(t *testing.T, name string, checks int, args ...string) {
+	t.Helper()
 	node := barNode(t)
-	harness, err := filepath.Abs(filepath.Join("testdata", "bar_harness.mjs"))
+	harness, err := filepath.Abs(filepath.Join("testdata", name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +106,7 @@ func barScenario(t *testing.T, checks int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := exec.Command(node, harness, fileURL(dir)+"/", t.Name()).CombinedOutput()
+	raw, err := exec.Command(node, append([]string{harness, fileURL(dir) + "/", t.Name()}, args...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, raw)
 	}
