@@ -512,7 +512,7 @@ func TestTheShippedExampleLeavesThePlayersDSDToItsState(t *testing.T) {
 	if !strings.Contains(prose, page) {
 		t.Errorf("the example does not say %q", page)
 	}
-	lines := strings.Split(string(raw), "\n")
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
 	start := -1
 	for i, l := range lines {
 		if l == "# output:" {
