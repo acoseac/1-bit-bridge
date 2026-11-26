@@ -22,7 +22,8 @@ import (
 
 // backupCmd is `bridge backup [--config X] [--keep N]` — captures a
 // timestamped snapshot of the bridge state under `<dataDir>/backups/`
-// and optionally prunes older snapshots to retain at most N.
+// and prunes older snapshots by the config's backup.keep, or by N where
+// --keep is given (backlog B1035).
 //
 // Safe to run while `bridge serve` is up: SQLite's `VACUUM INTO` on
 // a WAL-mode database produces an atomic clean copy without locking
@@ -59,7 +60,7 @@ func backupCmdContext(ctx context.Context, args []string, stdout, stderr io.Writ
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", configFlagUsage)
-	keep := fs.Int("keep", 7, "number of snapshots to retain (0 disables prune)")
+	keep := fs.Int("keep", 0, "retain the `N` newest snapshots and what recovery needs, 0 or less every one; overrides the config's backup.keep")
 	verify := fs.String("verify", "", "check the snapshot at this path and record its verdict; takes no snapshot")
 	full := fs.Bool("full", false, "with --verify: run SQLite's integrity_check and foreign_key_check (slower) in place of quick_check")
 	if err := fs.Parse(args); err != nil {
@@ -69,6 +70,7 @@ func backupCmdContext(ctx context.Context, args []string, stdout, stderr io.Writ
 	case fs.NArg() > 0:
 		fmt.Fprintf(stderr, "backup: unexpected argument %q\n", fs.Arg(0))
 		fmt.Fprintln(stderr, "Usage: bridge backup [--config bridge.yaml] [--keep N] | bridge backup --verify <snapshot-dir> [--full]")
+		fmt.Fprintln(stderr, "--keep N overrides the config's backup.keep for this run (0 or less keeps every snapshot)")
 		return 2
 	case strings.HasPrefix(*verify, "-"):
 		fmt.Fprintln(stderr, "backup: --verify takes the snapshot's folder: bridge backup --verify <snapshot-dir> [--full]")
@@ -88,9 +90,18 @@ func backupCmdContext(ctx context.Context, args []string, stdout, stderr io.Writ
 	if refuseDataDirAway("backup", resolvedCfgPath, cfg.DataDir, stderr) {
 		return 1
 	}
+	// One retention, for the prune and its report: --keep where it is given
+	// (0 or less is off), else the config's, as serve's ticker and the console
+	// read it (EffectiveKeep: -1 is off, 0 or none the default).
+	retain := cfg.Backup.EffectiveKeep()
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "keep" {
+			retain = *keep
+		}
+	})
 
 	src := buildBackupSources(cfg, resolvedCfgPath)
-	// The prune runs unconditionally, even at --keep 0. That disables the
+	// The prune runs unconditionally, even with retention off. That disables the
 	// KEEP-POLICY, not the crash-orphan sweep: an orphan is never a snapshot
 	// worth retaining, it carries a near-full DB copy, and nothing else in
 	// the backup package can ever reclaim it. Guarding the call on keep > 0
@@ -98,7 +109,7 @@ func backupCmdContext(ctx context.Context, args []string, stdout, stderr io.Writ
 	// and their warnings are never seen". It runs after a kept snapshot
 	// whatever its verdict (backup.Finish).
 	res := backup.SnapshotAndVerify(ctx, src, backup.SnapshotOptions{
-		Keep: func() int { return *keep },
+		Keep: func() int { return retain },
 		OnKept: func(dir string) {
 			fmt.Fprintf(stdout, "Snapshot written: %s\n", dir)
 			fmt.Fprintln(stdout, backup.SensitivityNotice)
@@ -127,7 +138,7 @@ func backupCmdContext(ctx context.Context, args []string, stdout, stderr io.Writ
 	case res.PruneSkipped && ctx.Err() == nil:
 		fmt.Fprintf(stdout, "Prune skipped: %s.\n", pruneSkipWords(res.VerifyErr))
 	case res.Prune.Deleted > 0:
-		fmt.Fprintf(stdout, "Pruned %d older snapshot(s) (kept %d most recent, and what recovery needs).\n", res.Prune.Deleted, *keep)
+		fmt.Fprintf(stdout, "Pruned %d older snapshot(s) (kept %d most recent, and what recovery needs).\n", res.Prune.Deleted, retain)
 	}
 	return code
 }
