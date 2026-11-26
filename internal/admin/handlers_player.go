@@ -54,20 +54,32 @@ type playerPageMeta struct {
 	Limit      int    `json:"limit"`
 	SnapshotAt string `json:"snapshotAt"`
 
-	// Buckets is the A–Z jump index for the CURRENT filter and sort,
-	// emitted on the FIRST page only — the same first-page-only
-	// convention Folders/Total already use, and for the same reason:
-	// it describes the whole result set, so repeating it on every page
-	// is pure wire cost.
+	// Rail and Buckets are the jump index for the CURRENT filter and
+	// sort, emitted on the FIRST page only — the same first-page-only
+	// convention Folders/Total already use, and for the same reason: it
+	// describes the whole result set, so repeating it on every page is
+	// pure wire cost.
 	//
-	// Omitted entirely when the ordering is not alphabetical (an album
-	// grid sorted by year or recency has no meaningful letter index),
-	// which is also how the client knows not to draw a rail.
+	// Rail is the kind of index the buckets are, which the client draws
+	// them by (B1021): "letters" (# and A–Z), "years" (one a year, "?"
+	// for the rest) or "dates" (Recently Added's periods: "this-month",
+	// "this-year", each earlier year, "?"). Both are omitted where the
+	// ordering has no index (a genre list ordered by track count) or the
+	// list is empty, which is also how the client knows not to draw a
+	// rail.
+	Rail    string            `json:"rail,omitempty"`
 	Buckets []playerBucketDTO `json:"buckets,omitempty"`
 }
 
-// playerBucketDTO is one letter of the jump index: where that letter
-// starts in the filtered+sorted list, and how many entries it holds.
+// index sets the page's jump index and its kind, neither for an empty one.
+func (m *playerPageMeta) index(kind string, buckets []playerBucketDTO) {
+	if len(buckets) > 0 {
+		m.Rail, m.Buckets = kind, buckets
+	}
+}
+
+// playerBucketDTO is one entry of the jump index: where its key starts
+// in the filtered+sorted list, and how many entries it holds.
 //
 // Offset is an index into that list, so the client jumps by re-fetching
 // at that offset rather than scrolling — which is the only thing that
@@ -79,12 +91,14 @@ type playerBucketDTO struct {
 }
 
 // buildBuckets walks an already-sorted list and records where each
-// letter starts. Runs only for the first page, so it is O(n) once per
+// key starts. Runs only for the first page, so it is O(n) once per
 // filter change rather than per page.
 //
 // letterAt returns the bucket for one entry; a caller that sorts by a
 // different key passes a different letterAt, which is why this takes a
-// function instead of reading a Bucket field.
+// function instead of reading a Bucket field. A key that came back
+// after another would make a second bucket: each caller's keys follow
+// its sort, so every key is one run.
 func buildBuckets(n int, letterAt func(i int) string) []playerBucketDTO {
 	if n == 0 {
 		return nil
@@ -342,6 +356,11 @@ func (s *Server) apiPlayerAlbums(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	zone, err := readerZone(q.Get("tz"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 
 	// The `needs` filter is parsed FIRST, and its predicate — not the
 	// parameter — decides whether coverage is required. The player always
@@ -399,31 +418,81 @@ func (s *Server) apiPlayerAlbums(w http.ResponseWriter, r *http.Request) {
 	meta := playerPageMeta{Total: len(idx), Offset: start, Limit: limit,
 		SnapshotAt: snapshotStamp(cat.BuiltAt)}
 	if start == 0 {
-		meta.Buckets = albumBuckets(cat, idx, q.Get("sort"))
+		meta.index(albumRail(cat, idx, q.Get("sort"), s.now(), zone))
 	}
 	writeJSON(w, http.StatusOK, playerAlbumsResponse{playerPageMeta: meta, Albums: out})
 }
 
-// albumBuckets builds the A–Z jump index for a sorted album window, or
-// nil when the ordering has no letters to index.
+// readerZone is the reader's calendar for Recently Added's periods: tz, the
+// minutes JavaScript's getTimezoneOffset gives (positive WEST of UTC, so
+// UTC+2 is -120), a whole number within 14 hours; absent, UTC.
+func readerZone(tz string) (*time.Location, error) {
+	if tz == "" {
+		return time.UTC, nil
+	}
+	m, err := strconv.Atoi(tz)
+	if err != nil || m < -840 || m > 840 {
+		return nil, errors.New("invalid tz: whole minutes west of UTC, within 840")
+	}
+	return time.FixedZone("", -m*60), nil
+}
+
+// albumRail is the jump index for a sorted album window, keyed as its sort
+// orders the rows, so each key is one run, and the kind it is: letters by
+// title or by artist; years under Year, one a year from 1000 to 9999 and "?"
+// for the rest, which the sort sinks with the undated (yearSortValue); and
+// dates under Recently Added: "this-month" from the first instant of the
+// reader's month in zone (a future album with it), "this-year" from the
+// year's, each earlier year's in that zone, and "?" for an album never
+// indexed (B1021).
 //
 // The letter depends on the SORT, not on the row: Album.Bucket is
 // derived from SortArtist (librarycat), which is right under an artist
 // sort and wrong under a title sort — "Abbey Road" by The Beatles files
-// under B by artist and A by title. Recency and year orderings get no
-// rail at all, and the omitted field is how the client knows not to draw
-// one.
-func albumBuckets(cat *librarycat.Catalog, idx []int, mode string) []playerBucketDTO {
-	var letterAt func(i int) string
+// under B by artist and A by title.
+func albumRail(cat *librarycat.Catalog, idx []int, mode string, now time.Time, zone *time.Location) (string, []playerBucketDTO) {
+	at := func(i int) librarycat.Album { return cat.Albums[idx[i]] }
+	kind, keyAt := "letters", func(i int) string { return at(i).Bucket }
 	switch mode {
-	case "artist":
-		letterAt = func(i int) string { return cat.Albums[idx[i]].Bucket }
 	case "title":
-		letterAt = func(i int) string { return librarycat.BucketOf(cat.Albums[idx[i]].SortTitle) }
-	default:
-		return nil // recent / year — not alphabetical
+		keyAt = func(i int) string { return librarycat.BucketOf(at(i).SortTitle) }
+	case "year":
+		kind, keyAt = "years", func(i int) string {
+			if y := yearSortValue(at(i).Year); y != 0 {
+				return strconv.Itoa(y)
+			}
+			return "?"
+		}
+	case "", "recent":
+		local := now.In(zone)
+		month := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, zone)
+		year := time.Date(local.Year(), time.January, 1, 0, 0, 0, 0, zone)
+		kind, keyAt = "dates", func(i int) string {
+			if at(i).AddedAt <= 0 {
+				return "?"
+			}
+			switch t := time.Unix(0, at(i).AddedAt).In(zone); {
+			case !t.Before(month):
+				return "this-month"
+			case !t.Before(year):
+				return "this-year"
+			default:
+				return strconv.Itoa(t.Year())
+			}
+		}
 	}
-	return buildBuckets(len(idx), letterAt)
+	return kind, buildBuckets(len(idx), keyAt)
+}
+
+// yearSortValue is the year the Year sort and its rail file an album by: its
+// tag from 1000 to 9999, else 0, which sorts with the undated, last, as the
+// phone's yearSortValue does; 12345 led the sort and 74 sorted below 1001
+// while the rail's "?" took both, a key in two runs.
+func yearSortValue(y int) int {
+	if y < 1000 || y > 9999 {
+		return 0
+	}
+	return y
 }
 
 // errCoverageUnavailable is filterAlbums' answer to an active variant
@@ -644,7 +713,12 @@ func sortAlbumIndices(cat *librarycat.Catalog, idx []int, mode string) {
 	case "", "recent":
 		// AddedAt is MIN(indexed_at) over the album's tracks — see
 		// librarycat.Album. It is "recently indexed", not a true
-		// first-seen date; the store has no such column.
+		// first-seen date: the store keeps first_indexed_at, a set-once
+		// added date, but the catalog does not read it
+		// (manifest/catalog_refs.go), and ordering by it changes the sort
+		// and the catalog's projection, an item of its own; so an album
+		// whose every track was re-indexed (a tag edit) sorts, and its
+		// rail files it, as this month's.
 		sort.SliceStable(idx, func(i, j int) bool {
 			x, y := al[idx[i]], al[idx[j]]
 			if x.AddedAt != y.AddedAt {
@@ -663,13 +737,14 @@ func sortAlbumIndices(cat *librarycat.Catalog, idx []int, mode string) {
 	case "year":
 		sort.SliceStable(idx, func(i, j int) bool {
 			x, y := al[idx[i]], al[idx[j]]
-			if x.Year != y.Year {
-				// Unknown years (0) sort last under a year sort rather
-				// than leading it, which is what a listener expects.
-				if x.Year == 0 || y.Year == 0 {
-					return y.Year == 0
+			if a, b := yearSortValue(x.Year), yearSortValue(y.Year); a != b {
+				// Years it cannot place (0, or outside 1000-9999) sort
+				// last under a year sort rather than leading it, which
+				// is what a listener expects.
+				if a == 0 || b == 0 {
+					return b == 0
 				}
-				return x.Year > y.Year
+				return a > b
 			}
 			return x.ID < y.ID
 		})
@@ -718,7 +793,7 @@ func (s *Server) apiPlayerArtists(w http.ResponseWriter, r *http.Request) {
 	meta := playerPageMeta{Total: len(artists), Offset: start, Limit: limit,
 		SnapshotAt: snapshotStamp(cat.BuiltAt)}
 	if start == 0 {
-		meta.Buckets = buildBuckets(len(artists), func(i int) string { return artists[i].Bucket })
+		meta.index("letters", buildBuckets(len(artists), func(i int) string { return artists[i].Bucket }))
 	}
 	writeJSON(w, http.StatusOK, playerArtistsResponse{playerPageMeta: meta, Artists: out})
 }
@@ -770,7 +845,7 @@ func (s *Server) serveAxis(w http.ResponseWriter, r *http.Request,
 	meta := playerPageMeta{Total: len(entries), Offset: start, Limit: limit,
 		SnapshotAt: snapshotStamp(cat.BuiltAt)}
 	if start == 0 && alphabetical {
-		meta.Buckets = buildBuckets(len(entries), func(i int) string { return entries[i].Bucket })
+		meta.index("letters", buildBuckets(len(entries), func(i int) string { return entries[i].Bucket }))
 	}
 	writeJSON(w, http.StatusOK, playerAxisResponse{playerPageMeta: meta, Entries: out})
 }
