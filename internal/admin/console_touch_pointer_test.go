@@ -41,11 +41,14 @@ func mediaRulesOf(t *testing.T, path, query string) []touchRule {
 // at the source: in an (any-pointer: coarse) block of each stylesheet, which
 // holds at every width, the bar's buttons, the output menu's picks, the queue
 // panel's entries and Remove, and the player's sections and crumbs are at
-// least 44px, the transport's buttons and the queue's entries 8px apart; and
-// app.css's operator controls (a button, an <a class="btn"> made an
-// inline-block that a min-height grows, a select, a switch's row, the gear, a
-// summary row) are 44px, a radio's glyph 24px in a 44px label row, and the
-// Player page's radio, which no label holds, a 44px target itself.
+// least 44px, a crumb at least 44px wide with its words at its middle, the
+// transport's buttons, the queue's entries and a trail's wrapped rows of
+// crumbs 8px apart; and app.css's operator controls (a button, an <a
+// class="btn"> made an inline-block that a min-height grows, a select, a
+// switch's row, the gear, a summary row) are 44px, a radio's glyph 24px in a
+// 44px label row, the Player page's radio, which no label holds, a 44px target
+// itself, and the buttons of a row of actions (the UPnP page's, a page's or a
+// dialog's row-actions) 8px apart, where 6.4px and a space's 4.3px stood.
 func TestEveryControlTakesAFingerWhereACoarsePointerIs(t *testing.T) {
 	for _, file := range []struct {
 		path  string
@@ -61,6 +64,8 @@ func TestEveryControlTakesAFingerWhereACoarsePointerIs(t *testing.T) {
 			{".np-queue-remove", "min-width", "44px"}, {".np-queue-remove", "min-height", "44px"},
 			{".player-section", "min-height", "44px"},
 			{".crumb-link", "min-height", "44px"},
+			{".crumb-link", "min-width", "44px"}, {".crumb-link", "text-align", "center"},
+			{".crumb-list", "row-gap", "var(--space-2)"},
 		}},
 		{"static/app.css", [][3]string{
 			{".btn", "min-height", "44px"},
@@ -72,6 +77,9 @@ func TestEveryControlTakesAFingerWhereACoarsePointerIs(t *testing.T) {
 			{`input[type="radio"]`, "width", "24px"}, {`input[type="radio"]`, "height", "24px"},
 			{`label:has(> input[type="radio"])`, "min-height", "44px"},
 			{`td > input[type="radio"]`, "width", "44px"}, {`td > input[type="radio"]`, "height", "44px"},
+			{".upnp-upstream-actions", "gap", "var(--space-2)"},
+			{"div.row-actions", "display", "flex"}, {"div.row-actions", "flex-wrap", "wrap"},
+			{"div.row-actions", "gap", "var(--space-2)"},
 		}},
 	} {
 		rules := mediaRulesOf(t, file.path, "(any-pointer: coarse)")
@@ -104,13 +112,17 @@ func TestTheOutputMenuScrollsRatherThanSqueezeAPick(t *testing.T) {
 
 // TestTheBarTakesRowsForAFingerFrom641px pins B1021's bar under a coarse
 // pointer from 641px at the source: its centre's transport and times are
-// rows of the bar's own, three where the window is taller than 500px (the
-// words beside the extras, the transport, the times) and two where it is
-// 500px tall or less, a phone held sideways, its toggles and its chip hidden
-// there as a phone's are: 44px buttons 8px apart do not fit the one row a
-// mouse's bar keeps.
+// rows of the bar's own, by one template and one override after it, so no
+// window height falls between two blocks (500.5px fell between 500 and 501):
+// three rows (the words beside the extras, the transport, the times), and,
+// where the window is 500px tall or less, two, the words beside the transport
+// and the times beside the extras, its toggles and its chip hidden there as a
+// phone's are. In one row, or with the extras beside the words in a short
+// window, the volume a pointer that hovers keeps from 769px laid the cover
+// over Previous at 769 by 390.
 func TestTheBarTakesRowsForAFingerFrom641px(t *testing.T) {
-	wide := mediaRulesOf(t, "static/player.css", "(any-pointer: coarse) and (min-width: 641px)")
+	const base, shortQuery = "(any-pointer: coarse) and (min-width: 641px)", "(any-pointer: coarse) and (min-width: 641px) and (max-height: 500px)"
+	wide := mediaRulesOf(t, "static/player.css", base)
 	for _, w := range [][3]string{
 		{".np-center", "display", "contents"}, {".np-now", "grid-area", "now"}, {".np-transport", "grid-area", "ctl"},
 		{".np-scrub", "grid-area", "scrub"}, {".np-extra", "grid-area", "extra"}, {".npbar", "grid-template-columns", "minmax(0, 1fr) auto auto"},
@@ -123,17 +135,39 @@ func TestTheBarTakesRowsForAFingerFrom641px(t *testing.T) {
 		query string
 		rows  []string
 	}{
-		{"(any-pointer: coarse) and (min-width: 641px) and (min-height: 501px)", []string{"now now extra", "ctl ctl ctl", "scrub scrub scrub"}},
-		{"(any-pointer: coarse) and (min-width: 641px) and (max-height: 500px)", []string{"now ctl extra", "scrub scrub scrub"}},
+		{base, []string{"now now extra", "ctl ctl ctl", "scrub scrub scrub"}},
+		{shortQuery, []string{"now ctl ctl", "scrub scrub extra"}},
 	} {
 		areas, rows := barAreas(mediaRulesOf(t, "static/player.css", c.query))
 		if strings.Join(rows, "|") != strings.Join(c.rows, "|") {
 			t.Errorf("%s: the bar's rows are %q, want %q", c.query, areas, c.rows)
 		}
 	}
-	short := mediaRulesOf(t, "static/player.css", "(any-pointer: coarse) and (min-width: 641px) and (max-height: 500px)")
+	short := mediaRulesOf(t, "static/player.css", shortQuery)
 	if !anyRule(short, ".np-btn-toggle", "display", "none") || !anyRule(short, ".np-chip", "display", "none") {
 		t.Error("in a short window under a coarse pointer the bar keeps its toggles or its chip, which a phone's two rows leave out")
+	}
+	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
+	if strings.Contains(css, "(min-height: 501px)") {
+		t.Error("a block for windows taller than 500px is back: a template by two height blocks leaves the heights between them none")
+	}
+	if strings.Index(css, "@media "+shortQuery) < strings.Index(css, "@media "+base+" {") {
+		t.Error("the short window's override comes before the template it overrides, so the template wins")
+	}
+}
+
+// TestTheVolumeTakesAFingerAndLooksDisabledWhileItIs pins the bar's volume at
+// the source: under a coarse pointer, where a pointer that hovers keeps it
+// from 769px (a touch laptop), it is 44px tall, where it stood 16px; and
+// disabled, as it is with the bridge's player chosen (its level is fixed), it
+// looks it, as the seek does, where it kept a live slider's look.
+func TestTheVolumeTakesAFingerAndLooksDisabledWhileItIs(t *testing.T) {
+	if !anyRule(mediaRulesOf(t, "static/player.css", "(any-pointer: coarse)"), ".np-vol", "height", "44px") {
+		t.Error("under a coarse pointer the volume keeps its 16px height")
+	}
+	all := touchRulesOf(cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), ""))
+	if !anyRule(all, ".np-vol:disabled", "opacity", ".35") || !anyRule(all, ".np-vol:disabled", "cursor", "default") {
+		t.Error("a disabled volume keeps a live slider's look")
 	}
 }
 

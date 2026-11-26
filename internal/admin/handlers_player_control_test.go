@@ -578,15 +578,23 @@ func TestTheReadBackRouteHydratesItsHandoverThroughTheCatalog(t *testing.T) {
 func TestTheBridgesQueueAndItsHandoversCarryEachAlbumsCover(t *testing.T) {
 	srv, fake, _ := newControlTestServer(t)
 	cover := "local-" + strings.Repeat("c0", 32)
+	// One of the album's two tracks carries the cover, so a row that copied
+	// its own track's fields would show for the other.
 	for _, tr := range []*manifest.Track{
 		{Path: "Lib/Covered/01.flac", Title: "One", Album: "Covered", ArtworkMBID: cover},
-		{Path: "Lib/Covered/02.flac", Title: "Two", Album: "Covered", ArtworkMBID: cover},
+		{Path: "Lib/Covered/02.flac", Title: "Two", Album: "Covered"},
 		{Path: "Lib/Bare/01.flac", Title: "Bare", Album: "Bare"},
 	} {
 		tr.AlbumArtist, tr.Artist, tr.Codec, tr.Size, tr.ModTime = "Artist", "Artist", "FLAC", 1000, time.Unix(1, 0)
 		if err := srv.deps.Manifest.UpsertTrack(t.Context(), tr); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A stored version, which UpsertTrack leaves empty: every answer below
+	// carries this literal for the covered album's rows.
+	const version = "v7"
+	if n, err := srv.deps.Manifest.SetArtworkVersionAndBumpIndex(t.Context(), cover, version); err != nil || n != 1 {
+		t.Fatalf("SetArtworkVersionAndBumpIndex = %d, %v; want the one row that carries the cover", n, err)
 	}
 	// Each album as its own detail answers it, and its rows as that detail has them.
 	_, list := playerGet(t, srv, "/api/player/albums?sort=title")
@@ -607,8 +615,8 @@ func TestTheBridgesQueueAndItsHandoversCarryEachAlbumsCover(t *testing.T) {
 		}
 	}
 	covered, _ := albums["Covered"]["album"].(map[string]any)
-	if covered == nil || covered["artworkMBID"] != cover {
-		t.Fatalf("the covered album's detail %v, want its cover %s", albums["Covered"]["album"], cover)
+	if covered == nil || covered["artworkMBID"] != cover || covered["artworkVersion"] != version {
+		t.Fatalf("the covered album's detail %v, want its cover %s at version %s", albums["Covered"]["album"], cover, version)
 	}
 	// want is each path's cover as its album's detail answers it.
 	want := map[string]string{"Lib/Covered/01.flac": cover, "Lib/Covered/02.flac": cover, "Lib/Bare/01.flac": ""}
@@ -630,13 +638,13 @@ func TestTheBridgesQueueAndItsHandoversCarryEachAlbumsCover(t *testing.T) {
 			if row == nil || !has || mbid != want[p] {
 				t.Errorf("%s: %s's row %v, want artworkMBID %q present, its album's", where, p, row, want[p])
 			}
-			version, hasVersion := row["artworkVersion"]
-			album := albums["Covered"]["album"].(map[string]any)
+			got, hasVersion := row["artworkVersion"]
 			if want[p] == "" {
-				album = albums["Bare"]["album"].(map[string]any)
-			}
-			if albumVersion, ok := album["artworkVersion"]; hasVersion != ok || version != albumVersion {
-				t.Errorf("%s: %s's artworkVersion %v, want its album's %v", where, p, version, albumVersion)
+				if _, bareHas := albums["Bare"]["album"].(map[string]any)["artworkVersion"]; hasVersion || bareHas {
+					t.Errorf("%s: %s's artworkVersion %v, its album has none", where, p, got)
+				}
+			} else if got != version {
+				t.Errorf("%s: %s's artworkVersion %v, want its album's %s", where, p, got, version)
 			}
 		}
 	}

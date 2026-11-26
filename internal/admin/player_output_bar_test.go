@@ -289,9 +289,36 @@ func TestACoverThatFailsGivesWayToTheMarkAndOneLeftBehindChangesNothing(t *testi
 func TestThisBrowserShowsTheCoverOfTheTrackItTookFromTheBridge(t *testing.T) { barScenario(t, 3) }
 
 // TestAHandedOverAlbumWithNoCoverKeepsTheMarkAfterAReload pins the same after
-// a reload: the queue restored beside the cover it saved shows the mark for a
-// handed-over album with no cover.
-func TestAHandedOverAlbumWithNoCoverKeepsTheMarkAfterAReload(t *testing.T) { barScenario(t, 1) }
+// a reload: the take stores its row's empty cover beside the queue's, and the
+// page reloaded over what it stored shows the mark for that album.
+func TestAHandedOverAlbumWithNoCoverKeepsTheMarkAfterAReload(t *testing.T) { barScenario(t, 2) }
+
+// TestACoverThatFailedIsAskedForAgainOnceTheBarHasShownAnother pins a failed
+// cover's retry with the bridge's player chosen: a failure holds while no
+// other cover comes between, the strip with no track included, and once the
+// bar has shown another cover the failed one is asked for afresh when its
+// entry is heard again.
+func TestACoverThatFailedIsAskedForAgainOnceTheBarHasShownAnother(t *testing.T) { barScenario(t, 3) }
+
+// TestThisBrowserAsksAgainForACoverThatFailedOnceItHasShownAnother pins the
+// same retry in this browser: A's cover fails, B's track shows its own, and
+// A's track again asks for A's cover afresh.
+func TestThisBrowserAsksAgainForACoverThatFailedOnceItHasShownAnother(t *testing.T) {
+	barScenario(t, 3)
+}
+
+// TestTheBridgesEntryTheCatalogNoLongerHoldsShowsTheMark pins the bridge's
+// heard entry whose row is read with no track: the no-cover mark, with no
+// image and no link, where an entry whose row is not read yet is an empty
+// square.
+func TestTheBridgesEntryTheCatalogNoLongerHoldsShowsTheMark(t *testing.T) { barScenario(t, 1) }
+
+// TestASwitchToThisBrowserShowsTheCoverOfTheTrackThatSurvives pins the cover
+// after a real switch to this browser from a queue with its own cover, each
+// handover's selected entry gone from the catalog: the next survivor's own
+// cover, the mark for a survivor whose album has none, and an empty strip
+// where none survives, never the queue's cover.
+func TestASwitchToThisBrowserShowsTheCoverOfTheTrackThatSurvives(t *testing.T) { barScenario(t, 3) }
 
 // TestTheMenuSaysWhatTheBridgesPlayerDoesNotDoAndItsControlsNameIt pins the
 // bar's reasons in words: the output menu's line of what the bridge's player

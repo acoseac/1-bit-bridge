@@ -4948,11 +4948,123 @@ S.TestThisBrowserShowsTheCoverOfTheTrackItTookFromTheBridge = async () => {
   check("a track handed over with a cover: its own over the queue's", c.src === "/api/library/artwork/local-b1?size=500" && c.href === "/album/b1" && !c.mark, [c.src, c.href]);
 };
 
+// reloadedBar is reloaded's page with the shipped bar mounted over it, from
+// the same fresh copy of the modules.
+async function reloadedBar(routes, st) {
+  const d = await reloaded(routes, st);
+  const np = await import(new URL("nowplaying.js", d.base));
+  np.mount();
+  const bar = d.body.children.find((c) => c.attrs.id === "nowplaying");
+  const byClass = (cls) => { const walk = (n) => { for (const c of n.children) { if (c.classList?.contains(cls)) return c; const f = walk(c); if (f) return f; } return null; }; return walk(bar); };
+  return { ...d, bar, byClass };
+}
+
 S.TestAHandedOverAlbumWithNoCoverKeepsTheMarkAfterAReload = async () => {
-  const r = await barPage({ saved: { queue: [flac(3, { albumId: "b2", artworkMBID: "" })], index: 0, at: 0, shuffle: false, repeat: "off", albumArt: "/cover/a" } });
+  // This browser's queue with the queue's cover, then the bridge's queue
+  // taken, an album with no cover, its row saying so; reloaded over what the
+  // take stored, never over a value the case writes.
+  const r = await barPage();
+  r.audio.playQueue([flac(1, { albumId: "q1" })], 0, { albumArt: "/cover/a" });
+  r.el.metadata(200);
+  await settle();
+  r.audio.take({ queue: [flac(3, { albumId: "b2", artworkMBID: "" })], index: 0, position: 0, playing: false }, false);
+  await settle();
+  const stored = JSON.parse(store.get("bridge-player-queue") || "null");
+  check("the take stores its row's empty cover beside the queue's cover", stored?.queue?.[0]?.artworkMBID === "" && stored?.albumArt === "/cover/a",
+    [stored?.queue?.[0]?.artworkMBID, stored?.albumArt]);
+  const d = await reloadedBar(() => {}, pub({ revision: 3 }));
+  const c = coverOf(d);
+  check("reloaded over it: the mark, never the queue's cover", c.images === 0 && c.mark && d.audio.snapshot().track?.path === "Album/03.flac",
+    [c.images, c.src, c.mark, d.audio.snapshot().track?.path]);
+};
+
+S.TestACoverThatFailedIsAskedForAgainOnceTheBarHasShownAnother = async () => {
+  // With the bridge's player chosen: A's image fails, then the strip holds no
+  // track and A is heard again, no other cover between (still the mark); then
+  // B is heard, then A again, asked for afresh.
+  const r = await coveredBar();
+  r.frame(heardAt(11, { revision: 4 }));
+  await settle();
+  coverOf(r).img?.fire("error");
+  r.frame(pub({ revision: 5, queueRev: 4, length: 4, selected: 11 }));
+  await settle();
+  r.frame(heardAt(11, { revision: 6 }));
+  await settle();
+  let c = coverOf(r);
+  check("A failed, no track between: A is not asked for again", c.images === 0 && c.mark, [c.images, c.src, c.mark]);
+  r.frame(heardAt(12, { revision: 7 }));
+  await settle();
+  c = coverOf(r);
+  check("B heard: its own cover", c.src === "/api/library/artwork/local-b2?size=500" && !c.mark, [c.src, c.mark]);
+  r.frame(heardAt(11, { revision: 8 }));
+  await settle();
+  c = coverOf(r);
+  check("A heard again after B: asked for afresh, linked, the mark gone", c.images === 1 && c.src === "/api/library/artwork/local-a1?size=500&v=v1" && c.linked && !c.mark,
+    [c.images, c.src, c.mark]);
+};
+
+S.TestThisBrowserAsksAgainForACoverThatFailedOnceItHasShownAnother = async () => {
+  const r = await barPage();
+  const rowA = flac(1, { albumId: "a1", artworkMBID: "local-a1" });
+  const rowB = flac(2, { albumId: "a2", artworkMBID: "local-b2" });
+  r.audio.take({ queue: [rowA], index: 0, position: 0, playing: false }, false);
+  await settle();
+  coverOf(r).img?.fire("error");
+  let c = coverOf(r);
+  check("A's cover fails: the mark", c.images === 0 && c.mark, [c.images, c.mark]);
+  r.audio.take({ queue: [rowB], index: 0, position: 0, playing: false }, false);
+  await settle();
+  c = coverOf(r);
+  check("B's track: its own cover", c.src === "/api/library/artwork/local-b2?size=500" && !c.mark, [c.src, c.mark]);
+  r.audio.take({ queue: [rowA], index: 0, position: 0, playing: false }, false);
+  await settle();
+  c = coverOf(r);
+  check("A's track again after B's: asked for afresh", c.images === 1 && c.src === "/api/library/artwork/local-a1?size=500" && !c.mark, [c.images, c.src, c.mark]);
+};
+
+S.TestTheBridgesEntryTheCatalogNoLongerHoldsShowsTheMark = async () => {
+  // The heard entry's row read, holding no track: the catalog no longer has
+  // it, so its album and its cover are unknown for good, not yet to come.
+  store.set(OUTPUT_KEY, "bridge");
+  const r = await barPage({ latest: playing({ revision: 3, queueRev: 3, length: 5 }) });
+  r.out.subscribe(() => {});
+  r.s.on("GET", ROUTES.queue, async () => ({ body: { epoch: E1, readAt: 4, queueRev: 4, token: 2, selected: 15,
+    entries: [...coveredQueue, { id: 15, path: "Gone/01 E.flac" }] } }));
+  r.frame(playing({ revision: 4, queueRev: 4, length: 5, selected: 15, track: { ...playing().track, entry: 15, path: "Gone/01 E.flac", title: "E", album: "Gone" },
+    anchor: { ...playing().anchor, entry: 15 } }));
   await settle();
   const c = coverOf(r);
-  check("the queue restored beside the cover it saved: the mark, never that cover", c.images === 0 && c.mark && r.audio.snapshot().albumArt === "/cover/a", [c.images, c.src, c.mark]);
+  check("its row read with no track: the mark, with no image and no link", c.images === 0 && c.href === null && c.mark, [c.images, c.href, c.mark]);
+};
+
+S.TestASwitchToThisBrowserShowsTheCoverOfTheTrackThatSurvives = async () => {
+  // This browser's queue with the queue's cover, moved to the bridge's player
+  // and back: each switch-out's handover holds a selected entry the catalog no
+  // longer has, which handoverOf leaves out.
+  const r = await barPage({ latest: pub({ revision: 2, silent: true }) });
+  r.audio.playQueue([flac(1, { albumId: "q1" })], 0, { albumArt: "/cover/a" });
+  r.el.metadata(200);
+  await settle();
+  let ho = null;
+  let rev = 3;
+  r.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace" }), playing({ revision: rev++ })));
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4, handover: ho }), pub({ revision: rev++, silent: true })));
+  const gone = (id) => ({ id, path: `Gone/${id}.flac` });
+  const move = async (h) => {
+    ho = h;
+    await r.out.pick("bridge");
+    await settle();
+    await r.out.pick("browser");
+    await settle();
+    return coverOf(r);
+  };
+  let c = await move({ tracks: [gone("x1"), { id: "x2", path: "Album/02.flac", track: flac(2, { albumId: "b1", artworkMBID: "local-b1" }) }], selected: 0, position: 30, playing: false });
+  check("the selected entry gone: the next survivor's own cover, linked to its album, never the queue's", c.src === "/api/library/artwork/local-b1?size=500" && c.href === "/album/b1" && !c.mark,
+    [c.src, c.href, c.mark]);
+  c = await move({ tracks: [gone("x3"), { id: "x4", path: "Album/04.flac", track: flac(4, { albumId: "b2", artworkMBID: "" }) }], selected: 0, position: 0, playing: false });
+  check("a survivor whose album has no cover: the mark, never the queue's cover", c.images === 0 && c.mark, [c.images, c.src, c.mark]);
+  c = await move({ tracks: [gone("x5"), gone("x6")], selected: 0, position: 0, playing: false });
+  check("no entry survives: an empty strip, without the mark", c.images === 0 && !c.mark && r.audio.snapshot().track === null, [c.images, c.src, c.mark, r.audio.snapshot().track]);
 };
 
 S.TestTheMenuSaysWhatTheBridgesPlayerDoesNotDoAndItsControlsNameIt = async () => {
