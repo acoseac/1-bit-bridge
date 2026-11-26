@@ -116,3 +116,38 @@ back from the commit after, `git status` clean; all red exactly as predicted:
 `ops/History-rules-output.md` gains the words of the two fixes with a config named, who names one
 and who does not, the element's precedence over the boot gate, the new tests, and this entry
 among its records.
+
+### Runs
+
+One build-slot session at `f8e96fbd`, on Go 1.27.3 with the release tags, `git status` clean after
+each step:
+
+- `make fmt vet test build-all docs-check` with `TEST_PKGS='-count=1 ./...'`: `make fmt` rewrote
+  nothing; `make vet` clean; `make test`, 93 packages ok under `-race` (`cmd/bridge` 1,889 s,
+  `internal/admin` 1,537 s, `internal/manifest` 1,471 s); `make build-all`, its build-tag check
+  OK and six binaries; `make docs-check` ok.
+- `make vet` for linux/amd64, linux/arm64, windows/amd64, windows/arm64, darwin/amd64, linux/386
+  and linux/arm: clean.
+- `cmd/bridge`'s source guards by name, `TestNoDocblockNamesAnotherDeclaration`,
+  `TestEveryCitedTestNameExists`, `TestNoBlankKeepers`, `TestEveryBackgroundGoroutineDrainsOnCleanup`,
+  `TestOnlyHostTreesNamesTheHostsTrees` and `TestTheDoctorsOutputsBuilderReadsNoHostTree`: green.
+  A test name planted in this entry failed the citation guard, naming the entry, and it passed
+  once the bytes were put back.
+- The pinned gofmt over the changed Go files: none listed.
+- `cmd/bridge` whole, without `-race`, with `BRIDGE_OUTPUT_PLAYER_ENABLED=true` exported for the
+  run: the checklist's file-decided cases and every test this change adds green. Thirteen other
+  tests of the package fail there, each because the exported variable turns the player on where
+  its config leaves it off, the product's answer read off a load that applied it
+  (`TestPriorOutputResolvesMergeKeysAsLoadDoes` and `TestPriorOutputOfAFileTheDecoderRefusesElsewhere`
+  build the block they expect from such a load, while the rewrite writes the file's own value):
+  `TestBothDoctorsFailEveryDataDirectoryServeRefuses`,
+  `TestTheConsolesDoctorNamesThePlayersStorageAsBridgeDoctorDoes`,
+  `TestPriorOutputResolvesMergeKeysAsLoadDoes`, `TestPriorOutputOfAFileTheDecoderRefusesElsewhere`,
+  `TestOutputDACInspectWorksWithoutAConfigOrABinding`,
+  `TestServeStartsThePlayersWatcherWhenTheConfigTurnsItOn`,
+  `TestTheConsoleSaysWhatTheOpenHomeSwitchWaitsFor`, `TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain`,
+  `TestTheConsoleTurnsAPlayerOnForTheNextStart`, `TestAPlayerTurnedOffIsNotOfferedJustAfterTheRestart`,
+  `TestServeSharesDiscoveryAcrossItsEligibleDevices`,
+  `TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer` and
+  `TestServeStartsThePlayerOnlyWhenEveryGateHolds`. They are outside this change and left to a
+  follow-up; each passes with the variable unset, as the gate above ran them.
