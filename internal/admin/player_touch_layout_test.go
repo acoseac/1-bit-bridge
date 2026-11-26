@@ -268,6 +268,9 @@ func TestAListsHeadPinsBelowWhatIsPinnedAboveIt(t *testing.T) {
 			t.Errorf("%s carries no scroll margin of what is pinned over it: a jump lands its first row under the head", sel)
 		}
 	}
+	if !anyRule(all, ".list-body > .rows", "content-visibility", "visible") {
+		t.Error("a list's rows are content-visibility: auto, which WebKit gives no heights as they go in: a restored place clamps short")
+	}
 	coarse := playerCSSBlocks(t, "(any-pointer: coarse)")
 	if !anyRule(coarse, ".list-filter", "min-height", "44px") || !anyRule(coarse, ".list-filter", "font-size", "16px") {
 		t.Error("where any pointer is coarse the list's filter is not 44px tall with 16px text")

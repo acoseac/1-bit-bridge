@@ -423,6 +423,10 @@ body.has-player-bar { --az-foot: var(--player-bottom-inset); }
 }
 .list-body { display: flow-root; }
 .list-body > .grid, .list-body > .rows { scroll-margin-top: calc(var(--list-head-top) + var(--list-head-pin)); }
+/* A list's rows have their heights as they go in, which its restore scrolls
+ * by: under content-visibility: auto WebKit gave the genres' rows none yet,
+ * and their restored place clamped to the window's height. */
+.list-body > .rows { content-visibility: visible; }
 /* A finger's field, and text iOS does not zoom into as it focuses. */
 @media (any-pointer: coarse) { .list-filter { min-height: 44px; font-size: 16px; } }
 
