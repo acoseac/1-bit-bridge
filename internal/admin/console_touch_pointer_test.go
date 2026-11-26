@@ -136,7 +136,7 @@ func TestTheBarTakesRowsForAFingerFrom641px(t *testing.T) {
 		rows  []string
 	}{
 		{base, []string{"now now extra", "ctl ctl ctl", "scrub scrub scrub"}},
-		{shortQuery, []string{"now ctl ctl", "scrub scrub extra"}},
+		{shortQuery, []string{"now ctl", "scrub extra"}},
 	} {
 		areas, rows := barAreas(mediaRulesOf(t, "static/player.css", c.query))
 		if strings.Join(rows, "|") != strings.Join(c.rows, "|") {
@@ -144,6 +144,9 @@ func TestTheBarTakesRowsForAFingerFrom641px(t *testing.T) {
 		}
 	}
 	short := mediaRulesOf(t, "static/player.css", shortQuery)
+	if !anyRule(short, ".npbar", "grid-template-columns", "minmax(0, 1fr) auto") {
+		t.Error("in a short window the times span a third column, which widens the transport's by their own width")
+	}
 	if !anyRule(short, ".np-btn-toggle", "display", "none") || !anyRule(short, ".np-chip", "display", "none") {
 		t.Error("in a short window under a coarse pointer the bar keeps its toggles or its chip, which a phone's two rows leave out")
 	}
