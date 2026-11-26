@@ -63,8 +63,10 @@ async function errorFrom(r) {
   try {
     const j = await r.json();
     if (j && (j.message || j.error)) msg = j.message || j.error;
-  } catch {
-    /* a non-JSON body is not worth a second failure */
+  } catch (e) {
+    // An abort that ends the body's read is the request's end, never its
+    // failure (B1021); a non-JSON body is not worth a second failure.
+    if (isAborted(e)) throw e;
   }
   const e = new Error(msg);
   e.status = r.status;
@@ -128,7 +130,10 @@ export const api = {
   // The player's own collection endpoints, not the operator ones:
   // /api/playlists and /api/smart-playlists are summaries-only by
   // design, so they carry no cover refs and nothing playable.
-  playlists: () => getJSON("/api/player/playlists", { key: "playlists" }),
+  playlists: (params) => {
+    const query = qs(params);
+    return getJSON(`/api/player/playlists${query ? `?${query}` : ""}`, { key: "playlists" });
+  },
   playlist: (id) => getJSON(`/api/player/playlists/${encodeURIComponent(id)}`, { key: "detail" }),
   // Tombstones + their undo. The OPERATOR endpoints, like the export
   // below: a deleted playlist has no cover, no playable tracks and no

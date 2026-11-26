@@ -257,7 +257,7 @@ export async function renderAlbums(view, ctx) {
     // but the parameter's mere presence once read as "a filter is active"
     // and defeated the variant-free shortcut on every default load, and a
     // query that says nothing about a filter cannot be misread that way.
-    fetchPage: (offset) => api.albums({ sort, quality, needs: needs === "all" ? "" : needs, ...scope, offset, limit: PAGE }),
+    fetchPage: (offset, limit, q) => api.albums({ sort, quality, needs: needs === "all" ? "" : needs, ...scope, q, offset, limit }),
     pick: (r) => r.albums,
     make: albumTile,
     containerClass: "grid",
@@ -267,6 +267,7 @@ export async function renderAlbums(view, ctx) {
     emptyTitle: "No albums here",
     emptyDetail: emptyGridDetail({ needs, quality, scoped: Object.keys(scope).length > 0 }),
     emptyAction: emptyGridAction({ needs, quality, scoped: Object.keys(scope).length > 0 }),
+    filter: true,
   });
 }
 
@@ -672,7 +673,8 @@ function editionPicker(eds, onPick) {
   return bar;
 }
 
-export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }) {
+export async function renderAlbum(view, ctx) {
+  const { id, gen, setToolbar, setCrumb, trail } = ctx;
   // Captured BEFORE any await. The album fetch is abort-guarded, but the
   // source-name lookup behind the crumb root is MEMOISED — after its
   // first resolution it is not a request at all, so abortReads cannot
@@ -692,7 +694,7 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   try {
     d = await api.album(id);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -723,7 +725,9 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
        { label: a.albumArtist || "Unknown artist", href: scopedHref(`/artist/${a.artistId}`) }]
     : [scopedRoot(CRUMB_ROOTS.albums)];
   const crumbChain = await sourceRootedCrumbs(trail, structural);
-  if (gen() !== at) return;
+  // Nor once an operator page has replaced this one, which moves no
+  // generation (B1021): the page must still be this route's.
+  if (gen() !== at || !owned(ctx)) return;
   setCrumb(crumbs(crumbChain, albumName));
   // The heading names the album, the way every other detail page names
   // its subject. It used to stay the generic word "Album", which left the
@@ -742,7 +746,9 @@ export async function renderAlbum(view, { id, gen, setToolbar, setCrumb, trail }
   // still expand to), as the paths it shows.
   const byId = eds.length === 1 && a.trackCount === d.tracks.length;
   const names = eds.some((e) => albumSourceIDs(e.rows).length > 1) ? await api.sourceNames().catch(() => null) : null;
-  if (gen() !== at) return;
+  // Nor, past the names, a page its route no longer owns: it subscribes, keeps
+  // an edition and paints nothing there (B1021).
+  if (gen() !== at || !owned(ctx)) return;
 
   // A row that played here at render and no longer does (a source the
   // browser confirmed it cannot decode) redraws the album, once a failure.
@@ -1252,12 +1258,13 @@ export async function renderArtists(view, ctx) {
   const source = ctx.params.get("source") || "";
   await renderPagedList(view, ctx, {
     banner: sourceScopeBanner(source),
-    fetchPage: (offset) => api.artists({ source, offset, limit: PAGE }),
+    fetchPage: (offset, limit, q) => api.artists({ source, q, offset, limit }),
     pick: (r) => r.artists,
     make: artistTile,
     containerClass: "grid grid-round",
     countNoun: "artist",
     emptyTitle: "No artists yet",
+    filter: true,
   });
 }
 
@@ -1302,7 +1309,8 @@ function monogram(name) {
 }
 
 
-export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail }) {
+export async function renderArtist(view, ctx) {
+  const { id, gen, setToolbar, setCrumb, trail } = ctx;
   // See renderAlbum: captured before any await, because the memoised
   // source-name lookup is not reachable by abortReads.
   const at = gen();
@@ -1313,7 +1321,7 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail 
   try {
     d = await api.artist(id);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -1326,7 +1334,7 @@ export async function renderArtist(view, { id, gen, setToolbar, setCrumb, trail 
   // case, and it would leave the page with no heading at all.
   const artistName = d.artist.name || "Unknown artist";
   const artistCrumbs = await sourceRootedCrumbs(trail, [scopedRoot(CRUMB_ROOTS.artists)]);
-  if (gen() !== at) return;
+  if (gen() !== at || !owned(ctx)) return;
   setCrumb(crumbs(artistCrumbs, artistName));
   setAxisTitle(artistName);
   const portrait = d.hasImage
@@ -1391,7 +1399,7 @@ async function renderAxis(view, ctx, fetcher, kind, emptyTitle, emptyDetail) {
   const source = ctx.params.get("source") || "";
   await renderPagedList(view, ctx, {
     banner: sourceScopeBanner(source),
-    fetchPage: (offset) => fetcher({ source, offset, limit: PAGE }),
+    fetchPage: (offset, limit, q) => fetcher({ source, q, offset, limit }),
     pick: (r) => r.entries,
     make: (e) => link(scopedHref(`/${kind}/${e.id}`), { class: "row" },
       el("span", { class: "row-title", text: e.name }),
@@ -1399,7 +1407,23 @@ async function renderAxis(view, ctx, fetcher, kind, emptyTitle, emptyDetail) {
         text: `${plural(e.albumCount, "album")} · ${plural(e.trackCount, "track")}` })),
     countNoun: kind,
     emptyTitle, emptyDetail,
+    filter: true,
   });
+}
+
+// Whether the page a view was routed for is still the page shown: its entry
+// current and its view in the document (boot.js's ctx.owns). A caller that
+// hands no check is its page's.
+function owned(ctx) {
+  return !ctx.owns || ctx.owns();
+}
+
+// Whether a render asked under generation at has been overtaken, by a newer
+// render of its entry or by a page its route no longer owns: its failure then
+// paints nothing (B1021). A refined search keeps the entry and the view while
+// route() moves the generation; a boost to an operator page moves none.
+function overtaken(ctx, at) {
+  return ctx.gen() !== at || !owned(ctx);
 }
 
 /**
@@ -1437,7 +1461,7 @@ export async function renderAxisAlbums(view, ctx, kind) {
   const myGen = ctx.gen();
   let chain = base;
   const rooted = await sourceRootedCrumbs(ctx.trail, [scopedRoot(root)]);
-  if (ctx.gen() !== myGen) return;
+  if (ctx.gen() !== myGen || !owned(ctx)) return;
   // Compared by LENGTH, not by reference: sourceRootedCrumbs builds its
   // own array from the same ancestors, so it is never the same object
   // even when it added nothing — and the only thing it can add is the one
@@ -1454,14 +1478,15 @@ export async function renderAxisAlbums(view, ctx, kind) {
   // whatever page the reader is now looking at. The generation counter
   // is what route() bumps on every navigation, so comparing it is the
   // reliable test rather than relying on which requests happen to share
-  // a key.
+  // a key. Nor does a boosted navigation to an operator page, which moves no
+  // generation: the page must still be this route's (B1021).
   let label = "";
   try {
     const r = await (kind === "genre" ? api.genres({ limit: 200 }) : api.composers({ limit: 200 }));
-    if (ctx.gen() !== myGen) return;
+    if (ctx.gen() !== myGen || !owned(ctx)) return;
     label = (r.entries || []).find((e) => e.id === id)?.name || "";
   } catch (e) {
-    if (isAborted(e) || ctx.gen() !== myGen) return;
+    if (isAborted(e) || ctx.gen() !== myGen || !owned(ctx)) return;
     // A missing label costs a heading, never the albums — the grid below
     // is driven by the id, not the name.
     label = "";
@@ -1500,26 +1525,54 @@ function setAxisTitle(label) {
  * server's own cap — a library with more than 200 artists showed the
  * first 200 with no count line and no hint that the rest existed.
  *
- * `fetchPage(offset)` returns the raw response; `pick` extracts the
- * items; `make` builds one node. `containerClass` chooses rows or a
+ * `fetchPage(offset, limit, q)` returns the raw response; `pick` extracts
+ * the items; `make` builds one node. `containerClass` chooses rows or a
  * grid, which is the only difference between the artist tiles and the
  * genre list.
+ *
+ * The list keeps the reader's place in its own history entry (B1021): its
+ * measure, the first row below what is pinned over it (its rows'
+ * scroll-margin-top), is what boot.js's writer records, and a list drawn on
+ * the URL it was measured on restores it: the rows from its window's start
+ * through that row, and on until the row can stand where it stood, in pages
+ * of 200 at once, then one scroll. A list with no place starts at its top;
+ * either way it is its page's one scroll writer. `filter` gives it a head
+ * holding its name filter (the URL's q), which a change leaves in place,
+ * its focus and caret too, while the count line, the rail and the rows
+ * below it are drawn again. `whole` is a list its endpoint answers at once
+ * from its first row, whatever the offset asked (Playlists, Smart Mixes):
+ * its window always starts there, and its place's row is found by its id.
  */
 async function renderPagedList(view, ctx, opts) {
   const { gen } = ctx;
   const { fetchPage, pick, make, containerClass = "rows",
     emptyTitle, emptyDetail, emptyAction = null,
-    countNoun = "", label = "", banner = null } = opts;
+    countNoun = "", label = "", banner = null, filter = false, whole = false } = opts;
+  const at = gen();
+  const key = history.state?.key;
+  let href = location.pathname + location.search;
+  const typing = document.activeElement?.classList?.contains("list-filter");
+  let q = filter ? (ctx.params.get("q") || "").trim() : "";
 
   clear(view);
-  view.appendChild(spinner());
+  if (banner) view.appendChild(banner);
+  let pause = 0;
+  const field = filter ? filterField() : null;
+  const body = el("div", { class: "list-body" }, spinner());
+  view.appendChild(body);
 
+  let start = 0; // the window's first offset: 0, a jump's or a place's
   let offset = 0;
   let total = 0;
   let loading = false;
   let disposeSentinel = null;
   let container = null;
+  let ids = [];
+  let snapshotAt = "";
   const sentinel = el("div", { class: "sentinel" });
+  // The way back to the first row from a window that starts past it, whose
+  // rows above come back by no scrolling: drawn with each body (paint).
+  let top = null;
 
   // renderGen invalidates a fetch that was in flight when a jump reset
   // the list.
@@ -1538,83 +1591,242 @@ async function renderPagedList(view, ctx, opts) {
   // `loading` at all: the superseded call's `finally` clears it while
   // the jump's own fetch is still running, which lets the sentinel start
   // a third page. That part is a real ordering defect today.
+  //
+  // And a load answered after a boosted navigation to an operator page, which
+  // replaces <main> and pushes its own entry with no route, is stale too: it
+  // must neither page on nor scroll the page that replaced the list's. Nor
+  // does a load or a page start once its route has moved on (`gone`): its
+  // request would cancel the next page's under a key they share, a genre's
+  // or a composer's name and the axis lists' pages both being "axis".
   let renderGen = 0;
+  const gone = () => gen() !== at || !owned(ctx);
+  const stale = (mine) => mine !== renderGen || gone();
+  const listGen = () => `${gen()}:${renderGen}`;
+  // The filter's commits so far: a body's callbacks (its rail's letters, its
+  // Back to the top, its Try again, its Clear) act only while no commit has
+  // come since it was drawn, so none drawn for the old q acts while the new
+  // q's rows are still on their way.
+  let commits = 0;
+  const whileDrawn = (fn) => {
+    const drawn = commits;
+    return (...a) => { if (drawn === commits) fn(...a); };
+  };
+  const pinned = () => parseFloat(getComputedStyle(container).scrollMarginTop) || 0;
+  const countText = () => (label ? `${plural(total, countNoun)} in ${label}` : plural(total, countNoun));
+  const stopPaging = () => {
+    if (disposeSentinel) { disposeSentinel(); disposeSentinel = null; }
+    sentinel.remove();
+  };
+  const append = (items, atOnce) => {
+    ids.push(...items.map((i) => i.id));
+    if (atOnce) for (const i of items) container.appendChild(make(i));
+    else chunkAppend(container, items, make, listGen);
+  };
+  // A place's row: by its id where the window holds it and the catalog was
+  // rebuilt since it was measured, or the list is whole (whose window an
+  // earlier build re-based past its first row); else by its offset in the
+  // window it was measured in. And where the window's scroll puts it, its
+  // delta below the pinned edge.
+  const rowOf = (place) => {
+    const i = (whole || place.snapshotAt !== snapshotAt) && ids.includes(place.anchorId)
+      ? ids.indexOf(place.anchorId) : place.anchor - (whole ? place.start : start);
+    return container.children[Math.min(i, container.children.length - 1)];
+  };
+  const placeTop = (place, row) => window.scrollY + row.getBoundingClientRect().top - pinned() - place.delta;
+  const reachable = (place, row = rowOf(place)) =>
+    !!row && document.documentElement.scrollHeight - window.innerHeight >= placeTop(place, row);
+
+  // The first row whose bottom is below what is pinned over the list: its
+  // offset and id, and its top less that edge.
+  const measure = () => {
+    if (!container?.isConnected) return null;
+    const rows = container.children;
+    const edge = pinned();
+    let lo = 0;
+    for (let hi = rows.length; lo < hi;) {
+      const m = (lo + hi) >> 1;
+      if (rows[m].getBoundingClientRect().bottom > edge) hi = m;
+      else lo = m + 1;
+    }
+    return { href, start, anchor: start + lo, anchorId: ids[lo] ?? null,
+      delta: rows[lo] ? rows[lo].getBoundingClientRect().top - edge : 0, snapshotAt };
+  };
+
+  // A fresh window's count line, rail and rows, below the head. The banner
+  // and the head stay on the EMPTY view too: "no albums here" with no sign
+  // of an active filter reads as a broken library rather than a narrow view.
+  function paint(r) {
+    clear(body);
+    total = r.total ?? (pick(r) || []).length;
+    snapshotAt = r.snapshotAt || "";
+    if (total === 0) {
+      body.appendChild(q ? noMatch() : emptyState(emptyTitle, emptyDetail, emptyAction));
+      return;
+    }
+    if (countNoun) body.appendChild(el("p", { class: "muted small", text: countText() }));
+    const rail = alphabetRail(r.buckets, whileDrawn((b) => void load(b.offset, null, "jump")));
+    if (rail) body.appendChild(rail);
+    top = el("button", { class: "btn btn-quiet", text: "Back to the top",
+      attrs: { type: "button", hidden: true }, on: { click: whileDrawn(() => void load(0, null, "jump")) } });
+    container = el("div", { class: containerClass });
+    for (const n of [top, container, sentinel]) body.appendChild(n);
+  }
 
   // A jump is a RESET, not an append. page() appends into the existing
   // container, so jumping to "S" (offset 240) while the reader has only
   // scrolled through offset 40 would splice 240 straight after 40 — one
   // list, two discontiguous alphabets, and a sentinel that then pages on
   // from the wrong place. So: tear down the observer, drop the nodes,
-  // reset the cursor, and let page() rebuild from the new offset.
-  function resetTo(newOffset) {
-    renderGen++;
-    if (disposeSentinel) { disposeSentinel(); disposeSentinel = null; }
-    sentinel.remove();
-    offset = newOffset;
-    loading = false;
-    if (container) clear(container);
-    void page({ jumped: true });
-  }
-
-  async function page({ jumped = false } = {}) {
-    if (loading) return;
+  // reset the cursor, and rebuild from the new offset, the rail kept.
+  //
+  // load draws the window from `from`: a jump's rows, or a fresh window
+  // through a place's row, scrolled to it, else to the page's top ("top")
+  // or, where the reader is past the list's top, to the list's ("keep").
+  // The list is measurable (boot.js's ready) only once a load's rows stand:
+  // never across its fetches, nor after one that failed or was superseded.
+  async function load(from, place, mode) {
+    if (gone()) return;
+    const mine = ++renderGen;
+    stopPaging();
+    ctx.listed?.(false);
     loading = true;
-    const myGen = renderGen;
+    start = offset = from;
+    ids = [];
+    if (mode === "jump" && container) clear(container);
+    else container = null;
     try {
-      const r = await fetchPage(offset);
-      if (myGen !== renderGen) return; // a jump superseded this page
-      const items = pick(r) || [];
-      const first = !container || jumped;
-      if (first) {
-        total = r.total ?? items.length;
-        if (total === 0) {
-          clear(view);
-          // The banner belongs on the EMPTY view too, and most of all
-          // there: "no albums here" with no sign of an active filter
-          // reads as a broken library rather than a narrow view.
-          if (banner) view.appendChild(banner);
-          view.appendChild(emptyState(emptyTitle, emptyDetail, emptyAction));
-          return;
-        }
-        if (!container) {
-          clear(view);
-          if (banner) view.appendChild(banner);
-          if (countNoun) {
-            view.appendChild(el("p", { class: "muted small",
-              text: label ? `${plural(total, countNoun)} in ${label}` : plural(total, countNoun) }));
-          }
-          const rail = alphabetRail(r.buckets, (b) => resetTo(b.offset));
-          if (rail) view.appendChild(rail);
-          container = el("div", { class: containerClass });
-          view.appendChild(container);
-        }
-        view.appendChild(sentinel);
-        disposeSentinel = onVisible(sentinel, () => {
-          if (offset < total) void page();
-        });
-        if (jumped) container.scrollIntoView({ block: "start", behavior: "auto" });
-      }
-      chunkAppend(container, items, make, gen);
-      offset += items.length;
-      // A page that returns nothing would otherwise leave the sentinel
-      // armed and spin: stop on a short page as well as a full one.
-      if (items.length === 0 || offset >= total) {
-        if (disposeSentinel) { disposeSentinel(); disposeSentinel = null; }
-        sentinel.remove();
+      // A window past the first row asks the first page for the rail and
+      // the total the server sends there alone.
+      const head = !container && from > 0 ? await fetchPage(0, 1, q) : null;
+      if (stale(mine)) return;
+      for (;;) {
+        const r = await fetchPage(offset, place ? 200 : PAGE, q);
+        if (stale(mine)) return;
+        if (!container) paint(head || r);
+        if (!container) return;
+        const items = pick(r) || [];
+        append(items, !!place);
+        offset += items.length;
+        if (!place || !items.length || offset >= total || (offset > place.anchor && reachable(place))) break;
       }
     } catch (e) {
-      if (isAborted(e) || myGen !== renderGen) return;
-      clear(view);
+      if (isAborted(e) || stale(mine)) return;
+      clear(body);
       container = null;
-      view.appendChild(errorState(e, () => { offset = 0; void page(); }));
+      // A refused request (the server's 400, a q past its bound) would be
+      // refused again: the field above is the way on, not Try again.
+      body.appendChild(errorState(e, e.status === 400 ? null : whileDrawn(() => void load(from, place, mode))));
+      return;
     } finally {
       // Only the CURRENT generation may release the flag: a superseded
       // page clearing it would let the sentinel fire while the jump's
       // own fetch is still in flight.
-      if (myGen === renderGen) loading = false;
+      if (mine === renderGen) loading = false;
+    }
+    top.hidden = start === 0;
+    const row = place && rowOf(place);
+    if (row) window.scrollTo({ top: placeTop(place, row) });
+    else if (mode === "jump" || (mode === "keep" && container.getBoundingClientRect().top < pinned())) {
+      container.scrollIntoView({ block: "start", behavior: "auto" });
+    } else if (mode === "top") window.scrollTo({ top: 0 });
+    // Armed once the rows stand, so its first answer pages on from them; put
+    // back below them first, since a jump keeps its container and paints
+    // nothing, and stopPaging took the sentinel out.
+    if (offset < total) {
+      body.appendChild(sentinel);
+      disposeSentinel = onVisible(sentinel, () => { if (offset < total) void page(); });
+    } else sentinel.remove();
+    ctx.listed?.(true);
+    if (mode !== "top") ctx.savePlace?.();
+  }
+
+  async function page() {
+    if (loading || gone()) return;
+    loading = true;
+    const mine = renderGen;
+    try {
+      const r = await fetchPage(offset, PAGE, q);
+      if (stale(mine)) return;
+      const items = pick(r) || [];
+      append(items, false);
+      offset += items.length;
+      // A page that returns nothing would otherwise leave the sentinel
+      // armed and spin: stop on a short page as well as a full one.
+      if (items.length === 0 || offset >= total) stopPaging();
+    } catch (e) {
+      if (isAborted(e) || stale(mine)) return;
+      clear(body);
+      container = null;
+      body.appendChild(errorState(e, whileDrawn(() => void load(start, null, "keep"))));
+    } finally {
+      if (mine === renderGen) loading = false;
     }
   }
-  await page();
+
+  // The name filter: the page-top search's pause, which belongs to this
+  // list's route and entry and, once either has moved on, writes and fetches
+  // nothing; Enter commits at once, Escape clears. A change writes q into the
+  // list's own entry, no new one, and draws the list below the head again.
+  function filterField() {
+    const noun = `${countNoun}s`;
+    const input = el("input", { class: "list-filter",
+      attrs: { type: "search", "aria-label": `Filter ${noun}`, placeholder: `Filter ${noun}` } });
+    input.value = q;
+    input.addEventListener("input", () => { clearTimeout(pause); pause = setTimeout(commit, 400); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") input.value = "";
+      if (e.key === "Enter" || e.key === "Escape") void commit();
+    });
+    view.appendChild(el("div", { class: "list-head" }, input));
+    if (typing) input.focus();
+    return input;
+  }
+
+  async function commit() {
+    clearTimeout(pause);
+    if (gen() !== at || history.state?.key !== key) return;
+    const next = field.value.trim();
+    if (next === q) return;
+    q = next;
+    const u = new URL(location.href);
+    if (q) u.searchParams.set("q", q);
+    else u.searchParams.delete("q");
+    const { place: _, ...s } = history.state;
+    history.replaceState(s, "", u);
+    // The entry's URL has moved: a crumb whose trail recorded the old one
+    // must not go back to it, whatever this load answers; and the source
+    // banner's way out keeps the filter the URL now holds.
+    ctx.moved?.();
+    commits += 1;
+    const out = banner?.querySelector?.(".scope-clear");
+    if (out) {
+      const all = new URL(u);
+      all.searchParams.delete("source");
+      out.setAttribute("href", all.pathname + all.search);
+    }
+    href = u.pathname + u.search;
+    const mine = renderGen + 1;
+    await load(0, null, "keep");
+    if (mine === renderGen && gen() === at) announce(total ? countText() : `No ${countNoun}s match “${q}”`);
+  }
+
+  // Its Clear, once the route has moved on, empties and focuses nothing.
+  function noMatch() {
+    const box = emptyState(`No ${countNoun}s match “${q}”`);
+    box.appendChild(el("button", { class: "btn", text: "Clear", attrs: { type: "button" },
+      on: { click: whileDrawn(() => { if (gone()) return; field.value = ""; void commit(); field.focus(); }) } }));
+    return box;
+  }
+
+  ctx.listing?.(measure);
+  const saved = history.state?.place;
+  const place = saved?.href === href && [saved.start, saved.anchor, saved.delta].every(Number.isFinite) ? saved : null;
+  // Up to 1,000 rows of a window are restored; past them it starts again at
+  // the page that holds the place's row. A whole list starts at its first
+  // row, whatever start its place names.
+  let from = place && !whole ? place.start : 0;
+  if (place && !whole && place.anchor - from > 1000) from = place.anchor - ((place.anchor - from) % PAGE);
+  await load(from, place, "top");
 }
 
 // ---- Favorites / Playlists / Mixes / Folders / Search ----
@@ -1634,7 +1846,9 @@ async function renderPagedList(view, ctx, opts) {
  * screen, and the two are answers to different questions asked one at a
  * time.
  */
-export async function renderFavorites(view, { gen, setToolbar }) {
+export async function renderFavorites(view, ctx) {
+  const { gen, setToolbar } = ctx;
+  const at = gen();
   setToolbar(null);
   clear(view);
   view.appendChild(spinner());
@@ -1642,7 +1856,7 @@ export async function renderFavorites(view, { gen, setToolbar }) {
   try {
     r = await api.favorites();
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -1749,7 +1963,7 @@ function favoriteTracksPanel(tracks, lost) {
 export async function renderPlaylists(view, ctx) {
   ctx.setToolbar(null);
   await renderPagedList(view, ctx, {
-    fetchPage: () => api.playlists(),
+    fetchPage: (offset, limit, q) => api.playlists({ q }),
     pick: (r) => r.collections || [],
     // Subtitle computed here rather than server-side: it is one line of
     // presentation over two fields the response already carries, and
@@ -1759,6 +1973,8 @@ export async function renderPlaylists(view, ctx) {
       `/playlist/${c.id}`, "playlist"),
     containerClass: "grid",
     countNoun: "playlist",
+    filter: true,
+    whole: true,
     emptyTitle: "No playlists backed up",
     emptyDetail: "Playlists appear here when a paired device has playlist backup switched on.",
     // The banner slot, not a section appended after the grid — and that
@@ -1970,7 +2186,7 @@ async function drawMixes(page) {
   try {
     r = await api.mixes();
   } catch (e) {
-    if (isAborted(e) || ctx.gen() !== at) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e, () => { void drawMixes(page); }));
     return;
@@ -2008,6 +2224,7 @@ async function drawMixes(page) {
     make: (c) => collectionTile(c, `/mix/${c.id}`, "smartmix"),
     containerClass: "grid",
     countNoun: "mix",
+    whole: true,
     emptyTitle: "No mixes generated yet",
     emptyDetail: "Mixes are rebuilt periodically once there is listening history to work from.",
   });
@@ -2230,17 +2447,21 @@ async function renderCollectionDetail(view, ctx, opts) {
   // and read as a third kind of button sandwiched between the two.
   const chain = crumbAncestors(ctx.trail, [opts.root]);
   ctx.setCrumb(crumbs(chain));
+  const at = ctx.gen();
   clear(view);
   view.appendChild(spinner());
   let d;
   try {
     d = await opts.fetch();
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
   }
+  // Every route ends this request (abortReads); a boosted navigation to an
+  // operator page ends none, so the page must still be this route's (B1021).
+  if (!owned(ctx)) return;
   clear(view);
   const c = d.collection;
   const tracks = d.tracks || [];
@@ -2496,7 +2717,9 @@ function readAsDataURL(file) {
   });
 }
 
-export async function renderFolders(view, { params, setToolbar, setCrumb }) {
+export async function renderFolders(view, ctx) {
+  const { params, setToolbar, setCrumb } = ctx;
+  const at = ctx.gen();
   setToolbar(null);
   const path = params.get("path") || "";
   // Both derived from the path, so both are painted BEFORE the fetch:
@@ -2521,7 +2744,7 @@ export async function renderFolders(view, { params, setToolbar, setCrumb }) {
   try {
     r = await api.browse(path);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
@@ -2758,7 +2981,8 @@ function browseTrackRow(t) {
  * `/api/library/browse?camelot=` the Inspector used, which already
  * returns exactly a filtered track list and no folders.
  */
-export async function renderTracks(view, { params, setToolbar, setCrumb, trail }) {
+export async function renderTracks(view, ctx) {
+  const { params, setToolbar, setCrumb, trail } = ctx;
   setToolbar(null);
   const camelot = (params.get("camelot") || "").toUpperCase();
   clear(view);
@@ -2767,16 +2991,19 @@ export async function renderTracks(view, { params, setToolbar, setCrumb, trail }
       "Open a segment of the harmonic wheel on Smart Mixes to list the tracks in that key."));
     return;
   }
+  const at = ctx.gen();
   view.appendChild(spinner());
   let r;
   try {
     r = await api.browseByKey(camelot);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;
   }
+  // As renderCollectionDetail's: every route ends the request, a boost none.
+  if (!owned(ctx)) return;
   clear(view);
   // The human pitch, not the wheel code: "A minor" names the page in the
   // same vocabulary the line below it uses.
@@ -2799,7 +3026,9 @@ export async function renderTracks(view, { params, setToolbar, setCrumb, trail }
   view.appendChild(list);
 }
 
-export async function renderSearch(view, { params, setToolbar }) {
+export async function renderSearch(view, ctx) {
+  const { params, setToolbar } = ctx;
+  const at = ctx.gen();
   setToolbar(null);
   const q = (params.get("q") || "").trim();
   if (q.length < 2) {
@@ -2827,7 +3056,7 @@ export async function renderSearch(view, { params, setToolbar }) {
   try {
     r = await api.search(q);
   } catch (e) {
-    if (isAborted(e)) return;
+    if (isAborted(e) || overtaken(ctx, at)) return;
     clear(view);
     view.appendChild(errorState(e));
     return;

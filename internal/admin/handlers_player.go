@@ -38,9 +38,10 @@ const (
 
 	// playerTimeLayout is the snapshot timestamp format every player
 	// response echoes. A named layout rather than five copies of the
-	// same magic string: the client compares snapshotAt across
-	// responses to notice a rebuild mid-scroll, so the format is a
-	// contract between the two, not incidental formatting.
+	// same magic string: a list's restored place compares the
+	// snapshotAt it was measured on with its answer's to notice a
+	// rebuild (views.js), so the format is a contract between the two,
+	// not incidental formatting.
 	playerTimeLayout = "2006-01-02T15:04:05Z"
 )
 
@@ -286,6 +287,35 @@ func playerPaging(r *http.Request) (offset, limit int, err error) {
 	return offset, limit, nil
 }
 
+// playerNameFilterMax bounds a list's name filter, q, in bytes once trimmed.
+const playerNameFilterMax = 256
+
+// nameFilter folds a list's name filter, q, as Catalog.Search folds a query;
+// a fold that comes out empty is no filter. A row matches where its own fold
+// holds the query's.
+func nameFilter(raw string) (string, error) {
+	q := strings.TrimSpace(raw)
+	if len(q) > playerNameFilterMax {
+		return "", errors.New("q is longer than 256 bytes")
+	}
+	return librarycat.SortKey(q), nil
+}
+
+// namedOnly keeps the rows whose fold holds key, in storage of the request's
+// own: rows may be the catalog's own slice, which every reader shares.
+func namedOnly[T any](rows []T, key string, fold func(T) string) []T {
+	if key == "" {
+		return rows
+	}
+	out := make([]T, 0, len(rows))
+	for _, r := range rows {
+		if strings.Contains(fold(r), key) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // pageSlice clamps an offset/limit window onto a length. An offset past
 // the end yields an empty page rather than an error — a client racing a
 // rebuild that shrank the library should see "no more", not a fault.
@@ -417,6 +447,12 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCover
 		}
 		return ""
 	}
+	// The name filter narrows the list, before its sort, its buckets and its
+	// pages, so every one of them describes the filtered set.
+	name, err := nameFilter(get("q"))
+	if err != nil {
+		return nil, err
+	}
 
 	allow, err := axisAllowSet(cat, get)
 	if err != nil {
@@ -468,6 +504,10 @@ func (s *Server) filterAlbums(cat *librarycat.Catalog, cov map[string]albumCover
 			continue
 		}
 		if wantVariants != nil && !wantVariants(cov[a.ID]) {
+			continue
+		}
+		// An album matches on its title or its album artist, as Search does.
+		if name != "" && !strings.Contains(a.SortTitle, name) && !strings.Contains(a.SortArtist, name) {
 			continue
 		}
 		idx = append(idx, i)
@@ -604,7 +644,8 @@ func sortAlbumIndices(cat *librarycat.Catalog, idx []int, mode string) {
 	case "", "recent":
 		// AddedAt is MIN(indexed_at) over the album's tracks — see
 		// librarycat.Album. It is "recently indexed", not a true
-		// first-seen date; the store has no such column.
+		// first-seen date: the store has one, first_indexed_at, which
+		// the catalog does not read.
 		sort.SliceStable(idx, func(i, j int) bool {
 			x, y := al[idx[i]], al[idx[j]]
 			if x.AddedAt != y.AddedAt {
@@ -648,10 +689,12 @@ func (s *Server) apiPlayerArtists(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	artists, err := narrowArtists(cat, r.URL.Query().Get("source"))
-	if err != nil {
+	name, nameErr := nameFilter(r.URL.Query().Get("q"))
+	if err = errors.Join(err, nameErr); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	artists = namedOnly(artists, name, func(a librarycat.Artist) string { return a.SortName })
 	start, end := pageSlice(len(artists), offset, limit)
 	// One ReadDir for the whole page, not one stat per artist.
 	withImages := s.cachedArtistImages()
@@ -701,10 +744,18 @@ func (s *Server) serveAxis(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	entries, err := narrowAxis(cat, pick(cat), r.URL.Query().Get("source"))
-	if err != nil {
+	name, nameErr := nameFilter(r.URL.Query().Get("q"))
+	if err = errors.Join(err, nameErr); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	// Genres are ordered by track count, not alphabetically
+	// (librarycat.finishAxis), so a letter rail would point at scattered
+	// offsets and mislead. Composers ARE alphabetical. Decided on the list
+	// before its name filter, which can leave a count-ordered list that
+	// happens to read in letter order.
+	alphabetical := axisIsAlphabetical(entries)
+	entries = namedOnly(entries, name, func(e librarycat.AxisEntry) string { return e.SortName })
 	start, end := pageSlice(len(entries), offset, limit)
 	out := make([]playerAxisDTO, 0, end-start)
 	for _, e := range entries[start:end] {
@@ -719,13 +770,8 @@ func (s *Server) serveAxis(w http.ResponseWriter, r *http.Request,
 	}
 	meta := playerPageMeta{Total: len(entries), Offset: start, Limit: limit,
 		SnapshotAt: snapshotStamp(cat.BuiltAt)}
-	if start == 0 {
-		// Genres are ordered by track count, not alphabetically
-		// (librarycat.finishAxis), so a letter rail would point at
-		// scattered offsets and mislead. Composers ARE alphabetical.
-		if axisIsAlphabetical(entries) {
-			meta.Buckets = buildBuckets(len(entries), func(i int) string { return entries[i].Bucket })
-		}
+	if start == 0 && alphabetical {
+		meta.Buckets = buildBuckets(len(entries), func(i int) string { return entries[i].Bucket })
 	}
 	writeJSON(w, http.StatusOK, playerAxisResponse{playerPageMeta: meta, Entries: out})
 }
