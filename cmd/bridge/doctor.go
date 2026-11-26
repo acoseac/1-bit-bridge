@@ -88,10 +88,10 @@ func runDoctorReport(d doctor.Deps, jsonOut, doFix bool, stdout, stderr io.Write
 		// root whose probe has ended, and joins one still out, keeping the
 		// bound it began with. It is taken from cliRootProbes, not from the
 		// runner behind d.RootProbes, which a ProbeRun does not expose: the
-		// two are one runner only because every caller builds d through
-		// buildDoctorDepsWith (doctorCmd, the launcher's row), so Deps
-		// carrying a run of another runner would have their second report
-		// run on the CLI's works.
+		// two are one runner only because every caller builds d over
+		// cliRootProbes (doctorCmd's buildDoctorDeps, the launcher's row
+		// through buildDoctorDepsWith), so Deps carrying a run of another
+		// runner would have their second report run on the CLI's works.
 		d.RootProbes = cliRootProbes.BeginRun()
 		report = doctor.Run(ctx, d)
 	}
@@ -241,8 +241,13 @@ func runFixes(w io.Writer, r *doctor.Report, d doctor.Deps) {
 // config (doctor runs before `bridge init` has written one) and one that
 // does not load (a config-file FAIL beside the rest of the report, not an
 // exit before it).
+//
+// cfgPath is bridge doctor's --config as typed, "" for none, and this is the
+// one assembly that names it in the command the player checklist's DAC line
+// advises (B1022FU): `bridge output dac inspect`, run as printed, resolves a
+// config of its own. The launcher's row and the console's doctor name none.
 func buildDoctorDeps(cfgPath string) doctor.Deps {
-	return buildDoctorDepsFor(cfgPath, false)
+	return buildDoctorDepsRun(context.Background(), cfgPath, cfgPath, false, doctorDACHost(), doctorLogs{host: hostLogs()}, cliRootProbes.BeginRun())
 }
 
 // inContainerFunc is fsutil.InContainer, a seam so a test decides the
@@ -262,7 +267,8 @@ var inContainerFunc = fsutil.InContainer
 // is the one about to run `bridge init` there whatever the lookup finds. A
 // config there this user cannot read (another user's install, which the
 // menu cannot see, so it offers Setup) still gets config-file's warn, and
-// config-dir and the port checks grade what Setup's preflight will.
+// config-dir and the port checks grade what Setup's preflight will. Unlike
+// buildDoctorDeps, it names no config in the player checklist's advice.
 func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 	return buildDoctorDepsWith(cfgPath, absentIsPreSetup, doctorDACHost(), doctorLogs{host: hostLogs()})
 }
@@ -287,15 +293,16 @@ var cliRootProbes = doctor.NewRootProbes()
 // run of the CLI's works on the library roots (cliRootProbes) that no caller
 // stops.
 func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost, logs doctorLogs) doctor.Deps {
-	return buildDoctorDepsRun(context.Background(), cfgPath, absentIsPreSetup, dacHost, logs, cliRootProbes.BeginRun())
+	return buildDoctorDepsRun(context.Background(), cfgPath, "", absentIsPreSetup, dacHost, logs, cliRootProbes.BeginRun())
 }
 
 // buildDoctorDepsRun is buildDoctorDepsWith as run, a run of a runner's works
 // on the library roots, which ctx stops: the console's runner passes its
 // request's context and a run of the RootProbes it keeps. The config's load
 // is one of those works (loadDoctorConfig), and the Deps carry the run, so
-// every check that touches a root waits on the same runner's works.
-func buildDoctorDepsRun(ctx context.Context, cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost, logs doctorLogs, run *doctor.ProbeRun) doctor.Deps {
+// every check that touches a root waits on the same runner's works. typed is
+// the --config the checklist's advice names, "" for none (buildDoctorDeps).
+func buildDoctorDepsRun(ctx context.Context, cfgPath, typed string, absentIsPreSetup bool, dacHost dacAccessHost, logs doctorLogs, run *doctor.ProbeRun) doctor.Deps {
 	lf := logs.choose()
 	d := doctor.Deps{
 		RootProbes: run,
@@ -432,7 +439,7 @@ func buildDoctorDepsRun(ctx context.Context, cfgPath string, absentIsPreSetup bo
 			// (adminDoctorRunner). Its proof of the library's paths reads
 			// the indexed tracks from the data dir's database, which it opens
 			// only where the record refuses nothing (doctorStoreGate).
-			d.OutputChecklist = doctorOutputChecklist(d.ConfigFile.Path, cfg, nil)
+			d.OutputChecklist = doctorOutputChecklistTyped(d.ConfigFile.Path, typed, cfg, doctorOutputsSeam)
 			// The storage under the data directory of the bridge's own player,
 			// from the medium check its strict writer makes (B603), for both
 			// the CLI and the console, which reads these Deps too.
@@ -1171,7 +1178,7 @@ func adminDoctorRunnerWith(cfgPath string, ownedPorts []int, checklist func(cont
 // file says now; nil reports nothing of it.
 func adminDoctorRunnerServing(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost, logs logsHost, probes *doctor.RootProbes, lan func() admin.ConsoleLANState) func(context.Context) *admin.DoctorReport {
 	return func(ctx context.Context) *admin.DoctorReport {
-		d := buildDoctorDepsRun(ctx, cfgPath, false, dacHost, doctorLogs{host: logs, console: true}, probes.BeginRun())
+		d := buildDoctorDepsRun(ctx, cfgPath, "", false, dacHost, doctorLogs{host: logs, console: true}, probes.BeginRun())
 		d.OwnedPorts = ownedPorts
 		// From what the run's own load set (the port, the posture), never a
 		// second load, which could wait on a root the run's works bound.

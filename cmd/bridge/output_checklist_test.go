@@ -13,7 +13,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -382,9 +385,13 @@ func TestTheChecklistJudgesTheConfiguredRootsWhenTheBoxCannotBeRead(t *testing.T
 // whose outputs body cannot be read is still judged on the roots the
 // bridge serves now and on the route that runs; and the player's gate as
 // serve decided it at boot, for a body that lists no element of the
-// player's yet (B1022).
+// player's yet (B1022). It names no config in the DAC line's advice, which
+// bridge doctor's command line alone does (TypedConfig, B1022FU).
 func TestServeChecklistReadsTheLiveRootsAndTheRoute(t *testing.T) {
 	got := serveChecklistSourceFields(t)
+	if v, ok := got["TypedConfig"]; ok {
+		t.Errorf("serve's checklist source sets TypedConfig to %q: only bridge doctor's command line names a config in the advice", v)
+	}
 	for field, want := range map[string]string{
 		"Active":          "apiSrv.LocalOutputsActive",
 		"Outputs":         "apiSrv.LocalOutputsResponse",
@@ -773,6 +780,172 @@ func TestBridgeDoctorNeverPointsMPDAtADACWhileTheBridgesOwnPlayerIsOn(t *testing
 				t.Fatalf("the doctor's DAC line\n%+v\nwant\n%+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// playerOnNoCardFix is the DAC line's fix with the bridge's own player on and
+// its card not known, naming no config; playerOnNoCardFixNaming is it naming
+// word, one shell word, in the command it advises (B1022FU).
+const playerOnNoCardFix = "Check the player's DAC binding (`bridge output dac inspect`, or the console's Player page) before changing MPD's output."
+
+func playerOnNoCardFixNaming(word string) string {
+	return "Check the player's DAC binding (`bridge output dac inspect --config " + word + "`, or the console's Player page) before changing MPD's output."
+}
+
+// TestBridgeDoctorNamesTheConfigItWasGivenInTheCommandItAdvises: bridge
+// doctor given --config prints the DAC line of the bridge's own player, its
+// card not known, with that config named in the command it advises, which run
+// as printed resolves a config of its own (B1022FU): the --config as typed,
+// one shell word a POSIX shell reads back as that path, a space, a double
+// quote or a dollar sign in it, through the doctor's own wiring (doctorCmd).
+func TestBridgeDoctorNamesTheConfigItWasGivenInTheCommandItAdvises(t *testing.T) {
+	for _, tc := range []struct{ name, dir string }{
+		{"a space", "my bridge"},
+		{"a double quote", `my "bridge"`},
+		{"a dollar sign", "my$HOME"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.Contains(tc.dir, `"`) {
+				t.Skip("a Windows file name takes no double quote")
+			}
+			path := filepath.Join(t.TempDir(), tc.dir, "bridge.yaml")
+			standInTheDoctorsBox(t, playerOnConfigAt(t, path))
+			fix := printedDACFix(t, func(out, errOut *strings.Builder) { doctorCmd([]string{"--config", path}, out, errOut) })
+			if want := playerOnNoCardFixNaming("'" + path + "'"); fix != want {
+				t.Fatalf("bridge doctor --config %s printed the fix\n%s\nwant\n%s", path, fix, want)
+			}
+			requireAShellReadsTheAdvisedCommandAs(t, fix, "bridge", "output", "dac", "inspect", "--config", path)
+		})
+	}
+}
+
+// TestOnlyBridgeDoctorsOwnConfigFlagIsNamedInTheAdvice: one config, the
+// bridge's own player on in it with no DAC bound, read through the doctors'
+// own wiring: given to bridge doctor as --config, the advised command names it
+// as typed, relative and uncleaned; found by bridge doctor with no --config
+// (./bridge.yaml), and named by the launcher's doctor row (actDoctor), where
+// no one typed it, the fix is as it was, word for word (B1022FU).
+func TestOnlyBridgeDoctorsOwnConfigFlagIsNamedInTheAdvice(t *testing.T) {
+	cwd, _ := isolateConfigEnv(t)
+	path := filepath.Join(cwd, "bridge.yaml")
+	standInTheDoctorsBox(t, playerOnConfigAt(t, path))
+	for _, tc := range []struct {
+		name string
+		run  func(out, errOut *strings.Builder)
+		want string
+	}{
+		{"given as --config bridge.yaml", func(out, errOut *strings.Builder) { doctorCmd([]string{"--config", "bridge.yaml"}, out, errOut) },
+			playerOnNoCardFixNaming("bridge.yaml")},
+		{"given as --config ./bridge.yaml", func(out, errOut *strings.Builder) { doctorCmd([]string{"--config", "./bridge.yaml"}, out, errOut) },
+			playerOnNoCardFixNaming("./bridge.yaml")},
+		{"found as ./bridge.yaml", func(out, errOut *strings.Builder) { doctorCmd(nil, out, errOut) }, playerOnNoCardFix},
+		{"named by the launcher's doctor row", func(out, errOut *strings.Builder) {
+			actDoctor(context.Background(), nil, out, errOut, menuState{cfgPath: path})
+		}, playerOnNoCardFix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := printedDACFix(t, tc.run); got != tc.want {
+				t.Errorf("the DAC line's fix\n%s\nwant\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheConsolesDoctorNamesNoConfigInTheAdvice: the console's doctor, run
+// with serve's own config, reads the serving process's checklist source,
+// which names no config, so its DAC line's fix is as it was, word for word
+// (B1022FU).
+func TestTheConsolesDoctorNamesNoConfigInTheAdvice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "my bridge", "bridge.yaml")
+	playerOnConfigAt(t, path)
+	standInForALinuxBox(t, ext4Storage, nil)
+	src := outputChecklistSource{
+		Active: func(context.Context) bool { return true },
+		Outputs: func(context.Context) (api.OutputsResponse, error) {
+			return api.OutputsResponse{Outputs: []api.OutputInfo{{ID: "a1", Kind: "mpd", Player: api.OutputPlayer{Software: "volumio", Version: "4.119"},
+				MPD: &api.OutputMPD{Port: 6600, Addresses: []string{}, Version: "0.24.0", State: "stop"}, PathRules: []api.OutputPathRule{}}}}, nil
+		},
+		LoopbackErr:    func() error { return nil },
+		Tokens:         func() []auth.Token { return nil },
+		BridgePlayerOn: func() bool { return true },
+	}
+	var dac *admin.DoctorCheck
+	for _, c := range adminDoctorRunner(path, nil, checklistDoctorChecks(src))(context.Background()).Checks {
+		if c.Name == "dac" {
+			dac = &c
+		}
+	}
+	if dac == nil || dac.Status != "warn" || dac.Hint != playerOnNoCardFix {
+		t.Fatalf("the console's doctor's DAC line %+v, want the warning whose fix is\n%s", dac, playerOnNoCardFix)
+	}
+}
+
+// playerOnConfigAt writes writePlayerConfig's config at path, the bridge's own
+// player turned on in the file with no DAC bound, and returns its root.
+func playerOnConfigAt(t *testing.T, path string) (music string) {
+	t.Helper()
+	src, music := writePlayerConfig(t)
+	body, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The config ends in its output block, which the player's block joins.
+	if err := os.WriteFile(path, append(body, "  player:\n    enabled: true\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return music
+}
+
+// standInTheDoctorsBox has bridge doctor's own wiring read the box
+// linuxBoxSeam stands in for (doctorOutputsSeam), and its player-storage line
+// ext4 storage (standInForALinuxBox), until the test ends.
+func standInTheDoctorsBox(t *testing.T, music string) {
+	t.Helper()
+	prev := doctorOutputsSeam
+	doctorOutputsSeam = linuxBoxSeam(music)
+	t.Cleanup(func() { doctorOutputsSeam = prev })
+	standInForALinuxBox(t, ext4Storage, nil)
+}
+
+// printedDACFix is the fix a doctor run prints under the DAC line of the
+// bridge's own player on, its card not known, which it requires.
+func printedDACFix(t *testing.T, run func(out, errOut *strings.Builder)) string {
+	t.Helper()
+	var out, errOut strings.Builder
+	run(&out, &errOut)
+	report := stripANSI(out.String())
+	if !strings.Contains(report, "The bridge's own player is on, and the checklist cannot tell which DAC it plays through") {
+		t.Fatalf("the doctor printed no DAC line for the player on, its card not known:\n%s%s", report, errOut.String())
+	}
+	return reportHint(report, "dac")
+}
+
+// requireAShellReadsTheAdvisedCommandAs requires a POSIX shell to read the
+// command between fix's backquotes, as a reader pastes it, as the words want.
+// Windows has no POSIX shell to ask.
+func requireAShellReadsTheAdvisedCommandAs(t *testing.T, fix string, want ...string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	start, end := strings.Index(fix, "`"), strings.LastIndex(fix, "`")
+	if start < 0 || end <= start {
+		t.Fatalf("the fix %q quotes no command", fix)
+	}
+	command := fix[start+1 : end]
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(sh, "-c", "set -- "+command+`; printf '%s\n' "$@"`).Output()
+	if err != nil {
+		t.Fatalf("sh reading %s: %v", command, err)
+	}
+	if got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n"); !slices.Equal(got, want) {
+		t.Errorf("a shell reads the advised command %s as %q, want %q", command, got, want)
 	}
 }
 

@@ -78,6 +78,12 @@ type outputChecklistSource struct {
 	// it loaded turns the player on, since its one-shot builder lists none.
 	// Either way the DAC line knows the player is on and not its card.
 	BridgePlayerOn func() bool
+	// TypedConfig is the --config bridge doctor was given, as typed, "" for
+	// none (B1022FU): the DAC line's `bridge output dac inspect` names it, one
+	// shell word (shellWord), since that command run as printed resolves a
+	// config of its own. Only bridge doctor's command line sets it: serve's
+	// source, the console's doctor and the launcher's row name none.
+	TypedConfig string
 }
 
 // usablePhones is the number of device tokens a phone can use now: not
@@ -111,6 +117,9 @@ func outputChecklist(ctx context.Context, src outputChecklistSource) ([]outputch
 		if in.Bridge == nil && src.BridgePlayerOn != nil && src.BridgePlayerOn() {
 			in.Bridge = &outputcheck.BridgePlayer{}
 		}
+	}
+	if src.TypedConfig != "" {
+		in.InspectConfig = shellWord(src.TypedConfig)
 	}
 	if src.LoopbackErr != nil {
 		switch err := src.LoopbackErr(); {
@@ -288,6 +297,12 @@ var cliOutputsReads = &outputsReads{}
 // inspections have returned.
 var cliMPDInspections = &api.MPDInspections{}
 
+// doctorOutputsSeam is the seam buildDoctorDepsRun hands bridge doctor's
+// checklist (doctorOutputChecklistTyped's): nil in production. A test's
+// stands in for Linux and for the box's MPD and cards through the doctor's
+// own wiring, and puts nil back on its cleanup.
+var doctorOutputsSeam func(*api.LocalOutputsConfig)
+
 // unreadInput is the input when the outputs body could not be read: the
 // error, and what does not come from that body. The configured roots are
 // judged unchecked, each by the name its path rule would carry, so the
@@ -425,8 +440,16 @@ func doctorChecks(lines []outputcheck.Line) []doctor.Check {
 // another gather began and a root still holds waits on that read rather
 // than beginning one of its own; and its builder inspects MPD through the
 // process's inspections (cliMPDInspections, likewise), so a gather whose
-// inspection another gather began waits on that one.
+// inspection another gather began waits on that one. Its DAC line's advice
+// names no config: doctorOutputChecklistTyped's names the one typed.
 func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.LocalOutputsConfig)) func(context.Context) []doctor.Check {
+	return doctorOutputChecklistTyped(cfgFile, "", cfg, seam)
+}
+
+// doctorOutputChecklistTyped is doctorOutputChecklist whose DAC line's advice
+// names typed, the --config bridge doctor's command line was given as typed,
+// "" for none (outputChecklistSource.TypedConfig).
+func doctorOutputChecklistTyped(cfgFile, typed string, cfg *config.Config, seam func(*api.LocalOutputsConfig)) func(context.Context) []doctor.Check {
 	reads, inspections := cliOutputsReads, cliMPDInspections
 	return func(ctx context.Context) []doctor.Check {
 		route := &loopbackAnswer{ask: func() (string, error) {
@@ -485,6 +508,7 @@ func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.Lo
 		defer lo.Close()
 		src := doctorChecklistSource(cfg, lo, route)
 		src.Reads, src.ReadKey = reads, outputsReadKey(cfgFile, cfg)
+		src.TypedConfig = typed
 		goos := lcfg.GOOS
 		if goos == "" {
 			goos = runtime.GOOS

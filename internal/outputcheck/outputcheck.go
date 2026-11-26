@@ -58,6 +58,11 @@ type Input struct {
 	Phones int
 	// Tokens is the number of device tokens the bridge holds.
 	Tokens int
+	// InspectConfig is the config the DAC line's `bridge output dac inspect`
+	// names, one shell word for its --config, "" for none (B1022FU): bridge
+	// doctor's, given an explicit --config, which that command run as printed
+	// would not read. The console names none.
+	InspectConfig string
 }
 
 // Player is the player software and the MPD it drives. MPDVersion is
@@ -120,7 +125,7 @@ func Lines(in Input) []Line {
 	if in.Unread != "" {
 		return []Line{unreadPlayerLine(in.Unread), uncheckedDACLine(), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones, in.Tokens)}
 	}
-	return []Line{playerLine(in.Player), dacLine(in.DACs, in.Bridge), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones, in.Tokens)}
+	return []Line{playerLine(in.Player), dacLine(in.DACs, in.Bridge, in.InspectConfig), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones, in.Tokens)}
 }
 
 // unreadPlayerLine is the Player line of a box the bridge could not read:
@@ -173,9 +178,9 @@ func playerLine(p Player) Line {
 
 // dacLine judges the cards MPD's elements list: as it always has while the
 // bridge's own player is off, and by playerDACLine while it is on (B1022).
-func dacLine(dacs []DAC, bridge *BridgePlayer) Line {
+func dacLine(dacs []DAC, bridge *BridgePlayer, inspectConfig string) Line {
 	if bridge != nil {
-		return playerDACLine(dacs, bridge.DAC)
+		return playerDACLine(dacs, bridge.DAC, inspectConfig)
 	}
 	l := Line{Key: "dac", Title: "DAC"}
 	if len(dacs) == 0 {
@@ -213,18 +218,22 @@ func dacLine(dacs []DAC, bridge *BridgePlayer) Line {
 // for 500 ms, was read with the player's card where it is now: so while the
 // player is on no line names a card to point MPD at. The two are matched by
 // Card alone, within one body.
-func playerDACLine(dacs []DAC, own *DAC) Line {
+func playerDACLine(dacs []DAC, own *DAC, inspectConfig string) Line {
 	l := Line{Key: "dac", Title: "DAC", Status: Warn}
 	if own == nil {
+		inspect := "bridge output dac inspect"
+		if inspectConfig != "" {
+			inspect += " --config " + inspectConfig
+		}
 		for _, d := range dacs {
 			if d.IsMPDsOutput {
 				l.Summary = dacName(d) + " is MPD's output, and the checklist cannot tell whether the bridge's own player plays through it too"
-				l.Fix = "Check the player's DAC binding (`bridge output dac inspect`, or the console's Player page): if it names this DAC, point MPD at another one, or cast over MPD only while the bridge's own player is off."
+				l.Fix = "Check the player's DAC binding (`" + inspect + "`, or the console's Player page): if it names this DAC, point MPD at another one, or cast over MPD only while the bridge's own player is off."
 				return l
 			}
 		}
 		l.Summary = "The bridge's own player is on, and the checklist cannot tell which DAC it plays through"
-		l.Fix = "Check the player's DAC binding (`bridge output dac inspect`, or the console's Player page) before changing MPD's output."
+		l.Fix = "Check the player's DAC binding (`" + inspect + "`, or the console's Player page) before changing MPD's output."
 		return l
 	}
 	name := dacName(*own)

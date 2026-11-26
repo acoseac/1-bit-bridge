@@ -92,6 +92,13 @@ func TestEveryLineIsGreenOrSaysItsFixInOneSentence(t *testing.T) {
 		},
 		"mpd's output beside the bridge's own player, its card not known": func(in *Input) { in.Bridge = &BridgePlayer{} },
 		"no dac beside the bridge's own player, its card not known":       func(in *Input) { in.DACs, in.Bridge = nil, &BridgePlayer{} },
+		"the bridge's own player, its card not known, a config named": func(in *Input) {
+			in.DACs[0].IsMPDsOutput = false
+			in.Bridge, in.InspectConfig = &BridgePlayer{}, namedConfig
+		},
+		"mpd's output beside the bridge's own player, its card not known, a config named": func(in *Input) {
+			in.Bridge, in.InspectConfig = &BridgePlayer{}, namedConfig
+		},
 		"candidates, the bridge's own player's among them": func(in *Input) {
 			in.DACs = []DAC{asCandidate(bar), asCandidate(desk)}
 			in.Bridge = bridgeOn(bar)
@@ -466,4 +473,71 @@ func TestTheDACLineNeverPointsMPDAtTheBridgesOwnPlayersDAC(t *testing.T) {
 			}
 		})
 	}
+}
+
+// namedConfig is a config bridge doctor was given, as the input carries it:
+// one shell word, its space quoted.
+const namedConfig = `'/srv/my bridge/bridge.yaml'`
+
+// TestTheDACLineNamesTheConfigBridgeDoctorWasGiven: where the input names the
+// config `bridge output dac inspect` is to read (bridge doctor's --config,
+// one shell word), the two warnings that send the reader to the player's
+// binding name it in that command, word for word, and every other line of
+// every other state is the line the input naming none gives (B1022FU).
+func TestTheDACLineNamesTheConfigBridgeDoctorWasGiven(t *testing.T) {
+	inspect := "`bridge output dac inspect --config " + namedConfig + "`"
+	for _, tc := range []struct {
+		name   string
+		dacs   []DAC
+		bridge *BridgePlayer
+		fix    string
+	}{
+		{"the player on, its card not known", []DAC{asCandidate(bar)}, &BridgePlayer{},
+			"Check the player's DAC binding (" + inspect + ", or the console's Player page) before changing MPD's output."},
+		{"the player on, its card not known, no DAC", nil, &BridgePlayer{},
+			"Check the player's DAC binding (" + inspect + ", or the console's Player page) before changing MPD's output."},
+		{"the player on, its card not known, MPD's output named", []DAC{asMPDsOutput(desk)}, &BridgePlayer{},
+			"Check the player's DAC binding (" + inspect + ", or the console's Player page): if it names this DAC, point MPD at another one, or cast over MPD only while the bridge's own player is off."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := withDACs(tc.dacs, tc.bridge)
+			in.InspectConfig = namedConfig
+			if got := Lines(in)[1].Fix; got != tc.fix {
+				t.Errorf("the DAC line's fix\n%s\nwant\n%s", got, tc.fix)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		in   func() Input
+	}{
+		{"the player's DAC", func() Input { return withDACs([]DAC{asCandidate(bar)}, bridgeOn(bar)) }},
+		{"MPD's output is the player's DAC", func() Input { return withDACs([]DAC{asMPDsOutput(bar)}, bridgeOn(bar)) }},
+		{"several candidates, the player's among them", func() Input { return withDACs([]DAC{asCandidate(bar), asCandidate(desk)}, bridgeOn(bar)) }},
+		{"a candidate, the player's another card", func() Input { return withDACs([]DAC{asCandidate(desk)}, bridgeOn(bar)) }},
+		{"no DAC, the player off", func() Input { return withDACs(nil, nil) }},
+		{"a DAC neither uses", func() Input { return withDACs([]DAC{asCandidate(desk)}, nil) }},
+		{"MPD's own DAC", func() Input { return withDACs([]DAC{asMPDsOutput(desk)}, nil) }},
+		{"a box that could not be read", func() Input {
+			return Input{Unread: "context canceled", Bridge: &BridgePlayer{}, Roots: []RootRule{{Root: "INTERNAL", State: "unchecked"}}, Phones: 1}
+		}},
+	} {
+		t.Run("as it was: "+tc.name, func(t *testing.T) {
+			named := tc.in()
+			named.InspectConfig = namedConfig
+			want, got := Lines(tc.in()), Lines(named)
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("the %s line naming a config\n%+v\nwant the line naming none\n%+v", want[i].Key, got[i], want[i])
+				}
+			}
+		})
+	}
+}
+
+// withDACs is a healthy box whose cards are dacs and whose own player is b.
+func withDACs(dacs []DAC, b *BridgePlayer) Input {
+	in := healthy()
+	in.DACs, in.Bridge = dacs, b
+	return in
 }
