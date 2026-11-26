@@ -367,6 +367,77 @@ func TestTheRailTakesColumnsWhereTheWindowIsShort(t *testing.T) {
 	}
 }
 
+// TestTheRailTakesAFingerWhereAnyPointerIsCoarse pins B1021 PR 3b's rail at
+// the source: wherever any pointer is coarse (a touch laptop's main pointer is
+// its touchpad), the rail is one column at least 44px wide, 8px from the list
+// (12px left a 390px phone's albums one column), as tall as the room between
+// where it sticks and the bar, its entries sharing that height and each as
+// wide as the column with no gutter or gap around them, nothing selecting
+// under a finger; the page pans under no touch or pen that goes down on the
+// rail, whatever the window; a short window's block, after the coarse one,
+// gives PR 1's grid back its letters' height (no 501px block: PR 2's
+// TestTheBarTakesRowsForAFingerFrom641px refuses one); and the scrub's
+// callout stands beside the rail, its words wrapping within the room left of
+// it, touched by no pointer.
+func TestTheRailTakesAFingerWhereAnyPointerIsCoarse(t *testing.T) {
+	coarse := mediaRulesOf(t, "static/player.css", "(any-pointer: coarse)")
+	for _, w := range [][3]string{
+		{".az-rail", "min-width", "44px"}, {".az-rail", "margin-left", "var(--space-2)"},
+		{".az-rail", "height", "calc(100vh - var(--az-top) - var(--az-foot))"},
+		{".az-rail", "height", "calc(100dvh - var(--az-top) - var(--az-foot))"}, {".az-rail", "padding", "0"},
+		{".az-rail", "gap", "0"}, {".az-rail", "align-items", "stretch"}, {".az-rail", "user-select", "none"},
+		{".az-rail", "-webkit-user-select", "none"}, {".az-rail", "-webkit-touch-callout", "none"}, {".az-letter", "flex", "1 1 0"},
+	} {
+		if !anyRule(coarse, w[0], w[1], w[2]) {
+			t.Errorf("where any pointer is coarse %s does not set %s: %s", w[0], w[1], w[2])
+		}
+	}
+	css := cssCommentRe.ReplaceAllString(readFile(t, "static/player.css"), "")
+	rest := css
+	for _, b := range cssMediaBlocks(css, "") {
+		rest = strings.Replace(rest, b, "", 1)
+	}
+	if !anyRule(touchRulesOf(rest), ".az-rail", "touch-action", "none") {
+		t.Error("the rail lets the page pan under a finger in some window: its touch-action is not none outside every @media block")
+	}
+	coarseAt, shortAt := -1, -1
+	for i := strings.Index(css, "@media "); i >= 0; {
+		open := i + strings.Index(css[i:], "{")
+		query := strings.TrimSpace(css[i+len("@media ") : open])
+		block := cssMediaBlocks(css[i:], "")[0]
+		for _, r := range touchRulesOf(block) {
+			if r.selects(".az-rail") && query == "(any-pointer: coarse)" && r.declares("min-width", "44px") {
+				coarseAt = i
+			}
+			if r.selects(".az-rail") && query == "(max-height: 500px)" && r.declares("height", "auto") {
+				shortAt = i
+			}
+		}
+		next := strings.Index(css[open+len(block):], "@media ")
+		if next < 0 {
+			break
+		}
+		i = open + len(block) + next
+	}
+	if coarseAt < 0 || shortAt < coarseAt {
+		t.Errorf("the short window's grid does not take its letters' height back after the coarse column (coarse block at %d, short at %d)", coarseAt, shortAt)
+	}
+	all := touchRulesOf(css)
+	if !anyRule(all, ".az-callout", "position", "absolute") || !anyRule(all, ".az-callout", "right", "calc(100% + var(--space-3))") ||
+		!anyRule(all, ".az-callout", "pointer-events", "none") {
+		t.Error("the scrub's callout does not stand beside the rail out of every pointer's way")
+	}
+	if !anyRule(all, ".az-callout", "width", "max-content") ||
+		!anyRule(all, ".az-callout", "max-width", "calc(100vw - 100% - var(--shell-gutter) - var(--space-3) - var(--space-2))") {
+		t.Error("the scrub's callout can run past the window's left edge beside a wide rail: its words do not wrap within the room left of the rail")
+	}
+	for _, r := range all {
+		if r.selects(".az-callout") && r.declares("white-space", "nowrap") {
+			t.Error("the scrub's callout keeps its words on one line, past the room left of the rail")
+		}
+	}
+}
+
 // TestTheDSDChipWrapsUnderItsTitleOnAPhone pins B1021's item 5 and the
 // count line's Download at the source: up to 640px a row's reason takes a
 // line of its own under the title and its chip wraps, where its nowrap ran

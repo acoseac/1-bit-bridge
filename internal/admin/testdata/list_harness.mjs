@@ -10,12 +10,16 @@
 // window's scroll, clamped to the document's height, its scroll events
 // delivered as settle() runs; each list row's box from its index (a column
 // count and a row height the case sets, the list's top, less the scroll),
-// the pinned edge the list's rows carry as their scroll-margin-top; an
+// the list's height its rows' or its min-height, the greater, and an
+// element's box where a case lays one out (its `box`); the pinned edge the
+// list's rows carry as their scroll-margin-top; a pointer's capture recorded
+// on the element that takes it (its `captures`); an
 // IntersectionObserver that answers when the sentinel is within its margin;
 // requestAnimationFrame queued and run by settle(); the shell's elements by
 // id; every timer of 50 ms or more held until the case advances the clock
 // (the filter's pause, the place writer's 500 ms); and a fetch that answers
-// the list endpoints by offset, limit, sort and q from a generated library.
+// the list endpoints by offset, limit, sort and q from a generated library,
+// each first page with its rail's kind and buckets.
 // What boot.js needs to import and boot and is not a list's is stubbed: the
 // audio element's media methods, navigator.mediaSession, the bridge
 // player's GET now (no player offered, unless a case holds it), and the
@@ -169,6 +173,7 @@ class El {
   focus() { if (doc) doc.activeElement = this; }
   blur() { if (doc && doc.activeElement === this) doc.activeElement = doc.body; }
   getBoundingClientRect() { return rectOf(this); }
+  setPointerCapture(id) { (this.captures ||= []).push(id); }
   scrollIntoView() { if (isList(this)) { codeScrolls.push(["intoView", top(this)]); scrollTo(top(this) - layout.pinned); } }
   set innerHTML(h) { for (const c of [...this.children]) this.removeChild(c); if (h === "SHELL") shell(this); else if (h) this.append(mk("h1", {}, "Stats")); }
   get offsetHeight() { return 0; }
@@ -195,7 +200,7 @@ let pendingScroll = false;
 const codeScrolls = [];
 const isList = (n) => n.isConnected && (n.classList.contains("grid") || n.classList.contains("rows")) && !!n.closest("#player-view");
 const listEl = () => doc?.getElementById("player-view")?.querySelectorAll(".grid, .rows").find(isList) || null;
-const listHeight = (c) => Math.ceil(c.children.length / layout.cols) * layout.rowH;
+const listHeight = (c) => Math.max(Math.ceil(c.children.length / layout.cols) * layout.rowH, parseFloat(c.style.minHeight) || 0);
 const top = (c) => layout.listTop;
 const docHeight = () => { const c = listEl(); return c ? layout.listTop + listHeight(c) + layout.tail : layout.pageH; };
 const maxScroll = () => Math.max(0, docHeight() - layout.innerHeight);
@@ -205,6 +210,7 @@ function scrollTo(y) {
 }
 const zero = { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0 };
 function rectOf(n) {
+  if (n.box) return n.box();
   const c = n.parentNode && isList(n.parentNode) ? n.parentNode : null;
   if (c) {
     const t = layout.listTop + Math.floor(c.children.indexOf(n) / layout.cols) * layout.rowH - win.scrollY;
@@ -385,11 +391,13 @@ const buckets = (rows, letter) => {
   return out;
 };
 const initial = (s) => (/^[A-Z]/.test(fold(s)) ? fold(s)[0] : "#");
-function page(rows, q, letter, key) {
+// An album's period of Recently Added, by its place in the list's order.
+const period = (a) => { const i = parseInt(a.id, 16) - 1; return i < 100 ? "this-month" : i < 400 ? "this-year" : i < 800 ? "2025" : i < 1200 ? "2024" : "?"; };
+function page(rows, q, letter, key, rail = "letters") {
   const offset = Number(q.get("offset") || 0);
   const limit = Math.min(Number(q.get("limit") || 60), 200);
   const body = { total: rows.length, offset, limit, snapshotAt: SNAP, [key]: rows.slice(offset, offset + limit) };
-  if (offset === 0 && letter) body.buckets = buckets(rows, letter);
+  if (offset === 0 && letter) Object.assign(body, { rail, buckets: buckets(rows, letter) });
   return body;
 }
 const named = (rows, q, ...fields) => {
@@ -412,7 +420,9 @@ function answer(e) {
     if (q.get("genre")) rows = rows.filter((a) => lib.genres[a.genre]?.id === q.get("genre"));
     const sort = q.get("sort") || "recent";
     if (sort === "title") rows = [...rows].sort((x, y) => fold(x.title).localeCompare(fold(y.title)));
-    return { body: page(rows, q, sort === "title" ? (a) => initial(a.title) : null, "albums") };
+    if (sort === "year") rows = [...rows].sort((x, y) => y.year - x.year || x.id.localeCompare(y.id));
+    const rail = { title: ["letters", (a) => initial(a.title)], year: ["years", (a) => String(a.year)], recent: ["dates", period] }[sort];
+    return { body: page(rows, q, rail?.[1], "albums", rail?.[0]) };
   }
   let m;
   if ((m = /^\/api\/player\/albums\/(\w+)$/.exec(p))) {
@@ -566,6 +576,8 @@ function makePage() {
     createTextNode: text,
     createDocumentFragment: () => new El("#fragment"),
     getElementById: (id) => html.querySelectorAll(`#${id}`)[0] || null,
+    // Nothing is under a point unless a case says what is.
+    elementFromPoint: () => null,
     querySelector: (sel) => html.querySelector(sel),
     querySelectorAll: (sel) => html.querySelectorAll(sel),
     addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); },
@@ -1515,6 +1527,233 @@ S.TestAnAlbumLeftWhileItsSourceNamesAreHeldDoesNothingOnceTheyCome = async () =>
   await navigate(nav("/albums"));
   await navigate(tile(3));
   check("the album in two editions still shows the one picked", pressed() === picked, [pressed(), picked]);
+};
+
+// ---- The rail's kinds on a restored list, and a scrub's jumps (B1021 PR 3b) ----
+
+const railNav = () => doc.getElementById("player-view").querySelector(".az-rail");
+const railEntry = (label) => doc.getElementById("player-view").querySelectorAll(".az-letter").find((b) => b.textContent === label);
+const yearOf = (n) => n?.querySelector(".tile-meta")?.textContent || "";
+
+S.TestARestoredListKeepsItsRailAndItsKind = async () => {
+  // Title: a jump to M, an album, Back, then the restored rail's jump to Z.
+  await rig("/albums?sort=title");
+  railEntry("M").fire("click", { detail: 0 });
+  await settle();
+  await navigate(tile(3));
+  await back();
+  check("Back restores M's window under its letter rail", titleOf(rows()[0]).startsWith("M") && railNav()?.getAttribute("aria-label") === "Jump to letter",
+    [titleOf(rows()[0]), railNav()?.getAttribute("aria-label")]);
+  railEntry("Z").fire("click", { detail: 0 });
+  await settle();
+  check("the restored rail's jump to Z draws the list from Z", titleOf(rows()[0]).startsWith("Z") && titleOf(rows()[1]).startsWith("Z"), titleOf(rows()[0]));
+  // Year: decades; a jump to the 1990s, an album, Back, then the 1960s.
+  history.pushState({ scrollY: 0 }, "", "/albums?sort=year");
+  win.dispatchEvent({ type: "popstate" });
+  await settle();
+  railEntry("’90s").fire("click", { detail: 0 });
+  await settle();
+  check("Year's rail is its decades, and a jump to the 1990s draws the list from 1999", railNav()?.getAttribute("aria-label") === "Jump to year" && yearOf(rows()[0]) === "1999",
+    [railNav()?.getAttribute("aria-label"), yearOf(rows()[0])]);
+  await navigate(tile(2));
+  await back();
+  check("Back restores the 1990s window under the year rail", yearOf(rows()[0]) === "1999" && railNav()?.getAttribute("aria-label") === "Jump to year" && !!railEntry("’60s"),
+    [yearOf(rows()[0]), railNav()?.getAttribute("aria-label")]);
+  railEntry("’60s").fire("click", { detail: 0 });
+  await settle();
+  check("the restored rail's jump to the 1960s draws the list from 1969", yearOf(rows()[0]) === "1969", yearOf(rows()[0]));
+  // Recently Added: its periods; a jump to 2025, an album, Back, then "?".
+  history.pushState({ scrollY: 0 }, "", "/albums");
+  win.dispatchEvent({ type: "popstate" });
+  await settle();
+  railEntry("2025").fire("click", { detail: 0 });
+  await settle();
+  check("Recently Added's rail is its periods, and a jump to 2025 draws the list from its first album",
+    railNav()?.getAttribute("aria-label") === "Jump to date added" && titleOf(rows()[0]) === "K Album 0400", [railNav()?.getAttribute("aria-label"), titleOf(rows()[0])]);
+  await navigate(tile(1));
+  await back();
+  check("Back restores 2025's window under the date rail", titleOf(rows()[0]) === "K Album 0400" && railNav()?.getAttribute("aria-label") === "Jump to date added",
+    [titleOf(rows()[0]), railNav()?.getAttribute("aria-label")]);
+  railEntry("?").fire("click", { detail: 0 });
+  await settle();
+  check("the restored rail's jump to ? draws the list from the first album with no date", titleOf(rows()[0]) === "E Album 1200", titleOf(rows()[0]));
+  const asked = listGets("/api/player/albums");
+  check("every albums request carries the reader's tz", asked.length > 0 && asked.every((e) => e.query.get("tz") === String(new Date().getTimezoneOffset())),
+    asked.map((e) => e.query.get("tz")));
+};
+
+S.TestARapidScrubAppendsOnlyTheLastJumpsRows = async () => {
+  await rig("/albums?sort=title");
+  const rail = railNav();
+  let under = railEntry("M");
+  doc.elementFromPoint = () => under;
+  const finger = (type, o = {}) => rail.fire(type, { target: rail, pointerType: "touch", pointerId: 1, isPrimary: true, clientX: 0, clientY: 0, ...o });
+  finger("pointerdown", { target: under });
+  // M's first page in: its first rows appended at once, the rest held in a
+  // frame the page has not run yet.
+  for (let i = 0; i < 50 && rows().length === 0; i++) await turn();
+  check("M's first rows are in, a frame holding the rest of its page", rows().length > 0 && rows().length < 60 && frames.length > 0 && titleOf(rows()[0]).startsWith("M"),
+    [rows().length, frames.length, titleOf(rows()[0])]);
+  under = railEntry("Z");
+  finger("pointermove");
+  await settle();
+  finger("pointerup");
+  const sorted = [...lib.albums].sort((x, y) => fold(x.title).localeCompare(fold(y.title)));
+  const z = sorted.findIndex((a) => initial(a.title) === "Z");
+  const got = rows().map(titleOf);
+  const want = sorted.slice(z, z + got.length).map((a) => a.title);
+  check("the list is Z's rows alone, in order, none of M's frame after the jump", got.length === sorted.length - z && same(got, want), [got.length, got.slice(0, 3), got.filter((t) => !t.startsWith("Z")).slice(0, 3)]);
+};
+
+// The albums by title, as the server sorts them, and where a letter's begin.
+const titleOrder = () => [...lib.albums].sort((x, y) => fold(x.title).localeCompare(fold(y.title)));
+const firstAt = (k) => titleOrder().findIndex((a) => initial(a.title) === k);
+const offsetsAsked = (from) => listGets("/api/player/albums").filter((e) => log.indexOf(e) >= from).map((e) => Number(e.query.get("offset")));
+
+S.TestAHeldFingerReadsTheRailWhereItsJumpFoundIt = async () => {
+  // A window 320px tall and its rail in seven columns of four rows, which,
+  // while the list is shorter than the window, stands 87px lower: as WebKit
+  // measured it once a jump had emptied the list.
+  await rig("/albums?sort=title", { layout: { innerHeight: 320, cols: 3 } });
+  const rail = railNav();
+  const cells = rail.children.filter((n) => n.classList.contains("az-letter"));
+  const box = (x, y, w, h) => ({ left: x, right: x + w, top: y, bottom: y + h, width: w, height: h, x, y });
+  const lower = () => (listHeight(listEl()) < layout.innerHeight ? 87 : 0);
+  rail.box = () => box(400, 60 + lower(), 140, 72);
+  cells.forEach((n, i) => { n.box = () => box(400 + (i % 7) * 20, 60 + lower() + Math.floor(i / 7) * 18, 20, 18); });
+  const inside = (r, x, y) => x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+  doc.elementFromPoint = (x, y) => cells.find((n) => inside(n.box(), x, y)) || (inside(rail.box(), x, y) ? rail : null);
+  const M = railEntry("M");
+  const point = { clientX: M.box().left + 10, clientY: M.box().top + 9 };
+  check("F, above M in the grid, and M are live", !railEntry("F").disabled && !M.disabled && firstAt("F") >= 0 && firstAt("M") >= 0);
+  const callout = rail.querySelector(".az-callout");
+  const from = log.length;
+  const releaseM = hold("/api/player/albums", (q) => q.get("offset") === String(firstAt("M")));
+  M.fire("pointerdown", { pointerType: "touch", pointerId: 1, isPrimary: true, ...point });
+  await settle();
+  // The finger held where it went down, M's rows not in yet.
+  rail.fire("pointermove", { target: rail, pointerType: "touch", pointerId: 1, isPrimary: true, ...point });
+  await settle();
+  check("a move where the finger went down, M's rows held, jumps nothing: the rail stands where the jump found it",
+    same(offsetsAsked(from), [firstAt("M")]) && callout.textContent === "M" && !callout.hidden && lower() === 0,
+    [offsetsAsked(from), firstAt("F"), callout.textContent, lower()]);
+  releaseM();
+  await settle();
+  rail.fire("pointerup", { target: rail, pointerType: "touch", pointerId: 1, isPrimary: true, ...point });
+  check("M's rows land, the list's height its own again", titleOf(rows()[0]).startsWith("M") && !listEl().style.minHeight,
+    [titleOf(rows()[0]), listEl().style.minHeight]);
+};
+
+S.TestAScrubWritesItsPlaceOnceAtItsLift = async () => {
+  await rig("/albums?sort=title");
+  const rail = railNav();
+  let under = null;
+  doc.elementFromPoint = () => under;
+  const finger = (type, k, id = 4) => {
+    under = railEntry(k);
+    rail.fire(type, { target: type === "pointerdown" ? under : rail, pointerType: "touch", pointerId: id, isPrimary: true, clientX: 0, clientY: 0 });
+  };
+  const placeStart = () => here().state?.place?.start;
+  // A drag across every live letter, each one's rows in before the next move.
+  let w = H.replaces;
+  finger("pointerdown", "A");
+  await settle();
+  for (const k of LETTERS.slice(1)) {
+    finger("pointermove", k);
+    await settle();
+  }
+  const during = H.replaces - w;
+  finger("pointerup", "Z");
+  await settle();
+  check("a drag across every live letter, each one's rows in before the next move, writes no place as it goes", during === 0 && titleOf(rows()[0]).startsWith("Z"), during);
+  check("its lift writes one, Z's", H.replaces - w === 1 && placeStart() === firstAt("Z"), [H.replaces - w, placeStart(), firstAt("Z")]);
+  // Z's rows held past the lift: its place is written once they land.
+  w = H.replaces;
+  finger("pointerdown", "M", 5);
+  await settle();
+  const releaseZ = hold("/api/player/albums", (q) => q.get("offset") === String(firstAt("Z")));
+  finger("pointermove", "Z", 5);
+  await settle();
+  finger("pointerup", "Z", 5);
+  await settle();
+  const atLift = H.replaces - w;
+  releaseZ();
+  await settle();
+  check("a lift before Z's rows land writes nothing then, and Z's place once they do", atLift === 0 && H.replaces - w === 1 && placeStart() === firstAt("Z"),
+    [atLift, H.replaces - w, placeStart()]);
+  // A key's jump and a mouse's write theirs as their rows land.
+  w = H.replaces;
+  railEntry("C").fire("click", { detail: 0 });
+  await settle();
+  check("a key's jump writes its place as its rows land", H.replaces - w === 1 && placeStart() === firstAt("C"), [H.replaces - w, placeStart()]);
+  railEntry("G").fire("pointerdown", { pointerType: "mouse", pointerId: 1, isPrimary: true });
+  railEntry("G").fire("click", { detail: 1 });
+  await settle();
+  check("and so does a mouse's", H.replaces - w === 2 && placeStart() === firstAt("G"), [H.replaces - w, placeStart()]);
+  // A scrub whose page its route left by its lift writes nothing there.
+  finger("pointerdown", "K", 6);
+  await settle();
+  await navigate(tile(2));
+  w = H.replaces;
+  finger("pointerup", "K", 6);
+  await settle();
+  check("a lift after the list's route moved on writes nothing", H.replaces === w && location.pathname.startsWith("/album/"), [H.replaces - w, location.pathname]);
+};
+
+S.TestAFrameQueuedBeforeABoostAppendsNothing = async () => {
+  if (!boostScript) {
+    check("app.js's boost router is given", false, "no boost script");
+    return;
+  }
+  await rig("/albums?sort=title");
+  railEntry("M").fire("click", { detail: 0 });
+  for (let i = 0; i < 50 && rows().length === 0; i++) await turn();
+  const list = listEl();
+  const n = list.children.length;
+  const queued = frames.splice(0);
+  check("M's first rows are in, a frame holding the rest of its page", n > 0 && n < 60 && queued.length > 0 && titleOf(rows()[0]).startsWith("M"), [n, queued.length]);
+  await navigate(doc.getElementById("primary-nav").querySelector('a[href="/stats"]'));
+  check("an operator page replaces the list", location.pathname === "/stats" && !list.isConnected, [location.pathname, list.isConnected]);
+  for (const f of queued) f(0);
+  await settle();
+  check("the frame, let go after, appends nothing to the list its page left", list.children.length === n, [list.children.length, n]);
+};
+
+S.TestTheOldRailTakesNoScrubWhileAFiltersRowsAreHeld = async () => {
+  await rig("/albums?sort=title");
+  const rail = railNav();
+  const callout = rail.querySelector(".az-callout");
+  let under = railEntry("M");
+  doc.elementFromPoint = () => under;
+  const finger = (type, id, o = {}) => rail.fire(type, { target: rail, pointerType: "touch", pointerId: id, isPrimary: true, clientX: 0, clientY: 0, ...o });
+  finger("pointerdown", 1, { target: under });
+  await settle();
+  check("a finger down on M jumps there, the callout saying M", titleOf(rows()[0]).startsWith("M") && callout.textContent === "M" && !callout.hidden,
+    [titleOf(rows()[0]), callout.textContent]);
+  // The filter commits while the finger holds the rail, its rows held.
+  const release = hold("/api/player/albums");
+  await type(field(), "Album 1");
+  await advance(400);
+  const from = log.length;
+  check("the filter's rows are on their way", holds.size === 0 && listGets("/api/player/albums").length > 0, holds.size);
+  under = railEntry("Z");
+  finger("pointermove", 1);
+  await settle();
+  check("the finger's move after the commit asks for nothing and ends the callout", offsetsAsked(from).length === 0 && callout.hidden,
+    [offsetsAsked(from), callout.textContent, callout.hidden]);
+  finger("pointerup", 1);
+  under = railEntry("C");
+  finger("pointerdown", 2, { target: under });
+  finger("pointermove", 2);
+  await settle();
+  check("a new finger on the old rail, its rows still held, is not taken: no request, no callout, no capture",
+    offsetsAsked(from).length === 0 && callout.hidden && !(rail.captures || []).includes(2), [offsetsAsked(from), callout.hidden, rail.captures]);
+  finger("pointerup", 2);
+  release();
+  await settle();
+  const want = titleOrder().filter((a) => fold(a.title).includes("ALBUM1") || fold(a.albumArtist).includes("ALBUM1"));
+  check("the filtered list stands from its first row under a rail of its own", titleOf(rows()[0]) === want[0].title && railNav() !== rail && !!railNav(),
+    [titleOf(rows()[0]), want[0].title]);
 };
 
 const name = scenarioName;
