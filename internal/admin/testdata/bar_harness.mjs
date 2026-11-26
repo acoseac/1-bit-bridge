@@ -1054,7 +1054,8 @@ function page() {
     createElement: (tag) => { if (tag === "audio") { const a = new AudioEl(); audios.push(a); return a; } return new El(tag); },
     createElementNS: (ns, tag) => new El(tag),
     createTextNode: textNode,
-    getElementById: () => null,
+    // The first element under the body with that id, as a browser's.
+    getElementById: (id) => findAll(body, (n) => n.getAttribute("id") === id)[0] || null,
     querySelector: () => null,
     querySelectorAll: () => [],
     addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); },
@@ -3646,8 +3647,9 @@ const albums = new Map();
 // the browser's row, which plays its track on the output chosen (playOn),
 // where the bar's queue panel, hidden while this browser is chosen, drives the
 // bridge. Its fetch answers the albums' details and nothing else, each answer
-// parsed afresh, as the server's is: no two requests share a row.
-async function libraryRows(tracks, { id = "a1", base = dirURL } = {}) {
+// parsed afresh, as the server's is: no two requests share a row. An album in
+// editions lists the rows of the one it shows (shown, every row by default).
+async function libraryRows(tracks, { id = "a1", base = dirURL, shown = tracks.length } = {}) {
   albums.set(id, tracks);
   globalThis.fetch = async (url) => {
     const m = /^\/api\/player\/albums\/([^?]+)/.exec(String(url));
@@ -3660,7 +3662,7 @@ async function libraryRows(tracks, { id = "a1", base = dirURL } = {}) {
   const view = document.createElement("main");
   await views.renderAlbum(view, { id, gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
   const rows = findAll(view, (n) => n.classList.contains("track-title"));
-  check(`the album page lists its ${tracks.length} rows`, rows.length === tracks.length, rows.length);
+  check(`the album page lists its ${shown} rows`, rows.length === shown, rows.length);
   rows.view = view;
   return rows;
 }
@@ -5454,6 +5456,1061 @@ S.TestAFailedVariantIsThatSourceAlone = async () => {
   p.play?.click();
   await settle();
   check("pressing it loads B", r.el.plays.length === 2 && /variant=B$/.test(r.el.src), [r.el.plays.length, r.el.src]);
+};
+
+// ---- An album's editions (B1023) ----
+//
+// An album whose folders hold the same songs (one album by its tags, as the
+// phone's is) shows one edition at a time: each a folder by the catalog's own
+// disc-folder fold, where a song repeats across them; the best the output
+// chosen plays by default, a pick repainting the page in place; its rows,
+// headings, count line, controls, stat line and Delete the edition's; and the
+// bridge's player is sent the edition's paths, never the album's id.
+
+// SONGS are the three-edition album's songs.
+const SONGS = ["Open Field", "Low Tide", "Paper Moon", "Iron Gate", "Slow River", "Glass House", "Red Kite",
+  "North Light", "Salt Road", "Quiet Hour", "Bright Wire", "Long Shadow", "Last Train"];
+const nn = (n) => String(n).padStart(2, "0");
+// edDsd, edHi and edCd are that album's folders' rows: DSF files at DSD64
+// tagged with their tracks and no disc, FLAC 192/24 tagged disc 1, and a CD
+// rip tagged disc 1, of which the album holds four songs, its track 1 not one.
+const edDsd = (n, o = {}) => ({ path: `Lib/DSD/Album/${nn(n)} ${SONGS[n - 1]}.dsf`, title: SONGS[n - 1], track: n, codec: "DSF", isDsd: true,
+  rateHz: 2822400, duration: 240, sizeBytes: 120000000, play: { kind: "none", contentType: "audio/x-dsf" }, ...o });
+const edHi = (n, o = {}) => ({ path: `Lib/Hi/Album [24-192]/${nn(n)} ${SONGS[n - 1]}.flac`, title: SONGS[n - 1], track: n, disc: 1, codec: "FLAC",
+  rateHz: 192000, bits: 24, duration: 240, sizeBytes: 90000000, play: { kind: "universal", contentType: "audio/flac" }, ...o });
+const edCd = (n, o = {}) => ({ path: `Lib/CD/Album [2004]/${nn(n)} ${SONGS[n - 1]}.flac`, title: SONGS[n - 1], track: n, disc: 1, codec: "FLAC",
+  rateHz: 44100, bits: 16, duration: 240, sizeBytes: 25000000, play: { kind: "universal", contentType: "audio/flac" }, ...o });
+const CD_SONGS = [2, 5, 8, 11];
+
+// threeEditions is the album's 30 rows in the server's order (resolved disc,
+// then track, then path), o.dsd, o.hi and o.cd laid over each folder's rows.
+function threeEditions(o = {}) {
+  const rows = [];
+  for (let n = 1; n <= 13; n++) {
+    if (CD_SONGS.includes(n)) rows.push(edCd(n, o.cd));
+    rows.push(edDsd(n, o.dsd), edHi(n, o.hi));
+  }
+  return rows;
+}
+
+// WAYS are the bridge's player's fields for that album: DSD64 natively, the
+// FLAC rows as PCM.
+const WAYS = { dsd: { bridge: { way: "native" } }, hi: { bridge: { way: "pcm" } }, cd: { bridge: { way: "pcm" } } };
+
+// editionPage renders the shipped views.js's album page over tracks for the
+// generation gen gives, as libraryRows does, the view on the page's body so
+// the focus can be followed; its fetch answers the album's detail (album its
+// own numbers), the settings (allowDelete) and the trash (trash's answer for
+// the paths sent), and logs every request it answers (log).
+async function editionPage(tracks, { id = "e1", album = { year: 2004 }, gen = () => 1, allowDelete = false, trash = null, base = dirURL } = {}) {
+  albums.set(id, tracks);
+  const log = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url).split("?")[0];
+    const e = { method: init.method || "GET", path, body: init.body ? JSON.parse(init.body) : null };
+    log.push(e);
+    const m = /^\/api\/player\/albums\/(.+)$/.exec(path);
+    let body = {};
+    if (m) body = { album: { id: m[1], title: "Album", albumArtist: "Artist", artistId: "", ...album }, tracks: albums.get(decodeURIComponent(m[1])) || [], variants: null, release: null };
+    else if (path === "/api/settings") body = { allowDelete };
+    else if (path === "/api/library/trash" && trash) body = await trash(e.body.paths);
+    return { ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(body)) };
+  };
+  document.title = "Player";
+  const views = await import(new URL("views.js", base));
+  const view = document.createElement("main");
+  document.body.appendChild(view);
+  const render = () => views.renderAlbum(view, { id, gen, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
+  await render();
+  await settle();
+  return { view, log, render, views };
+}
+
+// editions is an album page's edition picker: its group, its options, their
+// words and their names, and the one pressed.
+const editions = (view) => {
+  const group = findAll(view, (n) => n.classList.contains("edition-picker"))[0] || null;
+  const options = group ? findAll(group, (n) => n.tagName === "BUTTON") : [];
+  return { group, options, words: options.map((b) => b.textContent), names: options.map((b) => b.getAttribute("aria-label")),
+    pressed: options.find((b) => b.getAttribute("aria-pressed") === "true") || null };
+};
+
+// listing is an album page's track list as it reads: each disc heading and
+// each row's title, in order.
+const listing = (view) => findAll(view, (n) => n.classList.contains("track-disc") || n.classList.contains("track-title")).map((n) => n.textContent);
+
+// statOf is an album page's stat line: its words and its format chip.
+const statOf = (view) => {
+  const p = findAll(view, (n) => n.classList.contains("detail-stats"))[0];
+  return { line: p?.own || "", chip: (p && findAll(p, (n) => n.classList.contains("chip-quality"))[0]?.textContent) || "" };
+};
+
+// deletes is every Delete button an album page holds, and deleteOf its first.
+const deletes = (view) => findAll(view, (n) => n.tagName === "BUTTON" && n.classList.contains("danger"));
+const deleteOf = (view) => deletes(view)[0] || null;
+
+// deleteState is an album page's Delete buttons as they read, a disabled one so marked.
+const deleteState = (view) => deletes(view).map((b) => `${b.textContent}${b.disabled ? " (disabled)" : ""}`);
+
+// trashAll answers a trash request with every path moved.
+const trashAll = (into) => async (paths) => { into.push(paths); return { ok: paths.length, failed: 0, outcomes: paths.map((path) => ({ path, status: "trashed" })) }; };
+
+S.TestAnAlbumOfOneEditionDrawsAsItDid = async () => {
+  await pageRig();
+  const asked = [];
+  globalThis.confirm = (m) => { asked.push(m); return false; };
+  const solo = [1, 2, 3].map((n) => flac(n, { path: `Solo/Album/0${n}.flac`, disc: 1, track: n }));
+  const sets = [1, 2].flatMap((d) => [1, 2, 3].map((n) => flac(n, { path: `Set/Album CD${d}/0${n}.flac`, title: `S${n}`, disc: d, track: n })));
+  // Untagged folders whose first files share the number the scanner takes
+  // from a file's name, and a title that reads as another's only past its
+  // leading number: no song repeats.
+  const pair = [flac(1, { path: "Pair/First/01. Overture.flac", title: "01. Overture", track: 1 }),
+    flac(1, { path: "Pair/Second/01. Finale.flac", title: "01. Finale", track: 1 }),
+    flac(7, { path: "Pair/Second/07 Seconds.flac", title: "7 Seconds", track: 7 }),
+    flac(8, { path: "Pair/First/08.flac", title: "Seconds", track: 8 })];
+  const cases = [
+    ["one folder tagged disc 1", solo, { trackCount: 3, discCount: 1, duration: 600, sizeBytes: 30000000, rateHz: 44100, bits: 16, quality: "cdQuality" },
+      ["Disc 1", "T1", "T2", "T3"], "", "2004 · 3 tracks · 10 min · 29 MB", "CD · 44.1/16"],
+    ["a FLAC row beside two DSD rows", [flac(1), dsd(2), dsd(3)], { trackCount: 3, duration: 600 },
+      ["T1", "D2", "D3"], "2 of 3 can't play in a browser. Download those instead.", "2004 · 3 tracks · 10 min", ""],
+    ["sibling folders tagged discs 1 and 2, the same titles in each", sets, { trackCount: 6, discCount: 2, duration: 1200 },
+      ["Disc 1", "S1", "S2", "S3", "Disc 2", "S1", "S2", "S3"], "", "2004 · 2 discs · 6 tracks · 20 min", ""],
+    ["untagged folders, no song of which repeats", pair, { trackCount: 4, duration: 800 },
+      ["01. Overture", "01. Finale", "7 Seconds", "Seconds"], "", "2004 · 4 tracks · 13 min", ""],
+  ];
+  for (const [i, [name, tracks, album, list, why, line, fmt]] of cases.entries()) {
+    const { view } = await editionPage(tracks, { id: `one-${i}`, album: { year: 2004, ...album }, allowDelete: true });
+    const p = albumParts(view);
+    const s = statOf(view);
+    check(`${name}: no picker, every row listed`, !editions(view).group && findAll(view, (n) => n.classList.contains("track-title")).length === tracks.length,
+      [!!editions(view).group, listing(view)]);
+    check(`${name}: its headings as before`, JSON.stringify(listing(view)) === JSON.stringify(list), listing(view));
+    check(`${name}: its count line and controls as before`, (p.line?.textContent || "") === why && !p.play?.disabled && !p.shuffle?.disabled && !p.add?.disabled,
+      [p.line?.textContent, p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+    check(`${name}: its stat line as before`, s.line === line && s.chip === fmt, s);
+    if (i === 0) {
+      deleteOf(view)?.click();
+      check("its Delete asks in the words it always did", asked.length === 1 &&
+        asked[0] === "Move 3 files from \"Album\" to the trash?\n\nThey stay recoverable from the Library page until the trash is emptied.", asked);
+    }
+  }
+  store.set(OUTPUT_KEY, "bridge");
+  const b = await pageRig();
+  b.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 3, of: 3 }), playing({ revision: 4 })));
+  b.s.on("POST", ROUTES.append, async (e) => answer(recOf(e, { kind: "append", sent: 3, of: 3 }), playing({ revision: 5 })));
+  for (const [i, [name, tracks, album]] of cases.entries()) {
+    const id = `one-bridge-${i}`;
+    const { view } = await editionPage(tracks.map((t) => ({ ...t, bridge: { way: t.isDsd ? "native" : "pcm" } })), { id, album: { year: 2004, ...album } });
+    const p = albumParts(view);
+    p.play?.click();
+    await settle();
+    p.add?.click();
+    await settle();
+    const rep = b.s.posts(ROUTES.replace).at(-1)?.body;
+    const app = b.s.posts(ROUTES.append).at(-1)?.body;
+    check(`${name}: on the bridge's player, Play and Add to queue send the album by its id`,
+      rep?.album === id && !("tracks" in rep) && app?.album === id && !("tracks" in app), [rep, app]);
+  }
+};
+
+S.TestAnAlbumsEditionsAreItsFoldersOneShownAtATime = async () => {
+  await pageRig();
+  const rows = await libraryRows(threeEditions(), { id: "three-rows", shown: 13 });
+  const e = editions(rows.view);
+  check("three options in the format order, each its format and count", JSON.stringify(e.words) === JSON.stringify(["DSD64 · 13", "FLAC 192/24 · 13", "FLAC 44.1/16 · 4"]), e.words);
+  const word = findAll(rows.view, (n) => n.getAttribute?.("id") === e.group?.getAttribute("aria-labelledby"))[0];
+  check("each named with its tracks, the group named by the word it shows",
+    JSON.stringify(e.names) === JSON.stringify(["DSD64, 13 tracks", "FLAC 192/24, 13 tracks", "FLAC 44.1/16, 4 tracks"]) && e.group?.getAttribute("role") === "group" &&
+    word?.textContent === "Edition" && e.group.contains(word), [e.names, e.group?.getAttribute("role"), word?.textContent]);
+  check("FLAC 192/24 shown, pressed alone", e.pressed?.textContent === "FLAC 192/24 · 13" && e.options.filter((b) => b.getAttribute("aria-pressed") === "true").length === 1,
+    e.options.map((b) => b.getAttribute("aria-pressed")));
+  const { view } = await editionPage(threeEditions(), { id: "three" });
+  check("its rows alone, in order, under its heading, no row above it", JSON.stringify(listing(view)) === JSON.stringify(["Disc 1", ...SONGS]), listing(view));
+  check("its stat line: the album's year, its tracks, duration and size, its format", JSON.stringify(statOf(view)) === JSON.stringify({ line: "2004 · 13 tracks · 52 min · 1.1 GB", chip: "FLAC 192/24" }), statOf(view));
+  editions(view).options[0]?.click();
+  check("DSD64 picked: its rows alone, untagged and in no disc folder, so no heading", JSON.stringify(listing(view)) === JSON.stringify(SONGS), listing(view));
+  check("its stat line", JSON.stringify(statOf(view)) === JSON.stringify({ line: "2004 · 13 tracks · 52 min · 1.5 GB", chip: "DSD64" }), statOf(view));
+  editions(view).options[2]?.click();
+  check("FLAC 44.1/16 picked: its four rows under their heading", JSON.stringify(listing(view)) === JSON.stringify(["Disc 1", ...CD_SONGS.map((n) => SONGS[n - 1])]), listing(view));
+  check("its stat line", JSON.stringify(statOf(view)) === JSON.stringify({ line: "2004 · 4 tracks · 16 min · 95 MB", chip: "FLAC 44.1/16" }), statOf(view));
+};
+
+S.TestADiscFolderBelongsToItsEdition = async () => {
+  await pageRig();
+  const song = (d, n) => `${d === 1 ? "A" : "B"}${n}`;
+  const folded = (d, n) => flac(n, { path: `Box/Album/CD${d}/0${n}.flac`, title: song(d, n), track: n });
+  const tagged = (d, n) => flac(n, { path: `Box/Remaster/${d}-0${n}.flac`, title: song(d, n), track: n, disc: d });
+  const { view } = await editionPage([1, 2].flatMap((d) => [1, 2, 3].flatMap((n) => [folded(d, n), tagged(d, n)])), { id: "folds" });
+  const e = editions(view);
+  check("two editions, the disc folders one of them", JSON.stringify(e.words) === JSON.stringify(["FLAC 44.1/16 · 6 · Album", "FLAC 44.1/16 · 6 · Remaster"]), e.words);
+  const both = ["Disc 1", "A1", "A2", "A3", "Disc 2", "B1", "B2", "B3"];
+  check("the folders' edition shown, headed Disc 1 and Disc 2 by its folders", e.pressed === e.options[0] && JSON.stringify(listing(view)) === JSON.stringify(both), listing(view));
+  e.options[1]?.click();
+  check("the tagged edition by its tags", JSON.stringify(listing(view)) === JSON.stringify(both), listing(view));
+  // The table TestTheConsoleFoldsDiscFoldersAsTheCatalogDoes holds the
+  // catalog to: each path beside a twin of its song under another folder, and
+  // a row in the folder above its own. A folded path's edition is that folder
+  // above, headed by its disc; one that stays is its own, with no heading.
+  const fs = await import("node:fs");
+  const table = JSON.parse(fs.readFileSync(new URL("disc-folder-fold-cases.json", import.meta.url), "utf8"));
+  for (const [i, c] of table.entries()) {
+    const parts = c.path.split("/");
+    const folds = c.album !== parts[parts.length - 2];
+    const tracks = [flac(1, { path: c.path, title: "Same Song" }), flac(1, { path: `Twin/${c.path}`, title: "SAME song!" })];
+    if (parts.length > 2) tracks.push(flac(9, { path: `${parts.slice(0, -2).join("/")}/09.flac`, title: "Other" }));
+    const page = await editionPage(tracks, { id: `fold-${i}` });
+    const opts = editions(page.view).options;
+    let mine = null;
+    for (const o of opts) {
+      o.click();
+      if (listing(page.view).includes("Same Song")) {
+        mine = listing(page.view);
+        break;
+      }
+    }
+    const want = folds
+      ? (x) => x[0] === `Disc ${c.disc}` && x[1] === "Same Song" && x.includes("Other")
+      : (x) => JSON.stringify(x) === JSON.stringify(["Same Song"]);
+    check(`${c.path}: ${folds ? `in the edition of ${c.album}, disc ${c.disc}` : `an edition of its own, ${c.album}`}`,
+      opts.length === (folds || parts.length < 3 ? 2 : 3) && !!mine && want(mine), [opts.map((o) => o.textContent), mine]);
+  }
+};
+
+S.TestAnEditionHeadsAnUntaggedRowByItsDisc = async () => {
+  await pageRig();
+  // One edition: an untagged row first, a tagged one, and untagged rows in a
+  // disc folder.
+  const one = [flac(1, { path: "Mixed/Album/01.flac", title: "U1", track: 1 }), flac(2, { path: "Mixed/Album/02.flac", title: "U2", track: 2, disc: 1 }),
+    flac(1, { path: "Mixed/Album/CD2/01.flac", title: "W1", track: 1 }), flac(2, { path: "Mixed/Album/CD2/02.flac", title: "W2", track: 2 })];
+  let { view } = await editionPage(one, { id: "heads-one" });
+  check("one edition: no row above Disc 1, the disc folder's untagged rows under Disc 2",
+    !editions(view).group && JSON.stringify(listing(view)) === JSON.stringify(["Disc 1", "U1", "U2", "Disc 2", "W1", "W2"]), listing(view));
+  // Two editions of the same songs, the first an untagged row beside a tagged one.
+  const two = [flac(1, { path: "Two/A/01.flac", title: "S1", track: 1 }), flac(1, { path: "Two/B/01.flac", title: "S1", track: 1, disc: 1 }),
+    flac(2, { path: "Two/A/02.flac", title: "S2", track: 2, disc: 1 }), flac(2, { path: "Two/B/02.flac", title: "S2", track: 2, disc: 1 })];
+  ({ view } = await editionPage(two, { id: "heads-two" }));
+  const e = editions(view);
+  const lists = [];
+  for (const o of e.options) {
+    o.click();
+    lists.push(listing(view));
+  }
+  check("in editions: each headed from its first row, its untagged row under Disc 1",
+    e.options.length === 2 && lists.every((l) => JSON.stringify(l) === JSON.stringify(["Disc 1", "S1", "S2"])), [e.words, lists]);
+};
+
+S.TestTheDefaultEditionIsTheBestTheOutputPlays = async () => {
+  await pageRig();
+  let n = 0;
+  const shown = async (tracks) => editions((await editionPage(tracks, { id: `best-${n++}` })).view).pressed?.textContent || "";
+  const copy = (bits, rate) => ({ play: { kind: "none", contentType: "audio/x-dsf", variantId: "pcm-1", variantContentType: "audio/flac", variantBits: bits, variantRateHz: rate } });
+  let got = await shown(threeEditions());
+  check("this browser: FLAC 192/24 over 44.1/16 and over DSD it plays no copy of", got === "FLAC 192/24 · 13", got);
+  got = await shown([1, 2, 3].flatMap((k) => [edDsd(k, copy(24, 176400)), edHi(k)]));
+  check("this browser: FLAC 192/24 over a DSD edition with fresh copies", got === "FLAC 192/24 · 3", got);
+  got = await shown([1, 2, 3].flatMap((k) => [edCd(k), edDsd(k, copy(24, 176400))]));
+  check("this browser: its own file before a copy, a CD rip over DSD's 176.4/24 copies", got === "FLAC 44.1/16 · 3", got);
+  const part = [1, 2, 3, 4].map((k) => edHi(k, { path: `Lib/Part/Album/${nn(k)}.flac`, rateHz: 96000 }));
+  got = await shown([...part, ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((k) => edCd(k, { path: `Lib/Full/Album/${nn(k)}.flac` }))]);
+  check("this browser: quality before completeness, a 4-track 96/24 edition over a 9-track CD rip", got === "FLAC 96/24 · 4", got);
+  got = await shown([1, 2].flatMap((k) => [edDsd(k), edDsd(k, { path: `Lib/DSD128/Album/${nn(k)}.dsf`, rateHz: 5644800 })]));
+  check("this browser: DSD editions it plays none of, by the format order", got === "DSD128 · 2", got);
+  got = await shown([1, 2].flatMap((k) => [edDsd(k, copy(24, 88200)), edDsd(k, { path: `Lib/DSD128/Album/${nn(k)}.dsf`, rateHz: 5644800, ...copy(16, 176400) })]));
+  check("this browser: copies by their depth before their rate, 88.2/24 over 176.4/16", got === "DSD64 · 2", got);
+  got = await shown([1, 2, 3, 4].flatMap((k) => [edHi(k, { path: `Lib/P/Album/${nn(k)}.flac`, ...(k > 1 ? { rateHz: 44100, bits: 16 } : {}) }),
+    edHi(k, { path: `Lib/Q/Album/${nn(k)}.flac`, rateHz: 96000 })]));
+  check("this browser: the key most rows share, never the best row, an edition all 96/24 over one of 44.1/16 with a 192/24 row", got === "FLAC 96/24 · 4", got);
+  store.set(OUTPUT_KEY, "bridge");
+  await pageRig();
+  const way = (w) => threeEditions({ ...WAYS, dsd: { bridge: w === "none" ? { way: w, reason: "dsd_rate_not_played" } : { way: w } } });
+  got = await shown(way("native"));
+  check("the bridge's player, DSD64 native: DSD64", got === "DSD64 · 13", got);
+  got = await shown(way("dop"));
+  check("the bridge's player, DSD64 by DoP: DSD64, above PCM", got === "DSD64 · 13", got);
+  got = await shown(way("converted"));
+  check("the bridge's player, DSD converted: FLAC 192/24, PCM above converted", got === "FLAC 192/24 · 13", got);
+  got = await shown(way("none"));
+  check("the bridge's player, a DSD rate it does not take: FLAC 192/24", got === "FLAC 192/24 · 13", got);
+  got = await shown(threeEditions());
+  check("the bridge's player, no row it has said anything of: the format order", got === "DSD64 · 13", got);
+  got = await shown([1, 2].flatMap((k) => [edDsd(k), edCd(k, { path: `Lib/CD/Album/${nn(k)}.flac`, bridge: { way: "pcm" } })]));
+  check("the bridge's player: a CD rip it plays over DSD64 it has said nothing of", got === "FLAC 44.1/16 · 2", got);
+  got = await shown([1, 2].flatMap((k) => [edDsd(k, { bridge: { way: "dop" } }), edDsd(k, { path: `Lib/Native/Album/${nn(k)}.dsf`, bridge: { way: "native" } })]));
+  check("the bridge's player: native over DoP, the same DSD64 each", got === "DSD64 · 2 · Native/Album", got);
+  store.delete(OUTPUT_KEY);
+  await pageRig();
+  const row = (dir, k, o = {}) => flac(k, { path: `${dir}/0${k}.flac`, title: `S${k}`, track: k, ...o });
+  const none = { play: { kind: "none", contentType: "audio/x-ape" } };
+  got = await shown([row("T/A", 1, none), row("T/B", 1), row("T/A", 2), row("T/B", 2)]);
+  check("ties: more rows playing first", got === "FLAC 44.1/16 · 2 · B", got);
+  got = await shown([row("U/A", 1), row("U/B", 1), row("U/A", 2), row("U/B", 2), row("U/B", 3, none)]);
+  check("ties: then more rows", got === "FLAC 44.1/16 · 3", got);
+  got = await shown([row("V/A/B", 1), row("V/Longer Name", 1)]);
+  check("ties: then the fewer folders", got === "FLAC 44.1/16 · 1 · Longer Name", got);
+  got = await shown([row("W/Aaaa", 1), row("W/Zz", 1)]);
+  check("ties: then the shorter path", got === "FLAC 44.1/16 · 1 · Zz", got);
+  got = await shown([row("X/Bb", 1), row("X/Aa", 1)]);
+  check("ties: then the path that sorts first", got === "FLAC 44.1/16 · 1 · Aa", got);
+  got = await shown([row("Y/é", 1), row("Y/zz", 1)]);
+  check("ties: lengths and order in UTF-8's bytes, as the catalog's are: zz before é", got === "FLAC 44.1/16 · 1 · zz", got);
+  const routed = (k, o = {}) => flac(k, { path: `Upstream/Album/0${k}.flac`, title: `R${k}`, track: k, routed: true, sourceId: "uuid:up", rateHz: 48000, bits: 24, ...o });
+  const local = (k) => flac(k, { path: `Local/Album/0${k}.flac`, title: `R${k}`, track: k, rateHz: 192000, bits: 16 });
+  got = await shown([routed(1), local(1), routed(2), local(2)]);
+  check("a routed 48/24 edition over a local 192/16 one: depth first, a routed row no lower", got === "FLAC 48/24 · 2", got);
+  got = await shown([routed(1, { bits: 0 }), local(1), routed(2, { bits: 0 }), local(2)]);
+  check("the routed depth not known: the local 192/16 one", got === "FLAC 192/16 · 2", got);
+};
+
+S.TestAnOutputChangeChoosesTheEditionAgain = async () => {
+  const r = await pageRig();
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const { view, views } = await editionPage(threeEditions(WAYS), { id: "out" });
+  let redrawn = null;
+  const draw = () => { redrawn = views.renderAlbum(view, { id: "out", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); };
+  // As boot.js wires it: a change of the output and a view's rerender each
+  // redraw the route.
+  listen(r.out, { win: window, doc: document, onOutput: draw });
+  window.addEventListener("player:rerender", draw);
+  const pressed = () => editions(view).pressed?.textContent || "";
+  const to = async (which) => {
+    await r.out.pick(which);
+    await settle();
+    await redrawn;
+    await settle();
+  };
+  check("this browser: FLAC 192/24", pressed() === "FLAC 192/24 · 13", pressed());
+  await to("bridge");
+  check("the bridge's player: DSD64", r.out.view().output === "bridge" && pressed() === "DSD64 · 13", [r.out.view().output, pressed()]);
+  await to("browser");
+  check("this browser again: FLAC 192/24", r.out.view().output === "browser" && pressed() === "FLAC 192/24 · 13", [r.out.view().output, pressed()]);
+  editions(view).options[2]?.click();
+  window.dispatchEvent(new CustomEvent("player:rerender"));
+  await redrawn;
+  await settle();
+  check("a pick on this browser stands through a redraw", pressed() === "FLAC 44.1/16 · 4", pressed());
+  await to("bridge");
+  await to("browser");
+  check("and gives way to a change of output: this browser's default again", r.out.view().output === "browser" && pressed() === "FLAC 192/24 · 13", [r.out.view().output, pressed()]);
+};
+
+S.TestPlayShuffleAndAddTakeTheEditionShown = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const tracks = threeEditions();
+  const pathsOf = (dir, from = tracks) => from.filter((t) => t.path.startsWith(dir)).map((t) => t.path);
+  const hi = pathsOf("Lib/Hi/");
+  const q = () => r.audio.snapshot().queue.map((t) => t.path);
+  let { view } = await editionPage(tracks, { id: "acts" });
+  let p = albumParts(view);
+  p.play?.click();
+  await settle();
+  check("this browser: Play's queue the edition shown, in order, from its first", JSON.stringify(q()) === JSON.stringify(hi) && r.audio.snapshot().index === 0, q());
+  p.shuffle?.click();
+  await settle();
+  check("Shuffle's the same rows, shuffled", JSON.stringify([...q()].sort()) === JSON.stringify([...hi].sort()) && r.audio.snapshot().shuffle === true, [q(), r.audio.snapshot().shuffle]);
+  r.audio.setShuffle(false);
+  p.add?.click();
+  await settle();
+  check("Add to queue appends them", q().length === 26 && JSON.stringify(q().slice(13)) === JSON.stringify(hi), q());
+  findAll(view, (n) => n.classList.contains("track-title"))[4]?.click();
+  await settle();
+  check("a row's own Play plays the edition from that row", JSON.stringify(q()) === JSON.stringify(hi) && r.audio.snapshot().index === 4, [q(), r.audio.snapshot().index]);
+  store.set(OUTPUT_KEY, "bridge");
+  const b = await pageRig();
+  b.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 13, of: 13 }), playing({ revision: 4 })));
+  b.s.on("POST", ROUTES.append, async (e) => answer(recOf(e, { kind: "append", sent: 13, of: 13 }), playing({ revision: 5 })));
+  // The catalog counts the album's 30 rows, as it does: an album in editions
+  // goes as the edition's paths all the same.
+  const bt = threeEditions(WAYS);
+  ({ view } = await editionPage(bt, { id: "acts-bridge", album: { year: 2004, trackCount: 30 } }));
+  p = albumParts(view);
+  p.play?.click();
+  await settle();
+  p.add?.click();
+  await settle();
+  const dsdPaths = pathsOf("Lib/DSD/", bt);
+  const rep = b.s.posts(ROUTES.replace)[0]?.body;
+  const app = b.s.posts(ROUTES.append)[0]?.body;
+  const only = (body, keys) => !!body && Object.keys(body).every((k) => keys.includes(k));
+  check("the bridge's player: Play replaces the queue with the edition's paths, in order, from its first, no album",
+    !!rep && JSON.stringify(rep.tracks) === JSON.stringify(dsdPaths) && rep.start === 0 && rep.play === true && only(rep, ["op", "at", "tracks", "start", "play"]), rep);
+  check("its Add to queue appends them, no album", !!app && JSON.stringify(app.tracks) === JSON.stringify(dsdPaths) && only(app, ["op", "at", "tracks"]), app);
+};
+
+S.TestAnEditionThatPlaysNothingHereSaysWhy = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const { view } = await editionPage(threeEditions(WAYS), { id: "why" });
+  editions(view).options[0]?.click();
+  let p = albumParts(view);
+  check("the DSD edition shown in this browser: Play, Shuffle and Add to queue disabled",
+    editions(view).pressed?.textContent === "DSD64 · 13" && p.play?.disabled && p.shuffle?.disabled && p.add?.disabled,
+    [editions(view).pressed?.textContent, p.play?.disabled, p.shuffle?.disabled, p.add?.disabled]);
+  check("each named by the count line, which says 13 of 13 and offers the bridge's player",
+    p.line?.textContent === "13 of 13 can't play in a browser. The bridge's player plays them: choose it under Output, which says whether it can be chosen now. Download those instead." &&
+    [p.play, p.shuffle, p.add].every((x) => x?.getAttribute("aria-describedby") === p.line.getAttribute("id")), [p.line?.textContent, p.play?.getAttribute("aria-describedby")]);
+  p.play?.click();
+  p.shuffle?.click();
+  p.add?.click();
+  await settle();
+  check("a disabled Play sends no barrier and starts nothing", r.s.posts(ROUTES.switchOut).length === 0 && r.el.plays.length === 0, [r.s.posts(ROUTES.switchOut).length, r.el.plays]);
+  editions(view).options[1]?.click();
+  p = albumParts(view);
+  check("FLAC 192/24 picked: all three live, no count line", !p.play?.disabled && !p.shuffle?.disabled && !p.add?.disabled && !p.line,
+    [p.play?.disabled, p.shuffle?.disabled, p.add?.disabled, p.line?.textContent]);
+  p.play?.click();
+  await settle();
+  check("its Play asks the barrier once and plays", r.s.posts(ROUTES.switchOut).length === 1 && r.el.plays.length === 1, [r.s.posts(ROUTES.switchOut).length, r.el.plays]);
+};
+
+S.TestAnEditionKeepsThePagesFailedSources = async () => {
+  const r = await pageRig({ gate: true, latest: pub({ revision: 3, silent: true }) });
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const t = longTimers();
+  const F = await import(new URL("format.js", dirURL));
+  const copy = { kind: "none", contentType: "audio/x-dsf", variantId: "pcm-1", variantContentType: "audio/flac" };
+  const tracks = [flac(1, { path: "Keep/Rip/01.flac", title: "Song" }), dsd(1, { path: "Keep/DSD/01.dsf", title: "Song", play: copy })];
+  const page = await editionPage(tracks, { id: "keep" });
+  const view = page.view;
+  // The byte probe of the source that fails: the bridge served it.
+  const read = globalThis.fetch;
+  globalThis.fetch = (url, init) => /^\/api\/player\/albums\//.test(String(url)) ? read(url, init) : Promise.resolve({ ok: true, status: 206, json: async () => ({}) });
+  let redraws = 0;
+  let redrawn = null;
+  // As boot.js wires it (cut at three, so a storm of them ends the case).
+  window.addEventListener("player:rerender", () => {
+    redraws += 1;
+    if (redraws <= 3) redrawn = page.render();
+  });
+  const pressed = () => editions(view).pressed?.textContent || "";
+  albumParts(view).play?.click();
+  await settle();
+  check("the FLAC edition shown and its row played", pressed() === "FLAC 44.1/16 · 1" && r.el.plays.length === 1, [pressed(), r.el.plays]);
+  r.el.fail(4);
+  await settle();
+  await redrawn;
+  await settle();
+  const p = albumParts(view);
+  check("its decode confirmed failed: one redraw, the same edition, its row unplayable, the count line saying so, its controls disabled",
+    redraws === 1 && pressed() === "FLAC 44.1/16 · 1" && rowChips(view)[0] === "Not playable in a browser" &&
+    p.line?.textContent === "1 of 1 can't play in a browser. Download it instead." && p.play?.disabled && p.shuffle?.disabled && p.add?.disabled,
+    [redraws, pressed(), rowChips(view), p.line?.textContent, p.play?.disabled]);
+  const failures = F.failures();
+  editions(view).options[0]?.click();
+  editions(view).options[1]?.click();
+  check("picks redraw nothing and leave the sources it failed as they were",
+    redraws === 1 && F.failures() === failures && !F.playFor(tracks[0], "browser").playable && pressed() === "FLAC 44.1/16 · 1" && rowChips(view)[0] === "Not playable in a browser",
+    [redraws, F.failures(), failures, pressed(), rowChips(view)]);
+  window.dispatchEvent(new Event("pagehide"));
+  const stored = JSON.parse(store.get("bridge-player-queue") || "null");
+  check("the stored queue keeps each row's play as the catalog sent it", stored?.queue?.[0]?.play?.kind === "universal", stored?.queue?.[0]?.play);
+  t.fire(1200);
+  await settle();
+  // The edition picked since: its copy played, then confirmed undecodable,
+  // redraws the page once more, that edition still shown.
+  editions(view).options.find((b) => b.textContent.startsWith("DSD64"))?.click();
+  albumParts(view).play?.click();
+  await settle();
+  check("an edition picked since: its copy plays", pressed() === "DSD64 · 1" && /variant=pcm-1/.test(r.el.src), [pressed(), r.el.src]);
+  r.el.fail(4);
+  await settle();
+  await redrawn;
+  await settle();
+  check("its copy confirmed undecodable: one redraw more, that edition shown, its row unplayable",
+    redraws === 2 && pressed() === "DSD64 · 1" && albumParts(view).play?.disabled === true, [redraws, pressed(), albumParts(view).play?.disabled]);
+  t.fire(1200);
+  await settle();
+};
+
+S.TestAPickRepaintsThePageInPlace = async () => {
+  await pageRig();
+  let g = 1;
+  const page = await editionPage(threeEditions(), { id: "in-place", gen: () => g });
+  const view = page.view;
+  let rerenders = 0;
+  window.addEventListener("player:rerender", () => { rerenders += 1; });
+  const asked = page.log.length;
+  const e = editions(view);
+  const cd = e.options[2];
+  cd?.focus();
+  cd?.click();
+  await settle();
+  const after = editions(view);
+  check("a pick asks nothing of the bridge and redraws nothing", page.log.length === asked && rerenders === 0, [page.log.slice(asked), rerenders]);
+  check("aria-pressed moves to it, the options where they were, the focus on it",
+    !!cd && after.pressed === cd && after.options.length === 3 && after.options.every((b, i) => b === e.options[i]) && document.activeElement === cd && cd.isConnected,
+    [after.pressed?.textContent, after.options.length, document.activeElement === cd, cd?.isConnected]);
+  let p = albumParts(view);
+  check("the list, the stat line and the controls follow it",
+    JSON.stringify(listing(view)) === JSON.stringify(["Disc 1", ...CD_SONGS.map((n) => SONGS[n - 1])]) && statOf(view).line === "2004 · 4 tracks · 16 min · 95 MB" &&
+    statOf(view).chip === "FLAC 44.1/16" && !p.play?.disabled && !p.line, [listing(view), statOf(view), p.play?.disabled]);
+  e.options[0]?.click();
+  p = albumParts(view);
+  check("and so does the count line, for an edition this browser plays none of", p.line?.textContent === "13 of 13 can't play in a browser. Download those instead." && p.play?.disabled === true,
+    [p.line?.textContent, p.play?.disabled]);
+  // The route has moved on: a pick on the page it left paints nothing.
+  g = 2;
+  e.options[1]?.click();
+  check("a pick the route has gone past paints nothing", editions(view).pressed === e.options[0] && JSON.stringify(listing(view)) === JSON.stringify(SONGS) && page.log.length === asked,
+    [editions(view).pressed?.textContent, listing(view).length]);
+  // An edition spanning two sources repaints at once too, its source filter
+  // and all: the names are read once a render, so a pick waits for nothing.
+  const mixed = await editionPage([flac(1, { path: "Lib/Mix/01.flac", title: "M1" }), flac(1, { path: "Lib/Solo/01.flac", title: "M1" }),
+    flac(2, { path: "Lib/Mix/02.flac", title: "M2", routed: true, sourceId: "uuid:up" }), flac(2, { path: "Lib/Solo/02.flac", title: "M2" })], { id: "in-place-mixed" });
+  const m = editions(mixed.view);
+  m.options[1]?.click();
+  m.options[0]?.click();
+  check("an edition spanning two sources repaints at once, its source filter included, the names read once",
+    m.options[0]?.textContent === "FLAC 44.1/16 · 2 · Mix" && !!findAll(mixed.view, (x) => x.classList.contains("source-filter"))[0] &&
+    JSON.stringify(listing(mixed.view)) === JSON.stringify(["M1", "M2"]) && mixed.log.filter((x) => x.path === "/api/player/sources").length === 1,
+    [m.words, listing(mixed.view), mixed.log.map((x) => x.path)]);
+};
+
+S.TestAReloadShowsTheDefaultEdition = async () => {
+  await pageRig();
+  const tracks = threeEditions();
+  const page = await editionPage(tracks, { id: "reload" });
+  editions(page.view).options[2]?.click();
+  await page.render();
+  await settle();
+  check("the pick stands through a redraw of the page", editions(page.view).pressed?.textContent === "FLAC 44.1/16 · 4", editions(page.view).pressed?.textContent);
+  const st = pub({ revision: 5, silent: true });
+  const d = await reloaded(() => {}, st);
+  let again = await editionPage(tracks, { id: "reload", base: d.base });
+  check("a reload opens the default", editions(again.view).pressed?.textContent === "FLAC 192/24 · 13", editions(again.view).pressed?.textContent);
+  store.clear();
+  const link = await reloaded(() => {}, st);
+  again = await editionPage(tracks, { id: "reload", base: link.base });
+  check("a link opened afresh opens the default", editions(again.view).pressed?.textContent === "FLAC 192/24 · 13", editions(again.view).pressed?.textContent);
+};
+
+S.TestAnSACDImageIsAnEditionOfItsOwn = async () => {
+  // The bridge's player plays the image natively and the files as PCM, so the
+  // image's edition is the one an album page opens on, no pick made.
+  store.set(OUTPUT_KEY, "bridge");
+  await pageRig();
+  const asked = [];
+  globalThis.confirm = (m) => { asked.push(m); return true; };
+  const trashed = [];
+  const image = (k) => ({ path: `Lib/SACD/Album.iso/st/${nn(k)}.dff`, title: SONGS[k - 1], track: k, codec: "DSD", isDsd: true, rateHz: 2822400,
+    duration: 240, sizeBytes: 3000000000, play: { kind: "none", contentType: "audio/x-dff" }, bridge: { way: "native" } });
+  const tracks = [1, 2, 3].flatMap((k) => [image(k), edHi(k, { bridge: { way: "pcm" } })]);
+  const { view } = await editionPage(tracks, { id: "sacd", allowDelete: true, trash: trashAll(trashed) });
+  const e = editions(view);
+  check("an SACD image's tracks are an edition beside the files', the one shown first on the bridge's player", JSON.stringify(e.words) === JSON.stringify(["DSD64 · 3", "FLAC 192/24 · 3"]) &&
+    editions(view).pressed?.textContent === "DSD64 · 3", [e.words, editions(view).pressed?.textContent]);
+  check("its size counted once, never a track at a time", statOf(view).line === "2004 · 3 tracks · 12 min · 2.8 GB", statOf(view));
+  check("with the image shown from the first, the album's one Delete is there, for its files", JSON.stringify(deleteState(view)) === '["Delete…"]', deleteState(view));
+  deleteOf(view)?.click();
+  await settle();
+  check("it moves the files alone, never the image's tracks, which are no files, of their 1 edition",
+    JSON.stringify(trashed) === JSON.stringify([tracks.filter((t) => !t.isDsd).map((t) => t.path)]) &&
+    asked[0] === "Move 3 files of 1 edition of \"Album\" to the trash?\n\nThey stay recoverable from the Library page until the trash is emptied.", [trashed, asked]);
+  // Two rips of one image, each folder the image's stereo area, as the
+  // catalog's fold takes it.
+  const rip = (dir, k) => ({ ...image(k), path: `Lib/${dir}/Album.iso/st/${nn(k)}.dff` });
+  const twins = await editionPage([1, 2].flatMap((k) => [rip("RipA", k), rip("RipB", k)]), { id: "sacd-twins" });
+  check("two rips of one image read alike: each named by the shortest end of its path that tells it apart",
+    JSON.stringify(editions(twins.view).words) === JSON.stringify(["DSD64 · 2 · RipA/Album.iso/st", "DSD64 · 2 · RipB/Album.iso/st"]), editions(twins.view).words);
+};
+
+S.TestAnEditionPastTheBridgesBoundsIsRefusedInWords = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const b = await pageRig();
+  b.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 1, of: 1 }), playing({ revision: 4 })));
+  const words = "This edition is more than the bridge's player takes in one request (20,000 tracks of 4,096 bytes a path, 8 MiB in all): " +
+    "choose this browser under Output to play it, or add the tracks you want from their rows.";
+  let n = 0;
+  // shown is the page of tracks with the edition whose words end so shown.
+  const shown = async (tracks, end) => {
+    const { view } = await editionPage(tracks, { id: `bound-${n++}` });
+    editions(view).options.find((o) => o.textContent.endsWith(end))?.click();
+    return view;
+  };
+  const refused = (view) => {
+    const p = albumParts(view);
+    const why = findAll(view, (x) => x.getAttribute?.("id") === "album-scope")[0];
+    return p.play?.disabled === true && p.add?.disabled === true && why?.textContent === words &&
+      [p.play, p.add].every((x) => x?.getAttribute("aria-describedby") === "album-scope");
+  };
+  const pcm = (path, title, o = {}) => flac(1, { path, title, bridge: { way: "pcm" }, ...o });
+  // A path of so many bytes, two a letter past its folder's.
+  const wide = (bytes) => {
+    const fill = bytes - "Wide/Long/".length - ".flac".length;
+    return `Wide/Long/${"é".repeat(Math.floor(fill / 2))}${fill % 2 ? "x" : ""}.flac`;
+  };
+  let view = await shown([pcm(wide(4096), "Wide"), pcm("Wide/Short/01.flac", "Wide")], "Long");
+  albumParts(view).play?.click();
+  await settle();
+  const sent = b.s.posts(ROUTES.replace).at(-1)?.body;
+  check("a path of 4,096 bytes: Play live, the edition sent as its path", !refused(view) && JSON.stringify(sent?.tracks) === JSON.stringify([wide(4096)]),
+    [albumParts(view).play?.disabled, sent?.tracks?.[0]?.length]);
+  view = await shown([pcm(wide(4097), "Wide"), pcm("Wide/Short/01.flac", "Wide")], "Long");
+  const posts = b.s.posts(ROUTES.replace).length;
+  albumParts(view).play?.click();
+  albumParts(view).add?.click();
+  await settle();
+  check("one of 4,097 bytes, fewer letters than that: Play and Add to queue disabled, named by the words that say why and what to do",
+    refused(view) && b.s.posts(ROUTES.replace).length === posts && b.s.posts(ROUTES.append).length === 0, [albumParts(view).play?.disabled, b.s.posts(ROUTES.replace).length - posts]);
+  // The body: paths of 4,000 bytes, so many that the list and a KiB for the
+  // rest of the request fill 8 MiB, and one more.
+  const big = (dir, k) => {
+    const head = `Big/${dir}/${String(k).padStart(5, "0")} `;
+    return head + "x".repeat(4000 - head.length - ".flac".length) + ".flac";
+  };
+  const body = (count) => [pcm(big("Short", 1), "B1"), ...Array.from({ length: count }, (_, i) => pcm(big("Long", i + 1), `B${i + 1}`))];
+  view = await shown(body(2095), " · 2095");
+  check("2,095 such paths: Play live", !refused(view) && albumParts(view).play?.disabled === false, albumParts(view).play?.disabled);
+  view = await shown(body(2096), " · 2096");
+  check("2,096: refused in its words", refused(view), albumParts(view).play?.disabled);
+  // The count: 20,000 short paths, and one more.
+  const many = (count) => [pcm("Many/Short/1.flac", "M1"), ...Array.from({ length: count }, (_, i) => pcm(`Many/Long/${i + 1}.flac`, `M${i + 1}`))];
+  view = await shown(many(20000), " · 20000");
+  check("20,000 tracks: Play live", !refused(view) && albumParts(view).play?.disabled === false, albumParts(view).play?.disabled);
+  view = await shown(many(20001), " · 20001");
+  check("20,001: refused in its words", refused(view), albumParts(view).play?.disabled);
+};
+
+S.TestAnOutputChangeAwayFromTheAlbumShowsTheDefault = async () => {
+  const r = await pageRig();
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  const page = await editionPage(threeEditions(WAYS), { id: "away" });
+  const pressed = () => editions(page.view).pressed?.textContent || "";
+  editions(page.view).options[2]?.click();
+  check("this browser, the CD rip picked", pressed() === "FLAC 44.1/16 · 4", pressed());
+  // The album left for another page: nothing draws it while the output goes
+  // to the bridge's player and back.
+  await r.out.pick("bridge");
+  await settle();
+  await r.out.pick("browser");
+  await settle();
+  await page.render();
+  await settle();
+  check("an output change made away from the album shows its default when it opens again",
+    r.out.view().output === "browser" && pressed() === "FLAC 192/24 · 13", [r.out.view().output, pressed()]);
+  editions(page.view).options[2]?.click();
+  await page.render();
+  await settle();
+  check("with no change of output, a pick stands through leaving and coming back", pressed() === "FLAC 44.1/16 · 4", pressed());
+};
+
+S.TestAnEditionsRowsAreHeldToTheBridgesBounds = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const b = await pageRig();
+  b.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 1, of: 1 }), playing({ revision: 4 })));
+  b.s.on("POST", ROUTES.append, async (e) => answer(recOf(e, { kind: "append", sent: 1, of: 1 }), playing({ revision: 5 })));
+  const pcm = (path, title, o = {}) => flac(1, { path, title, bridge: { way: "pcm" }, ...o });
+  const titles = (view) => findAll(view, (n) => n.classList.contains("track-title"));
+  const adds = (view) => findAll(view, (n) => n.classList.contains("track-add"));
+  const replaced = () => b.s.posts(ROUTES.replace);
+  const appended = () => b.s.posts(ROUTES.append);
+  // An edition of 20,001 rows, its first three on an upstream, beside an
+  // edition of one row of the same song.
+  const up = { routed: true, sourceId: "uuid:up" };
+  const long = Array.from({ length: 20001 }, (_, i) => pcm(`Many/Long/${i + 1}.flac`, `M${i + 1}`, i < 3 ? up : {}));
+  let { view } = await editionPage([pcm("Many/Short/1.flac", "M1"), ...long], { id: "rows-many" });
+  titles(view)[5]?.click();
+  await settle();
+  check("an edition of 20,001 tracks: a title's tap sends nothing, the title named by the words that say why",
+    editions(view).pressed?.textContent === "FLAC 44.1/16 · 20001" && replaced().length === 0 &&
+    titles(view)[5]?.getAttribute("aria-disabled") === "true" && titles(view)[5]?.getAttribute("aria-describedby") === "album-scope",
+    [editions(view).pressed?.textContent, replaced().length, titles(view)[5]?.getAttribute("aria-describedby")]);
+  adds(view)[5]?.click();
+  await settle();
+  check("a row's Add sends that row's path alone", JSON.stringify(appended().at(-1)?.body?.tracks) === JSON.stringify([long[5].path]), appended().at(-1)?.body);
+  // Narrowed by its source filter to the three on the upstream, the list fits.
+  findAll(view, (n) => n.classList.contains("source-filter-btn"))[1]?.click();
+  titles(view)[1]?.click();
+  await settle();
+  const rep = replaced().at(-1)?.body;
+  check("filtered to the three on an upstream: a title's tap sends those three, in order, from the one tapped",
+    !!rep && JSON.stringify(rep.tracks) === JSON.stringify(long.slice(0, 3).map((t) => t.path)) && rep.start === 1 && rep.play === true, rep);
+  // A path of 4,097 bytes, two a letter past its folder's, beside a short one.
+  const fill = 4097 - "Wide/Long/".length - ".flac".length;
+  const wide = `Wide/Long/${"é".repeat(Math.floor(fill / 2))}${fill % 2 ? "x" : ""}.flac`;
+  ({ view } = await editionPage([pcm("Wide/Short/01.flac", "Wide"), pcm(wide, "Wide"), pcm("Wide/Long/02.flac", "Two")], { id: "rows-wide" }));
+  editions(view).options.find((o) => o.textContent.endsWith(" · 2"))?.click();
+  const [wideAdd, twoAdd] = adds(view);
+  const sent = appended().length;
+  wideAdd?.click();
+  twoAdd?.click();
+  await settle();
+  check("a path of 4,097 bytes: its row's Add disabled and named by the words, the other row's Add sending its path",
+    wideAdd?.disabled === true && wideAdd.getAttribute("aria-describedby") === "album-scope" && twoAdd?.disabled === false &&
+    appended().length === sent + 1 && JSON.stringify(appended().at(-1)?.body?.tracks) === JSON.stringify(["Wide/Long/02.flac"]), [wideAdd?.disabled, appended().length - sent]);
+  // Past the bounds, and played by the bridge's player not at all.
+  const none = { bridge: { way: "none", reason: "dsd_rate_not_played" } };
+  ({ view } = await editionPage([pcm("Both/Short/1.flac", "B1"), ...Array.from({ length: 20001 }, (_, i) => flac(1, { path: `Both/Long/${i + 1}.flac`, title: `B${i + 1}`, ...none }))],
+    { id: "rows-both" }));
+  editions(view).options.find((o) => o.textContent.endsWith(" · 20001"))?.click();
+  const p = albumParts(view);
+  check("past the bounds and playing nothing there: Play and Add to queue name both, the count line and the bounds' words",
+    !!p.line && [p.play, p.add].every((x) => x?.disabled === true && x.getAttribute("aria-describedby") === `${p.line.getAttribute("id")} album-scope`),
+    [p.play?.getAttribute("aria-describedby"), p.line?.textContent]);
+  // A playlist, another page drawn by the same rows, sends its list as it did.
+  const list = Array.from({ length: 20001 }, (_, i) => pcm(`List/${i + 1}.flac`, `L${i + 1}`));
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ collection: { id: "p1", name: "List", count: list.length }, tracks: list }) });
+  const views = await import(new URL("views.js", dirURL));
+  const pv = document.createElement("main");
+  document.body.appendChild(pv);
+  await views.renderPlaylistDetail(pv, { id: "p1", gen: () => 1, setToolbar: () => {}, setCrumb: () => {}, trail: [] });
+  const asked = replaced().length;
+  titles(pv)[2]?.click();
+  await settle();
+  const own = replaced().at(-1)?.body;
+  check("a playlist's title, on its own page, sends the list it was drawn in, as before",
+    replaced().length === asked + 1 && own?.tracks?.length === 20001 && own.start === 2, [replaced().length - asked, own?.tracks?.length, own?.start]);
+};
+
+S.TestAnAlbumsDeleteMovesEveryEditionsFiles = async () => {
+  await pageRig();
+  const asked = [];
+  globalThis.confirm = (m) => { asked.push(m); return true; };
+  const words = (what) => `Move ${what} to the trash?\n\nThey stay recoverable from the Library page until the trash is emptied.`;
+  const held = gate();
+  const sent = [];
+  const tracks = threeEditions();
+  const page = await editionPage(tracks, { id: "delete-all", allowDelete: true, trash: async (paths) => {
+    sent.push(paths);
+    await held.p;
+    return { ok: paths.length, failed: 0, outcomes: paths.map((path) => ({ path, status: "trashed" })) };
+  } });
+  const view = page.view;
+  deleteOf(view)?.click();
+  await settle();
+  check("three editions: Delete's confirmation names the album, its 30 files and their 3 editions", asked[0] === words("30 files of 3 editions of \"Album\""), asked);
+  check("its request names every file of every edition, in the album's order",
+    sent.length === 1 && JSON.stringify(sent[0]) === JSON.stringify(tracks.map((t) => t.path)), [sent.length, sent[0]?.length]);
+  editions(view).options[2]?.click();
+  deleteOf(view)?.click();
+  await settle();
+  check("an edition picked while its answer is held: the one Delete reads Deleting…, disabled, a press sending nothing",
+    editions(view).pressed?.textContent === "FLAC 44.1/16 · 4" && JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]' && sent.length === 1,
+    [editions(view).pressed?.textContent, deleteState(view), sent.length]);
+  held.open();
+  await settle();
+  check("its answer is said on the Delete the page shows: one request, the settings read once",
+    deleteOf(view)?.textContent === "30 moved to trash" && deleteOf(view)?.disabled === true && sent.length === 1 &&
+    page.log.filter((e) => e.path === "/api/settings").length === 1, [deleteOf(view)?.textContent, sent.length, page.log.map((e) => e.path)]);
+  check("and the page stays as it was, every edition drawn", JSON.stringify(editions(view).words) === JSON.stringify(["DSD64 · 13", "FLAC 192/24 · 13", "FLAC 44.1/16 · 4"]),
+    editions(view).words);
+  // Local files beside an edition on an upstream and an SACD image's.
+  const img = (k) => ({ path: `Lib/SACD/Album.iso/st/${nn(k)}.dff`, title: SONGS[k - 1], track: k, codec: "DSD", isDsd: true, rateHz: 2822400,
+    duration: 240, sizeBytes: 3000000000, play: { kind: "none", contentType: "audio/x-dff" } });
+  const up = (k) => edCd(k, { path: `Upstream/Album/${nn(k)}.flac`, routed: true, sourceId: "uuid:up" });
+  const local = [1, 2, 3].flatMap((k) => [edHi(k), edCd(k)]);
+  asked.length = 0;
+  sent.length = 0;
+  const mixed = await editionPage([...local, ...[1, 2, 3].map(up), ...[1, 2, 3].map(img)], { id: "delete-mixed", allowDelete: true, trash: trashAll(sent) });
+  deleteOf(mixed.view)?.click();
+  await settle();
+  check("local files, an edition on an upstream and an SACD image's: Delete moves the local files alone, naming their 2 editions and what it leaves alone",
+    asked[0] === words("6 files of 2 editions of \"Album\"") + "\n\n3 tracks on an upstream server are left alone." &&
+    JSON.stringify(sent[0]) === JSON.stringify(local.map((t) => t.path)), [asked[0], sent[0]]);
+  asked.length = 0;
+  sent.length = 0;
+  const two = await editionPage([1, 2, 3].flatMap((k) => [edCd(k), up(k)]), { id: "delete-two", allowDelete: true, trash: trashAll(sent) });
+  deleteOf(two.view)?.click();
+  await settle();
+  check("one edition's files beside an edition on an upstream: of 1 edition, and its upstream line",
+    asked[0] === words("3 files of 1 edition of \"Album\"") + "\n\n3 tracks on an upstream server are left alone." && sent[0]?.length === 3, [asked[0], sent[0]]);
+  const none = await editionPage([1, 2, 3].flatMap((k) => [up(k), img(k)]), { id: "delete-none", allowDelete: true, trash: trashAll(sent) });
+  check("no file the trash can move (an edition on an upstream and an SACD image's): no Delete, and no settings read for one",
+    deleteOf(none.view) === null && none.log.filter((e) => e.path === "/api/settings").length === 0, [deleteOf(none.view)?.textContent, none.log.map((e) => e.path)]);
+};
+
+S.TestAnAlbumsDeleteKeepsItsRequestThroughARedraw = async () => {
+  const r = await pageRig();
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  globalThis.confirm = () => true;
+  let g = 1;
+  const gen = () => g;
+  let held = gate();
+  const sent = [];
+  const { view, views, log } = await editionPage(threeEditions(WAYS), { id: "redraw", gen, allowDelete: true, trash: async (paths) => {
+    sent.push(paths);
+    await held.p;
+    return { ok: paths.length, failed: 0, outcomes: paths.map((path) => ({ path, status: "trashed" })) };
+  } });
+  // The settings a redraw reads: held where a case holds them, or deleting turned off.
+  let hold = null;
+  let off = false;
+  const served = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url) === "/api/settings") {
+      if (hold) await hold.p;
+      if (off) return { ok: true, status: 200, json: async () => ({ allowDelete: false }) };
+    }
+    return served(url, init);
+  };
+  // As boot.js wires it: a change of the output and a view's rerender each
+  // redraw the route, at a generation of its own.
+  let redrawn = null;
+  const draw = () => { g += 1; redrawn = views.renderAlbum(view, { id: "redraw", gen, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); };
+  listen(r.out, { win: window, doc: document, onOutput: draw });
+  window.addEventListener("player:rerender", draw);
+  const rerender = async () => { window.dispatchEvent(new CustomEvent("player:rerender")); await redrawn; await settle(); };
+  deleteOf(view)?.click();
+  await settle();
+  await r.out.pick("bridge");
+  await settle();
+  await redrawn;
+  await settle();
+  check("an output switch while its answer is held: one Delete, Deleting…, disabled",
+    r.out.view().output === "bridge" && JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]' && sent.length === 1, [r.out.view().output, deleteState(view), sent.length]);
+  held.open();
+  await settle();
+  check("its answer is said on the Delete the switch's redraw built", JSON.stringify(deleteState(view)) === '["30 moved to trash (disabled)"]', deleteState(view));
+  await rerender();
+  check("the redraw after it builds a fresh Delete", JSON.stringify(deleteState(view)) === '["Delete…"]', deleteState(view));
+  // An answer while a redraw has read the album and waits for its settings.
+  held = gate();
+  deleteOf(view)?.click();
+  await settle();
+  hold = gate();
+  await rerender();
+  const waiting = deleteState(view);
+  held.open();
+  await settle();
+  const answered = deleteState(view);
+  hold.open();
+  hold = null;
+  await settle();
+  check("an answer while the redraw waits for its settings: no Delete until they come, then the one Delete it builds says the answer, disabled",
+    waiting.length === 0 && answered.length === 0 && JSON.stringify(deleteState(view)) === '["30 moved to trash (disabled)"]' && sent.length === 2,
+    [waiting, answered, deleteState(view), sent.length]);
+  // A redraw that offers no Delete: deleting turned off, or no file to move.
+  held = gate();
+  await rerender();
+  deleteOf(view)?.click();
+  await settle();
+  off = true;
+  await rerender();
+  const turnedOff = deleteState(view);
+  albums.set("redraw", [1, 2, 3].map((k) => edCd(k, { path: `Upstream/Album/${nn(k)}.flac`, routed: true, sourceId: "uuid:up" })));
+  const reads = log.filter((e) => e.path === "/api/settings").length;
+  await rerender();
+  const nothing = deleteState(view);
+  const read = log.filter((e) => e.path === "/api/settings").length - reads;
+  held.open();
+  await settle();
+  check("a redraw while it is out where deleting is off, or with no file to move: no Delete, no settings read for none, and none once it is answered",
+    turnedOff.length === 0 && nothing.length === 0 && read === 0 && deleteState(view).length === 0 && sent.length === 3,
+    [turnedOff, nothing, read, deleteState(view), sent.length]);
+  off = false;
+  albums.set("redraw", threeEditions(WAYS));
+  await rerender();
+  check("the redraw after an answer no Delete took builds a fresh Delete", JSON.stringify(deleteState(view)) === '["Delete…"]', deleteState(view));
+  // An answer while a redraw whose rows are not the ones asked waits for its settings.
+  held = gate();
+  deleteOf(view)?.click();
+  await settle();
+  hold = gate();
+  albums.set("redraw", threeEditions(WAYS).filter((t) => !t.path.startsWith("Lib/CD/")));
+  await rerender();
+  held.open();
+  await settle();
+  hold.open();
+  hold = null;
+  await settle();
+  check("an answer kept for a redraw whose files are not the ones asked: the Delete it builds is a fresh one",
+    JSON.stringify(deleteState(view)) === '["Delete…"]' && sent.length === 4, [deleteState(view), sent.length]);
+};
+
+S.TestAnAlbumsDeleteAnswerIsSaidOnTheDeleteShown = async () => {
+  await pageRig();
+  globalThis.confirm = () => true;
+  const alerts = [];
+  globalThis.alert = (m) => { alerts.push(String(m)); };
+  let g = 1;
+  const gen = () => g;
+  const { view, views } = await editionPage(threeEditions(), { id: "said", gen, allowDelete: true });
+  // The trash's answer to each request, held until its case lets it go: a
+  // refusal, an answer whose every file failed, or every file moved.
+  const sent = [];
+  let next = null;
+  const served = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url) !== "/api/library/trash") return served(url, init);
+    const paths = JSON.parse(init.body).paths;
+    sent.push(paths);
+    const { held, how } = next;
+    await held.p;
+    if (how === "refuse") return { ok: false, status: 500, json: async () => ({ message: "The trash could not be written." }) };
+    const failed = how === "fail";
+    const body = { ok: failed ? 0 : paths.length, failed: failed ? paths.length : 0, outcomes: paths.map((path) => ({ path, status: failed ? "failed" : "trashed" })) };
+    return { ok: true, status: 200, json: async () => body };
+  };
+  const redraw = async () => { g += 1; await views.renderAlbum(view, { id: "said", gen, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); await settle(); };
+  next = { held: gate(), how: "refuse" };
+  deleteOf(view)?.click();
+  await settle();
+  await redraw();
+  check("a request out through a redraw: the Delete it builds reads Deleting…, disabled", JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]', deleteState(view));
+  next.held.open();
+  await settle();
+  check("the bridge refusing it: that Delete given back, Delete…, the refusal said once",
+    JSON.stringify(deleteState(view)) === '["Delete…"]' && JSON.stringify(alerts) === '["The trash could not be written."]', [deleteState(view), alerts]);
+  next = { held: gate(), how: "moved" };
+  deleteOf(view)?.click();
+  await settle();
+  next.held.open();
+  await settle();
+  check("a press then sends one new request, its answer said on it", sent.length === 2 && JSON.stringify(deleteState(view)) === '["30 moved to trash (disabled)"]',
+    [sent.length, deleteState(view)]);
+  await redraw();
+  next = { held: gate(), how: "fail" };
+  deleteOf(view)?.click();
+  await settle();
+  await redraw();
+  next.held.open();
+  await settle();
+  check("an answer whose every file failed: the redraw's Delete says so, disabled",
+    JSON.stringify(deleteState(view)) === '["0 deleted, 30 failed (disabled)"]' && sent.length === 3, [deleteState(view), sent.length]);
+};
+
+S.TestEachAlbumsDeleteKeepsItsOwnRequest = async () => {
+  await pageRig();
+  globalThis.confirm = () => true;
+  const alerts = [];
+  globalThis.alert = (m) => { alerts.push(String(m)); };
+  const thrown = [];
+  process.on("unhandledRejection", (e) => thrown.push(String(e)));
+  let g = 1;
+  const gen = () => g;
+  albums.set("album-b", [1, 2, 3].flatMap((k) => [edHi(k, { path: `Lib/Other/Hi/${nn(k)}.flac` }), edCd(k, { path: `Lib/Other/CD/${nn(k)}.flac` })]));
+  const { view, views } = await editionPage(threeEditions(), { id: "album-a", gen, allowDelete: true });
+  // Each album's trash requests, held until the case lets each go, then
+  // answered or refused.
+  const sent = { a: 0, b: 0 };
+  const holds = {};
+  const served = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url) !== "/api/library/trash") return served(url, init);
+    const paths = JSON.parse(init.body).paths;
+    const which = paths[0].startsWith("Lib/Other/") ? "b" : "a";
+    sent[which] += 1;
+    const h = holds[which] = { ...gate(), refuse: false };
+    await h.p;
+    if (h.refuse) return { ok: false, status: 500, json: async () => ({ message: `${which}: the trash could not be written.` }) };
+    const body = { ok: paths.length, failed: 0, outcomes: paths.map((path) => ({ path, status: "trashed" })) };
+    return { ok: true, status: 200, json: async () => body };
+  };
+  // One view, as boot.js's route keeps it: an album, or another route, each
+  // drawn at a generation of its own.
+  const open = async (id) => { g += 1; await views.renderAlbum(view, { id, gen, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); await settle(); };
+  const away = async () => { g += 1; while (view.firstChild) view.removeChild(view.firstChild); view.appendChild(document.createElement("div")); await settle(); };
+  deleteOf(view)?.click();
+  await settle();
+  await away();
+  await open("album-a");
+  check("away and back while its answer is held: the album's one Delete reads Deleting…, disabled",
+    JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]', deleteState(view));
+  await open("album-b");
+  const fresh = deleteState(view);
+  const first = deleteOf(view);
+  first?.click();
+  await settle();
+  check("another album's Delete is its own: live, a press sending its request", JSON.stringify(fresh) === '["Delete…"]' && sent.b === 1, [fresh, sent]);
+  await open("album-a");
+  check("back on the first with both held: its Delete still Deleting…, disabled", JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]', deleteState(view));
+  holds.b.open();
+  await settle();
+  const after = deleteState(view);
+  await open("album-a");
+  check("the other's answer while the first shows: the first's Delete stays Deleting…, through a redraw too, the other's old Delete untouched, nothing thrown",
+    JSON.stringify(after) === '["Deleting… (disabled)"]' && JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]' &&
+    first?.textContent === "Deleting…" && first?.disabled === true && thrown.length === 0, [after, deleteState(view), first?.textContent, thrown]);
+  holds.a.open();
+  await settle();
+  check("the first's own answer is said on its Delete", JSON.stringify(deleteState(view)) === '["30 moved to trash (disabled)"]', deleteState(view));
+  await open("album-b");
+  const again = deleteState(view);
+  deleteOf(view)?.click();
+  await settle();
+  check("the other again after its answer: a fresh Delete, a press sending one new request", JSON.stringify(again) === '["Delete…"]' && sent.b === 2, [again, sent]);
+  const second = deleteOf(view);
+  await open("album-a");
+  holds.b.refuse = true;
+  holds.b.open();
+  await settle();
+  check("its refusal while the first shows: said once, nothing else changed",
+    JSON.stringify(alerts) === '["b: the trash could not be written."]' && JSON.stringify(deleteState(view)) === '["Delete…"]' &&
+    second?.textContent === "Deleting…" && second?.disabled === true && thrown.length === 0, [alerts, deleteState(view), second?.textContent, thrown]);
+};
+
+S.TestAnAlbumTheCatalogCountsMoreOfGoesAsTheRowsItShows = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const b = await pageRig();
+  b.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 3, of: 3 }), playing({ revision: 4 })));
+  b.s.on("POST", ROUTES.append, async (e) => answer(recOf(e, { kind: "append", sent: 3, of: 3 }), playing({ revision: 5 })));
+  const rows = [1, 2, 3].map((k) => flac(k, { path: `Count/Album/0${k}.flac`, title: `C${k}`, track: k, bridge: { way: "pcm" } }));
+  // sends is what Play and then Add to queue send for the album as the catalog counts it.
+  const sends = async (id, trackCount) => {
+    const { view } = await editionPage(rows, { id, album: { year: 2004, trackCount } });
+    const p = albumParts(view);
+    p.play?.click();
+    await settle();
+    p.add?.click();
+    await settle();
+    return [b.s.posts(ROUTES.replace).at(-1)?.body, b.s.posts(ROUTES.append).at(-1)?.body];
+  };
+  let [rep, app] = await sends("count-whole", 3);
+  check("one edition the catalog counts as its rows: Play and Add to queue send the album by its id",
+    rep?.album === "count-whole" && !("tracks" in rep) && app?.album === "count-whole" && !("tracks" in app), [rep, app]);
+  [rep, app] = await sends("count-more", 5);
+  const paths = rows.map((t) => t.path);
+  check("one the catalog counts more of than it shows: Play sends the rows it shows, in order, from the first, no album",
+    JSON.stringify(rep?.tracks) === JSON.stringify(paths) && rep.start === 0 && !("album" in rep), rep);
+  check("and so does Add to queue", JSON.stringify(app?.tracks) === JSON.stringify(paths) && !("album" in app), app);
+};
+
+S.TestAnAlbumSentByItsIdHoldsItsRowsToTheBridgesBounds = async () => {
+  store.set(OUTPUT_KEY, "bridge");
+  const b = await pageRig();
+  b.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 1, of: 1 }), playing({ revision: 4 })));
+  b.s.on("POST", ROUTES.append, async (e) => answer(recOf(e, { kind: "append", sent: 1, of: 1 }), playing({ revision: 5 })));
+  const pcm = (path, title, o = {}) => flac(1, { path, title, bridge: { way: "pcm" }, ...o });
+  const titles = (view) => findAll(view, (n) => n.classList.contains("track-title"));
+  const adds = (view) => findAll(view, (n) => n.classList.contains("track-add"));
+  const scope = (view) => findAll(view, (x) => x.getAttribute?.("id") === "album-scope")[0]?.textContent || "";
+  const words = "A row's title here sends more than the bridge's player takes in one request (20,000 tracks of 4,096 bytes a path, " +
+    "8 MiB in all): play the album with Play, or add the tracks you want from their rows.";
+  // One edition of 20,001 rows, every one the catalog's.
+  const many = Array.from({ length: 20001 }, (_, i) => pcm(`One/Album/${i + 1}.flac`, `N${i + 1}`));
+  let { view } = await editionPage(many, { id: "id-many", album: { year: 2004, trackCount: many.length } });
+  albumParts(view).play?.click();
+  await settle();
+  let rep = b.s.posts(ROUTES.replace).at(-1)?.body;
+  check("one edition of 20,001 rows the catalog counts as its own: Play sends the album by its id", rep?.album === "id-many" && !("tracks" in rep), rep);
+  const asked = b.s.posts(ROUTES.replace).length;
+  titles(view)[7]?.click();
+  await settle();
+  check("its title's tap sends nothing, the title named by the words that say why",
+    b.s.posts(ROUTES.replace).length === asked && titles(view)[7]?.getAttribute("aria-disabled") === "true" &&
+    titles(view)[7]?.getAttribute("aria-describedby") === "album-scope", [b.s.posts(ROUTES.replace).length - asked, titles(view)[7]?.getAttribute("aria-describedby")]);
+  check("the words say what a row cannot send and that Play takes the album, Play and Add to queue live",
+    scope(view) === words && albumParts(view).play?.disabled === false && albumParts(view).add?.disabled === false, [scope(view), albumParts(view).play?.disabled]);
+  adds(view)[7]?.click();
+  await settle();
+  check("a row's Add sends its own path", JSON.stringify(b.s.posts(ROUTES.append).at(-1)?.body?.tracks) === JSON.stringify([many[7].path]), b.s.posts(ROUTES.append).at(-1)?.body);
+  // One edition holding a path of 4,097 bytes, two a letter past its folder's.
+  const fill = 4097 - "One/Wide/".length - ".flac".length;
+  const wide = `One/Wide/${"é".repeat(Math.floor(fill / 2))}${fill % 2 ? "x" : ""}.flac`;
+  ({ view } = await editionPage([pcm(wide, "W1"), pcm("One/Wide/02.flac", "W2")], { id: "id-wide", album: { year: 2004, trackCount: 2 } }));
+  const [wa, wb] = adds(view);
+  const before = b.s.posts(ROUTES.append).length;
+  wa?.click();
+  wb?.click();
+  await settle();
+  check("one holding a path of 4,097 bytes: that row's Add disabled and named by the words, the other row's Add sending its path",
+    wa?.disabled === true && wa.getAttribute("aria-describedby") === "album-scope" && wb?.disabled === false &&
+    b.s.posts(ROUTES.append).length === before + 1 && JSON.stringify(b.s.posts(ROUTES.append).at(-1)?.body?.tracks) === JSON.stringify(["One/Wide/02.flac"]),
+    [wa?.disabled, b.s.posts(ROUTES.append).length - before]);
+  albumParts(view).play?.click();
+  await settle();
+  rep = b.s.posts(ROUTES.replace).at(-1)?.body;
+  check("and its Play still sends the album by its id", rep?.album === "id-wide" && !("tracks" in rep), rep);
 };
 
 S.TestTheRailTakesEveryPointerDownForItsClick = async () => {

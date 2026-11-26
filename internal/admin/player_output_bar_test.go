@@ -405,6 +405,157 @@ func TestADecodeFailureClosesTheAlbumThatStartedIt(t *testing.T) { barScenario(t
 // disabled, and a fresh answer naming variant B enables it and plays B.
 func TestAFailedVariantIsThatSourceAlone(t *testing.T) { barScenario(t, 6) }
 
+// TestAnAlbumOfOneEditionDrawsAsItDid pins B1023's one edition: an album no
+// song of which repeats across its folders (one folder; a FLAC row beside DSD
+// rows; sibling folders tagged discs 1 and 2 with the same titles; untagged
+// folders whose first files share the number the scanner takes from a
+// file's name) draws as it did: no picker, every row, its headings, count
+// line, controls, stat line and Delete's words, and on the bridge's player
+// Play and Add to queue send the album by its id.
+func TestAnAlbumOfOneEditionDrawsAsItDid(t *testing.T) { barScenario(t, 21) }
+
+// TestAnAlbumsEditionsAreItsFoldersOneShownAtATime pins B1023's editions and
+// their picker: an album whose three folders hold the same songs offers three editions in the
+// format order, each its format and count and named with its tracks, the
+// group by its word, and lists the edition shown alone, under its heading,
+// its stat line the edition's.
+func TestAnAlbumsEditionsAreItsFoldersOneShownAtATime(t *testing.T) { barScenario(t, 10) }
+
+// TestADiscFolderBelongsToItsEdition pins the catalog's disc-folder fold in
+// the console: disc folders are one edition with the folder above them,
+// headed by their numbers, and every case of the table
+// TestTheConsoleFoldsDiscFoldersAsTheCatalogDoes holds the catalog to reads
+// the same through the console's fold, the white space and the letters
+// whose folds differ between Go and JavaScript among them.
+func TestADiscFolderBelongsToItsEdition(t *testing.T) { barScenario(t, 23) }
+
+// TestAnEditionHeadsAnUntaggedRowByItsDisc pins the album page's headings: in
+// an album of one edition and inside an edition, an untagged row is headed by its disc
+// folder's number, else 1, so no row stands above the first heading.
+func TestAnEditionHeadsAnUntaggedRowByItsDisc(t *testing.T) { barScenario(t, 2) }
+
+// TestTheDefaultEditionIsTheBestTheOutputPlays pins the order an album opens
+// on its best edition by, a check a term: this browser's own file before a
+// copy, then depth before rate, a copy's too (a routed edition no lower for
+// being routed); the key most rows share, never the best row; the bridge's
+// player's ways, native above DoP and PCM above converted, and a row it
+// plays above one it has said nothing of; the format order where nothing
+// plays; quality before completeness; then more rows playing, more rows,
+// and the folder, in UTF-8's bytes.
+func TestTheDefaultEditionIsTheBestTheOutputPlays(t *testing.T) { barScenario(t, 22) }
+
+// TestAnOutputChangeChoosesTheEditionAgain pins the edition's slot: a change
+// of the output, which redraws the route as boot.js wires it, opens the best the new
+// output plays, and a pick stands through a redraw but not a change of
+// output.
+func TestAnOutputChangeChoosesTheEditionAgain(t *testing.T) { barScenario(t, 5) }
+
+// TestPlayShuffleAndAddTakeTheEditionShown pins the album's playing controls:
+// Play, Shuffle, Add to queue and a row's own Play take the edition shown in
+// this browser, and the bridge's player is sent its paths in order and no
+// album.
+func TestPlayShuffleAndAddTakeTheEditionShown(t *testing.T) { barScenario(t, 6) }
+
+// TestAnEditionThatPlaysNothingHereSaysWhy pins the disabled rule over the
+// edition shown: an edition no row of which plays here disables Play, Shuffle and Add to queue, each named by the
+// count line in B1021's words, and sends no barrier; one that plays makes
+// them live.
+func TestAnEditionThatPlaysNothingHereSaysWhy(t *testing.T) { barScenario(t, 5) }
+
+// TestAnEditionKeepsThePagesFailedSources pins that B1021's failed sources
+// and their one redraw stand: a confirmed decode failure in the edition shown
+// redraws it once, the same edition, and picks change neither the failures
+// nor what reads as failed, nor the stored queue's play; and an edition
+// picked since, its copy then confirmed undecodable, redraws once more.
+func TestAnEditionKeepsThePagesFailedSources(t *testing.T) { barScenario(t, 6) }
+
+// TestAPickRepaintsThePageInPlace pins a pick's repaint: it asks nothing and
+// redraws no route, moves aria-pressed with the options in place and the
+// focus kept, repaints the list, stat line, count line and controls, an
+// edition spanning two sources at once, source filter and all, and a pick on
+// a page the route has left paints nothing.
+func TestAPickRepaintsThePageInPlace(t *testing.T) { barScenario(t, 6) }
+
+// TestAReloadShowsTheDefaultEdition pins the slot's page life: a pick stands
+// through a redraw, and a reload or a link opened afresh opens the default.
+func TestAReloadShowsTheDefaultEdition(t *testing.T) { barScenario(t, 3) }
+
+// TestAnSACDImageIsAnEditionOfItsOwn pins an SACD image's stereo tracks as an
+// edition beside a file edition, the one the bridge's player opens on: its
+// size counted once, never a track at a time; the album's one Delete, with the
+// image shown from the first, moving the files alone, of their one edition,
+// since its tracks are no files the trash can move; and two rips of one image
+// each named by the end of its path that tells it apart.
+func TestAnSACDImageIsAnEditionOfItsOwn(t *testing.T) { barScenario(t, 5) }
+
+// TestAnEditionPastTheBridgesBoundsIsRefusedInWords pins the bounds of the
+// bridge's player's control for an edition sent as its paths: a path of 4,096
+// bytes, 2,095 paths of 4,000 bytes and 20,000 paths go, and one byte, one
+// path or one track more disables Play and Add to queue in words that say why
+// and what to do.
+func TestAnEditionPastTheBridgesBoundsIsRefusedInWords(t *testing.T) { barScenario(t, 6) }
+
+// TestAnOutputChangeAwayFromTheAlbumShowsTheDefault pins the slot against a
+// change of output made while the album page is not shown: the album opens
+// on its default again, and a pick stands where the output did not change.
+func TestAnOutputChangeAwayFromTheAlbumShowsTheDefault(t *testing.T) { barScenario(t, 3) }
+
+// TestAnEditionsRowsAreHeldToTheBridgesBounds pins the bridge's bounds on an
+// edition's rows: a title sends nothing where its list is past them, named by
+// the words, and sends its list in order from itself where a source filter
+// narrows it to fit; a row's Add sends its path, and is disabled where that
+// path is past them; Play and Add to queue name the count line beside those
+// words where both apply; and a playlist's rows send as they did.
+func TestAnEditionsRowsAreHeldToTheBridgesBounds(t *testing.T) { barScenario(t, 6) }
+
+// TestAnAlbumsDeleteMovesEveryEditionsFiles pins the album page's one Delete:
+// it moves every file of every edition, in the album's order, its
+// confirmation naming the album, the files and how many editions they are;
+// an edition picked while its answer is held leaves it the one Delete,
+// Deleting…, a press sending nothing, and its answer is said on it, the
+// settings read once and the page as it was; routed tracks and an SACD
+// image's are left out, an upstream's said so, one edition's files beside
+// another's on an upstream are of 1 edition, and an album with no file the
+// trash can move offers no Delete and reads no settings.
+func TestAnAlbumsDeleteMovesEveryEditionsFiles(t *testing.T) { barScenario(t, 8) }
+
+// TestAnAlbumsDeleteKeepsItsRequestThroughARedraw pins the album's one Delete
+// through a redraw while its request is out: an output switch leaves one
+// Delete, Deleting… and disabled, and the answer is said on it; the redraw
+// after builds a fresh one; an answer while a redraw waits for its settings
+// is said by the Delete that redraw then builds, where its files are the ones
+// asked, and a fresh one is built where they are not; a redraw where deleting
+// is off, or with no file to move, offers none, and the redraw after that
+// builds a fresh one.
+func TestAnAlbumsDeleteKeepsItsRequestThroughARedraw(t *testing.T) { barScenario(t, 7) }
+
+// TestAnAlbumsDeleteAnswerIsSaidOnTheDeleteShown pins the answer's two
+// outcomes on the Delete a redraw built: a refusal gives it back and is said
+// once, a press then sending one new request, and an answer whose every file
+// failed says so on it, disabled.
+func TestAnAlbumsDeleteAnswerIsSaidOnTheDeleteShown(t *testing.T) { barScenario(t, 4) }
+
+// TestEachAlbumsDeleteKeepsItsOwnRequest pins one view taking two albums in
+// turn with both requests out: each album's Delete reads Deleting… until its
+// own answer, away and back included; an answer for the album not shown
+// changes nothing on the page or on that album's old Delete and throws
+// nothing, and that album's next Delete is a fresh one; and its refusal is
+// said once, nothing else changed.
+func TestEachAlbumsDeleteKeepsItsOwnRequest(t *testing.T) { barScenario(t, 7) }
+
+// TestAnAlbumTheCatalogCountsMoreOfGoesAsTheRowsItShows pins the album id's
+// send: an album of one edition the catalog counts as its rows goes by its id,
+// and one the catalog counts more of than its page shows goes as the rows it
+// shows, Play and Add to queue alike.
+func TestAnAlbumTheCatalogCountsMoreOfGoesAsTheRowsItShows(t *testing.T) { barScenario(t, 3) }
+
+// TestAnAlbumSentByItsIdHoldsItsRowsToTheBridgesBounds pins the bounds on the
+// rows of an album sent by its id: its Play goes by the id, its titles send
+// nothing where their list is past the bridge's player's bounds and its rows'
+// Adds nothing where their path is, each named by words that send the reader
+// to Play, and the other rows' Adds send their paths.
+func TestAnAlbumSentByItsIdHoldsItsRowsToTheBridgesBounds(t *testing.T) { barScenario(t, 6) }
+
 // TestTheRailTakesEveryPointerDownForItsClick pins the rail's record of where
 // a pointer went down, made at every pointerdown in the document: a click a
 // touch outside the rail is handed jumps after an empty tap that made no
