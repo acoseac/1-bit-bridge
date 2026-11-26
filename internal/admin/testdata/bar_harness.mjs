@@ -5566,10 +5566,17 @@ const deleteState = (view) => deletes(view).map((b) => `${b.textContent}${b.disa
 // trashAll answers a trash request with every path moved.
 const trashAll = (into) => async (paths) => { into.push(paths); return { ok: paths.length, failed: 0, outcomes: paths.map((path) => ({ path, status: "trashed" })) }; };
 
+// trashPosts is the body of every trash request an album page's log holds.
+const trashPosts = (log) => log.filter((e) => e.method === "POST" && e.path === "/api/library/trash").map((e) => e.body);
+
+// TRASH_KEEPS is the sentence every Delete's confirmation says of the trash.
+const TRASH_KEEPS = "They stay recoverable from the Library page until the trash is emptied.";
+
 S.TestAnAlbumOfOneEditionDrawsAsItDid = async () => {
   await pageRig();
   const asked = [];
-  globalThis.confirm = (m) => { asked.push(m); return false; };
+  let taken = false;
+  globalThis.confirm = (m) => { asked.push(m); return taken; };
   const solo = [1, 2, 3].map((n) => flac(n, { path: `Solo/Album/0${n}.flac`, disc: 1, track: n }));
   const sets = [1, 2].flatMap((d) => [1, 2, 3].map((n) => flac(n, { path: `Set/Album CD${d}/0${n}.flac`, title: `S${n}`, disc: d, track: n })));
   // Untagged folders whose first files share the number the scanner takes
@@ -5590,7 +5597,7 @@ S.TestAnAlbumOfOneEditionDrawsAsItDid = async () => {
       ["01. Overture", "01. Finale", "7 Seconds", "Seconds"], "", "2004 · 4 tracks · 13 min", ""],
   ];
   for (const [i, [name, tracks, album, list, why, line, fmt]] of cases.entries()) {
-    const { view } = await editionPage(tracks, { id: `one-${i}`, album: { year: 2004, ...album }, allowDelete: true });
+    const { view, log } = await editionPage(tracks, { id: `one-${i}`, album: { year: 2004, ...album }, allowDelete: true, trash: trashAll([]) });
     const p = albumParts(view);
     const s = statOf(view);
     check(`${name}: no picker, every row listed`, !editions(view).group && findAll(view, (n) => n.classList.contains("track-title")).length === tracks.length,
@@ -5601,8 +5608,15 @@ S.TestAnAlbumOfOneEditionDrawsAsItDid = async () => {
     check(`${name}: its stat line as before`, s.line === line && s.chip === fmt, s);
     if (i === 0) {
       deleteOf(view)?.click();
+      await settle();
       check("its Delete asks in the words it always did", asked.length === 1 &&
         asked[0] === "Move 3 files from \"Album\" to the trash?\n\nThey stay recoverable from the Library page until the trash is emptied.", asked);
+      check("called off, it sends nothing", trashPosts(log).length === 0, trashPosts(log));
+      taken = true;
+      deleteOf(view)?.click();
+      await settle();
+      check("taken, it asks the same words and sends the album's files once, in its order",
+        asked.length === 2 && asked[1] === asked[0] && JSON.stringify(trashPosts(log)) === JSON.stringify([{ paths: solo.map((t) => t.path) }]), [asked, trashPosts(log)]);
     }
   }
   store.set(OUTPUT_KEY, "bridge");
@@ -6014,9 +6028,10 @@ S.TestAnSACDImageIsAnEditionOfItsOwn = async () => {
   check("with the image shown from the first, the album's one Delete is there, for its files", JSON.stringify(deleteState(view)) === '["Delete…"]', deleteState(view));
   deleteOf(view)?.click();
   await settle();
-  check("it moves the files alone, never the image's tracks, which are no files, of their 1 edition",
-    JSON.stringify(trashed) === JSON.stringify([tracks.filter((t) => !t.isDsd).map((t) => t.path)]) &&
-    asked[0] === "Move 3 files of 1 edition of \"Album\" to the trash?\n\nThey stay recoverable from the Library page until the trash is emptied.", [trashed, asked]);
+  check("it moves the files alone, never the image's tracks, which are no files: its confirmation names the files' edition, and the image's as left alone and why",
+    asked[0] === "Move 3 files from \"Album\" to the trash?\n\nWhichever edition is shown, these files are moved:\nFLAC 192/24, 3 tracks: 3 files\n\n" +
+      `${TRASH_KEEPS}\n\nLeft alone:\nDSD64, 3 tracks: an SACD image, whose tracks are not files`, asked);
+  check("its request names the files alone, in the album's order", JSON.stringify(trashed) === JSON.stringify([tracks.filter((t) => !t.isDsd).map((t) => t.path)]), trashed);
   // Two rips of one image, each folder the image's stereo area, as the
   // catalog's fold takes it.
   const rip = (dir, k) => ({ ...image(k), path: `Lib/${dir}/Album.iso/st/${nn(k)}.dff` });
@@ -6177,7 +6192,8 @@ S.TestAnAlbumsDeleteMovesEveryEditionsFiles = async () => {
   await pageRig();
   const asked = [];
   globalThis.confirm = (m) => { asked.push(m); return true; };
-  const words = (what) => `Move ${what} to the trash?\n\nThey stay recoverable from the Library page until the trash is emptied.`;
+  // words is a confirmation's paragraphs, each as it reads.
+  const words = (...parts) => parts.join("\n\n");
   const held = gate();
   const sent = [];
   const tracks = threeEditions();
@@ -6189,7 +6205,9 @@ S.TestAnAlbumsDeleteMovesEveryEditionsFiles = async () => {
   const view = page.view;
   deleteOf(view)?.click();
   await settle();
-  check("three editions: Delete's confirmation names the album, its 30 files and their 3 editions", asked[0] === words("30 files of 3 editions of \"Album\""), asked);
+  check("three editions: Delete's confirmation names the album, its 30 files and each edition with the files it moves of it, whichever is shown",
+    asked[0] === words("Move 30 files from \"Album\" to the trash?",
+      "Whichever edition is shown, these files are moved:\nDSD64, 13 tracks: 13 files\nFLAC 192/24, 13 tracks: 13 files\nFLAC 44.1/16, 4 tracks: 4 files", TRASH_KEEPS), asked);
   check("its request names every file of every edition, in the album's order",
     sent.length === 1 && JSON.stringify(sent[0]) === JSON.stringify(tracks.map((t) => t.path)), [sent.length, sent[0]?.length]);
   editions(view).options[2]?.click();
@@ -6215,19 +6233,89 @@ S.TestAnAlbumsDeleteMovesEveryEditionsFiles = async () => {
   const mixed = await editionPage([...local, ...[1, 2, 3].map(up), ...[1, 2, 3].map(img)], { id: "delete-mixed", allowDelete: true, trash: trashAll(sent) });
   deleteOf(mixed.view)?.click();
   await settle();
-  check("local files, an edition on an upstream and an SACD image's: Delete moves the local files alone, naming their 2 editions and what it leaves alone",
-    asked[0] === words("6 files of 2 editions of \"Album\"") + "\n\n3 tracks on an upstream server are left alone." &&
-    JSON.stringify(sent[0]) === JSON.stringify(local.map((t) => t.path)), [asked[0], sent[0]]);
+  check("local files, an edition on an upstream and an SACD image's: Delete names the 2 editions it moves, each it leaves alone and why, and the upstream's tracks",
+    asked[0] === words("Move 6 files from \"Album\" to the trash?",
+      "Whichever edition is shown, these files are moved:\nFLAC 192/24, 3 tracks: 3 files\nFLAC 44.1/16, 3 tracks, Album [2004]: 3 files", TRASH_KEEPS,
+      "Left alone:\nDSD64, 3 tracks: an SACD image, whose tracks are not files\nFLAC 44.1/16, 3 tracks, Album: on an upstream server",
+      "3 tracks on an upstream server are left alone."), asked);
+  check("its request names the local files alone, in the album's order", sent.length === 1 && JSON.stringify(sent[0]) === JSON.stringify(local.map((t) => t.path)), sent);
   asked.length = 0;
   sent.length = 0;
   const two = await editionPage([1, 2, 3].flatMap((k) => [edCd(k), up(k)]), { id: "delete-two", allowDelete: true, trash: trashAll(sent) });
   deleteOf(two.view)?.click();
   await settle();
-  check("one edition's files beside an edition on an upstream: of 1 edition, and its upstream line",
-    asked[0] === words("3 files of 1 edition of \"Album\"") + "\n\n3 tracks on an upstream server are left alone." && sent[0]?.length === 3, [asked[0], sent[0]]);
+  check("one edition's files beside an edition on an upstream: that edition named, the upstream's as left alone, and its upstream line",
+    asked[0] === words("Move 3 files from \"Album\" to the trash?", "Whichever edition is shown, these files are moved:\nFLAC 44.1/16, 3 tracks, Album [2004]: 3 files", TRASH_KEEPS,
+      "Left alone:\nFLAC 44.1/16, 3 tracks, Album: on an upstream server", "3 tracks on an upstream server are left alone."), asked);
+  check("its request names that edition's files alone, in the album's order",
+    sent.length === 1 && JSON.stringify(sent[0]) === JSON.stringify([1, 2, 3].map((k) => edCd(k).path)), sent);
   const none = await editionPage([1, 2, 3].flatMap((k) => [up(k), img(k)]), { id: "delete-none", allowDelete: true, trash: trashAll(sent) });
   check("no file the trash can move (an edition on an upstream and an SACD image's): no Delete, and no settings read for one",
     deleteOf(none.view) === null && none.log.filter((e) => e.path === "/api/settings").length === 0, [deleteOf(none.view)?.textContent, none.log.map((e) => e.path)]);
+};
+
+S.TestAnAlbumsDeleteNamesEachEditionItMoves = async () => {
+  await pageRig();
+  const asked = [];
+  globalThis.confirm = (m) => { asked.push(m); return true; };
+  const words = (...parts) => parts.join("\n\n");
+  // pressed is a page's Delete pressed, and what it sent once settled.
+  const pressed = async (page) => {
+    asked.length = 0;
+    deleteOf(page.view)?.click();
+    await settle();
+    return trashPosts(page.log);
+  };
+  // One edition's local row beside its routed one, and an edition alike but
+  // for its folder: each named in full, the mixed one by both its rows.
+  const mix = [flac(1, { path: "Lib/Mix/01.flac", title: "M1" }), flac(1, { path: "Lib/Solo/01.flac", title: "M1" }),
+    flac(2, { path: "Lib/Mix/02.flac", title: "M2", routed: true, sourceId: "uuid:up" }), flac(2, { path: "Lib/Solo/02.flac", title: "M2" })];
+  const m = await editionPage(mix, { id: "names-mix", allowDelete: true, trash: trashAll([]) });
+  check("two editions alike but for their folders, named in full, the mixed one by both its rows",
+    JSON.stringify(editions(m.view).names) === JSON.stringify(["FLAC 44.1/16, 2 tracks, Mix", "FLAC 44.1/16, 2 tracks, Solo"]), editions(m.view).names);
+  let sent = await pressed(m);
+  check("an edition's routed row is no file of it: the confirmation names it with its 1 file, and the upstream's track as left alone",
+    asked[0] === words("Move 3 files from \"Album\" to the trash?",
+      "Whichever edition is shown, these files are moved:\nFLAC 44.1/16, 2 tracks, Mix: 1 file\nFLAC 44.1/16, 2 tracks, Solo: 2 files", TRASH_KEEPS,
+      "1 track on an upstream server is left alone."), asked);
+  check("its request names the local files alone, in the album's order",
+    JSON.stringify(sent) === JSON.stringify([{ paths: ["Lib/Mix/01.flac", "Lib/Solo/01.flac", "Lib/Solo/02.flac"] }]), sent);
+  // An album of one edition, no song repeated, holding an SACD image's tracks
+  // beside its files, and an upstream's track too.
+  const img = (k) => ({ path: `Lib/SACD/Album.iso/st/${nn(k)}.dff`, title: SONGS[k - 1], track: k, codec: "DSD", isDsd: true, rateHz: 2822400,
+    duration: 240, sizeBytes: 3000000000, play: { kind: "none", contentType: "audio/x-dff" } });
+  const up = (k) => edCd(k, { path: `Upstream/Album/${nn(k)}.flac`, routed: true, sourceId: "uuid:up" });
+  const one = await editionPage([edHi(1), edHi(2), img(3)], { id: "names-one-image", allowDelete: true, trash: trashAll([]) });
+  sent = await pressed(one);
+  check("an album of one edition keeps its words, and says its SACD image's track is left alone, being no file",
+    !editions(one.view).group && asked[0] === words("Move 2 files from \"Album\" to the trash?", TRASH_KEEPS, "1 track of an SACD image is left alone: it is not a file."), asked);
+  check("its request names its files alone, in the album's order", JSON.stringify(sent) === JSON.stringify([{ paths: [edHi(1).path, edHi(2).path] }]), sent);
+  const both = await editionPage([edHi(1), up(2), img(3), img(4)], { id: "names-one-both", allowDelete: true, trash: trashAll([]) });
+  sent = await pressed(both);
+  check("with an upstream's track too: the upstream's sentence as it always was, then the image's",
+    !editions(both.view).group && asked[0] === words("Move 1 file from \"Album\" to the trash?", TRASH_KEEPS, "1 track on an upstream server is left alone.",
+      "2 tracks of an SACD image are left alone: they are not files."), asked);
+  check("its request names its one file", JSON.stringify(sent) === JSON.stringify([{ paths: [edHi(1).path] }]), sent);
+  // Two rips of the same songs, a DSD64 folder of four and a CD folder of
+  // three: the bridge's player opens on the DSD rip, and the reader picks the
+  // CD rip before pressing Delete.
+  store.set(OUTPUT_KEY, "bridge");
+  await pageRig();
+  asked.length = 0;
+  const rips = [1, 2, 3, 4].flatMap((n) => [edDsd(n, WAYS.dsd), ...(n < 4 ? [edCd(n, WAYS.cd)] : [])]);
+  const r = await editionPage(rips, { id: "names-rips", allowDelete: true, trash: trashAll([]) });
+  const e = editions(r.view);
+  const opened = e.pressed;
+  e.options[1]?.click();
+  check("the CD rip picked before Delete is pressed: pressed, its rows alone shown, nothing asked yet",
+    opened === e.options[0] && JSON.stringify(e.names) === JSON.stringify(["DSD64, 4 tracks", "FLAC 44.1/16, 3 tracks"]) && editions(r.view).pressed === e.options[1] &&
+    JSON.stringify(listing(r.view)) === JSON.stringify(["Disc 1", ...SONGS.slice(0, 3)]) && asked.length === 0 && trashPosts(r.log).length === 0,
+    [opened?.textContent, e.names, editions(r.view).pressed?.textContent, listing(r.view)]);
+  sent = await pressed(r);
+  check("the CD rip shown: Delete's confirmation names both rips, each with the files it moves, whichever edition is shown",
+    asked[0] === words("Move 7 files from \"Album\" to the trash?", "Whichever edition is shown, these files are moved:\nDSD64, 4 tracks: 4 files\nFLAC 44.1/16, 3 tracks: 3 files",
+      TRASH_KEEPS), asked);
+  check("its request names both rips' files, in the album's order", JSON.stringify(sent) === JSON.stringify([{ paths: rips.map((t) => t.path) }]), sent);
 };
 
 S.TestAnAlbumsDeleteKeepsItsRequestThroughARedraw = async () => {
