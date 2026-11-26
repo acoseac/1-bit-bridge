@@ -95,7 +95,7 @@ func TestTheAlbumRailFollowsEverySort(t *testing.T) {
 		{"R/Cedar/01.flac", "Cedar", "The Aardvarks", 0, time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)},
 		{"R/Dune/01.flac", "Dune Sea", "Kilo Trio", 12345, time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)},
 		{"R/Ember/01.flac", "Ember", "Lumen", 74, time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)},
-		{"R/Fable/01.flac", "Fable", "Nadir", 1982, time.Date(2023, 2, 2, 0, 0, 0, 0, time.UTC)},
+		{"R/Fawn/01.flac", "Fawn", "Nadir", 1982, time.Date(2023, 2, 2, 0, 0, 0, 0, time.UTC)},
 		{"R/Gale/01.flac", "Gale", "Orbit", 2001, time.Time{}},
 	})
 	type b = playerBucketDTO
@@ -109,7 +109,7 @@ func TestTheAlbumRailFollowsEverySort(t *testing.T) {
 		{"sort=title", "letters", []b{{"A", 0, 1}, {"B", 1, 1}, {"C", 2, 1}, {"D", 3, 1}, {"E", 4, 1}, {"F", 5, 1}, {"G", 6, 1}}},
 		{"sort=artist", "letters", []b{{"A", 0, 1}, {"K", 1, 1}, {"L", 2, 1}, {"M", 3, 1}, {"N", 4, 1}, {"O", 5, 1}, {"Z", 6, 1}}},
 		// The name filter narrows the rail with the list: "a" leaves Apple Days,
-		// Cedar (by The Aardvarks), Dune Sea, Fable and Gale.
+		// Cedar (by The Aardvarks), Dune Sea, Fawn and Gale.
 		{"sort=year&q=a", "years", []b{{"2019", 0, 1}, {"2001", 1, 1}, {"1982", 2, 1}, {"?", 3, 2}}},
 		{"sort=recent&q=a", "dates", []b{{"this-month", 0, 1}, {"this-year", 1, 1}, {"2025", 2, 1}, {"2023", 3, 1}, {"?", 4, 1}}},
 	} {
