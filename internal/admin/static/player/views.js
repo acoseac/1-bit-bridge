@@ -6,7 +6,7 @@ import { api, coverURL, artistImageURL, collectionCoverURL, bookletURL, download
          playlistExportURL, isAborted } from "./api.js";
 import { duration, totalDuration, qualityLabel, formatChip, plural, playFor, failures, rankFor, dsdName,
          bytes, variantKindLabel, variantSkipLabel, timeAgo } from "./format.js";
-import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, alphabetRail, aboutBlock, detailTabs, crumbs, announce, setDisabled } from "./ui.js";
+import { el, clear, link, cover, chip, spinner, emptyState, errorState, chunkAppend, onVisible, indexRail, aboutBlock, detailTabs, crumbs, announce, setDisabled } from "./ui.js";
 import * as audio from "./audio.js";
 import { variantPanel, onVariantChange } from "./variants.js";
 import { bindTrackMarks } from "./trackmarks.js";
@@ -257,7 +257,9 @@ export async function renderAlbums(view, ctx) {
     // but the parameter's mere presence once read as "a filter is active"
     // and defeated the variant-free shortcut on every default load, and a
     // query that says nothing about a filter cannot be misread that way.
-    fetchPage: (offset, limit, q) => api.albums({ sort, quality, needs: needs === "all" ? "" : needs, ...scope, q, offset, limit }),
+    // tz is the reader's calendar, which Recently Added's rail files by.
+    fetchPage: (offset, limit, q) => api.albums({ sort, quality, needs: needs === "all" ? "" : needs, ...scope, q, offset, limit,
+      tz: new Date().getTimezoneOffset() }),
     pick: (r) => r.albums,
     make: albumTile,
     containerClass: "grid",
@@ -1621,7 +1623,7 @@ async function renderPagedList(view, ctx, opts) {
       return;
     }
     if (countNoun) body.appendChild(el("p", { class: "muted small", text: countText() }));
-    const rail = alphabetRail(r.buckets, (b) => void load(b.offset, null, "jump"));
+    const rail = indexRail(r.buckets, (b) => void load(b.offset, null, "jump"), r.rail);
     if (rail) body.appendChild(rail);
     container = el("div", { class: containerClass });
     for (const n of [top, container, sentinel]) body.appendChild(n);

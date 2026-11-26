@@ -882,7 +882,8 @@ class El {
     this.children = []; this.parentNode = null; this.attrs = {}; this.listeners = {};
     this.className = ""; this.dataset = {}; this.hidden = false; this.disabled = false; this.own = "";
     const self = this;
-    this.style = { setProperty() {}, removeProperty() {} };
+    // An inline style keeps what is set on it, by assignment or setProperty.
+    this.style = { setProperty(k, v) { this[k] = String(v); }, removeProperty(k) { delete this[k]; } };
     this.classList = {
       add: (...c) => { for (const x of c) if (!self.classList.contains(x)) self.className = (self.className + " " + x).trim(); },
       remove: (...c) => { self.className = self.className.split(/\s+/).filter((x) => x && !c.includes(x)).join(" "); },
@@ -923,6 +924,11 @@ class El {
     if (v && globalThis.document && globalThis.document.activeElement === this) globalThis.document.activeElement = globalThis.document.body;
   }
   contains(n) { for (let x = n; x; x = x.parentNode) if (x === this) return true; return false; }
+  // A pointer's capture is the browser's; the box is the one a case lays out
+  // (railModel), none by default.
+  setPointerCapture() {}
+  releasePointerCapture() {}
+  getBoundingClientRect() { return this.rect || { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0 }; }
   get isConnected() { let x = this; while (x.parentNode) x = x.parentNode; return x === globalThis.document?.body; }
   // A tag or a class (".track"), in document order, as far as the modules the
   // cases load ask.
@@ -1058,6 +1064,8 @@ function page() {
     getElementById: (id) => findAll(body, (n) => n.getAttribute("id") === id)[0] || null,
     querySelector: () => null,
     querySelectorAll: () => [],
+    // Nothing is under a point until a case lays its elements out (railModel).
+    elementFromPoint: () => null,
     addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); },
   };
   // navigator is a getter on node's global (as crypto is), so it is
@@ -5317,7 +5325,7 @@ S.TestATapOnTheRailJumpsOnlyFromTheLetterItBeganOn = async () => {
   page();
   const ui = await import(new URL("ui.js", dirURL));
   const jumps = [];
-  const rail = ui.alphabetRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
+  const rail = ui.indexRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
   const letter = (k) => rail.children.find((n) => n.textContent === k);
   const empty = rail.children.filter((n) => n.hasAttribute("disabled"));
   // A touch as WebKit delivers it: its pointerdown on the letter under the
@@ -6517,7 +6525,7 @@ S.TestTheRailTakesEveryPointerDownForItsClick = async () => {
   const pg = page();
   const ui = await import(new URL("ui.js", dirURL));
   const jumps = [];
-  const rail = ui.alphabetRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
+  const rail = ui.indexRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
   pg.body.appendChild(rail);
   const letter = (k) => rail.children.find((n) => n.textContent === k);
   const outside = document.createElement("div");
@@ -6534,6 +6542,214 @@ S.TestTheRailTakesEveryPointerDownForItsClick = async () => {
   letter("A").fire("click", { detail: 0 });
   letter("M").fire("click", { detail: 1 });
   check("a key's click beside a held touch jumps, and that touch's handed click does not", JSON.stringify(jumps) === '["A","A"]', jumps);
+};
+
+// ---- The jump rail's kinds and its scrub (B1021 PR 3b): ui.js alone ----
+
+// railModel lays a rail's entries out in cols columns of w by h from
+// (left, top), the rail's box around them, and makes elementFromPoint answer
+// the entry under a point, the rail inside its box elsewhere, null outside it.
+function railModel(rail, { cols = 1, w = 44, h = 10, left = 300, top = 100 } = {}) {
+  const entries = rail.children.filter((n) => n.classList.contains("az-letter"));
+  const box = (x, y, bw, bh) => ({ left: x, right: x + bw, top: y, bottom: y + bh, width: bw, height: bh, x, y });
+  entries.forEach((n, i) => { n.rect = box(left + (i % cols) * w, top + Math.floor(i / cols) * h, w, h); });
+  rail.rect = box(left, top, cols * w, Math.ceil(entries.length / cols) * h);
+  const inside = (r, x, y) => x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+  document.elementFromPoint = (x, y) => entries.find((n) => inside(n.rect, x, y)) || (inside(rail.rect, x, y) ? rail : null);
+  // at is a point inside an entry: across its width by fx, down its height by fy.
+  return { entries, at: (n, fy = 0.5, fx = 0.5) => ({ clientX: n.rect.left + w * fx, clientY: n.rect.top + h * fy }) };
+}
+const labelsOf = (rail) => rail.children.filter((n) => n.classList.contains("az-letter")).map((n) => n.textContent);
+const nameOf = (n) => n.getAttribute("aria-label") || n.textContent;
+const sameJSON = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// yearBuckets is the server's Year buckets over years, newest first, each
+// two albums, and n albums under "?" after them.
+function yearBuckets(years, n = 0) {
+  const out = years.map((y, i) => ({ key: String(y), offset: 2 * i, count: 2 }));
+  if (n) out.push({ key: "?", offset: 2 * years.length, count: n });
+  return out;
+}
+// atDate runs fn with the clock at iso.
+function atDate(iso, fn) {
+  const Real = Date;
+  const t = Real.parse(iso);
+  globalThis.Date = class extends Real {
+    constructor(...a) { super(...(a.length ? a : [t])); }
+    static now() { return t; }
+  };
+  try { return fn(); } finally { globalThis.Date = Real; }
+}
+
+S.TestTheYearRailFollowsThePhonesBands = async () => {
+  page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const rail = (years, n) => atDate("2026-11-26T12:00:00Z", () => ui.indexRail(yearBuckets(years, n), (b) => jumps.push(b.key), "years"));
+  const sixteen = [2025, 2024, 2019, 2018, 2010, 2003, 1999, 1998, 1990, 1987, 1985, 1982, 1979, 1975, 1970, 1966];
+  const r16 = rail(sixteen, 3);
+  check("16 years make 16 bands, ? a band of its own, each a year's without the century",
+    sameJSON(labelsOf(r16), ["’25", "’24", "’19", "’18", "’10", "’03", "’99", "’98", "’90", "’87", "’85", "’82", "’79", "’75", "’70", "’66", "?"]), labelsOf(r16));
+  const band82 = r16.children.find((n) => n.textContent === "’82");
+  const unknown = r16.children.find((n) => n.textContent === "?");
+  check("the nav is the year index, a band says its year whole and counts it, ? says Year unknown",
+    r16.getAttribute("aria-label") === "Jump to year" && nameOf(band82) === "1982" && band82.getAttribute("title") === "2 under 1982" && nameOf(unknown) === "Year unknown",
+    [r16.getAttribute("aria-label"), nameOf(band82), band82.getAttribute("title"), nameOf(unknown)]);
+  const r17 = rail([2025, 2024, 2019, 2018, 2010, 2003, 1999, 1998, 1990, 1987, 1985, 1983, 1982, 1979, 1975, 1970, 1966], 1);
+  check("17 years make a band to each decade", sameJSON(labelsOf(r17), ["’20s", "’10s", "’00s", "’90s", "’80s", "’70s", "’60s", "?"]), labelsOf(r17));
+  const eighties = r17.children.find((n) => n.textContent === "’80s");
+  check("a decade's band says its decade and counts its years", nameOf(eighties) === "1980s" && eighties.getAttribute("title") === "8 under 1980s",
+    [nameOf(eighties), eighties.getAttribute("title")]);
+  check("every band is an equal share: none is sized by its count", r17.children.every((n) => Object.keys(n.style).every((k) => typeof n.style[k] === "function")),
+    r17.children.map((n) => Object.keys(n.style).filter((k) => typeof n.style[k] !== "function")));
+  const old = rail([2025, 2024, 1982, 1874]);
+  check("an 1874 album puts the century on every label", sameJSON(labelsOf(old), ["2025", "2024", "1982", "1874"]), labelsOf(old));
+  const oldDecades = rail([2025, 2024, 2019, 2018, 2010, 2003, 1999, 1998, 1990, 1987, 1985, 1983, 1982, 1979, 1975, 1970, 1874]);
+  check("and on every decade's", sameJSON(labelsOf(oldDecades), ["2020s", "2010s", "2000s", "1990s", "1980s", "1970s", "1870s"]), labelsOf(oldDecades));
+  // A key on a decade's band jumps to its first year, the newest as the list
+  // sorts; a finger in it, to the year at its height there.
+  eighties.fire("click", { detail: 0 });
+  check("a key on a decade's band jumps to its first year", sameJSON(jumps, ["1987"]), jumps);
+  const m = railModel(r17, { h: 40 });
+  for (const [fy, want] of [[0.1, "1987"], [0.6, "1983"], [0.95, "1982"]]) {
+    r17.fire("pointerdown", { target: eighties, pointerType: "touch", pointerId: 4, isPrimary: true, ...m.at(eighties, fy) });
+    r17.fire("pointerup", { target: r17, pointerType: "touch", pointerId: 4, isPrimary: true, ...m.at(eighties, fy) });
+  }
+  check("a finger's height in a decade's band picks its year, top to bottom", sameJSON(jumps.slice(1), ["1987", "1983", "1982"]), jumps.slice(1));
+  const callout = r17.querySelector(".az-callout");
+  r17.fire("pointerdown", { target: eighties, pointerType: "touch", pointerId: 5, isPrimary: true, ...m.at(eighties, 0.3) });
+  check("the callout names the year under the finger", callout.textContent === "1985" && !callout.hidden, [callout.textContent, callout.hidden]);
+};
+
+S.TestTheDateRailNamesItsPeriods = async () => {
+  page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const buckets = [{ key: "this-month", offset: 0, count: 4 }, { key: "this-year", offset: 4, count: 10 },
+    { key: "2025", offset: 14, count: 30 }, { key: "2019", offset: 44, count: 2 }, { key: "?", offset: 46, count: 1 }];
+  const rail = atDate("2026-03-15T12:00:00Z", () => ui.indexRail(buckets, (b) => jumps.push(b.key), "dates"));
+  const entries = rail.children.filter((n) => n.classList.contains("az-letter"));
+  check("an entry to each period, in the list's order, labelled short: the month, the year, each earlier year, ?",
+    sameJSON(labelsOf(rail), ["Mar", "2026", "2025", "2019", "?"]), labelsOf(rail));
+  check("each one's name is its words whole", sameJSON(entries.map(nameOf), ["This month", "Earlier this year", "2025", "2019", "Date unknown"]), entries.map(nameOf));
+  check("the nav is the date index and each entry counts its albums",
+    rail.getAttribute("aria-label") === "Jump to date added" && entries[0].getAttribute("title") === "4 under This month" && entries[2].getAttribute("title") === "30 under 2025",
+    [rail.getAttribute("aria-label"), entries.map((n) => n.getAttribute("title"))]);
+  for (const n of entries) n.fire("click", { detail: 0 });
+  check("a key on each entry jumps to its period", sameJSON(jumps, ["this-month", "this-year", "2025", "2019", "?"]), jumps);
+  const m = railModel(rail, { h: 40 });
+  rail.fire("pointerdown", { target: entries[1], pointerType: "touch", pointerId: 6, isPrimary: true, ...m.at(entries[1]) });
+  const callout = rail.querySelector(".az-callout");
+  check("a finger's callout says the period's words", callout.textContent === "Earlier this year" && !callout.hidden, [callout.textContent, callout.hidden]);
+};
+
+S.TestAFingerScrubsTheRail = async () => {
+  page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const rail = ui.indexRail([{ key: "A", offset: 0, count: 5 }, { key: "C", offset: 5, count: 2 }, { key: "D", offset: 7, count: 4 },
+    { key: "M", offset: 11, count: 3 }, { key: "Z", offset: 14, count: 1 }], (b) => jumps.push(b.key));
+  const m = railModel(rail);
+  const letter = (k) => m.entries.find((n) => n.textContent === k);
+  const callout = rail.querySelector(".az-callout");
+  const finger = (type, k, o = {}) => rail.fire(type, { target: type === "pointerdown" ? letter(k) : rail, pointerType: "touch", pointerId: 3, isPrimary: true, ...m.at(letter(k)), ...o });
+  check("no callout before a finger", callout?.hidden === true && callout.getAttribute("aria-hidden") === "true", [callout?.hidden]);
+  finger("pointerdown", "A");
+  check("a finger down on a live letter jumps to it once", sameJSON(jumps, ["A"]), jumps);
+  check("the callout names it beside the rail at the finger's height", !callout.hidden && callout.textContent === "A" && callout.style.top === `${letter("A").rect.top + 5 - rail.rect.top}px`,
+    [callout.hidden, callout.textContent, callout.style.top]);
+  const seen = [];
+  for (const k of ["A", "B", "C", "C", "D", "E", "F", "M", "N", "Y", "Z"]) {
+    finger("pointermove", k);
+    seen.push(callout.textContent);
+  }
+  check("a drag jumps at each new live letter, once each, never at an empty one", sameJSON(jumps, ["A", "C", "D", "M", "Z"]), jumps);
+  check("over an empty letter the callout keeps the live one the list is at", sameJSON(seen, ["A", "A", "C", "C", "D", "D", "D", "M", "M", "M", "Z"]), seen);
+  check("the callout follows the finger's height", callout.style.top === `${letter("Z").rect.top + 5 - rail.rect.top}px`, callout.style.top);
+  finger("pointerup", "Z");
+  letter("Z").fire("click", { detail: 1 });
+  check("the lift and the touch's click after it jump nothing more, and the callout hides", sameJSON(jumps, ["A", "C", "D", "M", "Z"]) && callout.hidden, [jumps, callout.hidden]);
+  finger("pointerdown", "B");
+  check("a finger down on an empty letter jumps nothing and shows no callout", jumps.length === 5 && callout.hidden, [jumps, callout.hidden]);
+  finger("pointermove", "M");
+  finger("pointercancel", "M");
+  finger("pointermove", "Z");
+  check("a cancel ends the scrub: what the finger does after it moves nothing", sameJSON(jumps.slice(5), ["M"]) && callout.hidden, [jumps.slice(5), callout.hidden]);
+  // A finger beside the rail, its point held inside it: the letter at its height.
+  rail.fire("pointerdown", { target: rail, pointerType: "touch", pointerId: 8, isPrimary: true, clientX: rail.rect.left + 0.2, clientY: letter("D").rect.top + 5 });
+  rail.fire("pointermove", { target: rail, pointerType: "touch", pointerId: 8, isPrimary: true, clientX: rail.rect.right + 30, clientY: letter("Z").rect.top + 5 });
+  check("a finger on the rail's edge, or past it, takes the letter at its height", sameJSON(jumps.slice(6), ["D", "Z"]), jumps.slice(6));
+  // A mouse's down and click are PR 1's: one jump, no callout.
+  rail.fire("pointerup", { target: rail, pointerType: "touch", pointerId: 8, isPrimary: true });
+  rail.fire("pointerdown", { target: letter("C"), pointerType: "mouse", pointerId: 1, isPrimary: true, ...m.at(letter("C")) });
+  letter("C").fire("click", { detail: 1 });
+  check("a mouse's click jumps once and shows no callout", sameJSON(jumps.slice(8), ["C"]) && callout.hidden, [jumps.slice(8), callout.hidden]);
+};
+
+S.TestAScrubIsItsOwnersAlone = async () => {
+  const pg = page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const rail = ui.indexRail([{ key: "A", offset: 1, count: 3 }, { key: "M", offset: 14, count: 2 }, { key: "Z", offset: 28, count: 1 }], (b) => jumps.push(b.key));
+  pg.body.appendChild(rail);
+  const outside = document.createElement("div");
+  pg.body.appendChild(outside);
+  const m = railModel(rail);
+  const letter = (k) => m.entries.find((n) => n.textContent === k);
+  const callout = rail.querySelector(".az-callout");
+  const ev = (id, primary, k, o = {}) => ({ pointerType: "touch", pointerId: id, isPrimary: primary, ...m.at(letter(k)), ...o });
+  // One finger owns the scrub; a second beside it moves nothing.
+  letter("A").fire("pointerdown", ev(1, true, "A"));
+  letter("M").fire("pointerdown", ev(2, false, "M"));
+  rail.fire("pointermove", { target: rail, ...ev(2, false, "Z") });
+  check("a second finger on the rail beside the scrub's owner jumps nothing", sameJSON(jumps, ["A"]) && callout.textContent === "A", [jumps, callout.textContent]);
+  // The implicit capture moving from the letter to the rail is no end.
+  rail.fire("lostpointercapture", { target: letter("A"), ...ev(1, true, "A") });
+  rail.fire("pointermove", { target: rail, ...ev(1, true, "M") });
+  check("the owner's moves jump, its letter's lost capture ending nothing", sameJSON(jumps, ["A", "M"]), jumps);
+  rail.fire("lostpointercapture", { target: rail, ...ev(1, true, "M") });
+  check("the rail's lost capture ends the scrub and hides the callout", callout.hidden, callout.hidden);
+  rail.fire("pointermove", { target: rail, ...ev(1, true, "Z") });
+  rail.fire("pointerup", { target: rail, ...ev(1, true, "Z") });
+  letter("M").fire("click", { detail: 1 });
+  check("after it, the owner's moves and lift, and the second finger's click, jump nothing", sameJSON(jumps, ["A", "M"]), jumps);
+  letter("Z").fire("click", { detail: 0 });
+  check("a key's click jumps", sameJSON(jumps, ["A", "M", "Z"]), jumps);
+  // A tap whose click comes after another pointer went down elsewhere: the
+  // tap's one jump, at its down; the mouse's own click is the mouse's.
+  letter("A").fire("pointerdown", ev(3, true, "A"));
+  outside.fire("pointerdown", { pointerType: "mouse", pointerId: 9, isPrimary: true });
+  rail.fire("pointerup", { target: rail, ...ev(3, true, "A") });
+  letter("A").fire("click", { detail: 1 });
+  check("a tap's click after a mouse went down elsewhere is the tap's: one jump for the tap", sameJSON(jumps.slice(3), ["A"]) && callout.hidden, [jumps.slice(3), callout.hidden]);
+  letter("Z").fire("pointerdown", { pointerType: "mouse", pointerId: 9, isPrimary: true, ...m.at(letter("Z")) });
+  letter("Z").fire("click", { detail: 1 });
+  check("and the mouse's click after it jumps", sameJSON(jumps.slice(3), ["A", "Z"]), jumps.slice(3));
+};
+
+S.TestAScrubCrossesTheShortWindowsGrid = async () => {
+  page();
+  const ui = await import(new URL("ui.js", dirURL));
+  const jumps = [];
+  const live = ["A", "C", "H", "J", "M", "Q", "Z"];
+  const rail = ui.indexRail(live.map((k, i) => ({ key: k, offset: i * 3, count: 3 })), (b) => jumps.push(b.key));
+  // PR 1's short window: seven columns of four rows, # and A-F the first.
+  const m = railModel(rail, { cols: 7, w: 20, h: 18 });
+  const letter = (k) => m.entries.find((n) => n.textContent === k);
+  const at = (k, fx = 0.5) => m.at(letter(k), 0.5, fx);
+  rail.fire("pointerdown", { target: letter("A"), pointerType: "touch", pointerId: 2, isPrimary: true, ...at("A") });
+  for (const [k, fx] of [["B", 0.5], ["C", 0.9], ["G", 0.1], ["H", 0.5], ["J", 0.5], ["M", 0.5], ["N", 0.5]]) {
+    rail.fire("pointermove", { target: rail, pointerType: "touch", pointerId: 2, isPrimary: true, ...at(k, fx) });
+  }
+  check("a drag across two rows of the grid jumps at each new live letter, by the cell under the finger", sameJSON(jumps, ["A", "C", "H", "J", "M"]), jumps);
+  rail.fire("pointermove", { target: rail, pointerType: "touch", pointerId: 2, isPrimary: true, clientX: rail.rect.right - 2, clientY: rail.rect.bottom - 2 });
+  check("the grid's empty last cell is no entry: nothing moves", sameJSON(jumps, ["A", "C", "H", "J", "M"]), jumps);
+  rail.fire("pointerup", { target: rail, pointerType: "touch", pointerId: 2, isPrimary: true });
+  // Taps at both edges of a row: the cell at the edge.
+  rail.fire("pointerdown", { target: rail, pointerType: "touch", pointerId: 5, isPrimary: true, clientX: rail.rect.left, clientY: letter("G").rect.top + 9 });
+  rail.fire("pointerup", { target: rail, pointerType: "touch", pointerId: 5, isPrimary: true });
+  rail.fire("pointerdown", { target: rail, pointerType: "touch", pointerId: 5, isPrimary: true, clientX: rail.rect.right, clientY: letter("M").rect.top + 9 });
+  rail.fire("pointerup", { target: rail, pointerType: "touch", pointerId: 5, isPrimary: true });
+  check("a tap on a row's left or right edge takes the cell there (G empty, M live)", sameJSON(jumps.slice(5), ["M"]), jumps.slice(5));
 };
 
 const name = scenarioName;

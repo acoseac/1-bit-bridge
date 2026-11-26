@@ -15,7 +15,8 @@
 // requestAnimationFrame queued and run by settle(); the shell's elements by
 // id; every timer of 50 ms or more held until the case advances the clock
 // (the filter's pause, the place writer's 500 ms); and a fetch that answers
-// the list endpoints by offset, limit, sort and q from a generated library.
+// the list endpoints by offset, limit, sort and q from a generated library,
+// each first page with its rail's kind and buckets.
 // What boot.js needs to import and boot and is not a list's is stubbed: the
 // audio element's media methods, navigator.mediaSession, the bridge
 // player's GET now (no player offered, unless a case holds it), and the
@@ -161,6 +162,7 @@ class El {
   focus() { if (doc) doc.activeElement = this; }
   blur() { if (doc && doc.activeElement === this) doc.activeElement = doc.body; }
   getBoundingClientRect() { return rectOf(this); }
+  setPointerCapture() {}
   scrollIntoView() { if (isList(this)) { codeScrolls.push(["intoView", top(this)]); scrollTo(top(this) - layout.pinned); } }
   set innerHTML(h) { for (const c of [...this.children]) this.removeChild(c); if (h === "SHELL") shell(this); else if (h) this.append(mk("h1", {}, "Stats")); }
   get offsetHeight() { return 0; }
@@ -373,11 +375,13 @@ const buckets = (rows, letter) => {
   return out;
 };
 const initial = (s) => (/^[A-Z]/.test(fold(s)) ? fold(s)[0] : "#");
-function page(rows, q, letter, key) {
+// An album's period of Recently Added, by its place in the list's order.
+const period = (a) => { const i = parseInt(a.id, 16) - 1; return i < 100 ? "this-month" : i < 400 ? "this-year" : i < 800 ? "2025" : i < 1200 ? "2024" : "?"; };
+function page(rows, q, letter, key, rail = "letters") {
   const offset = Number(q.get("offset") || 0);
   const limit = Math.min(Number(q.get("limit") || 60), 200);
   const body = { total: rows.length, offset, limit, snapshotAt: SNAP, [key]: rows.slice(offset, offset + limit) };
-  if (offset === 0 && letter) body.buckets = buckets(rows, letter);
+  if (offset === 0 && letter) Object.assign(body, { rail, buckets: buckets(rows, letter) });
   return body;
 }
 const named = (rows, q, ...fields) => {
@@ -396,7 +400,9 @@ function answer(e) {
     if (q.get("genre")) rows = rows.filter((a) => lib.genres[a.genre]?.id === q.get("genre"));
     const sort = q.get("sort") || "recent";
     if (sort === "title") rows = [...rows].sort((x, y) => fold(x.title).localeCompare(fold(y.title)));
-    return { body: page(rows, q, sort === "title" ? (a) => initial(a.title) : null, "albums") };
+    if (sort === "year") rows = [...rows].sort((x, y) => y.year - x.year || x.id.localeCompare(y.id));
+    const rail = { title: ["letters", (a) => initial(a.title)], year: ["years", (a) => String(a.year)], recent: ["dates", period] }[sort];
+    return { body: page(rows, q, rail?.[1], "albums", rail?.[0]) };
   }
   let m;
   if ((m = /^\/api\/player\/albums\/(\w+)$/.exec(p))) {
@@ -493,6 +499,8 @@ async function rig(path = "/albums", o = {}) {
     createTextNode: text,
     createDocumentFragment: () => new El("#fragment"),
     getElementById: (id) => html.querySelectorAll(`#${id}`)[0] || null,
+    // Nothing is under a point unless a case says what is.
+    elementFromPoint: () => null,
     querySelector: (sel) => html.querySelector(sel),
     querySelectorAll: (sel) => html.querySelectorAll(sel),
     addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); },
@@ -864,6 +872,82 @@ S.TestAFilterPauseWritesNothingAfterANavigation = async () => {
   await advance(400);
   check("the album's URL and entry are as the tile left them", location.pathname + location.search === url && same(here().state, state), [location.href, here().state]);
   check("the pause asked for no list", listGets("/api/player/albums").filter((e) => log.indexOf(e) >= asked).length === 0, log.slice(asked).map((e) => e.path));
+};
+
+// ---- The rail's kinds on a restored list, and a scrub's jumps (B1021 PR 3b) ----
+
+const railNav = () => doc.getElementById("player-view").querySelector(".az-rail");
+const railEntry = (label) => doc.getElementById("player-view").querySelectorAll(".az-letter").find((b) => b.textContent === label);
+const yearOf = (n) => n?.querySelector(".tile-meta")?.textContent || "";
+
+S.TestARestoredListKeepsItsRailAndItsKind = async () => {
+  // Title: a jump to M, an album, Back, then the restored rail's jump to Z.
+  await rig("/albums?sort=title");
+  railEntry("M").fire("click", { detail: 0 });
+  await settle();
+  await navigate(tile(3));
+  await back();
+  check("Back restores M's window under its letter rail", titleOf(rows()[0]).startsWith("M") && railNav()?.getAttribute("aria-label") === "Jump to letter",
+    [titleOf(rows()[0]), railNav()?.getAttribute("aria-label")]);
+  railEntry("Z").fire("click", { detail: 0 });
+  await settle();
+  check("the restored rail's jump to Z draws the list from Z", titleOf(rows()[0]).startsWith("Z") && titleOf(rows()[1]).startsWith("Z"), titleOf(rows()[0]));
+  // Year: decades; a jump to the 1990s, an album, Back, then the 1960s.
+  history.pushState({ scrollY: 0 }, "", "/albums?sort=year");
+  win.dispatchEvent({ type: "popstate" });
+  await settle();
+  railEntry("’90s").fire("click", { detail: 0 });
+  await settle();
+  check("Year's rail is its decades, and a jump to the 1990s draws the list from 1999", railNav()?.getAttribute("aria-label") === "Jump to year" && yearOf(rows()[0]) === "1999",
+    [railNav()?.getAttribute("aria-label"), yearOf(rows()[0])]);
+  await navigate(tile(2));
+  await back();
+  check("Back restores the 1990s window under the year rail", yearOf(rows()[0]) === "1999" && railNav()?.getAttribute("aria-label") === "Jump to year" && !!railEntry("’60s"),
+    [yearOf(rows()[0]), railNav()?.getAttribute("aria-label")]);
+  railEntry("’60s").fire("click", { detail: 0 });
+  await settle();
+  check("the restored rail's jump to the 1960s draws the list from 1969", yearOf(rows()[0]) === "1969", yearOf(rows()[0]));
+  // Recently Added: its periods; a jump to 2025, an album, Back, then "?".
+  history.pushState({ scrollY: 0 }, "", "/albums");
+  win.dispatchEvent({ type: "popstate" });
+  await settle();
+  railEntry("2025").fire("click", { detail: 0 });
+  await settle();
+  check("Recently Added's rail is its periods, and a jump to 2025 draws the list from its first album",
+    railNav()?.getAttribute("aria-label") === "Jump to date added" && titleOf(rows()[0]) === "K Album 0400", [railNav()?.getAttribute("aria-label"), titleOf(rows()[0])]);
+  await navigate(tile(1));
+  await back();
+  check("Back restores 2025's window under the date rail", titleOf(rows()[0]) === "K Album 0400" && railNav()?.getAttribute("aria-label") === "Jump to date added",
+    [titleOf(rows()[0]), railNav()?.getAttribute("aria-label")]);
+  railEntry("?").fire("click", { detail: 0 });
+  await settle();
+  check("the restored rail's jump to ? draws the list from the first album with no date", titleOf(rows()[0]) === "E Album 1200", titleOf(rows()[0]));
+  const asked = listGets("/api/player/albums");
+  check("every albums request carries the reader's tz", asked.length > 0 && asked.every((e) => e.query.get("tz") === String(new Date().getTimezoneOffset())),
+    asked.map((e) => e.query.get("tz")));
+};
+
+S.TestARapidScrubAppendsOnlyTheLastJumpsRows = async () => {
+  await rig("/albums?sort=title");
+  const rail = railNav();
+  let under = railEntry("M");
+  doc.elementFromPoint = () => under;
+  const finger = (type, o = {}) => rail.fire(type, { target: rail, pointerType: "touch", pointerId: 1, isPrimary: true, clientX: 0, clientY: 0, ...o });
+  finger("pointerdown", { target: under });
+  // M's first page in: its first rows appended at once, the rest held in a
+  // frame the page has not run yet.
+  for (let i = 0; i < 50 && rows().length === 0; i++) await turn();
+  check("M's first rows are in, a frame holding the rest of its page", rows().length > 0 && rows().length < 60 && frames.length > 0 && titleOf(rows()[0]).startsWith("M"),
+    [rows().length, frames.length, titleOf(rows()[0])]);
+  under = railEntry("Z");
+  finger("pointermove");
+  await settle();
+  finger("pointerup");
+  const sorted = [...lib.albums].sort((x, y) => fold(x.title).localeCompare(fold(y.title)));
+  const z = sorted.findIndex((a) => initial(a.title) === "Z");
+  const got = rows().map(titleOf);
+  const want = sorted.slice(z, z + got.length).map((a) => a.title);
+  check("the list is Z's rows alone, in order, none of M's frame after the jump", got.length === sorted.length - z && same(got, want), [got.length, got.slice(0, 3), got.filter((t) => !t.startsWith("Z")).slice(0, 3)]);
 };
 
 const name = scenarioName;

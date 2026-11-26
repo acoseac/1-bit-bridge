@@ -113,3 +113,15 @@ func TestTheFilterNarrowsTheListInPlace(t *testing.T) { listScenario(t, 14) }
 // opened inside the pause: the album's URL and entry stay as the navigation
 // left them, and no list is asked for.
 func TestAFilterPauseWritesNothingAfterANavigation(t *testing.T) { listScenario(t, 2) }
+
+// TestARestoredListKeepsItsRailAndItsKind: a window restored past the list's
+// first row draws the rail its first page sends, of the kind it says: by
+// Title a jump to M, an album, Back, then the restored rail's jump to Z; by
+// Year the decades, from the 1990s to the 1960s; by Recently Added the
+// periods, from 2025 to "?"; every albums request carrying the reader's tz.
+func TestARestoredListKeepsItsRailAndItsKind(t *testing.T) { listScenario(t, 9) }
+
+// TestARapidScrubAppendsOnlyTheLastJumpsRows: a scrub's jump to M, its first
+// rows in and a frame holding the rest of its page, then its jump to Z
+// before that frame runs: the list is Z's rows alone, in order.
+func TestARapidScrubAppendsOnlyTheLastJumpsRows(t *testing.T) { listScenario(t, 2) }

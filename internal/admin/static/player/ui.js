@@ -233,57 +233,163 @@ export function onVisible(sentinel, onHit) {
 }
 
 /**
- * The A–Z jump rail.
+ * The jump rail: a list's index as its sort keys it (B1021).
  *
  * The server sends `buckets` on the FIRST page only, computed after the
- * filter and sort, so a letter's `offset` is an index into the CURRENT
- * result set. Jumping therefore means re-fetching at that offset, not
- * scrolling: the target is usually far past the pages loaded so far.
+ * filter and sort, with `rail`, the kind of index they are, so a bucket's
+ * `offset` is an index into the CURRENT result set. Jumping therefore means
+ * re-fetching at that offset, not scrolling: the target is usually far past
+ * the pages loaded so far.
  *
- * Letters with nothing behind them render as disabled buttons rather
- * than being omitted — a rail that changes length as you filter is
- * harder to hit than one that stays put.
+ * Letters (a server before the kinds sent no others): # and A–Z, those with
+ * nothing behind them disabled rather than omitted — a rail that changes
+ * length as you filter is harder to hit than one that stays put. Years: the
+ * phone's index, a band to each year where there are at most 16, else to each
+ * decade (its years shared out top to bottom), "?" one of its own, every band
+ * an equal share of the rail, and the century on every label unless every year
+ * is in the ten decades ending with this one. Dates: an entry to each of
+ * Recently Added's periods, its label short and its words whole.
  *
  * Real <button>s, so keyboard and screen-reader support come free. The
  * same reasoning that put a real <input type="range"> in the scrubber.
  */
 const RAIL_LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+const RAIL_NAMES = { letters: "Jump to letter", years: "Jump to year", dates: "Jump to date added" };
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const SCRUBS = new Set(["touch", "pen"]);
 
-// What the last pointer went down on, anywhere in the document, which one
-// capture listener a document records for every rail (B1021): a pointer's
-// click on a live letter jumps only where it went down on that letter or
-// outside the rail, since WebKit hands a tap on an empty letter's click to
-// the nearest live one, and takes the record; a key's click (detail 0) is its
-// letter's own and leaves it.
+// What the last pointer went down on, anywhere in the document, and its
+// type, which one capture listener a document records for every rail (B1021):
+// a pointer's click on a live entry jumps only where it went down outside the
+// rail, or by a mouse on that entry, since WebKit hands a tap on an empty
+// letter's click to the nearest live one and a touch's or a pen's jumped as
+// the scrub took it, and takes the record; a key's click (detail 0) is its
+// entry's own and leaves it. `owed` is a scrub's click: its owner went up on
+// the rail, and the click that tap makes, whatever pointer went down since
+// elsewhere, is the scrub's, until the next pointerdown.
 let pointerDown = null;
+let owed = false;
 let listening = null;
 
-export function alphabetRail(buckets, onJump) {
+// railEntries is the rail's entries for its kind: each one's label, the words
+// a screen reader and the callout say, and its buckets (none for an empty
+// letter; a decade's years, newest first as the list sorts them).
+function railEntries(kind, buckets, now) {
+  if (kind === "dates") {
+    const label = { "this-month": MONTHS[now.getMonth()], "this-year": String(now.getFullYear()) };
+    const words = { "this-month": "This month", "this-year": "Earlier this year", "?": "Date unknown" };
+    return buckets.map((b) => ({ label: label[b.key] || b.key, words: words[b.key] || b.key, buckets: [b] }));
+  }
+  if (kind === "years") {
+    const dated = buckets.filter((b) => /^\d{4}$/.test(b.key));
+    const decade = (b) => b.key.slice(0, 3) + "0";
+    const here = Math.floor(now.getFullYear() / 10) * 10;
+    const elide = dated.every((b) => Number(decade(b)) > here - 100 && Number(decade(b)) <= here);
+    const name = (y) => (elide ? `’${y.slice(2)}` : y);
+    const out = [];
+    for (const b of buckets) {
+      const d = decade(b);
+      if (!dated.includes(b)) out.push({ label: "?", words: "Year unknown", buckets: [b] });
+      else if (dated.length <= 16) out.push({ label: name(b.key), words: b.key, buckets: [b] });
+      else if (out.at(-1)?.decade === d) out.at(-1).buckets.push(b);
+      else out.push({ decade: d, label: name(d) + "s", words: d + "s", buckets: [b] });
+    }
+    return out;
+  }
+  const byKey = new Map(buckets.map((b) => [b.key, b]));
+  return RAIL_LETTERS.map((l) => ({ label: l, words: l, buckets: byKey.has(l) ? [byKey.get(l)] : [] }));
+}
+
+export function indexRail(buckets, onJump, kind = "letters") {
   if (!Array.isArray(buckets) || buckets.length === 0) return null;
   if (listening !== document) {
     listening = document;
-    document.addEventListener("pointerdown", (e) => { pointerDown = e.target; }, true);
+    document.addEventListener("pointerdown", (e) => { pointerDown = { target: e.target, type: e.pointerType }; owed = false; }, true);
   }
-  const byKey = new Map(buckets.map((b) => [b.key, b]));
-  const rail = el("nav", { class: "az-rail", attrs: { "aria-label": "Jump to letter" } });
-  for (const letter of RAIL_LETTERS) {
-    const b = byKey.get(letter);
+  const rail = el("nav", { class: "az-rail", attrs: { "aria-label": RAIL_NAMES[kind] || RAIL_NAMES.letters } });
+  const entries = new Map();
+  for (const entry of railEntries(kind, buckets, new Date())) {
+    const n = entry.buckets.reduce((sum, b) => sum + b.count, 0);
     const btn = el("button", {
-      class: "az-letter", text: letter,
-      attrs: b
-        ? { type: "button", title: `${b.count} under ${letter}` }
+      class: "az-letter", text: entry.label,
+      attrs: n
+        ? { type: "button", title: `${n} under ${entry.words}`, "aria-label": entry.words === entry.label ? null : entry.words }
         : { type: "button", disabled: "", "aria-disabled": "true" },
     });
-    if (b) btn.addEventListener("click", (e) => {
-      if (e.detail > 0) {
-        const from = pointerDown;
-        pointerDown = null;
-        if (from !== btn && from?.parentNode === rail) return;
-      }
-      onJump(b);
-    });
+    if (n) {
+      entries.set(btn, entry);
+      btn.addEventListener("click", (e) => {
+        if (e.detail > 0) {
+          const from = pointerDown;
+          const scrubbed = owed;
+          pointerDown = null;
+          owed = false;
+          if (scrubbed || (from && rail.contains(from.target) && (SCRUBS.has(from.type) || !btn.contains(from.target)))) return;
+        }
+        onJump(entry.buckets[0]);
+      });
+    }
     rail.appendChild(btn);
   }
+  const callout = el("div", { class: "az-callout", attrs: { "aria-hidden": "true" } });
+  callout.hidden = true;
+  rail.appendChild(callout);
+
+  // The scrub: a touch's or a pen's pointer, which the rail captures as it goes
+  // down there, owns it until its lift, its cancel or the rail's lost capture
+  // (a pointer beside it moves nothing; a primary one going down takes it over,
+  // its owner's end lost). It takes the entry at the contact point (the
+  // event's target, which WebKit gives), then at each move the one under the
+  // finger, the point held inside the rail; a decade's band gives the year at
+  // the finger's height in it. The list jumps at each new live bucket, never
+  // from an empty letter, and nothing more at the scrub's end; the callout
+  // says where it is, beside the rail at the finger's height.
+  let owner = null;
+  const entryOf = (n) => {
+    for (; n && n !== rail; n = n.parentNode) if (n.parentNode === rail) return n;
+    return null;
+  };
+  const under = (x, y) => {
+    const r = rail.getBoundingClientRect();
+    const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+    return entryOf(document.elementFromPoint(clamp(x, r.left + 1, r.right - 1), clamp(y, r.top + 1, r.bottom - 1)));
+  };
+  const take = (btn, y) => {
+    const at = Number.isFinite(y);
+    if (at) {
+      const r = rail.getBoundingClientRect();
+      callout.style.top = `${Math.min(Math.max(y - r.top, 0), r.height)}px`;
+    }
+    const entry = entries.get(btn);
+    if (!entry) return;
+    let b = entry.buckets[0];
+    if (at && entry.buckets.length > 1) {
+      const box = btn.getBoundingClientRect();
+      b = entry.buckets[Math.min(entry.buckets.length - 1, Math.floor(((y - box.top) / box.height) * entry.buckets.length))] || b;
+    }
+    callout.textContent = entry.buckets.length > 1 ? b.key : entry.words;
+    callout.hidden = false;
+    if (b !== owner.bucket) {
+      owner.bucket = b;
+      onJump(b);
+    }
+  };
+  rail.addEventListener("pointerdown", (e) => {
+    if (!SCRUBS.has(e.pointerType) || (owner && !e.isPrimary)) return;
+    owner = { id: e.pointerId, bucket: null };
+    rail.setPointerCapture(e.pointerId);
+    take(entryOf(e.target) || under(e.clientX, e.clientY), e.clientY);
+  });
+  rail.addEventListener("pointermove", (e) => {
+    if (owner?.id === e.pointerId) take(under(e.clientX, e.clientY), e.clientY);
+  });
+  const end = (e) => {
+    if (owner?.id !== e.pointerId || (e.type === "lostpointercapture" && e.target !== rail)) return;
+    if (e.type === "pointerup") owed = true;
+    owner = null;
+    callout.hidden = true;
+  };
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) rail.addEventListener(type, end);
   return rail;
 }
 
