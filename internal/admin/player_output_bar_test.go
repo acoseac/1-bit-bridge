@@ -330,8 +330,9 @@ func TestAnAlbumsEditionsAreItsFoldersOneShownAtATime(t *testing.T) { barScenari
 // the console: disc folders are one edition with the folder above them,
 // headed by their numbers, and every case of the table
 // TestTheConsoleFoldsDiscFoldersAsTheCatalogDoes holds the catalog to reads
-// the same through the console's fold.
-func TestADiscFolderBelongsToItsEdition(t *testing.T) { barScenario(t, 17) }
+// the same through the console's fold, the white space and the letters
+// whose folds differ between Go and JavaScript among them.
+func TestADiscFolderBelongsToItsEdition(t *testing.T) { barScenario(t, 23) }
 
 // TestAnEditionHeadsAnUntaggedRowByItsDisc pins the album page's headings: in
 // an album of one edition and inside an edition, an untagged row is headed by its disc
@@ -340,11 +341,13 @@ func TestAnEditionHeadsAnUntaggedRowByItsDisc(t *testing.T) { barScenario(t, 2) 
 
 // TestTheDefaultEditionIsTheBestTheOutputPlays pins the order an album opens
 // on its best edition by, a check a term: this browser's own file before a
-// copy, then depth before rate (a routed edition no lower for being routed);
-// the bridge's player's ways, PCM above converted; the format order where
-// nothing plays; quality before completeness; then more rows playing, more
-// rows, and the folder.
-func TestTheDefaultEditionIsTheBestTheOutputPlays(t *testing.T) { barScenario(t, 17) }
+// copy, then depth before rate, a copy's too (a routed edition no lower for
+// being routed); the key most rows share, never the best row; the bridge's
+// player's ways, native above DoP and PCM above converted, and a row it
+// plays above one it has said nothing of; the format order where nothing
+// plays; quality before completeness; then more rows playing, more rows,
+// and the folder, in UTF-8's bytes.
+func TestTheDefaultEditionIsTheBestTheOutputPlays(t *testing.T) { barScenario(t, 22) }
 
 // TestAnOutputChangeChoosesTheEditionAgain pins the edition's slot: a change
 // of the output, which redraws the route as boot.js wires it, opens the best the new
@@ -384,8 +387,9 @@ func TestAReloadShowsTheDefaultEdition(t *testing.T) { barScenario(t, 3) }
 
 // TestAnSACDImageIsAnEditionOfItsOwn pins an SACD image's stereo tracks as an
 // edition beside a file edition: its size counted once, never a track at a
-// time, and no Delete, since its tracks are no files the trash can move.
-func TestAnSACDImageIsAnEditionOfItsOwn(t *testing.T) { barScenario(t, 4) }
+// time, and no Delete, since its tracks are no files the trash can move; and
+// two rips of one image each named by the end of its path that tells it apart.
+func TestAnSACDImageIsAnEditionOfItsOwn(t *testing.T) { barScenario(t, 5) }
 
 // TestAnEditionPastTheBridgesBoundsIsRefusedInWords pins the bounds of the
 // bridge's player's control for an edition sent as its paths: a path of 4,096
@@ -399,6 +403,41 @@ func TestAnEditionPastTheBridgesBoundsIsRefusedInWords(t *testing.T) { barScenar
 // runs, never a live Delete over the rows sent, the picks asking nothing, and
 // its answer takes the files it moved off the page and keeps the rest.
 func TestAnEditionsDeleteStaysItsOwnAcrossPicks(t *testing.T) { barScenario(t, 6) }
+
+// TestAPendingDeleteHoldsAcrossARegroupingAndARedraw pins a deletion by its
+// paths: an album whose first edition's answer leaves one edition keeps the
+// second's Delete reading Deleting… while its answer is held, through a
+// redraw of the album too, a press sending nothing, and the second answer
+// reaches the page shown now, each edition's paths sent once.
+func TestAPendingDeleteHoldsAcrossARegroupingAndARedraw(t *testing.T) { barScenario(t, 6) }
+
+// TestAnAlbumLeftWithOneEditionByADeletion pins an album a deletion leaves
+// with one edition, from either way it opened: no picker, no Delete over an
+// SACD image, the stat line the rows' own, Delete in the album's words, and
+// the bridge's player sent the paths the page shows, never the album's id,
+// which an album opened as one edition goes by until a deletion.
+func TestAnAlbumLeftWithOneEditionByADeletion(t *testing.T) { barScenario(t, 8) }
+
+// TestADeletionsAnswerIsReconciledFromWhatTheLibraryHolds pins the trash's
+// answer as the library stands after it: a file moved back stays, playable,
+// one left in the trash goes; an answer lost before or after the move holds
+// its paths off the page, saying so, whatever a read after it lists; an
+// answer whose read fails holds the files it could not move until a read
+// tells; and a refusal moves nothing.
+func TestADeletionsAnswerIsReconciledFromWhatTheLibraryHolds(t *testing.T) { barScenario(t, 8) }
+
+// TestAnOutputChangeAwayFromTheAlbumShowsTheDefault pins the slot against a
+// change of output made while the album page is not shown: the album opens
+// on its default again, and a pick stands where the output did not change.
+func TestAnOutputChangeAwayFromTheAlbumShowsTheDefault(t *testing.T) { barScenario(t, 3) }
+
+// TestAnEditionsRowsAreHeldToTheBridgesBounds pins the bridge's bounds on an
+// edition's rows: a title sends nothing where its list is past them, named by
+// the words, and sends its list in order from itself where a source filter
+// narrows it to fit; a row's Add sends its path, and is disabled where that
+// path is past them; Play and Add to queue name the count line beside those
+// words where both apply; and a playlist's rows send as they did.
+func TestAnEditionsRowsAreHeldToTheBridgesBounds(t *testing.T) { barScenario(t, 6) }
 
 // TestTheRailTakesEveryPointerDownForItsClick pins the rail's record of where
 // a pointer went down, made at every pointerdown in the document: a click a

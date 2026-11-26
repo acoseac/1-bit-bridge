@@ -12,5 +12,11 @@
   {"path": "Lib/Artist/Album/Disc 1 - Bonus/01.flac", "album": "Disc 1 - Bonus", "disc": 1},
   {"path": "Lib/Artist/Album/Mix CD1 extra/01.flac", "album": "Mix CD1 extra", "disc": 1},
   {"path": "Lib/Artist/Album/CD123/01.flac", "album": "CD123", "disc": 1},
-  {"path": "CD1/01.flac", "album": "CD1", "disc": 1}
+  {"path": "CD1/01.flac", "album": "CD1", "disc": 1},
+  {"path": "Lib/Artist/Album/CD\u00851/01.flac", "album": "Album", "disc": 1},
+  {"path": "Lib/Artist/Album/CD\ufeff1/01.flac", "album": "CD\ufeff1", "disc": 1},
+  {"path": "Lib/Artist/Album/D\u0130sc 2/01.flac", "album": "Album", "disc": 2},
+  {"path": "Lib/Artist/Album/Di\u017fc 2/01.flac", "album": "Di\u017fc 2", "disc": 1},
+  {"path": "Lib/Artist/Album/Dis\u212a 3/01.flac", "album": "Album", "disc": 3},
+  {"path": "Lib/Artist/Album/D\u0131sc 4/01.flac", "album": "D\u0131sc 4", "disc": 1}
 ]
