@@ -409,18 +409,27 @@ function select(name, value, options) {
 // console rather than as somebody else’s library. An album spanning both
 // keeps its button for the local half and says what it is leaving alone.
 // An album in editions (B1023) keeps the one Delete: it moves every file of
-// every edition, never an SACD image's track, which is no file, and its
-// confirmation says how many editions those files are. Its request is the
-// album's (trashing), so a pick, which only moves the button, and a redraw,
-// which builds another, show it alike: Deleting… while it is out, then its
-// answer.
+// every edition, never an SACD image's track, which is no file. Its
+// confirmation (B1036) names each edition whose files it moves, by its name,
+// with how many it moves of it, whichever edition is shown, and each edition it
+// leaves alone, with why: an SACD image's, or an upstream's. An album of one
+// edition keeps its words, and says its SACD image's tracks are left alone as
+// it says its routed ones are. Its request is the album's (trashing), so a
+// pick, which only moves the button, and a redraw, which builds another, show
+// it alike: Deleting… while it is out, then its answer.
 function deleteButton(id, tracks, label, editions, gen) {
   const all = (tracks || []).filter((t) => t?.path);
   const routed = all.filter((t) => t.routed).length;
   const files = new Set(all.filter((t) => !t.routed && !imageOf(t.path)));
   if (!files.size) return null;
   const paths = [...files].map((t) => t.path);
-  const k = editions.filter((ed) => ed.rows.some((t) => files.has(t))).length;
+  // An edition's files are those of its rows the trash is sent, never a routed
+  // row; an edition with none is left alone.
+  const named = editions.length > 1 ? editions.map((ed) => ({ ed, k: ed.rows.filter((t) => files.has(t)).length })) : [];
+  const why = (ed) => (ed.rows.some((t) => imageOf(t?.path)) ? "an SACD image, whose tracks are not files" : "on an upstream server");
+  const moved = named.filter((e) => e.k).map((e) => `\n${e.ed.name}: ${plural(e.k, "file")}`).join("");
+  const kept = named.filter((e) => !e.k).map((e) => `\n${e.ed.name}: ${why(e.ed)}`).join("");
+  const images = named.length ? 0 : all.filter((t) => imageOf(t.path)).length;
   const out = trashing.get(id);
   if (out?.said) trashing.delete(id);
   const same = out && out.paths.length === paths.length && out.paths.every((p, i) => p === paths[i]);
@@ -435,10 +444,15 @@ function deleteButton(id, tracks, label, editions, gen) {
           ? `\n\n${routed} track${routed === 1 ? "" : "s"} on an upstream server ` +
             `${routed === 1 ? "is" : "are"} left alone.`
           : "";
+        const image = images
+          ? `\n\n${plural(images, "track")} of an SACD image ${images === 1 ? "is left alone: it is not a file" : "are left alone: they are not files"}.`
+          : "";
         if (!confirm(
-          `Move ${n} file${n === 1 ? "" : "s"} ${editions.length > 1 ? `of ${k} edition${k === 1 ? "" : "s"} of` : "from"} "${label}" to the trash?\n\n` +
-          `They stay recoverable from the Library page until the trash is emptied.` +
-          upstream)) {
+          `Move ${n} file${n === 1 ? "" : "s"} from "${label}" to the trash?` +
+          (moved && `\n\nWhichever edition is shown, these files are moved:${moved}`) +
+          `\n\nThey stay recoverable from the Library page until the trash is emptied.` +
+          (kept && `\n\nLeft alone:${kept}`) +
+          upstream + image)) {
           return;
         }
         setDisabled(btn, true);

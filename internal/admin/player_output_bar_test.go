@@ -410,9 +410,10 @@ func TestAFailedVariantIsThatSourceAlone(t *testing.T) { barScenario(t, 6) }
 // rows; sibling folders tagged discs 1 and 2 with the same titles; untagged
 // folders whose first files share the number the scanner takes from a
 // file's name) draws as it did: no picker, every row, its headings, count
-// line, controls, stat line and Delete's words, and on the bridge's player
-// Play and Add to queue send the album by its id.
-func TestAnAlbumOfOneEditionDrawsAsItDid(t *testing.T) { barScenario(t, 21) }
+// line, controls, stat line and Delete's words, its Delete called off sending
+// nothing and taken sending the album's files once, in its order; and on the
+// bridge's player Play and Add to queue send the album by its id.
+func TestAnAlbumOfOneEditionDrawsAsItDid(t *testing.T) { barScenario(t, 23) }
 
 // TestAnAlbumsEditionsAreItsFoldersOneShownAtATime pins B1023's editions and
 // their picker: an album whose three folders hold the same songs offers three editions in the
@@ -483,10 +484,11 @@ func TestAReloadShowsTheDefaultEdition(t *testing.T) { barScenario(t, 3) }
 // TestAnSACDImageIsAnEditionOfItsOwn pins an SACD image's stereo tracks as an
 // edition beside a file edition, the one the bridge's player opens on: its
 // size counted once, never a track at a time; the album's one Delete, with the
-// image shown from the first, moving the files alone, of their one edition,
-// since its tracks are no files the trash can move; and two rips of one image
-// each named by the end of its path that tells it apart.
-func TestAnSACDImageIsAnEditionOfItsOwn(t *testing.T) { barScenario(t, 5) }
+// image shown from the first, moving the files alone, its confirmation naming
+// their edition and the image's as left alone, since its tracks are no files
+// the trash can move; and two rips of one image each named by the end of its
+// path that tells it apart.
+func TestAnSACDImageIsAnEditionOfItsOwn(t *testing.T) { barScenario(t, 6) }
 
 // TestAnEditionPastTheBridgesBoundsIsRefusedInWords pins the bounds of the
 // bridge's player's control for an edition sent as its paths: a path of 4,096
@@ -510,14 +512,25 @@ func TestAnEditionsRowsAreHeldToTheBridgesBounds(t *testing.T) { barScenario(t, 
 
 // TestAnAlbumsDeleteMovesEveryEditionsFiles pins the album page's one Delete:
 // it moves every file of every edition, in the album's order, its
-// confirmation naming the album, the files and how many editions they are;
-// an edition picked while its answer is held leaves it the one Delete,
-// Deleting…, a press sending nothing, and its answer is said on it, the
-// settings read once and the page as it was; routed tracks and an SACD
-// image's are left out, an upstream's said so, one edition's files beside
-// another's on an upstream are of 1 edition, and an album with no file the
-// trash can move offers no Delete and reads no settings.
-func TestAnAlbumsDeleteMovesEveryEditionsFiles(t *testing.T) { barScenario(t, 8) }
+// confirmation naming the album, the files and each edition with the files it
+// moves of it, whichever edition is shown; an edition picked while its answer
+// is held leaves it the one Delete, Deleting…, a press sending nothing, and
+// its answer is said on it, the settings read once and the page as it was;
+// routed tracks and an SACD image's are left out, an edition of either named
+// as left alone and why and an upstream's tracks said so, one edition's files
+// beside another's on an upstream are that edition's alone, and an album with
+// no file the trash can move offers no Delete and reads no settings.
+func TestAnAlbumsDeleteMovesEveryEditionsFiles(t *testing.T) { barScenario(t, 10) }
+
+// TestAnAlbumsDeleteNamesEachEditionItMoves pins Delete's confirmation edition
+// by edition (B1036): two rips of one album, the CD rip picked before Delete
+// is pressed, are both named, each by its name with the files it moves,
+// whichever edition is shown; an edition's routed row is no file of it, its
+// name still counting both its rows, and two editions alike but for their
+// folders are named in full; an album of one edition keeps its words and says
+// how many tracks of an SACD image it leaves alone, after the upstream's
+// sentence; and each request names the files alone, in the album's order.
+func TestAnAlbumsDeleteNamesEachEditionItMoves(t *testing.T) { barScenario(t, 10) }
 
 // TestAnAlbumsDeleteKeepsItsRequestThroughARedraw pins the album's one Delete
 // through a redraw while its request is out: an output switch leaves one
