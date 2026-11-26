@@ -130,8 +130,8 @@ This record's three, `7a9d1506` against `ea72ad18`, in both contexts:
 - **Item 1.** Base: two `genres?offset=60&limit=60` while a genre's name was held, the lookup
   cancelled and the page left "Genre" over the old rows; the old Try again asked
   `composers?offset=0&limit=1`, that lookup cancelled too, no grid. Head: nothing asked while either
-  name was held, both answered, both grids open ("30 albums in Tidal Ambient", "13 albums in Fabian
-  Sonnhoff").
+  name was held, both answered, both grids open (the genre's count line "30 albums in Tidal Ambient",
+  the composer's grid of 13 albums under its name).
 - **Item 2.** Base: the album's, the artist's, the playlist's, a smart mix's and a key's names each
   written over "Stats — …". Head: "Stats — …" kept for all five. The library gives the mix engine
   nothing to build (its regeneration answers no families), so the mix page's answer was a made-up
