@@ -28,6 +28,7 @@
 // so the bridge's player can be picked before any track is (§7.1).
 
 import { el, clear, link, setDisabled } from "./ui.js";
+import { coverURL } from "./api.js";
 import { duration, formatChip, signalChip } from "./format.js";
 import * as audio from "./audio.js";
 import { currentOutput, PHASE, WORDS, PROMISE, ROUTES, whyWord, holdWord } from "./output.js";
@@ -223,13 +224,22 @@ function buildOutputMenu() {
   });
   refs.pickBridgeName = el("span", { class: "np-pick-name", text: "The bridge's player" });
   refs.pickBridgeLine = el("span", { class: "np-pick-line" });
+  // What the DAC is handed, while the player plays: the chip that says it
+  // is hidden up to 768px, and its title reaches no finger (B1021).
+  refs.pickBridgeDAC = el("span", { class: "np-pick-line" });
   refs.pickBridge = el("button", {
     class: "np-pick",
     attrs: { type: "button", "aria-pressed": "false" },
     on: { click: () => pickOutput("bridge") },
-  }, refs.pickBridgeName, refs.pickBridgeLine);
+  }, refs.pickBridgeName, refs.pickBridgeLine, refs.pickBridgeDAC);
+  // What the bridge's player does not do, in words a finger reaches, which
+  // the controls it disables name while it is chosen (B1021).
+  refs.menuLimits = el("p", {
+    class: "np-menu-help", attrs: { id: "np-bridge-limits" },
+    text: `${[WORDS.noShuffle, WORDS.noRepeatOne, WORDS.fixedLevel, WORDS.noSeekDSD].join(". ")}.`,
+  });
   refs.menuHelp = el("p", { class: "np-menu-help", text: PROMISE });
-  refs.menu.append(refs.pickBrowser, refs.pickBridge, refs.menuHelp);
+  refs.menu.append(refs.pickBrowser, refs.pickBridge, refs.menuLimits, refs.menuHelp);
   refs.menu.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       closeMenu();
@@ -284,6 +294,9 @@ function paintOutputButton(o) {
   refs.pickBridge.setAttribute("aria-pressed", String(bridge));
   refs.pickBridgeName.textContent = dacName ? `The bridge's player: ${dacName}` : "The bridge's player";
   refs.pickBridgeLine.textContent = bridgeLine(o);
+  const handed = o?.state?.transport === "playing" ? dacDetails(o) : "";
+  refs.pickBridgeDAC.textContent = handed ? `What the DAC is handed: ${handed}` : "";
+  refs.menuLimits.hidden = !o?.offered;
   const off = !o || (!o.canPick && !bridge);
   // A pick that goes disabled while it holds the focus would hand the focus
   // to the page, out of the open menu and its Escape: it goes to the other
@@ -366,6 +379,8 @@ function paintPanel(o) {
   if (key === panelKey) return;
   panelKey = key;
   clear(refs.panel);
+  // Why the entries wait, in words a finger reaches, which each names (B1021).
+  if (behind) refs.panel.appendChild(el("p", { class: "np-queue-behind", attrs: { id: "np-queue-behind" }, text: WORDS.queueBehind }));
   if (!q || !q.entries?.length) {
     refs.panel.appendChild(el("p", { class: "np-queue-empty", text: "The bridge's queue is empty" }));
     return;
@@ -376,7 +391,8 @@ function paintPanel(o) {
     const row = el("li", { class: `np-queue-row${e.id === heard || (!heard && e.id === st?.selected) ? " np-queue-current" : ""}` });
     const play = el("button", {
       class: "np-queue-title", text: name,
-      attrs: { type: "button", "aria-current": e.id === heard ? "true" : null, title: behind ? WORDS.queueBehind : null },
+      attrs: { type: "button", "aria-current": e.id === heard ? "true" : null, title: behind ? WORDS.queueBehind : null,
+        "aria-describedby": behind ? "np-queue-behind" : null },
       on: { click: () => out()?.command("index", { index: i }) },
     });
     setDisabled(play, !o.commands.has("index") || behind);
@@ -455,28 +471,28 @@ function tick() {
     return;
   }
   const s = audio.snapshot();
-  if (!s.track) return;
+  if (s.track) paintBrowserTimes(s);
+}
+
+/**
+ * This browser's times, rail and fetched band, at every tick and at every
+ * render (B1021), so a track change or a switch to this browser shows the new
+ * track's at once and not the last track's until the next tick. The seek's
+ * value moves only while it is not scrubbing, and the rail never with its
+ * preview (setRail). A track whose length is not in yet (the previous track's
+ * total would be a wrong number rather than a missing one), or which cannot
+ * seek, shows nothing fetched: the band left was the track's before it.
+ */
+function paintBrowserTimes(s) {
+  const known = s.seekable && s.duration > 0;
+  const frac = known ? s.currentTime / s.duration : 0;
   refs.elapsed.textContent = duration(s.currentTime) || "0:00";
-  if (s.seekable && s.duration > 0) {
-    refs.total.textContent = duration(s.duration);
-    setBuffered(s.buffered / s.duration);
-    setRail(s.currentTime / s.duration);
-    if (!refs.isScrubbing()) {
-      refs.seek.value = String(Math.round((s.currentTime / s.duration) * 1000));
-      setProgress(s.currentTime / s.duration);
-    }
-  } else if (s.seekable) {
-    // Loaded but the length is not in yet — the window this whole
-    // change is about. The previous track's total was still sitting
-    // there, which is a wrong number rather than a missing one, and its
-    // thumb was still parked wherever that track had got to.
-    refs.total.textContent = "0:00";
-    setBuffered(0);
-    setRail(0);
-    if (!refs.isScrubbing()) {
-      refs.seek.value = "0";
-      setProgress(0);
-    }
+  refs.total.textContent = known ? duration(s.duration) : (s.seekable ? "0:00" : "—");
+  setBuffered(known ? s.buffered / s.duration : 0);
+  setRail(frac);
+  if (!refs.isScrubbing()) {
+    refs.seek.value = String(Math.round(frac * 1000));
+    setProgress(frac);
   }
 }
 
@@ -556,11 +572,7 @@ function renderBrowser(s, o) {
   // unknown duration is a control that lies.
   setDisabled(refs.seek, !s.seekable);
   refs.seek.title = "";
-  if (!s.seekable) {
-    refs.total.textContent = "—";
-    setProgress(0);
-    setRail(0);
-  }
+  paintBrowserTimes(s);
 
   paintNotice(s, o?.line || "");
 }
@@ -615,6 +627,13 @@ function showBridgeControls(bridge) {
   refs.mute.title = bridge ? WORDS.fixedLevel : (refs.mute.getAttribute("aria-label") || "Mute");
   setDisabled(refs.volume, bridge);
   setDisabled(refs.mute, bridge);
+  // The output menu's line says what the bridge's player does not do, which
+  // these name while it is chosen, and only then: a title reaches no finger,
+  // and a disabled control takes no focus (B1021).
+  for (const c of [refs.shuffle, refs.repeat, refs.mute, refs.volume, refs.seek]) {
+    if (bridge) c.setAttribute("aria-describedby", "np-bridge-limits");
+    else c.removeAttribute("aria-describedby");
+  }
   if (!bridge) {
     refs.shuffle.title = "Shuffle";
     setDisabled(refs.shuffle, false);
@@ -676,9 +695,9 @@ function clockTime(iso) {
 function paintBridgeTrack(o) {
   const st = o.state;
   const t = st?.track || null;
-  clear(refs.art);
   clear(refs.title);
   if (!t) {
+    paintArt(null);
     refs.title.appendChild(document.createTextNode(st?.length > 0 ? "Stopped" : WORDS.nothing));
     refs.sub.textContent = st?.length > 0 ? `${st.length} in the bridge's queue` : "";
     refs.chip.textContent = "";
@@ -686,18 +705,72 @@ function paintBridgeTrack(o) {
   }
   const entry = o.queue?.entries?.find((e) => e.id === t.entry);
   const albumId = entry?.track?.albumId;
+  // The heard entry's cover, its queue row's (B1021): unknown, an empty
+  // square, until its row is read, and the mark where its row holds no
+  // track, the catalog no longer having it.
+  paintArt(entry?.track ? { url: coverURL(entry.track, 500), albumId, album: t.album } : entry ? { url: null } : null);
   const name = t.named ? (t.title || t.path) : (t.path || "A track this library does not name");
   refs.title.appendChild(albumId ? link(`/album/${albumId}`, { text: name }) : document.createTextNode(name));
   refs.sub.textContent = [t.artist, t.album].filter(Boolean).join(" — ");
   refs.chip.textContent = signalChip(t, st.signal);
-  // What the DAC is handed, for a reader who asks: its format, its
-  // channels and the sink's state.
-  const sig = st.signal;
-  refs.chip.title = sig ? [sig.format, sig.channels ? `${sig.channels} ch` : "", sig.state].filter(Boolean).join(" · ") : "";
+  refs.chip.title = dacDetails(o);
+}
+
+/** What the DAC is handed: its format, its channels and the sink's state. */
+function dacDetails(o) {
+  const st = o?.state;
+  const sig = st?.signal;
+  return sig ? [sig.format, sig.channels ? `${sig.channels} ch` : "", sig.state].filter(Boolean).join(" · ") : "";
+}
+
+/**
+ * The cover square, in both outputs (B1021): empty with no track, as the strip
+ * has always drawn it; with one, its cover, linked to its album where its row
+ * names one, or the mark the pages draw for an album without one. The image is
+ * replaced only when its URL changes, so a render that changes nothing keeps
+ * it, while the link follows the album whatever the image does: a local cover
+ * is named by its bytes, so two albums can share one URL. An image that fails
+ * to load gives way to the mark and is not asked for again while the bar shows
+ * that cover; once the bar has moved to another, an album's with none
+ * included, the failed one is asked for again when the bar comes back to it.
+ * No cover (no track, a row not read yet) is no move, so a failure holds
+ * across it.
+ */
+function paintArt(cover) {
+  if (cover && cover.url !== refs.artFailed) refs.artFailed = null;
+  refs.artCover = cover;
+  const url = cover?.url && cover.url !== refs.artFailed ? cover.url : null;
+  if ((refs.artImg?.getAttribute("src") ?? null) !== url) {
+    const img = url ? el("img", { attrs: { src: url, alt: "", loading: "lazy" } }) : null;
+    img?.addEventListener("error", () => {
+      if (refs.artImg !== img) return;
+      refs.artFailed = url;
+      paintArt(refs.artCover);
+    });
+    refs.artImg = img;
+  }
+  let top = refs.artImg;
+  if (top && cover.albumId) {
+    // The cover is the largest target in the bar, and it goes where the title
+    // beside it goes.
+    refs.artLink ||= link("/", { class: "np-art-link" });
+    refs.artLink.setAttribute("href", `/album/${cover.albumId}`);
+    refs.artLink.setAttribute("aria-label", `Go to ${cover.album || "album"}`);
+    if (refs.artLink.firstChild !== top) {
+      clear(refs.artLink);
+      refs.artLink.appendChild(top);
+    }
+    top = refs.artLink;
+  }
+  if (refs.art.firstChild !== top) {
+    clear(refs.art);
+    if (top) refs.art.appendChild(top);
+  }
+  refs.art.classList.toggle("cover-empty", !!cover && !refs.artImg);
 }
 
 function paintEmpty() {
-  clear(refs.art);
+  paintArt(null);
   clear(refs.title);
   refs.title.appendChild(document.createTextNode(WORDS.nothing));
   refs.sub.textContent = "";
@@ -707,20 +780,10 @@ function paintEmpty() {
 /** The cover, the title, the artist and the format chip. */
 function paintTrack(s) {
   const t = s.track;
-  clear(refs.art);
-  if (s.albumArt) {
-    const img = el("img", { attrs: { src: s.albumArt, alt: "", loading: "lazy" } });
-    // The cover is the largest target in the bar and it pointed nowhere,
-    // while the title beside it linked to the album. Same destination.
-    if (t.albumId) {
-      const a = link(`/album/${t.albumId}`, { class: "np-art-link" });
-      a.setAttribute("aria-label", `Go to ${t.album || "album"}`);
-      a.appendChild(img);
-      refs.art.appendChild(a);
-    } else {
-      refs.art.appendChild(img);
-    }
-  }
+  // A row the bridge's queue hydrated states its album's cover, an empty one
+  // included (a queue this browser took from the bridge's player); any other
+  // takes the cover the queue was started with (B1021).
+  paintArt({ url: t.artworkMBID !== undefined ? coverURL(t, 500) : s.albumArt, albumId: t.albumId, album: t.album });
   clear(refs.title);
   refs.title.appendChild(
     t.albumId ? link(`/album/${t.albumId}`, { text: t.title || t.path })

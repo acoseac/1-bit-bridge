@@ -21,6 +21,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/outputcheck"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
@@ -578,27 +579,51 @@ func TestTheOutputsRouteMakesNoPlayerFile(t *testing.T) {
 	}
 }
 
-// TestTheChecklistReadsNoBridgeElement: every consumer of the outputs body
-// that is MPD's reads the kind mpd elements alone (B470 PR 5b): the
-// checklist's input from a body that holds the bridge's own element after
-// MPD's, or that element alone, is the MPD element's, and nothing of the
-// bridge's.
-func TestTheChecklistReadsNoBridgeElement(t *testing.T) {
+// TestTheChecklistReadsTheBridgesElementForItsCardAlone: the checklist
+// stays MPD's (B470 PR 5b), and of the bridge's own player's element it
+// reads the card the player plays through alone, which the DAC line tells
+// from MPD's (B1022): the input from a body that holds the bridge's element
+// after MPD's is the MPD element's with the player's card beside it, from
+// that element alone the player's card and nothing else, and from one whose
+// dac is null the player with no card; and with MPD's gate shut a body that
+// carries the player's element shows no checklist and is never read.
+func TestTheChecklistReadsTheBridgesElementForItsCardAlone(t *testing.T) {
 	yes := true
 	mpdEl := api.OutputInfo{ID: "a1", Kind: "mpd", Player: api.OutputPlayer{Software: "volumio", Version: "4.119"},
 		MPD: &api.OutputMPD{Port: 6600, Addresses: []string{"192.168.1.42"}, Version: "0.24.0", State: "play", LoopbackBaseURL: "http://127.0.0.1:7791"},
-		DAC: &api.OutputDAC{ID: "Audio", Name: "iFi", USBID: "20b1:3009", IsMPDsOutput: &yes}, PathRules: []api.OutputPathRule{{Root: "Music", State: "proven"}}}
-	// A later change reports the player's DAC (dac, null today): even then
-	// the checklist reads none of it.
+		DAC: &api.OutputDAC{Card: 2, ID: "Audio", Name: "iFi", USBID: "20b1:3009", IsMPDsOutput: &yes}, PathRules: []api.OutputPathRule{{Root: "Music", State: "proven"}}}
 	bridgeEl := api.OutputInfo{ID: "bridge:" + thePlayerUUID, Kind: "bridge", Player: api.OutputPlayer{Software: "bridge", Version: "1"},
-		DAC: &api.OutputDAC{ID: "Bridge", Name: "the player's DAC", USBID: "20b1:3009"}, PathRules: []api.OutputPathRule{},
+		DAC: &api.OutputDAC{Card: 2, ID: "Bridge", Name: "the player's DAC", USBID: "20b1:3009",
+			Capabilities: api.OutputCapabilities{MaxPCMRate: 384000, NativeDSDRates: []int{2822400}}}, PathRules: []api.OutputPathRule{},
 		Bridge: &api.OutputBridge{State: "stopped", LibraryScope: "self", Codecs: []string{"flac"}}}
+	card := &outputcheck.DAC{Card: 2, ID: "Bridge", Name: "the player's DAC", USBID: "20b1:3009", MaxPCMRate: 384000, NativeDSDRates: []int{2822400}}
 	want := checklistInput(api.OutputsResponse{Outputs: []api.OutputInfo{mpdEl}})
-	if got := checklistInput(api.OutputsResponse{Outputs: []api.OutputInfo{mpdEl, bridgeEl}}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("with the bridge's element: %+v\nwant MPD's alone: %+v", got, want)
+	if want.Bridge != nil {
+		t.Fatalf("MPD's element alone gave the checklist a player of the bridge's own: %+v", want.Bridge)
 	}
-	if got, none := checklistInput(api.OutputsResponse{Outputs: []api.OutputInfo{bridgeEl}}), checklistInput(api.OutputsResponse{}); !reflect.DeepEqual(got, none) {
+	want.Bridge = &outputcheck.BridgePlayer{DAC: card}
+	if got := checklistInput(api.OutputsResponse{Outputs: []api.OutputInfo{mpdEl, bridgeEl}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("with the bridge's element: %+v\nwant MPD's with the player's card: %+v", got, want)
+	}
+	alone := outputcheck.Input{Bridge: &outputcheck.BridgePlayer{DAC: card}}
+	if got := checklistInput(api.OutputsResponse{Outputs: []api.OutputInfo{bridgeEl}}); !reflect.DeepEqual(got, alone) {
 		t.Fatalf("the bridge's element alone gave the checklist %+v", got)
+	}
+	noCard := bridgeEl
+	noCard.DAC = nil
+	if got := checklistInput(api.OutputsResponse{Outputs: []api.OutputInfo{noCard}}); !reflect.DeepEqual(got, outputcheck.Input{Bridge: &outputcheck.BridgePlayer{}}) {
+		t.Fatalf("the bridge's element with no card gave the checklist %+v", got)
+	}
+	read := false
+	shut := outputChecklistSource{
+		Active: func(context.Context) bool { return false },
+		Outputs: func(context.Context) (api.OutputsResponse, error) {
+			read = true
+			return api.OutputsResponse{Outputs: []api.OutputInfo{bridgeEl}}, nil
+		},
+	}
+	if lines, ok := outputChecklist(context.Background(), shut); ok || lines != nil || read {
+		t.Fatalf("the player on with MPD's gate shut: %d lines, shown %v, body read %v", len(lines), ok, read)
 	}
 }
 

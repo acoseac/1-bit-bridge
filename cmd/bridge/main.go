@@ -6619,7 +6619,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// The player checklist (Player, DAC, Music, Phone) for the dashboard's
 	// panel and the console's doctor: one source, over this process's own
 	// GET /v1/outputs builder, with its caches and its lazy MPD session,
-	// so the console reads the box the way the app does.
+	// so the console reads the box the way the app does. Its DAC line reads
+	// the player's gate as serve decided it at boot (B1022), since the body
+	// lists the player's element only once the player has an identity.
 	checklistSrc := outputChecklistSource{
 		Active:          apiSrv.LocalOutputsActive,
 		Outputs:         apiSrv.LocalOutputsResponse,
@@ -6627,6 +6629,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		LoopbackBaseURL: outLoop.BaseURL,
 		LoopbackErr:     outLoop.StartErr,
 		Tokens:          store.List,
+		BridgePlayerOn:  playerView.Enabled,
 	}
 	// The console's doctor reads its own process's home-network socket
 	// (backlog B989) through this, set once the console exists.

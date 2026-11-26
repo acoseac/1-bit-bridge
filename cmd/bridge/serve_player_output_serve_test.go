@@ -428,6 +428,61 @@ func TestTheCodecsAreTheManifestsCodecsThePlayerPlays(t *testing.T) {
 	}
 }
 
+// TestServesChecklistKnowsThePlayerIsOnBeforeItHasAnIdentity: serve's
+// checklist source reads the player's gate as serve decided it at boot
+// (B1022), since GET /v1/outputs lists the player's element only once the
+// player has an identity. On a box whose MPD gate is open and whose own
+// player is enabled with no DAC bound, and so no identity yet, the console's
+// DAC line knows the player is on and names no card to point MPD at, where
+// a source that read the body alone would see no player.
+func TestServesChecklistKnowsThePlayerIsOnBeforeItHasAnIdentity(t *testing.T) {
+	needsDirectorySync(t)
+	var adminAddr string
+	ps := bootPlayerServe(t, playerServeCase{keep: true,
+		before: func(dataDir string) {
+			root := filepath.Dir(dataDir)
+			conf := filepath.Join(root, "mpd.conf")
+			if err := os.WriteFile(conf, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// MPD's gate is on; its file is empty, and nothing answers at its
+			// endpoint, a socket in the case's own directory.
+			text := "libraryRoots:\n  - " + filepath.Join(root, "Music") + "\ndataDir: " + dataDir + "\nadminAddress: \"\"\n" +
+				"output:\n  mpd: on\n  loopbackPort: 0\n  endpoint: \"" + filepath.ToSlash(filepath.Join(root, "mpd.socket")) + "\"\n" +
+				"  conf: \"" + filepath.ToSlash(conf) + "\"\n  player:\n    enabled: true\n"
+			if err := os.WriteFile(filepath.Join(root, "bridge.yaml"), []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		with: func(o *serveOpts) {
+			o.localOutputsGOOS = "linux"
+			adminAddr = o.adminListener.Addr().String()
+		}})
+	if _, err := os.Lstat(filepath.Join(ps.dataDir, config.PlayerUUIDFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the player has an identity: %v", err)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get("http://" + adminAddr + "/api/output/checklist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checklist struct {
+		Active bool `json:"active"`
+		Lines  []struct{ Key, Title, Status, Summary, Fix string }
+	}
+	err = json.NewDecoder(resp.Body).Decode(&checklist)
+	resp.Body.Close()
+	if err != nil || !checklist.Active || len(checklist.Lines) != 4 {
+		t.Fatalf("the console's checklist: %+v (%v), want its four lines", checklist, err)
+	}
+	dac, want := checklist.Lines[1], struct{ Key, Title, Status, Summary, Fix string }{"dac", "DAC", "warn",
+		"The bridge's own player is on, and the checklist cannot tell which DAC it plays through",
+		"Check the player's DAC binding (`bridge output dac inspect`, or the console's Player page) before changing MPD's output."}
+	if dac != want {
+		t.Fatalf("the console's DAC line\n%+v\nwant\n%+v", dac, want)
+	}
+}
+
 // TestBridgeDoctorStaysMPDs: `bridge doctor`'s checklist is MPD's alone,
 // on the MPD gate (B470 PR 5b): a box with the player enabled and
 // output.mpd off prints no checklist and touches no player file, and with

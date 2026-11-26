@@ -43,9 +43,15 @@ type Input struct {
 	// empty when it was. Nothing that body carries was judged then: the
 	// Player line says what failed, the DAC line that it was not checked,
 	// and the Music line judges Roots, each one unchecked.
-	Unread   string
-	Player   Player
-	DACs     []DAC
+	Unread string
+	Player Player
+	DACs   []DAC
+	// Bridge is the bridge's own player while it is on, nil while it is
+	// off: in serve its element of the body (kind bridge), listed once the
+	// player has an identity, or else the player's gate, which serve decided
+	// at boot; in bridge doctor a config that turns the player on. The DAC
+	// line alone reads it (B1022).
+	Bridge   *BridgePlayer
 	Roots    []RootRule
 	Loopback Loopback
 	// Phones is the number of paired devices.
@@ -66,14 +72,28 @@ type Player struct {
 }
 
 // DAC is one candidate card. IsMPDsOutput is true only when MPD's ALSA
-// output names this card.
+// output names this card. Card is its ALSA index as GET /v1/outputs reports
+// it, for MPD's elements and the bridge's own player's alike: the one key
+// the DAC line matches the two by within one body, card 0 a card like any
+// other. The player's element's id is the player's own, and two DACs of one
+// model share a USB id, so neither is a key.
 type DAC struct {
+	Card           int
 	ID             string
 	Name           string
 	USBID          string
 	IsMPDsOutput   bool
 	MaxPCMRate     int
 	NativeDSDRates []int
+}
+
+// BridgePlayer is the bridge's own player as the DAC line reads it. DAC is
+// the card it plays through, nil while that card is not known: an element
+// whose dac is null; serve's player before it has an identity, which its
+// element waits for; and bridge doctor, which has no player of its own and
+// reads only whether the config it loaded turns it on.
+type BridgePlayer struct {
+	DAC *DAC
 }
 
 // RootRule is one library root's path rule: proven, mismatch, unproven or
@@ -100,7 +120,7 @@ func Lines(in Input) []Line {
 	if in.Unread != "" {
 		return []Line{unreadPlayerLine(in.Unread), uncheckedDACLine(), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones, in.Tokens)}
 	}
-	return []Line{playerLine(in.Player), dacLine(in.DACs), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones, in.Tokens)}
+	return []Line{playerLine(in.Player), dacLine(in.DACs, in.Bridge), musicLine(in.Roots, in.Loopback), phoneLine(in.Phones, in.Tokens)}
 }
 
 // unreadPlayerLine is the Player line of a box the bridge could not read:
@@ -151,7 +171,12 @@ func playerLine(p Player) Line {
 	return l
 }
 
-func dacLine(dacs []DAC) Line {
+// dacLine judges the cards MPD's elements list: as it always has while the
+// bridge's own player is off, and by playerDACLine while it is on (B1022).
+func dacLine(dacs []DAC, bridge *BridgePlayer) Line {
+	if bridge != nil {
+		return playerDACLine(dacs, bridge.DAC)
+	}
 	l := Line{Key: "dac", Title: "DAC"}
 	if len(dacs) == 0 {
 		// No card MPD's output resolves to, and no USB card to offer. The
@@ -176,6 +201,69 @@ func dacLine(dacs []DAC) Line {
 	l.Status = Warn
 	l.Summary = strings.Join(names, ", ") + " found, but MPD's output does not name it"
 	l.Fix = fmt.Sprintf(`Point MPD's audio_output at the DAC (device "hw:CARD=%s"), or choose it in the player's output settings.`, dacs[0].ID)
+	return l
+}
+
+// playerDACLine is the DAC line while the bridge's own player is on, own the
+// card it plays through, nil while that card is not known (B1022). ALSA
+// gives a card to one player at a time, whichever opens it second failing.
+// The body cannot say which card MPD's output names when it lists
+// candidates (a device that does not resolve and several that do are alike,
+// isMPDsOutput null on each), nor that its MPD half, which the builder keeps
+// for 500 ms, was read with the player's card where it is now: so while the
+// player is on no line names a card to point MPD at. The two are matched by
+// Card alone, within one body.
+func playerDACLine(dacs []DAC, own *DAC) Line {
+	l := Line{Key: "dac", Title: "DAC", Status: Warn}
+	if own == nil {
+		for _, d := range dacs {
+			if d.IsMPDsOutput {
+				l.Summary = dacName(d) + " is MPD's output, and the checklist cannot tell whether the bridge's own player plays through it too"
+				l.Fix = "Check the player's DAC binding (`bridge output dac inspect`, or the console's Player page): if it names this DAC, point MPD at another one, or cast over MPD only while the bridge's own player is off."
+				return l
+			}
+		}
+		l.Summary = "The bridge's own player is on, and the checklist cannot tell which DAC it plays through"
+		l.Fix = "Check the player's DAC binding (`bridge output dac inspect`, or the console's Player page) before changing MPD's output."
+		return l
+	}
+	name := dacName(*own)
+	for _, d := range dacs {
+		if d.IsMPDsOutput && d.Card == own.Card {
+			l.Summary = name + " is both the bridge's own player's DAC and MPD's output"
+			l.Fix = "It plays for one of them at a time: point MPD at another DAC, or cast over MPD only while the bridge's own player is off."
+			return l
+		}
+	}
+	for _, d := range dacs {
+		if d.IsMPDsOutput {
+			l.Status = OK
+			l.Summary = dacName(d) + " is MPD's output · " + capabilities(d)
+			return l
+		}
+	}
+	// MPD's output names no card: it may name any candidate, the player's
+	// card among them or not.
+	mine, others := false, []string{}
+	for _, d := range dacs {
+		if d.Card == own.Card {
+			mine = true
+		} else {
+			others = append(others, dacName(d))
+		}
+	}
+	check := "Check MPD's audio_output before changing it: the bridge's own player plays through " + name + "."
+	switch {
+	case len(others) == 0:
+		l.Status = OK
+		l.Summary = name + " is the bridge's own player's DAC; MPD's output only matters when 1-bit casts over MPD"
+	case mine:
+		l.Summary, l.Fix = "MPD's output may include "+name+", the bridge's own player's DAC", check
+	case len(others) == 1:
+		l.Summary, l.Fix = others[0]+" found, and the checklist cannot tell whether MPD's output names it", check
+	default:
+		l.Summary, l.Fix = strings.Join(others, ", ")+" found, and the checklist cannot tell which of them, if any, MPD's output names", check
+	}
 	return l
 }
 

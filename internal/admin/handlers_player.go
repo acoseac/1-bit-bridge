@@ -845,6 +845,16 @@ type playerTrackDTO struct {
 	// BridgeWayOf): additive, present while the player runs, absent
 	// otherwise. converted is to PCM, never bit-exact.
 	Bridge *PlayerBridgeWay `json:"bridge,omitempty"`
+
+	// ArtworkMBID and ArtworkVersion are the cover of the album the catalog
+	// files the track under, the album page's, under the album DTO's names
+	// so coverURL takes the row as it takes an album (B1021). hydrateByPath
+	// alone sets them, for the bridge's queue and a handover, and there
+	// always: an album with no cover is an empty ArtworkMBID, which the bar
+	// in this browser reads as the row's own answer, never the cover of the
+	// queue it played before.
+	ArtworkMBID    *string `json:"artworkMBID,omitempty"`
+	ArtworkVersion string  `json:"artworkVersion,omitempty"`
 }
 
 // playerVariantDTO is one cached sidecar as the UI needs it.

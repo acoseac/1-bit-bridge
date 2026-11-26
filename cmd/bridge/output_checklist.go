@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -69,6 +70,14 @@ type outputChecklistSource struct {
 	// flight with its request's context, which ends with the request.
 	Reads   *outputsReads
 	ReadKey string
+	// BridgePlayerOn, where it is not nil, says whether the bridge's own
+	// player is on, for a body that lists no element of the player's
+	// (B1022): serve's is the player's gate as serve decided it at boot
+	// (bridgeOutput.Enabled), since its body lists the player's element only
+	// once the player has an identity; bridge doctor's is whether the config
+	// it loaded turns the player on, since its one-shot builder lists none.
+	// Either way the DAC line knows the player is on and not its card.
+	BridgePlayerOn func() bool
 }
 
 // usablePhones is the number of device tokens a phone can use now: not
@@ -99,6 +108,9 @@ func outputChecklist(ctx context.Context, src outputChecklistSource) ([]outputch
 		in = unreadInput(err, src)
 	} else {
 		in = checklistInput(resp)
+		if in.Bridge == nil && src.BridgePlayerOn != nil && src.BridgePlayerOn() {
+			in.Bridge = &outputcheck.BridgePlayer{}
+		}
 	}
 	if src.LoopbackErr != nil {
 		switch err := src.LoopbackErr(); {
@@ -296,13 +308,23 @@ func unreadInput(err error, src outputChecklistSource) outputcheck.Input {
 }
 
 // checklistInput reads the outputs body: the player, MPD and path rules
-// every element shares, and each element's card. It reads the elements of
-// kind mpd alone: the bridge's own player's (kind bridge, B470 PR 5b), which
-// serve's body carries after them and which has no mpd object, is no MPD
-// output, so the checklist stays MPD's.
+// every element of kind mpd shares, and each one's card; and of the bridge's
+// own player's element (kind bridge, B470 PR 5b), which serve's body carries
+// after them, the card it plays through alone (B1022), which the DAC line
+// tells from MPD's by the ALSA card both report. That element is no MPD
+// output and adds no player, path rule or candidate card, so the checklist
+// stays MPD's.
 func checklistInput(resp api.OutputsResponse) outputcheck.Input {
 	var in outputcheck.Input
 	for i, o := range resp.Outputs {
+		if o.Kind == api.OutputKindBridge {
+			in.Bridge = &outputcheck.BridgePlayer{}
+			if o.DAC != nil {
+				d := checklistDAC(*o.DAC)
+				in.Bridge.DAC = &d
+			}
+			continue
+		}
 		if o.Kind != "mpd" || o.MPD == nil {
 			continue
 		}
@@ -321,17 +343,23 @@ func checklistInput(resp api.OutputsResponse) outputcheck.Input {
 			}
 		}
 		if o.DAC != nil {
-			in.DACs = append(in.DACs, outputcheck.DAC{
-				ID:             o.DAC.ID,
-				Name:           o.DAC.Name,
-				USBID:          o.DAC.USBID,
-				IsMPDsOutput:   o.DAC.IsMPDsOutput != nil && *o.DAC.IsMPDsOutput,
-				MaxPCMRate:     o.DAC.Capabilities.MaxPCMRate,
-				NativeDSDRates: o.DAC.Capabilities.NativeDSDRates,
-			})
+			in.DACs = append(in.DACs, checklistDAC(*o.DAC))
 		}
 	}
 	return in
+}
+
+// checklistDAC is an element's card as the checklist judges it.
+func checklistDAC(d api.OutputDAC) outputcheck.DAC {
+	return outputcheck.DAC{
+		Card:           d.Card,
+		ID:             d.ID,
+		Name:           d.Name,
+		USBID:          d.USBID,
+		IsMPDsOutput:   d.IsMPDsOutput != nil && *d.IsMPDsOutput,
+		MaxPCMRate:     d.Capabilities.MaxPCMRate,
+		NativeDSDRates: d.Capabilities.NativeDSDRates,
+	}
 }
 
 // consoleOutputChecklist is admin.Deps.OutputChecklist: the lines as the
@@ -380,7 +408,12 @@ func doctorChecks(lines []outputcheck.Line) []doctor.Check {
 // route, asked on its port; and the paired devices in tokens.json. It
 // stays MPD's: the one-shot builder lists MPD's elements alone, on the MPD
 // gate, and the doctor never reads or makes the bridge's own player's
-// identity (B470 PR 5b).
+// identity (B470 PR 5b). Its DAC line reads whether the config turns that
+// player on (config.PlayerEnabled, on the host the builder stands for), and
+// never the card the player plays through, which no element of the player's
+// gives it (B1022). That config is the one this run loaded, its file and its
+// own environment: a service whose environment turns the player on beside a
+// file that leaves it off is one the doctor run from a shell reads as off.
 //
 // seam, when not nil, edits the builder's config before it is built: a
 // test stands in for Linux and for the box's MPD and cards there.
@@ -452,6 +485,14 @@ func doctorOutputChecklist(cfgFile string, cfg *config.Config, seam func(*api.Lo
 		defer lo.Close()
 		src := doctorChecklistSource(cfg, lo, route)
 		src.Reads, src.ReadKey = reads, outputsReadKey(cfgFile, cfg)
+		goos := lcfg.GOOS
+		if goos == "" {
+			goos = runtime.GOOS
+		}
+		src.BridgePlayerOn = func() bool {
+			on, _ := cfg.PlayerEnabled(goos)
+			return on
+		}
 		lines, ok := outputChecklist(ctx, src)
 		if !ok {
 			return nil

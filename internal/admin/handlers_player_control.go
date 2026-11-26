@@ -802,7 +802,8 @@ func (s *Server) apiPlayerControlQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 // hydrateByPath is the catalog's row for each path that has one, keyed by its
-// path: hydrateTracks over the distinct paths, so a repeated path is one row.
+// path: hydrateTracks over the distinct paths, so a repeated path is one row,
+// each with the cover of the album the catalog files it under (B1021).
 func (s *Server) hydrateByPath(r *http.Request, paths []string) map[string]playerTrackDTO {
 	out := map[string]playerTrackDTO{}
 	if s.deps.Manifest == nil || len(paths) == 0 {
@@ -826,6 +827,8 @@ func (s *Server) hydrateByPath(r *http.Request, paths []string) map[string]playe
 		return out
 	}
 	for _, t := range rows {
+		a, _ := cat.AlbumByID(t.AlbumID)
+		t.ArtworkMBID, t.ArtworkVersion = &a.ArtworkMBID, a.ArtworkVersion
 		out[t.Path] = t
 	}
 	return out
