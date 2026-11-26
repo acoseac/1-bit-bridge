@@ -2,7 +2,7 @@
 
 ### Why
 
-The two B1023 entries before this one built a Delete of the edition shown, and with it the reconciliation of the trash's answer it needed: paths held across redraws, the album read again after each answer, rows held off a page after an answer it could not read. Each change to it opened more of the same kind: settled paths still playable while the album was read again, a failed rollback taken back, a gateway's timeout read as nothing moved, a reload restoring the album-id send too early, a stale render after a change of output. What the owner asked for is the picker and Play, Shuffle and Add to queue on the edition shown, never a Delete of it. So Delete is the album's again, as it was before editions, and a Delete of the edition shown is a later item, with those hazards as its first cases.
+The two B1023 entries before this one built a Delete of the edition shown, and with it the reconciliation of the trash's answer it needed: paths held across redraws, the album read again after each answer, rows held off a page after an answer it could not read. Each change to it opened more of the same kind: settled paths still playable while the album was read again, a failed rollback taken back, a gateway's timeout read as nothing moved, a reload restoring the album-id send too early, a stale render after a change of output. This item's scope is the picker and Play, Shuffle and Add to queue on the edition shown, never a Delete of it. So Delete is the album's again, as it was before editions, and a Delete of the edition shown is a later item, with those hazards as its first cases.
 
 ### What was taken out
 
@@ -36,7 +36,7 @@ The library, configs, scripts, results and screenshots are kept outside the repo
 
 ### Runs
 
-On ad962904, the code as it ships with its rule, in one session of the shared build lock: formatting (no file rewritten), the pinned gofmt, vet, vet with the release tags for the six release targets and for linux/386 and linux/arm, the docs' check, the console's source guards and the citation, docblock and keeper guards by name, the album and edition wrappers (27 of the harness's and the two Go tests) under the race detector ten times (ok, 98 s), the whole race-enabled suite (93 packages ok in 2,016 s: `cmd/bridge` 1,990 s, `internal/manifest` 1,655 s, `internal/admin` 1,540 s) and the cross-builds (24 s). The harness's 199 scenarios ran green with node on the path, and the controls over copies of the console's modules. The commit that adds this entry changes it alone; on it the docs' check, the citation guard and the harness ran again.
+On ad962904, the code as it ships with its rule, in one session of the shared build lock: formatting (no file rewritten), the pinned formatter's check, the static checks, the static checks with the release tags for the six release targets and for linux/386 and linux/arm, the docs' check, the console's source guards and the citation, docblock and keeper guards by name, the album and edition wrappers (27 of the harness's and the two Go tests) under the race detector ten times (ok, 98 s), the whole race-enabled suite (93 packages ok in 2,016 s: `cmd/bridge` 1,990 s, `internal/manifest` 1,655 s, `internal/admin` 1,540 s) and the cross-builds (24 s). The harness's 199 scenarios ran green, and the controls over copies of the console's modules. The commit that adds this entry changes it alone; on it the docs' check, the citation guard and the harness ran again.
 
 ### Lines
 

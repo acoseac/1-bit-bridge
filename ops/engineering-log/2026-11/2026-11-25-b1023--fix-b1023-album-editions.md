@@ -49,7 +49,7 @@ The library, configs, scripts, results and screenshots are kept outside the repo
 
 ### Runs
 
-On `dad0efc8`, the code as it ships, in one session of the shared build lock: formatting (no file rewritten), vet, vet with the release tags for the six release targets and for linux/386 and linux/arm, the docs' check, the source guards by name, the album and edition wrappers (B1021's nine and these fourteen) under the race detector ten times (ok, 72 s), the whole race-enabled suite (93 packages ok in 2,021 s: `cmd/bridge` 1,989 s, `internal/manifest` 1,657 s, `internal/admin` 1,538 s) and the cross-builds. The commit that adds the quality-before-completeness check and this section changes tests and this entry alone; on it the console package under the race detector, the album and edition wrappers ten times, the docs' check and the citation guard ran again, their results in the PR's description.
+On `dad0efc8`, the code as it ships, in one session of the shared build lock: formatting (no file rewritten), the static checks, the static checks with the release tags for the six release targets and for linux/386 and linux/arm, the docs' check, the source guards by name, the album and edition wrappers (B1021's nine and these fourteen) under the race detector ten times (ok, 72 s), the whole race-enabled suite (93 packages ok in 2,021 s: `cmd/bridge` 1,989 s, `internal/manifest` 1,657 s, `internal/admin` 1,538 s) and the cross-builds. The commit that adds the quality-before-completeness check and this section changes tests and this entry alone; on it the console package under the race detector, the album and edition wrappers ten times, the docs' check and the citation guard ran again, their results in the PR's description.
 
 ### Lines
 
