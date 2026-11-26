@@ -180,7 +180,20 @@ computed font size of the field under a coarse pointer, still to be measured.
 
 ### Runs
 
-Recorded once they finish, below.
+On `8d8a5699`, in one build-slot session (10:42 to 11:14): `make fmt` (the pinned toolchain's
+gofmt; the tree unchanged after it), `make vet`, `make test` (93 packages ok; cmd/bridge 1,802.1 s,
+internal/admin 1,469.0 s, internal/manifest 1,393.2 s), `make build-all` (the six targets) and
+`make docs-check`, exit 0 after 1,919 s. Then `GOOS=linux GOARCH=arm make vet`, `GOOS=linux
+GOARCH=386 make vet` and `GOOS=windows GOARCH=amd64 go vet -tags ts_omit_webclient,ts_omit_debugeventbus
+./...`, clean; the console's guards and the touch pins by name (`TestNoConsoleControlDisablesItselfOutsideSetDisabled`,
+`TestPlayerEmittedClassesAreStyled`, `TestPlayerCSSDoesNotHijackOperatorTableClasses`,
+`TestEveryPushStateCarriesTheRouteTrail`, `TestPlayerBootCallIsLast`, `TestEveryPlayerModuleLoads`,
+`TestPlayerHeadsMatchServerRoutes`, `TestPlayerRoutesTableCoversEveryPlayerHead`,
+`TestCrumbRootsAreRealSections`, the eight of `player_touch_layout_test.go`, and the server's two
+filter tests), 19, passed; every wrapper of the bar's harness (193) and the list's (17) under
+`-race -count=10`: idle, 2,100 of 2,100 in 523 s; beside four busy processes on the host's 12
+CPUs, 2,100 of 2,100 in 557 s; none skipped in either. The bar's harness is unchanged this round
+(193 scenarios before and after).
 
 ### Left open
 
