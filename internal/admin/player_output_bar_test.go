@@ -386,8 +386,9 @@ func TestAPickRepaintsThePageInPlace(t *testing.T) { barScenario(t, 6) }
 func TestAReloadShowsTheDefaultEdition(t *testing.T) { barScenario(t, 3) }
 
 // TestAnSACDImageIsAnEditionOfItsOwn pins an SACD image's stereo tracks as an
-// edition beside a file edition: its size counted once, never a track at a
-// time; the album's one Delete, with the image shown, moving the files alone,
+// edition beside a file edition, the one the bridge's player opens on: its
+// size counted once, never a track at a time; the album's one Delete, with the
+// image shown from the first, moving the files alone, of their one edition,
 // since its tracks are no files the trash can move; and two rips of one image
 // each named by the end of its path that tells it apart.
 func TestAnSACDImageIsAnEditionOfItsOwn(t *testing.T) { barScenario(t, 5) }
@@ -415,12 +416,35 @@ func TestAnEditionsRowsAreHeldToTheBridgesBounds(t *testing.T) { barScenario(t, 
 // TestAnAlbumsDeleteMovesEveryEditionsFiles pins the album page's one Delete:
 // it moves every file of every edition, in the album's order, its
 // confirmation naming the album, the files and how many editions they are;
-// an edition picked while its answer is held leaves it Deleting…, a press
-// sending nothing, and its answer is said on it, the settings read once and
-// the page as it was; routed tracks and an SACD image's are left out, an
-// upstream's said so, one edition's files take the album's own words, and an
-// album with no file the trash can move offers no Delete and reads no settings.
+// an edition picked while its answer is held leaves it the one Delete,
+// Deleting…, a press sending nothing, and its answer is said on it, the
+// settings read once and the page as it was; routed tracks and an SACD
+// image's are left out, an upstream's said so, one edition's files beside
+// another's on an upstream are of 1 edition, and an album with no file the
+// trash can move offers no Delete and reads no settings.
 func TestAnAlbumsDeleteMovesEveryEditionsFiles(t *testing.T) { barScenario(t, 8) }
+
+// TestAnAlbumsDeleteKeepsItsRequestThroughARedraw pins the album's one Delete
+// through a redraw while its request is out: an output switch leaves one
+// Delete, Deleting… and disabled, and the answer is said on it; the redraw
+// after builds a fresh one; an answer while a redraw waits for its settings
+// is said by the Delete that redraw then builds; and a redraw where deleting
+// is off, or with no file to move, offers none.
+func TestAnAlbumsDeleteKeepsItsRequestThroughARedraw(t *testing.T) { barScenario(t, 5) }
+
+// TestAnAlbumsDeleteAnswerIsSaidOnTheDeleteShown pins the answer's two
+// outcomes on the Delete a redraw built: a refusal gives it back and is said
+// once, a press then sending one new request, and an answer whose every file
+// failed says so on it, disabled.
+func TestAnAlbumsDeleteAnswerIsSaidOnTheDeleteShown(t *testing.T) { barScenario(t, 4) }
+
+// TestEachAlbumsDeleteKeepsItsOwnRequest pins one view taking two albums in
+// turn with both requests out: each album's Delete reads Deleting… until its
+// own answer, away and back included; an answer for the album not shown
+// changes nothing on the page or on that album's old Delete and throws
+// nothing, and that album's next Delete is a fresh one; and its refusal is
+// said once, nothing else changed.
+func TestEachAlbumsDeleteKeepsItsOwnRequest(t *testing.T) { barScenario(t, 7) }
 
 // TestAnAlbumTheCatalogCountsMoreOfGoesAsTheRowsItShows pins the album id's
 // send: an album of one edition the catalog counts as its rows goes by its id,

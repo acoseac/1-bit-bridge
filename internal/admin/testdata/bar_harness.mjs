@@ -1054,7 +1054,8 @@ function page() {
     createElement: (tag) => { if (tag === "audio") { const a = new AudioEl(); audios.push(a); return a; } return new El(tag); },
     createElementNS: (ns, tag) => new El(tag),
     createTextNode: textNode,
-    getElementById: () => null,
+    // The first element under the body with that id, as a browser's.
+    getElementById: (id) => findAll(body, (n) => n.getAttribute("id") === id)[0] || null,
     querySelector: () => null,
     querySelectorAll: () => [],
     addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); },
@@ -5180,8 +5181,12 @@ const statOf = (view) => {
   return { line: p?.own || "", chip: (p && findAll(p, (n) => n.classList.contains("chip-quality"))[0]?.textContent) || "" };
 };
 
-// deleteOf is an album page's Delete button.
-const deleteOf = (view) => findAll(view, (n) => n.tagName === "BUTTON" && n.classList.contains("danger"))[0] || null;
+// deletes is every Delete button an album page holds, and deleteOf its first.
+const deletes = (view) => findAll(view, (n) => n.tagName === "BUTTON" && n.classList.contains("danger"));
+const deleteOf = (view) => deletes(view)[0] || null;
+
+// deleteState is an album page's Delete buttons as they read, a disabled one so marked.
+const deleteState = (view) => deletes(view).map((b) => `${b.textContent}${b.disabled ? " (disabled)" : ""}`);
 
 // trashAll answers a trash request with every path moved.
 const trashAll = (into) => async (paths) => { into.push(paths); return { ok: paths.length, failed: 0, outcomes: paths.map((path) => ({ path, status: "trashed" })) }; };
@@ -5450,8 +5455,10 @@ S.TestPlayShuffleAndAddTakeTheEditionShown = async () => {
   const b = await pageRig();
   b.s.on("POST", ROUTES.replace, async (e) => answer(recOf(e, { kind: "replace", sent: 13, of: 13 }), playing({ revision: 4 })));
   b.s.on("POST", ROUTES.append, async (e) => answer(recOf(e, { kind: "append", sent: 13, of: 13 }), playing({ revision: 5 })));
+  // The catalog counts the album's 30 rows, as it does: an album in editions
+  // goes as the edition's paths all the same.
   const bt = threeEditions(WAYS);
-  ({ view } = await editionPage(bt, { id: "acts-bridge" }));
+  ({ view } = await editionPage(bt, { id: "acts-bridge", album: { year: 2004, trackCount: 30 } }));
   p = albumParts(view);
   p.play?.click();
   await settle();
@@ -5614,25 +5621,27 @@ S.TestAReloadShowsTheDefaultEdition = async () => {
 };
 
 S.TestAnSACDImageIsAnEditionOfItsOwn = async () => {
+  // The bridge's player plays the image natively and the files as PCM, so the
+  // image's edition is the one an album page opens on, no pick made.
+  store.set(OUTPUT_KEY, "bridge");
   await pageRig();
   const asked = [];
   globalThis.confirm = (m) => { asked.push(m); return true; };
   const trashed = [];
   const image = (k) => ({ path: `Lib/SACD/Album.iso/st/${nn(k)}.dff`, title: SONGS[k - 1], track: k, codec: "DSD", isDsd: true, rateHz: 2822400,
-    duration: 240, sizeBytes: 3000000000, play: { kind: "none", contentType: "audio/x-dff" } });
-  const tracks = [1, 2, 3].flatMap((k) => [image(k), edHi(k)]);
+    duration: 240, sizeBytes: 3000000000, play: { kind: "none", contentType: "audio/x-dff" }, bridge: { way: "native" } });
+  const tracks = [1, 2, 3].flatMap((k) => [image(k), edHi(k, { bridge: { way: "pcm" } })]);
   const { view } = await editionPage(tracks, { id: "sacd", allowDelete: true, trash: trashAll(trashed) });
   const e = editions(view);
-  e.options[0]?.click();
-  check("an SACD image's tracks are an edition beside the files'", JSON.stringify(e.words) === JSON.stringify(["DSD64 · 3", "FLAC 192/24 · 3"]) &&
+  check("an SACD image's tracks are an edition beside the files', the one shown first on the bridge's player", JSON.stringify(e.words) === JSON.stringify(["DSD64 · 3", "FLAC 192/24 · 3"]) &&
     editions(view).pressed?.textContent === "DSD64 · 3", [e.words, editions(view).pressed?.textContent]);
   check("its size counted once, never a track at a time", statOf(view).line === "2004 · 3 tracks · 12 min · 2.8 GB", statOf(view));
-  check("with the image shown, the album's one Delete stays, for its files", deleteOf(view)?.textContent === "Delete…", deleteOf(view)?.textContent);
+  check("with the image shown from the first, the album's one Delete is there, for its files", JSON.stringify(deleteState(view)) === '["Delete…"]', deleteState(view));
   deleteOf(view)?.click();
   await settle();
-  check("it moves the files alone, never the image's tracks, which are no files, in the album's own words",
+  check("it moves the files alone, never the image's tracks, which are no files, of their 1 edition",
     JSON.stringify(trashed) === JSON.stringify([tracks.filter((t) => !t.isDsd).map((t) => t.path)]) &&
-    asked[0] === "Move 3 files from \"Album\" to the trash?\n\nThey stay recoverable from the Library page until the trash is emptied.", [trashed, asked]);
+    asked[0] === "Move 3 files of 1 edition of \"Album\" to the trash?\n\nThey stay recoverable from the Library page until the trash is emptied.", [trashed, asked]);
   // Two rips of one image, each folder the image's stereo area, as the
   // catalog's fold takes it.
   const rip = (dir, k) => ({ ...image(k), path: `Lib/${dir}/Album.iso/st/${nn(k)}.dff` });
@@ -5812,8 +5821,8 @@ S.TestAnAlbumsDeleteMovesEveryEditionsFiles = async () => {
   deleteOf(view)?.click();
   await settle();
   check("an edition picked while its answer is held: the one Delete reads Deleting…, disabled, a press sending nothing",
-    editions(view).pressed?.textContent === "FLAC 44.1/16 · 4" && deleteOf(view)?.textContent === "Deleting…" && deleteOf(view)?.disabled === true && sent.length === 1,
-    [editions(view).pressed?.textContent, deleteOf(view)?.textContent, sent.length]);
+    editions(view).pressed?.textContent === "FLAC 44.1/16 · 4" && JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]' && sent.length === 1,
+    [editions(view).pressed?.textContent, deleteState(view), sent.length]);
   held.open();
   await settle();
   check("its answer is said on the Delete the page shows: one request, the settings read once",
@@ -5839,11 +5848,211 @@ S.TestAnAlbumsDeleteMovesEveryEditionsFiles = async () => {
   const two = await editionPage([1, 2, 3].flatMap((k) => [edCd(k), up(k)]), { id: "delete-two", allowDelete: true, trash: trashAll(sent) });
   deleteOf(two.view)?.click();
   await settle();
-  check("one edition's files beside an edition on an upstream: the album's own words and its upstream line",
-    asked[0] === words("3 files from \"Album\"") + "\n\n3 tracks on an upstream server are left alone." && sent[0]?.length === 3, [asked[0], sent[0]]);
+  check("one edition's files beside an edition on an upstream: of 1 edition, and its upstream line",
+    asked[0] === words("3 files of 1 edition of \"Album\"") + "\n\n3 tracks on an upstream server are left alone." && sent[0]?.length === 3, [asked[0], sent[0]]);
   const none = await editionPage([1, 2, 3].flatMap((k) => [up(k), img(k)]), { id: "delete-none", allowDelete: true, trash: trashAll(sent) });
   check("no file the trash can move (an edition on an upstream and an SACD image's): no Delete, and no settings read for one",
     deleteOf(none.view) === null && none.log.filter((e) => e.path === "/api/settings").length === 0, [deleteOf(none.view)?.textContent, none.log.map((e) => e.path)]);
+};
+
+S.TestAnAlbumsDeleteKeepsItsRequestThroughARedraw = async () => {
+  const r = await pageRig();
+  r.s.on("POST", ROUTES.switchOut, async (e) => answer(recOf(e, { kind: "switch-out", silence: 4 }), pub({ revision: 4, silent: true })));
+  globalThis.confirm = () => true;
+  let g = 1;
+  const gen = () => g;
+  let held = gate();
+  const sent = [];
+  const { view, views, log } = await editionPage(threeEditions(WAYS), { id: "redraw", gen, allowDelete: true, trash: async (paths) => {
+    sent.push(paths);
+    await held.p;
+    return { ok: paths.length, failed: 0, outcomes: paths.map((path) => ({ path, status: "trashed" })) };
+  } });
+  // The settings a redraw reads: held where a case holds them, or deleting turned off.
+  let hold = null;
+  let off = false;
+  const served = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url) === "/api/settings") {
+      if (hold) await hold.p;
+      if (off) return { ok: true, status: 200, json: async () => ({ allowDelete: false }) };
+    }
+    return served(url, init);
+  };
+  // As boot.js wires it: a change of the output and a view's rerender each
+  // redraw the route, at a generation of its own.
+  let redrawn = null;
+  const draw = () => { g += 1; redrawn = views.renderAlbum(view, { id: "redraw", gen, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); };
+  listen(r.out, { win: window, doc: document, onOutput: draw });
+  window.addEventListener("player:rerender", draw);
+  const rerender = async () => { window.dispatchEvent(new CustomEvent("player:rerender")); await redrawn; await settle(); };
+  deleteOf(view)?.click();
+  await settle();
+  await r.out.pick("bridge");
+  await settle();
+  await redrawn;
+  await settle();
+  check("an output switch while its answer is held: one Delete, Deleting…, disabled",
+    r.out.view().output === "bridge" && JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]' && sent.length === 1, [r.out.view().output, deleteState(view), sent.length]);
+  held.open();
+  await settle();
+  check("its answer is said on the Delete the switch's redraw built", JSON.stringify(deleteState(view)) === '["30 moved to trash (disabled)"]', deleteState(view));
+  await rerender();
+  check("the redraw after it builds a fresh Delete", JSON.stringify(deleteState(view)) === '["Delete…"]', deleteState(view));
+  // An answer while a redraw has read the album and waits for its settings.
+  held = gate();
+  deleteOf(view)?.click();
+  await settle();
+  hold = gate();
+  await rerender();
+  const waiting = deleteState(view);
+  held.open();
+  await settle();
+  const answered = deleteState(view);
+  hold.open();
+  hold = null;
+  await settle();
+  check("an answer while the redraw waits for its settings: no Delete until they come, then the one Delete it builds says the answer, disabled",
+    waiting.length === 0 && answered.length === 0 && JSON.stringify(deleteState(view)) === '["30 moved to trash (disabled)"]' && sent.length === 2,
+    [waiting, answered, deleteState(view), sent.length]);
+  // A redraw that offers no Delete: deleting turned off, or no file to move.
+  held = gate();
+  await rerender();
+  deleteOf(view)?.click();
+  await settle();
+  off = true;
+  await rerender();
+  const turnedOff = deleteState(view);
+  albums.set("redraw", [1, 2, 3].map((k) => edCd(k, { path: `Upstream/Album/${nn(k)}.flac`, routed: true, sourceId: "uuid:up" })));
+  const reads = log.filter((e) => e.path === "/api/settings").length;
+  await rerender();
+  const nothing = deleteState(view);
+  const read = log.filter((e) => e.path === "/api/settings").length - reads;
+  held.open();
+  await settle();
+  check("a redraw while it is out where deleting is off, or with no file to move: no Delete, no settings read for none, and none once it is answered",
+    turnedOff.length === 0 && nothing.length === 0 && read === 0 && deleteState(view).length === 0 && sent.length === 3,
+    [turnedOff, nothing, read, deleteState(view), sent.length]);
+};
+
+S.TestAnAlbumsDeleteAnswerIsSaidOnTheDeleteShown = async () => {
+  await pageRig();
+  globalThis.confirm = () => true;
+  const alerts = [];
+  globalThis.alert = (m) => { alerts.push(String(m)); };
+  let g = 1;
+  const gen = () => g;
+  const { view, views } = await editionPage(threeEditions(), { id: "said", gen, allowDelete: true });
+  // The trash's answer to each request, held until its case lets it go: a
+  // refusal, an answer whose every file failed, or every file moved.
+  const sent = [];
+  let next = null;
+  const served = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url) !== "/api/library/trash") return served(url, init);
+    const paths = JSON.parse(init.body).paths;
+    sent.push(paths);
+    const { held, how } = next;
+    await held.p;
+    if (how === "refuse") return { ok: false, status: 500, json: async () => ({ message: "The trash could not be written." }) };
+    const failed = how === "fail";
+    const body = { ok: failed ? 0 : paths.length, failed: failed ? paths.length : 0, outcomes: paths.map((path) => ({ path, status: failed ? "failed" : "trashed" })) };
+    return { ok: true, status: 200, json: async () => body };
+  };
+  const redraw = async () => { g += 1; await views.renderAlbum(view, { id: "said", gen, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); await settle(); };
+  next = { held: gate(), how: "refuse" };
+  deleteOf(view)?.click();
+  await settle();
+  await redraw();
+  check("a request out through a redraw: the Delete it builds reads Deleting…, disabled", JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]', deleteState(view));
+  next.held.open();
+  await settle();
+  check("the bridge refusing it: that Delete given back, Delete…, the refusal said once",
+    JSON.stringify(deleteState(view)) === '["Delete…"]' && JSON.stringify(alerts) === '["The trash could not be written."]', [deleteState(view), alerts]);
+  next = { held: gate(), how: "moved" };
+  deleteOf(view)?.click();
+  await settle();
+  next.held.open();
+  await settle();
+  check("a press then sends one new request, its answer said on it", sent.length === 2 && JSON.stringify(deleteState(view)) === '["30 moved to trash (disabled)"]',
+    [sent.length, deleteState(view)]);
+  await redraw();
+  next = { held: gate(), how: "fail" };
+  deleteOf(view)?.click();
+  await settle();
+  await redraw();
+  next.held.open();
+  await settle();
+  check("an answer whose every file failed: the redraw's Delete says so, disabled",
+    JSON.stringify(deleteState(view)) === '["0 deleted, 30 failed (disabled)"]' && sent.length === 3, [deleteState(view), sent.length]);
+};
+
+S.TestEachAlbumsDeleteKeepsItsOwnRequest = async () => {
+  await pageRig();
+  globalThis.confirm = () => true;
+  const alerts = [];
+  globalThis.alert = (m) => { alerts.push(String(m)); };
+  const thrown = [];
+  process.on("unhandledRejection", (e) => thrown.push(String(e)));
+  let g = 1;
+  const gen = () => g;
+  albums.set("album-b", [1, 2, 3].flatMap((k) => [edHi(k, { path: `Lib/Other/Hi/${nn(k)}.flac` }), edCd(k, { path: `Lib/Other/CD/${nn(k)}.flac` })]));
+  const { view, views } = await editionPage(threeEditions(), { id: "album-a", gen, allowDelete: true });
+  // Each album's trash requests, held until the case lets each go, then
+  // answered or refused.
+  const sent = { a: 0, b: 0 };
+  const holds = {};
+  const served = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url) !== "/api/library/trash") return served(url, init);
+    const paths = JSON.parse(init.body).paths;
+    const which = paths[0].startsWith("Lib/Other/") ? "b" : "a";
+    sent[which] += 1;
+    const h = holds[which] = { ...gate(), refuse: false };
+    await h.p;
+    if (h.refuse) return { ok: false, status: 500, json: async () => ({ message: `${which}: the trash could not be written.` }) };
+    const body = { ok: paths.length, failed: 0, outcomes: paths.map((path) => ({ path, status: "trashed" })) };
+    return { ok: true, status: 200, json: async () => body };
+  };
+  // One view, as boot.js's route keeps it: an album, or another route, each
+  // drawn at a generation of its own.
+  const open = async (id) => { g += 1; await views.renderAlbum(view, { id, gen, setToolbar: () => {}, setCrumb: () => {}, trail: [] }); await settle(); };
+  const away = async () => { g += 1; while (view.firstChild) view.removeChild(view.firstChild); view.appendChild(document.createElement("div")); await settle(); };
+  deleteOf(view)?.click();
+  await settle();
+  await away();
+  await open("album-a");
+  check("away and back while its answer is held: the album's one Delete reads Deleting…, disabled",
+    JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]', deleteState(view));
+  await open("album-b");
+  const fresh = deleteState(view);
+  const first = deleteOf(view);
+  first?.click();
+  await settle();
+  check("another album's Delete is its own: live, a press sending its request", JSON.stringify(fresh) === '["Delete…"]' && sent.b === 1, [fresh, sent]);
+  await open("album-a");
+  check("back on the first with both held: its Delete still Deleting…, disabled", JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]', deleteState(view));
+  holds.b.open();
+  await settle();
+  check("the other's answer while the first shows: the first's Delete stays Deleting…, the other's old Delete untouched, nothing thrown",
+    JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]' && first?.textContent === "Deleting…" && first?.disabled === true && thrown.length === 0,
+    [deleteState(view), first?.textContent, thrown]);
+  holds.a.open();
+  await settle();
+  check("the first's own answer is said on its Delete", JSON.stringify(deleteState(view)) === '["30 moved to trash (disabled)"]', deleteState(view));
+  await open("album-b");
+  const again = deleteState(view);
+  deleteOf(view)?.click();
+  await settle();
+  check("the other again after its answer: a fresh Delete, a press sending one new request", JSON.stringify(again) === '["Delete…"]' && sent.b === 2, [again, sent]);
+  const second = deleteOf(view);
+  await open("album-a");
+  holds.b.refuse = true;
+  holds.b.open();
+  await settle();
+  check("its refusal while the first shows: said once, nothing else changed",
+    JSON.stringify(alerts) === '["b: the trash could not be written."]' && JSON.stringify(deleteState(view)) === '["Delete…"]' &&
+    second?.textContent === "Deleting…" && second?.disabled === true && thrown.length === 0, [alerts, deleteState(view), second?.textContent, thrown]);
 };
 
 S.TestAnAlbumTheCatalogCountsMoreOfGoesAsTheRowsItShows = async () => {
