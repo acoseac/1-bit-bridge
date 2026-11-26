@@ -4,8 +4,8 @@
 > land (ops/release-playbook.md, section 0 step 3), turned into the release's
 > notes on release day (section 4 step 5). The release after v0.2.3, 0.2.4 by
 > plan. It covers the 150 merges from v0.2.3 to the release candidate
-> `29df3a4a` (v0.2.3-150-g29df3a4a); a line marked (check) waits on the
-> operator's decision.
+> `29df3a4a` (v0.2.3-150-g29df3a4a). The operator's decisions on the lines
+> that were marked for checking are applied.
 
 ---
 
@@ -17,15 +17,13 @@
 
 **DSD settings from an earlier version carry over at the first start** (backlog B728): rates an owner approved for native DSD or DoP keep playing with no prompt (DoP while its gain check passes), and an explicit `output.player.dsdMode: off`, or `dop` without `allowDoP`, becomes the default, off, for every DAC with no choice of its own; with none of `dsdMode`, `allowDoP` or `dsdQualification` set, DSD plays under `auto` from the first start. Those three keys reach the player's DSD state only through this migration, and each start of serve warns of each one set. Each DAC's choice is kept in `player-dsd.json` in the data directory, which backups carry.
 
-**The app reads each DAC's DSD, and changes its choice while playback is stopped** (backlog B728): `GET /v1/outputs` describes the bound DAC's DSD (`dsdDAC`, and in `dsdPlayback` the rates that play native or as DoP, those converted and those refused, with why), and `PUT /v1/outputs/{id}/dsd` (feature `bridgeDSDChoice`) sets its mode to `auto`, `native`, `dop`, `convert` or `off`, refused with "Stop playback to change DSD" while anything plays; while a write runs, the player starts nothing. `dsdPlayback` no longer sends `qualificationRevision` or `qualifiedOn`, which the app already read as optional, and the wire protocol stays at version 1. (check)
+**The bridge publishes each DAC's DSD choice, and an API changes it while playback is stopped** (backlog B728): `GET /v1/outputs` describes the bound DAC's DSD (`dsdDAC`, and in `dsdPlayback` the rates that play native or as DoP, those converted and those refused, with why), and `PUT /v1/outputs/{id}/dsd` (feature `bridgeDSDChoice`) sets its mode to `auto`, `native`, `dop`, `convert` or `off`, refused with "Stop playback to change DSD" while anything plays; while a write runs, the player starts nothing. `dsdPlayback` no longer sends `qualificationRevision` or `qualifiedOn`, which the app already read as optional, and the wire protocol stays at version 1. No released app uses the change route yet.
 
 **The console's Player page plays a test tone** (backlog B601): a 1 kHz sine on both channels, at -30 to -60 dBFS for 5, 10 or 30 seconds, through the DAC while the player is stopped; turn the DAC and the amplifier down first, since the bridge can't see their volume. Stop or leaving the page ends it, and a play from the app or another controller stops it.
 
 **The Player page's transports table follows the DAC's DSD choice** (backlog B1028, B1029): each DSD row is set by the DSD choice that applies to the DAC (its own, which the 1-bit app changes, or the bridge's default for a DAC with none), the Approved column is now Rates, the rates each way plays now, and a fourth row lists the DSD rates converted to PCM, with the PCM each becomes. The page no longer says DSD comes in a later version, and it still has no DSD control. The example config's player paragraph says the same.
 
 **A track that fails before it is heard no longer sends Play back to the track before it** (backlog B903AUD): in a gapless queue, when the next track fails before any of it was heard, playback still stops, and Play from Stopped now starts the entry after the track heard instead of replaying that track. With nothing after it (the last track, repeat off), the selection stays where it was.
-
-**The DAC catalog records the Chord Hugo 2's DoP up to DSD256** (backlog B730): its maker's DoP statement, DSD64 to DSD256, is the one change among the catalog's new rows to what the bridge's own player decides; the other new rows describe DACs for the iOS app alone. (check)
 
 ## The web console
 
@@ -89,7 +87,7 @@
 
 **Host names that aren't ASCII are used in their IDNA form** (backlog B744): a `customEndpoints` entry or `autocert.domain` that isn't ASCII is now certified and published in its `xn--` form, `bridge init --domain` writes that form and says so, and a name that has none is refused; before, the certificate could not be made. A library name also loses its control characters wherever it is set.
 
-**The embedded Tailscale node moves to 1.104.5, among the dependency updates**: Tailscale 1.104.2 to 1.104.5, the SQLite driver 1.61.0 to 1.62.0, quic-go 0.64.1 to 0.65.0, golang.org/x/crypto 0.58.0 to 0.59.0 and golang.org/x/image 0.47.0 to 0.48.0, with x/term and x/mod; Go stays 1.27.3. Tailscale 1.104.5's netstack turns RACK loss recovery off unless `TS_NETSTACK_ENABLE_RACK=true` is set, which may slow recovery for tsnet transfers on paths that reorder packets. (check)
+**The embedded Tailscale node moves to 1.104.5, among the dependency updates**: Tailscale 1.104.2 to 1.104.5, the SQLite driver 1.61.0 to 1.62.0, quic-go 0.64.1 to 0.65.0, golang.org/x/crypto 0.58.0 to 0.59.0 and golang.org/x/image 0.47.0 to 0.48.0, with x/term and x/mod; Go stays 1.27.3. Tailscale 1.104.5's netstack turns RACK loss recovery off unless `TS_NETSTACK_ENABLE_RACK=true` is set, which may slow recovery for tsnet transfers on paths that reorder packets.
 
 ## Fixes
 
@@ -107,7 +105,7 @@
 
 **The player checklist no longer points MPD at the bridge player's DAC** (backlog B1022): its DAC line (console and `bridge doctor`) told a reader to set MPD to the DAC the bridge's own player drives, which ALSA gives one player at a time. It now matches the two by ALSA card: the player's own DAC reads OK, and MPD set to the same card is a warning.
 
-**A stop during serve's start ends it cleanly** (backlog B662): a stop that arrived while serve seeded its upscale target could end it with exit 1 and a database error (`sql: transaction has already been committed or rolled back`). (check)
+**A stop during serve's start ends it cleanly** (backlog B662): a stop that arrived while serve seeded its upscale target could end it with exit 1 and a database error (`sql: transaction has already been committed or rolled back`).
 
 ## Upgrade notes
 
@@ -115,6 +113,6 @@
 
 **Before going back to an earlier version, remove `tailscale.uploadDiagnosticLogs` from `bridge.yaml`** (backlog B749): a bridge from before this release refuses the key at load, whatever its value, and does not start; it also uploads Tailscale's diagnostic logs unless `TS_NO_LOGS_NO_SUPPORT=true` is in its environment.
 
-**Before going back to an earlier version, remove this release's other new keys from `bridge.yaml`** (backlog B617, B761, B989): a bridge from before this release refuses `enrich.enabled`, `enrich.deezerEnabled`, `update.checkEnabled` and `adminLANAddress`, whatever their value, and does not start, and an update's automatic rollback is not made while one is there. Switching enrichment, the Deezer photos and the update check back on in Settings removes their keys; `adminLANAddress` takes removing by hand, and `tailscale.uploadDiagnosticLogs` has the line before this one. (check)
+**Before going back to an earlier version, remove this release's other new keys from `bridge.yaml`** (backlog B617, B761, B989): a bridge from before this release refuses `enrich.enabled`, `enrich.deezerEnabled`, `update.checkEnabled` and `adminLANAddress`, whatever their value, and does not start, and an update's automatic rollback is not made while one is there. Switching enrichment, the Deezer photos and the update check back on in Settings removes their keys; `adminLANAddress` takes removing by hand, and `tailscale.uploadDiagnosticLogs` has the line before this one.
 
 **Reload any console tab left open across the update** (backlog B1029, B1037): a page loaded from 0.2.3 keeps running 0.2.3's script, and the Player page's no longer reads the player's status: where it shows the player's transports, it says "Couldn't read the player" at each refresh until it is reloaded.
