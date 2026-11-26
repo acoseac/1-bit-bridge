@@ -143,7 +143,7 @@ func newFakePlayerOutput() *fakePlayerOutput {
 			Running:    PlayerRunning{Started: true, State: "playing", Transport: "playing"},
 			Configured: PlayerConfigured{Enabled: true, Starts: true},
 			Pending:    []PlayerPending{},
-			Transports: []PlayerTransport{{Kind: "pcm", Plays: true, Capable: "yes", Approved: []string{}}},
+			Transports: []PlayerTransport{{Kind: "pcm", Plays: true, Capable: "yes", Rates: []string{}}},
 		},
 		list: PlayerDACList{Read: true, Cards: []PlayerDACCard{{Card: 5, Name: "iFi (by AMR) HD USB Audio", Selection: "tok", Kinds: []PlayerDACKind{}}}},
 		device: config.PlayerDevice{Transport: "usb", Binding: config.BindingSerial, VendorID: "20b1", ProductID: "3009",

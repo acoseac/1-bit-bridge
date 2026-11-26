@@ -8103,11 +8103,12 @@ function renderPlayerOutputRunning(run) {
 }
 
 // renderPlayerOutputTransports paints each transport's row: whether it plays,
-// and the three facts it rests on.
+// and the three facts it rests on (what the DAC takes, what it is set to, the
+// rates it plays at).
 function renderPlayerOutputTransports(transports) {
   const body = document.getElementById("player-output-transports");
   if (!body) return;
-  const names = { pcm: "PCM", dop: "DoP", native: "Native DSD" };
+  const names = { pcm: "PCM", dop: "DoP", native: "Native DSD", converted: "DSD converted to PCM" };
   body.replaceChildren();
   for (const t of transports) {
     const tr = document.createElement("tr");
@@ -8120,7 +8121,7 @@ function renderPlayerOutputTransports(transports) {
       name.appendChild(note);
     }
     tr.appendChild(name);
-    for (const text of [t.plays ? "yes" : "no", t.capable, t.mode, t.approved.length ? t.approved.join(", ") : "none"]) {
+    for (const text of [t.plays ? "yes" : "no", t.capable, t.mode, t.rates.length ? t.rates.join(", ") : "none"]) {
       const td = document.createElement("td");
       td.textContent = text;
       tr.appendChild(td);
