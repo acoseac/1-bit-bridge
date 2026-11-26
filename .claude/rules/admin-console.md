@@ -611,41 +611,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   runs the shipped tray under node. **Two controls outside the trays
   offered a managed field** until 2026-09-29 (the Jobs page's fingerprint
   Enable button, the Duplicates page's policy radios): the next bullet.
-- **A control on the page that offers a managed field is hidden like a
-  tray's row, and one that only offers a change waits to know** (2026-09-29,
-  backlog B68). On a public-mode bridge whose `deployment.managedSettings`
-  listed `fingerprintEnabled` and `duplicatesFilter`, the Jobs page offered
-  the fingerprint Enable button and its click answered "Enable failed —
-  retry", and the Duplicates page offered the policy radios and a click
-  answered an alert, "these settings are managed by the control plane…":
-  B35's trays on a control beside them. There are exactly four console
-  callers of `PATCH /api/settings` (the Settings form, which hides managed
-  fields and drops unoffered keys, the trays, and these two) and the PATCH
-  is the only handler that reads the managed set. Both read the trays'
-  snapshot (`trayManaged`, kept across page inits). **The Enable button
-  waits for it**: `syncFingerprintEnable` shows it only for a switch that is
-  off, a managed set that is known and does not name the field
-  (`trayManagedKnown`; a card's button on a managed bridge must never
-  flash, which a tray's rows in a closed gear can afford), and `initJobs`
-  runs it again the moment the snapshot lands, not at the next 10 s poll.
-  **The policy radios stay until the set says otherwise**, since they also
-  say which policy is in force (`applyDupesPolicyManaged`, first from the
-  set an earlier page's snapshot left, so a boosted navigation never shows
-  them): the fieldset and the prose about saving one are hidden, the inputs
-  disabled, and a line says which policy is set for the bridge, named as its
-  radio names it (`dupesPolicyName`). Both handlers send nothing for a
-  managed field (`enableFingerprint`, `saveDupesPolicy`), as `saveTrayField`
-  does. **A tray blurb that counts switches is written from the rows the
-  reader can see**: `spec.blurb` may be a function of the shown fields,
-  which `applyTrayManaged` calls whenever the managed set may have changed,
-  and the CarPlay pre-generation tray's "All three switches have to be on
-  for anything to run" says how many are set for the bridge instead of
-  standing beside the two rows a hosted bridge leaves it (`carPlayBlurb`;
-  the DSD row is not one of the three).
-  `TestTheFingerprintEnableButtonIsOnlyOfferedWhereTheOperatorOwnsTheSwitch`,
-  `TestTheDuplicatesPolicyIsOnlyOfferedWhereTheOperatorOwnsIt` and
-  `TestTheCarPlayTrayBlurbCountsOnlySwitchesTheReaderCanSee` run the shipped
-  functions under node.
+- **A control on the page that offers a managed field is hidden like a tray's row, and one that only offers a change waits to know** (2026-09-29, backlog B68) → History-rules-admin-console.md
 - **The variant panel redraws IN PLACE after a tray save** (2026-09-29,
   backlog B68). A save in the panel's gear called `onChanged`, the whole
   route's re-render: after turning PCM upscaling on from the Variants tab,
