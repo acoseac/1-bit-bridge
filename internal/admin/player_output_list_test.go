@@ -142,8 +142,9 @@ func TestAListWritesNoPlaceUntilALoadsRowsStand(t *testing.T) { listScenario(t, 
 // 1,300 of them, come back to row 1,200 from their first row, asked for once,
 // with no Back to the top; a place an earlier build re-based at 1,200 lands on
 // its row and the next place starts at the first row; a playlist gone above
-// the place's row is found by its id; and Smart Mixes do the same.
-func TestAWholeCollectionRestoresFromItsFirstRowByItsRowsID(t *testing.T) { listScenario(t, 7) }
+// the place's row is found by its id, and one whose row is gone lands at the
+// index it was measured at; and Smart Mixes do the same.
+func TestAWholeCollectionRestoresFromItsFirstRowByItsRowsID(t *testing.T) { listScenario(t, 8) }
 
 // TestACrumbPushesWhereItsEntryNowHoldsAnotherURL: after Back, a filter
 // that matches nothing (the list at its top, no write pending) and Forward,

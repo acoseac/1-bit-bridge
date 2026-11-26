@@ -1041,6 +1041,10 @@ S.TestAWholeCollectionRestoresFromItsFirstRowByItsRowsID = async () => {
   win.dispatchEvent({ type: "popstate" });
   await settle();
   check("a playlist gone above the place's row: the row is found by its id", topRow()?.title === "Playlist 10", topRow());
+  history.pushState({ scrollY: 0, place: { href: "/playlists", start: 1200, anchor: 1203, anchorId: "p1", delta: 0, snapshotAt: SNAP } }, "", "/playlists");
+  win.dispatchEvent({ type: "popstate" });
+  await settle();
+  check("a re-based place whose row is gone lands at the index it was measured at in its window", topRow()?.title === "Playlist 4", topRow());
 
   // Smart Mixes, which their endpoint answers whole too.
   history.pushState({ scrollY: 0, place: { href: "/mixes", start: 1200, anchor: 1205, anchorId: "m5", delta: 0, snapshotAt: SNAP } }, "", "/mixes");
