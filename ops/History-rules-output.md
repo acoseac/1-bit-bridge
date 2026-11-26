@@ -752,9 +752,11 @@ that does not read shows as `state_unreadable` with no DAC available
 (`TestADamagedStateIsPublishedWithNoDAC`, through serve too, the state file
 damaged and the DAC unplugged), and a migration's refusal as the bound DAC's
 `migration_record_refused` (`TestAMigrationFailureIsPublished`, through
-serve with a stale legacy record). The console's Player page keeps the boot
-snapshot's legacy words (`bootDSDMode`, `bootAllowDoP`) until B13 replaces
-it. `TestTheReadSideIsTheSetsOwn` holds the view to the set it was made
+serve with a stale legacy record). The console's Player page read the boot
+snapshot's legacy words (`bootDSDMode`, `bootAllowDoP`) for its transports
+table until B1029, which took them out: its DSD rows are set to this
+element's `dsdMode` and `allowDoP` with `dsdDAC`'s choice, and its converted
+row lists `dsdPlayback.converted`. `TestTheReadSideIsTheSetsOwn` holds the view to the set it was made
 with, for a known DAC whose own choice is native, an unknown DAC with no
 choice, no DAC available and a state that does not read;
 `TestTheBridgeElementCarriesTheDACChoice` the element's members with no
