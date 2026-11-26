@@ -428,9 +428,11 @@ func TestAnAlbumsDeleteMovesEveryEditionsFiles(t *testing.T) { barScenario(t, 8)
 // through a redraw while its request is out: an output switch leaves one
 // Delete, Deleting… and disabled, and the answer is said on it; the redraw
 // after builds a fresh one; an answer while a redraw waits for its settings
-// is said by the Delete that redraw then builds; and a redraw where deleting
-// is off, or with no file to move, offers none.
-func TestAnAlbumsDeleteKeepsItsRequestThroughARedraw(t *testing.T) { barScenario(t, 5) }
+// is said by the Delete that redraw then builds, where its files are the ones
+// asked, and a fresh one is built where they are not; a redraw where deleting
+// is off, or with no file to move, offers none, and the redraw after that
+// builds a fresh one.
+func TestAnAlbumsDeleteKeepsItsRequestThroughARedraw(t *testing.T) { barScenario(t, 7) }
 
 // TestAnAlbumsDeleteAnswerIsSaidOnTheDeleteShown pins the answer's two
 // outcomes on the Delete a redraw built: a refusal gives it back and is said

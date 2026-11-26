@@ -5933,6 +5933,24 @@ S.TestAnAlbumsDeleteKeepsItsRequestThroughARedraw = async () => {
   check("a redraw while it is out where deleting is off, or with no file to move: no Delete, no settings read for none, and none once it is answered",
     turnedOff.length === 0 && nothing.length === 0 && read === 0 && deleteState(view).length === 0 && sent.length === 3,
     [turnedOff, nothing, read, deleteState(view), sent.length]);
+  off = false;
+  albums.set("redraw", threeEditions(WAYS));
+  await rerender();
+  check("the redraw after an answer no Delete took builds a fresh Delete", JSON.stringify(deleteState(view)) === '["Delete…"]', deleteState(view));
+  // An answer while a redraw whose rows are not the ones asked waits for its settings.
+  held = gate();
+  deleteOf(view)?.click();
+  await settle();
+  hold = gate();
+  albums.set("redraw", threeEditions(WAYS).filter((t) => !t.path.startsWith("Lib/CD/")));
+  await rerender();
+  held.open();
+  await settle();
+  hold.open();
+  hold = null;
+  await settle();
+  check("an answer kept for a redraw whose files are not the ones asked: the Delete it builds is a fresh one",
+    JSON.stringify(deleteState(view)) === '["Delete…"]' && sent.length === 4, [deleteState(view), sent.length]);
 };
 
 S.TestAnAlbumsDeleteAnswerIsSaidOnTheDeleteShown = async () => {
@@ -6034,9 +6052,11 @@ S.TestEachAlbumsDeleteKeepsItsOwnRequest = async () => {
   check("back on the first with both held: its Delete still Deleting…, disabled", JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]', deleteState(view));
   holds.b.open();
   await settle();
-  check("the other's answer while the first shows: the first's Delete stays Deleting…, the other's old Delete untouched, nothing thrown",
-    JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]' && first?.textContent === "Deleting…" && first?.disabled === true && thrown.length === 0,
-    [deleteState(view), first?.textContent, thrown]);
+  const after = deleteState(view);
+  await open("album-a");
+  check("the other's answer while the first shows: the first's Delete stays Deleting…, through a redraw too, the other's old Delete untouched, nothing thrown",
+    JSON.stringify(after) === '["Deleting… (disabled)"]' && JSON.stringify(deleteState(view)) === '["Deleting… (disabled)"]' &&
+    first?.textContent === "Deleting…" && first?.disabled === true && thrown.length === 0, [after, deleteState(view), first?.textContent, thrown]);
   holds.a.open();
   await settle();
   check("the first's own answer is said on its Delete", JSON.stringify(deleteState(view)) === '["30 moved to trash (disabled)"]', deleteState(view));
