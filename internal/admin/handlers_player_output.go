@@ -365,19 +365,21 @@ type PlayerPending struct {
 }
 
 // PlayerTransport is one transport's standing on the running player's DAC:
-// pcm, dop or native. Plays is what the player does now; Capable, Mode and
-// Approved are the three facts it rests on, never one standing for the
-// others.
+// pcm, dop, native, or converted (DSD the player converts to PCM). Plays is
+// what the player does now; Capable, Mode and Rates are the three facts it
+// rests on, never one standing for the others.
 type PlayerTransport struct {
 	Kind  string `json:"kind"`
 	Plays bool   `json:"plays"`
 	// Capable is yes, no or unknown: what the DAC's altsets take.
 	Capable string `json:"capable"`
-	// Mode is the setting the player runs with for it.
+	// Mode is the setting the player runs with for it: for DSD, the choice
+	// GET /v1/outputs publishes for the bound DAC.
 	Mode string `json:"mode"`
-	// Approved are the owner-approved tuples of the backend's published
-	// epoch, by rate; [] for PCM, which needs no approval.
-	Approved []string `json:"approved"`
+	// Rates are the rates the backend's published set plays it at: DoP's and
+	// native's tuples, each converted rate with the PCM it becomes, by rate;
+	// PCM's, every rate the DAC takes.
+	Rates []string `json:"rates"`
 	// Note is one sentence about it.
 	Note string `json:"note"`
 }

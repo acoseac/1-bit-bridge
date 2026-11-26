@@ -108,14 +108,11 @@ type bridgeOutput struct {
 	plan    servePlayerPlan
 	p       *bridgePlayer
 	dataDir string
-	// From the boot snapshot of output.player, which the player runs:
-	// fixedVolume, and the legacy DSD keys as it holds them, which the
-	// console's Player page alone still shows (B728's B13 replaces it); GET
-	// /v1/outputs' dsdMode and allowDoP are the bound DAC's, from the
-	// backend's snapshot (B8).
-	fixedVolume  bool
-	bootDSDMode  string
-	bootAllowDoP bool
+	// fixedVolume is from the boot snapshot of output.player, which the
+	// player runs. GET /v1/outputs' dsdMode and allowDoP are the bound DAC's,
+	// from the backend's snapshot (B8), and so are the console's Player page's
+	// (B1029): no legacy DSD key of the boot snapshot is read here.
+	fixedVolume bool
 	// DAC reads cannot interrupt a kernel read; retain the flight until
 	// it returns. Concurrent callers share it under their own wait bounds.
 	dacMu     sync.Mutex
@@ -129,7 +126,7 @@ type bridgeOutput struct {
 func newBridgeOutput(plan servePlayerPlan, p *bridgePlayer, cfg *config.Config) *bridgeOutput {
 	player := cfg.Output.Player
 	b := &bridgeOutput{plan: plan, p: p, dataDir: cfg.DataDir, dacLimit: 500 * time.Millisecond,
-		fixedVolume: player.EffectiveMixer() == "none", bootDSDMode: player.EffectiveDSDMode(), bootAllowDoP: player.AllowsDoP()}
+		fixedVolume: player.EffectiveMixer() == "none"}
 	if p != nil {
 		b.dacRead = func(ctx context.Context) *api.OutputDAC { return readPlayerDAC(ctx, p.trees, p.device) }
 	}
