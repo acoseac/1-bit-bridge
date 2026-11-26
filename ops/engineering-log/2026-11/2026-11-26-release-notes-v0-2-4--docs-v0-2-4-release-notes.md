@@ -78,8 +78,8 @@ the five pages answer 200, `/install.sh` redirects to the latest release's
 asset, and the features page holds the `public-mode` anchor `README.md` links
 to.
 Each stub also carries a `<noscript>` meta refresh to the same page, so a
-browser without JavaScript, or a crawler that follows a meta refresh, is still
-sent on (to the top of the page: a refresh drops the `#` fragment).
+client that follows the `<noscript>` refresh reaches the same page, without the
+original `#` fragment.
 
 Kept as they are: the infrastructure hosts under 1-bit.app (the demo bridge,
 the cloud tenants, Atlas); dated history (the engineering log,
