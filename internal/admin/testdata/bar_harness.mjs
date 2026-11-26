@@ -881,6 +881,8 @@ class El {
     this.tagName = String(tag).toUpperCase();
     this.children = []; this.parentNode = null; this.attrs = {}; this.listeners = {};
     this.className = ""; this.dataset = {}; this.hidden = false; this.disabled = false; this.own = "";
+    // A box's rendered height, none until a case gives one.
+    this.offsetHeight = 0;
     const self = this;
     // An inline style keeps what is set on it, by assignment or setProperty.
     this.style = { setProperty(k, v) { this[k] = String(v); }, removeProperty(k) { delete this[k]; } };
@@ -6683,6 +6685,16 @@ S.TestAFingerScrubsTheRail = async () => {
   rail.fire("pointerdown", { target: letter("C"), pointerType: "mouse", pointerId: 1, isPrimary: true, ...m.at(letter("C")) });
   letter("C").fire("click", { detail: 1 });
   check("a mouse's click jumps once and shows no callout", sameJSON(jumps.slice(8), ["C"]) && callout.hidden, [jumps.slice(8), callout.hidden]);
+  // A callout 40px tall at the first letter and at the last: its middle held
+  // 20px inside the rail's height, so what is pinned above the rail or the
+  // bar below it covers none of it.
+  callout.offsetHeight = 40;
+  finger("pointerdown", "A", { pointerId: 12 });
+  const atFirst = callout.style.top;
+  finger("pointermove", "Z", { pointerId: 12 });
+  check("a tall callout stays inside the rail's height at its first and last letters", atFirst === "20px" && callout.style.top === `${rail.rect.height - 20}px`,
+    [atFirst, callout.style.top]);
+  finger("pointerup", "Z", { pointerId: 12 });
 };
 
 S.TestAScrubIsItsOwnersAlone = async () => {

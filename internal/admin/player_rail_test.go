@@ -28,8 +28,9 @@ func TestTheDateRailNamesItsPeriods(t *testing.T) { barScenario(t, 5) }
 // height; the lift, the touch's click after it and a cancel jump nothing
 // more and hide the callout; a finger on the rail's edge or past it takes
 // the letter at its height; a mouse's click is PR 1's, one jump and no
-// callout.
-func TestAFingerScrubsTheRail(t *testing.T) { barScenario(t, 11) }
+// callout; and a callout taller than the room at the first or the last
+// letter stays inside the rail's height.
+func TestAFingerScrubsTheRail(t *testing.T) { barScenario(t, 12) }
 
 // TestAScrubIsItsOwnersAlone: a second finger on the rail beside the scrub's
 // owner moves nothing; the owner's letter losing the capture to the rail ends

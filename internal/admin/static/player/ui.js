@@ -356,22 +356,26 @@ export function indexRail(buckets, onJump, kind = "letters") {
   };
   const take = (btn, y) => {
     const at = Number.isFinite(y);
-    if (at) {
-      const r = rail.getBoundingClientRect();
-      callout.style.top = `${Math.min(Math.max(y - r.top, 0), r.height)}px`;
-    }
     const entry = entries.get(btn);
-    if (!entry) return;
-    let b = entry.buckets[0];
-    if (at && entry.buckets.length > 1) {
-      const box = btn.getBoundingClientRect();
-      b = entry.buckets[Math.min(entry.buckets.length - 1, Math.floor(((y - box.top) / box.height) * entry.buckets.length))] || b;
+    if (entry) {
+      let b = entry.buckets[0];
+      if (at && entry.buckets.length > 1) {
+        const box = btn.getBoundingClientRect();
+        b = entry.buckets[Math.min(entry.buckets.length - 1, Math.floor(((y - box.top) / box.height) * entry.buckets.length))] || b;
+      }
+      callout.textContent = entry.buckets.length > 1 ? b.key : entry.words;
+      callout.hidden = false;
+      if (b !== owner.bucket) {
+        owner.bucket = b;
+        onJump(b);
+      }
     }
-    callout.textContent = entry.buckets.length > 1 ? b.key : entry.words;
-    callout.hidden = false;
-    if (b !== owner.bucket) {
-      owner.bucket = b;
-      onJump(b);
+    // Centred at the finger's height, and held inside the rail's height, so
+    // what is pinned above the rail or the bar below it covers none of it.
+    if (at && !callout.hidden) {
+      const r = rail.getBoundingClientRect();
+      const half = callout.offsetHeight / 2;
+      callout.style.top = `${Math.min(Math.max(y - r.top, half), Math.max(half, r.height - half))}px`;
     }
   };
   rail.addEventListener("pointerdown", (e) => {
