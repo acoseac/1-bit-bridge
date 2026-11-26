@@ -368,6 +368,14 @@ passing; the harness's 193 scenarios, every one passing; and the bar's Go tests,
 275 s, and ten times beside four busy processes, ok in 241 s. On the commit that carries this
 paragraph the docs' check and the citation guard ran again.
 
+After the section on a table cell's actions, on `786501f4`, the same in one session of the
+shared build lock: formatting, no file rewritten; vet and the eight targets' vets, clean; the
+whole race-enabled suite, ok (93 packages, 37 answered from the test cache, `cmd/bridge` in
+1,975 s, 2,093 s in all); the cross-builds; the docs' check; the seven and the four guards by
+name; the harness's 193 scenarios; and the bar's 211 Go tests under the race detector ten times
+idle, ok in 271 s, and ten times beside four busy processes, ok in 242 s, every one passing. On
+the commit that carries this paragraph the docs' check and the citation guard ran again.
+
 ### Left open
 
 - No real phone, tablet or touch laptop was used: WebKit emulating touch is what was measured,
