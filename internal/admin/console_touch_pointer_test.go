@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -90,6 +91,21 @@ func TestEveryControlTakesAFingerWhereACoarsePointerIs(t *testing.T) {
 			}
 		}
 	}
+	// A table cell's actions from 641px, where the phone's column of them
+	// ends: 8px apart side by side and once their column wraps them (the
+	// Paired Devices page's three touched at 0px), the cell still a table
+	// cell, whose borders are the table's, and a cell of one button or none
+	// left as it was.
+	cell := mediaRulesOf(t, "static/app.css", "(any-pointer: coarse) and (min-width: 641px)")
+	if !anyRule(cell, "table.rows td.row-actions > .btn:not(:last-child)", "margin-inline-end", "8px") ||
+		!anyRule(cell, "table.rows td.row-actions:has(> .btn + .btn) > .btn", "margin-block", "4px") {
+		t.Error("from 641px under a coarse pointer a table cell's actions stand a space apart, and touch once wrapped")
+	}
+	for _, r := range cell {
+		if strings.Contains(r.sel, "td.row-actions") && strings.Contains(r.decl, "display") {
+			t.Errorf("%s sets the action cell's display, which takes it out of the table's collapsed borders", r.sel)
+		}
+	}
 }
 
 // TestTheOutputMenuScrollsRatherThanSqueezeAPick pins at the source that no
@@ -154,9 +170,50 @@ func TestTheBarTakesRowsForAFingerFrom641px(t *testing.T) {
 	if strings.Contains(css, "(min-height: 501px)") {
 		t.Error("a block for windows taller than 500px is back: a template by two height blocks leaves the heights between them none")
 	}
-	if strings.Index(css, "@media "+shortQuery) < strings.Index(css, "@media "+base+" {") {
-		t.Error("the short window's override comes before the template it overrides, so the template wins")
+	// What the cascade gives a short window is the last of these declarations:
+	// each property once in the template's block, then once in the short
+	// window's, so a second copy of the template after the override, which
+	// leaves both blocks' own rules as they are, is told.
+	for _, prop := range []string{"grid-template-areas", "grid-template-columns"} {
+		if got := barDeclarations(css, prop, base, shortQuery); strings.Join(got, " | ") != base+" | "+shortQuery {
+			t.Errorf(".npbar's %s under a coarse pointer from 641px is set in %q, want once in the template's block and then once in the short window's", prop, got)
+		}
 	}
+}
+
+// barDeclarations is, in source order, the query of every declaration of prop
+// on .npbar in css's @media blocks whose query is exactly one of queries.
+func barDeclarations(css, prop string, queries ...string) []string {
+	var out []string
+	for i := strings.Index(css, "@media "); i >= 0; {
+		open := i + strings.Index(css[i:], "{")
+		query := strings.TrimSpace(css[i+len("@media ") : open])
+		depth, j := 0, open
+		for ; j < len(css); j++ {
+			if css[j] == '{' {
+				depth++
+			} else if css[j] == '}' {
+				if depth--; depth == 0 {
+					break
+				}
+			}
+		}
+		if slices.Contains(queries, query) {
+			for _, r := range touchRulesOf(css[open+1 : j]) {
+				for _, d := range strings.Split(r.decl, ";") {
+					if k, _, ok := strings.Cut(d, ":"); ok && r.selects(".npbar") && strings.TrimSpace(k) == prop {
+						out = append(out, query)
+					}
+				}
+			}
+		}
+		next := strings.Index(css[j:], "@media ")
+		if next < 0 {
+			break
+		}
+		i = j + next
+	}
+	return out
 }
 
 // TestTheVolumeTakesAFingerAndLooksDisabledWhileItIs pins the bar's volume at

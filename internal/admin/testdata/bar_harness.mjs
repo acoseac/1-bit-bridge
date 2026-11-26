@@ -5024,17 +5024,28 @@ S.TestThisBrowserAsksAgainForACoverThatFailedOnceItHasShownAnother = async () =>
 
 S.TestTheBridgesEntryTheCatalogNoLongerHoldsShowsTheMark = async () => {
   // The heard entry's row read, holding no track: the catalog no longer has
-  // it, so its album and its cover are unknown for good, not yet to come.
+  // it, so its album and its cover are unknown for good, not yet to come. One
+  // hydrated queue holds it beside a covered entry, heard first; the next
+  // state hears it, the queue's revision the same, so nothing reads the
+  // queue again and the square goes from that cover to the mark.
   store.set(OUTPUT_KEY, "bridge");
   const r = await barPage({ latest: playing({ revision: 3, queueRev: 3, length: 5 }) });
   r.out.subscribe(() => {});
-  r.s.on("GET", ROUTES.queue, async () => ({ body: { epoch: E1, readAt: 4, queueRev: 4, token: 2, selected: 15,
+  r.s.on("GET", ROUTES.queue, async () => ({ body: { epoch: E1, readAt: 4, queueRev: 4, token: 2, selected: 11,
     entries: [...coveredQueue, { id: 15, path: "Gone/01 E.flac" }] } }));
-  r.frame(playing({ revision: 4, queueRev: 4, length: 5, selected: 15, track: { ...playing().track, entry: 15, path: "Gone/01 E.flac", title: "E", album: "Gone" },
+  r.frame(heardAt(11, { revision: 4, length: 5 }));
+  await settle();
+  let c = coverOf(r);
+  check("first the covered entry: its image, linked to its album", c.images === 1 && c.src === "/api/library/artwork/local-a1?size=500&v=v1" && c.linked && c.href === "/album/a1",
+    [c.images, c.src, c.href]);
+  const reads = r.s.gets(ROUTES.queue).length;
+  r.frame(playing({ revision: 5, queueRev: 4, length: 5, selected: 15, track: { ...playing().track, entry: 15, path: "Gone/01 E.flac", title: "E", album: "Gone" },
     anchor: { ...playing().anchor, entry: 15 } }));
   await settle();
-  const c = coverOf(r);
-  check("its row read with no track: the mark, with no image and no link", c.images === 0 && c.href === null && c.mark, [c.images, c.href, c.mark]);
+  c = coverOf(r);
+  const links = findAll(r.byClass("np-art"), (n) => n.tagName === "A").length;
+  check("then its row read with no track: the mark, the square holding no image and no link, the queue not read again",
+    c.mark && c.images === 0 && links === 0 && r.s.gets(ROUTES.queue).length === reads, [c.mark, c.images, links, r.s.gets(ROUTES.queue).length - reads]);
 };
 
 S.TestASwitchToThisBrowserShowsTheCoverOfTheTrackThatSurvives = async () => {

@@ -308,10 +308,10 @@ func TestThisBrowserAsksAgainForACoverThatFailedOnceItHasShownAnother(t *testing
 }
 
 // TestTheBridgesEntryTheCatalogNoLongerHoldsShowsTheMark pins the bridge's
-// heard entry whose row is read with no track: the no-cover mark, with no
-// image and no link, where an entry whose row is not read yet is an empty
-// square.
-func TestTheBridgesEntryTheCatalogNoLongerHoldsShowsTheMark(t *testing.T) { barScenario(t, 1) }
+// heard entry whose row is read with no track: after a covered entry's image
+// and link, the no-cover mark, the square holding no image and no link, where
+// an entry whose row is not read yet is an empty square.
+func TestTheBridgesEntryTheCatalogNoLongerHoldsShowsTheMark(t *testing.T) { barScenario(t, 2) }
 
 // TestASwitchToThisBrowserShowsTheCoverOfTheTrackThatSurvives pins the cover
 // after a real switch to this browser from a queue with its own cover, each
