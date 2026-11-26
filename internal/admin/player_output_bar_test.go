@@ -355,11 +355,11 @@ func TestTheDefaultEditionIsTheBestTheOutputPlays(t *testing.T) { barScenario(t,
 // output.
 func TestAnOutputChangeChoosesTheEditionAgain(t *testing.T) { barScenario(t, 5) }
 
-// TestPlayShuffleAddAndDeleteTakeTheEditionShown pins the album's controls:
-// Play, Shuffle, Add to queue and a row's own Play take the edition shown in this browser,
-// the bridge's player is sent its paths in order and no album, and Delete
-// moves its files, its confirmation naming it.
-func TestPlayShuffleAddAndDeleteTakeTheEditionShown(t *testing.T) { barScenario(t, 8) }
+// TestPlayShuffleAndAddTakeTheEditionShown pins the album's playing controls:
+// Play, Shuffle, Add to queue and a row's own Play take the edition shown in
+// this browser, and the bridge's player is sent its paths in order and no
+// album.
+func TestPlayShuffleAndAddTakeTheEditionShown(t *testing.T) { barScenario(t, 6) }
 
 // TestAnEditionThatPlaysNothingHereSaysWhy pins the disabled rule over the
 // edition shown: an edition no row of which plays here disables Play, Shuffle and Add to queue, each named by the
@@ -387,8 +387,9 @@ func TestAReloadShowsTheDefaultEdition(t *testing.T) { barScenario(t, 3) }
 
 // TestAnSACDImageIsAnEditionOfItsOwn pins an SACD image's stereo tracks as an
 // edition beside a file edition: its size counted once, never a track at a
-// time, and no Delete, since its tracks are no files the trash can move; and
-// two rips of one image each named by the end of its path that tells it apart.
+// time; the album's one Delete, with the image shown, moving the files alone,
+// since its tracks are no files the trash can move; and two rips of one image
+// each named by the end of its path that tells it apart.
 func TestAnSACDImageIsAnEditionOfItsOwn(t *testing.T) { barScenario(t, 5) }
 
 // TestAnEditionPastTheBridgesBoundsIsRefusedInWords pins the bounds of the
@@ -397,34 +398,6 @@ func TestAnSACDImageIsAnEditionOfItsOwn(t *testing.T) { barScenario(t, 5) }
 // path or one track more disables Play and Add to queue in words that say why
 // and what to do.
 func TestAnEditionPastTheBridgesBoundsIsRefusedInWords(t *testing.T) { barScenario(t, 6) }
-
-// TestAnEditionsDeleteStaysItsOwnAcrossPicks pins an edition's deletion
-// across picks: picked away and back while its answer is held it shows as it
-// runs, never a live Delete over the rows sent, the picks asking nothing, and
-// its answer takes the files it moved off the page and keeps the rest.
-func TestAnEditionsDeleteStaysItsOwnAcrossPicks(t *testing.T) { barScenario(t, 6) }
-
-// TestAPendingDeleteHoldsAcrossARegroupingAndARedraw pins a deletion by its
-// paths: an album whose first edition's answer leaves one edition keeps the
-// second's Delete reading Deleting… while its answer is held, through a
-// redraw of the album too, a press sending nothing, and the second answer
-// reaches the page shown now, each edition's paths sent once.
-func TestAPendingDeleteHoldsAcrossARegroupingAndARedraw(t *testing.T) { barScenario(t, 6) }
-
-// TestAnAlbumLeftWithOneEditionByADeletion pins an album a deletion leaves
-// with one edition, from either way it opened: no picker, no Delete over an
-// SACD image, the stat line the rows' own, Delete in the album's words, and
-// the bridge's player sent the paths the page shows, never the album's id,
-// which an album opened as one edition goes by until a deletion.
-func TestAnAlbumLeftWithOneEditionByADeletion(t *testing.T) { barScenario(t, 8) }
-
-// TestADeletionsAnswerIsReconciledFromWhatTheLibraryHolds pins the trash's
-// answer as the library stands after it: a file moved back stays, playable,
-// one left in the trash goes; an answer lost before or after the move holds
-// its paths off the page, saying so, whatever a read after it lists; an
-// answer whose read fails holds the files it could not move until a read
-// tells; and a refusal moves nothing.
-func TestADeletionsAnswerIsReconciledFromWhatTheLibraryHolds(t *testing.T) { barScenario(t, 8) }
 
 // TestAnOutputChangeAwayFromTheAlbumShowsTheDefault pins the slot against a
 // change of output made while the album page is not shown: the album opens
@@ -438,6 +411,29 @@ func TestAnOutputChangeAwayFromTheAlbumShowsTheDefault(t *testing.T) { barScenar
 // path is past them; Play and Add to queue name the count line beside those
 // words where both apply; and a playlist's rows send as they did.
 func TestAnEditionsRowsAreHeldToTheBridgesBounds(t *testing.T) { barScenario(t, 6) }
+
+// TestAnAlbumsDeleteMovesEveryEditionsFiles pins the album page's one Delete:
+// it moves every file of every edition, in the album's order, its
+// confirmation naming the album, the files and how many editions they are;
+// an edition picked while its answer is held leaves it Deleting…, a press
+// sending nothing, and its answer is said on it, the settings read once and
+// the page as it was; routed tracks and an SACD image's are left out, an
+// upstream's said so, one edition's files take the album's own words, and an
+// album with no file the trash can move offers no Delete and reads no settings.
+func TestAnAlbumsDeleteMovesEveryEditionsFiles(t *testing.T) { barScenario(t, 8) }
+
+// TestAnAlbumTheCatalogCountsMoreOfGoesAsTheRowsItShows pins the album id's
+// send: an album of one edition the catalog counts as its rows goes by its id,
+// and one the catalog counts more of than its page shows goes as the rows it
+// shows, Play and Add to queue alike.
+func TestAnAlbumTheCatalogCountsMoreOfGoesAsTheRowsItShows(t *testing.T) { barScenario(t, 3) }
+
+// TestAnAlbumSentByItsIdHoldsItsRowsToTheBridgesBounds pins the bounds on the
+// rows of an album sent by its id: its Play goes by the id, its titles send
+// nothing where their list is past the bridge's player's bounds and its rows'
+// Adds nothing where their path is, each named by words that send the reader
+// to Play, and the other rows' Adds send their paths.
+func TestAnAlbumSentByItsIdHoldsItsRowsToTheBridgesBounds(t *testing.T) { barScenario(t, 6) }
 
 // TestTheRailTakesEveryPointerDownForItsClick pins the rail's record of where
 // a pointer went down, made at every pointerdown in the document: a click a
