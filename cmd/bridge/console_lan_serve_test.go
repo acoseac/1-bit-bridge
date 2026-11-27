@@ -324,34 +324,95 @@ func (s *lanServe) console(t *testing.T) consolelan.State {
 // decode, is tried again. A bind the box holds (listenGate) is let go once a
 // read made while it held has not found want, so the bind answers after the
 // test began to wait, as a late one did on CI. The wait gives up where
-// serve's waits do (serveGiveUpTime), naming what it waited for, the last
-// state it read and the last error it met.
+// serve's waits do (serveGiveUpTime), and at once once serve has exited,
+// naming what it waited for, why it ended, the last state it read and the
+// last error it met; its requests go on a context that ends at both
+// (lanWaitContext), so neither waits out a request in flight, and past
+// either it hands out no state, one it has just read included (backlog
+// B1047's second round).
 func waitLANState(t *testing.T, s *lanServe, what string, want func(consolelan.State) bool) consolelan.State {
 	t.Helper()
 	giveUp := serveGiveUpTime(t)
+	ctx, cancel := lanWaitContext(s, giveUp)
+	defer cancel()
 	var last *consolelan.State
 	var lastErr error
+	failIfOver := func() {
+		t.Helper()
+		if why := lanWaitOver(s, giveUp); why != "" {
+			t.Fatalf("GET /api/console: no state that is %s was taken: %s; the last state it read: %+v; "+
+				"the last error: %v\nstdout=%s\nstderr=%s", what, why, last, lastErr, s.served.stdout.String(), s.served.stderr.String())
+		}
+	}
 	for {
+		failIfOver()
 		held := s.box.gate.held()
 		var got struct {
 			LAN consolelan.State `json:"lan"`
 		}
-		if err := fetchAdminJSON(context.Background(), s.admin, "/api/console", &got); err != nil {
+		if err := fetchAdminJSON(ctx, s.admin, "/api/console", &got); err != nil {
 			lastErr = err
 		} else {
 			last = &got.LAN
 			if want(got.LAN) && (got.LAN.State != consolelan.StateListening || s.box.count() > 0) {
+				failIfOver()
 				return got.LAN
 			}
 			if held {
 				s.box.gate.release()
 			}
 		}
-		if !giveUp.IsZero() && time.Now().After(giveUp) {
-			t.Fatalf("GET /api/console read no state that is %s before the test's deadline; the last state it read: %+v; "+
-				"the last error: %v\nstdout=%s\nstderr=%s", what, last, lastErr, s.served.stdout.String(), s.served.stderr.String())
+		lanWaitPause(ctx, s)
+	}
+}
+
+// lanWaitContext is the context a console-LAN wait sends its requests on
+// (backlog B1047's second round): it ends once serve has exited, so a request
+// in flight then is cancelled, and at giveUp where the test binary has a
+// deadline (giveUp is the zero time where it has none). Its cancel, which
+// the wait defers, ends the goroutine that watches for serve's exit.
+func lanWaitContext(s *lanServe, giveUp time.Time) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-s.served.exited:
+			cancel()
+		case <-ctx.Done():
 		}
-		time.Sleep(10 * time.Millisecond)
+	}()
+	if giveUp.IsZero() {
+		return ctx, cancel
+	}
+	capped, uncap := context.WithDeadline(ctx, giveUp)
+	return capped, func() {
+		uncap()
+		cancel()
+	}
+}
+
+// lanWaitOver is why a console-LAN wait may take nothing more, or "" while it
+// may: serve has exited, or giveUp, the wait's, has passed. It asks exited
+// alone, never done: the exit code stays for stopServed or the drain to read
+// and report.
+func lanWaitOver(s *lanServe, giveUp time.Time) string {
+	select {
+	case <-s.served.exited:
+		return "serve exited while the test waited (its exit code is left for the stop or the drain to report)"
+	default:
+	}
+	if !giveUp.IsZero() && time.Now().After(giveUp) {
+		return "the test's deadline came first"
+	}
+	return ""
+}
+
+// lanWaitPause is a console-LAN wait's 10 ms between two reads, cut short once
+// serve exits or ctx, the wait's context, ends at its give-up.
+func lanWaitPause(ctx context.Context, s *lanServe) {
+	select {
+	case <-s.served.exited:
+	case <-ctx.Done():
+	case <-time.After(10 * time.Millisecond):
 	}
 }
 
@@ -368,27 +429,48 @@ func lanWaitingFor(reason string) func(consolelan.State) bool {
 // waitLANBanner waits for serve's first home-network banner line, the line
 // it writes once the first attempt has answered, after the state that
 // attempt publishes (backlog B1047), and returns it: a test that checks the
-// banner's words waits for the line itself first. A bind the box holds is
-// let go as waitLANState lets it go. It gives up where serve's waits do.
+// banner's words waits for the line itself first. It waits as waitLANStdout
+// does.
 func waitLANBanner(t *testing.T, s *lanServe) string {
 	t.Helper()
+	return waitLANStdout(t, s, "home-network banner line", func(out string) (string, bool) {
+		_, rest, ok := strings.Cut(out, "Home network: ")
+		if !ok {
+			return "", false
+		}
+		line, _, ok := strings.Cut(rest, "\n")
+		return "Home network: " + line, ok
+	})
+}
+
+// waitLANStdout waits until find finds what it looks for in what serve has
+// written on stdout, and returns what find found (backlog B1047). A bind the
+// box holds is let go as waitLANState lets it go. It gives up where serve's
+// waits do, and at once once serve has exited, as waitLANState does, and
+// past either it hands out nothing, what a read has just found included.
+func waitLANStdout(t *testing.T, s *lanServe, what string, find func(stdout string) (string, bool)) string {
+	t.Helper()
 	giveUp := serveGiveUpTime(t)
+	ctx, cancel := lanWaitContext(s, giveUp)
+	defer cancel()
+	failIfOver := func() {
+		t.Helper()
+		if why := lanWaitOver(s, giveUp); why != "" {
+			t.Fatalf("serve's stdout: no %s was taken: %s; stdout=%s\nstderr=%s",
+				what, why, s.served.stdout.String(), s.served.stderr.String())
+		}
+	}
 	for {
+		failIfOver()
 		held := s.box.gate.held()
-		out := s.served.stdout.String()
-		if _, rest, ok := strings.Cut(out, "Home network: "); ok {
-			if line, _, ok := strings.Cut(rest, "\n"); ok {
-				return "Home network: " + line
-			}
+		if found, ok := find(s.served.stdout.String()); ok {
+			failIfOver()
+			return found
 		}
 		if held {
 			s.box.gate.release()
 		}
-		if !giveUp.IsZero() && time.Now().After(giveUp) {
-			t.Fatalf("serve wrote no home-network banner line before the test's deadline; stdout=%s\nstderr=%s",
-				out, s.served.stderr.String())
-		}
-		time.Sleep(10 * time.Millisecond)
+		lanWaitPause(ctx, s)
 	}
 }
 
@@ -592,6 +674,9 @@ func TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo(t *testin
 	box.setAddrs(serveLANAddr + "/24")
 	select {
 	case s.tick <- time.Now():
+	case <-s.served.exited:
+		t.Fatalf("serve exited before the plan's loop took the tick (its exit code is left for the stop or the drain to report); stderr=%s",
+			s.served.stderr.String())
 	case <-serveGiveUp(t):
 		t.Fatal("the plan's loop took no tick")
 	}
