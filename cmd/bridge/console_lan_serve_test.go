@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -437,16 +438,32 @@ func lanWaitingFor(reason string) func(consolelan.State) bool {
 	return func(st consolelan.State) bool { return st.State == consolelan.StateWaiting && st.Reason == reason }
 }
 
+// lanDialError is a dial's failure on firstLANState's transport, the one
+// failure it tries again: no connection was made, so no request reached the
+// console.
+type lanDialError struct{ err error }
+
+func (e lanDialError) Error() string { return e.err.Error() }
+
+func (e lanDialError) Unwrap() error { return e.err }
+
 // firstLANState reads the console's first answer to GET /api/console on
 // serve's loopback socket and returns its state, whatever that state is
 // (backlog B1047): for a test that asserts a state its plan holds from the
 // start on the first answer, where a wait for that state would pass over a
-// first answer that says otherwise. It tries again only a request that met a
-// transport error, which a console that has not begun to answer gives, or an
-// answer that does not decode; an answer of another status than 200 fails the
-// test at once, naming it. Its requests go on lanWaitContext, and it gives up
-// as waitLANState does, at serve's give-up and at once once serve has exited,
-// past either handing out no state, one it has just read included.
+// first answer that says otherwise. It tries again only a request whose dial
+// failed (lanDialError), and follows no redirect; once connected, a read
+// error, a status other than 200 (3xx included, its body left unread), a
+// body that is not a JSON object, or a "lan" key missing (matched exactly)
+// or null fails the test at once, and so does a state that does not decode.
+// The loopback socket is bound before serve starts (holdAdmin), so a request
+// sent before the console serves waits there to be answered: its one
+// lifetime is lanWaitContext, with no client timeout to end it and send
+// another, and it goes out alone, through a transport of its own that keeps
+// no connection to send it again on. It gives up as waitLANState does, at
+// serve's give-up and at once once serve has exited, saying which before any
+// failure it met then, and past either it hands out no state, one it has
+// just read included.
 func firstLANState(t *testing.T, s *lanServe) consolelan.State {
 	t.Helper()
 	giveUp := serveGiveUpTime(t)
@@ -460,37 +477,64 @@ func firstLANState(t *testing.T, s *lanServe) consolelan.State {
 				why, lastErr, s.served.stdout.String(), s.served.stderr.String())
 		}
 	}
-	get := func() (status int, body []byte, err error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.admin+"/api/console", nil)
-		if err != nil {
-			return 0, nil, err
-		}
-		req.Header.Set("Accept", "application/json")
-		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
-		if err != nil {
-			return 0, nil, err
-		}
-		defer resp.Body.Close()
-		body, err = io.ReadAll(resp.Body)
-		return resp.StatusCode, body, err
+	// fail ends the test at a failure met once connected, asking first
+	// whether the wait is over, which is then what it says.
+	fail := func(format string, args ...any) {
+		t.Helper()
+		lastErr = fmt.Errorf(format, args...)
+		failIfOver()
+		t.Fatalf("GET /api/console: %v", lastErr)
 	}
+	tr := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, lanDialError{err}
+		}
+		return c, nil
+	}}
+	defer tr.CloseIdleConnections()
 	for {
 		failIfOver()
-		status, body, err := get()
-		if err == nil && status != http.StatusOK {
-			t.Fatalf("GET /api/console answered %d, not 200: %s", status, body)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.admin+"/api/console", nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if err == nil {
-			var got struct {
-				LAN consolelan.State `json:"lan"`
-			}
-			if err = json.Unmarshal(body, &got); err == nil {
-				failIfOver()
-				return got.LAN
-			}
+		req.Header.Set("Accept", "application/json")
+		resp, err := tr.RoundTrip(req)
+		if errors.As(err, new(lanDialError)) {
+			lastErr = err
+			lanWaitPause(ctx, s)
+			continue
 		}
-		lastErr = err
-		lanWaitPause(ctx, s)
+		if err != nil {
+			fail("its request failed once connected: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			fail("answered %s, not 200 OK (its body not read)", resp.Status)
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			fail("its answer's body could not be read: %v", err)
+		}
+		var answer map[string]json.RawMessage
+		if err := json.Unmarshal(body, &answer); err != nil {
+			fail("its answer is not a JSON object: %v: %s", err, body)
+		}
+		lan, ok := answer["lan"]
+		if !ok {
+			fail("its answer has no \"lan\" key: %s", body)
+		}
+		if string(lan) == "null" {
+			fail("its answer's \"lan\" is null: %s", body)
+		}
+		var st consolelan.State
+		if err := json.Unmarshal(lan, &st); err != nil {
+			fail("its answer's \"lan\" does not decode: %v: %s", err, body)
+		}
+		failIfOver()
+		return st
 	}
 }
 
