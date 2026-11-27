@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -689,18 +690,25 @@ func TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo(t *testin
 	box := newServeBox("192.168.88.21/24")
 	s := startLANServe(t, cfg, adminLn, box)
 	defer s.stop(t)
-	// The attempt stores its state before it says its WARN: the wait is for
-	// both, and the WARN's count is read once the banner is there, which serve
-	// writes when the attempt's whole turn is over.
-	waitLANState(t, s, "waiting, the address not on the box, its WARN said", func(st consolelan.State) bool {
-		return lanWaitingFor(consolelan.ReasonAddressNotOnBox)(st) && len(logs.Lines("console: not listening on the home network")) > 0
-	})
+	// The attempt stores its state and then says its WARN before
+	// BeginConsoleLAN returns, and serve writes the banner once it has
+	// returned: the waits are for the state and the banner alone, and the WARN
+	// is read after the banner, from one snapshot of the records, which must
+	// hold it once and at WARN (backlog B1047).
+	waitLANState(t, s, "waiting, the address not on the box", lanWaitingFor(consolelan.ReasonAddressNotOnBox))
 	if st := s.console(t); st.State != consolelan.StateWaiting || st.Reason != consolelan.ReasonAddressNotOnBox {
 		t.Fatalf("state %+v", st)
 	}
 	waitLANBanner(t, s)
-	if n := len(logs.Lines("console: not listening on the home network")); n != 1 {
-		t.Errorf("%d WARN lines, want one", n)
+	const notListening = "console: not listening on the home network"
+	var levels []slog.Level
+	for _, rec := range logs.Records() {
+		if rec.Message == notListening {
+			levels = append(levels, rec.Level)
+		}
+	}
+	if len(levels) != 1 || levels[0] != slog.LevelWarn {
+		t.Errorf("the records saying %q are at the levels %v; want one, at WARN", notListening, levels)
 	}
 	if !strings.Contains(s.served.stdout.String(), "Home network: not open yet: "+serveLANAddr+" is not on this box; tried again every 5 s") {
 		t.Errorf("the banner:\n%s", s.served.stdout.String())
