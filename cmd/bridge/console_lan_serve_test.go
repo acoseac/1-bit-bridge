@@ -432,6 +432,63 @@ func lanWaitingFor(reason string) func(consolelan.State) bool {
 	return func(st consolelan.State) bool { return st.State == consolelan.StateWaiting && st.Reason == reason }
 }
 
+// firstLANState reads the console's first answer to GET /api/console on
+// serve's loopback socket and returns its state, whatever that state is
+// (backlog B1047): for a test that asserts a state its plan holds from the
+// start on the first answer, where a wait for that state would pass over a
+// first answer that says otherwise. It tries again only a request that met a
+// transport error, which a console that has not begun to answer gives, or an
+// answer that does not decode; an answer of another status than 200 fails the
+// test at once, naming it. Its requests go on lanWaitContext, and it gives up
+// as waitLANState does, at serve's give-up and at once once serve has exited,
+// past either handing out no state, one it has just read included.
+func firstLANState(t *testing.T, s *lanServe) consolelan.State {
+	t.Helper()
+	giveUp := serveGiveUpTime(t)
+	ctx, cancel := lanWaitContext(s, giveUp)
+	defer cancel()
+	var lastErr error
+	failIfOver := func() {
+		t.Helper()
+		if why := lanWaitOver(s, giveUp); why != "" {
+			t.Fatalf("GET /api/console: no answer was taken: %s; the last error: %v\nstdout=%s\nstderr=%s",
+				why, lastErr, s.served.stdout.String(), s.served.stderr.String())
+		}
+	}
+	get := func() (status int, body []byte, err error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.admin+"/api/console", nil)
+		if err != nil {
+			return 0, nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer resp.Body.Close()
+		body, err = io.ReadAll(resp.Body)
+		return resp.StatusCode, body, err
+	}
+	for {
+		failIfOver()
+		status, body, err := get()
+		if err == nil && status != http.StatusOK {
+			t.Fatalf("GET /api/console answered %d, not 200: %s", status, body)
+		}
+		if err == nil {
+			var got struct {
+				LAN consolelan.State `json:"lan"`
+			}
+			if err = json.Unmarshal(body, &got); err == nil {
+				failIfOver()
+				return got.LAN
+			}
+		}
+		lastErr = err
+		lanWaitPause(ctx, s)
+	}
+}
+
 // waitLANBanner waits for serve's first home-network banner line, the line
 // it writes once the first attempt has answered, after the state that
 // attempt publishes (backlog B1047), and returns it: a test that checks the
@@ -857,9 +914,10 @@ func TestAnEmptyKeyIsReportedAsCostingTheRollback(t *testing.T) {
 	// The plan stores off before the console's goroutine starts, but the
 	// loopback socket answers only once that goroutine serves it, which the
 	// banner startLANServe waits for does not follow: the state asserted is
-	// the console's first answer, never a wait for off (backlog B1047's
-	// second round).
-	st := waitLANState(t, s, "the console's first answer", func(consolelan.State) bool { return true })
+	// the console's first answer, whatever it says (firstLANState), never a
+	// wait, which would pass over a first answer that is not off (backlog
+	// B1047).
+	st := firstLANState(t, s)
 	if st.State != consolelan.StateOff || st.FileKeyAtBoot != consolelan.FileKeyEmpty {
 		t.Fatalf("state %+v", st)
 	}
