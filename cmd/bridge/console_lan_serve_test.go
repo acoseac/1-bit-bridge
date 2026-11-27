@@ -998,8 +998,34 @@ func TestTheConsoleNamesTheBootFilesAddressBesideTheEffectiveOne(t *testing.T) {
 	if len(logs.Lines("console listening on the home network")) == 0 {
 		t.Errorf("the bind logged no listening record, so the log's search reads none of what it says:\n%s", strings.Join(logs.All(), "\n"))
 	}
-	_, line := consoleDoctorLine(t, s.admin, "console-lan")
-	for where, text := range map[string]string{"the answer": string(body), "the doctor's line": line,
+	// The console's doctor is fetched once and searched whole, as it answered:
+	// the rollback check this file's key adds as well as console-lan, and
+	// whatever else the answer holds, so the two checks must be in it (backlog
+	// B1047).
+	var doctorBody json.RawMessage
+	if err := fetchAdminJSON(context.Background(), s.admin, "/api/doctor", &doctorBody); err != nil {
+		t.Fatal(err)
+	}
+	var doctorAnswer struct {
+		Report struct {
+			Checks []struct {
+				Name string `json:"name"`
+			} `json:"checks"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal(doctorBody, &doctorAnswer); err != nil {
+		t.Fatal(err)
+	}
+	checks := map[string]bool{}
+	for _, c := range doctorAnswer.Report.Checks {
+		checks[c.Name] = true
+	}
+	for _, name := range []string{"console-lan", "console-lan-rollback"} {
+		if !checks[name] {
+			t.Errorf("the console's doctor answered no %s check, so the search reads none of what it says:\n%s", name, doctorBody)
+		}
+	}
+	for where, text := range map[string]string{"the answer": string(body), "the doctor's answer": string(doctorBody),
 		"stdout": s.served.stdout.String(), "stderr": s.served.stderr.String()} {
 		if strings.Contains(text, secret) {
 			t.Errorf("%s names the file's value", where)
