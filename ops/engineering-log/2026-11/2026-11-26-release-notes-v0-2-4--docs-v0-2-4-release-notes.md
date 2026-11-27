@@ -195,3 +195,109 @@ On go1.27.3 with `GOPROXY=off`: `make docs-check` clean; the example's tests
 (`TestLoadShippedExample`, `TestTheShippedExampleLeavesThePlayersDSDToItsState`,
 `TestTheConfigExampleSaysWhatTheKeyCostsTheRollback`) and the citation guard
 (`TestEveryCitedTestNameExists`) passed. No code, test or config value changed.
+
+### Round 8: the notes made short
+
+The operator chose short notes on 2026-11-27. The notes now have three parts:
+"What's new in 0.2.4", one plain sentence per change with its backlog ids, 34
+lines, the dependency line and the B662 line as `0a3717f1` left them; "Before
+you upgrade or roll back", only what keeps an operator from a wrong step, each
+item read against `29df3a4a`, or `v0.2.3` for what an earlier version does;
+and one closing line, to the documentation and this log. The example config,
+the five stubs and the code are as round 7 left them.
+
+Moved into "Before you upgrade or roll back" from round 7's long lines:
+
+- under Warnings, the test tone's level (B601), the console on the home
+  network, with public mode's refusal of the address (B989), and Delete's
+  reach across editions (B1023, B1036);
+- under Snapshots and restore, `--verify` on a snapshot from before 0.2.4 and
+  outside the backups folder, restore's lock and the storage it refuses
+  (B653, B826), and what a restore replaces;
+- under "Also before you update", `bridge backup`'s exit status and its
+  `--keep 0` before the update (B653, B1035), storage with file locks (B653),
+  the data directory's identity files (B727, B741), the IDNA forms at load,
+  a custom endpoint's drop included (B744), `bridge update`'s reading of the
+  update switch (B761), an upload into a root with nothing indexed yet
+  (B776), an upload another tab lists as interrupted (B797) and a tab left
+  open (B1029, B1037);
+- under the Tailscale item, the container's recreate and the new process a
+  change of the uploads key takes, the menu's Start now among what does not
+  give one (B749);
+- the doctor's bound, which starts once `bridge.yaml` is read (B650).
+
+The operator's decisions of `0a3717f1`: the preamble's sentence, the
+dependency line and the B662 line stand as they were, and the Hugo 2 line
+stays out. The API line keeps its heading's claim (the bridge publishes the
+bound DAC's choice, and an API changes it), the protocol's version and "No
+released app uses the change route yet"; its field names, its feature flag,
+its modes, its refusal's words, the fields no longer sent and "while playback
+is stopped" leave it, the last for section 2. The line on the other new keys
+becomes the five keys named on the way back, with "check that none is left";
+its sentence on what a switch turned back on removes leaves the notes.
+
+Corrections to round 7's text, each read against the code:
+
+- A restore replaces the files its snapshot captured and no other, and a
+  snapshot taken before the first pairing holds no token store, so a device
+  paired after it stays paired (`v0.2.3`'s `internal/backup/backup.go`, 140
+  to 152, 252 to 262 and 514; at `29df3a4a` the same loop, 784 to 796).
+- No sentence says that an automatic rollback is not made: the notes name the
+  console's Roll back and the crash rollback, which 0.2.4's first start rules
+  out (`RollbackRefusal`, `CrashRollback`).
+- The DoP case under `auto` is what `auto` can do, its check worded "passes
+  the DoP gain check", a check of every level control on the card but the
+  profile's analogue ones (`internal/player/policy/gain.go`, 250 to 270), and
+  claims no DoP confirmation from a record that approved no DoP rate
+  (`internal/player/dsdstate/migrate.go`, 281 to 285) and none that outranks
+  the catalog's refusal of a rate (`internal/player/policy/policy.go`, 548 to
+  559).
+- The operator sets a choice only through the PUT, and the migration writes
+  one too: the two sentences no longer contradict each other.
+- A state file that does not read has two ways out: stop serve, move the file
+  aside and start serve, so that no write of the player's DSD state comes
+  between the move and the start; or the PUT with playback stopped, the file
+  moved aside first where the log says it stays where it is (serve's four
+  lines, `cmd/bridge/serve_player_dsd.go`, 234 to 251; the copy's name,
+  `internal/player/dsdstate/store.go`, 229 to 234).
+- After either way back, a later 0.2.4 goes on from the state the first one
+  left, and migrates the keys only where no migration's mark is there
+  (`playerDSD.steps`, `serve_player_dsd.go`, 357 to 366).
+- The five keys are named, with "check that none is left", which needs no
+  account of which keys a console switch removes.
+- A `false` written into Compose's `.env` takes `docker compose up -d` as a
+  `true` does, since `restart` keeps the old environment.
+- 0.2.3 serves the WavPack and Monkey's Audio rows to every app, with no
+  "until its scans drop them".
+- The probation line gives no count of starts; the empty Tailscale state is
+  the empty file alone; a newly made certificate carries the IDNA form; an
+  upload into a root with nothing indexed is not refused for its volume,
+  where round 7 said it takes the write; and the cases of a Settings save's
+  refusal, the update switch's reach over an install under way, the rows
+  sent again and the node's name over a state that does not read leave the
+  notes with the detail they sat in.
+
+One proposed correction did not hold against the code: a record refused as
+another model's gives the bound DAC its mode with nothing approved and keeps
+the record waiting for its own model (`migrate.go`, 204 to 216), as the notes
+and the example both say.
+
+Left for a later round, since this round's budget keeps the example as round
+7 left it, in `config/bridge.yaml.example`: "only PUT /v1/outputs/{id}/dsd
+sets" (77 to 79) beside the migration's choice (104 to 106); a DoP
+confirmation from any record taken (106 to 109), where one needs an approved
+DoP rate; a DoP rate "confirmed on the DAC's firmware" (117 to 120), which
+does not outrank the catalog's refusal; "an update's automatic rollback to
+one is not made" and its twins (5, 207, 264 and 286); "one a BRIDGE_ variable
+overrides, stays until it is deleted" (289 to 290), where a key whose
+override holds the switch off goes when the switch is turned on
+(`filedSwitch`, `internal/config/runtime.go`, 466 to 475); and "or turn the
+checks on in the console" (323 to 324), which removes only a key that turns
+them off. The example is one of this change's files, which round 7's
+"Outside this change's files" says otherwise of its `update` block.
+
+### Runs (round 8)
+
+On go1.27.3 with `GOPROXY=off`: `make docs-check` clean, and the citation
+guard (`TestEveryCitedTestNameExists`) passed. No code, test or config value
+changed.
