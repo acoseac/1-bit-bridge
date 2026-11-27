@@ -47,6 +47,61 @@ type serveBox struct {
 	sources   map[int]netip.Addr
 	sourced   chan struct{}
 	order     []string
+	// gate, set before serve starts and never after, holds the bind in the
+	// listen seam until it is let go (backlog B1047).
+	gate *listenGate
+}
+
+// listenGate holds the box's bind at one point of its listen seam, outside
+// the box's mutex, until it is let go (backlog B1047): before the bind is
+// registered, so the box holds no listener and a client finds "no LAN
+// listener", or once it is recorded (afterBind), so the box's order reads
+// hold,control,bind while the state still says the bridge is starting. The
+// bind's answer, and with it the state serve publishes and the banner after
+// it, waits for the release: the gate holds open the window a loaded runner
+// opens by chance between the banner startLANServe waits for and the
+// home-network socket's first bind. startLANServe lets it go in a cleanup
+// that runs before the drain, and a stop lets it go before it waits.
+type listenGate struct {
+	afterBind   bool
+	reached     chan struct{} // closed once the seam has come to the hold
+	released    chan struct{} // closed to let the seam go on
+	reachOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+// newListenGate is a gate held before the bind's registration, or once the
+// bind is recorded where afterBind.
+func newListenGate(afterBind bool) *listenGate {
+	return &listenGate{afterBind: afterBind, reached: make(chan struct{}), released: make(chan struct{})}
+}
+
+// hold marks the hold reached and waits for the release.
+func (g *listenGate) hold() {
+	g.reachOnce.Do(func() { close(g.reached) })
+	<-g.released
+}
+
+// held reports whether the seam has come to the hold; a nil gate holds
+// nothing.
+func (g *listenGate) held() bool {
+	if g == nil {
+		return false
+	}
+	select {
+	case <-g.reached:
+		return true
+	default:
+		return false
+	}
+}
+
+// release lets the seam go on, once, whoever calls it; a nil gate has
+// nothing to let go.
+func (g *listenGate) release() {
+	if g != nil {
+		g.releaseOnce.Do(func() { close(g.released) })
+	}
 }
 
 func newServeBox(addrs ...string) *serveBox {
@@ -93,11 +148,17 @@ func (b *serveBox) seams(tick <-chan time.Time) consoleLANSeams {
 				return nil, err
 			}
 			l := &serveStandIn{box: b, real: real, lan: netip.MustParseAddrPort(address)}
+			if b.gate != nil && !b.gate.afterBind {
+				b.gate.hold()
+			}
 			b.mu.Lock()
 			b.listeners = append(b.listeners, l)
 			b.reals = append(b.reals, real)
 			b.order = append(b.order, "bind")
 			b.mu.Unlock()
+			if b.gate != nil && b.gate.afterBind {
+				b.gate.hold()
+			}
 			return l, nil
 		},
 		localName: func() string { return "" },
@@ -211,17 +272,29 @@ func writeConsoleLANConfig(t *testing.T, dir, admin, lanLine string) string {
 }
 
 // startLANServe boots serve over cfg's directory with box, its admin socket
-// handed in on admin.
+// handed in on admin, and returns once serve's banner names its API: before
+// the home-network socket's first attempt, which serve makes after that
+// banner, on its own goroutine. A box's gate is let go in a cleanup that
+// runs before the drain (drainServeOnCleanup), whatever the boot did.
 func startLANServe(t *testing.T, cfgPath string, adminLn net.Listener, box *serveBox) *lanServe {
 	t.Helper()
 	tick := make(chan time.Time)
 	s := &lanServe{admin: adminLn.Addr().String(), cfgPath: cfgPath, box: box, tick: tick}
-	s.served = serveWithOpts(t, serveOpts{configPath: cfgPath, adminListener: adminLn, tailscaleCLI: noTailscaleCLI(),
-		consoleLAN: box.seams(tick)})
+	opts := serveOpts{configPath: cfgPath, adminListener: adminLn, tailscaleCLI: noTailscaleCLI(), consoleLAN: box.seams(tick)}
+	s.served = launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
+		return runServe(ctx, opts, stdout, stderr)
+	}, func(context.CancelFunc, <-chan struct{}) { t.Cleanup(box.gate.release) })
 	return s
 }
 
-func (s *lanServe) stop(t *testing.T) { s.stopOnce.Do(func() { stopServed(t, s.served) }) }
+// stop lets go of a bind the box holds, which serve's exit waits for, then
+// stops serve and waits for it to exit 0.
+func (s *lanServe) stop(t *testing.T) {
+	s.stopOnce.Do(func() {
+		s.box.gate.release()
+		stopServed(t, s.served)
+	})
+}
 
 // console reads GET /api/console on the loopback socket.
 func (s *lanServe) console(t *testing.T) consolelan.State {
