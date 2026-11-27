@@ -78,8 +78,8 @@ libraryName: "My Music Library"
 #   legacy keys below and a restore of a snapshot holding the state can
 #   also write, and which in 0.2.4 an operator sets or changes by hand
 #   only through PUT /v1/outputs/{id}/dsd (for the DAC the player is
-#   bound to, while the player is stopped; no released 1-bit app sends it
-#   yet),
+#   bound to, while playback is stopped with the player running; no
+#   released 1-bit app sends it yet),
 #   kept for the DAC's model from its maker, so every unit of that model
 #   shares it. The console's Player page has no control for changing the
 #   DAC's DSD choice. A fresh install's state holds the default mode
@@ -118,8 +118,8 @@ libraryName: "My Music Library"
 #     record reads for, still there, unchanged and accepted, in the same
 #     run or at a later start, that DAC takes the mode the keys held at
 #     the first 0.2.4 start, with the record's approvals, in place of a
-#     fallback the migration gave its model and maker; a missing, changed
-#     or still refused record keeps it waiting. A DAC that already has a
+#     fallback the migration gave its model and maker; a missing or still
+#     refused record keeps it waiting. A DAC that already has a
 #     choice of its own is left as it is.
 #   An opt-out whose save fails still holds for that run, and the start's
 #   log line says so with defaultMode=off; the next player start reads the
@@ -142,12 +142,12 @@ libraryName: "My Music Library"
 #   at a rate the database claims no DoP at).
 #   Under auto, on a DAC the profile database knows, a rate plays natively
 #   where native DSD is offered there, no listener rejected native there
-#   and the rate is under the cap. Otherwise it plays as DoP only where
+#   and the rate is at or below the cap. Otherwise it plays as DoP only where
 #   all of these hold: the database heard DoP at that rate, or a DoP
 #   confirmation holds on the current firmware; the database does not
 #   refuse DoP there, unless a listener answered DoP clean there; the DoP
 #   carrier is offered; the gain check passes; no listener rejected DoP
-#   there; and the rate is under the cap. On a DAC the database does not
+#   there; and the rate is at or below the cap. On a DAC the database does not
 #   know, the same holds, except that native also needs a clean native
 #   answer at the rate where the DAC's USB IDs are a shared reference
 #   board's, and DoP needs a clean DoP answer at the rate and a DoP

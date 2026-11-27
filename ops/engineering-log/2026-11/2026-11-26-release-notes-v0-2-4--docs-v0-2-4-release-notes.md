@@ -396,8 +396,9 @@ this round: the session could not run `git merge`.
    main (`internal/config/config.go` 3211, `env.go` 252) and at `v0.2.3`
    (`config.go` 3027, `env.go` 235). Both skip a variable whose value is
    empty before its kind is read. A value of spaces alone is not skipped: it
-   clears a list, sets a string to the spaces and, at main, reads as off for
-   an opt-out, so the notes say "empty" alone. 0.2.3 reads a boolean by
+   clears a list, sets a string to the spaces, and at main an opt-out's
+   switch reads it as unset, leaving the file's value (`env.go`
+   `readSwitchEnvAs`), so the notes say "empty" alone. 0.2.3 reads a boolean by
    `strconv.ParseBool` and ignores what it refuses, so
    `BRIDGE_UPDATE_AUTO_INSTALL=off` leaves the file's value (`v0.2.3`
    `env.go` 277 to 283). The Settings save's line (`runtime.go` 496 to 523,
@@ -449,3 +450,17 @@ round's edits: `make docs-check` clean; the example's tests
 (`TestLoadShippedExample`, `TestTheShippedExampleLeavesThePlayersDSDToItsState`,
 `TestTheConfigExampleSaysWhatTheKeyCostsTheRollback`) and the citation guard
 (`TestEveryCitedTestNameExists`) passed. No code or test changed.
+
+### Round 10's review, folded
+
+The round's review held each changed sentence to main `98efe691`. Its verified findings are folded here, with no further round:
+- the example's PUT precondition is playback stopped with the player running, not the player stopped (`serve_player_output_dsd.go`'s choice handler needs the player);
+- a record waiting for its model is kept waiting only while it is missing or still refused: a valid replacement at its path ends the wait with its own approvals (`migrate.go`), so "changed" and "unchanged" leave the example and the notes;
+- the cap admits its own rate ("at or below the cap", `policy.go`'s `bitRate <= s.MaxBitRate`), in both of the example's sentences;
+- the outcome check names the three rates `GET /v1/outputs` reports (DSD64, DSD128 and DSD256); DSD512 is refused, as the list above says;
+- this log's note on a value of spaces alone: an opt-out's switch reads it as unset (`env.go` `readSwitchEnvAs`);
+- the headline line holds for a fresh install, and an upgrade keeps the limits 0.2.3's settings set;
+- a record's DoP carries over under `dop`, or `auto` with `allowDoP: true`;
+- the waiting record's DAC takes 0.2.3's mode only when it has no choice of its own other than the migration's fallback;
+- the count is of commits.
+`make docs-check`, the example's three tests and the citation guard pass on the merged tree.
