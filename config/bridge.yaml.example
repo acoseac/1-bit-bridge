@@ -75,10 +75,11 @@ libraryName: "My Music Library"
 #   A running bridge serve player decides DSD playback for its DAC from
 #   its DSD state, <dataDir>/player-dsd.json, by its effective DSD policy.
 #   The state keeps each DAC's own choice, which the migration of the
-#   legacy keys below can also write, and which in 0.2.4 an operator
-#   sets or changes only through PUT /v1/outputs/{id}/dsd (for the DAC
-#   the player is bound to, while the player is stopped; no released
-#   1-bit app sends it yet),
+#   legacy keys below and a restore of a snapshot holding the state can
+#   also write, and which in 0.2.4 an operator sets or changes by hand
+#   only through PUT /v1/outputs/{id}/dsd (for the DAC the player is
+#   bound to, while the player is stopped; no released 1-bit app sends it
+#   yet),
 #   kept for the DAC's model from its maker, so every unit of that model
 #   shares it. The console's Player page has no control for changing the
 #   DAC's DSD choice. A fresh install's state holds the default mode
@@ -111,20 +112,55 @@ libraryName: "My Music Library"
 #     confirmation where the record approved a DoP rate, each held to the
 #     firmware it was approved on. With no
 #     record, or one refused, native and dop are taken with nothing
-#     approved and auto leaves the DAC on the default; a record refused
-#     as another model's waits for a DAC of that model. A DAC that already
-#     has a choice of its own is left as it is.
-#   As they behave today (backlog B1042, B1043): an opt-out applies only
-#   once the migration has saved it, and where that save fails the start
-#   runs under auto, says so, and the next start goes on from what the
-#   file holds. allowDoP false, or unset, no longer keeps DoP out under
-#   auto: on a DAC the profile database knows, auto plays DoP at a rate it
-#   heard, or one confirmed on the DAC's firmware, unless the database
-#   refuses DoP at that rate and no listener answered clean there, where
-#   native DSD is not offered or a listener rejected it, through the gain
-#   check. A native
-#   or dop taken with nothing approved still plays what that mode plays
-#   without approval, refuses the rest and never converts to PCM.
+#     approved and auto leaves the DAC on the default. A record refused
+#     only as another DAC model's is kept for that model: when the
+#     player's binding later resolves to a DAC of that model that the
+#     record reads for, still there, unchanged and accepted, in the same
+#     run or at a later start, that DAC takes the mode the keys held at
+#     the first 0.2.4 start, with the record's approvals, in place of a
+#     fallback the migration gave its model and maker; a missing, changed
+#     or still refused record keeps it waiting. A DAC that already has a
+#     choice of its own is left as it is.
+#   An opt-out whose save fails still holds for that run, and the start's
+#   log line says so with defaultMode=off; the next player start reads the
+#   file, and migrates again only if no mark was saved and a legacy key is
+#   still set. Only a migration refused before its write starts without
+#   it, its log line saying "the player starts without it" (backlog
+#   B1042). While the mark holds 0.2.3's dsdMode: auto with allowDoP not
+#   true, auto plays no DoP on any DAC until a user confirms DoP on the
+#   DAC's current, readable firmware (PUT /v1/outputs/{id}/dsd with
+#   confirmDoP, its mode dop or auto): until then such a rate converts to
+#   PCM, or is refused where the DAC takes no conversion target (backlog
+#   B1043). The
+#   migration's DoP confirmation counts only at a rate where a clean DoP
+#   answer holds on the current firmware (the record's approved rates, or
+#   a clean answer since), and a user's confirmDoP replaces it (backlog
+#   B1045). A native or dop taken with nothing approved carries no
+#   migrated answer and no DoP confirmation: it never converts to PCM,
+#   and refuses a rate that needs a listener's answer (native on a generic
+#   board the profile database does not know) or a DoP confirmation (dop
+#   at a rate the database claims no DoP at).
+#   Under auto, on a DAC the profile database knows, a rate plays natively
+#   where native DSD is offered there, no listener rejected native there
+#   and the rate is under the cap. Otherwise it plays as DoP only where
+#   all of these hold: the database heard DoP at that rate, or a DoP
+#   confirmation holds on the current firmware; the database does not
+#   refuse DoP there, unless a listener answered DoP clean there; the DoP
+#   carrier is offered; the gain check passes; no listener rejected DoP
+#   there; and the rate is under the cap. On a DAC the database does not
+#   know, the same holds, except that native also needs a clean native
+#   answer at the rate where the DAC's USB IDs are a shared reference
+#   board's, and DoP needs a clean DoP answer at the rate and a DoP
+#   confirmation on the current firmware, in place of the database's
+#   claim. A rate that plays neither way converts to PCM, or is refused
+#   where the DAC takes no conversion target. A DoP confirmation is kept
+#   for the DAC's model from its maker, tied to one firmware, and a unit
+#   whose firmware does not read takes and matches none. A user's counts
+#   at every rate while that firmware matches, but not at a rate the
+#   database refuses DoP at with no clean answer there; the migration's
+#   counts only where a clean DoP answer holds on that firmware. Beside
+#   the mark of 0.2.3's dsdMode: auto with allowDoP not true (above), auto
+#   plays no DoP until a user's confirmation.
 #   A plain bridge output play migrates them into a state of its own; its
 #   qualification report (bridge output play --report, see
 #   ops/b470-native-qualification.md) reads all three as they are.

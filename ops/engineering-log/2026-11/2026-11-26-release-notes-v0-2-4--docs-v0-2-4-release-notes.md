@@ -382,3 +382,70 @@ On go1.27.3 with `GOPROXY=off`: `make docs-check` clean; the example's tests
 `TestTheConfigExampleSaysWhatTheKeyCostsTheRollback`) and the citation guard
 (`TestEveryCitedTestNameExists`) passed. No code or test changed; the example
 changed in its comments alone.
+
+### Round 10: the DSD section at main `98efe691`
+
+Main `98efe691` (#1579, B1042, B1043 and B1045's fix, the squash of one
+parent, `29df3a4a`) touches none of this change's files. Every sentence below
+was read against it, `git show 98efe691:<file>`, and against `v0.2.3` where it
+says what 0.2.3 does. The merge of main into this branch was not made in
+this round: the session could not run `git merge`.
+
+1. Section 2 opens with the environment's rule. A `BRIDGE_*` variable set to
+   a value the running version accepts overrides its key at every start, at
+   main (`internal/config/config.go` 3211, `env.go` 252) and at `v0.2.3`
+   (`config.go` 3027, `env.go` 235). Both skip a variable whose value is
+   empty before its kind is read. A value of spaces alone is not skipped: it
+   clears a list, sets a string to the spaces and, at main, reads as off for
+   an opt-out, so the notes say "empty" alone. 0.2.3 reads a boolean by
+   `strconv.ParseBool` and ignores what it refuses, so
+   `BRIDGE_UPDATE_AUTO_INSTALL=off` leaves the file's value (`v0.2.3`
+   `env.go` 277 to 283). The Settings save's line (`runtime.go` 496 to 523,
+   `outside.go` 58) and the way back's `update.autoInstall` sentence point
+   to it; its pointer in the snapshot path follows.
+2. "DSD after an upgrade", three paragraphs and the recovery paragraph.
+   - The opt-out's check, by `playerDSD.say` (`cmd/bridge/serve_player_dsd.go`
+     at main, 305 to 373). Three lines hold the opt-out with `defaultMode=off`:
+     the Info line of a step saved, the Warn lines of a write that failed
+     (the 1 MiB one among them) and of one that landed not durable. "The
+     player starts without it" is a migration refused before its write.
+     `steps` (383 to 394) migrates again only with no marker and a legacy key
+     set, and a later write of the run can save a held step (the player
+     rules' B1042 line).
+   - What 0.2.4 keeps: B1043's rule (`internal/player/policy/policy.go` 642,
+     654, 708 to 714), B1045's (565; `choice.go` 172 and 181), and an explicit
+     `native` or `dop` with nothing approved, which never converts and
+     refuses a rate needing a listener's answer or a confirmation (659 to
+     688).
+   - The outcome check: `internal/api/outputs_bridge.go` 53 and 416,
+     `cmd/bridge/serve_player_output.go` 174, `serve_player_console.go` 558
+     to 569, `internal/api/outputs_dsd_choice.go` 54, 217 and 262,
+     `internal/player/playback/dsd_choice.go` 601, and `waitingFor`
+     (`serve_player_dsd.go` 372 at main). Only the PUT's route calls
+     `ChooseDSD` (`outputs_dsd_choice.go` 210, `serve_player_output_dsd.go`
+     77); the migration (`dsdstate.Migrate`) and a restore
+     (`dsdstate.WriteRestored`) write choices too.
+   - The recovery paragraph drops "the default `auto`".
+3. The example's player paragraph: the choice's writers; the record refused
+   as another model's, kept for its model and taken when a DAC it reads for
+   is bound, unless a choice of its own is there (`migrate.go` at main, 224
+   to 257; `record.go` 93 to 108); the "As they behave today" sentences
+   replaced by B1042's, B1043's and B1045's behaviour; and the `auto` rule,
+   known and unknown DACs apart (`policy.go` 541 to 589 and 625 to 658).
+4. The narrow fixes: the backups' verdicts (`internal/doctor/backups.go` 98
+   and 137, `internal/backup/status.go` 43 to 46); the data directory's
+   record, which protects once written (`cmd/bridge/serve_data_dir_record.go`
+   577 and 761 to 764); a later 0.2.4 over the file the first one left
+   (`dsdstate.Open`, `Defaults`, `Refusing`, `steps`; a marker can be
+   `keys`, `state_unreadable` or `schema_1`); the player's line's backlog
+   ids; the restore's `player-dsd.json`; and the candidate: `98efe691`, 151
+   merges since `v0.2.3`, the one tag in that range, so `git describe` reads
+   `v0.2.3-151-g98efe691`.
+
+### Runs (round 10)
+
+On go1.27.3 with `GOPROXY=off`, on this branch at `a9fd3114` with this
+round's edits: `make docs-check` clean; the example's tests
+(`TestLoadShippedExample`, `TestTheShippedExampleLeavesThePlayersDSDToItsState`,
+`TestTheConfigExampleSaysWhatTheKeyCostsTheRollback`) and the citation guard
+(`TestEveryCitedTestNameExists`) passed. No code or test changed.
