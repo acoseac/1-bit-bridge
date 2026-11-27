@@ -297,8 +297,14 @@ func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound, unit *al
 // the default the run plays by. A step saved logs each warning it wrote, a Warn line beside
 // it, and what it migrated. A line names the DAC by dacLabel, with unit for
 // the bound DAC alone: a warning that names another model gets no unit, and
-// its label is that model's USB IDs.
+// its label is that model's USB IDs. A start's dsdQualification the migration
+// could not take as a record's name (Step.RecordNameRefused) is a Warn line of
+// its own, which gives the name's length and never the name (B1042's round 2).
 func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound, unit *alsa.USBIdentity) {
+	if step.RecordNameRefused {
+		playerLog.Warn("player: the legacy dsdQualification is no name an owner's record can have (more than 4096 bytes, not UTF-8, or holding a NUL): the DSD migration takes the other legacy DSD keys without it, and reads no record by it",
+			"bytes", len(d.legacy.DSDQualification))
+	}
 	landed := errors.Is(err, atomicwrite.ErrLanded)
 	switch {
 	case errors.Is(err, dsdstate.ErrLandedNotHeld):
