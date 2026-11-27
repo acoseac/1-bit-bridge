@@ -17,6 +17,9 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
+	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification/approvaltest"
 )
@@ -243,62 +246,75 @@ func TestARefusedRecordLeavesAWarning(t *testing.T) {
 // Store.Update), or that it is durable.
 var rollbackClaims = []string{"is not written", "nothing was written", "unchanged", "as it was", "rolled back", "is durable"}
 
-// TestARefusedStateWriteLeavesAWarnLineAndThePlayerStarts (B728 B6): a
-// migration whose write fails stops nothing, the player starts all the same,
-// and a Warn line says so, in words that claim neither that the state is as
-// it was nor that it is durable. What the next start does is the file's: a
-// write refused before anything lands (here the durable writer's check of
-// the medium, refusing that one write) leaves no file, and the next start
-// migrates from the keys; one whose barrier fails once its rename has landed
-// leaves the migration in the file, which the next start reads, and migrates
-// nothing over.
+// TestARefusedStateWriteLeavesAWarnLineAndThePlayerStarts (B728 B6; B1042):
+// a migration whose write fails stops nothing, the player starts all the
+// same, and a Warn line says so, naming the default the run plays by, in
+// words that claim neither that the state is as it was nor that it is
+// durable. The store holds the start's step for the run (dsdstate's
+// Store.Migrate), so the effective policy serve wired refuses DSD as
+// dsd_off_by_choice in that run, before it stops, for an explicit off and for
+// dop without allowDoP, set false or unset, as 0.2.3 refused it. What the next
+// start does is the file's: a write refused before anything lands (here the
+// durable writer's check of the medium, refusing that one write) leaves no
+// file, and the next start migrates from the keys and saves them with their
+// marker; one whose barrier fails once its rename has landed leaves the
+// migration in the file, its fence refusing every later write of the run,
+// and the next start reads it and migrates nothing over.
 func TestARefusedStateWriteLeavesAWarnLineAndThePlayerStarts(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
-	t.Run("refused before it lands", func(t *testing.T) {
-		box := newDSDBox(t)
-		log := watchLog(t)
-		// The one write the step makes is refused: the seam arms the refusal
-		// just before the step, on the supervisor, and nothing else writes
-		// durably until the step has returned.
-		var armed atomic.Bool
-		t.Cleanup(atomicwrite.SetMediumForTest(func(string) error {
-			if armed.CompareAndSwap(true, false) {
-				return errors.New("the test's medium refuses this write")
+	no := false
+	for _, tc := range []struct {
+		name, keys string
+		marker     dsdstate.Marker
+	}{
+		{"dsdMode off", "    dsdMode: off\n", dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "off"}},
+		{"dop with allowDoP false", "    dsdMode: dop\n    allowDoP: false\n", dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "dop", AllowDoP: &no}},
+		{"dop with allowDoP unset", "    dsdMode: dop\n", dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "dop"}},
+	} {
+		t.Run("refused before it lands/"+tc.name, func(t *testing.T) {
+			box := newDSDBox(t)
+			goBarDSD(t, box.trees)
+			log := watchLog(t)
+			seams := refuseTheStartStep(t)
+			ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + tc.keys, standIn: newPlayerStandIn(), seams: seams, with: box.with})
+			eng := ps.runningEngine(t)
+			if eng == nil {
+				t.Fatal("the player did not start")
 			}
-			return nil
-		}))
-		seams := &servePlayerSeams{migrates: func(context.Context, *dsdstate.Bound) { armed.Store(true) }}
-		ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + "    dsdMode: off\n", standIn: newPlayerStandIn(), seams: seams, with: box.with})
-		if ps.runningEngine(t) == nil {
-			t.Fatal("the player did not start")
-		}
-		line := log.await(t, "player: the migration of the legacy DSD keys was not saved, and the player starts without it")
-		if strings.Contains(line, "is not known to be durable") || !strings.Contains(line, "the test's medium refuses this write") {
-			t.Errorf("a write refused before it landed: %s", line)
-		}
-		for _, claim := range rollbackClaims {
-			if strings.Contains(line, claim) {
-				t.Errorf("a write refused is said to have left the state as it was (%q): %s", claim, line)
+			// The run plays by the step it holds, before it stops: the player
+			// starts once its start's step has returned, and the output is
+			// available once the watcher has resolved the GO bar.
+			availableOutput(t, eng)
+			refusesDSDAs(t, ps, "dsd_off_by_choice")
+			line := log.await(t, "player: the migration of the legacy DSD keys was not saved, and the player holds it for this run alone")
+			if strings.Contains(line, "is not known to be durable") || !strings.Contains(line, "the test's medium refuses this write") || !strings.Contains(line, "defaultMode=off") {
+				t.Errorf("a write refused before it landed: %s", line)
 			}
-		}
-		stopped(t, ps)
-		if _, there := dsdStateIn(t, ps.dataDir); there {
-			t.Fatal("a write refused before anything landed left a state file")
-		}
-		if lines := migrationLines(log.all()); len(lines) != 1 {
-			t.Errorf("the refused step said %q, want its Warn line alone", lines)
-		}
-		// The next start reads no file, and migrates the keys.
-		ps2 := rebootDSD(t, ps, box, "    dsdMode: off\n")
-		ps2.runningEngine(t)
-		stopped(t, ps2)
-		if st, there := dsdStateIn(t, ps.dataDir); !there || st.DefaultMode != dsdstate.ModeOff {
-			t.Errorf("the next start left %+v (a file: %v), want the keys migrated", st, there)
-		}
-	})
+			for _, claim := range rollbackClaims {
+				if strings.Contains(line, claim) {
+					t.Errorf("a write refused is said to have left the state as it was (%q): %s", claim, line)
+				}
+			}
+			stopped(t, ps)
+			if _, there := dsdStateIn(t, ps.dataDir); there {
+				t.Fatal("a write refused before anything landed left a state file")
+			}
+			if lines := migrationLines(log.all()); len(lines) != 1 {
+				t.Errorf("the refused step said %q, want its Warn line alone", lines)
+			}
+			// The next start reads no file, and migrates the keys.
+			ps2 := rebootDSD(t, ps, box, tc.keys)
+			ps2.runningEngine(t)
+			stopped(t, ps2)
+			if st, there := dsdStateIn(t, ps.dataDir); !there || st.DefaultMode != dsdstate.ModeOff || st.MigratedFrom == nil || !reflect.DeepEqual(*st.MigratedFrom, tc.marker) {
+				t.Errorf("the next start left %+v, marker %+v (a file: %v), want the keys migrated with their marker", st, st.MigratedFrom, there)
+			}
+		})
+	}
 	t.Run("its barrier fails after it lands", func(t *testing.T) {
 		box := newDSDBox(t)
+		goBarDSD(t, box.trees)
 		log := watchLog(t)
 		var dataDir string
 		var failed atomic.Bool
@@ -312,15 +328,24 @@ func TestARefusedStateWriteLeavesAWarnLineAndThePlayerStarts(t *testing.T) {
 			return nil
 		}))
 		ps := bootDSD(t, box, "    dsdMode: off\n", func(d string) { dataDir = d })
-		ps.runningEngine(t)
+		availableOutput(t, ps.runningEngine(t))
+		// The run plays by the step that landed, and its fence refuses every
+		// later write of the run.
+		refusesDSDAs(t, ps, "dsd_off_by_choice")
 		line := log.await(t, "player: the migration of the legacy DSD keys reached the state's file and is not known to be durable")
-		if strings.Contains(line, "was not saved") {
-			t.Errorf("a write that landed is said not to have been saved: %s", line)
+		if strings.Contains(line, "was not saved") || !strings.Contains(line, "defaultMode=off") {
+			t.Errorf("a write that landed is said not to have been saved, or names no default: %s", line)
 		}
 		for _, claim := range rollbackClaims {
 			if strings.Contains(line, claim) {
 				t.Errorf("a write that landed is said to have left the state as it was (%q): %s", claim, line)
 			}
+		}
+		if err := wiredPolicyOf(t, wiredPlayback(t, ps.standIn)).Store.Update(func(st *dsdstate.State) error {
+			st.DefaultMode = dsdstate.ModeAuto
+			return nil
+		}); !errors.Is(err, dsdstate.ErrLandedNotHeld) {
+			t.Errorf("a write after the landed step: %v, want the fence, ErrLandedNotHeld", err)
 		}
 		stopped(t, ps)
 		st, there := dsdStateIn(t, ps.dataDir)
@@ -339,6 +364,101 @@ func TestARefusedStateWriteLeavesAWarnLineAndThePlayerStarts(t *testing.T) {
 			t.Errorf("the next start migrated again over the file that holds the migration: %q", lines)
 		}
 	})
+}
+
+// refuseTheStartStep refuses the one durable write the migration's start step
+// makes, through the strict writer's medium check, armed by the seam just
+// before that step on the supervisor: every other write is made.
+func refuseTheStartStep(t *testing.T) *servePlayerSeams {
+	t.Helper()
+	var armed atomic.Bool
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error {
+		if armed.CompareAndSwap(true, false) {
+			return errors.New("the test's medium refuses this write")
+		}
+		return nil
+	}))
+	return &servePlayerSeams{migrates: func(_ context.Context, b *dsdstate.Bound) {
+		if b == nil {
+			armed.Store(true)
+		}
+	}}
+}
+
+// refusesDSDAs fails t unless the effective policy serve's player wired, read
+// by a backend built on it as serve's reads it now, refuses the GO bar's DSD
+// as reason at every rate before the DAC is opened: nothing published or
+// converted, and a DSD start refused with no open.
+func refusesDSDAs(t *testing.T, ps *playerServe, reason engine.Reason) {
+	t.Helper()
+	opens := &dopOpens{}
+	content := dopContents{"dsd": playbacktest.DSF(dsdstate.DSD64, 0.1, func(ch, i int) byte { return byte(i + ch) })}
+	b := policyBackendOf(t, wiredPlayback(t, ps.standIn), content, opens)
+	if p := b.Policy(); len(p.Tuples) != 0 || len(p.Converted) != 0 || p.Reason != string(reason) {
+		t.Fatalf("the effective policy serve wired publishes %s(converted %+v, reason %q), want nothing playing for %s", ratesPublished(p), p.Converted, p.Reason, reason)
+	}
+	err := startOn(t, b, 1, "dsd")
+	native, pcm := opens.counts()
+	if unplayable(err) != reason || len(native) != 0 || len(pcm) != 0 {
+		t.Fatalf("a DSD start: %v (refused %q), %d DSD and %d PCM opens; want %s and none", err, unplayable(err), len(native), len(pcm), reason)
+	}
+}
+
+// TestAStartStepNotSavedIsSavedByTheRunsNextWrite (B1042): a start step whose
+// write is refused before it lands is held for the run, and the run's next
+// write, a user's choice for the bound DAC on a disk that works again, saves
+// the state the store holds, its marker with it: the file holds defaultMode
+// off beside the migration's marker, never the default alone. The next start,
+// its bridge.yaml no longer setting dsdMode, finds the migration done, as
+// after a migration saved at its start: off and the marker kept, no line of
+// the migration's, and the file as the run left it.
+func TestAStartStepNotSavedIsSavedByTheRunsNextWrite(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	box := newDSDBox(t)
+	goBarDSD(t, box.trees)
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + "    dsdMode: off\n", standIn: newPlayerStandIn(), seams: refuseTheStartStep(t), with: box.with})
+	availableOutput(t, ps.runningEngine(t))
+	if _, there := dsdStateIn(t, ps.dataDir); there {
+		t.Fatal("the start step's refused write left a state file")
+	}
+	b := policyBackendOf(t, wiredPlayback(t, ps.standIn), dopContents{}, &dopOpens{})
+	view := b.Policy().DSD
+	if view == nil || view.DAC == nil {
+		t.Fatalf("the read side names no DAC: %+v", b.Policy())
+	}
+	res := b.ChooseDSD(context.Background(), playback.ChoiceRequest{DACKey: view.DAC.Key, DACToken: view.DAC.Token,
+		Choice: policy.Choice{BaseRevision: view.DAC.Choice.Revision, Mode: dsdstate.ModeNative, By: dsdstate.ByApp}})
+	if res.Outcome != playback.ChoiceWritten {
+		t.Fatalf("the user's choice: %s (%v), want it written", res.Outcome, res.Err)
+	}
+	if err := b.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stopped(t, ps)
+	want := dsdstate.Marker{From: dsdstate.FromKeys, DSDMode: "off"}
+	st, there := dsdStateIn(t, ps.dataDir)
+	if !there || st.DefaultMode != dsdstate.ModeOff || st.MigratedFrom == nil || !reflect.DeepEqual(*st.MigratedFrom, want) {
+		t.Fatalf("the run's next write left %+v, marker %+v (a file: %v), want defaultMode off beside the marker %+v", st, st.MigratedFrom, there, want)
+	}
+	if len(st.Warnings) != 1 || st.Warnings[0].Code != dsdstate.WarningMigratedOff {
+		t.Errorf("the warnings %+v, want the migration's migrated_off", st.Warnings)
+	}
+	if d, _ := st.DAC(goBarKey(t), goBarStamp()); d.Choice == nil || d.Choice.Mode != dsdstate.ModeNative || d.Choice.SetBy != dsdstate.ByApp {
+		t.Errorf("the GO bar holds %+v, want the user's native", d)
+	}
+	statePath := filepath.Join(ps.dataDir, dsdstate.FileName)
+	saved := readBytes(t, statePath)
+	log := watchLog(t)
+	ps2 := rebootDSD(t, ps, box, "")
+	availableOutput(t, ps2.runningEngine(t))
+	stopped(t, ps2)
+	if lines := migrationLines(log.all()); len(lines) != 0 {
+		t.Errorf("the next start logged the migration's lines: %q", lines)
+	}
+	if again := readBytes(t, statePath); !bytes.Equal(again, saved) {
+		t.Errorf("the next start wrote over the state the run saved:\n%s\n%s", saved, again)
+	}
 }
 
 // TestTheMigrationRunsOnceAndAgainAfterTheStateIsDeleted (B728 B6; the

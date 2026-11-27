@@ -75,8 +75,11 @@ var ErrNotWritable = errors.New("dsdstate: the state's file could not be read or
 // that landed. Every later write of the store is refused, whoever makes it
 // (the migration's, playback's evidence, a choice), until the next Open
 // reads the file (B728 B7: B6 fenced the migration alone, and an evidence
-// write after a landed migration step wrote over it).
-var ErrLandedNotHeld = errors.New("dsdstate: an earlier write reached the state's file and is not known to be durable, and the store does not hold it: no write is made until the next start reads the file")
+// write after a landed migration step wrote over it). The migration's start
+// step is the one write that holds its state when it fails (Migrate, B1042):
+// landed, the store holds what the file holds, and the fence stands all the
+// same, so no write of the run is made over a file not known to be durable.
+var ErrLandedNotHeld = errors.New("dsdstate: an earlier write reached the state's file and is not known to be durable: no write is made until the next start reads the file")
 
 // Store is the state's one writer (the package's doc): it holds the state
 // the last write left, and makes each write durable before it answers.
@@ -89,8 +92,9 @@ type Store struct {
 	state   State
 	blocked error
 	// landed is the write that reached the file and is not known to be
-	// durable, whose state the store does not hold: it refuses every write
-	// after it (ErrLandedNotHeld).
+	// durable, whose state the store does not hold, but for the migration's
+	// start step (Migrate): it refuses every write after it
+	// (ErrLandedNotHeld).
 	landed error
 	report Report
 
@@ -262,9 +266,10 @@ func (s *Store) Report() Report {
 // lock (B762 round 2): a write holds that lock through its durable write,
 // whose fsyncs a stalled disk holds as long as it likes, and a reader, serve's
 // player's supervisor at each snapshot among them, never waits on it. A state
-// is published once the store holds it, after its write is durable, so a
-// reader sees what the next write starts from, or what a write under way
-// started from.
+// is published once the store holds it, after its write is durable (or, for
+// the migration's start step whose write failed, as that step holds it:
+// Migrate), so a reader sees what the next write starts from, or what a write
+// under way started from.
 func (s *Store) State() State {
 	if p := s.pub.Load(); p != nil {
 		return p.Clone()
@@ -292,23 +297,29 @@ func (s *Store) State() State {
 // Once a write has landed and is not known to be durable, the file holds a
 // state the store does not, and every write after it is refused
 // (ErrLandedNotHeld) until the next Open reads the file: no write is made
-// from a state that would undo one in the file.
+// from a state that would undo one in the file. The migration's start step is
+// the one exception, held when its write fails (Migrate).
 func (s *Store) Update(fn func(*State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateLocked(fn)
+	return s.updateLocked(fn, false)
 }
 
 // Landed is the write that reached the state's file and is not known to be
-// durable, which the store does not hold and which fences every later write
-// (ErrLandedNotHeld): nil while there is none.
+// durable, which the store does not hold (but for the migration's start step,
+// Migrate) and which fences every later write (ErrLandedNotHeld): nil while
+// there is none.
 func (s *Store) Landed() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.landed
 }
 
-func (s *Store) updateLocked(fn func(*State) error) error {
+// updateLocked is Update's write, under s.mu. heldIfFailed, the migration's
+// start step's alone (Migrate), holds the state fn made where the write of it
+// fails, landed or not; every other write that fails leaves the state as it
+// was.
+func (s *Store) updateLocked(fn func(*State) error, heldIfFailed bool) error {
 	if s.landed != nil {
 		return ErrLandedNotHeld
 	}
@@ -349,6 +360,9 @@ func (s *Store) updateLocked(fn func(*State) error) error {
 		if errors.Is(err, atomicwrite.ErrLanded) {
 			s.landed = err
 		}
+		if heldIfFailed {
+			s.hold(next)
+		}
 		return fmt.Errorf("dsdstate: the state's write failed: %w", err)
 	}
 	s.hold(next)
@@ -366,6 +380,20 @@ func (s *Store) updateLocked(fn func(*State) error) error {
 // dsdQualification names a record within (serve's data directory), by the
 // name the migration took. It reads nothing and writes nothing over a state
 // that did not read, which a marker keeps from any migration.
+//
+// The part of the bridge's (bound nil), which writes the marker and the
+// default, is the one step held when its write fails (B1042): before the
+// write lands (a full disk, an I/O error) or once it has landed and is not
+// known to be durable, the store holds the state the step made, its marker
+// with it, for the rest of the run, so the run plays by the keys' opt-out
+// (defaultMode off, and B1043's marker of auto without allowDoP), as serve and
+// bridge output play read it alike. A write that landed keeps its fence
+// (ErrLandedNotHeld): the file holds what the store holds, and no later write
+// is made. One that did not land leaves no file: a later write of the run
+// persists the held state, its marker with it, so defaultMode off never
+// reaches the file without the marker, and with no later write the next start
+// migrates again. A part of a DAC's that fails is not held: the state stays as
+// it was, its marker still waiting, and its caller asks it again.
 func (s *Store) Migrate(stateDir string, legacy Legacy, bound *Bound) (Step, error) {
 	var step Step
 	s.mu.Lock()
@@ -383,6 +411,6 @@ func (s *Store) Migrate(stateDir string, legacy Legacy, bound *Bound) (Step, err
 		}
 		*st, step = next, done
 		return nil
-	})
+	}, bound == nil)
 	return step, err
 }
