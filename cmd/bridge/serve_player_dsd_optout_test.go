@@ -223,21 +223,32 @@ func goBarDoPOnly(t *testing.T, trees outputTrees) {
 // known to be durable, keeps DoP out in that run on a GO bar a profile knows
 // and heard DoP from at DSD64 and DSD128, with no native: every rate converts,
 // from the marker the store holds for the run. With allowDoP: true, the
-// control, DoP plays at both.
+// control, DoP plays at both. Every row first requires the start step's own
+// line to carry the failure the test injected (the seams are the process's,
+// so a seam that fired does not say which write it failed), matched by the
+// words this line has had since before B1042; the control asserts that and
+// what plays, and the hold, the marker and the landed fence, is the opt-out
+// rows' alone (B1042's round 2).
 func TestAnAutoWithoutAllowDoPKeepsDoPOutInTheRunWhoseSaveFailed(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
+	failures := map[string]struct{ line, injected string }{
+		"refused before it lands":          {"player: the migration of the legacy DSD keys was not saved", "the test's medium refuses this write"},
+		"its barrier fails after it lands": {"player: the migration of the legacy DSD keys reached the state's file and is not known to be durable", "the test's barrier fails once the state's file is there"},
+	}
 	for _, keys := range []struct {
 		name, keys, want string
+		optOut           bool
 	}{
-		{"allowDoP false", "    dsdMode: auto\n    allowDoP: false\n", `2822400/"converted" 5644800/"converted" 11289600/"converted" `},
-		{"allowDoP unset", "    dsdMode: auto\n", `2822400/"converted" 5644800/"converted" 11289600/"converted" `},
-		{"allowDoP true", "    dsdMode: auto\n    allowDoP: true\n", `2822400/"dop" 5644800/"dop" 11289600/"converted" `},
+		{"allowDoP false", "    dsdMode: auto\n    allowDoP: false\n", `2822400/"converted" 5644800/"converted" 11289600/"converted" `, true},
+		{"allowDoP unset", "    dsdMode: auto\n", `2822400/"converted" 5644800/"converted" 11289600/"converted" `, true},
+		{"allowDoP true", "    dsdMode: auto\n    allowDoP: true\n", `2822400/"dop" 5644800/"dop" 11289600/"converted" `, false},
 	} {
 		for _, path := range []string{"refused before it lands", "its barrier fails after it lands"} {
 			t.Run(keys.name+"/"+path, func(t *testing.T) {
 				box := newDSDBox(t)
 				goBarDoPOnly(t, box.trees)
+				log := watchLog(t)
 				c := playerServeCase{player: goBarPlayer + keys.keys, standIn: newPlayerStandIn(), with: box.with}
 				if path == "refused before it lands" {
 					c.seams = refuseTheStartStep(t)
@@ -258,16 +269,24 @@ func TestAnAutoWithoutAllowDoPKeepsDoPOutInTheRunWhoseSaveFailed(t *testing.T) {
 				}
 				ps := bootPlayerServe(t, c)
 				availableOutput(t, ps.runningEngine(t))
+				// The start step itself failed as the test made it fail.
+				if line := log.await(t, failures[path].line); !strings.Contains(line, failures[path].injected) {
+					t.Fatalf("the start step's line does not carry the failure the test injected (%q): %.400s", failures[path].injected, line)
+				}
 				b := policyBackendOf(t, wiredPlayback(t, ps.standIn), dopContents{}, &dopOpens{}, knownGoBar)
 				if got := planned(b.Policy()); got != keys.want {
 					t.Errorf("the effective policy serve wired plays %s(reason %q), want %s", got, b.Policy().Reason, keys.want)
 				}
-				store := wiredPolicyOf(t, wiredPlayback(t, ps.standIn)).Store
-				if m := store.State().MigratedFrom; m == nil || m.DSDMode != dsdstate.ModeAuto {
-					t.Errorf("the store holds the marker %+v, want auto's", m)
-				}
-				if landed := store.(interface{ Landed() error }).Landed(); (landed != nil) != (path != "refused before it lands") {
-					t.Errorf("the store's fence %v on the path %q", landed, path)
+				if keys.optOut {
+					// The hold (B1042): the store holds the step's marker for the
+					// run, behind the fence where the write landed.
+					store := wiredPolicyOf(t, wiredPlayback(t, ps.standIn)).Store
+					if m := store.State().MigratedFrom; m == nil || m.DSDMode != dsdstate.ModeAuto {
+						t.Errorf("the store holds the marker %+v, want auto's", m)
+					}
+					if landed := store.(interface{ Landed() error }).Landed(); (landed != nil) != (path != "refused before it lands") {
+						t.Errorf("the store's fence %v on the path %q", landed, path)
+					}
 				}
 				stopped(t, ps)
 			})
