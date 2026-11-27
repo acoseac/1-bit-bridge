@@ -74,9 +74,11 @@ libraryName: "My Music Library"
 #   UUID is kept in <dataDir>/player-uuid.
 #   A running bridge serve player decides DSD playback for its DAC from
 #   its DSD state, <dataDir>/player-dsd.json, by its effective DSD policy.
-#   The state keeps each DAC's own choice, which in 0.2.4 only
-#   PUT /v1/outputs/{id}/dsd sets (for the DAC the player is bound to,
-#   while the player is stopped; no released 1-bit app sends it yet),
+#   The state keeps each DAC's own choice, which the migration of the
+#   legacy keys below can also write, and which in 0.2.4 an operator
+#   sets or changes only through PUT /v1/outputs/{id}/dsd (for the DAC
+#   the player is bound to, while the player is stopped; no released
+#   1-bit app sends it yet),
 #   kept for the DAC's model from its maker, so every unit of that model
 #   shares it. The console's Player page has no control for changing the
 #   DAC's DSD choice. A fresh install's state holds the default mode
@@ -106,7 +108,8 @@ libraryName: "My Music Library"
 #     choice, with no maximum rate, and, from the approval record
 #     dsdQualification names, each approved rate as a listener's clean
 #     answer and, for dop, or auto with allowDoP: true, a DoP
-#     confirmation, each held to the firmware it was approved on. With no
+#     confirmation where the record approved a DoP rate, each held to the
+#     firmware it was approved on. With no
 #     record, or one refused, native and dop are taken with nothing
 #     approved and auto leaves the DAC on the default; a record refused
 #     as another model's waits for a DAC of that model. A DAC that already
@@ -116,8 +119,10 @@ libraryName: "My Music Library"
 #   runs under auto, says so, and the next start goes on from what the
 #   file holds. allowDoP false, or unset, no longer keeps DoP out under
 #   auto: on a DAC the profile database knows, auto plays DoP at a rate it
-#   heard, or one confirmed on the DAC's firmware, where native DSD is not
-#   offered or a listener rejected it, through the gain check. A native
+#   heard, or one confirmed on the DAC's firmware, unless the database
+#   refuses DoP at that rate and no listener answered clean there, where
+#   native DSD is not offered or a listener rejected it, through the gain
+#   check. A native
 #   or dop taken with nothing approved still plays what that mode plays
 #   without approval, refuses the rest and never converts to PCM.
 #   A plain bridge output play migrates them into a state of its own; its

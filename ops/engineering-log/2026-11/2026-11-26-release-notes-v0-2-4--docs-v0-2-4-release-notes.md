@@ -301,3 +301,84 @@ them off. The example is one of this change's files, which round 7's
 On go1.27.3 with `GOPROXY=off`: `make docs-check` clean, and the citation
 guard (`TestEveryCitedTestNameExists`) passed. No code, test or config value
 changed.
+
+### Round 9: wording fixes
+
+Twenty-three fixes, each read against the code again as it was written, 4, 5,
+7, 10, 14, 19 and 20 in a corrected wording; all are in the notes but 3, which
+is in the example.
+
+1. The player's line: under its default `auto`; DSD512, mono or multichannel
+   DSD and DST-compressed DFF refused; a converted rate not bit-exact
+   (`internal/player/playback/dsd_policy.go` 328 to 333,
+   `internal/player/decode/dff.go` 124 and 233, `internal/player/dsdconv/doc.go`
+   5).
+2. To keep DSD off: check the log for "the player starts without it"
+   (`cmd/bridge/serve_player_dsd.go` 310 and 317).
+3. The example's player paragraph, which the notes point to, at its three
+   places: the migration writes a choice too; a DoP confirmation only where
+   the record approved a DoP rate (`internal/player/dsdstate/migrate.go` 281
+   to 285); and a DoP rate the profile database refuses is neither heard nor
+   confirmed unless a listener answered clean there
+   (`internal/player/policy/policy.go` 548 to 559).
+4. A restart takes a fresh install's defaults, and migrates the legacy keys
+   again, only while `player-dsd.json` is absent (`dsdstate.Open`,
+   `playerDSD.steps`).
+5. The probation line: the crash rollback to 0.2.3 is disabled once 0.2.4
+   begins the database migration (`updater.CrashRollback`).
+6. A Settings save keeps the changes it finds, which apply at the next start.
+7. 0.2.3 drops the WavPack and Monkey's Audio rows after
+   `scanner.deleteAfterMissingScans` scans that count them missing, 3 by
+   default (`internal/config/config.go` at `v0.2.3`, 866 to 885 and 2755), and
+   a root its scanner protects as empty keeps them: a subfolder its walk
+   enters is library content and a `.wv` or `.ape` file is not
+   (`internal/manifest/scanner.go` at `v0.2.3`, 1061, 3449, 3508 and 3958 to
+   3966). The next sentence names 0.2.3 in place of its pronoun.
+8. The snapshot path is for a snapshot that holds `bridge.db`.
+9. Retention: once a newer snapshot's database has verified
+   (`keptByRecovery`).
+10. A restore brings back a captured console account with its sessions
+    signed out (`adminauth.SignedOutFile`, at `29df3a4a` and `v0.2.3` alike)
+    and the captured DAC choices (`dsdstate.ForRestore`), and a token in the
+    snapshot that was revoked since works again.
+11. A `compose.yaml` kept from 0.2.3 has no line for the uploads variable
+    (`compose.yaml` 62 at `29df3a4a`, none at `v0.2.3`).
+12. A stop that gave up on the node's start takes a new process too, and the
+    menu's Start now and the start its Setup offers run in the menu's own
+    process (`internal/tsnet/uploads.go` 100 to 131; `cmd/bridge/menu.go` 361
+    to 364 and 407 to 414).
+13. `TS_NETSTACK_ENABLE_RACK=true` brings back the stalls after a burst loss
+    that 1.104.5 turned RACK off for (`wgengine/netstack/netstack.go` in
+    `tailscale.com@v1.104.5`, 146 to 152 and 412 to 417).
+14. A refused data directory: check the volume is mounted at `dataDir`, then
+    follow the refusal's words, which name the record to remove only for a
+    data directory removed on purpose (`cmd/bridge/serve_data_dir_record.go`
+    394 to 406 and 476 to 500).
+15. B903AUD's line: while a playable entry follows the track heard, the word
+    "playable" added, since entries already refused leave the selection
+    where it was (`player.md`'s B903AUD bullet).
+16. The console shows each snapshot's verdict, `bridge doctor` the newest's
+    and the newest verified's (`internal/doctor/backups.go` 15 to 31,
+    `internal/admin/handlers_backups.go` 66 to 77).
+17. The layout warning goes by the path as written (`config.LayoutOf`).
+18. A library rename no longer renames a registered node whose state reads.
+19. The format gate filters the catalog's rows; `/v1/list` and the other
+    filesystem views are not gated (`internal/api/formats.go` 3 to 11).
+20. The Christmas floor counts the tracks the request sees (PROTOCOL.md,
+    "Client formats").
+21. `adminLANAddress` opens the console once its listener opens.
+22. Delete leaves an SACD image's and an upstream server's tracks alone, and
+    its confirmation names each edition
+    (`internal/admin/static/player/views.js` 420 to 455).
+23. The PUT's request, with `dacToken`, is in PROTOCOL.md.
+
+Nothing changed for a host name that isn't ASCII on an existing certificate:
+that claim did not hold.
+
+### Runs (round 9)
+
+On go1.27.3 with `GOPROXY=off`: `make docs-check` clean; the example's tests
+(`TestLoadShippedExample`, `TestTheShippedExampleLeavesThePlayersDSDToItsState`,
+`TestTheConfigExampleSaysWhatTheKeyCostsTheRollback`) and the citation guard
+(`TestEveryCitedTestNameExists`) passed. No code or test changed; the example
+changed in its comments alone.
