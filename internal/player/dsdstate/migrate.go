@@ -23,12 +23,14 @@ type Legacy struct {
 // set reports whether the block sets any of the keys.
 func (l Legacy) set() bool { return l.DSDMode != "" || l.AllowDoP != nil || l.DSDQualification != "" }
 
+// check refuses keys the migration never takes: a dsdMode bridge.yaml's reader
+// refuses (config's Problem), never guessed at. The record's name is not
+// checked here: bridge.yaml's reader takes any text, and one the migration
+// cannot take as a record's name (validName) is dropped while the other keys
+// migrate (Migrate; B1042's round 2).
 func (l Legacy) check() error {
 	if !slices.Contains([]string{"", ModeOff, ModeNative, ModeDoP, ModeAuto}, l.DSDMode) {
 		return errors.New("dsdstate: the legacy dsdMode is not a legacy mode")
-	}
-	if !validName(l.DSDQualification) {
-		return errors.New("dsdstate: the legacy dsdQualification is not a name")
 	}
 	return nil
 }
@@ -81,6 +83,12 @@ type Step struct {
 	// Warnings are the warnings the step wrote, each to be logged beside it
 	// (B6's Warn line).
 	Warnings []Warning
+	// RecordNameRefused reports that the start step's legacy dsdQualification
+	// is no name a record can have (validName: more than 4096 bytes, not
+	// UTF-8, or holding a NUL), which the step migrated the other keys
+	// without: the marker holds no name, and a part of a DAC's after it reads
+	// no record. Its caller says so, never quoting the name.
+	RecordNameRefused bool
 }
 
 // RecordToRead is the owner's record a step on s asks of the bound DAC, by
@@ -89,12 +97,16 @@ type Step struct {
 // (native, dop with allowDoP, auto), by the name they hold now; then, while
 // the part of a DAC's waits, by the name the marker keeps; and never once the
 // part is done, so nothing reads the record again. The name may be "", which
-// reads as no record (ReadRecord).
+// reads as no record (ReadRecord): a name the migration cannot take
+// (validName) is no name it reads a record by.
 func RecordToRead(s State, l Legacy) (name string, ask bool) {
 	m := s.MigratedFrom
 	if m == nil {
 		if !l.set() || !dacPart(l.DSDMode, l.AllowDoP != nil && *l.AllowDoP) {
 			return "", false
+		}
+		if !validName(l.DSDQualification) {
+			return "", true
 		}
 		return l.DSDQualification, true
 	}
@@ -112,9 +124,19 @@ func RecordToRead(s State, l Legacy) (name string, ask bool) {
 // now, which no later step reads again: with dsdMode unset, nothing else (the
 // defaults; the marker still keeps a later edit of the keys from migrating
 // over what the user chose since); with an explicit off, or dop with allowDoP
-// false or unset, defaultMode off and the bridge's migrated_off warning; with
+// false or unset, defaultMode off and the bridge's migrated_off warning (none
+// in a state already at the 512 warnings it may hold, whose opt-out goes
+// without it); with
 // native, dop with allowDoP, or auto, a part of a DAC's that waits for the
-// binding to resolve to one. With no key set it writes nothing at all.
+// binding to resolve to one. With no key set it writes nothing at all. The
+// keys are checked here alone, while no migration ran (a dsdMode the reader
+// never takes is an error), so a later edit of bridge.yaml never blocks a part
+// a saved marker waits for, which takes the keys the marker holds; and a
+// dsdQualification that is no name a record can have (validName) is dropped,
+// the other keys migrated without it, so 0.2.3's opt-out holds whatever the
+// name: the marker holds no name, a part of a DAC's after it reads no record,
+// and the step says so (Step.RecordNameRefused). A name alone, with no other
+// key set, leaves nothing to migrate and writes nothing (B1042's round 2).
 //
 // The part of a DAC's runs once a DAC is bound while it waits, with the
 // reader's answer for that DAC (in.Record; ReadRecord compares the model and
@@ -152,9 +174,6 @@ func RecordToRead(s State, l Legacy) (name string, ask bool) {
 // migrated: the part done for it writes nothing for it. A choice the
 // migration writes clears no warning, the one written with it included.
 func Migrate(s State, in Input) (State, Step, error) {
-	if err := in.Legacy.check(); err != nil {
-		return s, Step{}, err
-	}
 	next, step := s.Clone(), Step{}
 	at := stamp(in.Now)
 	warn := func(w Warning) {
@@ -163,8 +182,14 @@ func Migrate(s State, in Input) (State, Step, error) {
 	}
 	if next.MigratedFrom == nil {
 		l := in.Legacy
+		if err := l.check(); err != nil {
+			return s, Step{}, err
+		}
+		if !validName(l.DSDQualification) {
+			l.DSDQualification, step.RecordNameRefused = "", true
+		}
 		if !l.set() {
-			return s, Step{}, nil
+			return s, step, nil
 		}
 		m := &Marker{From: FromKeys, DSDMode: l.DSDMode, DSDQualification: l.DSDQualification}
 		if l.AllowDoP != nil {
@@ -174,7 +199,10 @@ func Migrate(s State, in Input) (State, Step, error) {
 		switch {
 		case m.DSDMode == ModeOff, m.DSDMode == ModeDoP && !m.allowDoP():
 			next.DefaultMode = ModeOff
-			if !slices.ContainsFunc(next.Warnings, func(w Warning) bool { return w.Code == WarningMigratedOff }) {
+			// A state at the 512 warnings it may hold takes no more: the
+			// opt-out goes without its warning, never lost to a state its check
+			// refuses (B1042's round 2).
+			if !slices.ContainsFunc(next.Warnings, func(w Warning) bool { return w.Code == WarningMigratedOff }) && len(next.Warnings) < maxWarnings {
 				warn(Warning{Code: WarningMigratedOff, At: at})
 			}
 		case dacPart(m.DSDMode, m.allowDoP()):

@@ -448,7 +448,9 @@ adapters read them before each call.
 ### 3.2 The rule, per DSD rate
 
 (Amended 2026-11-22, B990: no first use is asked, and native on a generic board's IDs waits for a
-listener's clean answer. The table, its definitions and the bullets under it are that rule.)
+listener's clean answer. The table, its definitions and the bullets under it are that rule.
+Amended 2026-11-27, B1043: a migrated 0.2.3 `auto` without `allowDoP: true` plays no DoP until the
+user confirms it, the paragraph after the bullets.)
 
 The rule covers DSD64, DSD128 and DSD256. DSD512 is refused in every mode, as today
 (`rate_not_supported`; `internal/player/playback/native.go:56-61`, `authorization.go:310-312`).
@@ -524,7 +526,8 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
   leaves the mode as it was, its cap or a consent changed, clears none.
 - **A migrated `native` or `dop`** (§3.6) plays what the table plays: its record's approvals are
   clean answers at the approved rates, which keep native there on a generic board, and its
-  acknowledgement, of those rates, is kept for the read side alone.
+  acknowledgement, of those rates, is kept for the read side alone. Its DoP confirmation is "DoP
+  confirmed" only at a rate a clean DoP answer holds (B1045, §3.6's approval's rate limits).
 - **A known DAC with no DoP claim at r** treats DoP as an unknown DAC does: `auto` needs the user's
   confirmation, and an explicit `dop` write without `confirmDoP` is refused (§7.2).
 - **The listener-answer clause** on an unknown DAC (native's on a generic board, DoP's on every
@@ -533,6 +536,24 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
 - **One effective set** feeds both selection and publication, as today
   (`authorization.go:202-213`, R10 and R11). The `effectiveSet` shape stays, gaining the converted
   rates.
+
+**A 0.2.3 `auto` without `allowDoP: true`** (B1043, 2026-11-27, the owner's choice before the
+0.2.4 tag). 0.2.3 never played DoP under those keys. While the state's migration marker holds them
+(`from: keys`, `dsdMode: auto`, `allowDoP` false or unset), the two `auto` rows play no DoP at any
+rate, on a known DAC or an unknown one: a rate they would play DoP at converts, or is refused as
+`conversion_not_offered` where the DAC takes no target, and native is as the table says. The
+consent that ends it is the user's DoP confirmation for the DAC's current, readable firmware: a
+write's `confirmDoP` from the app or the console, recorded under the bound unit's bcdDevice; never
+the migration's own confirmation, a consent under another firmware (whatever the profile claims
+there), or `firstUseAcknowledged`, which the table no longer asks and which is not this consent. An
+explicit `dop` is no `auto` row and plays by its own; a confirmed `dop` wrote the consent, which a
+switch back to `auto` keeps, and an unconfirmed `dop` the profile's claims admitted gave none.
+Everywhere else the catalog keeps the authority B990 gave it: with no such marker (none, one with
+`dsdMode` unset, another mode, or `allowDoP: true`), the `auto` rows are the table's. The read side's
+facts keep their meanings (`needsConfirmation` the rates an explicit `dop` needs `confirmDoP` at,
+`allowDoP` a profile's claim or a user's confirmation): the rule shows in the effective plans alone
+(`dsdPlayback.tuples`, `converted`, `refused`). This is another consent than the first-use
+acknowledgement §3.6's `auto` row once named, not that rule back (`policy.dopKeptOut`).
 
 **A residual: XMOS's vendor ID** (B993, 2026-11-23; amended the same day, B999: the state's gate,
 the mode that applies and the probe's clause; by bridge lows 18: the rates, the generic-board
@@ -864,7 +885,9 @@ policy would convert.
 first use. A migrated `native` plays every rate the table plays, and with no record it plays too,
 never refusing as `first_use_pending`; a migrated `dop` with no record refuses until the app
 confirms DoP where the profile claims none; the record's clean answers are what keep native, rate
-by rate, on a generic board's IDs.)
+by rate, on a generic board's IDs. B1043, 2026-11-27: under a migrated `auto` with `allowDoP`
+false or unset, DoP stays out until the user confirms it on the DAC's firmware, §3.2's paragraph
+on it, which is not the acknowledgement the `auto` row names.)
 
 - **The record is read through the legacy reader** (§3.5), with the model comparison: the port is
   not compared, nor the bcdDevice, and versions from 35 to the build's own are taken. An unset
@@ -878,7 +901,22 @@ by rate, on a generic board's IDs.)
   stays `first_use_pending` until the user acknowledges the transport or chooses the mode again.
   (B990: superseded. The acknowledgement's rates are kept and reported and gate no rate; the
   record's rates survive as clean listener answers, which admit native there on a generic board's
-  IDs.)
+  IDs.) (B1045, 2026-11-27, the owner's choice before the 0.2.4 tag: DoP's rate limits hold
+  through the confirmation instead. 0.2.3's record held its approved rates alone, and 0.2.3
+  refused DoP at any other. The migration's one DoP confirmation, which names no rate, counts at a
+  rate only where a clean DoP answer for that rate holds on this firmware: the record's approved
+  rates, or an independent clean answer since, which authorizes its rate. So a record that
+  approved DSD64 alone plays DoP at DSD64 under `dop`, and under `auto` with `allowDoP: true`,
+  and a rate the catalog neither hears nor states is refused as `dop_confirmation_required` under
+  `dop`, and converted under `auto`, as 0.2.3 refused it. The catalog keeps the authority B990
+  gave it: a rate the row hears or states still admits DoP under `dop`, a heard one under `auto`,
+  and a row that states DoP to DSD256 still plays DSD128 DoP; the residual, a maker-stated DoP a
+  unit does not decode, is the catalog's evidence rules' (B730). A user's confirmation, the app's
+  or the console's `confirmDoP`, counts at every rate as before, and replaces the migration's on
+  the write that carries it. `choice.dopConfirmed` keeps its meaning, a stored confirmation that
+  counts on this firmware, so a migrated one can show it beside `needsConfirmation` at the rates
+  it does not cover. This is a per-rate limit on one consent, not the acknowledgement rule above
+  back.)
 - **A failure is a warning the app can read, not only a log line** (Gemini). A refused record is
   `migration_record_refused` with its reason word, the kind the reader marks the refusal with
   (`qualification.ErrStaleVersion`: `stale_version`, `ErrIdentityMismatch`: `identity_mismatch`,

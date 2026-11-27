@@ -185,10 +185,11 @@ type playerDSD struct {
 	tries, wait int
 	// done says this run makes no step more: a write landed and is not known
 	// to be durable, which the store does not hold in memory (dsdstate's
-	// Store.Update), so a step now would be made from the state as it was
-	// before that write, over the file that holds it; the next start goes on
-	// from the file. The store fences every writer alike since B7
-	// (dsdstate.ErrLandedNotHeld), the migration's and playback's evidence.
+	// Store.Update) but for the start step's (Store.Migrate, B1042), so a step
+	// now would be made from the state as it was before that write, over the
+	// file that holds it; the next start goes on from the file. The store
+	// fences every writer alike since B7 (dsdstate.ErrLandedNotHeld), the
+	// migration's and playback's evidence, the start step held included.
 	done bool
 	// changed, when set, is told of a DAC's part that changed the state, the
 	// DAC's key and its maker's stamp: the player's backend probes the DAC
@@ -290,32 +291,57 @@ func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound, unit *al
 // part, which this run asks no more, and the warnings the step wrote, which
 // the file holds, each a Warn line beside it. One refused or failed before it
 // landed is one Warn line for the start's step, which the next start makes
-// again, and for a DAC's part the lines ask writes as it asks the part again
-// in this run. A step saved logs each warning it wrote, a Warn line beside
+// again unless a later write of this run saved what the store holds of it
+// (dsdstate's Store.Migrate, B1042), and for a DAC's part the lines ask writes
+// as it asks the part again in this run. Each line of the start's step names
+// the default the run plays by. A step saved logs each warning it wrote, a Warn line beside
 // it, and what it migrated. A line names the DAC by dacLabel, with unit for
 // the bound DAC alone: a warning that names another model gets no unit, and
-// its label is that model's USB IDs.
+// its label is that model's USB IDs. A start's dsdQualification the migration
+// could not take as a record's name (Step.RecordNameRefused) is a Warn line of
+// its own, which gives the name's length and never the name, and a start step
+// whose state would encode past the reader's bound (dsdstate.ErrTooLarge) says
+// so in its line (B1042's round 2).
 func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound, unit *alsa.USBIdentity) {
+	if step.RecordNameRefused {
+		playerLog.Warn("player: the legacy dsdQualification is no name an owner's record can have (more than 4096 bytes, not UTF-8, or holding a NUL): the DSD migration takes the other legacy DSD keys without it, and reads no record by it",
+			"bytes", len(d.legacy.DSDQualification))
+	}
 	landed := errors.Is(err, atomicwrite.ErrLanded)
 	switch {
 	case errors.Is(err, dsdstate.ErrLandedNotHeld):
 		// The store's fence (B7): an earlier write, the migration's or
 		// playback's, landed and is not known to be durable, and no write is
 		// made from the state the store holds.
-		playerLog.Warn("player: the DSD migration makes no step more in this run: an earlier write of the player's DSD state reached its file and is not known to be durable, which the store does not hold; the next start goes on from what the file holds then")
+		playerLog.Warn("player: the DSD migration makes no step more in this run: an earlier write of the player's DSD state reached its file and is not known to be durable; the next start goes on from what the file holds then")
 		return
 	case err != nil && !landed && bound != nil:
 		return
-	case err != nil && !landed:
+	case err != nil && !landed && d.store.State().MigratedFrom == nil:
+		// Refused before its write (a dsdMode the migration does not take, or
+		// a state its check refuses): the store holds nothing of it.
 		playerLog.Warn("player: the migration of the legacy DSD keys was not saved, and the player starts without it: this run does not ask it again, and the next start goes on from what the state's file holds then",
-			"err", err)
+			"defaultMode", d.store.State().DefaultMode, "err", err)
+		return
+	case errors.Is(err, dsdstate.ErrTooLarge):
+		// Its state would encode past the reader's bound: the store holds the
+		// step for this run, nothing written, until a later write makes the
+		// state smaller (dsdstate's Store.Migrate, B1042's round 2).
+		playerLog.Warn("player: the migration of the legacy DSD keys was not saved: with it the player's DSD state encodes to more than the 1 MiB its file may hold, and the player holds it for this run alone: a later write that makes the state smaller saves it, and the next start goes on from what the state's file holds then",
+			"defaultMode", d.store.State().DefaultMode, "err", err)
+		return
+	case err != nil && !landed:
+		// Its write failed: the store holds the step for this run
+		// (dsdstate's Store.Migrate, B1042), whose default the player plays by.
+		playerLog.Warn("player: the migration of the legacy DSD keys was not saved, and the player holds it for this run alone: this run does not ask it again, and the next start goes on from what the state's file holds then",
+			"defaultMode", d.store.State().DefaultMode, "err", err)
 		return
 	case landed && bound != nil:
 		playerLog.Warn("player: the DSD migration's part for the bound DAC reached the state's file and is not known to be durable: the player plays on, this run asks it no more, and the next start goes on from what the file holds then",
 			"dac", dacLabel(bound.Key, unit), "err", err)
 	case landed:
-		playerLog.Warn("player: the migration of the legacy DSD keys reached the state's file and is not known to be durable, and the player starts without it: this run asks it no more, and the next start goes on from what the file holds then",
-			"err", err)
+		playerLog.Warn("player: the migration of the legacy DSD keys reached the state's file and is not known to be durable, and the player holds it for this run: this run asks it no more, and the next start goes on from what the file holds then",
+			"defaultMode", d.store.State().DefaultMode, "err", err)
 	}
 	for _, w := range step.Warnings {
 		attrs := []any{"code", w.Code}
@@ -350,8 +376,8 @@ func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound, un
 
 // steps reports whether a step for bound would make anything of the state as
 // it holds now: at the start (bound nil), a migration never run while the
-// keys set any; for a DAC, its part waiting; never once a write landed that
-// the store does not hold (done). Nothing else asks the store, so a state
+// keys set any; for a DAC, its part waiting; never once a write landed and is
+// not known to be durable (done). Nothing else asks the store, so a state
 // that did not read, whose marker no migration runs over, and a migration
 // done write nothing and say nothing.
 func (d *playerDSD) steps(bound *dsdstate.Bound) bool {
@@ -367,9 +393,11 @@ func (d *playerDSD) steps(bound *dsdstate.Bound) bool {
 }
 
 // waits reports whether the migration's part for a DAC waits, as the state
-// holds it: a start whose own step was not saved holds no marker, and the
-// next start reads what the file holds then; and never once a write landed
-// that the store does not hold (done), for which the next start does too.
+// holds it: a start whose own step's write failed before it landed holds that
+// step's marker for the run (dsdstate's Store.Migrate, B1042), so the part is
+// asked in this run and its write, where it is made, saves the marker with
+// it; and never once a write landed and is not known to be durable (done),
+// for which the next start reads what the file holds then.
 func (d *playerDSD) waits() bool {
 	if d == nil || d.store == nil || d.done {
 		return false

@@ -183,15 +183,16 @@ func TestTheBridgesPartIsAtOnceAndADACsWaits(t *testing.T) {
 	}
 }
 
-// TestAMigratedAcknowledgementListsItsRecordsRates: a migrated first use
-// covers the rates the owner's record approved, and no other (the design's
-// sections 2.5 and 3.6), so admission stays per rate: a record of DSD64
-// alone covers DSD64 and not DSD128 or DSD256, its file lists [2822400], and a
-// transport the record approved no rate of gets no acknowledgement at all
-// (an empty list would read as every rate): under auto with allowDoP, a
-// native-only record leaves DoP unacknowledged and unconfirmed. A write's
-// acknowledgement, with no list, covers every rate; a list present and empty
-// does not decode.
+// TestAMigratedAcknowledgementListsItsRecordsRates: a migrated first-use
+// acknowledgement covers the rates the owner's record approved and no other
+// (the design's sections 2.5 and 3.6), which the read side reports and which
+// gates no rate since B990: a record of DSD64 alone gives an acknowledgement
+// that covers DSD64 and not DSD128 or DSD256, its file serializes the one rate
+// as "bitRates":[2822400], and a transport the record approved no rate of gets
+// no acknowledgement at all (an empty list would read as every rate): under
+// auto with allowDoP, a native-only record leaves DoP unacknowledged and
+// unconfirmed. A write's acknowledgement, with no list, covers every rate; a
+// list present and empty does not decode.
 func TestAMigratedAcknowledgementListsItsRecordsRates(t *testing.T) {
 	gb := goBar(t)
 	s, _, err := Migrate(Defaults(), Input{Legacy: Legacy{DSDMode: ModeNative, DSDQualification: "approved.json"}, Bound: bound(t), Record: takenRecord([]int{DSD64}, nil, ""), Now: t0})
