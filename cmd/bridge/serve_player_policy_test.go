@@ -66,8 +66,10 @@ func wiredPolicyOf(t *testing.T, cfg playback.Config) *playback.DSDPolicy {
 // policyBackendOf is a backend built on the policy cfg was wired with, as
 // serve's and output play's is, but for its card's controls, read through a
 // reader standing in for the box, which has no control node, and its opens,
-// which opens counts and refuses; its set computed once.
-func policyBackendOf(t *testing.T, cfg playback.Config, content playback.Resolver, opens *dopOpens) *playback.Backend {
+// which opens counts and refuses; its set computed once. Each edit, when
+// given, changes that copy of the policy first (a profile database of the
+// test's), its store still the one serve's player holds.
+func policyBackendOf(t *testing.T, cfg playback.Config, content playback.Resolver, opens *dopOpens, edit ...func(*playback.DSDPolicy)) *playback.Backend {
 	t.Helper()
 	pol := *wiredPolicyOf(t, cfg)
 	box, ok := pol.Box.(playback.HostBox)
@@ -76,6 +78,9 @@ func policyBackendOf(t *testing.T, cfg playback.Config, content playback.Resolve
 	}
 	box.Controls = alsactl.Reader{Open: func(int) (alsactl.Device, error) { return qualifyNoControls{}, nil }}
 	pol.Box = box
+	for _, e := range edit {
+		e(&pol)
+	}
 	b, err := playback.New(playback.Config{DSD: &pol, Locator: cfg.Locator, Resolver: content, OpenSink: opens.openSink, OpenNative: opens.openNative})
 	if err != nil {
 		t.Fatal(err)

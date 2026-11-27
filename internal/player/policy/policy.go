@@ -615,7 +615,8 @@ func refused(bitRate int, reason engine.Reason, detail string) Plan {
 // the reason is the first in this order: what the DAC does not offer, then a
 // listener's rejection, then what the bridge cannot see (a generic board's
 // DAC, the gain check's stages), then what the user can change (the level,
-// the confirmation, the cap).
+// the confirmation, the cap). Under auto, DoP plays only where dopKeptOut
+// keeps nothing out (B1043).
 func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 	under := s.MaxBitRate == 0 || bitRate <= s.MaxBitRate
 	offered := n.Format != ""
@@ -630,18 +631,21 @@ func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 	}
 	switch s.Mode {
 	case dsdstate.ModeAuto:
+		// A 0.2.3 auto without allowDoP played no DoP, and auto plays none
+		// until the user consents on this firmware (B1043).
+		keptOut := rd.dopKeptOut()
 		if s.Known {
 			if offered && !n.Rejected && under {
 				return rd.nativePlan(bitRate, n)
 			}
-			if (d.Heard || d.Confirmed) && d.Offered && d.Gain.Unity && !d.Rejected && under {
+			if (d.Heard || d.Confirmed) && d.Offered && d.Gain.Unity && !d.Rejected && under && !keptOut {
 				return rd.dopPlan(bitRate, d)
 			}
 		} else {
 			if offered && !n.Rejected && under && vouched {
 				return rd.nativePlan(bitRate, n)
 			}
-			if d.Clean && d.Confirmed && d.Offered && d.Gain.Unity && under {
+			if d.Clean && d.Confirmed && d.Offered && d.Gain.Unity && under && !keptOut {
 				return rd.dopPlan(bitRate, d)
 			}
 		}
@@ -684,6 +688,24 @@ func (rd *reading) decide(bitRate int, s Set, n Native, d DoP) Plan {
 	// A state that decodes holds no other mode; one that holds it is a state
 	// that would not read.
 	return refused(bitRate, ReasonStateUnreadable, "the choice that applies is not a mode")
+}
+
+// dopKeptOut reports whether auto keeps DoP out of the bound DAC (B1043): the
+// migration's marker holds 0.2.3's keys as dsdMode auto with allowDoP not
+// true, under which 0.2.3 never played DoP, and the DAC holds no DoP
+// confirmation a user wrote for its firmware now, which alone lifts it: one
+// the app's or the console's confirmDoP wrote (SetBy not the migration's),
+// under the unit's bcdDevice, which reads. A consent under another firmware
+// lifts nothing, whatever the profile claims there, and neither does a first
+// use acknowledged. A marker of another mode, of none, or no marker keeps
+// nothing out, and an explicit choice is no auto.
+func (rd *reading) dopKeptOut() bool {
+	m := rd.in.State.MigratedFrom
+	if m == nil || m.From != dsdstate.FromKeys || m.DSDMode != dsdstate.ModeAuto || m.AllowDoP != nil && *m.AllowDoP {
+		return false
+	}
+	c := rd.dac.DoPConfirmed
+	return c == nil || c.SetBy == dsdstate.ByMigration || rd.bcd == "" || c.BCDDevice != rd.bcd
 }
 
 // genericBridge reports whether the unit's IDs are a shared reference ID of

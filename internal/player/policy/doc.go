@@ -45,6 +45,11 @@
 //     is offered, which the live altsets and the probe decide.
 //  4. DoP needs the gain check (CheckGain): the playback path's gain stages
 //     all visible, and every level control at unity, whatever its name.
+//  5. Under auto, DoP plays nowhere while the migration's marker holds 0.2.3's
+//     auto without allowDoP: true, which never played DoP, until the DAC
+//     holds a DoP confirmation a user wrote for its firmware now (B1043); the
+//     facts the read side publishes (heard, stated, confirmed) stay as they
+//     are, and the rule shows in the plans alone.
 //
 // Reconcile is the per-occurrence predicate of the design's section 3.5:
 // whether an occurrence of the session is kept, re-planned or revoked when

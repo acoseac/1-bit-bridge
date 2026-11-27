@@ -448,7 +448,9 @@ adapters read them before each call.
 ### 3.2 The rule, per DSD rate
 
 (Amended 2026-11-22, B990: no first use is asked, and native on a generic board's IDs waits for a
-listener's clean answer. The table, its definitions and the bullets under it are that rule.)
+listener's clean answer. The table, its definitions and the bullets under it are that rule.
+Amended 2026-11-27, B1043: a migrated 0.2.3 `auto` without `allowDoP: true` plays no DoP until the
+user confirms it, the paragraph after the bullets.)
 
 The rule covers DSD64, DSD128 and DSD256. DSD512 is refused in every mode, as today
 (`rate_not_supported`; `internal/player/playback/native.go:56-61`, `authorization.go:310-312`).
@@ -533,6 +535,24 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
 - **One effective set** feeds both selection and publication, as today
   (`authorization.go:202-213`, R10 and R11). The `effectiveSet` shape stays, gaining the converted
   rates.
+
+**A 0.2.3 `auto` without `allowDoP: true`** (B1043, 2026-11-27, the owner's choice before the
+0.2.4 tag). 0.2.3 never played DoP under those keys. While the state's migration marker holds them
+(`from: keys`, `dsdMode: auto`, `allowDoP` false or unset), the two `auto` rows play no DoP at any
+rate, on a known DAC or an unknown one: a rate they would play DoP at converts, or is refused as
+`conversion_not_offered` where the DAC takes no target, and native is as the table says. The
+consent that ends it is the user's DoP confirmation for the DAC's current, readable firmware: a
+write's `confirmDoP` from the app or the console, recorded under the bound unit's bcdDevice; never
+the migration's own confirmation, a consent under another firmware (whatever the profile claims
+there), or `firstUseAcknowledged`, which the table no longer asks and which is not this consent. An
+explicit `dop` is no `auto` row and plays by its own; a confirmed `dop` wrote the consent, which a
+switch back to `auto` keeps, and an unconfirmed `dop` the profile's claims admitted gave none.
+Everywhere else the catalog keeps the authority B990 gave it: with no such marker (none, one with
+`dsdMode` unset, another mode, or `allowDoP: true`), the `auto` rows are the table's. The read side's
+facts keep their meanings (`needsConfirmation` the rates an explicit `dop` needs `confirmDoP` at,
+`allowDoP` a profile's claim or a user's confirmation): the rule shows in the effective plans alone
+(`dsdPlayback.tuples`, `converted`, `refused`). This is another consent than the first-use
+acknowledgement §3.6's `auto` row once named, not that rule back (`policy.dopKeptOut`).
 
 **A residual: XMOS's vendor ID** (B993, 2026-11-23; amended the same day, B999: the state's gate,
 the mode that applies and the probe's clause; by bridge lows 18: the rates, the generic-board
@@ -864,7 +884,9 @@ policy would convert.
 first use. A migrated `native` plays every rate the table plays, and with no record it plays too,
 never refusing as `first_use_pending`; a migrated `dop` with no record refuses until the app
 confirms DoP where the profile claims none; the record's clean answers are what keep native, rate
-by rate, on a generic board's IDs.)
+by rate, on a generic board's IDs. B1043, 2026-11-27: under a migrated `auto` with `allowDoP`
+false or unset, DoP stays out until the user confirms it on the DAC's firmware, §3.2's paragraph
+on it, which is not the acknowledgement the `auto` row names.)
 
 - **The record is read through the legacy reader** (§3.5), with the model comparison: the port is
   not compared, nor the bcdDevice, and versions from 35 to the build's own are taken. An unset
