@@ -53,15 +53,21 @@ type serveBox struct {
 }
 
 // listenGate holds the box's bind at one point of its listen seam, outside
-// the box's mutex, until it is let go (backlog B1047): before the bind is
-// registered, so the box holds no listener and a client finds "no LAN
-// listener", or once it is recorded (afterBind), so the box's order reads
-// hold,control,bind while the state still says the bridge is starting. The
-// bind's answer, and with it the state serve publishes and the banner after
-// it, waits for the release: the gate holds open the window a loaded runner
-// opens by chance between the banner startLANServe waits for and the
-// home-network socket's first bind. startLANServe lets it go in a cleanup
-// that runs before the drain, and a stop lets it go before it waits.
+// the box's mutex, until it is let go (backlog B1047). Without afterBind it
+// holds inside the seam before the box records the stand-in: the state still
+// says the bridge is starting and the box holds no listener (count 0), so a
+// client that does not wait finds "no LAN listener". With afterBind it holds
+// once the box has recorded the stand-in, before the listener goes back to
+// serve: the box's order reads hold,control,bind and its listener is there,
+// while the state still says starting. Neither holds a listening state with
+// no box listener, which serve publishes only once the seam has returned, so
+// neither shows the half of waitLANState's listening wait that asks for the
+// box's listener. The bind's answer, and with it the state serve publishes
+// and the banner after it, waits for the release: the gate holds open the
+// window a loaded runner opens by chance between the banner startLANServe
+// waits for and the home-network socket's first bind. startLANServe lets it
+// go in a cleanup that runs before the drain, and a stop lets it go before
+// it waits.
 type listenGate struct {
 	afterBind   bool
 	reached     chan struct{} // closed once the seam has come to the hold
@@ -627,17 +633,18 @@ func TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo(t *testin
 	s := startLANServe(t, cfg, adminLn, box)
 	defer s.stop(t)
 	// The attempt stores its state before it says its WARN: the wait is for
-	// both, before the WARN's count is read.
+	// both, and the WARN's count is read once the banner is there, which serve
+	// writes when the attempt's whole turn is over.
 	waitLANState(t, s, "waiting, the address not on the box, its WARN said", func(st consolelan.State) bool {
 		return lanWaitingFor(consolelan.ReasonAddressNotOnBox)(st) && len(logs.Lines("console: not listening on the home network")) > 0
 	})
 	if st := s.console(t); st.State != consolelan.StateWaiting || st.Reason != consolelan.ReasonAddressNotOnBox {
 		t.Fatalf("state %+v", st)
 	}
+	waitLANBanner(t, s)
 	if n := len(logs.Lines("console: not listening on the home network")); n != 1 {
 		t.Errorf("%d WARN lines, want one", n)
 	}
-	waitLANBanner(t, s)
 	if !strings.Contains(s.served.stdout.String(), "Home network: not open yet: "+serveLANAddr+" is not on this box; tried again every 5 s") {
 		t.Errorf("the banner:\n%s", s.served.stdout.String())
 	}
@@ -839,12 +846,21 @@ func TestUnsettingTheVariableMakesTheFilesAddressTheOneServed(t *testing.T) {
 // opens no LAN socket, /api/console reports the key at boot, empty, and the
 // console's doctor's rollback line says to remove the line (D16).
 func TestAnEmptyKeyIsReportedAsCostingTheRollback(t *testing.T) {
+	// The case is the file's empty key alone: a variable the test's own
+	// environment sets would be the address served.
+	t.Setenv("BRIDGE_ADMIN_LAN_ADDRESS", "")
 	adminLn := holdAdmin(t)
 	cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \"\"\n")
 	box := newServeBox(serveLANAddr + "/24")
 	s := startLANServe(t, cfg, adminLn, box)
 	defer s.stop(t)
-	if st := s.console(t); st.State != consolelan.StateOff || st.FileKeyAtBoot != consolelan.FileKeyEmpty {
+	// The plan stores off before the console's goroutine starts, but the
+	// loopback socket answers only once that goroutine serves it, which the
+	// banner startLANServe waits for does not follow: the state asserted is
+	// the console's first answer, never a wait for off (backlog B1047's
+	// second round).
+	st := waitLANState(t, s, "the console's first answer", func(consolelan.State) bool { return true })
+	if st.State != consolelan.StateOff || st.FileKeyAtBoot != consolelan.FileKeyEmpty {
 		t.Fatalf("state %+v", st)
 	}
 	if box.count() != 0 {
@@ -900,20 +916,39 @@ func TestTheConsoleNamesTheBootFilesAddressBesideTheEffectiveOne(t *testing.T) {
 	defer s.stop(t)
 	// The fields asserted are the plan's from the start, but the bind's log
 	// line and the banner, which the search below reads, come once the
-	// attempt has answered: the wait is for the bind, then the banner.
+	// attempt has answered, and the banner writes its lines one at a time: the
+	// wait is for the bind, then for the banner's last line, the rollback line
+	// a key in the file adds (backlog B1047's second round).
 	waitLANState(t, s, "listening", lanListening)
-	waitLANBanner(t, s)
-	st := s.console(t)
-	if st.Address != a2 || st.FileKeyAtBoot != consolelan.FileKeyNotAnAddress || st.FileAddressAtBoot != "" {
+	rollback := "Home network: " + consolelan.RollbackWords + "\n"
+	waitLANStdout(t, s, "rollback line", func(out string) (string, bool) { return rollback, strings.Contains(out, rollback) })
+	// The answer is searched as the console sent it, so a field this test's
+	// type does not decode is searched too.
+	var body json.RawMessage
+	if err := fetchAdminJSON(context.Background(), s.admin, "/api/console", &body); err != nil {
+		t.Fatal(err)
+	}
+	var answer struct {
+		LAN consolelan.State `json:"lan"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
+		t.Fatal(err)
+	}
+	if st := answer.LAN; st.Address != a2 || st.FileKeyAtBoot != consolelan.FileKeyNotAnAddress || st.FileAddressAtBoot != "" {
 		t.Fatalf("state %+v", st)
 	}
-	raw, _ := json.Marshal(st)
+	if len(logs.Lines("console listening on the home network")) == 0 {
+		t.Errorf("the bind logged no listening record, so the log's search reads none of what it says:\n%s", strings.Join(logs.All(), "\n"))
+	}
 	_, line := consoleDoctorLine(t, s.admin, "console-lan")
-	for where, text := range map[string]string{"the answer": string(raw), "the doctor's line": line,
-		"stdout": s.served.stdout.String(), "stderr": s.served.stderr.String(), "the log": strings.Join(logs.All(), "\n")} {
+	for where, text := range map[string]string{"the answer": string(body), "the doctor's line": line,
+		"stdout": s.served.stdout.String(), "stderr": s.served.stderr.String()} {
 		if strings.Contains(text, secret) {
 			t.Errorf("%s names the file's value", where)
 		}
+	}
+	if lines := logs.Carrying(secret); len(lines) != 0 {
+		t.Errorf("the log names the file's value: %q", lines)
 	}
 }
 
