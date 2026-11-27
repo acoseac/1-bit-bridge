@@ -554,10 +554,12 @@ func hex16(s string) (uint16, error) {
 // Decode reads a state from its file's bytes: schema 2, as this build writes
 // it, or schema 1, an earlier build's, each refused for anything a writer of
 // that schema would not write (data past the file's bound, an unknown field,
-// data after the value, any value its check refuses), and any other schema
+// data after the value, any value its check refuses, a time encoding/json
+// reads and will not write among them: writable), and any other schema
 // refused. A schema-1 file is checked by schema 1's own rules in full first,
-// and then held as fromSchema1 converts it: none of its DAC entries, whose
-// maker it never recorded. It writes nothing and keeps nothing.
+// a DAC entry's times included, and then held as fromSchema1 converts it:
+// none of its DAC entries, whose maker it never recorded. It writes nothing
+// and keeps nothing.
 func Decode(data []byte) (State, error) {
 	if len(data) > maxFileBytes {
 		return State{}, fmt.Errorf("dsdstate: more than %d bytes", maxFileBytes)
@@ -774,7 +776,9 @@ func (s State) check() error { return s.checkAt(SchemaVersion) }
 // checkAt refuses a state no writer of schema writes. Its refusals name the
 // field and never quote a value. Schema 1's rules are frozen: an entry is a
 // model's alone and holds no stamp, and no marker is schema_1's; schema 2's
-// entry is a model's of one maker, its stamp a stamp (Stamp.Valid).
+// entry is a model's of one maker, its stamp a stamp (Stamp.Valid). A time
+// encoding/json will not write (writable) is refused at both: the writers of
+// both marshalled their files through it, so neither wrote one.
 func (s State) checkAt(schema int) error {
 	if s.DefaultMode != ModeAuto && s.DefaultMode != ModeOff {
 		return errors.New("dsdstate: defaultMode is neither auto nor off")
@@ -838,6 +842,8 @@ func (d DAC) check(schema int) error {
 			return errors.New("choice.revision is not 1 or more")
 		case c.SetAt.IsZero():
 			return errors.New("choice.setAt is missing")
+		case !writable(c.SetAt):
+			return errors.New("choice.setAt is a time the state's writer cannot write")
 		case !validBy(c.SetBy):
 			return errors.New("choice.setBy is not app, console or migration")
 		}
@@ -848,6 +854,8 @@ func (d DAC) check(schema int) error {
 			return errors.New("dopConfirmed.bcdDevice is not four lowercase hexadecimal digits")
 		case c.ConfirmedAt.IsZero():
 			return errors.New("dopConfirmed.confirmedAt is missing")
+		case !writable(c.ConfirmedAt):
+			return errors.New("dopConfirmed.confirmedAt is a time the state's writer cannot write")
 		case !validBy(c.SetBy):
 			return errors.New("dopConfirmed.setBy is not app, console or migration")
 		}
@@ -867,6 +875,10 @@ func (d DAC) check(schema int) error {
 			return fmt.Errorf("firstUse[%d].bitRates are not DSD rates, each once, ascending", i)
 		case f.AcknowledgedAt.IsZero():
 			return fmt.Errorf("firstUse[%d].acknowledgedAt is missing", i)
+		case !writable(f.AcknowledgedAt):
+			return fmt.Errorf("firstUse[%d].acknowledgedAt is a time the state's writer cannot write", i)
+		case !writable(f.ObservedAt):
+			return fmt.Errorf("firstUse[%d].observedAt is a time the state's writer cannot write", i)
 		}
 		transports[f.Transport] = true
 	}
@@ -906,6 +918,10 @@ func (d DAC) check(schema int) error {
 			return fmt.Errorf("evidence[%d] holds no observation", i)
 		case e.Kernel != "" && e.DriverAcceptedAt.IsZero():
 			return fmt.Errorf("evidence[%d].kernel is given without driverAcceptedAt", i)
+		case !writable(e.DriverAcceptedAt):
+			return fmt.Errorf("evidence[%d].driverAcceptedAt is a time the state's writer cannot write", i)
+		case !writable(e.StreamingObservedAt):
+			return fmt.Errorf("evidence[%d].streamingObservedAt is a time the state's writer cannot write", i)
 		case !validText(e.Kernel, maxKernelBytes):
 			return fmt.Errorf("evidence[%d].kernel is not a kernel release", i)
 		case observed[id]:
@@ -975,8 +991,26 @@ func (w Warning) check() error {
 		return errors.New("a warning of the bridge's names a DAC")
 	case w.At.IsZero():
 		return errors.New("at is missing")
+	case !writable(w.At):
+		return errors.New("at is a time the state's writer cannot write")
 	}
 	return nil
+}
+
+// writable reports whether t is a time the state's writer writes as the file
+// holds it, its offset kept: encoding/json, which encode marshals the file
+// through, refuses a time whose offset is 24 hours or more, which its reader
+// takes (+24:00, -24:00, +23:60, +24:60). A file holding one would read, and no
+// state made from it could be written again, the migration's start step that
+// keeps 0.2.3's dsdMode: off included, whose write would then fail with an
+// error no hold takes (B1045's round 3). So the reader refuses it, as it
+// refuses any value no writer of either schema writes: the file is damaged
+// (Store.Open). Each time is asked alone, never the state's whole encoding,
+// whose bound (ErrTooLarge) a dense file within the reader's may pass. The
+// zero time, an optional time the file leaves out, is written.
+func writable(t time.Time) bool {
+	_, err := json.Marshal(t)
+	return err == nil
 }
 
 // dacPart reports whether the legacy keys give the DAC the migration's part

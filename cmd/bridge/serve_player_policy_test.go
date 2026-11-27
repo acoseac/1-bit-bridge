@@ -303,9 +303,13 @@ func TestOutputsPublishTheEffectiveSet(t *testing.T) {
 
 // playWired runs output play on c's config and files until its first track
 // is heard, and answers the backend config it wired, read while the run
-// plays; quit ends the run.
-func playWired(t *testing.T, c *playCase) (playback.Config, func()) {
+// plays; quit ends the run. Flags, when given, come before the files (a
+// --state-dir whose DSD state the test laid out); with none the run makes a
+// state directory of its own.
+func playWired(t *testing.T, c *playCase, flags ...string) (playback.Config, func()) {
 	t.Helper()
+	argv := append([]string{"--config", c.configPath}, flags...)
+	argv = append(append(argv, "--keys"), c.files...)
 	c.standIn.hold = true
 	pr, pw := io.Pipe()
 	c.stdin = pr
@@ -322,7 +326,7 @@ func playWired(t *testing.T, c *playCase) (playback.Config, func()) {
 	stdout, stderr := newPlayBuf(), newPlayBuf()
 	done := make(chan int, 1)
 	go func() {
-		done <- runOutputPlay(context.Background(), append([]string{"--config", c.configPath, "--keys"}, c.files...), env, stdout, stderr)
+		done <- runOutputPlay(context.Background(), argv, env, stdout, stderr)
 	}()
 	stdout.waitFor(t, "a.flac) is audible")
 	mu.Lock()

@@ -121,8 +121,9 @@ func TestAWriteWhereNoDirectoryCanBeSyncedIsRefused(t *testing.T) {
 // migration runs over it. A reopen reads that fresh state, still refusing,
 // and a choice written then clears the refusal for good, defaultMode off
 // still applying to every other DAC. Each kind of damage: bytes that are not
-// JSON, a field schema 1 does not have, another schema, and a value no
-// writer writes.
+// JSON, a field schema 1 does not have, another schema, a value no writer
+// writes, and a time the reader takes and the writer cannot write (B1045's
+// round 3: a choice set at +24:00 on another DAC, beside no marker).
 func TestADamagedStateRefusesDSDAndIsMovedAside(t *testing.T) {
 	durable(t)
 	for name, bad := range map[string]string{
@@ -131,6 +132,7 @@ func TestADamagedStateRefusesDSDAndIsMovedAside(t *testing.T) {
 		"another_schema":   `{"schemaVersion": 3, "defaultMode": "auto", "dacs": [], "migratedFrom": null, "warnings": []}`,
 		"an_empty_rate_list": `{"schemaVersion": 1, "defaultMode": "auto", "dacs": [{"key": {"vendorId": "20b1", "productId": "3009", "interface": 1, "product": "GO bar"}, "choice": null, "dopConfirmed": null,
   "firstUse": [{"transport": "native", "bcdDevice": "0123", "bitRates": [], "acknowledgedAt": "2026-11-05T10:00:00Z"}], "listener": [], "evidence": []}], "migratedFrom": null, "warnings": []}`,
+		"a_time_its_writer_cannot_write": otherDACsChoiceAt("+24:00"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			data := t.TempDir()
