@@ -305,13 +305,17 @@ func (s *lanServe) stop(t *testing.T) {
 
 // console reads GET /api/console on the loopback socket, failing the test
 // at a transport error: a test reads it once waitLANState has read the state
-// it asserts, never at once after a start or a tick.
+// it asserts, never at once after a start or a tick. Its request goes on
+// lanWaitContext, so it ends at serve's give-up and once serve has exited
+// (backlog B1047).
 func (s *lanServe) console(t *testing.T) consolelan.State {
 	t.Helper()
+	ctx, cancel := lanWaitContext(s, serveGiveUpTime(t))
+	defer cancel()
 	var got struct {
 		LAN consolelan.State `json:"lan"`
 	}
-	if err := fetchAdminJSON(context.Background(), s.admin, "/api/console", &got); err != nil {
+	if err := fetchAdminJSON(ctx, s.admin, "/api/console", &got); err != nil {
 		t.Fatal(err)
 	}
 	return got.LAN
@@ -657,9 +661,12 @@ func requireLANServes(t *testing.T, box *serveBox, addr, port string) {
 }
 
 // consoleDoctorLine is the console's own doctor's line name, through the
-// loopback socket.
-func consoleDoctorLine(t *testing.T, admin, name string) (status, summary string) {
+// loopback socket of s, its request on lanWaitContext as lanServe.console's
+// is.
+func consoleDoctorLine(t *testing.T, s *lanServe, name string) (status, summary string) {
 	t.Helper()
+	ctx, cancel := lanWaitContext(s, serveGiveUpTime(t))
+	defer cancel()
 	var resp struct {
 		Report struct {
 			Checks []struct {
@@ -667,7 +674,7 @@ func consoleDoctorLine(t *testing.T, admin, name string) (status, summary string
 			} `json:"checks"`
 		} `json:"report"`
 	}
-	if err := fetchAdminJSON(context.Background(), admin, "/api/doctor", &resp); err != nil {
+	if err := fetchAdminJSON(ctx, s.admin, "/api/doctor", &resp); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range resp.Report.Checks {
@@ -713,14 +720,19 @@ func TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo(t *testin
 	if !strings.Contains(s.served.stdout.String(), "Home network: not open yet: "+serveLANAddr+" is not on this box; tried again every 5 s") {
 		t.Errorf("the banner:\n%s", s.served.stdout.String())
 	}
-	if status, line := consoleDoctorLine(t, s.admin, "console-lan"); status != "warn" || !strings.Contains(line, "this machine only") {
+	if status, line := consoleDoctorLine(t, s, "console-lan"); status != "warn" || !strings.Contains(line, "this machine only") {
 		t.Errorf("the console's doctor: %s %q", status, line)
 	}
 	if status, line := runDoctorJSON(t, cfg, "console-lan"); status != "warn" || !strings.Contains(line, "this machine only") {
 		t.Errorf("bridge doctor: %s %q", status, line)
 	}
+	// The probes below go on lanWaitContext, so none outlasts serve's give-up
+	// or its exit (backlog B1047).
+	ctx, cancel := lanWaitContext(s, serveGiveUpTime(t))
+	defer cancel()
 	// The menu's line, on a page the loopback socket serves.
-	page, err := http.Get("http://" + s.admin + "/stats")
+	pageReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.admin+"/stats", nil)
+	page, err := http.DefaultClient.Do(pageReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -729,14 +741,14 @@ func TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo(t *testin
 	if !strings.Contains(string(body), "Until then this console answers on this machine only.") {
 		t.Errorf("the menu does not say the console answers on this machine only")
 	}
-	req, _ := http.NewRequest(http.MethodGet, "http://"+s.admin+"/api/console", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.admin+"/api/console", nil)
 	req.Host = serveLANAddr + ":" + port
 	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 421 {
 		t.Errorf("the loopback socket answered Host A:P with %v %v", resp, err)
 	} else {
 		_ = resp.Body.Close()
 	}
-	post, _ := http.NewRequest(http.MethodPost, "http://"+s.admin+"/logout", nil)
+	post, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+s.admin+"/logout", nil)
 	post.Header.Set("Origin", "http://"+serveLANAddr+":"+port)
 	if resp, err := http.DefaultClient.Do(post); err != nil || resp.StatusCode != 403 {
 		t.Errorf("the loopback socket answered Origin http://A:P with %v %v", resp, err)
@@ -768,8 +780,10 @@ func TestALANSocketThatDoesNotBindIsNoFailedStart(t *testing.T) {
 	// The stop follows the failure it is about: the hold's refusal is the
 	// state first.
 	waitLANState(t, s, "waiting, the hold refused", lanWaitingFor(consolelan.ReasonRestrictionRefused))
+	ctx, cancel := lanWaitContext(s, serveGiveUpTime(t))
+	defer cancel()
 	var stats map[string]any
-	if err := fetchAdminJSON(context.Background(), s.admin, "/api/stats", &stats); err != nil {
+	if err := fetchAdminJSON(ctx, s.admin, "/api/stats", &stats); err != nil {
 		t.Fatalf("the loopback socket: %v", err)
 	}
 	s.stop(t)
@@ -790,7 +804,7 @@ func TestRemovingTheKeyLeavesTheVariablesListenerAndTheDoctorSaysSo(t *testing.T
 	if st := s.console(t); st.State != consolelan.StateListening || st.Source != consolelan.SourceEnvironment {
 		t.Fatalf("state %+v", st)
 	}
-	if _, line := consoleDoctorLine(t, s.admin, "console-lan"); !strings.Contains(line, "set by BRIDGE_ADMIN_LAN_ADDRESS in the bridge's environment") ||
+	if _, line := consoleDoctorLine(t, s, "console-lan"); !strings.Contains(line, "set by BRIDGE_ADMIN_LAN_ADDRESS in the bridge's environment") ||
 		!strings.Contains(line, "unset BRIDGE_ADMIN_LAN_ADDRESS where the service is started") {
 		t.Errorf("the console's doctor: %q", line)
 	}
@@ -887,7 +901,7 @@ func TestUnsettingTheVariableMakesTheFilesAddressTheOneServed(t *testing.T) {
 	if st.Address != a2 || st.Source != consolelan.SourceBoth || st.FileAddressAtBoot != serveLANAddr {
 		t.Fatalf("with the variable: %+v", st)
 	}
-	if _, line := consoleDoctorLine(t, s.admin, "console-lan"); !strings.Contains(line, "opens the console at bridge.yaml's address, "+serveLANAddr+",") {
+	if _, line := consoleDoctorLine(t, s, "console-lan"); !strings.Contains(line, "opens the console at bridge.yaml's address, "+serveLANAddr+",") {
 		t.Errorf("the line did not say what unsetting the variable does: %q", line)
 	}
 	s.stop(t)
@@ -932,7 +946,7 @@ func TestAnEmptyKeyIsReportedAsCostingTheRollback(t *testing.T) {
 	if box.count() != 0 {
 		t.Fatal("an empty key opened a LAN socket")
 	}
-	if status, line := consoleDoctorLine(t, s.admin, "console-lan-rollback"); status != "warn" || !strings.Contains(line, "holds adminLANAddress, empty") ||
+	if status, line := consoleDoctorLine(t, s, "console-lan-rollback"); status != "warn" || !strings.Contains(line, "holds adminLANAddress, empty") ||
 		!strings.Contains(line, "remove the whole adminLANAddress line") {
 		t.Fatalf("the console's doctor: %s %q", status, line)
 	}
@@ -958,11 +972,11 @@ func TestAVariableOverAnEmptyKeyIsBothAndCostsTheRollback(t *testing.T) {
 	if st.State != consolelan.StateListening || st.Source != consolelan.SourceBoth || st.FileKeyAtBoot != consolelan.FileKeyEmpty {
 		t.Fatalf("state %+v", st)
 	}
-	if _, line := consoleDoctorLine(t, s.admin, "console-lan"); !strings.Contains(line, "turns the console off the home network") ||
+	if _, line := consoleDoctorLine(t, s, "console-lan"); !strings.Contains(line, "turns the console off the home network") ||
 		!strings.Contains(line, "still costs the rollback") {
 		t.Errorf("the console's doctor: %q", line)
 	}
-	if status, _ := consoleDoctorLine(t, s.admin, "console-lan-rollback"); status != "warn" {
+	if status, _ := consoleDoctorLine(t, s, "console-lan-rollback"); status != "warn" {
 		t.Errorf("the rollback line: %q", status)
 	}
 }
@@ -1003,10 +1017,13 @@ func TestTheConsoleNamesTheBootFilesAddressBesideTheEffectiveOne(t *testing.T) {
 	if want := "Home network: " + consolelan.RollbackWords; second != want {
 		t.Errorf("the banner's second home-network line is %q, want %q", second, want)
 	}
-	// The answer is searched as the console sent it, so a field this test's
-	// type does not decode is searched too.
+	// The reads below go on lanWaitContext, so none outlasts serve's give-up or
+	// its exit (backlog B1047). The answer is searched as the console sent it,
+	// so a field this test's type does not decode is searched too.
+	ctx, cancel := lanWaitContext(s, serveGiveUpTime(t))
+	defer cancel()
 	var body json.RawMessage
-	if err := fetchAdminJSON(context.Background(), s.admin, "/api/console", &body); err != nil {
+	if err := fetchAdminJSON(ctx, s.admin, "/api/console", &body); err != nil {
 		t.Fatal(err)
 	}
 	var answer struct {
@@ -1026,7 +1043,7 @@ func TestTheConsoleNamesTheBootFilesAddressBesideTheEffectiveOne(t *testing.T) {
 	// whatever else the answer holds, so the two checks must be in it (backlog
 	// B1047).
 	var doctorBody json.RawMessage
-	if err := fetchAdminJSON(context.Background(), s.admin, "/api/doctor", &doctorBody); err != nil {
+	if err := fetchAdminJSON(ctx, s.admin, "/api/doctor", &doctorBody); err != nil {
 		t.Fatal(err)
 	}
 	var doctorAnswer struct {
