@@ -110,9 +110,11 @@ func StoredRevision(st dsdstate.State, key dacprofile.Key, stamp dsdstate.Stamp)
 //
 // The write: the DAC's choice at the next revision (one more than its own,
 // whatever was published, so a revision never goes back), set now by c.By;
-// confirmDoP, on a dop or auto write, records the confirmation under the
-// unit's firmware where none counts there, and is kept by every later write
-// (the confirmation is the model's, not the mode's); firstUseAcknowledged
+// confirmDoP, on a dop or auto write, records c.By's confirmation under the
+// unit's firmware where the DAC holds none under it or only the migration's,
+// which counts at its record's clean rates alone and which the user's then
+// replaces (B1045), and is kept by every later write (the confirmation is the
+// model's, not the mode's); firstUseAcknowledged
 // records an acknowledgement of every rate under the firmware for each
 // transport the write plays once acknowledged (an explicit native or dop its
 // own transport; auto each transport its set would play at some rate, under
@@ -176,7 +178,7 @@ func Choose(in Inputs, c Choice, now time.Time) (dsdstate.State, error) {
 			return a.Transport == explicit && a.BCDDevice == rd.bcd && a.Answer != dsdstate.AnswerClean && (c.MaxBitRate == 0 || a.BitRate <= c.MaxBitRate)
 		})
 	}
-	if c.ConfirmDoP && (c.Mode == dsdstate.ModeDoP || c.Mode == dsdstate.ModeAuto) && (d.DoPConfirmed == nil || d.DoPConfirmed.BCDDevice != rd.bcd) {
+	if c.ConfirmDoP && (c.Mode == dsdstate.ModeDoP || c.Mode == dsdstate.ModeAuto) && (d.DoPConfirmed == nil || d.DoPConfirmed.BCDDevice != rd.bcd || d.DoPConfirmed.SetBy == dsdstate.ByMigration) {
 		d.DoPConfirmed = &dsdstate.DoPConfirmation{BCDDevice: rd.bcd, ConfirmedAt: at, SetBy: c.By}
 	}
 	if !c.FirstUseAcknowledged {

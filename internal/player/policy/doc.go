@@ -42,7 +42,11 @@
 //     the user's confirmation, and only this box's own latest listener
 //     answer for DoP at that rate, clean, overrides it. A profile's native
 //     claim holds no refusal: its maximum bounds what it reports, never what
-//     is offered, which the live altsets and the probe decide.
+//     is offered, which the live altsets and the probe decide. A DoP
+//     confirmation counts per rate too: a user's at every rate, the one the
+//     migration wrote of an owner's record only where a clean DoP answer at
+//     the rate holds on this firmware, the record's approved rates or this
+//     box's own since (B1045).
 //  4. DoP needs the gain check (CheckGain): the playback path's gain stages
 //     all visible, and every level control at unity, whatever its name.
 //  5. Under auto, DoP plays nowhere while the migration's marker holds 0.2.3's

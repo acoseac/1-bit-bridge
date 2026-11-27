@@ -238,7 +238,8 @@ type DoP struct {
 	// there, unless Clean.
 	Heard, Stated, ProfileRefused bool
 	// Confirmed: the DAC's DoP confirmation, under the unit's firmware,
-	// counts at the rate.
+	// counts at the rate: a user's at every rate, the migration's only where
+	// Clean holds (B1045).
 	Confirmed bool
 	// Acknowledged, Rejected and Clean are as Native's, for DoP.
 	Acknowledged, Rejected, Clean bool
@@ -555,8 +556,13 @@ func (rd *reading) dop(bitRate int) DoP {
 		d.Heard = !blocked && slices.Contains(p.HeardBitRates, bitRate)
 		d.Stated = !blocked && p.StatedMaxBitRate != 0 && bitRate <= p.StatedMaxBitRate
 	}
+	// The migration's confirmation, of a 0.2.3 record that approved DoP at
+	// some rate, counts only where a clean DoP answer for this rate holds on
+	// this firmware (the record's rates, or this box's own since): 0.2.3
+	// refused DoP at any rate its record did not approve (B1045). A user's
+	// counts at every rate.
 	c := rd.dac.DoPConfirmed
-	d.Confirmed = !blocked && c != nil && rd.bcd != "" && c.BCDDevice == rd.bcd
+	d.Confirmed = !blocked && c != nil && rd.bcd != "" && c.BCDDevice == rd.bcd && (c.SetBy != dsdstate.ByMigration || d.Clean)
 	carrier := alsapcm.ProbeCandidate{Format: format.S32LE, RateHz: bitRate / 16}
 	res := rd.answer(carrier)
 	switch res.Answer {

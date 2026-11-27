@@ -526,7 +526,8 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
   leaves the mode as it was, its cap or a consent changed, clears none.
 - **A migrated `native` or `dop`** (§3.6) plays what the table plays: its record's approvals are
   clean answers at the approved rates, which keep native there on a generic board, and its
-  acknowledgement, of those rates, is kept for the read side alone.
+  acknowledgement, of those rates, is kept for the read side alone. Its DoP confirmation is "DoP
+  confirmed" only at a rate a clean DoP answer holds (B1045, §3.6's approval's rate limits).
 - **A known DAC with no DoP claim at r** treats DoP as an unknown DAC does: `auto` needs the user's
   confirmation, and an explicit `dop` write without `confirmDoP` is refused (§7.2).
 - **The listener-answer clause** on an unknown DAC (native's on a generic board, DoP's on every
@@ -900,7 +901,22 @@ on it, which is not the acknowledgement the `auto` row names.)
   stays `first_use_pending` until the user acknowledges the transport or chooses the mode again.
   (B990: superseded. The acknowledgement's rates are kept and reported and gate no rate; the
   record's rates survive as clean listener answers, which admit native there on a generic board's
-  IDs.)
+  IDs.) (B1045, 2026-11-27, the owner's choice before the 0.2.4 tag: DoP's rate limits hold
+  through the confirmation instead. 0.2.3's record held its approved rates alone, and 0.2.3
+  refused DoP at any other. The migration's one DoP confirmation, which names no rate, counts at a
+  rate only where a clean DoP answer for that rate holds on this firmware: the record's approved
+  rates, or an independent clean answer since, which authorizes its rate. So a record that
+  approved DSD64 alone plays DoP at DSD64 under `dop`, and under `auto` with `allowDoP: true`,
+  and a rate the catalog neither hears nor states is refused as `dop_confirmation_required` under
+  `dop`, and converted under `auto`, as 0.2.3 refused it. The catalog keeps the authority B990
+  gave it: a rate the row hears or states still admits DoP under `dop`, a heard one under `auto`,
+  and a row that states DoP to DSD256 still plays DSD128 DoP; the residual, a maker-stated DoP a
+  unit does not decode, is the catalog's evidence rules' (B730). A user's confirmation, the app's
+  or the console's `confirmDoP`, counts at every rate as before, and replaces the migration's on
+  the write that carries it. `choice.dopConfirmed` keeps its meaning, a stored confirmation that
+  counts on this firmware, so a migrated one can show it beside `needsConfirmation` at the rates
+  it does not cover. This is a per-rate limit on one consent, not the acknowledgement rule above
+  back.)
 - **A failure is a warning the app can read, not only a log line** (Gemini). A refused record is
   `migration_record_refused` with its reason word, the kind the reader marks the refusal with
   (`qualification.ErrStaleVersion`: `stale_version`, `ErrIdentityMismatch`: `identity_mismatch`,
