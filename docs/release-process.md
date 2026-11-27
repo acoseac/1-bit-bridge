@@ -34,9 +34,9 @@ not of any deployment.
 
 > **User-facing docs moved (2026-06-09).** The overview / setup / features / troubleshooting /
 > privacy pages now live in the **`acoseac/1bitapp`** repo (local `~/dev/1bitapp`) and are
-> published at **`1-bit.app/bridge/*`**. Update them THERE, following that repo's `CLAUDE.md` →
+> published at **`1-bit.swiss/bridge/*`**. Update them THERE, following that repo's `CLAUDE.md` →
 > "Adding a release". The `docs/*.html` files in *this* repo are now **redirect stubs** pointing at
-> 1-bit.app — do not edit them. The only per-release doc touch in this repo is the `README.md`
+> 1-bit.swiss — do not edit them. The only per-release doc touch in this repo is the `README.md`
 > status line.
 
 The blueprint below was hardened across PR #185 (v0.1.2), where four rounds of bot review surfaced
@@ -58,7 +58,7 @@ privacy, link-rendering, and anchor-target issues. The HTML-rendering items now 
   Atlas harvest and certificate renewal. `PROTOCOL.md`'s Updates section and the README's Updates
   section are this repo's statement of the update check.
 - **`docs/docker.md`, `docs/deployment/*`** — operator/dev docs that stayed here; update if the
-  container or VPS flow changed. The env-var table on `1-bit.app/bridge/features/` mirrors
+  container or VPS flow changed. The env-var table on `1-bit.swiss/bridge/features/` mirrors
   `internal/config/config.go` — keep them in sync when new env-var overrides land.
 
 ### Files NOT to touch per release
@@ -67,8 +67,8 @@ privacy, link-rendering, and anchor-target issues. The HTML-rendering items now 
 - `.goreleaser.yaml`, `.github/workflows/release.yml` — pipeline is mature; only touch for genuine pipeline changes (a new platform, signing-cert rotation, etc.).
 - `PROTOCOL.md` — only on a wire-protocol break (which also bumps `ProtocolVersion` and triggers the Mirror-PR rule).
 - `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` — stable.
-- `docs/*.html` — **redirect stubs** to `1-bit.app/bridge/*`; the real content lives in the `1bitapp` repo. Don't edit (other than to repoint a redirect target if a 1-bit.app URL ever changes).
-- `docs/docker.md` — kept as markdown so the GitHub-rendered view + raw-repo-browse view both work; the 1-bit.app docs link to it at the GitHub blob URL (see Gotchas).
+- `docs/*.html` — **redirect stubs** to `1-bit.swiss/bridge/*`; the real content lives in the `1bitapp` repo. Don't edit (other than to repoint a redirect target if a 1-bit.swiss URL ever changes).
+- `docs/docker.md` — kept as markdown so the GitHub-rendered view + raw-repo-browse view both work; the 1-bit.swiss docs link to it at the GitHub blob URL (see Gotchas).
 
 ### Process
 
@@ -87,7 +87,7 @@ privacy, link-rendering, and anchor-target issues. The HTML-rendering items now 
    grep -c ' install.sh$' dist/checksums.txt            # → 1
    rm -rf dist release-meta.json install.sh
    ```
-   The installer (`scripts/install.sh`) ships as the release asset `install.sh`, stamped with the release's version by `scripts/stamp-install.sh` in a before-hook and attached by `release.extra_files`; a snapshot publishes nothing, so it shows the stamped file at the repository root and its line in `dist/checksums.txt`. `https://1-bit.app/install.sh` redirects to `releases/latest/download/install.sh`.
+   The installer (`scripts/install.sh`) ships as the release asset `install.sh`, stamped with the release's version by `scripts/stamp-install.sh` in a before-hook and attached by `release.extra_files`; a snapshot publishes nothing, so it shows the stamped file at the repository root and its line in `dist/checksums.txt`. `https://1-bit.swiss/install.sh` redirects to `releases/latest/download/install.sh`.
 5. `make fmt vet test build-all` — clean. Race-enabled tests; cross-compiles to all 6 targets.
 6. **Open PR**, branch + PR convention (never direct to main *for code*; CLAUDE.md alone is the docs-only direct-to-main exception).
 7. **Bot review rounds.** Plan for 2 rounds minimum, expect up to 4 on a docs-touch + privacy-adjacent PR. Greptile finds smaller things each round; CodeRabbit confirms "no actionable" once the security-shaped issues are gone. Address all comments per round in a single fix commit; reject suggestions that contradict deliberate in-code rationale (Gemini flagged "iOS 26.4" as a typo for "16.4" on PR #185 — rejected, iOS 26 is real and Gemini's training cutoff predates it).
@@ -96,7 +96,7 @@ privacy, link-rendering, and anchor-target issues. The HTML-rendering items now 
 
 ### Gotchas (proven on PR #185)
 
-- **HTML-site rendering gotchas moved to the `1bitapp` repo.** The old GitHub Pages site's hand-rolled traps — `<pre><code>` inside `<li>` rendering light-on-light, `ol.steps` items needing `id="step-N"` for cross-page anchors — were specific to that HTML/CSS. The 1-bit.app docs are Astro; their conventions live in the `1bitapp` repo's `CLAUDE.md`. What survives here: `docs/.nojekyll` **stays** (it lets Pages serve the redirect stubs and `docker.md` without Jekyll), and the 1-bit.app docs link to `docs/docker.md` at the **GitHub blob URL** (`https://github.com/acoseac/1-bit-bridge/blob/main/docs/docker.md`) so GitHub renders the markdown rather than serving it raw.
+- **HTML-site rendering gotchas moved to the `1bitapp` repo.** The old GitHub Pages site's hand-rolled traps — `<pre><code>` inside `<li>` rendering light-on-light, `ol.steps` items needing `id="step-N"` for cross-page anchors — were specific to that HTML/CSS. The 1-bit.swiss docs are Astro; their conventions live in the `1bitapp` repo's `CLAUDE.md`. What survives here: `docs/.nojekyll` **stays** (it lets Pages serve the redirect stubs and `docker.md` without Jekyll), and the 1-bit.swiss docs link to `docs/docker.md` at the **GitHub blob URL** (`https://github.com/acoseac/1-bit-bridge/blob/main/docs/docker.md`) so GitHub renders the markdown rather than serving it raw.
 - **`bridge start`, `bridge stop` and `bridge restart` are real subcommands now** (this said otherwise from PR #185, when they were not). Each drives the service `bridge init` installed through its own manager: the launchd user agent on macOS, the per-user unit `com.acoseac.1-bit-bridge.service` through `systemctl --user` on Linux, the SCM service or the Startup-folder launcher on Windows. A system-level install (a LaunchDaemon, a system unit such as the VPS doc's `1-bit-bridge`) is refused by them and driven with its manager directly.
 - **`*os.PathError`'s `.Error()` string embeds the absolute filesystem path.** `filepath.WalkDir` propagates these for permission-denied / file-not-found failures. Privacy commitment ("absolute filesystem paths are not logged AND not sent over the wire") requires unwrapping for **both** `logger.Error("err", …)` (slog will format the value) AND any `writeError` body. `redactWalkErr` in [internal/api/upscale.go](internal/api/upscale.go) is the canonical helper; reuse it at any new walk-error site (Greptile rounds 1 + 2).
 - **iOS 26.4+ ATS lower-layer enforces 825-day cert validity** independently of `NSAllowsLocalNetworking`. This is real, not a typo for iOS 16.4 — Gemini's training cutoff predates iOS 26 and may flag it. Keep the version as written.
@@ -125,7 +125,7 @@ Per-release hygiene:
   `docker buildx imagetools inspect ghcr.io/acoseac/1-bit-bridge:<ver>` (shows both arches), or the
   anonymous registry tags list.
 - **Keep the pull instructions in sync** when the tag scheme or run/usage changes: `docs/docker.md`
-  (this repo) and the 1-bit.app **download** page's container line (`1bitapp` repo,
+  (this repo) and the 1-bit.swiss **download** page's container line (`1bitapp` repo,
   `src/pages/bridge/download.astro`).
 - **Publishing an image for a tag whose own `Dockerfile` is broken** (a frozen tag that predates a
   `GO_VERSION` fix): dispatch the workflow with `tag=<version>` + `ref=main` so it builds current

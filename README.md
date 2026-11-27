@@ -7,7 +7,7 @@
 
 Companion server for the **[1-bit iOS music player](https://apps.apple.com/us/app/1-bit/id6762529497)** — bit-exact playback of your own music library, including DSD, from anywhere. The bridge runs on a home server (Windows / Linux / macOS / NAS) and exposes your library over HTTPS + bearer-token auth with a pre-built manifest endpoint, so the iOS app syncs its whole library in a single request instead of walking a slow SMB tree.
 
-👉 **[1-bit.app/bridge](https://1-bit.app/bridge/)** for the landing page, setup walkthrough, feature reference, troubleshooting, and privacy policy.
+👉 **[1-bit.swiss/bridge](https://1-bit.swiss/bridge/)** for the landing page, setup walkthrough, feature reference, troubleshooting, and privacy policy.
 
 ## Why
 
@@ -19,24 +19,24 @@ Companion server for the **[1-bit iOS music player](https://apps.apple.com/us/ap
 
 ## Status
 
-**v0.2.3** — wire protocol stays at [`PROTOCOL.md`](PROTOCOL.md) v1 (additive only since v0.1.7). **The bridge can be the player**: on a Linux box with a USB DAC, `bridge serve` plays this bridge's FLAC, WAV, AIFF and ALAC files through ALSA at their own rate and bit depth, as an OpenHome renderer the 1-bit app casts to. It is PCM only for now (a DSD track is refused, never converted: DSD on the bridge's own player needs a listening qualification and comes later), off by default, Linux only and refused in public mode. It seeks within a track, and a 16-bit track plays on a DAC with no 16-bit format, losslessly in a wider container. The console's **Player page** shows its status and DAC, turns it on or off, chooses the DAC and lets the app cast to it. On a box that runs MPD (Volumio, moOde, Raspberry Pi OS), the bridge tells the app about that MPD and its DAC, and `bridge doctor` prints a Player / DAC / Music / Phone checklist. **A one-line installer for Linux** (`curl -fsSL https://1-bit.app/install.sh | sh`) installs and upgrades the bridge as the user's own service, checked against the release's checksums. Favorites, playlists and the library announce their changes to the app's other devices, and a favorite removed on one device stays removed; the library's `.m3u` and `.m3u8` files are served read-only; DLNA answers on the home network only, never on a tailnet. Whole numbers in `bridge.yaml` are read strictly (a fraction or a leading zero stops the bridge from starting, and `bridge doctor` names the line), and the first start after an upgrade from before v0.2.2 re-reads the library's tags once (ExtractorVersion 30). A host whose name isn't ASCII can install, and once the bridge knows a library or data dir, a disk that mounts after it starts isn't taken for an empty one. macOS binaries are Developer-ID-signed and Apple-notarized; Windows binaries are unsigned for now. See the [releases page](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
+**v0.2.3** — wire protocol stays at [`PROTOCOL.md`](PROTOCOL.md) v1 (additive only since v0.1.7). **The bridge can be the player**: on a Linux box with a USB DAC, `bridge serve` plays this bridge's FLAC, WAV, AIFF and ALAC files through ALSA at their own rate and bit depth, as an OpenHome renderer the 1-bit app casts to. It is PCM only for now (a DSD track is refused, never converted: DSD on the bridge's own player needs a listening qualification and comes later), off by default, Linux only and refused in public mode. It seeks within a track, and a 16-bit track plays on a DAC with no 16-bit format, losslessly in a wider container. The console's **Player page** shows its status and DAC, turns it on or off, chooses the DAC and lets the app cast to it. On a box that runs MPD (Volumio, moOde, Raspberry Pi OS), the bridge tells the app about that MPD and its DAC, and `bridge doctor` prints a Player / DAC / Music / Phone checklist. **A one-line installer for Linux** (`curl -fsSL https://1-bit.swiss/install.sh | sh`) installs and upgrades the bridge as the user's own service, checked against the release's checksums. Favorites, playlists and the library announce their changes to the app's other devices, and a favorite removed on one device stays removed; the library's `.m3u` and `.m3u8` files are served read-only; DLNA answers on the home network only, never on a tailnet. Whole numbers in `bridge.yaml` are read strictly (a fraction or a leading zero stops the bridge from starting, and `bridge doctor` names the line), and the first start after an upgrade from before v0.2.2 re-reads the library's tags once (ExtractorVersion 30). A host whose name isn't ASCII can install, and once the bridge knows a library or data dir, a disk that mounts after it starts isn't taken for an empty one. macOS binaries are Developer-ID-signed and Apple-notarized; Windows binaries are unsigned for now. See the [releases page](https://github.com/acoseac/1-bit-bridge/releases) for per-release notes.
 
 ## Install
 
 **Linux, in one line** (moOde, Raspberry Pi OS, Volumio, Debian, Ubuntu and the rest; 64-bit, amd64 or arm64). Run it as the user the bridge should run as, not as root:
 
 ```sh
-curl -fsSL https://1-bit.app/install.sh | sh
+curl -fsSL https://1-bit.swiss/install.sh | sh
 ```
 
 It downloads the release it came with (`https://github.com/acoseac/1-bit-bridge/releases/latest/download/install.sh` is the same script) with curl, which it needs, checks the archive's SHA-256 against the release's `checksums.txt`, installs the program as `~/.local/bin/bridge`, and runs `bridge init`, which offers your music folders, writes the settings and installs the per-user systemd service. It asks for `sudo` once, and says why first: to turn on lingering (`loginctl enable-linger`), so the service keeps running after you log out and starts at boot. It finishes with how to pair your phone: the console through an SSH tunnel, or `bridge pair` in the terminal. Run it again later and it upgrades the bridge through `bridge update`, which checks your paired devices first and keeps the previous program for a rollback. A box with anything else of the bridge on it (a `~/.local/bin/bridge` no service of yours runs, settings without a service, drop-ins left for a service that is not there, a system service, a service with drop-ins that set its program or its environment, or a change to its unit your service manager has not reloaded) is refused with nothing changed, and told what to run instead.
 
-Options go after `sh -s --`, for example `curl -fsSL https://1-bit.app/install.sh | sh -s -- --library /mnt/USB`: `--library PATH` (the music folder; without a terminal to ask, the installer needs it), `--version X.Y.Z` (a new install of that release), `--no-init` (a new install of the program only), `--uninstall` (prints the commands that remove the bridge, and changes nothing; your music is never among them) and `--help`, which lists the exit codes too.
+Options go after `sh -s --`, for example `curl -fsSL https://1-bit.swiss/install.sh | sh -s -- --library /mnt/USB`: `--library PATH` (the music folder; without a terminal to ask, the installer needs it), `--version X.Y.Z` (a new install of that release), `--no-init` (a new install of the program only), `--uninstall` (prints the commands that remove the bridge, and changes nothing; your music is never among them) and `--help`, which lists the exit codes too.
 
 To read it before you run it:
 
 ```sh
-curl -fsSL https://1-bit.app/install.sh -o install.sh
+curl -fsSL https://1-bit.swiss/install.sh -o install.sh
 less install.sh
 sh install.sh
 ```
@@ -100,7 +100,7 @@ Before (or any time after) running `bridge init`, `bridge doctor` prints a punch
 
 `bridge init` runs doctor automatically and bails on `fail` (use `--skip-doctor` to override — not recommended).
 
-**Admin console** — [http://127.0.0.1:7789/](http://127.0.0.1:7789/). Add/remove library folders, pair iOS devices (QR + copy-buttons), revoke tokens, view scan state + stats, and run the preflight checks + read operational counters from the **Diagnostics** page. Loopback-only, no auth — anyone on the machine already has filesystem access to the token store. (For internet-exposed deployments, see `bridge init --public` in [the public-deployment docs](https://1-bit.app/bridge/features/#public-mode) — that profile binds the admin console to a routable interface and adds a single-user password login.)
+**Admin console** — [http://127.0.0.1:7789/](http://127.0.0.1:7789/). Add/remove library folders, pair iOS devices (QR + copy-buttons), revoke tokens, view scan state + stats, and run the preflight checks + read operational counters from the **Diagnostics** page. Loopback-only, no auth — anyone on the machine already has filesystem access to the token store. (For internet-exposed deployments, see `bridge init --public` in [the public-deployment docs](https://1-bit.swiss/bridge/features/#public-mode) — that profile binds the admin console to a routable interface and adds a single-user password login.)
 
 **Pairing an iOS device**: on the Devices page, click _Pair new device_, give it a name, optionally edit the bridge URL (defaults to `https://<hostname>.local:7788`), then generate the token. The modal shows a QR encoding an `onebit://pair?...` URL — scan it in the 1-bit app (2.2 or later; earlier versions read only `bridge://` links), or copy the URL/token/fingerprint fields manually.
 
