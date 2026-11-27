@@ -771,34 +771,38 @@ func TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo(t *testin
 		t.Errorf("bridge doctor: %s %q", status, line)
 	}
 	// The probes below go on lanWaitContext, so none outlasts serve's give-up
-	// or its exit (backlog B1047).
-	ctx, cancel := lanWaitContext(s, serveGiveUpTime(t))
-	defer cancel()
-	// The menu's line, on a page the loopback socket serves.
-	pageReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.admin+"/stats", nil)
-	page, err := http.DefaultClient.Do(pageReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(page.Body)
-	_ = page.Body.Close()
-	if !strings.Contains(string(body), "Until then this console answers on this machine only.") {
-		t.Errorf("the menu does not say the console answers on this machine only")
-	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.admin+"/api/console", nil)
-	req.Host = serveLANAddr + ":" + port
-	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 421 {
-		t.Errorf("the loopback socket answered Host A:P with %v %v", resp, err)
-	} else {
-		_ = resp.Body.Close()
-	}
-	post, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+s.admin+"/logout", nil)
-	post.Header.Set("Origin", "http://"+serveLANAddr+":"+port)
-	if resp, err := http.DefaultClient.Do(post); err != nil || resp.StatusCode != 403 {
-		t.Errorf("the loopback socket answered Origin http://A:P with %v %v", resp, err)
-	} else {
-		_ = resp.Body.Close()
-	}
+	// or its exit, in a func of their own, whose deferred cancel ends the
+	// context's watcher once they have run, through a Fatal among them too
+	// (backlog B1047).
+	func() {
+		ctx, cancel := lanWaitContext(s, serveGiveUpTime(t))
+		defer cancel()
+		// The menu's line, on a page the loopback socket serves.
+		pageReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.admin+"/stats", nil)
+		page, err := http.DefaultClient.Do(pageReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(page.Body)
+		_ = page.Body.Close()
+		if !strings.Contains(string(body), "Until then this console answers on this machine only.") {
+			t.Errorf("the menu does not say the console answers on this machine only")
+		}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.admin+"/api/console", nil)
+		req.Host = serveLANAddr + ":" + port
+		if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 421 {
+			t.Errorf("the loopback socket answered Host A:P with %v %v", resp, err)
+		} else {
+			_ = resp.Body.Close()
+		}
+		post, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+s.admin+"/logout", nil)
+		post.Header.Set("Origin", "http://"+serveLANAddr+":"+port)
+		if resp, err := http.DefaultClient.Do(post); err != nil || resp.StatusCode != 403 {
+			t.Errorf("the loopback socket answered Origin http://A:P with %v %v", resp, err)
+		} else {
+			_ = resp.Body.Close()
+		}
+	}()
 	box.setAddrs(serveLANAddr + "/24")
 	select {
 	case s.tick <- time.Now():
