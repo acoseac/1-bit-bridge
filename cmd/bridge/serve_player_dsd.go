@@ -318,8 +318,8 @@ func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound, un
 	case err != nil && !landed && bound != nil:
 		return
 	case err != nil && !landed && d.store.State().MigratedFrom == nil:
-		// Refused before its write (keys the migration does not take): the
-		// store holds nothing of it.
+		// Refused before its write (a dsdMode the migration does not take, or
+		// a state its check refuses): the store holds nothing of it.
 		playerLog.Warn("player: the migration of the legacy DSD keys was not saved, and the player starts without it: this run does not ask it again, and the next start goes on from what the state's file holds then",
 			"defaultMode", d.store.State().DefaultMode, "err", err)
 		return

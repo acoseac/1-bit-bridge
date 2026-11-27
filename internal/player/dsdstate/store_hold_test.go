@@ -202,7 +202,7 @@ func TestALandedStartStepIsHeldBehindItsFence(t *testing.T) {
 // TestADACPartWhoseWriteFailsIsNotHeld (B1042's control): a part of a DAC's
 // whose write fails leaves the state as it was, its marker still waiting for
 // the DAC, so its caller asks it again (cmd/bridge's playerDSD.retry); and a
-// step refused before any write (keys the migration does not take) holds
+// step refused before any write (a dsdMode the migration does not take) holds
 // nothing either.
 func TestADACPartWhoseWriteFailsIsNotHeld(t *testing.T) {
 	durable(t)
