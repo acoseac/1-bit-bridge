@@ -115,7 +115,7 @@ libraryName: "My Music Library"
 #     approved and auto leaves the DAC on the default. A record refused
 #     only as another DAC model's is kept for that model: when the
 #     player's binding later resolves to a DAC of that model that the
-#     record reads for, still there, unchanged and accepted, in the same
+#     record reads for, still there and accepted, in the same
 #     run or at a later start, that DAC takes the mode the keys held at
 #     the first 0.2.4 start, with the record's approvals, in place of a
 #     fallback the migration gave its model and maker; a missing or still

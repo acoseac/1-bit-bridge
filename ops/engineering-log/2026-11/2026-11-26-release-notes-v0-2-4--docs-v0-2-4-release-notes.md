@@ -440,7 +440,7 @@ this round: the session could not run `git merge`.
    (`dsdstate.Open`, `Defaults`, `Refusing`, `steps`; a marker can be
    `keys`, `state_unreadable` or `schema_1`); the player's line's backlog
    ids; the restore's `player-dsd.json`; and the candidate: `98efe691`, 151
-   merges since `v0.2.3`, the one tag in that range, so `git describe` reads
+   commits since `v0.2.3`, the one tag in that range, so `git describe` reads
    `v0.2.3-151-g98efe691`.
 
 ### Runs (round 10)
@@ -459,8 +459,14 @@ The round's review held each changed sentence to main `98efe691`. Its verified f
 - the cap admits its own rate ("at or below the cap", `policy.go`'s `bitRate <= s.MaxBitRate`), in both of the example's sentences;
 - the outcome check names the three rates `GET /v1/outputs` reports (DSD64, DSD128 and DSD256); DSD512 is refused, as the list above says;
 - this log's note on a value of spaces alone: an opt-out's switch reads it as unset (`env.go` `readSwitchEnvAs`);
-- the headline line holds for a fresh install, and an upgrade keeps the limits 0.2.3's settings set;
-- a record's DoP carries over under `dop`, or `auto` with `allowDoP: true`;
+- the headline line holds for a fresh install, and points an upgrade to "DSD after an upgrade";
+- a record's DoP carries over under `dop` or `auto`, each with `allowDoP: true`;
 - the waiting record's DAC takes 0.2.3's mode only when it has no choice of its own other than the migration's fallback;
 - the count is of commits.
 `make docs-check`, the example's three tests and the citation guard pass on the merged tree.
+
+The closure read of that fold found four more wording errors, fixed the same way:
+- a leftover "unchanged" in the example's waiting-record sentence;
+- the headline, which now points an upgrade to "DSD after an upgrade" instead of saying every 0.2.3 limit is kept (a migrated `native` choice carries no rate cap, so a DSD64-only record no longer refuses DSD128 on a known DAC that offers it);
+- `allowDoP: true` attached to `dop` as well as `auto` (`dop` without it is the opt-out);
+- this log's count, "151 commits".
