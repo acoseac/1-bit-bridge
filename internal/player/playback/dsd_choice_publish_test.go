@@ -572,10 +572,13 @@ func TestAWriteWhoseTimeRunsOutAtItsReadingWritesNothing(t *testing.T) {
 // (B728 B9 PR 3): a write publishes the state its decision read, never one
 // another writer left after it, and a state written in between is published
 // after the write's publication. A write of DoP refused for its confirmation,
-// and another writer (the migration's part for the DAC) recording the
-// confirmation once the write's decision is made and before it publishes: the
-// answer says DoP needs its confirmation, as decided, and the refresh the
-// write then owes publishes the confirmation at a larger publication.
+// and another writer (the migration's part for the DAC) recording, once the
+// write's decision is made and before it publishes, what a migration of an
+// owner's record of DoP at DSD64 records: its clean answer at that rate, an
+// offered one, and its confirmation, which counts there alone (B1045). The
+// answer says DoP needs its confirmation, as decided, its DSD64 no listener's
+// rung; the refresh the write then owes publishes the confirmation and DSD64's
+// answer at a larger publication.
 func TestAStateWrittenBetweenTheDecisionAndThePublicationIsPublishedAfterIt(t *testing.T) {
 	store := playbacktest.NewMemStore(dsdstate.Defaults())
 	b := keyedBackend(t, playbacktest.NewBox(5), store, nil)
@@ -583,7 +586,9 @@ func TestAStateWrittenBetweenTheDecisionAndThePublicationIsPublishedAfterIt(t *t
 	playback.SetSeamsForTest(b, &playback.Seams{ChoiceWritten: func(error) {
 		migrated.Do(func() {
 			if err := store.Update(func(st *dsdstate.State) error {
-				st.Entry(playbacktest.DACKey(), playbacktest.DACStamp()).DoPConfirmed = &dsdstate.DoPConfirmation{BCDDevice: playbacktest.DACBCD, ConfirmedAt: playbacktest.T0, SetBy: dsdstate.ByMigration}
+				d := st.Entry(playbacktest.DACKey(), playbacktest.DACStamp())
+				d.DoPConfirmed = &dsdstate.DoPConfirmation{BCDDevice: playbacktest.DACBCD, ConfirmedAt: playbacktest.T0, SetBy: dsdstate.ByMigration}
+				d.Listener = append(d.Listener, dsdstate.Answer{Transport: dsdstate.TransportDoP, BitRate: playbacktest.DSD64, BCDDevice: playbacktest.DACBCD, Answer: dsdstate.AnswerClean})
 				return nil
 			}); err != nil {
 				t.Error(err)
@@ -594,6 +599,9 @@ func TestAStateWrittenBetweenTheDecisionAndThePublicationIsPublishedAfterIt(t *t
 	wantChoice(t, res, playback.ChoiceConfirmationRequired)
 	if o := optionIn(t, res.Policy, dsdstate.ModeDoP); !o.NeedsConfirmation || dacOf(t, res.Policy).Choice.DoPConfirmed {
 		t.Errorf("the answer's DoP option %+v, confirmed %v: want the state the refusal was decided on, unconfirmed", o, dacOf(t, res.Policy).Choice.DoPConfirmed)
+	}
+	if rung := dopRungAt(t, res.Policy, playbacktest.DSD64); rung == string(policy.RungListenerConfirmed) {
+		t.Errorf("the answer's DSD64 is %s: the answer written after the decision is in it", rung)
 	}
 	// The refresh the write owed runs on the refreshes' goroutine, the one
 	// goroutine of the backend's left once the write has returned: joined, it
@@ -607,9 +615,25 @@ func TestAStateWrittenBetweenTheDecisionAndThePublicationIsPublishedAfterIt(t *t
 	if !dacOf(t, now).Choice.DoPConfirmed {
 		t.Fatalf("the confirmation written after the write's decision is not published: %+v", dacOf(t, now).Choice)
 	}
+	if rung := dopRungAt(t, now, playbacktest.DSD64); rung != string(policy.RungListenerConfirmed) {
+		t.Errorf("DSD64's clean answer written after the write's decision is published as %q, want %s", rung, policy.RungListenerConfirmed)
+	}
 	if now.Publication <= res.Policy.Publication {
 		t.Errorf("the confirmation is published at %d, the write at %d: want it after the write", now.Publication, res.Policy.Publication)
 	}
+}
+
+// dopRungAt is the evidence rung p's DoP option publishes at rate, "" where
+// it offers DoP there with none.
+func dopRungAt(t *testing.T, p playback.PlayerPolicy, rate int) string {
+	t.Helper()
+	for _, r := range optionIn(t, p, dsdstate.ModeDoP).Rates {
+		if r.BitRate == rate {
+			return r.Evidence.Rung
+		}
+	}
+	t.Fatalf("the DoP option offers no %d", rate)
+	return ""
 }
 
 // TestTheCauseIsKeptWhereItOccurs (B728 B9 PR 3): a write answers its

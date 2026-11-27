@@ -1037,8 +1037,8 @@ func tupleTransport(p policy.Plan) string {
 // records was observed under, as they were then, never the set published
 // when the write is made. A write the store refuses changes
 // nothing and is said, the landed write's fence once (dsdstate's
-// ErrLandedNotHeld: the file holds a state the store does not, so no write
-// is made from it).
+// ErrLandedNotHeld: an earlier write reached the file and is not known to be
+// durable, and no write is made over it until the next start reads it).
 func (b *Backend) recordDSD(what string, key dacprofile.Key, stamp dsdstate.Stamp, mutate func(d *dsdstate.DAC, now time.Time) bool) {
 	p := b.cfg.DSD
 	if p == nil || p.Store == nil {
@@ -1061,7 +1061,7 @@ func (b *Backend) recordDSD(what string, key dacprofile.Key, stamp dsdstate.Stam
 		case err == nil, errors.Is(err, errUnchanged):
 		case errors.Is(err, dsdstate.ErrLandedNotHeld):
 			b.dsdFenceOnce.Do(func() {
-				b.dsdLog().Warn("player: what playback observes of a DAC is not written to the player's DSD state in this run: an earlier write reached its file and is not known to be durable, which the store does not hold", "what", what)
+				b.dsdLog().Warn("player: what playback observes of a DAC is not written to the player's DSD state in this run: an earlier write reached its file and is not known to be durable", "what", what)
 			})
 		default:
 			b.dsdLog().Warn("player: what playback observed of a DAC was not written to the player's DSD state", "what", what, "err", err)

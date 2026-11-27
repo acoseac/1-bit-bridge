@@ -343,10 +343,13 @@ func dopRecordAs(t *testing.T, dir string, trees outputTrees, confirmation strin
 // still reaches the DAC; under auto, allowDoP or not, the GO bar, which the
 // shipped DAC list does not know and whose IDs are no generic board's, plays
 // native at every rate it offers, with no acknowledgement (B990), and the DSD
-// opens the native sink. Under dop with allowDoP the dop the migration wrote,
-// its confirmation with it, plays DoP at every rate the GO bar offers its
-// carrier at, from the policy over the box, the gain check passing a card with
-// no gain stage, and the DSD opens DoP.
+// opens the native sink. Under dop with allowDoP the dop the migration wrote
+// plays DoP at DSD64 alone, the one rate the record approved, where its clean
+// answer lets the migration's confirmation count (B1045), from the policy over
+// the box, the gain check passing a card with no gain stage, and the DSD opens
+// DoP; at DSD128, whose carrier the GO bar offers too and which the record did
+// not approve, a start is refused as dop_confirmation_required and opens no
+// sink, as 0.2.3 refused it.
 func TestServeOutputPlayAllowDoP(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -354,8 +357,8 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := dopContents{"dsd": dsd, "pcm": qualifyWAV(44100)}
-	every, carrier := []int{2822400, 5644800, 11289600}, []int{2822400, 5644800}
+	content := dopContents{"dsd": dsd, "pcm": qualifyWAV(44100), "dsd128": playbacktest.DSF(dsdstate.DSD128, 0.1, func(ch, i int) byte { return byte(i + ch) })}
+	every, approved := []int{2822400, 5644800, 11289600}, []int{2822400}
 	for _, path := range []string{"serve", "output_play"} {
 		for _, tc := range []struct {
 			mode      string
@@ -363,7 +366,7 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 			refusal   engine.Reason
 			transport string
 			rates     []int
-		}{{"dop", false, "dsd_off_by_choice", "", nil}, {"auto", false, "", "", every}, {"dop", true, "", "dop", carrier}, {"auto", true, "", "", every}} {
+		}{{"dop", false, "dsd_off_by_choice", "", nil}, {"auto", false, "", "", every}, {"dop", true, "", "dop", approved}, {"auto", true, "", "", every}} {
 			t.Run(fmt.Sprintf("%s/%s_allowDoP_%t", path, tc.mode, tc.allow), func(t *testing.T) {
 				var wired playback.Config
 				switch path {
@@ -408,6 +411,16 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 				}
 				if len(native) != 1 || native[0].Kind != kind || native[0].Format != f {
 					t.Fatalf("DSD under %s with allowDoP %t opened %+v (%v), want the %s sink", tc.mode, tc.allow, native, err, f)
+				}
+				if tc.transport != "dop" {
+					return
+				}
+				// DSD128, which the record did not approve: refused before any
+				// sink, beside DSD64's open above.
+				err = startOn(t, b, 2, "dsd128")
+				native, pcm := opens.counts()
+				if unplayable(err) != "dop_confirmation_required" || len(native) != 1 || len(pcm) != 0 {
+					t.Fatalf("DSD128 under dop with allowDoP: %v (refused %q), %d DSD and %d PCM opens; want dop_confirmation_required and no open beside DSD64's", err, unplayable(err), len(native), len(pcm))
 				}
 			})
 		}
