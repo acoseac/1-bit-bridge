@@ -296,7 +296,9 @@ func (s *lanServe) stop(t *testing.T) {
 	})
 }
 
-// console reads GET /api/console on the loopback socket.
+// console reads GET /api/console on the loopback socket, failing the test
+// at a transport error: a test reads it once waitLANState has read the state
+// it asserts, never at once after a start or a tick.
 func (s *lanServe) console(t *testing.T) consolelan.State {
 	t.Helper()
 	var got struct {
@@ -306,6 +308,88 @@ func (s *lanServe) console(t *testing.T) consolelan.State {
 		t.Fatal(err)
 	}
 	return got.LAN
+}
+
+// waitLANState waits until a GET /api/console of serve's loopback socket
+// reads a state want holds for, and returns it (backlog B1047). Serve makes
+// the home-network socket's first attempt, binds it and publishes its state
+// on its own goroutine after the banner startLANServe waits for, and again
+// at a tick, so a test that reads the socket or the state after a start or
+// a change waits here first for the state it then asserts: a transition,
+// never a state the start's own waiting, for starting, already answers, so
+// a failed attempt's is named by its reason (lanWaitingFor). A listening
+// state holds only once the box holds a listener too, so a client can
+// reach it. Each read is a request of its own: a transport error, which a
+// console that has not begun to answer gives, or an answer that does not
+// decode, is tried again. A bind the box holds (listenGate) is let go once a
+// read made while it held has not found want, so the bind answers after the
+// test began to wait, as a late one did on CI. The wait gives up where
+// serve's waits do (serveGiveUpTime), naming what it waited for, the last
+// state it read and the last error it met.
+func waitLANState(t *testing.T, s *lanServe, what string, want func(consolelan.State) bool) consolelan.State {
+	t.Helper()
+	giveUp := serveGiveUpTime(t)
+	var last *consolelan.State
+	var lastErr error
+	for {
+		held := s.box.gate.held()
+		var got struct {
+			LAN consolelan.State `json:"lan"`
+		}
+		if err := fetchAdminJSON(context.Background(), s.admin, "/api/console", &got); err != nil {
+			lastErr = err
+		} else {
+			last = &got.LAN
+			if want(got.LAN) && (got.LAN.State != consolelan.StateListening || s.box.count() > 0) {
+				return got.LAN
+			}
+			if held {
+				s.box.gate.release()
+			}
+		}
+		if !giveUp.IsZero() && time.Now().After(giveUp) {
+			t.Fatalf("GET /api/console read no state that is %s before the test's deadline; the last state it read: %+v; "+
+				"the last error: %v\nstdout=%s\nstderr=%s", what, last, lastErr, s.served.stdout.String(), s.served.stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// lanListening holds for a home-network socket that listens.
+func lanListening(st consolelan.State) bool { return st.State == consolelan.StateListening }
+
+// lanWaitingFor holds for a socket that does not listen for reason, a failed
+// attempt's state: never the state alone, which the start's own waiting,
+// for starting, answers before any attempt.
+func lanWaitingFor(reason string) func(consolelan.State) bool {
+	return func(st consolelan.State) bool { return st.State == consolelan.StateWaiting && st.Reason == reason }
+}
+
+// waitLANBanner waits for serve's first home-network banner line, the line
+// it writes once the first attempt has answered, after the state that
+// attempt publishes (backlog B1047), and returns it: a test that checks the
+// banner's words waits for the line itself first. A bind the box holds is
+// let go as waitLANState lets it go. It gives up where serve's waits do.
+func waitLANBanner(t *testing.T, s *lanServe) string {
+	t.Helper()
+	giveUp := serveGiveUpTime(t)
+	for {
+		held := s.box.gate.held()
+		out := s.served.stdout.String()
+		if _, rest, ok := strings.Cut(out, "Home network: "); ok {
+			if line, _, ok := strings.Cut(rest, "\n"); ok {
+				return "Home network: " + line
+			}
+		}
+		if held {
+			s.box.gate.release()
+		}
+		if !giveUp.IsZero() && time.Now().After(giveUp) {
+			t.Fatalf("serve wrote no home-network banner line before the test's deadline; stdout=%s\nstderr=%s",
+				out, s.served.stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // holdAdmin binds a loopback admin socket for serve to adopt.
@@ -335,6 +419,7 @@ func TestServeHoldsItsLANSocketThroughConsolelan(t *testing.T) {
 	box := newServeBox(serveLANAddr + "/24")
 	s := startLANServe(t, cfg, adminLn, box)
 	defer s.stop(t)
+	waitLANState(t, s, "listening", lanListening)
 	box.mu.Lock()
 	holds, order := append([]int(nil), box.holds...), append([]string(nil), box.order...)
 	box.mu.Unlock()
@@ -352,6 +437,9 @@ func TestServeHoldsItsLANSocketThroughConsolelan(t *testing.T) {
 	box2.holdErr = &consolelan.RefusalError{Reason: consolelan.ReasonRestrictionRefused}
 	s2 := startLANServe(t, cfg2, adminLn2, box2)
 	defer s2.stop(t)
+	// The box holds no listener before the attempt either: the count is read
+	// once the hold's refusal is the state.
+	waitLANState(t, s2, "waiting, the hold refused", lanWaitingFor(consolelan.ReasonRestrictionRefused))
 	if box2.count() != 0 {
 		t.Fatal("a LAN socket listens after its hold erred")
 	}
@@ -362,28 +450,47 @@ func TestServeHoldsItsLANSocketThroughConsolelan(t *testing.T) {
 
 // TestServeOpensTheConsoleOnItsLANAddress: a client from inside the network
 // gets the console, one from outside 403, and the banner says where it
-// answers.
+// answers; and all of it holds where the bind answers only after the test
+// began to wait for it: held before the box registers it, where a client
+// that does not wait finds no LAN listener, or once the box has recorded
+// it, where the state still says starting. The rows with a held bind are
+// the waits' regression guard (backlog B1047): the wait lets the bind go
+// once it has read the state the held bind keeps back.
 func TestServeOpensTheConsoleOnItsLANAddress(t *testing.T) {
-	adminLn := holdAdmin(t)
-	port := lanPortOf(t, adminLn)
-	cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
-	box := newServeBox(serveLANAddr + "/24")
-	s := startLANServe(t, cfg, adminLn, box)
-	defer s.stop(t)
-	url := "http://" + serveLANAddr + ":" + port + "/api/console"
-	resp, err := box.client(t, "192.168.88.5").Get(url)
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("from inside: %v %v", resp, err)
-	}
-	_ = resp.Body.Close()
-	resp, err = box.client(t, "10.0.0.5").Get(url)
-	if err != nil || resp.StatusCode != 403 {
-		t.Fatalf("from outside: %v %v", resp, err)
-	}
-	_ = resp.Body.Close()
-	want := "Home network: http://" + serveLANAddr + ":" + port + "/ (no password: anyone on your network can use it), set in bridge.yaml (adminLANAddress)"
-	if !strings.Contains(s.served.stdout.String(), want) {
-		t.Fatalf("the banner does not say %q:\n%s", want, s.served.stdout.String())
+	for _, c := range []struct {
+		name string
+		gate func() *listenGate
+	}{
+		{"as serve binds it", func() *listenGate { return nil }},
+		{"its bind held before the box registers it", func() *listenGate { return newListenGate(false) }},
+		{"its bind held once the box has recorded it", func() *listenGate { return newListenGate(true) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			adminLn := holdAdmin(t)
+			port := lanPortOf(t, adminLn)
+			cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
+			box := newServeBox(serveLANAddr + "/24")
+			box.gate = c.gate()
+			s := startLANServe(t, cfg, adminLn, box)
+			defer s.stop(t)
+			waitLANState(t, s, "listening", lanListening)
+			url := "http://" + serveLANAddr + ":" + port + "/api/console"
+			resp, err := box.client(t, "192.168.88.5").Get(url)
+			if err != nil || resp.StatusCode != 200 {
+				t.Fatalf("from inside: %v %v", resp, err)
+			}
+			_ = resp.Body.Close()
+			resp, err = box.client(t, "10.0.0.5").Get(url)
+			if err != nil || resp.StatusCode != 403 {
+				t.Fatalf("from outside: %v %v", resp, err)
+			}
+			_ = resp.Body.Close()
+			waitLANBanner(t, s)
+			want := "Home network: http://" + serveLANAddr + ":" + port + "/ (no password: anyone on your network can use it), set in bridge.yaml (adminLANAddress)"
+			if !strings.Contains(s.served.stdout.String(), want) {
+				t.Fatalf("the banner does not say %q:\n%s", want, s.served.stdout.String())
+			}
+		})
 	}
 }
 
@@ -437,12 +544,18 @@ func TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo(t *testin
 	box := newServeBox("192.168.88.21/24")
 	s := startLANServe(t, cfg, adminLn, box)
 	defer s.stop(t)
+	// The attempt stores its state before it says its WARN: the wait is for
+	// both, before the WARN's count is read.
+	waitLANState(t, s, "waiting, the address not on the box, its WARN said", func(st consolelan.State) bool {
+		return lanWaitingFor(consolelan.ReasonAddressNotOnBox)(st) && len(logs.Lines("console: not listening on the home network")) > 0
+	})
 	if st := s.console(t); st.State != consolelan.StateWaiting || st.Reason != consolelan.ReasonAddressNotOnBox {
 		t.Fatalf("state %+v", st)
 	}
 	if n := len(logs.Lines("console: not listening on the home network")); n != 1 {
 		t.Errorf("%d WARN lines, want one", n)
 	}
+	waitLANBanner(t, s)
 	if !strings.Contains(s.served.stdout.String(), "Home network: not open yet: "+serveLANAddr+" is not on this box; tried again every 5 s") {
 		t.Errorf("the banner:\n%s", s.served.stdout.String())
 	}
@@ -477,14 +590,12 @@ func TestALANAddressThatDoesNotBindLeavesTheConsoleOnLoopbackAndSaysSo(t *testin
 		_ = resp.Body.Close()
 	}
 	box.setAddrs(serveLANAddr + "/24")
-	s.tick <- time.Now()
-	deadline := time.Now().Add(10 * time.Second)
-	for s.console(t).State != consolelan.StateListening {
-		if time.Now().After(deadline) {
-			t.Fatalf("the tick did not bind: %+v", s.console(t))
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case s.tick <- time.Now():
+	case <-serveGiveUp(t):
+		t.Fatal("the plan's loop took no tick")
 	}
+	waitLANState(t, s, "listening, the tick's bind", lanListening)
 }
 
 // TestALANSocketThatDoesNotBindIsNoFailedStart: a LAN bind's failure never
@@ -497,6 +608,9 @@ func TestALANSocketThatDoesNotBindIsNoFailedStart(t *testing.T) {
 	box := newServeBox(serveLANAddr + "/24")
 	box.holdErr = &consolelan.RefusalError{Reason: consolelan.ReasonRestrictionRefused}
 	s := startLANServe(t, cfg, adminLn, box)
+	// The stop follows the failure it is about: the hold's refusal is the
+	// state first.
+	waitLANState(t, s, "waiting, the hold refused", lanWaitingFor(consolelan.ReasonRestrictionRefused))
 	var stats map[string]any
 	if err := fetchAdminJSON(context.Background(), s.admin, "/api/stats", &stats); err != nil {
 		t.Fatalf("the loopback socket: %v", err)
@@ -514,6 +628,7 @@ func TestRemovingTheKeyLeavesTheVariablesListenerAndTheDoctorSaysSo(t *testing.T
 	box := newServeBox(serveLANAddr + "/24")
 	s := startLANServe(t, cfg, adminLn, box)
 	defer s.stop(t)
+	waitLANState(t, s, "listening", lanListening)
 	requireLANServes(t, box, serveLANAddr, lanPortOf(t, adminLn))
 	if st := s.console(t); st.State != consolelan.StateListening || st.Source != consolelan.SourceEnvironment {
 		t.Fatalf("state %+v", st)
@@ -557,6 +672,7 @@ func TestTheDoctorReadsTheServingProcesssSourceNotItsOwnEnvironment(t *testing.T
 		cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "")
 		s := startLANServe(t, cfg, adminLn, newServeBox(serveLANAddr+"/24"))
 		defer s.stop(t)
+		waitLANState(t, s, "listening", lanListening)
 		t.Setenv("BRIDGE_ADMIN_LAN_ADDRESS", "")
 		_, line := runDoctorJSON(t, cfg, "console-lan")
 		if !strings.Contains(line, "set by BRIDGE_ADMIN_LAN_ADDRESS in the bridge's environment") ||
@@ -569,6 +685,7 @@ func TestTheDoctorReadsTheServingProcesssSourceNotItsOwnEnvironment(t *testing.T
 		cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
 		s := startLANServe(t, cfg, adminLn, newServeBox(serveLANAddr+"/24"))
 		defer s.stop(t)
+		waitLANState(t, s, "listening", lanListening)
 		t.Setenv("BRIDGE_ADMIN_LAN_ADDRESS", "192.168.88.30")
 		_, line := runDoctorJSON(t, cfg, "console-lan")
 		if !strings.Contains(line, "set in bridge.yaml (adminLANAddress)") ||
@@ -586,6 +703,7 @@ func TestBridgeDoctorReadsTheRunningBridgesConsole(t *testing.T) {
 	cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
 	s := startLANServe(t, cfg, adminLn, newServeBox(serveLANAddr+"/24"))
 	defer s.stop(t)
+	waitLANState(t, s, "listening", lanListening)
 	status, line := runDoctorJSON(t, cfg, "console-lan")
 	if status != "warn" || !strings.Contains(line, "http://"+serveLANAddr+":"+port) || !strings.Contains(line, "eth-test") {
 		t.Fatalf("bridge doctor's console-lan: %s %q", status, line)
@@ -606,6 +724,7 @@ func TestUnsettingTheVariableMakesTheFilesAddressTheOneServed(t *testing.T) {
 	t.Setenv("BRIDGE_ADMIN_LAN_ADDRESS", a2)
 	box := newServeBox(serveLANAddr+"/24", a2+"/24")
 	s := startLANServe(t, cfg, adminLn, box)
+	waitLANState(t, s, "listening", lanListening)
 	requireLANServes(t, box, a2, lanPortOf(t, adminLn))
 	st := s.console(t)
 	if st.Address != a2 || st.Source != consolelan.SourceBoth || st.FileAddressAtBoot != serveLANAddr {
@@ -623,6 +742,9 @@ func TestUnsettingTheVariableMakesTheFilesAddressTheOneServed(t *testing.T) {
 	t.Cleanup(func() { _ = adminLn2.Close() })
 	s2 := startLANServe(t, cfg, adminLn2, newServeBox(serveLANAddr+"/24", a2+"/24"))
 	defer s2.stop(t)
+	// The second boot's address and source are its plan's from the start:
+	// the wait is for its bind.
+	waitLANState(t, s2, "listening", lanListening)
 	if st := s2.console(t); st.Address != serveLANAddr || st.Source != consolelan.SourceFile {
 		t.Fatalf("without the variable: %+v", st)
 	}
@@ -663,6 +785,7 @@ func TestAVariableOverAnEmptyKeyIsBothAndCostsTheRollback(t *testing.T) {
 	box := newServeBox(serveLANAddr + "/24")
 	s := startLANServe(t, cfg, adminLn, box)
 	defer s.stop(t)
+	waitLANState(t, s, "listening", lanListening)
 	requireLANServes(t, box, serveLANAddr, lanPortOf(t, adminLn))
 	st := s.console(t)
 	if st.State != consolelan.StateListening || st.Source != consolelan.SourceBoth || st.FileKeyAtBoot != consolelan.FileKeyEmpty {
@@ -690,6 +813,11 @@ func TestTheConsoleNamesTheBootFilesAddressBesideTheEffectiveOne(t *testing.T) {
 	cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+secret+"\"\n")
 	s := startLANServe(t, cfg, adminLn, newServeBox(a2+"/24"))
 	defer s.stop(t)
+	// The fields asserted are the plan's from the start, but the bind's log
+	// line and the banner, which the search below reads, come once the
+	// attempt has answered: the wait is for the bind, then the banner.
+	waitLANState(t, s, "listening", lanListening)
+	waitLANBanner(t, s)
 	st := s.console(t)
 	if st.Address != a2 || st.FileKeyAtBoot != consolelan.FileKeyNotAnAddress || st.FileAddressAtBoot != "" {
 		t.Fatalf("state %+v", st)
@@ -712,6 +840,8 @@ func TestStatusAndTheRunningInstanceGuardsFindTheBridgeAfterALANFallback(t *test
 	cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
 	s := startLANServe(t, cfg, adminLn, newServeBox("192.168.88.21/24"))
 	defer s.stop(t)
+	// The fallback the probes are asked after: the first attempt's refusal.
+	waitLANState(t, s, "waiting, the address not on the box", lanWaitingFor(consolelan.ReasonAddressNotOnBox))
 	var out, errOut strings.Builder
 	if code := run(context.Background(), []string{"status", "--config", cfg}, &out, &errOut); code != 0 {
 		t.Fatalf("bridge status exited %d: %s", code, errOut.String())
@@ -729,6 +859,7 @@ func TestTheLibraryCommandsReachTheLiveAPIBesideALANSocket(t *testing.T) {
 	cfg := writeConsoleLANConfig(t, t.TempDir(), adminLn.Addr().String(), "adminLANAddress: \""+serveLANAddr+"\"\n")
 	s := startLANServe(t, cfg, adminLn, newServeBox(serveLANAddr+"/24"))
 	defer s.stop(t)
+	waitLANState(t, s, "listening", lanListening)
 	extra := filepath.Join(filepath.Dir(cfg), "More")
 	if err := os.MkdirAll(extra, 0o755); err != nil {
 		t.Fatal(err)
