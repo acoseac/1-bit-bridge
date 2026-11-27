@@ -1257,10 +1257,14 @@ func TestNativeIntegrationSuccessfulCutReplacement(t *testing.T) {
 	if err := b.Prepare(ctx, 1, 3, nil); err != nil {
 		t.Fatal(err)
 	}
+	// Free the DAC before the resume (B1038): the resume can meet the queue
+	// end's release already begun and wait for it, which on a held DAC never
+	// ends, its budget timed by the fake's clock that a held DAC never moves.
+	// Paused until the resume, the sink plays nothing before it.
+	k.Free()
 	if _, err := b.Resume(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
-	k.Free()
 	select {
 	case <-ev.done:
 	case <-ctx.Done():
