@@ -477,8 +477,9 @@ func firstLANState(t *testing.T, s *lanServe) consolelan.State {
 				why, lastErr, s.served.stdout.String(), s.served.stderr.String())
 		}
 	}
-	// fail ends the test at a failure met once connected, asking first
-	// whether the wait is over, which is then what it says.
+	// fail ends the test at a failure that is not a dial's, asking first
+	// whether the wait is over, which is then what it says: a request the
+	// wait's end cancelled before its connection was made fails here too.
 	fail := func(format string, args ...any) {
 		t.Helper()
 		lastErr = fmt.Errorf(format, args...)
@@ -507,7 +508,7 @@ func firstLANState(t *testing.T, s *lanServe) consolelan.State {
 			continue
 		}
 		if err != nil {
-			fail("its request failed once connected: %v", err)
+			fail("its request failed: %v", err)
 		}
 		if resp.StatusCode != http.StatusOK {
 			_ = resp.Body.Close()
