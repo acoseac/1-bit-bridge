@@ -975,11 +975,26 @@ func TestTheConsoleNamesTheBootFilesAddressBesideTheEffectiveOne(t *testing.T) {
 	// The fields asserted are the plan's from the start, but the bind's log
 	// line and the banner, which the search below reads, come once the
 	// attempt has answered, and the banner writes its lines one at a time: the
-	// wait is for the bind, then for the banner's last line, the rollback line
-	// a key in the file adds (backlog B1047's second round).
+	// wait is for the bind, then for the banner's second complete line, the one
+	// a key in the file adds, whatever it says, so a line that is not the
+	// rollback sentence fails at its words and at the search below, never in
+	// the wait (backlog B1047).
 	waitLANState(t, s, "listening", lanListening)
-	rollback := "Home network: " + consolelan.RollbackWords + "\n"
-	waitLANStdout(t, s, "rollback line", func(out string) (string, bool) { return rollback, strings.Contains(out, rollback) })
+	second := waitLANStdout(t, s, "second home-network banner line", func(out string) (string, bool) {
+		var lines []string
+		for _, line := range strings.SplitAfter(out, "\n") {
+			if strings.HasPrefix(line, "Home network: ") && strings.HasSuffix(line, "\n") {
+				lines = append(lines, strings.TrimSuffix(line, "\n"))
+			}
+		}
+		if len(lines) < 2 {
+			return "", false
+		}
+		return lines[1], true
+	})
+	if want := "Home network: " + consolelan.RollbackWords; second != want {
+		t.Errorf("the banner's second home-network line is %q, want %q", second, want)
+	}
 	// The answer is searched as the console sent it, so a field this test's
 	// type does not decode is searched too.
 	var body json.RawMessage
