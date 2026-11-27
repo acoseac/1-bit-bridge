@@ -299,7 +299,9 @@ func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound, unit *al
 // the bound DAC alone: a warning that names another model gets no unit, and
 // its label is that model's USB IDs. A start's dsdQualification the migration
 // could not take as a record's name (Step.RecordNameRefused) is a Warn line of
-// its own, which gives the name's length and never the name (B1042's round 2).
+// its own, which gives the name's length and never the name, and a start step
+// whose state would encode past the reader's bound (dsdstate.ErrTooLarge) says
+// so in its line (B1042's round 2).
 func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound, unit *alsa.USBIdentity) {
 	if step.RecordNameRefused {
 		playerLog.Warn("player: the legacy dsdQualification is no name an owner's record can have (more than 4096 bytes, not UTF-8, or holding a NUL): the DSD migration takes the other legacy DSD keys without it, and reads no record by it",
@@ -319,6 +321,13 @@ func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound, un
 		// Refused before its write (keys the migration does not take): the
 		// store holds nothing of it.
 		playerLog.Warn("player: the migration of the legacy DSD keys was not saved, and the player starts without it: this run does not ask it again, and the next start goes on from what the state's file holds then",
+			"defaultMode", d.store.State().DefaultMode, "err", err)
+		return
+	case errors.Is(err, dsdstate.ErrTooLarge):
+		// Its state would encode past the reader's bound: the store holds the
+		// step for this run, nothing written, until a later write makes the
+		// state smaller (dsdstate's Store.Migrate, B1042's round 2).
+		playerLog.Warn("player: the migration of the legacy DSD keys was not saved: with it the player's DSD state encodes to more than the 1 MiB its file may hold, and the player holds it for this run alone: a later write that makes the state smaller saves it, and the next start goes on from what the state's file holds then",
 			"defaultMode", d.store.State().DefaultMode, "err", err)
 		return
 	case err != nil && !landed:

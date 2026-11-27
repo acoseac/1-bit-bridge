@@ -124,7 +124,9 @@ func RecordToRead(s State, l Legacy) (name string, ask bool) {
 // now, which no later step reads again: with dsdMode unset, nothing else (the
 // defaults; the marker still keeps a later edit of the keys from migrating
 // over what the user chose since); with an explicit off, or dop with allowDoP
-// false or unset, defaultMode off and the bridge's migrated_off warning; with
+// false or unset, defaultMode off and the bridge's migrated_off warning (none
+// in a state already at the 512 warnings it may hold, whose opt-out goes
+// without it); with
 // native, dop with allowDoP, or auto, a part of a DAC's that waits for the
 // binding to resolve to one. With no key set it writes nothing at all. The
 // keys are checked here alone, while no migration ran (a dsdMode the reader
@@ -197,7 +199,10 @@ func Migrate(s State, in Input) (State, Step, error) {
 		switch {
 		case m.DSDMode == ModeOff, m.DSDMode == ModeDoP && !m.allowDoP():
 			next.DefaultMode = ModeOff
-			if !slices.ContainsFunc(next.Warnings, func(w Warning) bool { return w.Code == WarningMigratedOff }) {
+			// A state at the 512 warnings it may hold takes no more: the
+			// opt-out goes without its warning, never lost to a state its check
+			// refuses (B1042's round 2).
+			if !slices.ContainsFunc(next.Warnings, func(w Warning) bool { return w.Code == WarningMigratedOff }) && len(next.Warnings) < maxWarnings {
 				warn(Warning{Code: WarningMigratedOff, At: at})
 			}
 		case dacPart(m.DSDMode, m.allowDoP()):

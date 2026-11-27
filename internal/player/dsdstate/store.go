@@ -317,8 +317,8 @@ func (s *Store) Landed() error {
 
 // updateLocked is Update's write, under s.mu. heldIfFailed, the migration's
 // start step's alone (Migrate), holds the state fn made where the write of it
-// fails, landed or not; every other write that fails leaves the state as it
-// was.
+// fails, landed or not, or where its encoding would pass the reader's bound
+// (ErrTooLarge); every other write that fails leaves the state as it was.
 func (s *Store) updateLocked(fn func(*State) error, heldIfFailed bool) error {
 	if s.landed != nil {
 		return ErrLandedNotHeld
@@ -347,6 +347,13 @@ func (s *Store) updateLocked(fn func(*State) error, heldIfFailed bool) error {
 	next = next.normalized()
 	data, err := next.encode()
 	if err != nil {
+		// A start step whose state would encode past the reader's bound is held
+		// as a write that did not land (B1042's round 2): nothing is written,
+		// and a later write that makes the state smaller saves it. Any other
+		// refusal of the encoding is a state its check refuses, never held.
+		if heldIfFailed && errors.Is(err, ErrTooLarge) {
+			s.hold(next)
+		}
 		return err
 	}
 	if was, err := s.state.encode(); err == nil && bytes.Equal(was, data) {
@@ -392,8 +399,14 @@ func (s *Store) updateLocked(fn func(*State) error, heldIfFailed bool) error {
 // is made. One that did not land leaves no file: a later write of the run
 // persists the held state, its marker with it, so defaultMode off never
 // reaches the file without the marker, and with no later write the next start
-// migrates again. A part of a DAC's that fails is not held: the state stays as
-// it was, its marker still waiting, and its caller asks it again.
+// migrates again. A step whose state would encode past the 1 MiB the reader
+// reads (ErrTooLarge, a markerless state just under it that the step's marker
+// takes past it) is held the same way, nothing written: the encoding of what
+// the store holds is then past the bound, every later write that does not make
+// it smaller is refused alike, and one that does saves it, its marker with it
+// (B1042's round 2). A step whose state its check refuses is never held. A part
+// of a DAC's that fails is not held: the state stays as it was, its marker
+// still waiting, and its caller asks it again.
 func (s *Store) Migrate(stateDir string, legacy Legacy, bound *Bound) (Step, error) {
 	var step Step
 	s.mu.Lock()
