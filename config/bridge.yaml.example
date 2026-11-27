@@ -74,28 +74,55 @@ libraryName: "My Music Library"
 #   UUID is kept in <dataDir>/player-uuid.
 #   A running bridge serve player decides DSD playback for its DAC from
 #   its DSD state, <dataDir>/player-dsd.json, by its effective DSD policy.
-#   The state keeps each DAC's choice as the 1-bit app writes it
-#   (PUT /v1/outputs/{id}/dsd, for the DAC the player is bound to, while
-#   the player is stopped). The console's Player page has no control for
-#   changing the DAC's DSD choice. A fresh install's state holds the
-#   default mode auto, which a DAC with no choice of its own takes; under
-#   auto each DSD rate plays natively, as DoP or converted to PCM, or is
-#   refused, by the DAC's USB identity, the DSD formats it offers, a
-#   listener's answers, the evidence of its DoP, its gain and the PCM it
-#   takes for a conversion. A choice the app writes may also set a maximum
-#   rate (none by default, and 0 is none): under auto a DSD64, DSD128 or
-#   DSD256 rate above it is converted to PCM, even one the DAC takes
-#   natively or as DoP, or refused where the DAC takes no conversion
-#   target; a rate at the maximum may still play natively or as DoP.
+#   The state keeps each DAC's own choice, which in 0.2.4 only
+#   PUT /v1/outputs/{id}/dsd sets (for the DAC the player is bound to,
+#   while the player is stopped; no released 1-bit app sends it yet),
+#   kept for the DAC's model from its maker, so every unit of that model
+#   shares it. The console's Player page has no control for changing the
+#   DAC's DSD choice. A fresh install's state holds the default mode
+#   auto, which a DAC with no choice of its own takes; under auto each DSD
+#   rate plays natively, as DoP or converted to PCM, or is refused, by the
+#   DAC's USB identity, the DSD formats it offers, a listener's answers,
+#   the evidence of its DoP, its gain and the PCM it takes for a
+#   conversion. A choice may also set a maximum rate (none by default, and
+#   0 is none): under auto a DSD64, DSD128 or DSD256 rate above it is
+#   converted to PCM, even one the DAC takes natively or as DoP, or
+#   refused where the DAC takes no conversion target; a rate at the
+#   maximum may still play natively or as DoP.
 #   dsdMode, allowDoP and dsdQualification are legacy keys, which reach
 #   that state only through a migration: each start of bridge serve warns
 #   of each one set, the player on or off, and the player's start migrates
-#   them into the state once (an explicit dsdMode: off, or dop without
-#   allowDoP: true, becomes its default mode off), the part for a DAC
-#   waiting until the binding resolves to one. A plain bridge output play
-#   migrates them into a state of its own; its qualification report
-#   (bridge output play --report, see ops/b470-native-qualification.md)
-#   reads all three as they are.
+#   them into the state once, at a start that finds any of them set and
+#   the state holding no mark of a migration:
+#   - dsdMode unset, whatever the other two say: the default stays auto,
+#     where 0.2.3 played no DSD. With none of the three set nothing is
+#     marked, so a dsdMode: off added later still migrates; with allowDoP
+#     or dsdQualification set the mark is written, and a dsdMode added
+#     later is not migrated.
+#   - dsdMode: off, or dop without allowDoP: true: the default mode
+#     becomes off, for every DAC with no choice of its own.
+#   - dsdMode: native, auto, or dop with allowDoP: true: once the binding
+#     resolves to a DAC, its model from its maker takes the mode as its
+#     choice, with no maximum rate, and, from the approval record
+#     dsdQualification names, each approved rate as a listener's clean
+#     answer and, for dop, or auto with allowDoP: true, a DoP
+#     confirmation, each held to the firmware it was approved on. With no
+#     record, or one refused, native and dop are taken with nothing
+#     approved and auto leaves the DAC on the default; a record refused
+#     as another model's waits for a DAC of that model. A DAC that already
+#     has a choice of its own is left as it is.
+#   As they behave today (backlog B1042, B1043): an opt-out applies only
+#   once the migration has saved it, and where that save fails the start
+#   runs under auto, says so, and the next start goes on from what the
+#   file holds. allowDoP false, or unset, no longer keeps DoP out under
+#   auto: on a DAC the profile database knows, auto plays DoP at a rate it
+#   heard, or one confirmed on the DAC's firmware, where native DSD is not
+#   offered or a listener rejected it, through the gain check. A native
+#   or dop taken with nothing approved still plays what that mode plays
+#   without approval, refuses the rest and never converts to PCM.
+#   A plain bridge output play migrates them into a state of its own; its
+#   qualification report (bridge output play --report, see
+#   ops/b470-native-qualification.md) reads all three as they are.
 #   openhome: true puts the player on the LAN as an OpenHome renderer that
 #   the 1-bit app lists and casts to (off by default; the console's Player
 #   page has a switch for it): a listener of its own on each LAN address on
@@ -170,9 +197,10 @@ libraryName: "My Music Library"
 #   bridge's settings, music and devices. Give the box a fixed address (or
 #   a DHCP reservation), let the network through the host's firewall to
 #   that port, and don't forward the port on a router. The kernel holds the
-#   socket to the address's interface: Linux needs 5.7 or later (or
-#   CAP_NET_RAW), macOS holds an IPv4 address alone, and Windows needs every
-#   interface of the family to keep its strong host model; where it cannot,
+#   socket to the address's interface: Linux needs 5.7 or later, or 5.0 to
+#   5.6 with CAP_NET_RAW, macOS holds an IPv4 address alone, and Windows
+#   needs every interface of the family to keep its strong host model, with
+#   weak host send, weak host receive and forwarding off; where it cannot,
 #   the console stays on this machine and says why. Leave it unset for
 #   loopback alone; public mode refuses it.
 #   While this key is in the file, even empty, bridge 0.2.3 and earlier
@@ -226,8 +254,11 @@ libraryName: "My Music Library"
 #   requires them refuses it, and the admin tile says what to change. A
 #   TS_NO_LOGS_NO_SUPPORT=true in the bridge's own environment keeps the
 #   uploads off even with the key set. A change takes a restart of the
-#   bridge's process. Also in the admin console (Settings -> Networking) and
-#   BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS.
+#   bridge's process. Also in the admin console (Settings -> Networking).
+#   BRIDGE_TAILSCALE_UPLOAD_DIAGNOSTIC_LOGS, where it is set, overrides this
+#   key both ways: true allows the uploads with no key, and false keeps them
+#   off over a true key. In a container a change of it takes recreating the
+#   container (docker compose up -d), since a restart keeps its environment.
 #   uploadDiagnosticLogs is new in 0.2.4: while it is in the file, whatever
 #   its value, bridge 0.2.3 and earlier refuse the file, so an update's
 #   automatic rollback to one of them is not made and one installed by hand
@@ -253,8 +284,10 @@ libraryName: "My Music Library"
 #   enabled and deezerEnabled are new in 0.2.4: while either is in the file,
 #   whatever its value, bridge 0.2.3 and earlier refuse the file, so an
 #   update's automatic rollback to one of them is not made and one installed
-#   by hand will not start. Switch the lookups back on in the console, which
-#   removes the keys, or delete the lines, before you go back to one.
+#   by hand will not start. Switch the lookups back on in the console where
+#   it shows them off, which removes the keys, or delete the lines, before
+#   you go back to one: a key that holds true, or one a BRIDGE_ variable
+#   overrides, stays until it is deleted.
 #   BRIDGE_ENRICH_ENABLED and BRIDGE_ENRICH_DEEZER_ENABLED instead cost no
 #   rollback: earlier versions ignore them, and run the lookups.
 #   musicbrainzBaseURL and coverArtBaseURL say where it looks: both empty by
