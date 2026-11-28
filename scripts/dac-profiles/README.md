@@ -18,7 +18,8 @@ export, to the iOS registry's baseline.
 A profile whose native claim comes from a kernel quirk names the Linux
 kernel's `sound/usb/quirks.c` at the tag `internal/alsapcm/uapi.go` pins
 (`const uapiKernel`), the one `scripts/alsa-abi` checks the PCM interface
-against. `kernel-check.sh` fetches that file at that tag and runs
+against. `kernel-check.sh` fetches that file at that tag, or takes the copy
+`DACPROFILE_KERNEL_QUIRKS` names, and runs
 `TestTheKernelSeedIsThePinnedTags` with it, which reads the file's DSD format
 quirk and its flags table and compares, both ways:
 
@@ -45,12 +46,25 @@ bash scripts/dac-profiles/kernel-check.sh
 DACPROFILE_KERNEL_QUIRKS=/path/to/quirks.c bash scripts/dac-profiles/kernel-check.sh   # a copy you already have
 ```
 
-The file is kernel source and is never vendored: the script reads it in a
+In CI the job keeps the file between runs, as `alsa-abi` keeps its header
+(`scripts/alsa-abi/README.md`): under the key `kernel-files-<tag>-quirks.c-v1`
+in this repository's Actions cache, an exact hit that holds the file is read
+through `DACPROFILE_KERNEL_QUIRKS`, and otherwise the job sets
+`DACPROFILE_KERNEL_QUIRKS_SAVE`, to which the script copies the file it
+fetched, kept only when the whole job succeeds. A download that fails says
+which failure it was: a 429 that outlasts curl's retries is the raw host's
+rate limit, which asks for a rerun of the job; any other failure gives
+curl's exit status and the HTTP status.
+
+The file is kernel source and is never vendored: never in the repository, a
+build, a release archive, a log or the database. The script reads it in a
 temporary directory and deletes it, and prints its git blob id, which
 `git ls-tree <tag> sound/usb/quirks.c` in any kernel clone shows for the same
-bytes. The test logs the facts it read (USB IDs, DSD formats, how the driver
-finds the altsetting) and none of the file's text, and the database copies no
-code and no comment of it: a kernel-seeded profile is named by its ID.
+bytes; the unmodified file is kept only in this repository's Actions cache,
+keyed by the tag. The test logs the facts it read (USB IDs, DSD formats, how
+the driver finds the altsetting) and none of the file's text, and the
+database copies no code and no comment of it: a kernel-seeded profile is
+named by its ID.
 
 To follow a newer kernel, move the pin in `internal/alsapcm/uapi.go` (see
 `scripts/alsa-abi/README.md`), run this script, and seed, change or drop what

@@ -9,6 +9,7 @@ paths:
   - "scripts/third-party-licenses/**"
   - "deploy/**"
   - "scripts/alsa-abi/check.sh"
+  - "scripts/dac-profiles/kernel-check.sh"
   - "scripts/check-engineering-log.py"
   - "THIRD_PARTY_LICENSES.md"
   - "compose.yaml"
@@ -89,6 +90,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **A test whose request gets an answer with no body sends it on a transport of its own, never `http.DefaultTransport`** (2026-10-18, backlog B456) **Don't oversubscribe HTTP tests to hunt it** → History-rules-build-ci-tests.md
 - **A test connection recorder that an assertion reads after the client returns must record under the lock before it closes the connection** (2026-10-20, backlog B461). **Don't Close first and append after: the client's handshake fails as soon as Close lands, so the assertion can run while the append is still pending.** → History-rules-build-ci-tests.md
 - **Dependabot's github-actions ecosystem groups `github/codeql-action*` so the three CodeQL steps arrive in one PR** (2026-10-20, backlog B459). **Don't drop the `codeql-action` group: a single-step PR fails alone because `init` stamps its version into the config `autobuild`/`analyze` refuse.** → History-rules-build-ci-tests.md
+- **The `alsa-abi` and `dac-profiles` jobs keep the kernel files they compare (`asound.h`, `quirks.c`) in this repository's Actions cache, under a key made from the pinned tag, read as the scripts read it (`kernel-files-<tag>-asound.h-v1`, `kernel-files-<tag>-quirks.c-v1`), with no `restore-keys`: the check step hands the script the cached copy only on an exact hit (`cache-hit` true) that holds a non-empty regular file, and otherwise sets the script's save variable, to which the script copies what it fetched right after the fetch, a copy actions/cache keeps only when the job succeeds; and a download that fails names its failure, a 429 that outlasts curl's retries as the host's rate limit** (2026-11-28, backlog B1053: all three of main's downloads of them got a 429 on every retry for about four minutes). **Don't add `restore-keys`, take the copy on a hit that is not exact or holds no file, save a copy the override variable named or one whose fetch failed, skip the check on a rate limit (a skip reads as a pass), expect a run to mend an exact hit's entry (delete it, or move the key's `-v1` on), or keep either file anywhere but that cache: never in the repository, a build, a release archive, a log or the database.** → History-rules-build-ci-tests.md
 
 - **A test that never touches the wiring proves nothing.** Three shapes, all of
   which shipped a dead feature with a green suite: a helper nothing calls, a
