@@ -389,9 +389,27 @@ jobs:
   # and the probe can read where the compiler put snd_interval's one-bit
   # fields, which no compile-time assertion can.
   #
-  # The header is fetched, never vendored, and the run prints its git blob
-  # id and sha256. Off this job, TestProbeAndGoNameTheSameFacts and
-  # TestIoctlNumbersEncodeTheirStructures run in every ordinary test leg.
+  # The header is never vendored: never in the repository, a build, a
+  # release archive, a log or the database. The run prints its git blob id
+  # and sha256. Since backlog B1053 (2026-11-28) the job keeps the
+  # unmodified header in this repository's Actions cache, keyed by the tag
+  # (kernel-files-<tag>-asound.h-v1, which both legs share; with no
+  # restore-keys, another tag never restores). A run that finds that key
+  # holding the header as a regular file, through no link, compares the
+  # copy through ALSA_UAPI_HEADER and fetches nothing; one that misses it
+  # fetches the header and saves it through ALSA_UAPI_HEADER_SAVE, and
+  # actions/cache keeps the copy only when the job succeeds (its post step
+  # runs on success()), so a failed comparison caches nothing. Until then every run fetched it: on 2026-11-27 the raw
+  # host answered 429 on every retry for about four minutes and failed both
+  # legs and dac-profiles on main (run 46050180223), and a 429 that outlasts
+  # curl's retries now says it is a rate limit, not a definitions
+  # difference. actions/cache saves nothing over an exact hit, so an entry
+  # that holds no usable header (the step warns, fetches and saves nothing)
+  # is mended by deleting it or by moving the key's -v1 on. A cache belongs to the ref that saved
+  # it: a PR reads main's and its own, and main reads only its own, so
+  # main's first run after a merge may fetch again. Off this job,
+  # TestProbeAndGoNameTheSameFacts and TestIoctlNumbersEncodeTheirStructures
+  # run in every ordinary test leg.
   alsa-abi:
     name: alsa-abi (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -426,14 +444,55 @@ jobs:
           fi
           cc --version | head -1
           dpkg-query -W -f='${Package} ${Version}\n' linux-libc-dev libc6-dev || true
+      - name: the kernel tag uapi.go pins, and the header's cache key
+        id: kernel-tag
+        # Read as check.sh reads it, so the key names the header the script
+        # compares.
+        run: |
+          tag=$(sed -n 's/^const uapiKernel = "\(v[0-9][0-9.]*\)"$/\1/p' internal/alsapcm/uapi.go)
+          if [ -z "$tag" ]; then
+            echo "::error::no 'const uapiKernel = \"vX.Y\"' line in internal/alsapcm/uapi.go"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "key=kernel-files-$tag-asound.h-v1" >> "$GITHUB_OUTPUT"
+      - name: the header a passing run kept for this tag
+        id: kernel-file
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/kernel-files
+          key: ${{ steps.kernel-tag.outputs.key }}
       - name: compare the Go definitions with the pinned asound.h
         # The job's read-only token authenticates the header's download,
         # which raises GitHub's rate limit on its raw host. check.sh writes
         # it into a private curl config and drops it from the environment
-        # before it runs anything else.
+        # before it runs anything else; the lines before it here are the
+        # shell's own builtins. The copy the cache restored is compared only
+        # on an exact hit that holds a non-empty regular file, neither it nor
+        # its directory a link (-f and -s follow a link); an exact hit without
+        # one warns and fetches, with no save variable, since actions/cache
+        # saves nothing over an exact hit. Only a miss (cache-hit is unset)
+        # or a restore of another key's entry (false) sets the save
+        # variable, and not where the directory is a link.
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: bash scripts/alsa-abi/check.sh
+          KERNEL_FILE: ${{ runner.temp }}/kernel-files/asound.h
+          KERNEL_FILE_HIT: ${{ steps.kernel-file.outputs.cache-hit }}
+          KERNEL_FILE_KEY: ${{ steps.kernel-tag.outputs.key }}
+        run: |
+          kernel_dir=${KERNEL_FILE%/*}
+          if [ "$KERNEL_FILE_HIT" = true ]; then
+            if [ ! -L "$kernel_dir" ] && [ ! -L "$KERNEL_FILE" ] && [ -f "$KERNEL_FILE" ] && [ -s "$KERNEL_FILE" ]; then
+              export ALSA_UAPI_HEADER="$KERNEL_FILE"
+            else
+              echo "::warning::the cache entry $KERNEL_FILE_KEY holds no usable asound.h (it is missing, empty or a link, or its directory is a link), so the header is fetched and not saved; actions/cache saves nothing over an exact hit: delete the entry, or move the key's -v1 on"
+            fi
+          elif [ -L "$kernel_dir" ]; then
+            echo "::warning::$kernel_dir is a link, so the header is fetched and not saved"
+          else
+            export ALSA_UAPI_HEADER_SAVE="$KERNEL_FILE"
+          fi
+          bash scripts/alsa-abi/check.sh
 
   # internal/player/dacprofile, the bridge player's DAC profile database
   # (B728), seeds native DSD claims from the Linux kernel's own USB audio
@@ -446,8 +505,16 @@ jobs:
   # no device-specific quirk of the tag neither seeded nor listed as a
   # shared reference ID. The script fails unless that test ran and passed:
   # without its -kernel-quirks file the test skips, and a skip looks like a
-  # pass. The file is fetched, never vendored; the run prints its git blob
-  # id and sha256 and the facts the test read, never its text. Since B730
+  # pass. The file is never vendored: never in the repository, a build, a
+  # release archive, a log or the database; the run prints its git blob id
+  # and sha256 and the facts the test read, never its text. The job keeps
+  # the unmodified file in this repository's Actions cache, keyed by the tag
+  # (kernel-files-<tag>-quirks.c-v1), as alsa-abi keeps asound.h (see its
+  # comment): an exact hit with the file is read through
+  # DACPROFILE_KERNEL_QUIRKS, an exact hit without it fetches the file and
+  # saves nothing, and a miss fetches it and saves it through
+  # DACPROFILE_KERNEL_QUIRKS_SAVE, kept only when the whole job succeeds,
+  # its next step included. Since B730
   # B1 the database is also the iOS app's DAC registry's one source: its
   # second step runs scripts/dac-profiles/ios-export -check, which fails
   # when DACCatalog.ios.json is not what the catalog exports now and prints
@@ -470,14 +537,52 @@ jobs:
           check-latest: true
           # One small package compiles in seconds; no cache to keep warm.
           cache: false
+      - name: the kernel tag uapi.go pins, and the file's cache key
+        id: kernel-tag
+        # Read as kernel-check.sh reads it, so the key names the file the
+        # script compares.
+        run: |
+          tag=$(sed -n 's/^const uapiKernel = "\(v[0-9][0-9.]*\)"$/\1/p' internal/alsapcm/uapi.go)
+          if [ -z "$tag" ]; then
+            echo "::error::no 'const uapiKernel = \"vX.Y\"' line in internal/alsapcm/uapi.go"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "key=kernel-files-$tag-quirks.c-v1" >> "$GITHUB_OUTPUT"
+      - name: the file a passing run kept for this tag
+        id: kernel-file
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/kernel-files
+          key: ${{ steps.kernel-tag.outputs.key }}
       - name: compare the kernel-seeded profiles with the pinned sound/usb/quirks.c
         # The job's read-only token authenticates the download, as
         # alsa-abi's does; kernel-check.sh writes it into a private curl
         # config and drops it from the environment before it runs anything
-        # else.
+        # else, and the lines before it here are the shell's own builtins.
+        # The choice is alsa-abi's: the copy only on an exact hit that holds
+        # a non-empty regular file, neither it nor its directory a link; the
+        # save variable only on a miss or another key's restore, and not
+        # where the directory is a link.
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: bash scripts/dac-profiles/kernel-check.sh
+          KERNEL_FILE: ${{ runner.temp }}/kernel-files/quirks.c
+          KERNEL_FILE_HIT: ${{ steps.kernel-file.outputs.cache-hit }}
+          KERNEL_FILE_KEY: ${{ steps.kernel-tag.outputs.key }}
+        run: |
+          kernel_dir=${KERNEL_FILE%/*}
+          if [ "$KERNEL_FILE_HIT" = true ]; then
+            if [ ! -L "$kernel_dir" ] && [ ! -L "$KERNEL_FILE" ] && [ -f "$KERNEL_FILE" ] && [ -s "$KERNEL_FILE" ]; then
+              export DACPROFILE_KERNEL_QUIRKS="$KERNEL_FILE"
+            else
+              echo "::warning::the cache entry $KERNEL_FILE_KEY holds no usable quirks.c (it is missing, empty or a link, or its directory is a link), so the file is fetched and not saved; actions/cache saves nothing over an exact hit: delete the entry, or move the key's -v1 on"
+            fi
+          elif [ -L "$kernel_dir" ]; then
+            echo "::warning::$kernel_dir is a link, so the file is fetched and not saved"
+          else
+            export DACPROFILE_KERNEL_QUIRKS_SAVE="$KERNEL_FILE"
+          fi
+          bash scripts/dac-profiles/kernel-check.sh
       - name: the catalog's iOS export and its tests
         run: |
           go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/dac-profiles/ios-export -check

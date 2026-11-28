@@ -1523,6 +1523,90 @@ Records: `ops/engineering-log.md`, 2026-11-09, B652 rounds 4 and 5.
 
 - **…and a Windows test of a read another process's handle refuses holds the file through a handle that asks to write and shares no reading (one that asks for reading and writing and shares nothing, or, to let a rename of the held file land, one that asks only to write and shares writing and deleting), and requires a read beside it to answer `ERROR_SHARING_VIOLATION`, as its premise before anything else or by an assertion of its own: on CI's runner, its process elevated with SeBackupPrivilege enabled, `os.ReadFile` read past a handle that shares nothing and asks only to read** (2026-11-17, backlog B898FU2). Round 1's probe (PR #1501's first run: windows-latest, Windows 10.0.26100, go1.27.3) found that handle, on NTFS and the same file by its volume serial and file index, refusing an open for reading made without `FILE_FLAG_BACKUP_SEMANTICS`, an open for writing and an open for deleting, each with `ERROR_SHARING_VIOLATION`, on a file of `t.TempDir()`'s and on the harvest state file alike; a handle asking for reading and writing refused `os.ReadFile` at its open; and `os.OpenFile`'s read-write handle with `LockFileEx`'s exclusive lock over every byte refused its read with `ERROR_LOCK_VIOLATION`, which `atomicwrite`'s read retry does not ask again on. Go's read-only open sets `FILE_FLAG_BACKUP_SEMANTICS` (go1.27.3 `src/syscall/syscall_windows.go:414-425`), so the read past the hold is consistent with that open let past a hold that only reads by the enabled privilege: an inference, since the probe varied neither the privilege nor the flag alone. B898 PR 3's real-hold case, whose hold asked only to read, failed its premise in every subtest, as the probe's did, and was removed (58927057); it is back with a hold that asks for both. internal/backup's `TestSnapshotRetriesAHandleHeldAcrossRename` and `TestSnapshotRefusesAReservationStillHeldOrCancelled` hold the file for writing alone, sharing writing and deleting, so that a rename of the held file lands (`internal/backup/sharing_windows_test.go` 89-91 and 170-172), and each shows the read refused: the first by a premise, a read of the file it renamed under the hold answering `ERROR_SHARING_VIOLATION` as soon as the rename lands (104-112), the second by its assertion on the snapshot's error and its retry's waits (185-197). **Don't make a read fail with a handle that asks only to read, or take that handle's refusal of a rename, a delete or an open made without `FILE_FLAG_BACKUP_SEMANTICS` for a read's.** `TestTheHarvestHelperReadsPastAHoldOnTheStateFile`, internal/atlasharvest's `TestTheStateFileIsReadPastAHoldThatSharesNothing` and internal/backup's `TestTheLookBeforeThePromptReadsPastAHoldThatSharesNothing` hold to it. A rename's hold (`holdShareNone`, the entry above) still asks only to read: its own premise requires a rename of the held file to answer `ERROR_SHARING_VIOLATION` before the case goes on, a rename that lands put back, and fails the case otherwise (`internal/updater/held_windows_test.go` 94-103), so a hold a runner let a rename past fails its case, never passes it. Records: `ops/engineering-log.md`, 2026-11-17, B898FU2, and 2026-11-18, its correction.
 
+### B1053 — the kernel files in CI's Actions cache (2026-11-28)
+
+- **The `alsa-abi` and `dac-profiles` jobs keep the kernel files they compare (`asound.h`, `quirks.c`) in this repository's Actions cache, under a key made from the pinned tag, read as the scripts read it (`kernel-files-<tag>-asound.h-v1`, `kernel-files-<tag>-quirks.c-v1`), with no `restore-keys`: the check step hands the script the cached copy only on an exact hit (`cache-hit` true) that holds a non-empty regular file, neither it nor its directory a link, and sets the script's save variable only where `cache-hit` is not true and the directory is no link, actions/cache saving nothing over an exact hit; the script copies what it fetched to that path right after the fetch, a copy actions/cache keeps only when the job succeeds, refuses a path that is a link or is there and is no regular file, and prints its could-not-save line whichever step of the save fails; and only curl's exit 0 with a final 200 is a download, one that fails naming its failure, a 429 that outlasts curl's retries as the host's rate limit** (2026-11-28, backlog B1053: all three of main's downloads of them got a 429 on every retry for about four minutes). **Don't add `restore-keys`, take the copy on a hit that is not exact, holds no file or reaches it through a link, set the save variable on an exact hit or through a linked directory, take a download whose final status is not 200, save a copy the override variable named or one whose fetch failed, save over a link or anything but a regular file, let a step of the save fail without its line, skip the check on a rate limit (a skip reads as a pass), expect a run to mend an exact hit's entry (delete it, or move the key's `-v1` on), or keep either file anywhere but that cache: never in the repository, a build, a release archive, a log or the database.**
+
+Every run of `alsa-abi`, on each leg, and of `dac-profiles` fetched a file
+from GitHub's raw host at the tag `internal/alsapcm/uapi.go` pins
+(`uapiKernel`): the kernel's `include/uapi/sound/asound.h`, once a leg, and
+its `sound/usb/quirks.c`. Main's gate on 762e53d6 (run 46050180223,
+2026-11-27) failed its first attempt when all three downloads got HTTP 429 on
+every retry of curl's for about four minutes, the job's token sent; the rerun
+passed. So a rate limit could fail any run, whatever it changed.
+
+The jobs now keep the files:
+
+- A step reads the tag as the scripts read it (`sed` on `uapi.go`), fails on
+  an empty one, and makes the key: `kernel-files-<tag>-asound.h-v1`, which
+  both `alsa-abi` legs share, or `kernel-files-<tag>-quirks.c-v1`.
+- `actions/cache`, at the SHA every job pins, keeps `${{ runner.temp }}/kernel-files`
+  under that key alone. With no `restore-keys`, another tag never restores.
+- The check step takes the copy (`ALSA_UAPI_HEADER`,
+  `DACPROFILE_KERNEL_QUIRKS`) only where `cache-hit` is `true` and the file
+  is a non-empty regular file, neither it nor its directory, `kernel-files`,
+  a link: `-f` and `-s` follow a link, so an entry holding `asound.h` as a
+  link to the runner's installed header, or restored under a linked
+  directory, would compare that header under the pinned tag. An exact hit
+  without such a file warns, naming the key, and fetches with no save
+  variable: the pinned action saves nothing over an exact hit
+  (`src/saveImpl.ts`), so a save there could never be kept. The save
+  variable (`ALSA_UAPI_HEADER_SAVE`, `DACPROFILE_KERNEL_QUIRKS_SAVE`) is set
+  only where `cache-hit` is not `true` and the directory is no link, a
+  linked one warning and fetching. The action leaves `cache-hit` unset on a
+  miss and sets it `false` when the entry it restored is another key's
+  (`src/restoreImpl.ts` at the pin): both save, the fetched file replacing
+  what such a restore left. The directory is `${KERNEL_FILE%/*}`, a
+  parameter expansion, so no command but the script sees the token.
+- The script copies what it fetched to the save path right after the fetch,
+  before the comparison, to a temporary file beside the path that it then
+  renames. A path that is a link, dangling or not, or that is there and is
+  no regular file, is refused before anything is written, the link tested
+  on its own (`-L`: a dangling link fails `-e`, and a link to a regular file
+  passes `-f`): `mv -f` into a directory moved the temporary file inside it
+  with a status of 0, a save that did not happen, and replaced a link or a
+  fifo. Each step (`mkdir -p`, `mktemp`, `cp`, `mv -f`) is in one condition,
+  `save_tmp` empty first, so whichever fails prints the could-not-save line,
+  the temporary file it made is removed and a file already at the path is
+  kept; a directory a successful `mkdir -p` made may remain. Outside that
+  condition, `set -e` ended the run at a failed `mkdir -p` or `mktemp` with
+  no line. A copy the override variable named is never saved, and each new
+  variable, empty, is unset. The action's post step runs on `success()`
+  alone (`action.yml` at the pin), so a failed comparison, or a later step
+  of the job that fails, caches nothing.
+- curl's last HTTP status is read with `-w '%{http_code}'`, its assignment
+  guarded so that `set -e` cannot end the script first (`code=$(…) || rc=$?`),
+  and only an exit of 0 with a final 200 is a download: `-f` fails a status
+  of 400 or more alone, and curl exits 0 after a 204 or a 206, which hold no
+  whole file. Anything else enters the one classifier: a 429 says it is the
+  host's rate limit after curl's retries and no definitions difference, a
+  status of `000` or none (a timeout, a connection failure) says there was
+  no HTTP status, and any other gives curl's exit status and the HTTP
+  status. The partial file is removed and the run fails. The token's
+  handling is unchanged: it reaches curl through the private config file
+  alone, and the step's lines before the script are shell builtins.
+
+"Never vendored" reads, for both files: never in the repository, a build, a
+release archive, a log or the database. The unmodified files sit only in
+this repository's Actions cache, keyed by the tag; a log carries each file's
+git blob id and sha256 and what the probe and the test read, as before.
+
+Out of scope, and why: vendoring either file (`player.md`'s pinned-and-checked
+rule); a second upstream host; a skip on a rate limit, which would read as a
+pass. The pinned action never saves over an exact hit (`src/saveImpl.ts` at
+the pin: "Cache hit occurred on the primary key …, not saving cache."), so
+an entry that holds no file is mended only by deleting it or by moving the
+key's `-v1` on, and the step's warning says so. A cache belongs to the ref
+that saved it: a PR reads main's and its own, and main only its own, so
+main's first run after a merge may fetch again; the two `alsa-abi` legs can
+both miss and fetch, and one save makes the entry they share.
+
+The final-200 check, the two link checks, the exact hit with no save
+variable, the save's refusal and its one condition came on 2026-11-28,
+before the merge, each shown red first and by a negative control.
+
+Record: `ops/engineering-log/2026-11/2026-11-28-b1053--fix-b1053-kernel-file-cache.md`.
+
 ## B514 — deterministic medium evidence and controls (2026-10-23)
 
 Mount tables, device identities and statfs sequences are explicit fixtures.
