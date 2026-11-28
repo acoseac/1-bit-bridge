@@ -88,6 +88,12 @@ ones, none failing.
   quirk is defined 0 times"). With the stub serving Ubuntu 26.04's own `/usr/include/sound/asound.h`,
   a run that saved it and a run that took the saved copy as the override each passed
   `TestUAPIMatchesTheKernelHeader`, git blob `421ab7d7…` both times, curl never run in the second.
+- The stub's model of curl, held to the host's own curl 8.18.0 with the scripts' flags but
+  `--proto` (the server being plain http) against a throwaway server on 127.0.0.1: a 429 retried
+  twice printed `429` on stdout once, after the third request, and exited 22, `-o` writing
+  nothing; a 404, not retried, printed `404` and exited 22; a 200 printed `200`, exited 0 and wrote
+  the file; a refused connection printed `000` and exited 7; a stall past `--max-time`, retried
+  once, printed `000` and exited 28.
 - `gate.yml` parsed with PyYAML, and its new steps ran as the runner runs a step (`bash --noprofile
   --norc -eo pipefail`, each `${{ }}` in `env:` resolved by hand): the tag step's outputs (`v6.12`
   and its key) and its failure on a `uapi.go` without the line; the check step through a miss, an
@@ -107,7 +113,11 @@ ones, none failing.
 - `bash -n` on both scripts; shellcheck is not installed here. `go test -tags
   ts_omit_webclient,ts_omit_debugeventbus ./internal/alsapcm ./internal/player/dacprofile
   -count=1` passed (38.6 s and 0.06 s), both kernel-file tests skipping without their flags; `make
-  fmt` rewrote nothing; `make vet`, `make check-build-tags` and `make docs-check` passed.
+  fmt` rewrote nothing; `make vet`, `make check-build-tags` and `make docs-check` passed, and so
+  did the tests that read these files: `cmd/bridge`'s citation and docblock guards (a test name
+  planted in this entry turned the citation guard red, naming the entry),
+  `internal/player/qualification` (which reads `gate.yml`), `scripts/third-party-licenses` and
+  `scripts/dac-profiles/ios-export`, with its `-check`.
 
 ### What CI is to show
 
