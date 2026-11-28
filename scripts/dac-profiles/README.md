@@ -47,14 +47,18 @@ DACPROFILE_KERNEL_QUIRKS=/path/to/quirks.c bash scripts/dac-profiles/kernel-chec
 ```
 
 In CI the job keeps the file between runs, as `alsa-abi` keeps its header
-(`scripts/alsa-abi/README.md`): under the key `kernel-files-<tag>-quirks.c-v1`
-in this repository's Actions cache, an exact hit that holds the file is read
-through `DACPROFILE_KERNEL_QUIRKS`, and otherwise the job sets
-`DACPROFILE_KERNEL_QUIRKS_SAVE`, to which the script copies the file it
-fetched, kept only when the whole job succeeds. A download that fails says
-which failure it was: a 429 that outlasts curl's retries is the raw host's
-rate limit, which asks for a rerun of the job; any other failure gives
-curl's exit status and the HTTP status.
+(`scripts/alsa-abi/README.md`), under the key
+`kernel-files-<tag>-quirks.c-v1` in this repository's Actions cache: an
+exact hit that holds the file as a non-empty regular file, neither it nor
+its directory a link, is read through `DACPROFILE_KERNEL_QUIRKS`; an exact
+hit without one warns, fetches the file and saves nothing; and a miss sets
+`DACPROFILE_KERNEL_QUIRKS_SAVE`, unless the cache's directory is a link, to
+which the script copies the file it fetched, never over a link or anything
+but a regular file, kept only when the whole job succeeds. Only an exit of
+0 with a final status of 200 is a download. One that fails says which
+failure it was: a 429 that outlasts curl's retries is the raw host's rate
+limit, which asks for a rerun of the job; any other failure gives curl's
+exit status and the HTTP status.
 
 The file is kernel source and is never vendored: never in the repository, a
 build, a release archive, a log or the database. The script reads it in a

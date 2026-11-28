@@ -72,7 +72,9 @@ else
 	# minutes, the job's token sent. Its line says so, so that a rerun that
 	# passes is not taken for a fix. The status is read with the assignment
 	# guarded: under set -e a bare failure would end the script before it is
-	# read.
+	# read. Only an exit of 0 with a final 200 is a download: -f fails a
+	# status of 400 or more alone, and curl exits 0 after a 204 or a 206,
+	# which hold no whole file.
 	fetch=(curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 15 --max-time 60 --retry 8 --retry-max-time 300 -o "$header" -w '%{http_code}')
 	rc=0
 	if [ -s "$auth" ]; then
@@ -80,7 +82,7 @@ else
 	else
 		code=$("${fetch[@]}" "$url") || rc=$?
 	fi
-	if [ "$rc" -ne 0 ]; then
+	if [ "$rc" -ne 0 ] || [ "$code" != 200 ]; then
 		rm -f "$header"
 		if [ "$code" = 429 ]; then
 			echo "check.sh: the upstream host rate-limited the download of $url (HTTP 429) after curl's retries; this is not a definitions difference: rerun the job" >&2
@@ -96,13 +98,23 @@ else
 		# The copy is made right after the fetch, before the comparison, so
 		# that the save can be tried offline. CI keeps it only when the job
 		# succeeds (actions/cache saves at the job's end, post-if: success()),
-		# and a run by hand sets no save variable. It is written beside its
+		# and a run by hand sets no save variable. A path that is a link,
+		# dangling or not, or that is there and is no regular file, is
+		# refused before anything is written: mv -f would move the copy into
+		# a directory with a status of 0, a save that did not happen, and
+		# would replace a link or a fifo. The copy is written beside its
 		# path and renamed into place, so the path never holds part of one.
+		# Each step is in the one condition, so whichever fails prints the
+		# line below, the temporary file it made is removed and a file
+		# already at the path is kept; a directory a successful mkdir -p
+		# made may remain.
 		save_dir=$(dirname "$ALSA_UAPI_HEADER_SAVE")
-		mkdir -p "$save_dir"
-		save_tmp=$(mktemp "$save_dir/.asound.h.XXXXXX")
-		if ! cp "$header" "$save_tmp" || ! mv -f "$save_tmp" "$ALSA_UAPI_HEADER_SAVE"; then
-			rm -f "$save_tmp"
+		save_tmp=""
+		if [ -L "$ALSA_UAPI_HEADER_SAVE" ] ||
+			{ [ -e "$ALSA_UAPI_HEADER_SAVE" ] && [ ! -f "$ALSA_UAPI_HEADER_SAVE" ]; } ||
+			! mkdir -p "$save_dir" || ! save_tmp=$(mktemp "$save_dir/.asound.h.XXXXXX") ||
+			! cp "$header" "$save_tmp" || ! mv -f "$save_tmp" "$ALSA_UAPI_HEADER_SAVE"; then
+			[ -z "$save_tmp" ] || rm -f "$save_tmp" || true
 			echo "check.sh: could not save the header to $ALSA_UAPI_HEADER_SAVE" >&2
 			exit 1
 		fi

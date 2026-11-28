@@ -56,6 +56,7 @@ else
 	# outlasts the retries is named as the host's limit, which asks for a
 	# rerun and not a fix. The status is read with the assignment guarded:
 	# under set -e a bare failure would end the script before it is read.
+	# As there, only an exit of 0 with a final 200 is a download.
 	fetch=(curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 15 --max-time 60 --retry 8 --retry-max-time 300 -o "$quirks" -w '%{http_code}')
 	rc=0
 	if [ -s "$auth" ]; then
@@ -63,7 +64,7 @@ else
 	else
 		code=$("${fetch[@]}" "$url") || rc=$?
 	fi
-	if [ "$rc" -ne 0 ]; then
+	if [ "$rc" -ne 0 ] || [ "$code" != 200 ]; then
 		rm -f "$quirks"
 		if [ "$code" = 429 ]; then
 			echo "kernel-check.sh: the upstream host rate-limited the download of $url (HTTP 429) after curl's retries; this is not a definitions difference: rerun the job" >&2
@@ -79,13 +80,20 @@ else
 		# The copy is made right after the fetch, before the comparison, so
 		# that the save can be tried offline. CI keeps it only when the job
 		# succeeds (actions/cache saves at the job's end, post-if: success()),
-		# and a run by hand sets no save variable. It is written beside its
-		# path and renamed into place, so the path never holds part of one.
+		# and a run by hand sets no save variable. As alsa-abi's does, the
+		# save refuses a path that is a link, dangling or not, or that is
+		# there and is no regular file, before anything is written, and writes
+		# the copy beside its path and renames it into place, each step in the
+		# one condition: whichever fails prints the line below, the temporary
+		# file it made is removed and a file already at the path is kept; a
+		# directory a successful mkdir -p made may remain.
 		save_dir=$(dirname "$DACPROFILE_KERNEL_QUIRKS_SAVE")
-		mkdir -p "$save_dir"
-		save_tmp=$(mktemp "$save_dir/.quirks.c.XXXXXX")
-		if ! cp "$quirks" "$save_tmp" || ! mv -f "$save_tmp" "$DACPROFILE_KERNEL_QUIRKS_SAVE"; then
-			rm -f "$save_tmp"
+		save_tmp=""
+		if [ -L "$DACPROFILE_KERNEL_QUIRKS_SAVE" ] ||
+			{ [ -e "$DACPROFILE_KERNEL_QUIRKS_SAVE" ] && [ ! -f "$DACPROFILE_KERNEL_QUIRKS_SAVE" ]; } ||
+			! mkdir -p "$save_dir" || ! save_tmp=$(mktemp "$save_dir/.quirks.c.XXXXXX") ||
+			! cp "$quirks" "$save_tmp" || ! mv -f "$save_tmp" "$DACPROFILE_KERNEL_QUIRKS_SAVE"; then
+			[ -z "$save_tmp" ] || rm -f "$save_tmp" || true
 			echo "kernel-check.sh: could not save the file to $DACPROFILE_KERNEL_QUIRKS_SAVE" >&2
 			exit 1
 		fi

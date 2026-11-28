@@ -30,14 +30,20 @@ ALSA_UAPI_HEADER=/path/to/asound.h bash scripts/alsa-abi/check.sh   # a copy you
 
 In CI the job keeps the header between runs, in this repository's Actions
 cache under the key `kernel-files-<tag>-asound.h-v1`, which both legs share.
-On an exact hit that holds the file it hands `check.sh` that copy as
-`ALSA_UAPI_HEADER`, and nothing is fetched; otherwise it sets
-`ALSA_UAPI_HEADER_SAVE`, and `check.sh` copies the header it fetched to that
-path right after the fetch, which the cache keeps only when the job succeeds.
-A download that fails says which failure it was: a 429 that outlasts curl's
-retries is the raw host's rate limit, no definitions difference, and asks
-for a rerun of the job; any other failure gives curl's exit status and the
-HTTP status.
+On an exact hit that holds the header as a non-empty regular file, neither
+it nor its directory a link, it hands `check.sh` that copy as
+`ALSA_UAPI_HEADER`, and nothing is fetched; an exact hit without one warns,
+fetches the header and saves nothing, since the cache saves nothing over an
+exact hit. A miss sets `ALSA_UAPI_HEADER_SAVE`, unless the cache's directory
+is a link, and `check.sh` copies the header it fetched to that path right
+after the fetch, which the cache keeps only when the job succeeds. The save
+refuses a path that is a link or is there and is no regular file, and says
+so whichever of its steps fails.
+
+Only an exit of 0 with a final status of 200 is a download. One that fails
+says which failure it was: a 429 that outlasts curl's retries is the raw
+host's rate limit, no definitions difference, and asks for a rerun of the
+job; any other failure gives curl's exit status and the HTTP status.
 
 `TestProbeAndGoNameTheSameFacts` runs everywhere, without a compiler: it
 holds the probe's macro calls and the Go side's list to the same facts, so a

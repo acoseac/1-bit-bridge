@@ -395,17 +395,17 @@ jobs:
   # unmodified header in this repository's Actions cache, keyed by the tag
   # (kernel-files-<tag>-asound.h-v1, which both legs share; with no
   # restore-keys, another tag never restores). A run that finds that key
-  # compares the copy through ALSA_UAPI_HEADER and fetches nothing; one
-  # that does not fetches the header and saves it through
-  # ALSA_UAPI_HEADER_SAVE, and actions/cache keeps the copy only when the
-  # job succeeds (its post step runs on success()), so a failed comparison
-  # caches nothing. Until then every run fetched it: on 2026-11-27 the raw
+  # holding the header as a regular file, through no link, compares the
+  # copy through ALSA_UAPI_HEADER and fetches nothing; one that misses it
+  # fetches the header and saves it through ALSA_UAPI_HEADER_SAVE, and
+  # actions/cache keeps the copy only when the job succeeds (its post step
+  # runs on success()), so a failed comparison caches nothing. Until then every run fetched it: on 2026-11-27 the raw
   # host answered 429 on every retry for about four minutes and failed both
   # legs and dac-profiles on main (run 46050180223), and a 429 that outlasts
   # curl's retries now says it is a rate limit, not a definitions
   # difference. actions/cache saves nothing over an exact hit, so an entry
-  # that holds no header (the step warns and fetches) is mended by deleting
-  # it or by moving the key's -v1 on. A cache belongs to the ref that saved
+  # that holds no usable header (the step warns, fetches and saves nothing)
+  # is mended by deleting it or by moving the key's -v1 on. A cache belongs to the ref that saved
   # it: a PR reads main's and its own, and main reads only its own, so
   # main's first run after a merge may fetch again. Off this job,
   # TestProbeAndGoNameTheSameFacts and TestIoctlNumbersEncodeTheirStructures
@@ -468,20 +468,28 @@ jobs:
         # it into a private curl config and drops it from the environment
         # before it runs anything else; the lines before it here are the
         # shell's own builtins. The copy the cache restored is compared only
-        # on an exact hit that holds a non-empty file (cache-hit is unset on
-        # a miss); otherwise the header is fetched and saved for the cache.
+        # on an exact hit that holds a non-empty regular file, neither it nor
+        # its directory a link (-f and -s follow a link); an exact hit without
+        # one warns and fetches, with no save variable, since actions/cache
+        # saves nothing over an exact hit. Only a miss (cache-hit is unset)
+        # or a restore of another key's entry (false) sets the save
+        # variable, and not where the directory is a link.
         env:
           GITHUB_TOKEN: ${{ github.token }}
           KERNEL_FILE: ${{ runner.temp }}/kernel-files/asound.h
           KERNEL_FILE_HIT: ${{ steps.kernel-file.outputs.cache-hit }}
           KERNEL_FILE_KEY: ${{ steps.kernel-tag.outputs.key }}
         run: |
-          if [ "$KERNEL_FILE_HIT" = true ] && [ -f "$KERNEL_FILE" ] && [ -s "$KERNEL_FILE" ]; then
-            export ALSA_UAPI_HEADER="$KERNEL_FILE"
-          else
-            if [ "$KERNEL_FILE_HIT" = true ]; then
-              echo "::warning::the cache entry $KERNEL_FILE_KEY holds no asound.h, so the header is fetched; actions/cache saves nothing over an exact hit: delete the entry, or move the key's -v1 on"
+          kernel_dir=${KERNEL_FILE%/*}
+          if [ "$KERNEL_FILE_HIT" = true ]; then
+            if [ ! -L "$kernel_dir" ] && [ ! -L "$KERNEL_FILE" ] && [ -f "$KERNEL_FILE" ] && [ -s "$KERNEL_FILE" ]; then
+              export ALSA_UAPI_HEADER="$KERNEL_FILE"
+            else
+              echo "::warning::the cache entry $KERNEL_FILE_KEY holds no usable asound.h (it is missing, empty or a link, or its directory is a link), so the header is fetched and not saved; actions/cache saves nothing over an exact hit: delete the entry, or move the key's -v1 on"
             fi
+          elif [ -L "$kernel_dir" ]; then
+            echo "::warning::$kernel_dir is a link, so the header is fetched and not saved"
+          else
             export ALSA_UAPI_HEADER_SAVE="$KERNEL_FILE"
           fi
           bash scripts/alsa-abi/check.sh
@@ -503,7 +511,8 @@ jobs:
   # the unmodified file in this repository's Actions cache, keyed by the tag
   # (kernel-files-<tag>-quirks.c-v1), as alsa-abi keeps asound.h (see its
   # comment): an exact hit with the file is read through
-  # DACPROFILE_KERNEL_QUIRKS, anything else fetches it and saves it through
+  # DACPROFILE_KERNEL_QUIRKS, an exact hit without it fetches the file and
+  # saves nothing, and a miss fetches it and saves it through
   # DACPROFILE_KERNEL_QUIRKS_SAVE, kept only when the whole job succeeds,
   # its next step included. Since B730
   # B1 the database is also the iOS app's DAC registry's one source: its
@@ -551,20 +560,26 @@ jobs:
         # alsa-abi's does; kernel-check.sh writes it into a private curl
         # config and drops it from the environment before it runs anything
         # else, and the lines before it here are the shell's own builtins.
-        # The copy the cache restored is read only on an exact hit that
-        # holds a non-empty file; otherwise the file is fetched and saved.
+        # The choice is alsa-abi's: the copy only on an exact hit that holds
+        # a non-empty regular file, neither it nor its directory a link; the
+        # save variable only on a miss or another key's restore, and not
+        # where the directory is a link.
         env:
           GITHUB_TOKEN: ${{ github.token }}
           KERNEL_FILE: ${{ runner.temp }}/kernel-files/quirks.c
           KERNEL_FILE_HIT: ${{ steps.kernel-file.outputs.cache-hit }}
           KERNEL_FILE_KEY: ${{ steps.kernel-tag.outputs.key }}
         run: |
-          if [ "$KERNEL_FILE_HIT" = true ] && [ -f "$KERNEL_FILE" ] && [ -s "$KERNEL_FILE" ]; then
-            export DACPROFILE_KERNEL_QUIRKS="$KERNEL_FILE"
-          else
-            if [ "$KERNEL_FILE_HIT" = true ]; then
-              echo "::warning::the cache entry $KERNEL_FILE_KEY holds no quirks.c, so the file is fetched; actions/cache saves nothing over an exact hit: delete the entry, or move the key's -v1 on"
+          kernel_dir=${KERNEL_FILE%/*}
+          if [ "$KERNEL_FILE_HIT" = true ]; then
+            if [ ! -L "$kernel_dir" ] && [ ! -L "$KERNEL_FILE" ] && [ -f "$KERNEL_FILE" ] && [ -s "$KERNEL_FILE" ]; then
+              export DACPROFILE_KERNEL_QUIRKS="$KERNEL_FILE"
+            else
+              echo "::warning::the cache entry $KERNEL_FILE_KEY holds no usable quirks.c (it is missing, empty or a link, or its directory is a link), so the file is fetched and not saved; actions/cache saves nothing over an exact hit: delete the entry, or move the key's -v1 on"
             fi
+          elif [ -L "$kernel_dir" ]; then
+            echo "::warning::$kernel_dir is a link, so the file is fetched and not saved"
+          else
             export DACPROFILE_KERNEL_QUIRKS_SAVE="$KERNEL_FILE"
           fi
           bash scripts/dac-profiles/kernel-check.sh

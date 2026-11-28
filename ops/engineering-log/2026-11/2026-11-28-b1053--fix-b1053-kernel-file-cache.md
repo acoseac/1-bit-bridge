@@ -94,12 +94,15 @@ ones, none failing.
   nothing; a 404, not retried, printed `404` and exited 22; a 200 printed `200`, exited 0 and wrote
   the file; a refused connection printed `000` and exited 7; a stall past `--max-time`, retried
   once, printed `000` and exited 28.
-- `gate.yml` parsed with PyYAML, and its new steps ran as the runner runs a step (`bash --noprofile
-  --norc -eo pipefail`, each `${{ }}` in `env:` resolved by hand): the tag step's outputs (`v6.12`
-  and its key) and its failure on a `uapi.go` without the line; the check step through a miss, an
-  exact hit, a hit whose file was missing or empty (the warning naming the key, then a fetch and a
-  save) and a `cache-hit` of `false` with another key's file present (a fetch over it); for
-  `alsa-abi` each run to the comparison's end, which passed, the hit's blob id the miss's.
+- `gate.yml` parsed with PyYAML, and its new steps ran under `bash --noprofile --norc -eo
+  pipefail`, each `${{ }}` in `env:` resolved by hand. That is how the runner runs a step with
+  `shell: bash`; these steps name no shell, so the Ubuntu runner runs them as `bash -e {0}`, and as
+  they hold no pipeline the two agree for them (Round 2's runs use `bash -e`). The runs covered
+  the tag step's outputs (`v6.12` and its key) and its failure on a `uapi.go` without the line; the
+  check step through a miss, an exact hit, a hit whose file was missing or empty (the warning
+  naming the key, then a fetch and a save) and a `cache-hit` of `false` with another key's file
+  present (a fetch over it); for `alsa-abi` each run to the comparison's end, which passed, the
+  hit's blob id the miss's.
 - Controls, each on a copy of the tree and never on a tracked file, predicted before they ran, the
   copy unmutated green first: all fourteen went red. In `check.sh`: curl given no `-w` (the 429
   and 404 runs lost their status), the assignment unguarded (`set -e` ended the failed runs with
@@ -126,3 +129,83 @@ and fetch, and one of their saves makes the entry they share. A rerun on the PR 
 and `dac-profiles` take the override, print the saved file's git blob id, and pass their
 comparisons. Main's first run after the merge can be cold again: a PR's cache belongs to its merge
 ref, which main does not read.
+
+### Round 2
+
+Five gaps in `ac89883a`, each shown red there first with the harness above (the stub `curl`, and
+now `mktemp`, `cp` and `mv` stand-ins that each fail only the save's own call, so that a failed
+save does not rest on a permission a privileged process ignores), with both scripts and both
+token branches, then green on the change:
+
+- **Only a final 200 is a download.** The scripts read curl's exit alone, so a 206 or a 204,
+  which `-f` lets through with an exit of 0, reached the save and the comparison. A download now
+  needs an exit of 0 and a final status of 200 (`[ "$rc" -ne 0 ] || [ "$code" != 200 ]` enters
+  the classifier), and the classifier is as it was: a 429 keeps its rate-limit line, `000` or no
+  status the no-HTTP-status line, any other status the other-failure line.
+- **A link is never a hit.** `[ -f ]` and `[ -s ]` follow links, so an entry holding the file as
+  a link to the runner's installed header, or a `kernel-files` directory that is a link, would
+  have been compared under the pinned tag. Both check steps now take the copy only where neither
+  the file nor its directory is a link (`[ ! -L ]`, the directory as `${KERNEL_FILE%/*}`, a
+  parameter expansion, so that no command but the script runs with the token in its
+  environment).
+- **An exact hit sets no save variable, and a save path that is no regular file is refused.** The
+  check steps set the save variable on an exact hit too, where actions/cache saves nothing
+  (`src/saveImpl.ts`), and `mv -f` into a directory at the path moved the temporary file inside
+  it with a status of 0, the script then saying it had saved; a link or a fifo there was
+  replaced. The save variable is now set only where `cache-hit` is not `true` and the directory
+  is no link, a linked one warning, and the scripts refuse a path that is a link, dangling or
+  not, tested on its own, or that is there and is no regular file, before anything is written.
+- **Every failed save prints its line.** `mkdir -p` and the `mktemp` assignment ran outside the
+  guarded condition, so under `set -e` their failure ended the run with no could-not-save line.
+  Both are in the one condition now, `save_tmp` empty first: whichever step fails prints the line,
+  the temporary file it made is removed, and a file already at the path is kept; a directory a
+  successful `mkdir -p` made may remain.
+- **The simulation's shell.** The first runs above used `bash --noprofile --norc -eo pipefail`,
+  corrected in place; these run each step as the runner runs one with no `shell:`, `bash -e`.
+
+The runs, 74 on `ac89883a` and 74 on the change (each new case with both scripts and both
+branches):
+
+- A 206 after partial bytes, with an exit of 0: `ac89883a` saved the partial bytes and compared
+  them, with no line of its own; the change says `failed with curl exit status 0 and HTTP status
+  206`, exits 1, removes the partial file, saves nothing, and the comparison never begins.
+- A 200 cut short (exit 18) after partial bytes: already right on `ac89883a`, which enters the
+  classifier on any non-zero exit (`failed with curl exit status 18 and HTTP status 200`).
+- A directory at the save path: `ac89883a` moved `.asound.h.<random>` into it and printed the
+  save; the change prints the could-not-save line and exits 1, the directory empty, nothing beside
+  it, the comparison never begun. A dangling link, a link to a regular file and a fifo at the path:
+  `ac89883a` replaced each with the copy; the change refuses each, the dangling link still
+  dangling, the linked file's bytes kept, nothing beside it.
+- `mktemp` refused for the save's template, the script's first `mktemp -d` let through: `ac89883a`
+  ended at `mktemp` with no line; the change prints it and exits 1, the directory `mkdir -p` made
+  left empty. The save path under a regular file, where `mkdir -p` fails (`Not a directory`):
+  `ac89883a` ended there with no line; the change prints it, the file in the way unchanged.
+- `cp` refused for the temporary file, and `mv` refused over a file already at the path: already
+  right on `ac89883a`, whose `cp` and `mv` were guarded; the temporary file removed, the file at the
+  path kept.
+- Every earlier case passed on both trees, and with the save variable unset or empty, and with the
+  override, the changed scripts print what main's print (36 of 36 streams).
+- The check steps, through 8 states each, both jobs, `alsa-abi`'s to the comparison's end: on
+  `ac89883a` an exact hit with the file missing or empty saved, a save the cache would never keep;
+  a hit whose file or whose directory is a link took the copy, curl never running; and a miss
+  whose directory is a link saved through it into its target. On the change each of those warns,
+  fetches, saves nothing and leaves the fixture and its target as they were: the missing file
+  absent, the empty file empty, each link as it was. A miss, a hit and a `false` restore are as
+  they were.
+
+Controls, each predicted before it ran, on a copy of the tree, the copy unmutated green first: all
+eighteen red, in both scripts and both jobs. In the scripts: no 200 check (the 206 case), no `-L`
+refusal (both link cases), no refusal of a path that is there and is no regular file (the
+directory and the fifo), `mktemp` moved out of the condition (its case), and `mkdir -p` moved out
+(its case). In the check steps: no `[ ! -L "$KERNEL_FILE" ]` (the linked file); the save variable
+set on an exact hit (the missing, empty and linked files, and one case past the prediction, the
+linked directory, which the save went through); no directory check on a hit (the linked
+directory), and none on a miss (the miss through it).
+
+Checks, on the change: `bash -n` on both scripts (shellcheck is not installed here); PyYAML and
+the simulation above; `go test -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/alsapcm
+./internal/player/dacprofile -count=1` passed (38.9 s and 0.06 s), both kernel-file tests
+skipping without their flags; `make fmt` rewrote nothing; `make vet`, `make check-build-tags` and
+`make docs-check` passed; and so did `cmd/bridge`'s citation, docblock and blank-keeper guards,
+which `make docs-check` does not run, `internal/player/qualification`,
+`scripts/third-party-licenses`, and `scripts/dac-profiles/ios-export` with its `-check`.
