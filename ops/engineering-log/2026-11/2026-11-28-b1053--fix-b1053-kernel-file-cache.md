@@ -49,11 +49,11 @@ download.
 
 ### What the owner may decline
 
-`quirks.c` is GPL-2.0 without the Linux-syscall-note that `asound.h` carries. The change reads
-"never vendored" as never in the repository, a build, a release archive, a log or the database: the
-unmodified files sit only in this repository's Actions cache, keyed by the tag. Declining the CI
-copy of `quirks.c` drops the `dac-profiles` job's tag and cache steps and its check step's choice;
-`asound.h` stays cached.
+`quirks.c` is kernel driver source and carries no Linux-syscall-note, which `asound.h` does
+(`GPL-2.0+ WITH Linux-syscall-note`). The change reads "never vendored" as never in the
+repository, a build, a release archive, a log or the database: the unmodified files sit only in
+this repository's Actions cache, keyed by the tag. Declining the CI copy of `quirks.c` drops the
+`dac-profiles` job's tag and cache steps and its check step's choice; `asound.h` stays cached.
 
 ### Runs
 
