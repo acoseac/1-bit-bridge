@@ -12,10 +12,11 @@ kernel's own header:
   of `snd_interval`'s one-bit fields takes, the constants and the ioctl
   numbers, one fact a line.
 - `check.sh` fetches `asound.h` at the kernel tag `uapi.go` pins
-  (`const uapiKernel`), compiles and runs the probe with the machine's own
-  compiler, and runs `TestUAPIMatchesTheKernelHeader`, which compares every
-  fact with the Go definitions compiled for the same architecture. It fails
-  unless that test ran and passed.
+  (`const uapiKernel`), or takes the copy `ALSA_UAPI_HEADER` names, compiles
+  and runs the probe with the machine's own compiler, and runs
+  `TestUAPIMatchesTheKernelHeader`, which compares every fact with the Go
+  definitions compiled for the same architecture. It fails unless that test
+  ran and passed.
 
 CI runs `check.sh` natively on linux/amd64 and linux/arm64, the two
 architectures the backend builds for (the `alsa-abi` job in
@@ -26,6 +27,23 @@ compiler, the distribution's kernel headers (`linux-libc-dev`), curl and Go:
 bash scripts/alsa-abi/check.sh
 ALSA_UAPI_HEADER=/path/to/asound.h bash scripts/alsa-abi/check.sh   # a copy you already have
 ```
+
+In CI the job keeps the header between runs, in this repository's Actions
+cache under the key `kernel-files-<tag>-asound.h-v1`, which both legs share.
+On an exact hit that holds the header as a non-empty regular file, neither
+it nor its directory a link, it hands `check.sh` that copy as
+`ALSA_UAPI_HEADER`, and nothing is fetched; an exact hit without one warns,
+fetches the header and saves nothing, since the cache saves nothing over an
+exact hit. A miss sets `ALSA_UAPI_HEADER_SAVE`, unless the cache's directory
+is a link, and `check.sh` copies the header it fetched to that path right
+after the fetch, which the cache keeps only when the job succeeds. The save
+refuses a path that is a link or is there and is no regular file, and says
+so whichever of its steps fails.
+
+Only an exit of 0 with a final status of 200 is a download. One that fails
+says which failure it was: a 429 that outlasts curl's retries is the raw
+host's rate limit, no definitions difference, and asks for a rerun of the
+job; any other failure gives curl's exit status and the HTTP status.
 
 `TestProbeAndGoNameTheSameFacts` runs everywhere, without a compiler: it
 holds the probe's macro calls and the Go side's list to the same facts, so a
@@ -43,11 +61,13 @@ on that architecture with the real C compiler's.
 ## The header and its licence
 
 `asound.h` is `GPL-2.0+ WITH Linux-syscall-note`, the note that lets a user
-program use the kernel's interface. It is not vendored: `check.sh` fetches
-it into a temporary directory and deletes it, and it is never part of the
-bridge binary or its release archives. `check.sh` prints the file's git blob
-id, which `git ls-tree <tag> include/uapi/sound/asound.h` in any kernel clone
-shows for the same bytes.
+program use the kernel's interface. It is never vendored: never in the
+repository, a build, a release archive, a log or the database. `check.sh`
+fetches it into a temporary directory and deletes it, and the unmodified
+file is kept only in this repository's Actions cache, keyed by the tag.
+`check.sh` prints the file's git blob id, which
+`git ls-tree <tag> include/uapi/sound/asound.h` in any kernel clone shows for
+the same bytes.
 
 ## Moving the pin
 

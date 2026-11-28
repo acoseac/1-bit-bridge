@@ -239,6 +239,10 @@ type servedBridge struct {
 	stdout, stderr *safeBuffer
 	// done delivers serve's exit code once it returns.
 	done <-chan int
+	// exited is closed once serve has returned. A wait that ends when serve
+	// does asks exited, never done, so the exit code stays for stopServed or
+	// the drain to read (backlog B1047).
+	exited <-chan struct{}
 	// stop cancels serve's context, as SIGINT and SIGTERM do.
 	stop context.CancelFunc
 }
@@ -284,7 +288,7 @@ func launchServe(t *testing.T, start func(ctx context.Context, stdout, stderr io
 		f(cancel, exited)
 	}
 	addr, _ := waitForListening(t, stdout, exited, exitCode, stderr)
-	return servedBridge{addr: addr, stdout: stdout, stderr: stderr, done: exitCode, stop: cancel}
+	return servedBridge{addr: addr, stdout: stdout, stderr: stderr, done: exitCode, exited: exited, stop: cancel}
 }
 
 func TestServeMissingConfigReturns2(t *testing.T) {
